@@ -1,0 +1,41 @@
+# Production configuration for Octoprox
+server:
+  host: "0.0.0.0"
+  api_port: 8000
+  proxy_port: 8080
+  debug: false
+  reload: false
+
+logging:
+  level: INFO
+  format: json
+  
+redis:
+  url: "${OCTOPROX_REDIS_URL}"
+  
+proxy:
+  default_strategy: health_based
+  
+  health_check:
+    enabled: true
+    interval_seconds: 60
+    timeout_seconds: 15
+    unhealthy_threshold: 3
+    healthy_threshold: 2
+    
+  connection:
+    timeout_seconds: 30
+    max_retries: 3
+    retry_delay_seconds: 1
+    
+  session:
+    ttl_seconds: 3600
+    cookie_name: "octoprox_session"
+
+sources: []
+
+metrics:
+  enabled: true
+  port: 9100
+  path: /metrics
+

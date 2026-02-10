@@ -1,0 +1,66 @@
+# Development configuration for Octoprox
+server:
+  host: "0.0.0.0"
+  api_port: 8000
+  proxy_port: 8080
+  debug: true
+  reload: true
+
+logging:
+  level: DEBUG
+  format: json
+  
+redis:
+  url: "redis://localhost:6379/0"
+  
+proxy:
+  # Default routing strategy: round_robin, least_used, random, sticky, health_based
+  default_strategy: round_robin
+  
+  # Health check settings
+  health_check:
+    enabled: true
+    interval_seconds: 30
+    timeout_seconds: 10
+    unhealthy_threshold: 3
+    healthy_threshold: 2
+    
+  # Connection settings
+  connection:
+    timeout_seconds: 30
+    max_retries: 3
+    retry_delay_seconds: 1
+    
+  # Session settings (for sticky sessions)
+  session:
+    ttl_seconds: 3600
+    cookie_name: "octoprox_session"
+
+# Proxy sources configuration
+sources:
+  # Example static proxy list
+  - name: "static-proxies"
+    type: static
+    enabled: true
+    proxies:
+      - host: "proxy1.example.com"
+        port: 8080
+        protocol: http
+      - host: "proxy2.example.com"
+        port: 8080
+        protocol: http
+        
+  # Example API-based provider (disabled by default)
+  # - name: "proxy-api"
+  #   type: api
+  #   enabled: false
+  #   config:
+  #     url: "https://api.proxyservice.com/v1/proxies"
+  #     api_key: "${PROXY_API_KEY}"
+  #     refresh_interval_seconds: 300
+
+metrics:
+  enabled: true
+  port: 9100
+  path: /metrics
+
