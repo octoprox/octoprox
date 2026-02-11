@@ -158,7 +158,7 @@ class ProxyForwarder:
             
         finally:
             latency_ms = (time.monotonic() - start_time) * 1000
-            self._proxy_manager.update_proxy_stats(proxy.id, success, latency_ms)
+            await self._proxy_manager.update_proxy_stats(proxy.id, success, latency_ms)
 
     async def forward_with_retry(
         self,

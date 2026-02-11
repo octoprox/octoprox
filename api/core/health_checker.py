@@ -82,42 +82,51 @@ class HealthChecker:
                 latency_ms = (time.monotonic() - start_time) * 1000
                 
                 if response.status_code == 200:
-                    proxy.status = ProxyStatus.HEALTHY
-                    proxy.consecutive_failures = 0
-                    proxy.last_check_latency_ms = latency_ms
+                    await self._proxy_manager.update_proxy_status(
+                        proxy.id,
+                        ProxyStatus.HEALTHY,
+                        latency_ms=latency_ms,
+                        consecutive_failures=0,
+                    )
                     logger.debug(
                         "Proxy healthy",
                         proxy_id=proxy.id,
                         latency_ms=round(latency_ms, 2),
                     )
                 else:
-                    self._mark_unhealthy(proxy, f"HTTP {response.status_code}")
+                    await self._mark_unhealthy(proxy, f"HTTP {response.status_code}")
                     
         except httpx.TimeoutException:
-            self._mark_unhealthy(proxy, "Timeout")
+            await self._mark_unhealthy(proxy, "Timeout")
         except httpx.ProxyError as e:
-            self._mark_unhealthy(proxy, f"Proxy error: {e}")
+            await self._mark_unhealthy(proxy, f"Proxy error: {e}")
         except Exception as e:
-            self._mark_unhealthy(proxy, f"Error: {e}")
-    
-    def _mark_unhealthy(self, proxy: Proxy, reason: str) -> None:
+            await self._mark_unhealthy(proxy, f"Error: {e}")
+
+    async def _mark_unhealthy(self, proxy: Proxy, reason: str) -> None:
         """Mark a proxy as unhealthy."""
-        proxy.consecutive_failures += 1
-        
-        if proxy.consecutive_failures >= 3:
-            proxy.status = ProxyStatus.UNHEALTHY
+        new_failures = proxy.consecutive_failures + 1
+
+        if new_failures >= 3:
+            status = ProxyStatus.UNHEALTHY
             logger.warning(
                 "Proxy marked unhealthy",
                 proxy_id=proxy.id,
                 reason=reason,
-                failures=proxy.consecutive_failures,
+                failures=new_failures,
             )
         else:
-            proxy.status = ProxyStatus.DEGRADED
+            status = ProxyStatus.DEGRADED
             logger.debug(
                 "Proxy degraded",
                 proxy_id=proxy.id,
                 reason=reason,
-                failures=proxy.consecutive_failures,
+                failures=new_failures,
             )
+
+        await self._proxy_manager.update_proxy_status(
+            proxy.id,
+            status,
+            consecutive_failures=new_failures,
+        )
 

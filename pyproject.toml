@@ -20,6 +20,10 @@ dependencies = [
     "prometheus-client==0.21.1",
     "python-multipart==0.0.20",
     "python-jose[cryptography]==3.5.0",
+    "sqlalchemy[asyncio]==2.0.46",
+    "asyncpg==0.31.0",
+    "alembic==1.18.4",
+    "psycopg2-binary==2.9.11",
 ]
 
 [project.optional-dependencies]

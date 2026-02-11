@@ -12,7 +12,16 @@ logging:
   
 redis:
   url: "${OCTOPROX_REDIS_URL}"
-  
+
+database:
+  host: "${OCTOPROX_DB_HOST}"
+  port: 5432
+  user: "${OCTOPROX_DB_USER}"
+  password: "${OCTOPROX_DB_PASSWORD}"
+  name: "${OCTOPROX_DB_NAME}"
+  application_name: "octoprox"
+  metrics_flush_interval: 300
+
 proxy:
   default_strategy: health_based
   

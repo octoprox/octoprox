@@ -199,14 +199,11 @@ make setup-dev
 source .venv/bin/activate
 ```
 
-2. **Start Redis (required for session storage):**
+2. **Start Redis and postgres:**
 
 ```bash
-# Using Docker
-docker run -d -p 6379:6379 redis:7-alpine
-
-# Or use docker-compose
 docker-compose up -d redis
+docker-compose up -d postgres
 ```
 
 3. **Run the API server:**

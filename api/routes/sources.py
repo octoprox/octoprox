@@ -53,7 +53,7 @@ async def create_source(request: Request, source_data: SourceCreate) -> SourceRe
         refresh_interval_seconds=source_data.refresh_interval_seconds,
     )
     
-    proxy_manager.add_source(source)
+    await proxy_manager.add_source(source)
     return _source_to_response(source)
 
 
@@ -98,7 +98,7 @@ async def delete_source(request: Request, source_id: str) -> None:
     """Remove a proxy source."""
     proxy_manager = request.app.state.proxy_manager
     
-    if not proxy_manager.remove_source(source_id):
+    if not await proxy_manager.remove_source(source_id):
         raise HTTPException(status_code=404, detail="Source not found")
 
 

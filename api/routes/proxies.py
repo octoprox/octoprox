@@ -72,7 +72,7 @@ async def create_proxy(request: Request, proxy_data: ProxyCreate) -> ProxyRespon
         metadata=proxy_data.metadata,
     )
 
-    proxy_manager.add_proxy(proxy)
+    await proxy_manager.add_proxy(proxy)
 
     # Update source proxy count
     source.proxy_count += 1
@@ -137,7 +137,7 @@ async def delete_proxy(request: Request, proxy_id: str) -> None:
     if source and source.proxy_count > 0:
         source.proxy_count -= 1
 
-    proxy_manager.remove_proxy(proxy_id)
+    await proxy_manager.remove_proxy(proxy_id)
 
 
 @router.post("/strategy")

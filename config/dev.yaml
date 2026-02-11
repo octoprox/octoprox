@@ -12,7 +12,16 @@ logging:
   
 redis:
   url: "redis://localhost:6379/0"
-  
+
+database:
+  host: "localhost"
+  port: 5433
+  user: "octoprox"
+  password: "octoprox"
+  name: "octoprox"
+  application_name: "octoprox-dev"
+  metrics_flush_interval: 60
+
 proxy:
   # Default routing strategy: round_robin, least_used, random, sticky, health_based
   default_strategy: round_robin

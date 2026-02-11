@@ -35,6 +35,11 @@ spec:
                 secretKeyRef:
                   name: octoprox-secrets
                   key: redis-url
+            - name: OCTOPROX_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: octoprox-secrets
+                  key: database-url
           resources:
             requests:
               memory: "256Mi"
@@ -94,4 +99,5 @@ metadata:
 type: Opaque
 stringData:
   redis-url: "redis://redis-service:6379/0"
+  database-url: "postgresql+asyncpg://octoprox:changeme@postgres-service:5432/octoprox"
 
