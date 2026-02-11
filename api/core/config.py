@@ -37,7 +37,17 @@ class Settings(BaseSettings):
     health_check_timeout: int = Field(default=10)
     connection_timeout: int = Field(default=30)
     max_retries: int = Field(default=3)
-    
+
+    # Authentication settings
+    auth_enabled: bool = Field(default=False, description="Enable authentication")
+    auth_username: str = Field(default="admin", description="Login username")
+    auth_password: str = Field(default="", description="Login password (required if auth enabled)")
+    jwt_secret: str = Field(
+        default="change-me-in-production",
+        description="Secret key for JWT token signing"
+    )
+    jwt_expiry_hours: int = Field(default=24, description="JWT token expiry in hours")
+
     model_config = {
         "env_prefix": "OCTOPROX_",
         "env_file": ".env",

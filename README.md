@@ -341,6 +341,43 @@ Configuration is loaded from YAML files in the `config/` directory based on the 
 | `OCTOPROX_ENV` | Environment (development/production) | development |
 | `OCTOPROX_REDIS_URL` | Redis connection URL | redis://localhost:6379/0 |
 | `OCTOPROX_LOG_LEVEL` | Logging level | INFO |
+| `OCTOPROX_AUTH_ENABLED` | Enable authentication for the web UI and API | false |
+| `OCTOPROX_AUTH_USERNAME` | Login username (required if auth enabled) | admin |
+| `OCTOPROX_AUTH_PASSWORD` | Login password (required if auth enabled) | (empty) |
+| `OCTOPROX_JWT_SECRET` | Secret key for JWT token signing | change-me-in-production |
+| `OCTOPROX_JWT_EXPIRY_HOURS` | JWT token expiry in hours | 24 |
+
+### Authentication
+
+Octoprox supports optional authentication to protect the web UI and API endpoints. When enabled, users must log in with a username and password to access the dashboard and API.
+
+#### Enabling Authentication
+
+Set the following environment variables to enable authentication:
+
+```bash
+export OCTOPROX_AUTH_ENABLED=true
+export OCTOPROX_AUTH_USERNAME=admin
+export OCTOPROX_AUTH_PASSWORD=your-secure-password
+export OCTOPROX_JWT_SECRET=your-random-secret-key
+```
+
+Or create a `.env` file in the project root:
+
+```env
+OCTOPROX_AUTH_ENABLED=true
+OCTOPROX_AUTH_USERNAME=admin
+OCTOPROX_AUTH_PASSWORD=your-secure-password
+OCTOPROX_JWT_SECRET=your-random-secret-key
+```
+
+#### Security Notes
+
+- **Always set a strong `OCTOPROX_JWT_SECRET`** in production. The default value is insecure.
+- **Never commit credentials** to version control. Use environment variables or `.env` files (which should be gitignored).
+- The `/api/v1/auth/login` and `/api/v1/auth/status` endpoints are always public.
+- The `/health` endpoint is always public for load balancer health checks.
+- All other API endpoints require authentication when `OCTOPROX_AUTH_ENABLED=true`.
 
 ### Example Configuration
 

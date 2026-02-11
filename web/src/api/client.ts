@@ -7,6 +7,81 @@ const api = axios.create({
   },
 })
 
+// Token storage key
+const TOKEN_KEY = 'octoprox_token'
+
+// Auth state management
+export const auth = {
+  getToken: (): string | null => {
+    return localStorage.getItem(TOKEN_KEY)
+  },
+
+  setToken: (token: string): void => {
+    localStorage.setItem(TOKEN_KEY, token)
+  },
+
+  clearToken: (): void => {
+    localStorage.removeItem(TOKEN_KEY)
+  },
+
+  isAuthenticated: (): boolean => {
+    return !!localStorage.getItem(TOKEN_KEY)
+  },
+}
+
+// Add auth token to requests
+api.interceptors.request.use((config) => {
+  const token = auth.getToken()
+  if (token) {
+    config.headers.Authorization = `Bearer ${token}`
+  }
+  return config
+})
+
+// Handle 401 responses
+api.interceptors.response.use(
+  (response) => response,
+  (error) => {
+    if (error.response?.status === 401) {
+      auth.clearToken()
+      // Dispatch custom event for auth state change
+      window.dispatchEvent(new CustomEvent('auth:logout'))
+    }
+    return Promise.reject(error)
+  }
+)
+
+// Auth API types
+export interface AuthStatus {
+  enabled: boolean
+  authenticated: boolean
+  username: string | null
+}
+
+export interface LoginResponse {
+  access_token: string
+  token_type: string
+  expires_in: number
+}
+
+// Auth API functions
+export const checkAuthStatus = async (): Promise<AuthStatus> => {
+  const response = await api.get('/auth/status')
+  return response.data
+}
+
+export const login = async (username: string, password: string): Promise<LoginResponse> => {
+  const response = await api.post('/auth/login', { username, password })
+  const data = response.data as LoginResponse
+  auth.setToken(data.access_token)
+  return data
+}
+
+export const logout = (): void => {
+  auth.clearToken()
+  window.dispatchEvent(new CustomEvent('auth:logout'))
+}
+
 export interface Proxy {
   id: string
   host: string

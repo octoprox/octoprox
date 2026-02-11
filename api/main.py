@@ -6,12 +6,13 @@ from typing import AsyncGenerator
 
 import structlog
 import uvicorn
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from api.core.auth import require_auth
 from api.core.config import settings
 from api.core.proxy_manager import ProxyManager
-from api.routes import forward, health, metrics, proxies, sources
+from api.routes import auth, forward, health, metrics, proxies, sources
 
 logger = structlog.get_logger()
 
@@ -54,12 +55,39 @@ def create_app() -> FastAPI:
     )
     
     # Include routers
+    # Auth routes (public)
+    app.include_router(auth.router, prefix="/api/v1/auth", tags=["Auth"])
+
+    # Health check (public)
     app.include_router(health.router, tags=["Health"])
-    app.include_router(proxies.router, prefix="/api/v1/proxies", tags=["Proxies"])
-    app.include_router(sources.router, prefix="/api/v1/sources", tags=["Sources"])
-    app.include_router(metrics.router, prefix="/api/v1/metrics", tags=["Metrics"])
-    app.include_router(forward.router, prefix="/api/v1/forward", tags=["Forward"])
-    
+
+    # Protected routes - require auth when enabled
+    auth_dependency = [Depends(require_auth)]
+    app.include_router(
+        proxies.router,
+        prefix="/api/v1/proxies",
+        tags=["Proxies"],
+        dependencies=auth_dependency,
+    )
+    app.include_router(
+        sources.router,
+        prefix="/api/v1/sources",
+        tags=["Sources"],
+        dependencies=auth_dependency,
+    )
+    app.include_router(
+        metrics.router,
+        prefix="/api/v1/metrics",
+        tags=["Metrics"],
+        dependencies=auth_dependency,
+    )
+    app.include_router(
+        forward.router,
+        prefix="/api/v1/forward",
+        tags=["Forward"],
+        dependencies=auth_dependency,
+    )
+
     return app
 
 
