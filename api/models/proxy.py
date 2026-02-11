@@ -46,7 +46,7 @@ class Proxy(BaseModel):
     avg_latency_ms: float = 0.0
     
     # Metadata
-    source_id: str | None = None
+    source_id: str
     tags: list[str] = Field(default_factory=list)
     metadata: dict[str, Any] = Field(default_factory=dict)
     created_at: datetime = Field(default_factory=datetime.utcnow)
@@ -72,6 +72,7 @@ class ProxyCreate(BaseModel):
     """Schema for creating a new proxy."""
     host: str
     port: int
+    source_id: str
     protocol: ProxyProtocol = ProxyProtocol.HTTP
     username: str | None = None
     password: str | None = None

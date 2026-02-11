@@ -148,12 +148,26 @@ export const fetchSources = async (): Promise<SourceListResponse> => {
   return response.data
 }
 
+export const createSource = async (data: { name: string; type: string; enabled?: boolean; refresh_interval_seconds?: number }): Promise<Source> => {
+  const response = await api.post('/sources', data)
+  return response.data
+}
+
+export const updateSource = async (id: string, data: { name?: string; enabled?: boolean; refresh_interval_seconds?: number }): Promise<Source> => {
+  const response = await api.patch(`/sources/${id}`, data)
+  return response.data
+}
+
+export const deleteSource = async (id: string): Promise<void> => {
+  await api.delete(`/sources/${id}`)
+}
+
 export const fetchMetrics = async (): Promise<MetricsResponse> => {
   const response = await api.get('/metrics')
   return response.data
 }
 
-export const createProxy = async (data: { host: string; port: number; protocol?: string }) => {
+export const createProxy = async (data: { host: string; port: number; source_id: string; protocol?: string }) => {
   const response = await api.post('/proxies', data)
   return response.data
 }

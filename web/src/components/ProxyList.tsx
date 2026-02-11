@@ -1,24 +1,30 @@
 import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { Plus, Trash2 } from 'lucide-react'
-import { fetchProxies, createProxy, deleteProxy } from '../api/client'
+import { fetchProxies, fetchSources, createProxy, deleteProxy } from '../api/client'
 
 export default function ProxyList() {
   const queryClient = useQueryClient()
   const [showForm, setShowForm] = useState(false)
-  const [formData, setFormData] = useState({ host: '', port: '', protocol: 'http' })
+  const [formData, setFormData] = useState({ host: '', port: '', protocol: 'http', source_id: '' })
 
   const { data, isLoading } = useQuery({
     queryKey: ['proxies'],
     queryFn: fetchProxies,
   })
 
+  const { data: sourcesData } = useQuery({
+    queryKey: ['sources'],
+    queryFn: fetchSources,
+  })
+
   const createMutation = useMutation({
     mutationFn: createProxy,
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['proxies'] })
+      queryClient.invalidateQueries({ queryKey: ['sources'] })
       setShowForm(false)
-      setFormData({ host: '', port: '', protocol: 'http' })
+      setFormData({ host: '', port: '', protocol: 'http', source_id: '' })
     },
   })
 
@@ -26,6 +32,7 @@ export default function ProxyList() {
     mutationFn: deleteProxy,
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['proxies'] })
+      queryClient.invalidateQueries({ queryKey: ['sources'] })
     },
   })
 
@@ -35,6 +42,7 @@ export default function ProxyList() {
       host: formData.host,
       port: parseInt(formData.port),
       protocol: formData.protocol,
+      source_id: formData.source_id,
     })
   }
 
@@ -55,7 +63,20 @@ export default function ProxyList() {
 
       {showForm && (
         <form onSubmit={handleSubmit} className="bg-white rounded-lg shadow p-6 mb-8">
-          <div className="grid grid-cols-3 gap-4">
+          <div className="grid grid-cols-4 gap-4">
+            <select
+              value={formData.source_id}
+              onChange={(e) => setFormData({ ...formData, source_id: e.target.value })}
+              className="px-4 py-2 border rounded-lg"
+              required
+            >
+              <option value="">Select Source</option>
+              {sourcesData?.sources.map((source) => (
+                <option key={source.id} value={source.id}>
+                  {source.name}
+                </option>
+              ))}
+            </select>
             <input
               type="text"
               placeholder="Host"
@@ -84,7 +105,8 @@ export default function ProxyList() {
           </div>
           <button
             type="submit"
-            className="mt-4 px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700"
+            disabled={!formData.source_id}
+            className="mt-4 px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:bg-gray-400 disabled:cursor-not-allowed"
           >
             Create Proxy
           </button>

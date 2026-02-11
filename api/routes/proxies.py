@@ -55,18 +55,28 @@ async def list_proxies(request: Request) -> ProxyListResponse:
 async def create_proxy(request: Request, proxy_data: ProxyCreate) -> ProxyResponse:
     """Add a new proxy to the pool."""
     proxy_manager = request.app.state.proxy_manager
-    
+
+    # Validate that the source exists
+    source = proxy_manager.get_source(proxy_data.source_id)
+    if source is None:
+        raise HTTPException(status_code=404, detail="Source not found")
+
     proxy = Proxy(
         host=proxy_data.host,
         port=proxy_data.port,
         protocol=proxy_data.protocol,
         username=proxy_data.username,
         password=proxy_data.password,
+        source_id=proxy_data.source_id,
         tags=proxy_data.tags,
         metadata=proxy_data.metadata,
     )
-    
+
     proxy_manager.add_proxy(proxy)
+
+    # Update source proxy count
+    source.proxy_count += 1
+
     return _proxy_to_response(proxy)
 
 
@@ -116,9 +126,18 @@ async def update_proxy(
 async def delete_proxy(request: Request, proxy_id: str) -> None:
     """Remove a proxy from the pool."""
     proxy_manager = request.app.state.proxy_manager
-    
-    if not proxy_manager.remove_proxy(proxy_id):
+
+    # Get proxy to update source count before deletion
+    proxy = proxy_manager.get_proxy(proxy_id)
+    if proxy is None:
         raise HTTPException(status_code=404, detail="Proxy not found")
+
+    # Update source proxy count
+    source = proxy_manager.get_source(proxy.source_id)
+    if source and source.proxy_count > 0:
+        source.proxy_count -= 1
+
+    proxy_manager.remove_proxy(proxy_id)
 
 
 @router.post("/strategy")
