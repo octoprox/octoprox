@@ -59,15 +59,13 @@ class Proxy(BaseModel):
         if self.username and self.password:
             auth = f"{self.username}:{self.password}@"
         return f"{self.protocol.value}://{auth}{self.host}:{self.port}"
-    
+
     @property
     def success_rate(self) -> float:
         """Calculate success rate percentage."""
         if self.request_count == 0:
             return 0.0
         return (self.success_count / self.request_count) * 100
-    
-    model_config = {"use_enum_values": True}
 
 
 class ProxyCreate(BaseModel):

@@ -19,7 +19,7 @@ def _source_to_response(source: ProxySource) -> SourceResponse:
     return SourceResponse(
         id=source.id,
         name=source.name,
-        type=source.type.value if hasattr(source.type, 'value') else source.type,
+        type=source.type.value,
         enabled=source.enabled,
         proxy_count=source.proxy_count,
         last_refresh=source.last_refresh,

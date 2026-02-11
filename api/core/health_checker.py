@@ -10,7 +10,7 @@ import httpx
 import structlog
 
 from api.core.config import settings
-from api.models.proxy import ProxyStatus
+from api.models.proxy import ProxyProtocol, ProxyStatus
 
 if TYPE_CHECKING:
     from api.core.proxy_manager import ProxyManager
@@ -53,13 +53,28 @@ class HealthChecker:
         tasks = [self._check_proxy(proxy) for proxy in proxies]
         await asyncio.gather(*tasks, return_exceptions=True)
     
+    def _get_proxy_mounts(self, proxy: Proxy) -> dict[str, httpx.AsyncHTTPTransport]:
+        """Create proxy mounts for httpx client."""
+        proxy_url = proxy.url
+
+        if proxy.protocol in (ProxyProtocol.HTTP, ProxyProtocol.HTTPS):
+            transport = httpx.AsyncHTTPTransport(proxy=proxy_url)
+            return {
+                "http://": transport,
+                "https://": transport,
+            }
+        else:
+            # SOCKS proxies not supported for health checks
+            raise ValueError(f"Unsupported proxy protocol: {proxy.protocol}")
+
     async def _check_proxy(self, proxy: Proxy) -> None:
         """Check health of a single proxy."""
         start_time = time.monotonic()
-        
+
         try:
+            mounts = self._get_proxy_mounts(proxy)
             async with httpx.AsyncClient(
-                proxies={proxy.protocol: proxy.url},
+                mounts=mounts,
                 timeout=self._timeout,
             ) as client:
                 response = await client.get("https://httpbin.org/ip")
