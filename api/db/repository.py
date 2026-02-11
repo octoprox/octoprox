@@ -162,6 +162,22 @@ class ProxyRepository:
         )
         return result.rowcount
 
+    def _to_domain(self, model: ProxyModel) -> Proxy:
+        """Convert database model to domain model."""
+        return Proxy(
+            id=model.id,
+            host=model.host,
+            port=model.port,
+            protocol=ProxyProtocol(model.protocol),
+            username=model.username,
+            password=model.password,
+            source_id=model.source_id,
+            tags=model.tags or [],
+            metadata=model.metadata_ or {},
+            created_at=model.created_at,
+            updated_at=model.updated_at,
+        )
+
 
 class MetricsRepository:
     """Repository for metrics database operations."""
