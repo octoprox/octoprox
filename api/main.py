@@ -12,10 +12,11 @@ from api.core.auth import require_auth
 from api.core.config import settings
 from api.core.logging import setup_logging
 from api.core.proxy_manager import ProxyManager
+from api.core.proxy_server import ProxyServer
 from api.db.migrations import run_migrations
 from api.db.redis import get_redis_client
 from api.db.session import get_async_session_factory
-from api.routes import auth, forward, health, metrics, proxies, sources
+from api.routes import auth, health, metrics, proxies, sources
 
 # Configure logging before getting the logger
 log_level = "DEBUG" if settings.debug else "INFO"
@@ -58,10 +59,16 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # Start background tasks (loads from DB, hydrates from Redis)
     await proxy_manager.start()
 
+    # Start the HTTP proxy server
+    proxy_server = ProxyServer(proxy_manager)
+    await proxy_server.start()
+    app.state.proxy_server = proxy_server
+
     yield
 
     # Cleanup
     logger.info("Shutting down Octoprox")
+    await proxy_server.stop()
     await proxy_manager.stop()
     await redis_client.close()
 
@@ -109,12 +116,6 @@ def create_app() -> FastAPI:
         metrics.router,
         prefix="/api/v1/metrics",
         tags=["Metrics"],
-        dependencies=auth_dependency,
-    )
-    app.include_router(
-        forward.router,
-        prefix="/api/v1/forward",
-        tags=["Forward"],
         dependencies=auth_dependency,
     )
 
