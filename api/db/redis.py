@@ -106,22 +106,26 @@ class RedisClient:
             pipe.hincrby(key, "success_count", 1)
         else:
             pipe.hincrby(key, "failure_count", 1)
-        # Store latest latency (we'll compute avg during flush)
-        pipe.hset(key, "last_latency_ms", str(latency_ms))
+        # Store latency sum for computing true average during flush
+        pipe.hincrbyfloat(key, "latency_sum_ms", latency_ms)
         pipe.hset(key, "updated_at", datetime.utcnow().isoformat())
         await pipe.execute()
-    
+
     async def get_proxy_metrics(self, proxy_id: str) -> dict[str, Any] | None:
         """Get proxy metrics from Redis."""
         key = PROXY_METRICS_KEY.format(proxy_id=proxy_id)
         data = await self.client.hgetall(key)
         if not data:
             return None
+        request_count = int(data.get("request_count", 0))
+        latency_sum = float(data.get("latency_sum_ms", 0))
+        avg_latency = latency_sum / request_count if request_count > 0 else 0.0
         return {
-            "request_count": int(data.get("request_count", 0)),
+            "request_count": request_count,
             "success_count": int(data.get("success_count", 0)),
             "failure_count": int(data.get("failure_count", 0)),
-            "last_latency_ms": float(data.get("last_latency_ms", 0)),
+            "latency_sum_ms": latency_sum,
+            "avg_latency_ms": avg_latency,
             "updated_at": data.get("updated_at"),
         }
     

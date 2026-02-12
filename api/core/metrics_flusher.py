@@ -73,7 +73,7 @@ class MetricsFlusher:
                     request_count=metrics["request_count"],
                     success_count=metrics["success_count"],
                     failure_count=metrics["failure_count"],
-                    avg_latency_ms=metrics["last_latency_ms"],
+                    avg_latency_ms=metrics["avg_latency_ms"],
                     status=status,
                 )
 

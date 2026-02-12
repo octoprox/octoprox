@@ -125,7 +125,7 @@ class ProxyManager:
                 proxy.request_count = m["request_count"]
                 proxy.success_count = m["success_count"]
                 proxy.failure_count = m["failure_count"]
-                proxy.avg_latency_ms = m["last_latency_ms"]
+                proxy.avg_latency_ms = m["avg_latency_ms"]
 
         logger.info("Hydrated from Redis", proxy_count=len(self._proxies))
 
@@ -219,16 +219,18 @@ class ProxyManager:
         """Update proxy statistics after a request (stores in Redis)."""
         proxy = self._proxies.get(proxy_id)
         if proxy:
-            # Update in-memory cache
+            # Update in-memory cache with proper running average
+            old_count = proxy.request_count
             proxy.request_count += 1
             if success:
                 proxy.success_count += 1
             else:
                 proxy.failure_count += 1
-            if proxy.avg_latency_ms == 0:
+            # Compute proper weighted average: new_avg = (old_avg * old_count + new_value) / new_count
+            if old_count == 0:
                 proxy.avg_latency_ms = latency_ms
             else:
-                proxy.avg_latency_ms = (proxy.avg_latency_ms + latency_ms) / 2
+                proxy.avg_latency_ms = (proxy.avg_latency_ms * old_count + latency_ms) / proxy.request_count
 
             # Persist to Redis
             await self._redis_client.update_proxy_metrics(proxy_id, success, latency_ms)
