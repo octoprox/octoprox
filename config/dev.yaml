@@ -29,8 +29,8 @@ proxy:
   # Health check settings
   health_check:
     enabled: true
-    interval_seconds: 30
-    timeout_seconds: 10
+    interval_seconds: 60
+    timeout_seconds: 30
     unhealthy_threshold: 3
     healthy_threshold: 2
     

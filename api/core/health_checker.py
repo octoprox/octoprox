@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 
 import httpx
 import structlog
+from httpx_socks import AsyncProxyTransport
 
 from api.core.config import settings
 from api.models.proxy import ProxyProtocol, ProxyStatus
@@ -53,7 +54,9 @@ class HealthChecker:
         tasks = [self._check_proxy(proxy) for proxy in proxies]
         await asyncio.gather(*tasks, return_exceptions=True)
     
-    def _get_proxy_mounts(self, proxy: Proxy) -> dict[str, httpx.AsyncHTTPTransport]:
+    def _get_proxy_mounts(
+        self, proxy: Proxy
+    ) -> dict[str, httpx.AsyncHTTPTransport | AsyncProxyTransport]:
         """Create proxy mounts for httpx client."""
         proxy_url = proxy.url
 
@@ -63,8 +66,13 @@ class HealthChecker:
                 "http://": transport,
                 "https://": transport,
             }
+        elif proxy.protocol in (ProxyProtocol.SOCKS4, ProxyProtocol.SOCKS5):
+            transport = AsyncProxyTransport.from_url(proxy_url)
+            return {
+                "http://": transport,
+                "https://": transport,
+            }
         else:
-            # SOCKS proxies not supported for health checks
             raise ValueError(f"Unsupported proxy protocol: {proxy.protocol}")
 
     async def _check_proxy(self, proxy: Proxy) -> None:

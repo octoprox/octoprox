@@ -128,8 +128,8 @@ class Settings(BaseSettings):
 
     # Proxy settings
     default_strategy: str = Field(default="round_robin")
-    health_check_interval: int = Field(default=30)
-    health_check_timeout: int = Field(default=10)
+    health_check_interval: int = Field(default=60)
+    health_check_timeout: int = Field(default=30)
     connection_timeout: int = Field(default=30)
     max_retries: int = Field(default=3)
 

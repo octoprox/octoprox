@@ -100,6 +100,7 @@ export default function ProxyList() {
             >
               <option value="http">HTTP</option>
               <option value="https">HTTPS</option>
+              <option value="socks4">SOCKS4</option>
               <option value="socks5">SOCKS5</option>
             </select>
           </div>

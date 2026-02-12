@@ -28,7 +28,7 @@ proxy:
   health_check:
     enabled: true
     interval_seconds: 60
-    timeout_seconds: 15
+    timeout_seconds: 30
     unhealthy_threshold: 3
     healthy_threshold: 2
     

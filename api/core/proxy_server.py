@@ -36,11 +36,12 @@ class ProxyServer:
         self._host = settings.host
         self._port = settings.proxy_port
         self._timeout = settings.connection_timeout
+        self._client_tasks: set[asyncio.Task[None]] = set()
 
     async def start(self) -> None:
         """Start the proxy server."""
         self._server = await asyncio.start_server(
-            self._handle_client,
+            self._handle_client_wrapper,
             self._host,
             self._port,
         )
@@ -51,11 +52,41 @@ class ProxyServer:
         )
 
     async def stop(self) -> None:
-        """Stop the proxy server."""
+        """Stop the proxy server gracefully."""
         if self._server:
+            # Stop accepting new connections
             self._server.close()
             await self._server.wait_closed()
+
+            # Cancel all active client tasks
+            if self._client_tasks:
+                logger.info(
+                    "Cancelling active client connections",
+                    count=len(self._client_tasks),
+                )
+                for task in self._client_tasks:
+                    task.cancel()
+
+                # Wait for all tasks to complete with a timeout
+                await asyncio.gather(*self._client_tasks, return_exceptions=True)
+                self._client_tasks.clear()
+
             logger.info("Proxy server stopped")
+
+    async def _handle_client_wrapper(
+        self,
+        client_reader: asyncio.StreamReader,
+        client_writer: asyncio.StreamWriter,
+    ) -> None:
+        """Wrapper to track client handler tasks."""
+        task = asyncio.current_task()
+        if task:
+            self._client_tasks.add(task)
+        try:
+            await self._handle_client(client_reader, client_writer)
+        finally:
+            if task:
+                self._client_tasks.discard(task)
 
     def _get_upstream_proxy(self, session_id: str | None = None) -> Proxy | None:
         """Select an upstream proxy using the configured strategy."""
@@ -101,6 +132,9 @@ class ProxyServer:
                     client_reader, client_writer, method, target, version, headers
                 )
 
+        except asyncio.CancelledError:
+            logger.debug("Client connection cancelled", client_addr=client_addr)
+            raise
         except TimeoutError:
             logger.debug("Client connection timeout", client_addr=client_addr)
         except ConnectionResetError:
@@ -229,10 +263,21 @@ class ProxyServer:
         upstream_reader: asyncio.StreamReader,
         upstream_writer: asyncio.StreamWriter,
     ) -> None:
-        """Bidirectional tunnel between client and upstream."""
+        """Bidirectional tunnel between client and upstream.
+
+        Each direction runs independently until:
+        - The reader returns EOF (remote closed their write side)
+        - A write fails (remote closed their read side or connection lost)
+        - An OS-level error occurs
+
+        We wait for both directions to complete naturally, which correctly
+        handles half-closed connections (e.g., client sends request, closes
+        write side, but still reads the response).
+        """
 
         async def forward(
-            reader: asyncio.StreamReader, writer: asyncio.StreamWriter
+            reader: asyncio.StreamReader,
+            writer: asyncio.StreamWriter,
         ) -> None:
             try:
                 while True:
@@ -241,15 +286,23 @@ class ProxyServer:
                         break
                     writer.write(data)
                     await writer.drain()
-            except (ConnectionResetError, BrokenPipeError):
+            except (ConnectionResetError, BrokenPipeError, OSError):
+                # Connection closed or errored - exit gracefully
                 pass
 
-        # Run both directions concurrently
-        await asyncio.gather(
-            forward(client_reader, upstream_writer),
-            forward(upstream_reader, client_writer),
-            return_exceptions=True,
-        )
+        task1 = asyncio.create_task(forward(client_reader, upstream_writer))
+        task2 = asyncio.create_task(forward(upstream_reader, client_writer))
+
+        try:
+            # Wait for both directions to complete
+            await asyncio.gather(task1, task2)
+        except asyncio.CancelledError:
+            # If we're cancelled from outside, cancel both tasks
+            task1.cancel()
+            task2.cancel()
+            # Wait for cleanup, suppressing exceptions
+            await asyncio.gather(task1, task2, return_exceptions=True)
+            raise
 
 
     async def _handle_http(
