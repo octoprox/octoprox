@@ -185,6 +185,7 @@ class ProxyServer:
 
         start_time = time.monotonic()
         success = False
+        latency_ms = 0.0
 
         try:
             # Connect to upstream proxy
@@ -222,6 +223,9 @@ class ProxyServer:
                     if line in (b"\r\n", b"\n", b""):
                         break
 
+                # Measure latency up to connection establishment (before tunneling)
+                latency_ms = (time.monotonic() - start_time) * 1000
+
                 # Check if upstream proxy accepted the CONNECT
                 if "200" in response_str:
                     # Send 200 to client
@@ -230,7 +234,7 @@ class ProxyServer:
 
                     success = True
 
-                    # Start bidirectional tunnel
+                    # Start bidirectional tunnel (not included in latency measurement)
                     await self._tunnel(
                         client_reader, client_writer,
                         upstream_reader, upstream_writer,
@@ -245,15 +249,17 @@ class ProxyServer:
                 await upstream_writer.wait_closed()
 
         except TimeoutError:
+            latency_ms = (time.monotonic() - start_time) * 1000
             await self._send_error(client_writer, 504, "Gateway Timeout")
         except ConnectionRefusedError:
+            latency_ms = (time.monotonic() - start_time) * 1000
             await self._send_error(client_writer, 502, "Bad Gateway")
         except Exception as e:
+            latency_ms = (time.monotonic() - start_time) * 1000
             logger.error("CONNECT error", error=str(e), target=target)
             await self._send_error(client_writer, 502, "Bad Gateway")
         finally:
             if proxy:
-                latency_ms = (time.monotonic() - start_time) * 1000
                 await self._proxy_manager.update_proxy_stats(proxy.id, success, latency_ms)
 
     async def _tunnel(
@@ -323,6 +329,7 @@ class ProxyServer:
 
         start_time = time.monotonic()
         success = False
+        latency_ms = 0.0
 
         try:
             # Connect to upstream proxy
@@ -362,11 +369,16 @@ class ProxyServer:
 
                 await upstream_writer.drain()
 
-                # Read and forward response
+                # Read response status line - this marks successful proxy connection
                 response_line = await asyncio.wait_for(
                     upstream_reader.readline(),
                     timeout=self._timeout,
                 )
+
+                # Measure latency up to first response (connection establishment)
+                latency_ms = (time.monotonic() - start_time) * 1000
+                success = True
+
                 client_writer.write(response_line)
 
                 # Read and forward response headers
@@ -383,7 +395,7 @@ class ProxyServer:
 
                 await client_writer.drain()
 
-                # Forward response body
+                # Forward response body (not included in latency measurement)
                 resp_content_length = response_headers.get("content-length")
                 transfer_encoding = response_headers.get("transfer-encoding", "")
 
@@ -394,22 +406,22 @@ class ProxyServer:
                     client_writer.write(body)
                     await client_writer.drain()
 
-                success = True
-
             finally:
                 upstream_writer.close()
                 await upstream_writer.wait_closed()
 
         except TimeoutError:
+            latency_ms = (time.monotonic() - start_time) * 1000
             await self._send_error(client_writer, 504, "Gateway Timeout")
         except ConnectionRefusedError:
+            latency_ms = (time.monotonic() - start_time) * 1000
             await self._send_error(client_writer, 502, "Bad Gateway")
         except Exception as e:
+            latency_ms = (time.monotonic() - start_time) * 1000
             logger.error("HTTP forward error", error=str(e), target=target)
             await self._send_error(client_writer, 502, "Bad Gateway")
         finally:
             if proxy:
-                latency_ms = (time.monotonic() - start_time) * 1000
                 await self._proxy_manager.update_proxy_stats(proxy.id, success, latency_ms)
 
     async def _forward_chunked(

@@ -10,7 +10,7 @@ from api.core.config import Settings
 from api.core.health_checker import HealthChecker
 from api.core.metrics_flusher import MetricsFlusher
 from api.db.redis import RedisClient
-from api.db.repository import ProxyRepository, SourceRepository
+from api.db.repository import MetricsRepository, ProxyRepository, SourceRepository
 from api.models.proxy import Proxy, ProxyStatus
 from api.models.source import ProxySource
 from api.strategies import get_strategy
@@ -108,10 +108,19 @@ class ProxyManager:
         )
 
     async def _hydrate_from_redis(self) -> None:
-        """Hydrate proxy objects with operational data from Redis."""
-        logger.info("Hydrating from Redis")
+        """Hydrate proxy objects with operational data from Redis and Postgres.
+
+        Combines cumulative totals from Postgres (historical snapshots) with
+        the current window from Redis to get accurate total counts.
+        """
+        logger.info("Hydrating operational data")
         statuses = await self._redis_client.get_all_proxy_statuses()
-        metrics = await self._redis_client.get_all_proxy_metrics()
+        redis_metrics = await self._redis_client.get_all_proxy_metrics()
+
+        # Always load cumulative totals from Postgres
+        async with self._session_factory() as session:
+            repo = MetricsRepository(session)
+            postgres_metrics = await repo.get_cumulative_metrics_for_all_proxies()
 
         for proxy_id, proxy in self._proxies.items():
             if proxy_id in statuses:
@@ -120,14 +129,34 @@ class ProxyManager:
                 proxy.last_check_latency_ms = status_data["latency_ms"]
                 proxy.consecutive_failures = status_data["consecutive_failures"]
 
-            if proxy_id in metrics:
-                m = metrics[proxy_id]
-                proxy.request_count = m["request_count"]
-                proxy.success_count = m["success_count"]
-                proxy.failure_count = m["failure_count"]
-                proxy.avg_latency_ms = m["avg_latency_ms"]
+            # Combine Postgres (historical) + Redis (current window)
+            pg = postgres_metrics.get(proxy_id, {})
+            rd = redis_metrics.get(proxy_id, {})
 
-        logger.info("Hydrated from Redis", proxy_count=len(self._proxies))
+            pg_requests = pg.get("request_count", 0)
+            rd_requests = rd.get("request_count", 0)
+            total_requests = pg_requests + rd_requests
+
+            proxy.request_count = total_requests
+            proxy.success_count = pg.get("success_count", 0) + rd.get("success_count", 0)
+            proxy.failure_count = pg.get("failure_count", 0) + rd.get("failure_count", 0)
+
+            # Compute weighted average latency
+            pg_latency = pg.get("avg_latency_ms", 0)
+            rd_latency = rd.get("avg_latency_ms", 0)
+            if total_requests > 0:
+                proxy.avg_latency_ms = (
+                    pg_latency * pg_requests + rd_latency * rd_requests
+                ) / total_requests
+            else:
+                proxy.avg_latency_ms = 0.0
+
+        logger.info(
+            "Hydrated operational data",
+            proxy_count=len(self._proxies),
+            from_redis=len(redis_metrics),
+            from_postgres=len(postgres_metrics),
+        )
 
     @property
     def proxies(self) -> list[Proxy]:

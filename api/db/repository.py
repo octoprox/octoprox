@@ -234,3 +234,45 @@ class MetricsRepository:
             }
             for m in models
         ]
+
+    async def get_cumulative_metrics_for_all_proxies(self) -> dict[str, dict]:
+        """Get cumulative metrics (sum of all snapshots) for each proxy.
+
+        Returns a dict mapping proxy_id to its total metrics across all snapshots.
+        Used to restore metrics on startup - these totals should be combined with
+        the current Redis window.
+        """
+        from sqlalchemy import func
+
+        # Sum counts and compute weighted average for latency
+        # weighted_avg = sum(avg_latency * request_count) / sum(request_count)
+        query = (
+            select(
+                ProxyMetricsModel.proxy_id,
+                func.sum(ProxyMetricsModel.request_count).label("total_requests"),
+                func.sum(ProxyMetricsModel.success_count).label("total_successes"),
+                func.sum(ProxyMetricsModel.failure_count).label("total_failures"),
+                func.sum(
+                    ProxyMetricsModel.avg_latency_ms * ProxyMetricsModel.request_count
+                ).label("weighted_latency_sum"),
+            )
+            .group_by(ProxyMetricsModel.proxy_id)
+        )
+
+        result = await self._session.execute(query)
+        rows = result.all()
+
+        metrics = {}
+        for row in rows:
+            total_requests = row.total_requests or 0
+            weighted_latency_sum = row.weighted_latency_sum or 0
+            avg_latency = weighted_latency_sum / total_requests if total_requests > 0 else 0.0
+
+            metrics[row.proxy_id] = {
+                "request_count": total_requests,
+                "success_count": row.total_successes or 0,
+                "failure_count": row.total_failures or 0,
+                "avg_latency_ms": avg_latency,
+            }
+
+        return metrics
