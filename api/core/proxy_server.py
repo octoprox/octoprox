@@ -143,6 +143,11 @@ class ProxyServer:
         client_addr = client_writer.get_extra_info("peername")
         logger.debug("New client connection", client_addr=client_addr)
 
+        # Extract client IP for sticky session routing
+        client_ip: str | None = None
+        if client_addr and isinstance(client_addr, tuple) and len(client_addr) >= 1:
+            client_ip = str(client_addr[0])
+
         try:
             # Read the first line to determine request type
             first_line = await asyncio.wait_for(
@@ -167,11 +172,11 @@ class ProxyServer:
 
             if method.upper() == "CONNECT":
                 await self._handle_connect(
-                    client_reader, client_writer, target, headers
+                    client_reader, client_writer, target, headers, client_ip
                 )
             else:
                 await self._handle_http(
-                    client_reader, client_writer, method, target, version, headers
+                    client_reader, client_writer, method, target, version, headers, client_ip
                 )
 
         except asyncio.CancelledError:
@@ -230,10 +235,11 @@ class ProxyServer:
         client_writer: asyncio.StreamWriter,
         target: str,
         headers: dict[str, str],
+        client_ip: str | None = None,
     ) -> None:
         """Handle HTTPS CONNECT tunneling."""
-        # Select upstream proxy
-        proxy = self._get_upstream_proxy()
+        # Select upstream proxy (use client IP for sticky session routing)
+        proxy = self._get_upstream_proxy(session_id=client_ip)
         if not proxy:
             await self._send_error(client_writer, 503, "No upstream proxy available")
             return
@@ -390,10 +396,11 @@ class ProxyServer:
         target: str,
         version: str,
         headers: dict[str, str],
+        client_ip: str | None = None,
     ) -> None:
         """Handle regular HTTP request forwarding."""
-        # Select upstream proxy
-        proxy = self._get_upstream_proxy()
+        # Select upstream proxy (use client IP for sticky session routing)
+        proxy = self._get_upstream_proxy(session_id=client_ip)
         if not proxy:
             await self._send_error(client_writer, 503, "No upstream proxy available")
             return
