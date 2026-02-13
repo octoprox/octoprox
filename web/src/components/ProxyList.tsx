@@ -1,28 +1,32 @@
 import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { Plus, Trash2 } from 'lucide-react'
-import { fetchProxies, fetchSources, createProxy, deleteProxy } from '../api/client'
+import { fetchProjectProxies, fetchProjectSources, createProxy, deleteProxy } from '../api/client'
+import { useProject } from '../contexts/ProjectContext'
 
 export default function ProxyList() {
   const queryClient = useQueryClient()
+  const { selectedProjectId } = useProject()
   const [showForm, setShowForm] = useState(false)
   const [formData, setFormData] = useState({ host: '', port: '', protocol: 'http', source_id: '' })
 
   const { data, isLoading } = useQuery({
-    queryKey: ['proxies'],
-    queryFn: fetchProxies,
+    queryKey: ['proxies', selectedProjectId],
+    queryFn: () => fetchProjectProxies(selectedProjectId!),
+    enabled: !!selectedProjectId,
   })
 
   const { data: sourcesData } = useQuery({
-    queryKey: ['sources'],
-    queryFn: fetchSources,
+    queryKey: ['sources', selectedProjectId],
+    queryFn: () => fetchProjectSources(selectedProjectId!),
+    enabled: !!selectedProjectId,
   })
 
   const createMutation = useMutation({
     mutationFn: createProxy,
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['proxies'] })
-      queryClient.invalidateQueries({ queryKey: ['sources'] })
+      queryClient.invalidateQueries({ queryKey: ['proxies', selectedProjectId] })
+      queryClient.invalidateQueries({ queryKey: ['sources', selectedProjectId] })
       setShowForm(false)
       setFormData({ host: '', port: '', protocol: 'http', source_id: '' })
     },
@@ -31,8 +35,8 @@ export default function ProxyList() {
   const deleteMutation = useMutation({
     mutationFn: deleteProxy,
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['proxies'] })
-      queryClient.invalidateQueries({ queryKey: ['sources'] })
+      queryClient.invalidateQueries({ queryKey: ['proxies', selectedProjectId] })
+      queryClient.invalidateQueries({ queryKey: ['sources', selectedProjectId] })
     },
   })
 

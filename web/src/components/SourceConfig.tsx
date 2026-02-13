@@ -1,26 +1,30 @@
 import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { Database, RefreshCw, Trash2, Pencil, X } from 'lucide-react'
-import { fetchSources, createSource, updateSource, deleteSource, Source } from '../api/client'
+import { fetchProjectSources, createProjectSource, updateSource, deleteSource, Source } from '../api/client'
+import { useProject } from '../contexts/ProjectContext'
 
 const SOURCE_TYPES = ['static', 'api', 'aws', 'gcp', 'azure']
 
 export default function SourceConfig() {
   const queryClient = useQueryClient()
+  const { selectedProjectId } = useProject()
   const [showForm, setShowForm] = useState(false)
   const [formData, setFormData] = useState({ name: '', type: 'static' })
   const [editingSource, setEditingSource] = useState<Source | null>(null)
   const [editFormData, setEditFormData] = useState({ name: '', enabled: true })
 
   const { data, isLoading } = useQuery({
-    queryKey: ['sources'],
-    queryFn: fetchSources,
+    queryKey: ['sources', selectedProjectId],
+    queryFn: () => fetchProjectSources(selectedProjectId!),
+    enabled: !!selectedProjectId,
   })
 
   const createMutation = useMutation({
-    mutationFn: createSource,
+    mutationFn: (data: { name: string; type: string }) =>
+      createProjectSource(selectedProjectId!, data),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['sources'] })
+      queryClient.invalidateQueries({ queryKey: ['sources', selectedProjectId] })
       setShowForm(false)
       setFormData({ name: '', type: 'static' })
     },
@@ -30,7 +34,7 @@ export default function SourceConfig() {
     mutationFn: ({ id, data }: { id: string; data: { name?: string; enabled?: boolean } }) =>
       updateSource(id, data),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['sources'] })
+      queryClient.invalidateQueries({ queryKey: ['sources', selectedProjectId] })
       setEditingSource(null)
     },
   })
@@ -38,8 +42,8 @@ export default function SourceConfig() {
   const deleteMutation = useMutation({
     mutationFn: deleteSource,
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['sources'] })
-      queryClient.invalidateQueries({ queryKey: ['proxies'] })
+      queryClient.invalidateQueries({ queryKey: ['sources', selectedProjectId] })
+      queryClient.invalidateQueries({ queryKey: ['proxies', selectedProjectId] })
     },
   })
 

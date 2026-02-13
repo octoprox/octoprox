@@ -5,7 +5,7 @@ from pydantic import BaseModel
 
 from api.models.source import ProxySource, SourceCreate, SourceResponse, SourceUpdate
 
-router = APIRouter()
+router = APIRouter(prefix="/projects/{project_id}/sources")
 
 
 class SourceListResponse(BaseModel):
@@ -21,6 +21,7 @@ def _source_to_response(source: ProxySource) -> SourceResponse:
         name=source.name,
         type=source.type.value,
         enabled=source.enabled,
+        project_id=source.project_id,
         proxy_count=source.proxy_count,
         last_refresh=source.last_refresh,
         refresh_interval_seconds=source.refresh_interval_seconds,
@@ -29,11 +30,15 @@ def _source_to_response(source: ProxySource) -> SourceResponse:
 
 
 @router.get("", response_model=SourceListResponse)
-async def list_sources(request: Request) -> SourceListResponse:
-    """List all proxy sources."""
+async def list_sources(request: Request, project_id: str) -> SourceListResponse:
+    """List all proxy sources for a project."""
     proxy_manager = request.app.state.proxy_manager
-    sources = proxy_manager.sources
-    
+
+    project = proxy_manager.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    sources = proxy_manager.get_sources_for_project(project_id)
     return SourceListResponse(
         total=len(sources),
         sources=[_source_to_response(s) for s in sources],
@@ -41,18 +46,27 @@ async def list_sources(request: Request) -> SourceListResponse:
 
 
 @router.post("", response_model=SourceResponse, status_code=201)
-async def create_source(request: Request, source_data: SourceCreate) -> SourceResponse:
-    """Add a new proxy source."""
+async def create_source(
+    request: Request,
+    source_data: SourceCreate,
+    project_id: str,
+) -> SourceResponse:
+    """Add a new proxy source to a project."""
     proxy_manager = request.app.state.proxy_manager
-    
+
+    project = proxy_manager.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
     source = ProxySource(
         name=source_data.name,
         type=source_data.type,
         enabled=source_data.enabled,
+        project_id=project_id,
         config=source_data.config,
         refresh_interval_seconds=source_data.refresh_interval_seconds,
     )
-    
+
     await proxy_manager.add_source(source)
     return _source_to_response(source)
 

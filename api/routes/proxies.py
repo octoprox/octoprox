@@ -5,7 +5,7 @@ from pydantic import BaseModel
 
 from api.models.proxy import Proxy, ProxyCreate, ProxyResponse, ProxyUpdate
 
-router = APIRouter()
+router = APIRouter(prefix="/projects/{project_id}/proxies")
 
 
 class ProxyListResponse(BaseModel):
@@ -39,14 +39,20 @@ def _proxy_to_response(proxy: Proxy) -> ProxyResponse:
 
 
 @router.get("", response_model=ProxyListResponse)
-async def list_proxies(request: Request) -> ProxyListResponse:
-    """List all proxies in the pool."""
+async def list_proxies(request: Request, project_id: str) -> ProxyListResponse:
+    """List all proxies for a project."""
     proxy_manager = request.app.state.proxy_manager
-    proxies = proxy_manager.proxies
-    
+
+    project = proxy_manager.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    proxies = proxy_manager.get_proxies_for_project(project_id)
+    healthy_proxies = proxy_manager.get_healthy_proxies_for_project(project_id)
+
     return ProxyListResponse(
         total=len(proxies),
-        healthy=len(proxy_manager.healthy_proxies),
+        healthy=len(healthy_proxies),
         proxies=[_proxy_to_response(p) for p in proxies],
     )
 
@@ -144,24 +150,9 @@ async def delete_proxy(request: Request, proxy_id: str) -> None:
 async def set_strategy(request: Request, strategy_req: StrategyRequest) -> dict[str, str]:
     """Change the routing strategy."""
     proxy_manager = request.app.state.proxy_manager
-    
+
     try:
         proxy_manager.set_strategy(strategy_req.strategy)
         return {"status": "ok", "strategy": strategy_req.strategy}
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
-
-
-@router.get("/select/next")
-async def select_next_proxy(
-    request: Request, session_id: str | None = None
-) -> ProxyResponse:
-    """Select the next proxy using the current routing strategy."""
-    proxy_manager = request.app.state.proxy_manager
-    proxy = proxy_manager.select_proxy(session_id)
-    
-    if proxy is None:
-        raise HTTPException(status_code=503, detail="No healthy proxies available")
-    
-    return _proxy_to_response(proxy)
-

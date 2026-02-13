@@ -16,7 +16,7 @@ from api.core.proxy_server import ProxyServer
 from api.db.migrations import run_migrations
 from api.db.redis import get_redis_client
 from api.db.session import get_async_session_factory
-from api.routes import auth, health, metrics, proxies, sources
+from api.routes import auth, health, metrics, projects, proxies, sources
 
 # Configure logging before getting the logger
 log_level = "DEBUG" if settings.debug else "INFO"
@@ -92,32 +92,18 @@ def create_app() -> FastAPI:
     )
 
     # Include routers
-    # Auth routes (public)
-    app.include_router(auth.router, prefix="/api/v1/auth", tags=["Auth"])
-
     # Health check (public)
     app.include_router(health.router, tags=["Health"])
 
     # Protected routes - require auth when enabled
     auth_dependency = [Depends(require_auth)]
-    app.include_router(
-        proxies.router,
-        prefix="/api/v1/proxies",
-        tags=["Proxies"],
-        dependencies=auth_dependency,
-    )
-    app.include_router(
-        sources.router,
-        prefix="/api/v1/sources",
-        tags=["Sources"],
-        dependencies=auth_dependency,
-    )
-    app.include_router(
-        metrics.router,
-        prefix="/api/v1/metrics",
-        tags=["Metrics"],
-        dependencies=auth_dependency,
-    )
+
+    # All API routes under /api/v1
+    app.include_router(auth.router, prefix="/api/v1", tags=["Auth"])
+    app.include_router(projects.router, prefix="/api/v1", tags=["Projects"], dependencies=auth_dependency)
+    app.include_router(sources.router, prefix="/api/v1", tags=["Sources"], dependencies=auth_dependency)
+    app.include_router(proxies.router, prefix="/api/v1", tags=["Proxies"], dependencies=auth_dependency)
+    app.include_router(metrics.router, prefix="/api/v1", tags=["Metrics"], dependencies=auth_dependency)
 
     return app
 

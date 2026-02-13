@@ -11,11 +11,38 @@ from api.models.proxy import ProxyProtocol
 from api.models.source import SourceType
 
 
+class ProjectModel(Base):
+    """SQLAlchemy model for projects (multi-tenancy)."""
+
+    __tablename__ = "projects"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    name: Mapped[str] = mapped_column(String(255), nullable=False, unique=True)
+    description: Mapped[str] = mapped_column(Text, default="")
+
+    # Proxy authentication credentials (plain text)
+    username: Mapped[str] = mapped_column(String(255), nullable=False, unique=True)
+    password: Mapped[str] = mapped_column(String(255), nullable=False)
+
+    # Project-level settings
+    routing_strategy: Mapped[str] = mapped_column(String(50), default="round_robin")
+    health_check_interval: Mapped[int] = mapped_column(Integer, default=60)
+    health_check_timeout: Mapped[int] = mapped_column(Integer, default=30)
+    connection_timeout: Mapped[int] = mapped_column(Integer, default=30)
+    max_retries: Mapped[int] = mapped_column(Integer, default=3)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    # Relationship to sources
+    sources: Mapped[list["SourceModel"]] = relationship("SourceModel", back_populates="project", cascade="all, delete-orphan")
+
+
 class SourceModel(Base):
     """SQLAlchemy model for proxy sources."""
-    
+
     __tablename__ = "sources"
-    
+
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     type: Mapped[str] = mapped_column(String(50), nullable=False)
@@ -24,7 +51,13 @@ class SourceModel(Base):
     refresh_interval_seconds: Mapped[int] = mapped_column(Integer, default=300)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
-    
+
+    # Foreign key to project
+    project_id: Mapped[str] = mapped_column(String(36), ForeignKey("projects.id"), nullable=False)
+
+    # Relationship to project
+    project: Mapped["ProjectModel"] = relationship("ProjectModel", back_populates="sources")
+
     # Relationship to proxies
     proxies: Mapped[list["ProxyModel"]] = relationship("ProxyModel", back_populates="source", cascade="all, delete-orphan")
 

@@ -12,7 +12,7 @@ from api.core.config import settings
 
 logger = structlog.get_logger()
 
-router = APIRouter()
+router = APIRouter(prefix="/auth")
 
 ALGORITHM = "HS256"
 

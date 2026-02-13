@@ -1,23 +1,31 @@
 import { useQuery } from '@tanstack/react-query'
 import { Activity, Server, CheckCircle, XCircle } from 'lucide-react'
-import { fetchMetrics, fetchProxies } from '../api/client'
+import { fetchProjectMetrics, fetchProjectProxies } from '../api/client'
+import { useProject } from '../contexts/ProjectContext'
 
 export default function Dashboard() {
+  const { selectedProjectId, selectedProject } = useProject()
+
   const { data: metrics } = useQuery({
-    queryKey: ['metrics'],
-    queryFn: fetchMetrics,
+    queryKey: ['metrics', selectedProjectId],
+    queryFn: () => fetchProjectMetrics(selectedProjectId!),
+    enabled: !!selectedProjectId,
   })
 
   const { data: proxies } = useQuery({
-    queryKey: ['proxies'],
-    queryFn: fetchProxies,
+    queryKey: ['proxies', selectedProjectId],
+    queryFn: () => fetchProjectProxies(selectedProjectId!),
+    enabled: !!selectedProjectId,
   })
 
   const pool = metrics?.pool
 
   return (
     <div>
-      <h1 className="text-3xl font-bold mb-8">Dashboard</h1>
+      <h1 className="text-3xl font-bold mb-2">Dashboard</h1>
+      {selectedProject && (
+        <p className="text-gray-500 mb-6">Project: {selectedProject.name}</p>
+      )}
 
       {/* Stats Grid */}
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-8">

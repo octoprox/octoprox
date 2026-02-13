@@ -19,20 +19,23 @@ class SourceType(str, Enum):
 
 class ProxySource(BaseModel):
     """Represents a source of proxies."""
-    
+
     id: str = Field(default_factory=lambda: str(uuid4()))
     name: str
     type: SourceType
     enabled: bool = True
-    
+
+    # Project association
+    project_id: str
+
     # Configuration for the source
     config: dict[str, Any] = Field(default_factory=dict)
-    
+
     # Statistics
     proxy_count: int = 0
     last_refresh: datetime | None = None
     refresh_interval_seconds: int = 300
-    
+
     # Metadata
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)
@@ -63,6 +66,7 @@ class SourceResponse(BaseModel):
     name: str
     type: str
     enabled: bool
+    project_id: str
     proxy_count: int
     last_refresh: datetime | None
     refresh_interval_seconds: int

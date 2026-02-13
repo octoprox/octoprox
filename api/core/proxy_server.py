@@ -7,9 +7,11 @@ It supports:
 - HTTP CONNECT method for HTTPS tunneling
 - Regular HTTP request forwarding
 - Upstream proxy selection via ProxyManager strategies
+- Project-based authentication via HTTP Basic Auth (Proxy-Authorization header)
 """
 
 import asyncio
+import base64
 import time
 from typing import TYPE_CHECKING
 
@@ -17,6 +19,7 @@ import structlog
 from python_socks.async_.asyncio import Proxy as SocksProxy
 
 from api.core.config import settings
+from api.models.project import Project
 from api.models.proxy import Proxy, ProxyProtocol
 
 if TYPE_CHECKING:
@@ -89,9 +92,64 @@ class ProxyServer:
             if task:
                 self._client_tasks.discard(task)
 
-    def _get_upstream_proxy(self, session_id: str | None = None) -> Proxy | None:
-        """Select an upstream proxy using the configured strategy."""
+    def _get_upstream_proxy(
+        self, project_id: str | None = None, session_id: str | None = None
+    ) -> Proxy | None:
+        """Select an upstream proxy using the configured strategy.
+
+        Args:
+            project_id: If provided, selects from project-scoped proxies using
+                        the project's routing strategy.
+            session_id: Session identifier for sticky routing.
+
+        Returns:
+            Selected proxy or None if no healthy proxies available.
+        """
+        if project_id:
+            return self._proxy_manager.select_proxy_for_project(project_id, session_id)
         return self._proxy_manager.select_proxy(session_id)
+
+    def _authenticate_project(self, headers: dict[str, str]) -> Project | None:
+        """Authenticate a client request using Proxy-Authorization header.
+
+        Expects HTTP Basic Auth in the Proxy-Authorization header with
+        project username and password.
+
+        Args:
+            headers: Request headers (lowercase keys)
+
+        Returns:
+            Authenticated Project or None if authentication fails.
+        """
+        auth_header = headers.get("proxy-authorization", "")
+        if not auth_header:
+            return None
+
+        # Parse Basic auth
+        if not auth_header.lower().startswith("basic "):
+            return None
+
+        try:
+            encoded_credentials = auth_header[6:]  # Remove "Basic " prefix
+            decoded = base64.b64decode(encoded_credentials).decode("utf-8")
+            if ":" not in decoded:
+                return None
+            username, password = decoded.split(":", 1)
+        except (ValueError, UnicodeDecodeError):
+            return None
+
+        # Look up project by username
+        project = self._proxy_manager.get_project_by_username(username)
+        if not project:
+            logger.debug("Project not found for username", username=username)
+            return None
+
+        # Verify password (plain text comparison as per requirements)
+        if project.password != password:
+            logger.debug("Invalid password for project", project_id=project.id)
+            return None
+
+        return project
 
     async def _connect_via_proxy(
         self,
@@ -170,13 +228,32 @@ class ProxyServer:
             # Read headers
             headers = await self._read_headers(client_reader)
 
+            # Authenticate project using Proxy-Authorization header
+            project = self._authenticate_project(headers)
+            if not project:
+                await self._send_error(
+                    client_writer,
+                    407,
+                    "Proxy Authentication Required",
+                    "Valid project credentials required in Proxy-Authorization header",
+                )
+                return
+
+            project_id = project.id
+            logger.debug(
+                "Authenticated project",
+                project_id=project_id,
+                project_name=project.name,
+                client_addr=client_addr,
+            )
+
             if method.upper() == "CONNECT":
                 await self._handle_connect(
-                    client_reader, client_writer, target, headers, client_ip
+                    client_reader, client_writer, target, headers, project_id, client_ip
                 )
             else:
                 await self._handle_http(
-                    client_reader, client_writer, method, target, version, headers, client_ip
+                    client_reader, client_writer, method, target, version, headers, project_id, client_ip
                 )
 
         except asyncio.CancelledError:
@@ -235,13 +312,14 @@ class ProxyServer:
         client_writer: asyncio.StreamWriter,
         target: str,
         headers: dict[str, str],
+        project_id: str,
         client_ip: str | None = None,
     ) -> None:
         """Handle HTTPS CONNECT tunneling."""
-        # Select upstream proxy (use client IP for sticky session routing)
-        proxy = self._get_upstream_proxy(session_id=client_ip)
+        # Select upstream proxy scoped to the authenticated project
+        proxy = self._get_upstream_proxy(project_id=project_id, session_id=client_ip)
         if not proxy:
-            await self._send_error(client_writer, 503, "No upstream proxy available")
+            await self._send_error(client_writer, 503, "No upstream proxy available for project")
             return
 
         # Parse target host:port
@@ -396,13 +474,14 @@ class ProxyServer:
         target: str,
         version: str,
         headers: dict[str, str],
+        project_id: str,
         client_ip: str | None = None,
     ) -> None:
         """Handle regular HTTP request forwarding."""
-        # Select upstream proxy (use client IP for sticky session routing)
-        proxy = self._get_upstream_proxy(session_id=client_ip)
+        # Select upstream proxy scoped to the authenticated project
+        proxy = self._get_upstream_proxy(project_id=project_id, session_id=client_ip)
         if not proxy:
-            await self._send_error(client_writer, 503, "No upstream proxy available")
+            await self._send_error(client_writer, 503, "No upstream proxy available for project")
             return
 
         start_time = time.monotonic()
@@ -436,8 +515,6 @@ class ProxyServer:
             # Forward headers, adding proxy auth for HTTP proxies only
             # (SOCKS auth is handled during tunnel establishment)
             if not is_socks and proxy.username and proxy.password:
-                import base64
-
                 credentials = base64.b64encode(
                     f"{proxy.username}:{proxy.password}".encode()
                 ).decode()

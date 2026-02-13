@@ -10,7 +10,8 @@ from api.core.config import Settings
 from api.core.health_checker import HealthChecker
 from api.core.metrics_flusher import MetricsFlusher
 from api.db.redis import RedisClient
-from api.db.repository import MetricsRepository, ProxyRepository, SourceRepository
+from api.db.repository import MetricsRepository, ProjectRepository, ProxyRepository, SourceRepository
+from api.models.project import Project
 from api.models.proxy import Proxy, ProxyStatus
 from api.models.source import ProxySource
 from api.strategies import get_strategy
@@ -44,8 +45,12 @@ class ProxyManager:
         self._settings = settings
 
         # In-memory cache (loaded from Postgres on start)
+        self._projects: dict[str, Project] = {}
         self._proxies: dict[str, Proxy] = {}
         self._sources: dict[str, ProxySource] = {}
+        # Per-project strategies (project_id -> strategy)
+        self._project_strategies: dict[str, "RoutingStrategy"] = {}
+        # Default strategy for backward compatibility
         self._strategy: RoutingStrategy = get_strategy(settings.default_strategy)
         self._health_checker = HealthChecker(self)
         self._metrics_flusher = MetricsFlusher(session_factory, redis_client, settings)
@@ -87,11 +92,18 @@ class ProxyManager:
         self._tasks.clear()
 
     async def _load_from_database(self) -> None:
-        """Load sources and proxies from Postgres."""
+        """Load projects, sources and proxies from Postgres."""
         logger.info("Loading data from database")
         async with self._session_factory() as session:
+            project_repo = ProjectRepository(session)
             source_repo = SourceRepository(session)
             proxy_repo = ProxyRepository(session)
+
+            # Load projects and initialize their strategies
+            projects = await project_repo.get_all()
+            for project in projects:
+                self._projects[project.id] = project
+                self._project_strategies[project.id] = get_strategy(project.routing_strategy)
 
             sources = await source_repo.get_all()
             for source in sources:
@@ -103,6 +115,7 @@ class ProxyManager:
 
         logger.info(
             "Loaded from database",
+            project_count=len(self._projects),
             source_count=len(self._sources),
             proxy_count=len(self._proxies),
         )
@@ -172,6 +185,104 @@ class ProxyManager:
     def sources(self) -> list[ProxySource]:
         """Get all proxy sources."""
         return list(self._sources.values())
+
+    @property
+    def projects(self) -> list[Project]:
+        """Get all projects."""
+        return list(self._projects.values())
+
+    def get_project(self, project_id: str) -> Project | None:
+        """Get a project by ID."""
+        return self._projects.get(project_id)
+
+    def get_project_by_username(self, username: str) -> Project | None:
+        """Get a project by proxy username (for authentication)."""
+        for project in self._projects.values():
+            if project.username == username:
+                return project
+        return None
+
+    async def add_project(self, project: Project) -> None:
+        """Add a project (persists to Postgres)."""
+        async with self._session_factory() as session:
+            repo = ProjectRepository(session)
+            await repo.create(project)
+            await session.commit()
+
+        self._projects[project.id] = project
+        self._project_strategies[project.id] = get_strategy(project.routing_strategy)
+        logger.info("Added project", project_id=project.id, name=project.name)
+
+    async def update_project(self, project: Project) -> None:
+        """Update a project (persists to Postgres)."""
+        async with self._session_factory() as session:
+            repo = ProjectRepository(session)
+            await repo.update(project)
+            await session.commit()
+
+        self._projects[project.id] = project
+        self._project_strategies[project.id] = get_strategy(project.routing_strategy)
+        logger.info("Updated project", project_id=project.id, name=project.name)
+
+    async def remove_project(self, project_id: str) -> bool:
+        """Remove a project (deletes from Postgres, cascades to sources and proxies)."""
+        if project_id not in self._projects:
+            return False
+
+        async with self._session_factory() as session:
+            repo = ProjectRepository(session)
+            await repo.delete(project_id)
+            await session.commit()
+
+        # Remove from cache
+        del self._projects[project_id]
+        if project_id in self._project_strategies:
+            del self._project_strategies[project_id]
+
+        # Remove associated sources and proxies from cache
+        source_ids_to_remove = [
+            sid for sid, s in self._sources.items() if s.project_id == project_id
+        ]
+        for sid in source_ids_to_remove:
+            del self._sources[sid]
+
+        self._proxies = {
+            pid: p for pid, p in self._proxies.items()
+            if p.source_id not in source_ids_to_remove
+        }
+
+        logger.info("Removed project", project_id=project_id)
+        return True
+
+    def get_sources_for_project(self, project_id: str) -> list[ProxySource]:
+        """Get all sources for a project."""
+        return [s for s in self._sources.values() if s.project_id == project_id]
+
+    def get_proxies_for_project(self, project_id: str) -> list[Proxy]:
+        """Get all proxies for a project (via sources)."""
+        source_ids = {s.id for s in self._sources.values() if s.project_id == project_id}
+        return [p for p in self._proxies.values() if p.source_id in source_ids]
+
+    def get_healthy_proxies_for_project(self, project_id: str) -> list[Proxy]:
+        """Get healthy proxies for a project."""
+        source_ids = {s.id for s in self._sources.values() if s.project_id == project_id}
+        return [
+            p for p in self._proxies.values()
+            if p.source_id in source_ids and p.status == ProxyStatus.HEALTHY
+        ]
+
+    def select_proxy_for_project(
+        self, project_id: str, session_id: str | None = None
+    ) -> Proxy | None:
+        """Select a proxy for a specific project using the project's routing strategy."""
+        healthy_proxies = self.get_healthy_proxies_for_project(project_id)
+        strategy = self._project_strategies.get(project_id, self._strategy)
+        return strategy.select(healthy_proxies, session_id)
+
+    def set_project_strategy(self, project_id: str, strategy_name: str) -> None:
+        """Change the routing strategy for a project."""
+        self._project_strategies[project_id] = get_strategy(strategy_name)
+        logger.info("Changed project routing strategy", project_id=project_id, strategy=strategy_name)
 
     def get_proxy(self, proxy_id: str) -> Proxy | None:
         """Get a proxy by ID."""

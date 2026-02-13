@@ -2,12 +2,122 @@
 
 from datetime import datetime
 
-from sqlalchemy import select, delete
+from sqlalchemy import select, delete, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from api.db.models import ProxyModel, SourceModel, ProxyMetricsModel
+from api.db.models import ProjectModel, ProxyModel, SourceModel, ProxyMetricsModel
+from api.models.project import Project
 from api.models.proxy import Proxy, ProxyProtocol, ProxyStatus
 from api.models.source import ProxySource, SourceType
+
+
+class ProjectRepository:
+    """Repository for project database operations."""
+
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+
+    async def get_all(self) -> list[Project]:
+        """Get all projects."""
+        result = await self._session.execute(select(ProjectModel))
+        models = result.scalars().all()
+        return [self._to_domain(m) for m in models]
+
+    async def get_by_id(self, project_id: str) -> Project | None:
+        """Get project by ID."""
+        result = await self._session.execute(
+            select(ProjectModel).where(ProjectModel.id == project_id)
+        )
+        model = result.scalar_one_or_none()
+        return self._to_domain(model) if model else None
+
+    async def get_by_username(self, username: str) -> Project | None:
+        """Get project by username (for proxy authentication)."""
+        result = await self._session.execute(
+            select(ProjectModel).where(ProjectModel.username == username)
+        )
+        model = result.scalar_one_or_none()
+        return self._to_domain(model) if model else None
+
+    async def create(self, project: Project) -> Project:
+        """Create a new project."""
+        model = ProjectModel(
+            id=project.id,
+            name=project.name,
+            description=project.description,
+            username=project.username,
+            password=project.password,
+            routing_strategy=project.routing_strategy,
+            health_check_interval=project.health_check_interval,
+            health_check_timeout=project.health_check_timeout,
+            connection_timeout=project.connection_timeout,
+            max_retries=project.max_retries,
+            created_at=project.created_at,
+            updated_at=project.updated_at,
+        )
+        self._session.add(model)
+        await self._session.flush()
+        return project
+
+    async def update(self, project: Project) -> Project:
+        """Update an existing project."""
+        result = await self._session.execute(
+            select(ProjectModel).where(ProjectModel.id == project.id)
+        )
+        model = result.scalar_one_or_none()
+        if model:
+            model.name = project.name
+            model.description = project.description
+            model.username = project.username
+            model.password = project.password
+            model.routing_strategy = project.routing_strategy
+            model.health_check_interval = project.health_check_interval
+            model.health_check_timeout = project.health_check_timeout
+            model.connection_timeout = project.connection_timeout
+            model.max_retries = project.max_retries
+            model.updated_at = datetime.utcnow()
+            await self._session.flush()
+        return project
+
+    async def delete(self, project_id: str) -> bool:
+        """Delete a project (cascades to sources and proxies)."""
+        result = await self._session.execute(
+            delete(ProjectModel).where(ProjectModel.id == project_id)
+        )
+        return result.rowcount > 0
+
+    async def get_source_count(self, project_id: str) -> int:
+        """Get the number of sources for a project."""
+        result = await self._session.execute(
+            select(func.count(SourceModel.id)).where(SourceModel.project_id == project_id)
+        )
+        return result.scalar() or 0
+
+    async def get_proxy_count(self, project_id: str) -> int:
+        """Get the number of proxies for a project (via sources)."""
+        result = await self._session.execute(
+            select(func.count(ProxyModel.id))
+            .join(SourceModel, ProxyModel.source_id == SourceModel.id)
+            .where(SourceModel.project_id == project_id)
+        )
+        return result.scalar() or 0
+
+    def _to_domain(self, model: ProjectModel) -> Project:
+        """Convert database model to domain model."""
+        return Project(
+            id=model.id,
+            name=model.name,
+            description=model.description,
+            username=model.username,
+            password=model.password,
+            routing_strategy=model.routing_strategy,
+            health_check_interval=model.health_check_interval,
+            health_check_timeout=model.health_check_timeout,
+            connection_timeout=model.connection_timeout,
+            max_retries=model.max_retries,
+            created_at=model.created_at,
+            updated_at=model.updated_at,
+        )
 
 
 class SourceRepository:
@@ -19,6 +129,14 @@ class SourceRepository:
     async def get_all(self) -> list[ProxySource]:
         """Get all sources."""
         result = await self._session.execute(select(SourceModel))
+        models = result.scalars().all()
+        return [self._to_domain(m) for m in models]
+
+    async def get_by_project(self, project_id: str) -> list[ProxySource]:
+        """Get all sources for a project."""
+        result = await self._session.execute(
+            select(SourceModel).where(SourceModel.project_id == project_id)
+        )
         models = result.scalars().all()
         return [self._to_domain(m) for m in models]
 
@@ -37,6 +155,7 @@ class SourceRepository:
             name=source.name,
             type=source.type.value if isinstance(source.type, SourceType) else source.type,
             enabled=source.enabled,
+            project_id=source.project_id,
             config=source.config,
             refresh_interval_seconds=source.refresh_interval_seconds,
             created_at=source.created_at,
@@ -76,6 +195,7 @@ class SourceRepository:
             name=model.name,
             type=SourceType(model.type),
             enabled=model.enabled,
+            project_id=model.project_id,
             config=model.config,
             refresh_interval_seconds=model.refresh_interval_seconds,
             created_at=model.created_at,

@@ -1,18 +1,21 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { fetchMetrics, setStrategy } from '../api/client'
+import { fetchProjectMetrics, setStrategy } from '../api/client'
+import { useProject } from '../contexts/ProjectContext'
 
 export default function Metrics() {
   const queryClient = useQueryClient()
+  const { selectedProjectId } = useProject()
 
   const { data, isLoading } = useQuery({
-    queryKey: ['metrics'],
-    queryFn: fetchMetrics,
+    queryKey: ['metrics', selectedProjectId],
+    queryFn: () => fetchProjectMetrics(selectedProjectId!),
+    enabled: !!selectedProjectId,
   })
 
   const strategyMutation = useMutation({
     mutationFn: setStrategy,
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['metrics'] })
+      queryClient.invalidateQueries({ queryKey: ['metrics', selectedProjectId] })
     },
   })
 
