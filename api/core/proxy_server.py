@@ -10,12 +10,11 @@ It supports:
 """
 
 import asyncio
-import socket
-import struct
 import time
 from typing import TYPE_CHECKING
 
 import structlog
+from python_socks.async_.asyncio import Proxy as SocksProxy
 
 from api.core.config import settings
 from api.models.proxy import Proxy, ProxyProtocol
@@ -94,243 +93,6 @@ class ProxyServer:
         """Select an upstream proxy using the configured strategy."""
         return self._proxy_manager.select_proxy(session_id)
 
-    async def _connect_via_socks5(
-        self,
-        proxy: Proxy,
-        target_host: str,
-        target_port: int,
-        reader: asyncio.StreamReader,
-        writer: asyncio.StreamWriter,
-    ) -> None:
-        """Perform SOCKS5 handshake to establish tunnel (RFC 1928).
-
-        Args:
-            proxy: The SOCKS5 proxy with optional credentials
-            target_host: Destination hostname or IP
-            target_port: Destination port
-            reader: Stream reader connected to proxy
-            writer: Stream writer connected to proxy
-
-        Raises:
-            ConnectionError: If handshake fails
-        """
-        # Greeting: version + auth methods
-        if proxy.username and proxy.password:
-            # Offer no-auth (0x00) and username/password (0x02)
-            writer.write(b"\x05\x02\x00\x02")
-        else:
-            # Offer only no-auth
-            writer.write(b"\x05\x01\x00")
-        await writer.drain()
-
-        # Receive auth method selection
-        response = await asyncio.wait_for(reader.readexactly(2), timeout=self._timeout)
-        version, auth_method = response[0], response[1]
-
-        if version != 0x05:
-            raise ConnectionError(f"SOCKS5: Invalid version {version}")
-
-        if auth_method == 0xFF:
-            raise ConnectionError("SOCKS5: No acceptable auth method")
-
-        # Handle username/password auth (RFC 1929)
-        if auth_method == 0x02:
-            if not proxy.username or not proxy.password:
-                raise ConnectionError("SOCKS5: Server requires auth but no credentials")
-
-            username_bytes = proxy.username.encode("utf-8")
-            password_bytes = proxy.password.encode("utf-8")
-            auth_request = (
-                b"\x01"
-                + bytes([len(username_bytes)])
-                + username_bytes
-                + bytes([len(password_bytes)])
-                + password_bytes
-            )
-            writer.write(auth_request)
-            await writer.drain()
-
-            auth_response = await asyncio.wait_for(
-                reader.readexactly(2), timeout=self._timeout
-            )
-            if auth_response[1] != 0x00:
-                raise ConnectionError("SOCKS5: Authentication failed")
-
-        # Send connect request
-        # Format: VER(1) + CMD(1) + RSV(1) + ATYP(1) + DST.ADDR(var) + DST.PORT(2)
-        connect_request = b"\x05\x01\x00"  # version, connect command, reserved
-
-        # Try to parse as IP address first
-        try:
-            ip_bytes = socket.inet_aton(target_host)
-            connect_request += b"\x01" + ip_bytes  # IPv4
-        except OSError:
-            # It's a domain name
-            host_bytes = target_host.encode("utf-8")
-            connect_request += b"\x03" + bytes([len(host_bytes)]) + host_bytes
-
-        connect_request += struct.pack("!H", target_port)
-        writer.write(connect_request)
-        await writer.drain()
-
-        # Receive connect response
-        # Format: VER(1) + REP(1) + RSV(1) + ATYP(1) + BND.ADDR(var) + BND.PORT(2)
-        response = await asyncio.wait_for(reader.readexactly(4), timeout=self._timeout)
-        version, reply, _, addr_type = response
-
-        if version != 0x05:
-            raise ConnectionError(f"SOCKS5: Invalid response version {version}")
-
-        if reply != 0x00:
-            error_messages = {
-                0x01: "General failure",
-                0x02: "Connection not allowed",
-                0x03: "Network unreachable",
-                0x04: "Host unreachable",
-                0x05: "Connection refused",
-                0x06: "TTL expired",
-                0x07: "Command not supported",
-                0x08: "Address type not supported",
-            }
-            msg = error_messages.get(reply, f"Unknown error {reply}")
-            raise ConnectionError(f"SOCKS5: {msg}")
-
-        # Read bound address (we don't use it, but must consume it)
-        if addr_type == 0x01:  # IPv4
-            await reader.readexactly(4)
-        elif addr_type == 0x03:  # Domain
-            domain_len = (await reader.readexactly(1))[0]
-            await reader.readexactly(domain_len)
-        elif addr_type == 0x04:  # IPv6
-            await reader.readexactly(16)
-
-        # Read bound port
-        await reader.readexactly(2)
-
-        # Tunnel is now established
-
-    async def _connect_via_socks4(
-        self,
-        proxy: Proxy,
-        target_host: str,
-        target_port: int,
-        reader: asyncio.StreamReader,
-        writer: asyncio.StreamWriter,
-    ) -> None:
-        """Perform SOCKS4/4a handshake to establish tunnel.
-
-        Uses SOCKS4a extension for domain names (sends 0.0.0.x as IP
-        and appends hostname after userid).
-
-        Args:
-            proxy: The SOCKS4 proxy (username used as userid if provided)
-            target_host: Destination hostname or IP
-            target_port: Destination port
-            reader: Stream reader connected to proxy
-            writer: Stream writer connected to proxy
-
-        Raises:
-            ConnectionError: If handshake fails
-        """
-        # SOCKS4 request format:
-        # VN(1) + CD(1) + DSTPORT(2) + DSTIP(4) + USERID(var) + NULL(1)
-        # For SOCKS4a with domain: DSTIP=0.0.0.x + USERID + NULL + HOSTNAME + NULL
-
-        userid = (proxy.username or "").encode("utf-8")
-
-        # Try to resolve as IP first
-        try:
-            ip_bytes = socket.inet_aton(target_host)
-            use_socks4a = False
-        except OSError:
-            # Use SOCKS4a for domain names
-            ip_bytes = b"\x00\x00\x00\x01"  # 0.0.0.1 signals SOCKS4a
-            use_socks4a = True
-
-        request = (
-            b"\x04\x01"  # version 4, connect command
-            + struct.pack("!H", target_port)
-            + ip_bytes
-            + userid
-            + b"\x00"
-        )
-
-        if use_socks4a:
-            request += target_host.encode("utf-8") + b"\x00"
-
-        writer.write(request)
-        await writer.drain()
-
-        # Response format: VN(1) + CD(1) + DSTPORT(2) + DSTIP(4)
-        response = await asyncio.wait_for(reader.readexactly(8), timeout=self._timeout)
-        reply_code = response[1]
-
-        if reply_code != 0x5A:  # 90 = request granted
-            error_messages = {
-                0x5B: "Request rejected or failed",
-                0x5C: "Request failed - client not running identd",
-                0x5D: "Request failed - identd could not confirm user",
-            }
-            msg = error_messages.get(reply_code, f"Unknown error {reply_code}")
-            raise ConnectionError(f"SOCKS4: {msg}")
-
-        # Tunnel is now established
-
-    async def _connect_via_http(
-        self,
-        proxy: Proxy,
-        target_host: str,
-        target_port: int,
-        reader: asyncio.StreamReader,
-        writer: asyncio.StreamWriter,
-    ) -> None:
-        """Perform HTTP CONNECT to establish tunnel through HTTP proxy.
-
-        Args:
-            proxy: The HTTP/HTTPS proxy with optional credentials
-            target_host: Destination hostname or IP
-            target_port: Destination port
-            reader: Stream reader connected to proxy
-            writer: Stream writer connected to proxy
-
-        Raises:
-            ConnectionError: If CONNECT request fails
-        """
-        target = f"{target_host}:{target_port}"
-        connect_req = f"CONNECT {target} HTTP/1.1\r\nHost: {target}\r\n"
-
-        # Add proxy authentication if needed
-        if proxy.username and proxy.password:
-            import base64
-
-            credentials = base64.b64encode(
-                f"{proxy.username}:{proxy.password}".encode()
-            ).decode()
-            connect_req += f"Proxy-Authorization: Basic {credentials}\r\n"
-
-        connect_req += "\r\n"
-        writer.write(connect_req.encode())
-        await writer.drain()
-
-        # Read response from upstream proxy
-        response_line = await asyncio.wait_for(
-            reader.readline(),
-            timeout=self._timeout,
-        )
-        response_str = response_line.decode("utf-8", errors="replace").strip()
-
-        # Read and discard response headers
-        while True:
-            line = await reader.readline()
-            if line in (b"\r\n", b"\n", b""):
-                break
-
-        # Check if proxy accepted the CONNECT
-        if "200" not in response_str:
-            raise ConnectionError(f"HTTP CONNECT failed: {response_str}")
-
-        # Tunnel is now established
-
     async def _connect_via_proxy(
         self,
         proxy: Proxy,
@@ -339,8 +101,8 @@ class ProxyServer:
     ) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
         """Connect to target through upstream proxy.
 
-        Establishes a TCP connection to the proxy and performs the
-        appropriate handshake based on proxy protocol.
+        Uses python-socks library to handle SOCKS4, SOCKS5, and HTTP CONNECT
+        proxy protocols.
 
         Args:
             proxy: The upstream proxy to connect through
@@ -354,34 +116,23 @@ class ProxyServer:
             ConnectionError: If connection or handshake fails
             TimeoutError: If connection times out
         """
-        # Connect to the proxy server
-        reader, writer = await asyncio.wait_for(
-            asyncio.open_connection(proxy.host, proxy.port),
+        # Create proxy instance from URL (handles all protocol types)
+        socks_proxy = SocksProxy.from_url(proxy.url)
+
+        # Connect through the proxy - returns a socket with tunnel established
+        sock = await asyncio.wait_for(
+            socks_proxy.connect(dest_host=target_host, dest_port=target_port),
             timeout=self._timeout,
         )
 
+        # Wrap the socket in asyncio streams
         try:
-            # Perform protocol-specific handshake
-            if proxy.protocol == ProxyProtocol.SOCKS5:
-                await self._connect_via_socks5(
-                    proxy, target_host, target_port, reader, writer
-                )
-            elif proxy.protocol == ProxyProtocol.SOCKS4:
-                await self._connect_via_socks4(
-                    proxy, target_host, target_port, reader, writer
-                )
-            else:  # HTTP or HTTPS
-                await self._connect_via_http(
-                    proxy, target_host, target_port, reader, writer
-                )
-
-            return reader, writer
-
+            reader, writer = await asyncio.open_connection(sock=sock)
         except Exception:
-            # Clean up on failure
-            writer.close()
-            await writer.wait_closed()
+            sock.close()
             raise
+
+        return reader, writer
 
     async def _handle_client(
         self,
@@ -455,17 +206,23 @@ class ProxyServer:
     async def _send_error(
         self, writer: asyncio.StreamWriter, status: int, message: str, body: str = ""
     ) -> None:
-        """Send an HTTP error response."""
-        body_bytes = body.encode("utf-8")
-        response = (
-            f"HTTP/1.1 {status} {message}\r\n"
-            f"Content-Length: {len(body_bytes)}\r\n"
-            f"\r\n"
-        )
-        writer.write(response.encode())
-        if body_bytes:
-            writer.write(body_bytes)
-        await writer.drain()
+        """Send an HTTP error response. Silently ignores closed connections."""
+        try:
+            if writer.is_closing():
+                return
+            body_bytes = body.encode("utf-8")
+            response = (
+                f"HTTP/1.1 {status} {message}\r\n"
+                f"Content-Length: {len(body_bytes)}\r\n"
+                f"\r\n"
+            )
+            writer.write(response.encode())
+            if body_bytes:
+                writer.write(body_bytes)
+            await writer.drain()
+        except (ConnectionError, BrokenPipeError, OSError):
+            # Client already disconnected, nothing to do
+            pass
 
     async def _handle_connect(
         self,
