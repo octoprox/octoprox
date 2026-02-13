@@ -453,11 +453,18 @@ class ProxyServer:
         return headers
 
     async def _send_error(
-        self, writer: asyncio.StreamWriter, status: int, message: str
+        self, writer: asyncio.StreamWriter, status: int, message: str, body: str = ""
     ) -> None:
         """Send an HTTP error response."""
-        response = f"HTTP/1.1 {status} {message}\r\nContent-Length: 0\r\n\r\n"
+        body_bytes = body.encode("utf-8")
+        response = (
+            f"HTTP/1.1 {status} {message}\r\n"
+            f"Content-Length: {len(body_bytes)}\r\n"
+            f"\r\n"
+        )
         writer.write(response.encode())
+        if body_bytes:
+            writer.write(body_bytes)
         await writer.drain()
 
     async def _handle_connect(
@@ -512,18 +519,22 @@ class ProxyServer:
 
         except TimeoutError:
             latency_ms = (time.monotonic() - start_time) * 1000
-            await self._send_error(client_writer, 504, "Gateway Timeout")
+            await self._send_error(
+                client_writer, 504, "Gateway Timeout", "Connection to upstream proxy timed out"
+            )
         except ConnectionRefusedError:
             latency_ms = (time.monotonic() - start_time) * 1000
-            await self._send_error(client_writer, 502, "Bad Gateway")
+            await self._send_error(
+                client_writer, 502, "Bad Gateway", "Upstream proxy refused connection"
+            )
         except ConnectionError as e:
             latency_ms = (time.monotonic() - start_time) * 1000
             logger.error("CONNECT error", error=str(e), target=target)
-            await self._send_error(client_writer, 502, "Bad Gateway")
+            await self._send_error(client_writer, 502, "Bad Gateway", str(e))
         except Exception as e:
             latency_ms = (time.monotonic() - start_time) * 1000
             logger.error("CONNECT error", error=str(e), target=target)
-            await self._send_error(client_writer, 502, "Bad Gateway")
+            await self._send_error(client_writer, 502, "Bad Gateway", str(e))
         finally:
             if upstream_writer:
                 upstream_writer.close()
@@ -724,18 +735,22 @@ class ProxyServer:
 
         except TimeoutError:
             latency_ms = (time.monotonic() - start_time) * 1000
-            await self._send_error(client_writer, 504, "Gateway Timeout")
+            await self._send_error(
+                client_writer, 504, "Gateway Timeout", "Connection to upstream proxy timed out"
+            )
         except ConnectionRefusedError:
             latency_ms = (time.monotonic() - start_time) * 1000
-            await self._send_error(client_writer, 502, "Bad Gateway")
+            await self._send_error(
+                client_writer, 502, "Bad Gateway", "Upstream proxy refused connection"
+            )
         except ConnectionError as e:
             latency_ms = (time.monotonic() - start_time) * 1000
             logger.error("HTTP forward error", error=str(e), target=target)
-            await self._send_error(client_writer, 502, "Bad Gateway")
+            await self._send_error(client_writer, 502, "Bad Gateway", str(e))
         except Exception as e:
             latency_ms = (time.monotonic() - start_time) * 1000
             logger.error("HTTP forward error", error=str(e), target=target)
-            await self._send_error(client_writer, 502, "Bad Gateway")
+            await self._send_error(client_writer, 502, "Bad Gateway", str(e))
         finally:
             if upstream_writer:
                 upstream_writer.close()
