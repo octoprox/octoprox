@@ -27,7 +27,8 @@ class DeleteConfirmation(BaseModel):
 
 def _project_to_response(
     project: Project,
-    source_count: int = 0,
+    credential_count: int = 0,
+    connector_count: int = 0,
     proxy_count: int = 0,
     healthy_proxy_count: int = 0,
 ) -> ProjectResponse:
@@ -45,7 +46,8 @@ def _project_to_response(
         max_retries=project.max_retries,
         created_at=project.created_at,
         updated_at=project.updated_at,
-        source_count=source_count,
+        credential_count=credential_count,
+        connector_count=connector_count,
         proxy_count=proxy_count,
         healthy_proxy_count=healthy_proxy_count,
     )
@@ -53,7 +55,8 @@ def _project_to_response(
 
 def _project_to_summary(
     project: Project,
-    source_count: int = 0,
+    credential_count: int = 0,
+    connector_count: int = 0,
     proxy_count: int = 0,
     healthy_proxy_count: int = 0,
 ) -> ProjectSummary:
@@ -65,7 +68,8 @@ def _project_to_summary(
         username=project.username,
         password=project.password,
         routing_strategy=project.routing_strategy,
-        source_count=source_count,
+        credential_count=credential_count,
+        connector_count=connector_count,
         proxy_count=proxy_count,
         healthy_proxy_count=healthy_proxy_count,
         created_at=project.created_at,
@@ -80,12 +84,14 @@ async def list_projects(request: Request) -> ProjectListResponse:
 
     summaries = []
     for project in projects:
-        sources = proxy_manager.get_sources_for_project(project.id)
+        credentials = proxy_manager.get_credentials_for_project(project.id)
+        connectors = proxy_manager.get_connectors_for_project(project.id)
         proxies = proxy_manager.get_proxies_for_project(project.id)
         healthy_proxies = proxy_manager.get_healthy_proxies_for_project(project.id)
         summaries.append(_project_to_summary(
             project,
-            source_count=len(sources),
+            credential_count=len(credentials),
+            connector_count=len(connectors),
             proxy_count=len(proxies),
             healthy_proxy_count=len(healthy_proxies),
         ))
@@ -134,13 +140,15 @@ async def get_project(request: Request, project_id: str) -> ProjectResponse:
     if project is None:
         raise HTTPException(status_code=404, detail="Project not found")
 
-    sources = proxy_manager.get_sources_for_project(project_id)
+    credentials = proxy_manager.get_credentials_for_project(project_id)
+    connectors = proxy_manager.get_connectors_for_project(project_id)
     proxies = proxy_manager.get_proxies_for_project(project_id)
     healthy_proxies = proxy_manager.get_healthy_proxies_for_project(project_id)
 
     return _project_to_response(
         project,
-        source_count=len(sources),
+        credential_count=len(credentials),
+        connector_count=len(connectors),
         proxy_count=len(proxies),
         healthy_proxy_count=len(healthy_proxies),
     )
@@ -188,13 +196,15 @@ async def update_project(
 
     await proxy_manager.update_project(project)
 
-    sources = proxy_manager.get_sources_for_project(project_id)
+    credentials = proxy_manager.get_credentials_for_project(project_id)
+    connectors = proxy_manager.get_connectors_for_project(project_id)
     proxies = proxy_manager.get_proxies_for_project(project_id)
     healthy_proxies = proxy_manager.get_healthy_proxies_for_project(project_id)
 
     return _project_to_response(
         project,
-        source_count=len(sources),
+        credential_count=len(credentials),
+        connector_count=len(connectors),
         proxy_count=len(proxies),
         healthy_proxy_count=len(healthy_proxies),
     )

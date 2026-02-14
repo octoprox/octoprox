@@ -2,7 +2,8 @@
 
 from api.models.project import Project, ProjectCreate, ProjectResponse, ProjectSummary, ProjectUpdate
 from api.models.proxy import Proxy, ProxyProtocol, ProxyStatus
-from api.models.source import ProxySource, SourceType
+from api.models.credential import Credential, CredentialType, CredentialCreate, CredentialUpdate, CredentialResponse
+from api.models.connector import Connector, ConnectorCreate, ConnectorUpdate, ConnectorResponse
 
 __all__ = [
     "Project",
@@ -13,7 +14,14 @@ __all__ = [
     "Proxy",
     "ProxyProtocol",
     "ProxyStatus",
-    "ProxySource",
-    "SourceType",
+    "Credential",
+    "CredentialType",
+    "CredentialCreate",
+    "CredentialUpdate",
+    "CredentialResponse",
+    "Connector",
+    "ConnectorCreate",
+    "ConnectorUpdate",
+    "ConnectorResponse",
 ]
 

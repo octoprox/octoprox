@@ -1,9 +1,10 @@
 import { useState, useEffect } from 'react'
 import { BrowserRouter, Routes, Route, Link, Navigate, useParams, useNavigate } from 'react-router-dom'
-import { Activity, Server, Settings, BarChart3, LogOut, FolderOpen, ChevronDown } from 'lucide-react'
+import { Activity, Server, BarChart3, LogOut, FolderOpen, ChevronDown, Key, Link2 } from 'lucide-react'
 import Dashboard from './components/Dashboard'
 import ProxyList from './components/ProxyList'
-import SourceConfig from './components/SourceConfig'
+import CredentialsConfig from './components/CredentialsConfig'
+import ConnectorConfig from './components/ConnectorConfig'
 import Metrics from './components/Metrics'
 import Login from './components/Login'
 import ProjectSelection from './components/ProjectSelection'
@@ -159,7 +160,8 @@ function ProjectLayout({
         <nav className="mt-4 flex-1">
           <NavLink to={`/projects/${projectId}/dashboard`} icon={<BarChart3 />} label="Dashboard" />
           <NavLink to={`/projects/${projectId}/proxies`} icon={<Server />} label="Proxies" />
-          <NavLink to={`/projects/${projectId}/sources`} icon={<Settings />} label="Sources" />
+          <NavLink to={`/projects/${projectId}/credentials`} icon={<Key />} label="Credentials" />
+          <NavLink to={`/projects/${projectId}/connectors`} icon={<Link2 />} label="Connectors" />
           <NavLink to={`/projects/${projectId}/metrics`} icon={<Activity />} label="Metrics" />
         </nav>
 
@@ -185,7 +187,8 @@ function ProjectLayout({
         <Routes>
           <Route path="dashboard" element={<Dashboard />} />
           <Route path="proxies" element={<ProxyList />} />
-          <Route path="sources" element={<SourceConfig />} />
+          <Route path="credentials" element={<CredentialsConfig />} />
+          <Route path="connectors" element={<ConnectorConfig />} />
           <Route path="metrics" element={<Metrics />} />
           <Route path="*" element={<Navigate to="dashboard" replace />} />
         </Routes>

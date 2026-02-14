@@ -1,0 +1,188 @@
+"""Connector management endpoints."""
+
+from fastapi import APIRouter, HTTPException, Request
+from pydantic import BaseModel, ValidationError
+
+from api.models.connector import (
+    Connector,
+    ConnectorCreate,
+    ConnectorResponse,
+    ConnectorUpdate,
+    ConnectorOptionsResponse,
+    validate_connector_config,
+)
+from api.models.credential import CredentialType
+
+router = APIRouter(prefix="/projects/{project_id}/connectors")
+
+
+class ConnectorListResponse(BaseModel):
+    """Response for listing connectors."""
+    total: int
+    connectors: list[ConnectorResponse]
+
+
+def _connector_to_response(connector: Connector, credential_name: str | None = None, credential_type: str | None = None) -> ConnectorResponse:
+    """Convert a Connector to ConnectorResponse."""
+    return ConnectorResponse(
+        id=connector.id,
+        name=connector.name,
+        credential_id=connector.credential_id,
+        credential_name=credential_name,
+        credential_type=credential_type,
+        project_id=connector.project_id,
+        config=connector.config,
+        enabled=connector.enabled,
+        proxy_count=connector.proxy_count,
+        created_at=connector.created_at,
+        updated_at=connector.updated_at,
+    )
+
+
+@router.get("", response_model=ConnectorListResponse)
+async def list_connectors(request: Request, project_id: str) -> ConnectorListResponse:
+    """List all connectors for a project."""
+    proxy_manager = request.app.state.proxy_manager
+
+    project = proxy_manager.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    connectors = proxy_manager.get_connectors_for_project(project_id)
+    responses = []
+    for connector in connectors:
+        credential = proxy_manager.get_credential(connector.credential_id)
+        credential_name = credential.name if credential else None
+        credential_type = credential.type.value if credential and hasattr(credential.type, 'value') else (credential.type if credential else None)
+        responses.append(_connector_to_response(connector, credential_name, credential_type))
+
+    return ConnectorListResponse(
+        total=len(connectors),
+        connectors=responses,
+    )
+
+
+@router.post("", response_model=ConnectorResponse, status_code=201)
+async def create_connector(
+    request: Request,
+    connector_data: ConnectorCreate,
+    project_id: str,
+) -> ConnectorResponse:
+    """Create a new connector."""
+    proxy_manager = request.app.state.proxy_manager
+
+    project = proxy_manager.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    # Validate that the credential exists and belongs to this project
+    credential = proxy_manager.get_credential(connector_data.credential_id)
+    if credential is None:
+        raise HTTPException(status_code=404, detail="Credential not found")
+    if credential.project_id != project_id:
+        raise HTTPException(status_code=400, detail="Credential does not belong to this project")
+
+    # Validate connector config based on credential type
+    credential_type_enum = credential.type if isinstance(credential.type, CredentialType) else CredentialType(credential.type)
+    try:
+        validated_config = validate_connector_config(credential_type_enum, connector_data.config)
+    except ValidationError as e:
+        raise HTTPException(status_code=422, detail=f"Invalid connector config: {e}")
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+
+    connector = Connector(
+        name=connector_data.name,
+        credential_id=connector_data.credential_id,
+        project_id=project_id,
+        config=validated_config,
+        enabled=connector_data.enabled,
+    )
+
+    await proxy_manager.add_connector(connector)
+    credential_type = credential.type.value if hasattr(credential.type, 'value') else credential.type
+    return _connector_to_response(connector, credential.name, credential_type)
+
+
+@router.get("/{connector_id}", response_model=ConnectorResponse)
+async def get_connector(request: Request, connector_id: str) -> ConnectorResponse:
+    """Get a specific connector by ID."""
+    proxy_manager = request.app.state.proxy_manager
+    connector = proxy_manager.get_connector(connector_id)
+
+    if connector is None:
+        raise HTTPException(status_code=404, detail="Connector not found")
+
+    credential = proxy_manager.get_credential(connector.credential_id)
+    credential_name = credential.name if credential else None
+    credential_type = credential.type.value if credential and hasattr(credential.type, 'value') else (credential.type if credential else None)
+    return _connector_to_response(connector, credential_name, credential_type)
+
+
+@router.patch("/{connector_id}", response_model=ConnectorResponse)
+async def update_connector(
+    request: Request, connector_id: str, connector_data: ConnectorUpdate
+) -> ConnectorResponse:
+    """Update a connector."""
+    proxy_manager = request.app.state.proxy_manager
+    connector = proxy_manager.get_connector(connector_id)
+
+    if connector is None:
+        raise HTTPException(status_code=404, detail="Connector not found")
+
+    # Get current credential for validation
+    current_credential = proxy_manager.get_credential(connector.credential_id)
+
+    # Update fields
+    if connector_data.name is not None:
+        connector.name = connector_data.name
+    if connector_data.credential_id is not None:
+        # Validate new credential
+        credential = proxy_manager.get_credential(connector_data.credential_id)
+        if credential is None:
+            raise HTTPException(status_code=404, detail="Credential not found")
+        if credential.project_id != connector.project_id:
+            raise HTTPException(status_code=400, detail="Credential does not belong to this project")
+        connector.credential_id = connector_data.credential_id
+        current_credential = credential
+    if connector_data.config is not None:
+        # Validate connector config based on credential type
+        if current_credential:
+            credential_type_enum = current_credential.type if isinstance(current_credential.type, CredentialType) else CredentialType(current_credential.type)
+            try:
+                validated_config = validate_connector_config(credential_type_enum, connector_data.config)
+                connector.config = validated_config
+            except ValidationError as e:
+                raise HTTPException(status_code=422, detail=f"Invalid connector config: {e}")
+            except ValueError as e:
+                raise HTTPException(status_code=422, detail=str(e))
+        else:
+            connector.config = connector_data.config
+    if connector_data.enabled is not None:
+        connector.enabled = connector_data.enabled
+
+    await proxy_manager.update_connector(connector)
+
+    credential = proxy_manager.get_credential(connector.credential_id)
+    credential_name = credential.name if credential else None
+    credential_type = credential.type.value if credential and hasattr(credential.type, 'value') else (credential.type if credential else None)
+    return _connector_to_response(connector, credential_name, credential_type)
+
+
+@router.delete("/{connector_id}", status_code=204)
+async def delete_connector(request: Request, connector_id: str) -> None:
+    """Delete a connector and all its proxies."""
+    proxy_manager = request.app.state.proxy_manager
+
+    if not await proxy_manager.remove_connector(connector_id):
+        raise HTTPException(status_code=404, detail="Connector not found")
+
+
+# Separate router for non-project-specific endpoints
+options_router = APIRouter(prefix="/connector-options")
+
+
+@options_router.get("", response_model=ConnectorOptionsResponse)
+async def get_connector_options() -> ConnectorOptionsResponse:
+    """Get available options for connector configuration (regions, instance types, etc.)."""
+    return ConnectorOptionsResponse()

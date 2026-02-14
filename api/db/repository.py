@@ -5,10 +5,11 @@ from datetime import datetime
 from sqlalchemy import select, delete, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from api.db.models import ProjectModel, ProxyModel, SourceModel, ProxyMetricsModel
+from api.db.models import ProjectModel, ProxyModel, CredentialModel, ConnectorModel, ProxyMetricsModel
 from api.models.project import Project
 from api.models.proxy import Proxy, ProxyProtocol, ProxyStatus
-from api.models.source import ProxySource, SourceType
+from api.models.credential import Credential, CredentialType
+from api.models.connector import Connector
 
 
 class ProjectRepository:
@@ -86,19 +87,19 @@ class ProjectRepository:
         )
         return result.rowcount > 0
 
-    async def get_source_count(self, project_id: str) -> int:
-        """Get the number of sources for a project."""
+    async def get_connector_count(self, project_id: str) -> int:
+        """Get the number of connectors for a project."""
         result = await self._session.execute(
-            select(func.count(SourceModel.id)).where(SourceModel.project_id == project_id)
+            select(func.count(ConnectorModel.id)).where(ConnectorModel.project_id == project_id)
         )
         return result.scalar() or 0
 
     async def get_proxy_count(self, project_id: str) -> int:
-        """Get the number of proxies for a project (via sources)."""
+        """Get the number of proxies for a project (via connectors)."""
         result = await self._session.execute(
             select(func.count(ProxyModel.id))
-            .join(SourceModel, ProxyModel.source_id == SourceModel.id)
-            .where(SourceModel.project_id == project_id)
+            .join(ConnectorModel, ProxyModel.connector_id == ConnectorModel.id)
+            .where(ConnectorModel.project_id == project_id)
         )
         return result.scalar() or 0
 
@@ -120,84 +121,164 @@ class ProjectRepository:
         )
 
 
-class SourceRepository:
-    """Repository for source database operations."""
+class CredentialRepository:
+    """Repository for credential database operations."""
 
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
 
-    async def get_all(self) -> list[ProxySource]:
-        """Get all sources."""
-        result = await self._session.execute(select(SourceModel))
+    async def get_all(self) -> list[Credential]:
+        """Get all credentials."""
+        result = await self._session.execute(select(CredentialModel))
         models = result.scalars().all()
         return [self._to_domain(m) for m in models]
 
-    async def get_by_project(self, project_id: str) -> list[ProxySource]:
-        """Get all sources for a project."""
+    async def get_by_project(self, project_id: str) -> list[Credential]:
+        """Get all credentials for a project."""
         result = await self._session.execute(
-            select(SourceModel).where(SourceModel.project_id == project_id)
+            select(CredentialModel).where(CredentialModel.project_id == project_id)
         )
         models = result.scalars().all()
         return [self._to_domain(m) for m in models]
 
-    async def get_by_id(self, source_id: str) -> ProxySource | None:
-        """Get source by ID."""
+    async def get_by_id(self, credential_id: str) -> Credential | None:
+        """Get credential by ID."""
         result = await self._session.execute(
-            select(SourceModel).where(SourceModel.id == source_id)
+            select(CredentialModel).where(CredentialModel.id == credential_id)
         )
         model = result.scalar_one_or_none()
         return self._to_domain(model) if model else None
 
-    async def create(self, source: ProxySource) -> ProxySource:
-        """Create a new source."""
-        model = SourceModel(
-            id=source.id,
-            name=source.name,
-            type=source.type.value if isinstance(source.type, SourceType) else source.type,
-            enabled=source.enabled,
-            project_id=source.project_id,
-            config=source.config,
-            refresh_interval_seconds=source.refresh_interval_seconds,
-            created_at=source.created_at,
-            updated_at=source.updated_at,
+    async def create(self, credential: Credential) -> Credential:
+        """Create a new credential."""
+        model = CredentialModel(
+            id=credential.id,
+            name=credential.name,
+            type=credential.type.value if isinstance(credential.type, CredentialType) else credential.type,
+            project_id=credential.project_id,
+            config=credential.config,
+            created_at=credential.created_at,
+            updated_at=credential.updated_at,
         )
         self._session.add(model)
         await self._session.flush()
-        return source
+        return credential
 
-    async def update(self, source: ProxySource) -> ProxySource:
-        """Update an existing source."""
+    async def update(self, credential: Credential) -> Credential:
+        """Update an existing credential."""
         result = await self._session.execute(
-            select(SourceModel).where(SourceModel.id == source.id)
+            select(CredentialModel).where(CredentialModel.id == credential.id)
         )
         model = result.scalar_one_or_none()
         if model:
-            model.name = source.name
-            model.type = source.type.value if isinstance(source.type, SourceType) else source.type
-            model.enabled = source.enabled
-            model.config = source.config
-            model.refresh_interval_seconds = source.refresh_interval_seconds
+            model.name = credential.name
+            model.config = credential.config
             model.updated_at = datetime.utcnow()
             await self._session.flush()
-        return source
+        return credential
 
-    async def delete(self, source_id: str) -> bool:
-        """Delete a source."""
+    async def delete(self, credential_id: str) -> bool:
+        """Delete a credential."""
         result = await self._session.execute(
-            delete(SourceModel).where(SourceModel.id == source_id)
+            delete(CredentialModel).where(CredentialModel.id == credential_id)
         )
         return result.rowcount > 0
 
-    def _to_domain(self, model: SourceModel) -> ProxySource:
+    def _to_domain(self, model: CredentialModel) -> Credential:
         """Convert database model to domain model."""
-        return ProxySource(
+        return Credential(
             id=model.id,
             name=model.name,
-            type=SourceType(model.type),
-            enabled=model.enabled,
+            type=CredentialType(model.type),
             project_id=model.project_id,
             config=model.config,
-            refresh_interval_seconds=model.refresh_interval_seconds,
+            created_at=model.created_at,
+            updated_at=model.updated_at,
+        )
+
+
+class ConnectorRepository:
+    """Repository for connector database operations."""
+
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+
+    async def get_all(self) -> list[Connector]:
+        """Get all connectors."""
+        result = await self._session.execute(select(ConnectorModel))
+        models = result.scalars().all()
+        return [self._to_domain(m) for m in models]
+
+    async def get_by_project(self, project_id: str) -> list[Connector]:
+        """Get all connectors for a project."""
+        result = await self._session.execute(
+            select(ConnectorModel).where(ConnectorModel.project_id == project_id)
+        )
+        models = result.scalars().all()
+        return [self._to_domain(m) for m in models]
+
+    async def get_by_id(self, connector_id: str) -> Connector | None:
+        """Get connector by ID."""
+        result = await self._session.execute(
+            select(ConnectorModel).where(ConnectorModel.id == connector_id)
+        )
+        model = result.scalar_one_or_none()
+        return self._to_domain(model) if model else None
+
+    async def create(self, connector: Connector) -> Connector:
+        """Create a new connector."""
+        model = ConnectorModel(
+            id=connector.id,
+            name=connector.name,
+            credential_id=connector.credential_id,
+            project_id=connector.project_id,
+            config=connector.config,
+            enabled=connector.enabled,
+            created_at=connector.created_at,
+            updated_at=connector.updated_at,
+        )
+        self._session.add(model)
+        await self._session.flush()
+        return connector
+
+    async def update(self, connector: Connector) -> Connector:
+        """Update an existing connector."""
+        result = await self._session.execute(
+            select(ConnectorModel).where(ConnectorModel.id == connector.id)
+        )
+        model = result.scalar_one_or_none()
+        if model:
+            model.name = connector.name
+            model.credential_id = connector.credential_id
+            model.config = connector.config
+            model.enabled = connector.enabled
+            model.updated_at = datetime.utcnow()
+            await self._session.flush()
+        return connector
+
+    async def delete(self, connector_id: str) -> bool:
+        """Delete a connector."""
+        result = await self._session.execute(
+            delete(ConnectorModel).where(ConnectorModel.id == connector_id)
+        )
+        return result.rowcount > 0
+
+    async def get_proxy_count(self, connector_id: str) -> int:
+        """Get the number of proxies for a connector."""
+        result = await self._session.execute(
+            select(func.count(ProxyModel.id)).where(ProxyModel.connector_id == connector_id)
+        )
+        return result.scalar() or 0
+
+    def _to_domain(self, model: ConnectorModel) -> Connector:
+        """Convert database model to domain model."""
+        return Connector(
+            id=model.id,
+            name=model.name,
+            credential_id=model.credential_id,
+            project_id=model.project_id,
+            config=model.config,
+            enabled=model.enabled,
             created_at=model.created_at,
             updated_at=model.updated_at,
         )
@@ -223,10 +304,10 @@ class ProxyRepository:
         model = result.scalar_one_or_none()
         return self._to_domain(model) if model else None
 
-    async def get_by_source(self, source_id: str) -> list[Proxy]:
-        """Get all proxies for a source."""
+    async def get_by_connector(self, connector_id: str) -> list[Proxy]:
+        """Get all proxies for a connector."""
         result = await self._session.execute(
-            select(ProxyModel).where(ProxyModel.source_id == source_id)
+            select(ProxyModel).where(ProxyModel.connector_id == connector_id)
         )
         models = result.scalars().all()
         return [self._to_domain(m) for m in models]
@@ -240,7 +321,7 @@ class ProxyRepository:
             protocol=proxy.protocol.value if isinstance(proxy.protocol, ProxyProtocol) else proxy.protocol,
             username=proxy.username,
             password=proxy.password,
-            source_id=proxy.source_id,
+            connector_id=proxy.connector_id,
             tags=proxy.tags,
             metadata_=proxy.metadata,
             created_at=proxy.created_at,
@@ -275,10 +356,10 @@ class ProxyRepository:
         )
         return result.rowcount > 0
 
-    async def delete_by_source(self, source_id: str) -> int:
-        """Delete all proxies for a source."""
+    async def delete_by_connector(self, connector_id: str) -> int:
+        """Delete all proxies for a connector."""
         result = await self._session.execute(
-            delete(ProxyModel).where(ProxyModel.source_id == source_id)
+            delete(ProxyModel).where(ProxyModel.connector_id == connector_id)
         )
         return result.rowcount
 
@@ -291,7 +372,7 @@ class ProxyRepository:
             protocol=ProxyProtocol(model.protocol),
             username=model.username,
             password=model.password,
-            source_id=model.source_id,
+            connector_id=model.connector_id,
             tags=model.tags or [],
             metadata=model.metadata_ or {},
             created_at=model.created_at,

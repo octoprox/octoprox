@@ -10,10 +10,17 @@ from api.core.config import Settings
 from api.core.health_checker import HealthChecker
 from api.core.metrics_flusher import MetricsFlusher
 from api.db.redis import RedisClient
-from api.db.repository import MetricsRepository, ProjectRepository, ProxyRepository, SourceRepository
+from api.db.repository import (
+    MetricsRepository,
+    ProjectRepository,
+    ProxyRepository,
+    CredentialRepository,
+    ConnectorRepository,
+)
 from api.models.project import Project
 from api.models.proxy import Proxy, ProxyStatus
-from api.models.source import ProxySource
+from api.models.credential import Credential
+from api.models.connector import Connector
 from api.strategies import get_strategy
 
 if TYPE_CHECKING:
@@ -25,7 +32,7 @@ logger = structlog.get_logger()
 class ProxyManager:
     """Manages the proxy pool and routing.
 
-    Uses Postgres for persistent storage of proxies and sources.
+    Uses Postgres for persistent storage of proxies, credentials, and connectors.
     Uses Redis for operational data (health status, metrics, sessions).
 
     Args:
@@ -47,7 +54,8 @@ class ProxyManager:
         # In-memory cache (loaded from Postgres on start)
         self._projects: dict[str, Project] = {}
         self._proxies: dict[str, Proxy] = {}
-        self._sources: dict[str, ProxySource] = {}
+        self._credentials: dict[str, Credential] = {}
+        self._connectors: dict[str, Connector] = {}
         # Per-project strategies (project_id -> strategy)
         self._project_strategies: dict[str, "RoutingStrategy"] = {}
         # Default strategy for backward compatibility
@@ -92,11 +100,12 @@ class ProxyManager:
         self._tasks.clear()
 
     async def _load_from_database(self) -> None:
-        """Load projects, sources and proxies from Postgres."""
+        """Load projects, credentials, connectors and proxies from Postgres."""
         logger.info("Loading data from database")
         async with self._session_factory() as session:
             project_repo = ProjectRepository(session)
-            source_repo = SourceRepository(session)
+            credential_repo = CredentialRepository(session)
+            connector_repo = ConnectorRepository(session)
             proxy_repo = ProxyRepository(session)
 
             # Load projects and initialize their strategies
@@ -105,9 +114,13 @@ class ProxyManager:
                 self._projects[project.id] = project
                 self._project_strategies[project.id] = get_strategy(project.routing_strategy)
 
-            sources = await source_repo.get_all()
-            for source in sources:
-                self._sources[source.id] = source
+            credentials = await credential_repo.get_all()
+            for credential in credentials:
+                self._credentials[credential.id] = credential
+
+            connectors = await connector_repo.get_all()
+            for connector in connectors:
+                self._connectors[connector.id] = connector
 
             proxies = await proxy_repo.get_all()
             for proxy in proxies:
@@ -116,7 +129,8 @@ class ProxyManager:
         logger.info(
             "Loaded from database",
             project_count=len(self._projects),
-            source_count=len(self._sources),
+            credential_count=len(self._credentials),
+            connector_count=len(self._connectors),
             proxy_count=len(self._proxies),
         )
 
@@ -182,9 +196,14 @@ class ProxyManager:
         return [p for p in self._proxies.values() if p.status == ProxyStatus.HEALTHY]
 
     @property
-    def sources(self) -> list[ProxySource]:
-        """Get all proxy sources."""
-        return list(self._sources.values())
+    def credentials(self) -> list[Credential]:
+        """Get all credentials."""
+        return list(self._credentials.values())
+
+    @property
+    def connectors(self) -> list[Connector]:
+        """Get all connectors."""
+        return list(self._connectors.values())
 
     @property
     def projects(self) -> list[Project]:
@@ -225,7 +244,7 @@ class ProxyManager:
         logger.info("Updated project", project_id=project.id, name=project.name)
 
     async def remove_project(self, project_id: str) -> bool:
-        """Remove a project (deletes from Postgres, cascades to sources and proxies)."""
+        """Remove a project (deletes from Postgres, cascades to credentials, connectors and proxies)."""
         if project_id not in self._projects:
             return False
 
@@ -239,36 +258,135 @@ class ProxyManager:
         if project_id in self._project_strategies:
             del self._project_strategies[project_id]
 
-        # Remove associated sources and proxies from cache
-        source_ids_to_remove = [
-            sid for sid, s in self._sources.items() if s.project_id == project_id
+        # Remove associated credentials from cache
+        credential_ids_to_remove = [
+            cid for cid, c in self._credentials.items() if c.project_id == project_id
         ]
-        for sid in source_ids_to_remove:
-            del self._sources[sid]
+        for cid in credential_ids_to_remove:
+            del self._credentials[cid]
+
+        # Remove associated connectors and proxies from cache
+        connector_ids_to_remove = [
+            cid for cid, c in self._connectors.items() if c.project_id == project_id
+        ]
+        for cid in connector_ids_to_remove:
+            del self._connectors[cid]
 
         self._proxies = {
             pid: p for pid, p in self._proxies.items()
-            if p.source_id not in source_ids_to_remove
+            if p.connector_id not in connector_ids_to_remove
         }
 
         logger.info("Removed project", project_id=project_id)
         return True
 
-    def get_sources_for_project(self, project_id: str) -> list[ProxySource]:
-        """Get all sources for a project."""
-        return [s for s in self._sources.values() if s.project_id == project_id]
+    # Credential methods
+    def get_credentials_for_project(self, project_id: str) -> list[Credential]:
+        """Get all credentials for a project."""
+        return [c for c in self._credentials.values() if c.project_id == project_id]
+
+    def get_credential(self, credential_id: str) -> Credential | None:
+        """Get a credential by ID."""
+        return self._credentials.get(credential_id)
+
+    async def add_credential(self, credential: Credential) -> None:
+        """Add a credential (persists to Postgres)."""
+        async with self._session_factory() as session:
+            repo = CredentialRepository(session)
+            await repo.create(credential)
+            await session.commit()
+
+        self._credentials[credential.id] = credential
+        logger.info("Added credential", credential_id=credential.id, name=credential.name)
+
+    async def update_credential(self, credential: Credential) -> None:
+        """Update a credential (persists to Postgres)."""
+        async with self._session_factory() as session:
+            repo = CredentialRepository(session)
+            await repo.update(credential)
+            await session.commit()
+
+        self._credentials[credential.id] = credential
+        logger.info("Updated credential", credential_id=credential.id, name=credential.name)
+
+    async def remove_credential(self, credential_id: str) -> bool:
+        """Remove a credential (deletes from Postgres)."""
+        if credential_id not in self._credentials:
+            return False
+
+        async with self._session_factory() as session:
+            repo = CredentialRepository(session)
+            await repo.delete(credential_id)
+            await session.commit()
+
+        del self._credentials[credential_id]
+        logger.info("Removed credential", credential_id=credential_id)
+        return True
+
+    def get_connectors_for_credential(self, credential_id: str) -> list[Connector]:
+        """Get all connectors using a specific credential."""
+        return [c for c in self._connectors.values() if c.credential_id == credential_id]
+
+    # Connector methods
+    def get_connectors_for_project(self, project_id: str) -> list[Connector]:
+        """Get all connectors for a project."""
+        return [c for c in self._connectors.values() if c.project_id == project_id]
+
+    def get_connector(self, connector_id: str) -> Connector | None:
+        """Get a connector by ID."""
+        return self._connectors.get(connector_id)
+
+    async def add_connector(self, connector: Connector) -> None:
+        """Add a connector (persists to Postgres)."""
+        async with self._session_factory() as session:
+            repo = ConnectorRepository(session)
+            await repo.create(connector)
+            await session.commit()
+
+        self._connectors[connector.id] = connector
+        logger.info("Added connector", connector_id=connector.id, name=connector.name)
+
+    async def update_connector(self, connector: Connector) -> None:
+        """Update a connector (persists to Postgres)."""
+        async with self._session_factory() as session:
+            repo = ConnectorRepository(session)
+            await repo.update(connector)
+            await session.commit()
+
+        self._connectors[connector.id] = connector
+        logger.info("Updated connector", connector_id=connector.id, name=connector.name)
+
+    async def remove_connector(self, connector_id: str) -> bool:
+        """Remove a connector (deletes from Postgres, cascades to proxies)."""
+        if connector_id not in self._connectors:
+            return False
+
+        async with self._session_factory() as session:
+            repo = ConnectorRepository(session)
+            await repo.delete(connector_id)
+            await session.commit()
+
+        # Remove from cache
+        del self._connectors[connector_id]
+        # Also remove associated proxies from cache
+        self._proxies = {
+            pid: p for pid, p in self._proxies.items()
+            if p.connector_id != connector_id
+        }
+        logger.info("Removed connector", connector_id=connector_id)
+        return True
 
     def get_proxies_for_project(self, project_id: str) -> list[Proxy]:
-        """Get all proxies for a project (via sources)."""
-        source_ids = {s.id for s in self._sources.values() if s.project_id == project_id}
-        return [p for p in self._proxies.values() if p.source_id in source_ids]
+        """Get all proxies for a project (via connectors)."""
+        connector_ids = {c.id for c in self._connectors.values() if c.project_id == project_id}
+        return [p for p in self._proxies.values() if p.connector_id in connector_ids]
 
     def get_healthy_proxies_for_project(self, project_id: str) -> list[Proxy]:
         """Get healthy proxies for a project."""
-        source_ids = {s.id for s in self._sources.values() if s.project_id == project_id}
+        connector_ids = {c.id for c in self._connectors.values() if c.project_id == project_id}
         return [
             p for p in self._proxies.values()
-            if p.source_id in source_ids and p.status == ProxyStatus.HEALTHY
+            if p.connector_id in connector_ids and p.status == ProxyStatus.HEALTHY
         ]
 
     def select_proxy_for_project(
@@ -298,6 +416,16 @@ class ProxyManager:
         self._proxies[proxy.id] = proxy
         logger.info("Added proxy", proxy_id=proxy.id, host=proxy.host)
 
+    async def update_proxy(self, proxy: Proxy) -> None:
+        """Update a proxy in the pool (persists to Postgres)."""
+        async with self._session_factory() as session:
+            repo = ProxyRepository(session)
+            await repo.update(proxy)
+            await session.commit()
+
+        self._proxies[proxy.id] = proxy
+        logger.info("Updated proxy", proxy_id=proxy.id, host=proxy.host)
+
     async def remove_proxy(self, proxy_id: str) -> bool:
         """Remove a proxy from the pool (deletes from Postgres)."""
         if proxy_id not in self._proxies:
@@ -310,40 +438,6 @@ class ProxyManager:
 
         del self._proxies[proxy_id]
         logger.info("Removed proxy", proxy_id=proxy_id)
-        return True
-
-    def get_source(self, source_id: str) -> ProxySource | None:
-        """Get a source by ID."""
-        return self._sources.get(source_id)
-
-    async def add_source(self, source: ProxySource) -> None:
-        """Add a proxy source (persists to Postgres)."""
-        async with self._session_factory() as session:
-            repo = SourceRepository(session)
-            await repo.create(source)
-            await session.commit()
-
-        self._sources[source.id] = source
-        logger.info("Added source", source_id=source.id, name=source.name)
-
-    async def remove_source(self, source_id: str) -> bool:
-        """Remove a proxy source (deletes from Postgres, cascades to proxies)."""
-        if source_id not in self._sources:
-            return False
-
-        async with self._session_factory() as session:
-            repo = SourceRepository(session)
-            await repo.delete(source_id)
-            await session.commit()
-
-        # Remove from cache
-        del self._sources[source_id]
-        # Also remove associated proxies from cache
-        self._proxies = {
-            pid: p for pid, p in self._proxies.items()
-            if p.source_id != source_id
-        }
-        logger.info("Removed source", source_id=source_id)
         return True
 
     def select_proxy(self, session_id: str | None = None) -> Proxy | None:

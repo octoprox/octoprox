@@ -26,32 +26,32 @@ class ProxyStatus(str, Enum):
 
 class Proxy(BaseModel):
     """Represents a proxy server."""
-    
+
     id: str = Field(default_factory=lambda: str(uuid4()))
     host: str
     port: int
     protocol: ProxyProtocol = ProxyProtocol.HTTP
     username: str | None = None
     password: str | None = None
-    
+
     # Status and health
     status: ProxyStatus = ProxyStatus.UNKNOWN
     consecutive_failures: int = 0
     last_check_latency_ms: float = 0.0
-    
+
     # Statistics
     request_count: int = 0
     success_count: int = 0
     failure_count: int = 0
     avg_latency_ms: float = 0.0
-    
+
     # Metadata
-    source_id: str
+    connector_id: str
     tags: list[str] = Field(default_factory=list)
     metadata: dict[str, Any] = Field(default_factory=dict)
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)
-    
+
     @property
     def url(self) -> str:
         """Get the proxy URL."""
@@ -72,7 +72,7 @@ class ProxyCreate(BaseModel):
     """Schema for creating a new proxy."""
     host: str
     port: int
-    source_id: str
+    connector_id: str
     protocol: ProxyProtocol = ProxyProtocol.HTTP
     username: str | None = None
     password: str | None = None
@@ -97,6 +97,10 @@ class ProxyResponse(BaseModel):
     host: str
     port: int
     protocol: str
+    username: str | None = None
+    password: str | None = None
+    connector_id: str
+    connector_name: str | None = None
     status: str
     request_count: int
     success_count: int

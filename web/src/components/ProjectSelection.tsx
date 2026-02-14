@@ -491,7 +491,7 @@ function DeleteProjectModal({
         <h2 className="text-xl font-semibold text-red-600 mb-4">Delete Project</h2>
         <p className="text-gray-600 mb-4">
           Are you sure you want to delete <strong>{project.name}</strong>? This will also delete
-          all sources and proxies associated with this project.
+          all credentials, connectors, and proxies associated with this project.
         </p>
         <p className="text-sm text-gray-500 mb-4">
           Type <strong>permanently delete</strong> to confirm:

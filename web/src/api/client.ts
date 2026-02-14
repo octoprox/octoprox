@@ -48,9 +48,20 @@ api.interceptors.response.use(
       window.dispatchEvent(new CustomEvent('auth:logout'))
     }
     // Extract error message from API response for better error display
-    const apiMessage = error.response?.data?.detail
-    if (apiMessage) {
-      error.message = apiMessage
+    const apiDetail = error.response?.data?.detail
+    if (apiDetail) {
+      // Handle Pydantic validation errors (422) which return an array of error objects
+      if (Array.isArray(apiDetail)) {
+        const messages = apiDetail.map((err: { msg?: string; loc?: string[] }) => {
+          const field = err.loc?.slice(-1)[0] || 'field'
+          return err.msg || `Invalid ${field}`
+        })
+        error.message = messages.join('; ')
+      } else if (typeof apiDetail === 'string') {
+        error.message = apiDetail
+      } else {
+        error.message = JSON.stringify(apiDetail)
+      }
     }
     return Promise.reject(error)
   }
@@ -104,7 +115,8 @@ export interface Project {
 }
 
 export interface ProjectSummary extends Project {
-  source_count: number
+  credential_count: number
+  connector_count: number
   proxy_count: number
   healthy_proxy_count: number
 }
@@ -129,6 +141,7 @@ export interface ProjectCreate {
 export interface ProjectUpdate {
   name?: string
   description?: string
+  username?: string
   password?: string
   routing_strategy?: string
   health_check_interval?: number
@@ -142,6 +155,10 @@ export interface Proxy {
   host: string
   port: number
   protocol: string
+  username: string | null
+  password: string | null
+  connector_id: string
+  connector_name: string | null
   status: string
   request_count: number
   success_count: number
@@ -158,20 +175,100 @@ export interface ProxyListResponse {
   proxies: Proxy[]
 }
 
-export interface Source {
-  id: string
-  name: string
-  type: string
-  enabled: boolean
-  proxy_count: number
-  last_refresh: string | null
-  refresh_interval_seconds: number
-  created_at: string
+export interface ProxyCreate {
+  host: string
+  port: number
+  connector_id: string
+  protocol?: string
+  username?: string
+  password?: string
+  tags?: string[]
 }
 
-export interface SourceListResponse {
+export interface ProxyUpdate {
+  host?: string
+  port?: number
+  protocol?: string
+  username?: string
+  password?: string
+  tags?: string[]
+}
+
+// Credential types
+export type CredentialType = 'static_proxy_provider' | 'aws' | 'gcp' | 'azure'
+
+export interface Credential {
+  id: string
+  name: string
+  type: CredentialType
+  project_id: string
+  has_username: boolean
+  has_password: boolean
+  created_at: string
+  updated_at: string
+}
+
+export interface CredentialDetail extends Credential {
+  config: Record<string, unknown>
+}
+
+export interface CredentialListResponse {
   total: number
-  sources: Source[]
+  credentials: Credential[]
+}
+
+export interface CredentialCreate {
+  name: string
+  type: CredentialType
+  config: Record<string, unknown>
+}
+
+export interface CredentialUpdate {
+  name?: string
+  config?: Record<string, unknown>
+}
+
+// Connector types
+export interface Connector {
+  id: string
+  name: string
+  credential_id: string
+  credential_name: string | null
+  credential_type: CredentialType | null
+  project_id: string
+  config: Record<string, unknown>
+  enabled: boolean
+  proxy_count: number
+  created_at: string
+  updated_at: string
+}
+
+export interface ConnectorListResponse {
+  total: number
+  connectors: Connector[]
+}
+
+export interface ConnectorCreate {
+  name: string
+  credential_id: string
+  config?: Record<string, unknown>
+  enabled?: boolean
+}
+
+export interface ConnectorUpdate {
+  name?: string
+  credential_id?: string
+  config?: Record<string, unknown>
+  enabled?: boolean
+}
+
+export interface ConnectorOptions {
+  aws_regions: string[]
+  aws_instance_types: string[]
+  gcp_regions: string[]
+  gcp_machine_types: string[]
+  azure_regions: string[]
+  azure_vm_sizes: string[]
 }
 
 export interface PoolMetrics {
@@ -193,42 +290,9 @@ export interface MetricsResponse {
   }
 }
 
-export const fetchProxies = async (): Promise<ProxyListResponse> => {
-  const response = await api.get('/proxies')
-  return response.data
-}
-
-export const fetchSources = async (): Promise<SourceListResponse> => {
-  const response = await api.get('/sources')
-  return response.data
-}
-
-export const createSource = async (data: { name: string; type: string; enabled?: boolean; refresh_interval_seconds?: number }): Promise<Source> => {
-  const response = await api.post('/sources', data)
-  return response.data
-}
-
-export const updateSource = async (id: string, data: { name?: string; enabled?: boolean; refresh_interval_seconds?: number }): Promise<Source> => {
-  const response = await api.patch(`/sources/${id}`, data)
-  return response.data
-}
-
-export const deleteSource = async (id: string): Promise<void> => {
-  await api.delete(`/sources/${id}`)
-}
-
 export const fetchMetrics = async (): Promise<MetricsResponse> => {
   const response = await api.get('/metrics')
   return response.data
-}
-
-export const createProxy = async (data: { host: string; port: number; source_id: string; protocol?: string }) => {
-  const response = await api.post('/proxies', data)
-  return response.data
-}
-
-export const deleteProxy = async (id: string) => {
-  await api.delete(`/proxies/${id}`)
 }
 
 export const setStrategy = async (strategy: string) => {
@@ -261,27 +325,84 @@ export const deleteProject = async (id: string, confirmation: string): Promise<v
   await api.delete(`/projects/${id}`, { data: { confirmation } })
 }
 
-// Project-scoped API functions
+// Project-scoped Proxy API functions
 export const fetchProjectProxies = async (projectId: string): Promise<ProxyListResponse> => {
   const response = await api.get(`/projects/${projectId}/proxies`)
   return response.data
 }
 
-export const fetchProjectSources = async (projectId: string): Promise<SourceListResponse> => {
-  const response = await api.get(`/projects/${projectId}/sources`)
+export const createProjectProxy = async (projectId: string, data: ProxyCreate): Promise<Proxy> => {
+  const response = await api.post(`/projects/${projectId}/proxies`, data)
   return response.data
 }
 
-export const createProjectSource = async (
-  projectId: string,
-  data: { name: string; type: string; enabled?: boolean; refresh_interval_seconds?: number }
-): Promise<Source> => {
-  const response = await api.post(`/projects/${projectId}/sources`, data)
+export const updateProjectProxy = async (projectId: string, proxyId: string, data: ProxyUpdate): Promise<Proxy> => {
+  const response = await api.patch(`/projects/${projectId}/proxies/${proxyId}`, data)
   return response.data
+}
+
+export const deleteProjectProxy = async (projectId: string, proxyId: string): Promise<void> => {
+  await api.delete(`/projects/${projectId}/proxies/${proxyId}`)
 }
 
 export const fetchProjectMetrics = async (projectId: string): Promise<MetricsResponse> => {
   const response = await api.get(`/projects/${projectId}/metrics`)
+  return response.data
+}
+
+// Project-scoped Credential API functions
+export const fetchProjectCredentials = async (projectId: string): Promise<CredentialListResponse> => {
+  const response = await api.get(`/projects/${projectId}/credentials`)
+  return response.data
+}
+
+export const fetchProjectCredential = async (projectId: string, credentialId: string): Promise<CredentialDetail> => {
+  const response = await api.get(`/projects/${projectId}/credentials/${credentialId}`)
+  return response.data
+}
+
+export const createProjectCredential = async (projectId: string, data: CredentialCreate): Promise<CredentialDetail> => {
+  const response = await api.post(`/projects/${projectId}/credentials`, data)
+  return response.data
+}
+
+export const updateProjectCredential = async (projectId: string, credentialId: string, data: CredentialUpdate): Promise<CredentialDetail> => {
+  const response = await api.patch(`/projects/${projectId}/credentials/${credentialId}`, data)
+  return response.data
+}
+
+export const deleteProjectCredential = async (projectId: string, credentialId: string): Promise<void> => {
+  await api.delete(`/projects/${projectId}/credentials/${credentialId}`)
+}
+
+// Project-scoped Connector API functions
+export const fetchProjectConnectors = async (projectId: string): Promise<ConnectorListResponse> => {
+  const response = await api.get(`/projects/${projectId}/connectors`)
+  return response.data
+}
+
+export const fetchProjectConnector = async (projectId: string, connectorId: string): Promise<Connector> => {
+  const response = await api.get(`/projects/${projectId}/connectors/${connectorId}`)
+  return response.data
+}
+
+export const createProjectConnector = async (projectId: string, data: ConnectorCreate): Promise<Connector> => {
+  const response = await api.post(`/projects/${projectId}/connectors`, data)
+  return response.data
+}
+
+export const updateProjectConnector = async (projectId: string, connectorId: string, data: ConnectorUpdate): Promise<Connector> => {
+  const response = await api.patch(`/projects/${projectId}/connectors/${connectorId}`, data)
+  return response.data
+}
+
+export const deleteProjectConnector = async (projectId: string, connectorId: string): Promise<void> => {
+  await api.delete(`/projects/${projectId}/connectors/${connectorId}`)
+}
+
+// Connector options (regions, instance types, etc.)
+export const fetchConnectorOptions = async (): Promise<ConnectorOptions> => {
+  const response = await api.get('/connector-options')
   return response.data
 }
 

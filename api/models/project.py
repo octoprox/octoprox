@@ -71,7 +71,8 @@ class ProjectResponse(BaseModel):
     created_at: datetime
     updated_at: datetime
     # Aggregated stats (populated by API)
-    source_count: int = 0
+    credential_count: int = 0
+    connector_count: int = 0
     proxy_count: int = 0
     healthy_proxy_count: int = 0
 
@@ -84,7 +85,8 @@ class ProjectSummary(BaseModel):
     username: str
     password: str
     routing_strategy: str
-    source_count: int = 0
+    credential_count: int = 0
+    connector_count: int = 0
     proxy_count: int = 0
     healthy_proxy_count: int = 0
     created_at: datetime
