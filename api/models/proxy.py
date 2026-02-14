@@ -7,6 +7,8 @@ from uuid import uuid4
 
 from pydantic import BaseModel, Field
 
+from api.core import utc_now
+
 
 class ProxyProtocol(str, Enum):
     """Supported proxy protocols."""
@@ -49,8 +51,8 @@ class Proxy(BaseModel):
     connector_id: str
     tags: list[str] = Field(default_factory=list)
     metadata: dict[str, Any] = Field(default_factory=dict)
-    created_at: datetime = Field(default_factory=datetime.utcnow)
-    updated_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=utc_now)
+    updated_at: datetime = Field(default_factory=utc_now)
 
     @property
     def url(self) -> str:

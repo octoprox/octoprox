@@ -4,6 +4,8 @@ from datetime import datetime
 from functools import lru_cache
 from typing import Any
 
+from api.core import utc_now
+
 import redis.asyncio as redis
 import structlog
 
@@ -64,7 +66,7 @@ class RedisClient:
             "status": status.value,
             "latency_ms": latency_ms,
             "consecutive_failures": consecutive_failures,
-            "updated_at": datetime.utcnow().isoformat(),
+            "updated_at": utc_now().isoformat(),
         }
         await self.client.hset(key, mapping=data)
     
@@ -108,7 +110,7 @@ class RedisClient:
             pipe.hincrby(key, "failure_count", 1)
         # Store latency sum for computing true average during flush
         pipe.hincrbyfloat(key, "latency_sum_ms", latency_ms)
-        pipe.hset(key, "updated_at", datetime.utcnow().isoformat())
+        pipe.hset(key, "updated_at", utc_now().isoformat())
         await pipe.execute()
 
     async def get_proxy_metrics(self, proxy_id: str) -> dict[str, Any] | None:

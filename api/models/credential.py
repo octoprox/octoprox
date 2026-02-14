@@ -7,6 +7,8 @@ from uuid import uuid4
 
 from pydantic import BaseModel, Field, model_validator
 
+from api.core import utc_now
+
 
 class CredentialType(str, Enum):
     """Types of credentials for different providers."""
@@ -101,8 +103,8 @@ class Credential(BaseModel):
     config: dict[str, Any] = Field(default_factory=dict)
 
     # Metadata
-    created_at: datetime = Field(default_factory=datetime.utcnow)
-    updated_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=utc_now)
+    updated_at: datetime = Field(default_factory=utc_now)
 
 
 class CredentialCreate(BaseModel):

@@ -1,2 +1,12 @@
 """Core modules for Octoprox."""
 
+from datetime import datetime, timezone
+
+
+def utc_now() -> datetime:
+    """Return current UTC time as a naive datetime.
+
+    This avoids the deprecated datetime.utcnow() while remaining compatible
+    with database columns that use TIMESTAMP WITHOUT TIME ZONE.
+    """
+    return datetime.now(timezone.utc).replace(tzinfo=None)

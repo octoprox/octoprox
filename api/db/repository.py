@@ -3,6 +3,8 @@
 from datetime import datetime
 
 from sqlalchemy import select, delete, func
+
+from api.core import utc_now
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.db.models import ProjectModel, ProxyModel, CredentialModel, ConnectorModel, ProxyMetricsModel
@@ -76,7 +78,7 @@ class ProjectRepository:
             model.health_check_timeout = project.health_check_timeout
             model.connection_timeout = project.connection_timeout
             model.max_retries = project.max_retries
-            model.updated_at = datetime.utcnow()
+            model.updated_at = utc_now()
             await self._session.flush()
         return project
 
@@ -173,7 +175,7 @@ class CredentialRepository:
         if model:
             model.name = credential.name
             model.config = credential.config
-            model.updated_at = datetime.utcnow()
+            model.updated_at = utc_now()
             await self._session.flush()
         return credential
 
@@ -252,7 +254,7 @@ class ConnectorRepository:
             model.credential_id = connector.credential_id
             model.config = connector.config
             model.enabled = connector.enabled
-            model.updated_at = datetime.utcnow()
+            model.updated_at = utc_now()
             await self._session.flush()
         return connector
 
@@ -345,7 +347,7 @@ class ProxyRepository:
             model.password = proxy.password
             model.tags = proxy.tags
             model.metadata_ = proxy.metadata
-            model.updated_at = datetime.utcnow()
+            model.updated_at = utc_now()
             await self._session.flush()
         return proxy
 
@@ -398,7 +400,7 @@ class MetricsRepository:
         """Save a metrics snapshot to the database."""
         model = ProxyMetricsModel(
             proxy_id=proxy_id,
-            timestamp=datetime.utcnow(),
+            timestamp=utc_now(),
             request_count=request_count,
             success_count=success_count,
             failure_count=failure_count,

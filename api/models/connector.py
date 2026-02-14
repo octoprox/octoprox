@@ -6,6 +6,8 @@ from uuid import uuid4
 
 from pydantic import BaseModel, Field, model_validator
 
+from api.core import utc_now
+
 from api.models.credential import CredentialType
 
 
@@ -184,8 +186,8 @@ class Connector(BaseModel):
     proxy_count: int = 0
 
     # Metadata
-    created_at: datetime = Field(default_factory=datetime.utcnow)
-    updated_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=utc_now)
+    updated_at: datetime = Field(default_factory=utc_now)
 
 
 class ConnectorCreate(BaseModel):

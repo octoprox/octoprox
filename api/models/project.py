@@ -6,6 +6,8 @@ from uuid import uuid4
 
 from pydantic import BaseModel, Field
 
+from api.core import utc_now
+
 
 class Project(BaseModel):
     """Represents a project for multi-tenancy."""
@@ -26,8 +28,8 @@ class Project(BaseModel):
     max_retries: int = 3
     
     # Metadata
-    created_at: datetime = Field(default_factory=datetime.utcnow)
-    updated_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=utc_now)
+    updated_at: datetime = Field(default_factory=utc_now)
 
 
 class ProjectCreate(BaseModel):

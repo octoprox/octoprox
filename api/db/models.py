@@ -3,6 +3,8 @@
 from datetime import datetime
 from typing import Any
 
+from api.core import utc_now
+
 from sqlalchemy import JSON, Boolean, DateTime, Float, Integer, String, Text, ForeignKey
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -30,8 +32,8 @@ class ProjectModel(Base):
     connection_timeout: Mapped[int] = mapped_column(Integer, default=30)
     max_retries: Mapped[int] = mapped_column(Integer, default=3)
 
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
-    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now, onupdate=utc_now)
 
     # Relationships
     credentials: Mapped[list["CredentialModel"]] = relationship("CredentialModel", back_populates="project", cascade="all, delete-orphan")
@@ -47,8 +49,8 @@ class CredentialModel(Base):
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     type: Mapped[str] = mapped_column(String(50), nullable=False)
     config: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
-    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now, onupdate=utc_now)
 
     # Foreign key to project
     project_id: Mapped[str] = mapped_column(String(36), ForeignKey("projects.id"), nullable=False)
@@ -67,8 +69,8 @@ class ConnectorModel(Base):
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     config: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
-    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now, onupdate=utc_now)
 
     # Foreign keys
     project_id: Mapped[str] = mapped_column(String(36), ForeignKey("projects.id"), nullable=False)
@@ -94,8 +96,8 @@ class ProxyModel(Base):
     connector_id: Mapped[str] = mapped_column(String(36), ForeignKey("connectors.id"), nullable=False)
     tags: Mapped[list[str]] = mapped_column(JSON, default=list)
     metadata_: Mapped[dict[str, Any]] = mapped_column("metadata", JSON, default=dict)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
-    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now, onupdate=utc_now)
 
     # Relationship to connector
     connector: Mapped["ConnectorModel"] = relationship("ConnectorModel", back_populates="proxies")
@@ -108,7 +110,7 @@ class ProxyMetricsModel(Base):
     
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     proxy_id: Mapped[str] = mapped_column(String(36), ForeignKey("proxies.id", ondelete="CASCADE"), nullable=False)
-    timestamp: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+    timestamp: Mapped[datetime] = mapped_column(DateTime, default=utc_now, index=True)
     
     # Snapshot of metrics at flush time
     request_count: Mapped[int] = mapped_column(Integer, default=0)
