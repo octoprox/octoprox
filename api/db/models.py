@@ -105,17 +105,19 @@ class ProxyModel(Base):
 
 class ProxyMetricsModel(Base):
     """SQLAlchemy model for historical proxy metrics (flushed from Redis)."""
-    
+
     __tablename__ = "proxy_metrics"
-    
+
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     proxy_id: Mapped[str] = mapped_column(String(36), ForeignKey("proxies.id", ondelete="CASCADE"), nullable=False)
     timestamp: Mapped[datetime] = mapped_column(DateTime, default=utc_now, index=True)
-    
+
     # Snapshot of metrics at flush time
     request_count: Mapped[int] = mapped_column(Integer, default=0)
     success_count: Mapped[int] = mapped_column(Integer, default=0)
     failure_count: Mapped[int] = mapped_column(Integer, default=0)
     avg_latency_ms: Mapped[float] = mapped_column(Float, default=0.0)
+    bytes_sent: Mapped[int] = mapped_column(Integer, default=0)
+    bytes_received: Mapped[int] = mapped_column(Integer, default=0)
     status: Mapped[str] = mapped_column(String(20), default="unknown")
 

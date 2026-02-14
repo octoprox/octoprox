@@ -99,6 +99,8 @@ class RedisClient:
         proxy_id: str,
         success: bool,
         latency_ms: float,
+        bytes_sent: int = 0,
+        bytes_received: int = 0,
     ) -> None:
         """Update proxy metrics in Redis (incremental)."""
         key = PROXY_METRICS_KEY.format(proxy_id=proxy_id)
@@ -110,6 +112,11 @@ class RedisClient:
             pipe.hincrby(key, "failure_count", 1)
         # Store latency sum for computing true average during flush
         pipe.hincrbyfloat(key, "latency_sum_ms", latency_ms)
+        # Track bytes transferred
+        if bytes_sent > 0:
+            pipe.hincrby(key, "bytes_sent", bytes_sent)
+        if bytes_received > 0:
+            pipe.hincrby(key, "bytes_received", bytes_received)
         pipe.hset(key, "updated_at", utc_now().isoformat())
         await pipe.execute()
 
@@ -128,6 +135,8 @@ class RedisClient:
             "failure_count": int(data.get("failure_count", 0)),
             "latency_sum_ms": latency_sum,
             "avg_latency_ms": avg_latency,
+            "bytes_sent": int(data.get("bytes_sent", 0)),
+            "bytes_received": int(data.get("bytes_received", 0)),
             "updated_at": data.get("updated_at"),
         }
     

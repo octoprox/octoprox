@@ -15,6 +15,7 @@ import {
 } from '../api/client'
 import { useProject } from '../contexts/ProjectContext'
 import { DataTable, createSelectionColumn } from './DataTable'
+import { formatBytes } from '../utils/format'
 
 export default function ProxyList() {
   const queryClient = useQueryClient()
@@ -226,6 +227,16 @@ export default function ProxyList() {
       accessorKey: 'avg_latency_ms',
       header: 'Latency',
       cell: ({ getValue }) => `${getValue<number>().toFixed(0)}ms`,
+    },
+    {
+      accessorKey: 'bytes_sent',
+      header: 'Sent',
+      cell: ({ getValue }) => formatBytes(getValue<number>()),
+    },
+    {
+      accessorKey: 'bytes_received',
+      header: 'Received',
+      cell: ({ getValue }) => formatBytes(getValue<number>()),
     },
     {
       id: 'actions',

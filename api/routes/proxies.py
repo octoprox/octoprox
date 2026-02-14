@@ -83,6 +83,8 @@ def _proxy_to_response(proxy: Proxy, connector_name: str | None = None) -> Proxy
         failure_count=proxy.failure_count,
         success_rate=proxy.success_rate,
         avg_latency_ms=proxy.avg_latency_ms,
+        bytes_sent=proxy.bytes_sent,
+        bytes_received=proxy.bytes_received,
         tags=proxy.tags,
         created_at=proxy.created_at,
     )

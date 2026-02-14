@@ -178,6 +178,10 @@ class ProxyManager:
             else:
                 proxy.avg_latency_ms = 0.0
 
+            # Combine bytes sent/received
+            proxy.bytes_sent = pg.get("bytes_sent", 0) + rd.get("bytes_sent", 0)
+            proxy.bytes_received = pg.get("bytes_received", 0) + rd.get("bytes_received", 0)
+
         logger.info(
             "Hydrated operational data",
             proxy_count=len(self._proxies),
@@ -449,7 +453,14 @@ class ProxyManager:
         self._strategy = get_strategy(strategy_name)
         logger.info("Changed routing strategy", strategy=strategy_name)
 
-    async def update_proxy_stats(self, proxy_id: str, success: bool, latency_ms: float) -> None:
+    async def update_proxy_stats(
+        self,
+        proxy_id: str,
+        success: bool,
+        latency_ms: float,
+        bytes_sent: int = 0,
+        bytes_received: int = 0,
+    ) -> None:
         """Update proxy statistics after a request (stores in Redis)."""
         proxy = self._proxies.get(proxy_id)
         if proxy:
@@ -466,8 +477,14 @@ class ProxyManager:
             else:
                 proxy.avg_latency_ms = (proxy.avg_latency_ms * old_count + latency_ms) / proxy.request_count
 
+            # Update byte counts
+            proxy.bytes_sent += bytes_sent
+            proxy.bytes_received += bytes_received
+
             # Persist to Redis
-            await self._redis_client.update_proxy_metrics(proxy_id, success, latency_ms)
+            await self._redis_client.update_proxy_metrics(
+                proxy_id, success, latency_ms, bytes_sent, bytes_received
+            )
 
     async def update_proxy_status(
         self,

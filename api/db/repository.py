@@ -396,6 +396,8 @@ class MetricsRepository:
         failure_count: int,
         avg_latency_ms: float,
         status: str,
+        bytes_sent: int = 0,
+        bytes_received: int = 0,
     ) -> None:
         """Save a metrics snapshot to the database."""
         model = ProxyMetricsModel(
@@ -405,6 +407,8 @@ class MetricsRepository:
             success_count=success_count,
             failure_count=failure_count,
             avg_latency_ms=avg_latency_ms,
+            bytes_sent=bytes_sent,
+            bytes_received=bytes_received,
             status=status,
         )
         self._session.add(model)
@@ -434,6 +438,8 @@ class MetricsRepository:
                 "failure_count": m.failure_count,
                 "avg_latency_ms": m.avg_latency_ms,
                 "status": m.status,
+                "bytes_sent": m.bytes_sent,
+                "bytes_received": m.bytes_received,
             }
             for m in models
         ]
@@ -458,6 +464,8 @@ class MetricsRepository:
                 func.sum(
                     ProxyMetricsModel.avg_latency_ms * ProxyMetricsModel.request_count
                 ).label("weighted_latency_sum"),
+                func.sum(ProxyMetricsModel.bytes_sent).label("total_bytes_sent"),
+                func.sum(ProxyMetricsModel.bytes_received).label("total_bytes_received"),
             )
             .group_by(ProxyMetricsModel.proxy_id)
         )
@@ -476,6 +484,8 @@ class MetricsRepository:
                 "success_count": row.total_successes or 0,
                 "failure_count": row.total_failures or 0,
                 "avg_latency_ms": avg_latency,
+                "bytes_sent": row.total_bytes_sent or 0,
+                "bytes_received": row.total_bytes_received or 0,
             }
 
         return metrics

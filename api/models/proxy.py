@@ -46,6 +46,8 @@ class Proxy(BaseModel):
     success_count: int = 0
     failure_count: int = 0
     avg_latency_ms: float = 0.0
+    bytes_sent: int = 0
+    bytes_received: int = 0
 
     # Metadata
     connector_id: str
@@ -109,6 +111,8 @@ class ProxyResponse(BaseModel):
     failure_count: int
     success_rate: float
     avg_latency_ms: float
+    bytes_sent: int = 0
+    bytes_received: int = 0
     tags: list[str]
     created_at: datetime
 

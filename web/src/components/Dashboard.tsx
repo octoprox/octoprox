@@ -1,9 +1,10 @@
 import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { Activity, Server, CheckCircle, XCircle, Settings } from 'lucide-react'
+import { Activity, Server, CheckCircle, XCircle, Settings, ArrowUpCircle, ArrowDownCircle } from 'lucide-react'
 import { fetchProjectMetrics, updateProject, ProjectUpdate } from '../api/client'
 import { useProject } from '../contexts/ProjectContext'
 import EditProjectModal from './EditProjectModal'
+import { formatBytes } from '../utils/format'
 
 export default function Dashboard() {
   const queryClient = useQueryClient()
@@ -88,7 +89,7 @@ export default function Dashboard() {
       {/* Request Statistics */}
       <div className="bg-white rounded-lg shadow p-6 mb-8">
         <h2 className="text-xl font-semibold mb-4">Request Statistics</h2>
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-6">
+        <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-6">
           <MetricItem label="Total Requests" value={pool?.total_requests ?? 0} />
           <MetricItem label="Successes" value={pool?.total_successes ?? 0} color="text-green-600" />
           <MetricItem label="Failures" value={pool?.total_failures ?? 0} color="text-red-600" />
@@ -96,6 +97,18 @@ export default function Dashboard() {
             label="Success Rate"
             value={`${pool?.overall_success_rate?.toFixed(1) ?? 0}%`}
             color="text-blue-600"
+          />
+          <MetricItem
+            label="Bytes Sent"
+            value={formatBytes(pool?.total_bytes_sent ?? 0)}
+            color="text-orange-600"
+            icon={<ArrowUpCircle className="w-4 h-4 text-orange-500" />}
+          />
+          <MetricItem
+            label="Bytes Received"
+            value={formatBytes(pool?.total_bytes_received ?? 0)}
+            color="text-teal-600"
+            icon={<ArrowDownCircle className="w-4 h-4 text-teal-500" />}
           />
         </div>
       </div>
@@ -156,14 +169,19 @@ function MetricItem({
   label,
   value,
   color = 'text-gray-900',
+  icon,
 }: {
   label: string
   value: string | number
   color?: string
+  icon?: React.ReactNode
 }) {
   return (
     <div>
-      <p className="text-gray-500 text-sm">{label}</p>
+      <div className="flex items-center gap-1">
+        {icon}
+        <p className="text-gray-500 text-sm">{label}</p>
+      </div>
       <p className={`text-2xl font-bold ${color}`}>{value}</p>
     </div>
   )

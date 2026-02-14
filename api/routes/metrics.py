@@ -16,6 +16,8 @@ class PoolMetrics(BaseModel):
     total_failures: int
     overall_success_rate: float
     avg_latency_ms: float
+    total_bytes_sent: int
+    total_bytes_received: int
 
 
 class StrategyMetrics(BaseModel):
@@ -49,6 +51,8 @@ async def get_metrics(request: Request, project_id: str) -> MetricsResponse:
     total_requests = sum(p.request_count for p in proxies)
     total_successes = sum(p.success_count for p in proxies)
     total_failures = sum(p.failure_count for p in proxies)
+    total_bytes_sent = sum(p.bytes_sent for p in proxies)
+    total_bytes_received = sum(p.bytes_received for p in proxies)
 
     overall_success_rate = 0.0
     if total_requests > 0:
@@ -69,6 +73,8 @@ async def get_metrics(request: Request, project_id: str) -> MetricsResponse:
             total_failures=total_failures,
             overall_success_rate=round(overall_success_rate, 2),
             avg_latency_ms=round(avg_latency, 2),
+            total_bytes_sent=total_bytes_sent,
+            total_bytes_received=total_bytes_received,
         ),
         strategy=StrategyMetrics(
             current_strategy=current_strategy,
@@ -98,6 +104,8 @@ async def prometheus_metrics(request: Request, project_id: str) -> str:
     total_requests = sum(p.request_count for p in proxies)
     total_successes = sum(p.success_count for p in proxies)
     total_failures = sum(p.failure_count for p in proxies)
+    total_bytes_sent = sum(p.bytes_sent for p in proxies)
+    total_bytes_received = sum(p.bytes_received for p in proxies)
 
     label_str = f'{{project="{project_id}"}}'
 
@@ -121,6 +129,14 @@ async def prometheus_metrics(request: Request, project_id: str) -> str:
         "# HELP octoprox_requests_failure_total Total failed requests",
         "# TYPE octoprox_requests_failure_total counter",
         f"octoprox_requests_failure_total{label_str} {total_failures}",
+        "",
+        "# HELP octoprox_bytes_sent_total Total bytes sent through proxies",
+        "# TYPE octoprox_bytes_sent_total counter",
+        f"octoprox_bytes_sent_total{label_str} {total_bytes_sent}",
+        "",
+        "# HELP octoprox_bytes_received_total Total bytes received through proxies",
+        "# TYPE octoprox_bytes_received_total counter",
+        f"octoprox_bytes_received_total{label_str} {total_bytes_received}",
     ]
 
     return "\n".join(lines)

@@ -58,10 +58,16 @@ class TestRedisClient:
         """Test updating proxy metrics."""
         proxy_id = "metrics-proxy"
 
-        # Record some requests
-        await redis_client.update_proxy_metrics(proxy_id, success=True, latency_ms=100)
-        await redis_client.update_proxy_metrics(proxy_id, success=True, latency_ms=200)
-        await redis_client.update_proxy_metrics(proxy_id, success=False, latency_ms=50)
+        # Record some requests with bytes
+        await redis_client.update_proxy_metrics(
+            proxy_id, success=True, latency_ms=100, bytes_sent=1000, bytes_received=5000
+        )
+        await redis_client.update_proxy_metrics(
+            proxy_id, success=True, latency_ms=200, bytes_sent=2000, bytes_received=10000
+        )
+        await redis_client.update_proxy_metrics(
+            proxy_id, success=False, latency_ms=50, bytes_sent=500, bytes_received=0
+        )
 
         metrics = await redis_client.get_proxy_metrics(proxy_id)
 
@@ -72,6 +78,9 @@ class TestRedisClient:
         assert metrics["latency_sum_ms"] == 350.0
         # Average should be 350/3 ≈ 116.67
         assert abs(metrics["avg_latency_ms"] - 116.67) < 1
+        # Check bytes tracking
+        assert metrics["bytes_sent"] == 3500
+        assert metrics["bytes_received"] == 15000
 
     async def test_get_proxy_metrics_not_found(self, redis_client: RedisClient) -> None:
         """Test getting metrics for non-existent proxy."""

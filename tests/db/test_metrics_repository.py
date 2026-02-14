@@ -85,6 +85,8 @@ class TestMetricsRepository:
             failure_count=2,
             avg_latency_ms=150.5,
             status="healthy",
+            bytes_sent=5000,
+            bytes_received=25000,
         )
         await db_session.commit()
 
@@ -97,6 +99,8 @@ class TestMetricsRepository:
         assert history[0]["failure_count"] == 2
         assert history[0]["avg_latency_ms"] == 150.5
         assert history[0]["status"] == "healthy"
+        assert history[0]["bytes_sent"] == 5000
+        assert history[0]["bytes_received"] == 25000
 
     async def test_save_multiple_snapshots(
         self,
@@ -121,6 +125,8 @@ class TestMetricsRepository:
                 failure_count=2 * (i + 1),
                 avg_latency_ms=100.0 + i * 10,
                 status="healthy",
+                bytes_sent=1000 * (i + 1),
+                bytes_received=5000 * (i + 1),
             )
         await db_session.commit()
 
@@ -163,6 +169,8 @@ class TestMetricsRepository:
             failure_count=2,
             avg_latency_ms=100.0,
             status="healthy",
+            bytes_sent=5000,
+            bytes_received=25000,
         )
         await metrics_repo.save_metrics_snapshot(
             proxy_id=proxy2.id,
@@ -171,6 +179,8 @@ class TestMetricsRepository:
             failure_count=5,
             avg_latency_ms=200.0,
             status="healthy",
+            bytes_sent=10000,
+            bytes_received=50000,
         )
         await db_session.commit()
 
@@ -181,6 +191,10 @@ class TestMetricsRepository:
         assert proxy2.id in cumulative
         assert cumulative[proxy1.id]["request_count"] == 10
         assert cumulative[proxy2.id]["request_count"] == 20
+        assert cumulative[proxy1.id]["bytes_sent"] == 5000
+        assert cumulative[proxy1.id]["bytes_received"] == 25000
+        assert cumulative[proxy2.id]["bytes_sent"] == 10000
+        assert cumulative[proxy2.id]["bytes_received"] == 50000
 
     async def test_get_metrics_history_empty(
         self,
@@ -213,6 +227,8 @@ class TestMetricsRepository:
                 failure_count=2 * (i + 1),
                 avg_latency_ms=100.0,
                 status="healthy",
+                bytes_sent=1000 * (i + 1),
+                bytes_received=5000 * (i + 1),
             )
         await db_session.commit()
 

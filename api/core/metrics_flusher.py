@@ -74,6 +74,8 @@ class MetricsFlusher:
                     success_count=metrics["success_count"],
                     failure_count=metrics["failure_count"],
                     avg_latency_ms=metrics["avg_latency_ms"],
+                    bytes_sent=metrics.get("bytes_sent", 0),
+                    bytes_received=metrics.get("bytes_received", 0),
                     status=status,
                 )
 

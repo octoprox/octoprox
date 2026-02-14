@@ -165,6 +165,8 @@ export interface Proxy {
   failure_count: number
   success_rate: number
   avg_latency_ms: number
+  bytes_sent: number
+  bytes_received: number
   tags: string[]
   created_at: string
 }
@@ -294,6 +296,8 @@ export interface PoolMetrics {
   total_failures: number
   overall_success_rate: number
   avg_latency_ms: number
+  total_bytes_sent: number
+  total_bytes_received: number
 }
 
 export interface MetricsResponse {

@@ -270,16 +270,24 @@ class TestProxyManager:
         )
         await proxy_manager.add_proxy(proxy)
 
-        # Update stats
-        await proxy_manager.update_proxy_stats(proxy.id, success=True, latency_ms=100)
-        await proxy_manager.update_proxy_stats(proxy.id, success=True, latency_ms=200)
-        await proxy_manager.update_proxy_stats(proxy.id, success=False, latency_ms=50)
+        # Update stats with bytes tracking
+        await proxy_manager.update_proxy_stats(
+            proxy.id, success=True, latency_ms=100, bytes_sent=1000, bytes_received=5000
+        )
+        await proxy_manager.update_proxy_stats(
+            proxy.id, success=True, latency_ms=200, bytes_sent=2000, bytes_received=10000
+        )
+        await proxy_manager.update_proxy_stats(
+            proxy.id, success=False, latency_ms=50, bytes_sent=500, bytes_received=0
+        )
 
         updated_proxy = proxy_manager.get_proxy(proxy.id)
         assert updated_proxy is not None
         assert updated_proxy.request_count == 3
         assert updated_proxy.success_count == 2
         assert updated_proxy.failure_count == 1
+        assert updated_proxy.bytes_sent == 3500
+        assert updated_proxy.bytes_received == 15000
 
     async def test_update_proxy_status(self, proxy_manager: ProxyManager) -> None:
         """Test updating proxy health status."""

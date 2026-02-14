@@ -333,6 +333,8 @@ class ProxyServer:
         start_time = time.monotonic()
         success = False
         latency_ms = 0.0
+        bytes_sent = 0
+        bytes_received = 0
         upstream_writer: asyncio.StreamWriter | None = None
 
         try:
@@ -351,7 +353,7 @@ class ProxyServer:
             success = True
 
             # Start bidirectional tunnel (not included in latency measurement)
-            await self._tunnel(
+            bytes_sent, bytes_received = await self._tunnel(
                 client_reader,
                 client_writer,
                 upstream_reader,
@@ -381,7 +383,9 @@ class ProxyServer:
                 upstream_writer.close()
                 await upstream_writer.wait_closed()
             if proxy:
-                await self._proxy_manager.update_proxy_stats(proxy.id, success, latency_ms)
+                await self._proxy_manager.update_proxy_stats(
+                    proxy.id, success, latency_ms, bytes_sent, bytes_received
+                )
 
     async def _tunnel(
         self,
@@ -389,7 +393,7 @@ class ProxyServer:
         client_writer: asyncio.StreamWriter,
         upstream_reader: asyncio.StreamReader,
         upstream_writer: asyncio.StreamWriter,
-    ) -> None:
+    ) -> tuple[int, int]:
         """Bidirectional tunnel between client and upstream.
 
         Each direction runs independently until:
@@ -400,29 +404,42 @@ class ProxyServer:
         We wait for both directions to complete naturally, which correctly
         handles half-closed connections (e.g., client sends request, closes
         write side, but still reads the response).
+
+        Returns:
+            Tuple of (bytes_sent, bytes_received) where bytes_sent is data
+            sent to upstream (from client) and bytes_received is data
+            received from upstream (to client).
         """
+        bytes_sent = 0
+        bytes_received = 0
 
         async def forward(
             reader: asyncio.StreamReader,
             writer: asyncio.StreamWriter,
-        ) -> None:
+        ) -> int:
+            """Forward data and return total bytes transferred."""
+            total_bytes = 0
             try:
                 while True:
                     data = await reader.read(BUFFER_SIZE)
                     if not data:
                         break
+                    total_bytes += len(data)
                     writer.write(data)
                     await writer.drain()
             except (ConnectionResetError, BrokenPipeError, OSError):
                 # Connection closed or errored - exit gracefully
                 pass
+            return total_bytes
 
         task1 = asyncio.create_task(forward(client_reader, upstream_writer))
         task2 = asyncio.create_task(forward(upstream_reader, client_writer))
 
         try:
             # Wait for both directions to complete
-            await asyncio.gather(task1, task2)
+            results = await asyncio.gather(task1, task2)
+            bytes_sent = results[0]  # client -> upstream
+            bytes_received = results[1]  # upstream -> client
         except asyncio.CancelledError:
             # If we're cancelled from outside, cancel both tasks
             task1.cancel()
@@ -430,6 +447,8 @@ class ProxyServer:
             # Wait for cleanup, suppressing exceptions
             await asyncio.gather(task1, task2, return_exceptions=True)
             raise
+
+        return bytes_sent, bytes_received
 
 
     def _parse_http_url(self, url: str) -> tuple[str, int, str]:
@@ -487,6 +506,8 @@ class ProxyServer:
         start_time = time.monotonic()
         success = False
         latency_ms = 0.0
+        bytes_sent = 0
+        bytes_received = 0
         upstream_writer: asyncio.StreamWriter | None = None
 
         # Check if this is a SOCKS proxy
@@ -510,7 +531,9 @@ class ProxyServer:
                 # Send request with full URL (proxy style)
                 request_line = f"{method} {target} {version}\r\n"
 
-            upstream_writer.write(request_line.encode())
+            request_line_bytes = request_line.encode()
+            upstream_writer.write(request_line_bytes)
+            bytes_sent += len(request_line_bytes)
 
             # Forward headers, adding proxy auth for HTTP proxies only
             # (SOCKS auth is handled during tunnel establishment)
@@ -518,13 +541,16 @@ class ProxyServer:
                 credentials = base64.b64encode(
                     f"{proxy.username}:{proxy.password}".encode()
                 ).decode()
-                upstream_writer.write(
-                    f"Proxy-Authorization: Basic {credentials}\r\n".encode()
-                )
+                auth_header = f"Proxy-Authorization: Basic {credentials}\r\n".encode()
+                upstream_writer.write(auth_header)
+                bytes_sent += len(auth_header)
 
             for key, value in headers.items():
-                upstream_writer.write(f"{key}: {value}\r\n".encode())
+                header_line = f"{key}: {value}\r\n".encode()
+                upstream_writer.write(header_line)
+                bytes_sent += len(header_line)
             upstream_writer.write(b"\r\n")
+            bytes_sent += 2
 
             # Forward request body if present
             content_length = int(headers.get("content-length", 0))
@@ -534,6 +560,7 @@ class ProxyServer:
                     timeout=self._timeout,
                 )
                 upstream_writer.write(body)
+                bytes_sent += len(body)
 
             await upstream_writer.drain()
 
@@ -542,6 +569,7 @@ class ProxyServer:
                 upstream_reader.readline(),
                 timeout=self._timeout,
             )
+            bytes_received += len(response_line)
 
             # Measure latency up to first response (connection establishment)
             latency_ms = (time.monotonic() - start_time) * 1000
@@ -553,6 +581,7 @@ class ProxyServer:
             response_headers: dict[str, str] = {}
             while True:
                 line = await upstream_reader.readline()
+                bytes_received += len(line)
                 client_writer.write(line)
                 if line in (b"\r\n", b"\n", b""):
                     break
@@ -568,9 +597,11 @@ class ProxyServer:
             transfer_encoding = response_headers.get("transfer-encoding", "")
 
             if transfer_encoding.lower() == "chunked":
-                await self._forward_chunked(upstream_reader, client_writer)
+                chunked_bytes = await self._forward_chunked(upstream_reader, client_writer)
+                bytes_received += chunked_bytes
             elif resp_content_length:
                 body = await upstream_reader.readexactly(int(resp_content_length))
+                bytes_received += len(body)
                 client_writer.write(body)
                 await client_writer.drain()
 
@@ -597,17 +628,21 @@ class ProxyServer:
                 upstream_writer.close()
                 await upstream_writer.wait_closed()
             if proxy:
-                await self._proxy_manager.update_proxy_stats(proxy.id, success, latency_ms)
+                await self._proxy_manager.update_proxy_stats(
+                    proxy.id, success, latency_ms, bytes_sent, bytes_received
+                )
 
     async def _forward_chunked(
         self,
         reader: asyncio.StreamReader,
         writer: asyncio.StreamWriter,
-    ) -> None:
-        """Forward chunked transfer encoding."""
+    ) -> int:
+        """Forward chunked transfer encoding and return total bytes read."""
+        total_bytes = 0
         while True:
             # Read chunk size line
             size_line = await reader.readline()
+            total_bytes += len(size_line)
             writer.write(size_line)
 
             size_str = size_line.decode("utf-8", errors="replace").strip()
@@ -616,12 +651,15 @@ class ProxyServer:
             if chunk_size == 0:
                 # Final chunk - read trailing CRLF
                 trailing = await reader.readline()
+                total_bytes += len(trailing)
                 writer.write(trailing)
                 break
 
             # Read chunk data + CRLF
             chunk_data = await reader.readexactly(chunk_size + 2)
+            total_bytes += len(chunk_data)
             writer.write(chunk_data)
 
         await writer.drain()
+        return total_bytes
 

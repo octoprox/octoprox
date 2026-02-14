@@ -31,6 +31,8 @@ class TestMetricsEndpoints:
         assert "total_failures" in pool
         assert "overall_success_rate" in pool
         assert "avg_latency_ms" in pool
+        assert "total_bytes_sent" in pool
+        assert "total_bytes_received" in pool
 
         # Check strategy metrics
         assert "strategy" in data
@@ -77,6 +79,8 @@ class TestMetricsEndpoints:
         assert "octoprox_proxies_total" in text
         assert "octoprox_proxies_healthy" in text
         assert "octoprox_requests_total" in text
+        assert "octoprox_bytes_sent_total" in text
+        assert "octoprox_bytes_received_total" in text
 
     def test_prometheus_metrics_project_not_found(
         self,
