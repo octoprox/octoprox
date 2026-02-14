@@ -4,53 +4,19 @@ import { Key, Trash2, Pencil, X, Eye, EyeOff } from 'lucide-react'
 import {
   fetchProjectCredentials,
   fetchProjectCredential,
-  createProjectCredential,
   updateProjectCredential,
   deleteProjectCredential,
   Credential,
   CredentialDetail,
   CredentialType,
-  CredentialCreate,
 } from '../api/client'
 import { useProject } from '../contexts/ProjectContext'
-
-const CREDENTIAL_TYPES: { value: CredentialType; label: string }[] = [
-  { value: 'static_proxy_provider', label: 'Static Proxy Provider' },
-  { value: 'aws', label: 'AWS' },
-  { value: 'gcp', label: 'GCP' },
-  { value: 'azure', label: 'Azure' },
-]
-
-interface CredentialFormData {
-  name: string
-  type: CredentialType
-  config: Record<string, string>
-}
-
-const getDefaultConfig = (type: CredentialType): Record<string, string> => {
-  switch (type) {
-    case 'static_proxy_provider':
-      return { username: '', password: '' }
-    case 'aws':
-      return { access_key: '', secret_key: '' }
-    case 'gcp':
-      return { service_account_json: '', project_id: '' }
-    case 'azure':
-      return { subscription_id: '', tenant_id: '', client_id: '', client_secret: '', key_vault_name: '' }
-    default:
-      return {}
-  }
-}
+import AddCredentialModal, { CREDENTIAL_TYPES, getDefaultCredentialConfig } from './AddCredentialModal'
 
 export default function CredentialsConfig() {
   const queryClient = useQueryClient()
   const { selectedProjectId } = useProject()
-  const [showForm, setShowForm] = useState(false)
-  const [formData, setFormData] = useState<CredentialFormData>({
-    name: '',
-    type: 'static_proxy_provider',
-    config: getDefaultConfig('static_proxy_provider'),
-  })
+  const [showAddModal, setShowAddModal] = useState(false)
   const [editingCredential, setEditingCredential] = useState<CredentialDetail | null>(null)
   const [showSecrets, setShowSecrets] = useState<Record<string, boolean>>({})
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
@@ -59,20 +25,6 @@ export default function CredentialsConfig() {
     queryKey: ['credentials', selectedProjectId],
     queryFn: () => fetchProjectCredentials(selectedProjectId!),
     enabled: !!selectedProjectId,
-  })
-
-  const createMutation = useMutation({
-    mutationFn: (data: CredentialCreate) => createProjectCredential(selectedProjectId!, data),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['credentials', selectedProjectId] })
-      queryClient.invalidateQueries({ queryKey: ['project', selectedProjectId] })
-      setShowForm(false)
-      setFormData({ name: '', type: 'static_proxy_provider', config: getDefaultConfig('static_proxy_provider') })
-      setErrorMessage(null)
-    },
-    onError: (error: Error) => {
-      setErrorMessage(error.message || 'Failed to create credential')
-    },
   })
 
   const updateMutation = useMutation({
@@ -100,23 +52,6 @@ export default function CredentialsConfig() {
     },
   })
 
-  const handleTypeChange = (type: CredentialType) => {
-    setFormData({ ...formData, type, config: getDefaultConfig(type) })
-  }
-
-  const handleConfigChange = (key: string, value: string) => {
-    setFormData({ ...formData, config: { ...formData.config, [key]: value } })
-  }
-
-  const handleSubmit = (e: React.FormEvent) => {
-    e.preventDefault()
-    createMutation.mutate({
-      name: formData.name,
-      type: formData.type,
-      config: formData.config,
-    })
-  }
-
   const startEditing = async (credential: Credential) => {
     const detail = await fetchProjectCredential(selectedProjectId!, credential.id)
     setEditingCredential(detail)
@@ -127,7 +62,7 @@ export default function CredentialsConfig() {
   }
 
   const renderConfigFields = (type: CredentialType, config: Record<string, string>, onChange: (key: string, value: string) => void, isEdit = false) => {
-    const fields = getDefaultConfig(type)
+    const fields = getDefaultCredentialConfig(type)
     const prefix = isEdit ? 'edit-' : ''
     return Object.keys(fields).map((key) => {
       const isSecret = ['password', 'secret_key', 'client_secret', 'service_account_json'].includes(key)
@@ -173,7 +108,7 @@ export default function CredentialsConfig() {
       <div className="flex justify-between items-center mb-8">
         <h1 className="text-3xl font-bold">Credentials</h1>
         <button
-          onClick={() => setShowForm(!showForm)}
+          onClick={() => setShowAddModal(true)}
           className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700"
         >
           <Key className="w-5 h-5" />
@@ -190,43 +125,10 @@ export default function CredentialsConfig() {
         </div>
       )}
 
-      {showForm && (
-        <form onSubmit={handleSubmit} className="bg-white rounded-lg shadow p-6 mb-8">
-          <div className="grid gap-4">
-            <div className="grid grid-cols-2 gap-4">
-              <input
-                type="text"
-                placeholder="Credential Name"
-                value={formData.name}
-                onChange={(e) => setFormData({ ...formData, name: e.target.value })}
-                className="px-4 py-2 border rounded-lg"
-                required
-              />
-              <select
-                value={formData.type}
-                onChange={(e) => handleTypeChange(e.target.value as CredentialType)}
-                className="px-4 py-2 border rounded-lg"
-              >
-                {CREDENTIAL_TYPES.map((type) => (
-                  <option key={type.value} value={type.value}>
-                    {type.label}
-                  </option>
-                ))}
-              </select>
-            </div>
-            <div className="grid grid-cols-2 gap-4">
-              {renderConfigFields(formData.type, formData.config, handleConfigChange)}
-            </div>
-          </div>
-          <button
-            type="submit"
-            disabled={createMutation.isPending}
-            className="mt-4 px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:opacity-50"
-          >
-            {createMutation.isPending ? 'Creating...' : 'Create Credential'}
-          </button>
-        </form>
-      )}
+      <AddCredentialModal
+        isOpen={showAddModal}
+        onClose={() => setShowAddModal(false)}
+      />
 
       <div className="grid gap-6">
         {data?.credentials.map((credential) => (

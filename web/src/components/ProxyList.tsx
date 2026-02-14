@@ -289,7 +289,7 @@ export default function ProxyList() {
             Upload CSV
           </button>
           <button
-            onClick={() => setShowForm(!showForm)}
+            onClick={() => setShowForm(true)}
             className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700"
           >
             <Plus className="w-5 h-5" />
@@ -298,78 +298,94 @@ export default function ProxyList() {
         </div>
       </div>
 
+      {/* Add Proxy Modal */}
       {showForm && (
-        <form onSubmit={handleSubmit} className="bg-white rounded-lg shadow p-6 mb-8">
-          <div className="grid grid-cols-3 gap-4 mb-4">
-            <select
-              value={formData.connector_id}
-              onChange={(e) => setFormData({ ...formData, connector_id: e.target.value })}
-              className="px-4 py-2 border rounded-lg"
-              required
-            >
-              <option value="">Select Connector</option>
-              {staticConnectors.map((connector) => (
-                <option key={connector.id} value={connector.id}>
-                  {connector.name}
-                </option>
-              ))}
-            </select>
-            <input
-              type="text"
-              placeholder="Host"
-              value={formData.host}
-              onChange={(e) => setFormData({ ...formData, host: e.target.value })}
-              className="px-4 py-2 border rounded-lg"
-              required
-            />
-            <input
-              type="number"
-              placeholder="Port"
-              value={formData.port}
-              onChange={(e) => setFormData({ ...formData, port: e.target.value })}
-              className="px-4 py-2 border rounded-lg"
-              required
-            />
-          </div>
-          <div className="grid grid-cols-3 gap-4">
-            <select
-              value={formData.protocol}
-              onChange={(e) => setFormData({ ...formData, protocol: e.target.value })}
-              className="px-4 py-2 border rounded-lg"
-            >
-              <option value="http">HTTP</option>
-              <option value="https">HTTPS</option>
-              <option value="socks4">SOCKS4</option>
-              <option value="socks5">SOCKS5</option>
-            </select>
-            <input
-              type="text"
-              placeholder="Username (optional)"
-              value={formData.username}
-              onChange={(e) => setFormData({ ...formData, username: e.target.value })}
-              className="px-4 py-2 border rounded-lg"
-            />
-            <input
-              type="password"
-              placeholder="Password (optional)"
-              value={formData.password}
-              onChange={(e) => setFormData({ ...formData, password: e.target.value })}
-              className="px-4 py-2 border rounded-lg"
-            />
-          </div>
-          {staticConnectors.length === 0 && (
-            <p className="mt-2 text-sm text-amber-600">
-              No static proxy provider connectors available. Create a connector with a Static Proxy Provider credential first.
-            </p>
-          )}
-          <button
-            type="submit"
-            disabled={!formData.connector_id || createMutation.isPending}
-            className="mt-4 px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:bg-gray-400 disabled:cursor-not-allowed"
-          >
-            {createMutation.isPending ? 'Creating...' : 'Create Proxy'}
-          </button>
-        </form>
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+          <form onSubmit={handleSubmit} className="bg-white rounded-lg shadow-lg p-6 w-full max-w-md">
+            <div className="flex justify-between items-center mb-4">
+              <h2 className="text-xl font-semibold">Add Proxy</h2>
+              <button type="button" onClick={() => setShowForm(false)} className="text-gray-500 hover:text-gray-700">
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+            <div className="grid gap-4">
+              <select
+                value={formData.connector_id}
+                onChange={(e) => setFormData({ ...formData, connector_id: e.target.value })}
+                className="px-4 py-2 border rounded-lg"
+                required
+              >
+                <option value="">Select Connector</option>
+                {staticConnectors.map((connector) => (
+                  <option key={connector.id} value={connector.id}>
+                    {connector.name}
+                  </option>
+                ))}
+              </select>
+              <input
+                type="text"
+                placeholder="Host"
+                value={formData.host}
+                onChange={(e) => setFormData({ ...formData, host: e.target.value })}
+                className="px-4 py-2 border rounded-lg"
+                required
+              />
+              <input
+                type="number"
+                placeholder="Port"
+                value={formData.port}
+                onChange={(e) => setFormData({ ...formData, port: e.target.value })}
+                className="px-4 py-2 border rounded-lg"
+                required
+              />
+              <select
+                value={formData.protocol}
+                onChange={(e) => setFormData({ ...formData, protocol: e.target.value })}
+                className="px-4 py-2 border rounded-lg"
+              >
+                <option value="http">HTTP</option>
+                <option value="https">HTTPS</option>
+                <option value="socks4">SOCKS4</option>
+                <option value="socks5">SOCKS5</option>
+              </select>
+              <input
+                type="text"
+                placeholder="Username (optional)"
+                value={formData.username}
+                onChange={(e) => setFormData({ ...formData, username: e.target.value })}
+                className="px-4 py-2 border rounded-lg"
+              />
+              <input
+                type="password"
+                placeholder="Password (optional)"
+                value={formData.password}
+                onChange={(e) => setFormData({ ...formData, password: e.target.value })}
+                className="px-4 py-2 border rounded-lg"
+              />
+              {staticConnectors.length === 0 && (
+                <p className="text-sm text-amber-600">
+                  No static proxy provider connectors available. Create a connector with a Static Proxy Provider credential first.
+                </p>
+              )}
+            </div>
+            <div className="flex gap-2 mt-4">
+              <button
+                type="submit"
+                disabled={!formData.connector_id || createMutation.isPending}
+                className="flex-1 px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:bg-gray-400 disabled:cursor-not-allowed"
+              >
+                {createMutation.isPending ? 'Creating...' : 'Create Proxy'}
+              </button>
+              <button
+                type="button"
+                onClick={() => setShowForm(false)}
+                className="px-4 py-2 bg-gray-200 text-gray-700 rounded-lg hover:bg-gray-300"
+              >
+                Cancel
+              </button>
+            </div>
+          </form>
+        </div>
       )}
 
       {/* Edit form modal */}

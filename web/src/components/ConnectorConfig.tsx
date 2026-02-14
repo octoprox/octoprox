@@ -6,16 +6,15 @@ import {
   fetchProjectCredentials,
   fetchConnectorOptions,
   createProjectConnector,
-  createProjectCredential,
   updateProjectConnector,
   deleteProjectConnector,
   Connector,
   CredentialType,
   ConnectorCreate,
-  CredentialCreate,
   ConnectorOptions,
 } from '../api/client'
 import { useProject } from '../contexts/ProjectContext'
+import AddCredentialModal from './AddCredentialModal'
 
 // Import logos
 import awsLogo from '../assets/logos/aws.svg'
@@ -28,12 +27,6 @@ interface ConnectorFormData {
   credential_id: string
   config: Record<string, string>
   enabled: boolean
-}
-
-interface CredentialFormData {
-  name: string
-  type: CredentialType
-  config: Record<string, string>
 }
 
 const CONNECTOR_TYPES: { type: CredentialType; name: string; description: string; logo: string }[] = [
@@ -90,21 +83,6 @@ const getDefaultConfig = (type: CredentialType | null, options?: ConnectorOption
   }
 }
 
-const getDefaultCredentialConfig = (type: CredentialType): Record<string, string> => {
-  switch (type) {
-    case 'static_proxy_provider':
-      return { username: '', password: '' }
-    case 'aws':
-      return { access_key: '', secret_key: '' }
-    case 'gcp':
-      return { service_account_json: '', project_id: '' }
-    case 'azure':
-      return { subscription_id: '', tenant_id: '', client_id: '', client_secret: '', key_vault_name: '' }
-    default:
-      return {}
-  }
-}
-
 type WizardStep = 'select-type' | 'select-credential' | 'configure'
 
 export default function ConnectorConfig() {
@@ -122,8 +100,6 @@ export default function ConnectorConfig() {
 
   // Credential creation modal state
   const [showCredentialModal, setShowCredentialModal] = useState(false)
-  const [credentialFormData, setCredentialFormData] = useState<CredentialFormData>({ name: '', type: 'static_proxy_provider', config: {} })
-  const [credentialModalError, setCredentialModalError] = useState<string | null>(null)
 
   // Error state for connector forms
   const [createError, setCreateError] = useState<string | null>(null)
@@ -155,20 +131,6 @@ export default function ConnectorConfig() {
     },
     onError: (error: Error) => {
       setCreateError(error.message || 'Failed to create connector')
-    },
-  })
-
-  const createCredentialMutation = useMutation({
-    mutationFn: (data: CredentialCreate) => createProjectCredential(selectedProjectId!, data),
-    onSuccess: (newCredential) => {
-      queryClient.invalidateQueries({ queryKey: ['credentials', selectedProjectId] })
-      setShowCredentialModal(false)
-      setFormData({ ...formData, credential_id: newCredential.id })
-      setCredentialFormData({ name: '', type: selectedType || 'static_proxy_provider', config: {} })
-      setCredentialModalError(null)
-    },
-    onError: (error: Error) => {
-      setCredentialModalError(error.message || 'Failed to create credential')
     },
   })
 
@@ -210,7 +172,6 @@ export default function ConnectorConfig() {
 
   const handleCredentialSelect = (credentialId: string) => {
     if (credentialId === 'create-new') {
-      setCredentialFormData({ name: '', type: selectedType!, config: getDefaultCredentialConfig(selectedType!) })
       setShowCredentialModal(true)
     } else {
       setFormData({ ...formData, credential_id: credentialId })
@@ -218,22 +179,19 @@ export default function ConnectorConfig() {
     }
   }
 
-  const handleConfigChange = (key: string, value: string) => {
-    setFormData({ ...formData, config: { ...formData.config, [key]: value } })
+  const handleCredentialCreated = (newCredential: { id: string }) => {
+    setFormData({ ...formData, credential_id: newCredential.id })
+    setShowCredentialModal(false)
+    setWizardStep('configure')
   }
 
-  const handleCredentialConfigChange = (key: string, value: string) => {
-    setCredentialFormData({ ...credentialFormData, config: { ...credentialFormData.config, [key]: value } })
+  const handleConfigChange = (key: string, value: string) => {
+    setFormData({ ...formData, config: { ...formData.config, [key]: value } })
   }
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault()
     createMutation.mutate({ name: formData.name, credential_id: formData.credential_id, config: formData.config, enabled: formData.enabled })
-  }
-
-  const handleCredentialSubmit = (e: React.FormEvent) => {
-    e.preventDefault()
-    createCredentialMutation.mutate({ name: credentialFormData.name, type: credentialFormData.type, config: credentialFormData.config })
   }
 
   const getCredentialTypeLabel = (type: string | null) => {
@@ -274,26 +232,6 @@ export default function ConnectorConfig() {
             </div>
           )
         })}
-      </div>
-    )
-  }
-
-  const renderCredentialConfigFields = () => {
-    const type = credentialFormData.type
-    const config = credentialFormData.config
-    const fields = getDefaultCredentialConfig(type)
-    return (
-      <div className="grid gap-4 mt-4">
-        {Object.keys(fields).map((key) => (
-          <div key={key}>
-            <label className="block text-sm font-medium text-gray-700 mb-1">{key.replace(/_/g, ' ').replace(/\b\w/g, (l) => l.toUpperCase())}</label>
-            {key === 'service_account_json' ? (
-              <textarea value={config[key] || ''} onChange={(e) => handleCredentialConfigChange(key, e.target.value)} className="w-full px-4 py-2 border rounded-lg h-32" placeholder="Paste service account JSON" />
-            ) : (
-              <input type={key.includes('password') || key.includes('secret') ? 'password' : 'text'} value={config[key] || ''} onChange={(e) => handleCredentialConfigChange(key, e.target.value)} className="w-full px-4 py-2 border rounded-lg" placeholder={key.replace(/_/g, ' ')} />
-            )}
-          </div>
-        ))}
       </div>
     )
   }
@@ -403,37 +341,12 @@ export default function ConnectorConfig() {
       )}
 
       {/* Credential Creation Modal */}
-      {showCredentialModal && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-[60]">
-          <div className="bg-white rounded-lg shadow-xl max-w-lg w-full mx-4">
-            <div className="p-6 border-b flex justify-between items-center">
-              <h2 className="text-xl font-semibold">Create {getCredentialTypeLabel(selectedType)} Credential</h2>
-              <button onClick={() => { setShowCredentialModal(false); setCredentialModalError(null) }} className="p-2 hover:bg-gray-100 rounded-lg"><X className="w-5 h-5" /></button>
-            </div>
-            <form onSubmit={handleCredentialSubmit} className="p-6">
-              {credentialModalError && (
-                <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-lg mb-4 flex justify-between items-center">
-                  <span className="text-sm">{credentialModalError}</span>
-                  <button type="button" onClick={() => setCredentialModalError(null)} className="text-red-500 hover:text-red-700">
-                    <X className="w-4 h-4" />
-                  </button>
-                </div>
-              )}
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Credential Name</label>
-                <input type="text" value={credentialFormData.name} onChange={(e) => setCredentialFormData({ ...credentialFormData, name: e.target.value })} className="w-full px-4 py-2 border rounded-lg" placeholder="My Credential" required />
-              </div>
-              {renderCredentialConfigFields()}
-              <div className="flex justify-end gap-4 mt-6">
-                <button type="button" onClick={() => { setShowCredentialModal(false); setCredentialModalError(null) }} className="px-4 py-2 border rounded-lg hover:bg-gray-50">Cancel</button>
-                <button type="submit" disabled={createCredentialMutation.isPending} className="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:opacity-50">
-                  {createCredentialMutation.isPending ? 'Creating...' : 'Create Credential'}
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
-      )}
+      <AddCredentialModal
+        isOpen={showCredentialModal}
+        onClose={() => setShowCredentialModal(false)}
+        onSuccess={handleCredentialCreated}
+        fixedType={selectedType || undefined}
+      />
 
       {/* Connector List */}
       <div className="grid gap-6">
