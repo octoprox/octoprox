@@ -1,5 +1,6 @@
-import { useState, useRef } from 'react'
+import { useState, useRef, useMemo, useCallback } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
+import { ColumnDef } from '@tanstack/react-table'
 import { Plus, Trash2, Pencil, X, Upload } from 'lucide-react'
 import {
   fetchProjectProxies,
@@ -13,6 +14,7 @@ import {
   ProxyUploadResponse,
 } from '../api/client'
 import { useProject } from '../contexts/ProjectContext'
+import { DataTable, createSelectionColumn } from './DataTable'
 
 export default function ProxyList() {
   const queryClient = useQueryClient()
@@ -28,6 +30,10 @@ export default function ProxyList() {
   const [uploadResult, setUploadResult] = useState<ProxyUploadResponse | null>(null)
   const [uploadError, setUploadError] = useState<string | null>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
+
+  // Selection state for bulk operations
+  const [selectedProxies, setSelectedProxies] = useState<Proxy[]>([])
+  const [isBulkDeleting, setIsBulkDeleting] = useState(false)
 
   const { data, isLoading } = useQuery({
     queryKey: ['proxies', selectedProjectId],
@@ -70,6 +76,35 @@ export default function ProxyList() {
       queryClient.invalidateQueries({ queryKey: ['connectors', selectedProjectId] })
     },
   })
+
+  // Bulk delete handler
+  const handleBulkDelete = useCallback(async () => {
+    if (selectedProxies.length === 0) return
+
+    const confirmed = window.confirm(
+      `Are you sure you want to delete ${selectedProxies.length} proxy${selectedProxies.length > 1 ? 'ies' : ''}?`
+    )
+    if (!confirmed) return
+
+    setIsBulkDeleting(true)
+    try {
+      await Promise.all(
+        selectedProxies.map(proxy => deleteProjectProxy(selectedProjectId!, proxy.id))
+      )
+      queryClient.invalidateQueries({ queryKey: ['proxies', selectedProjectId] })
+      queryClient.invalidateQueries({ queryKey: ['connectors', selectedProjectId] })
+      setSelectedProxies([])
+    } catch (error) {
+      console.error('Bulk delete failed:', error)
+    } finally {
+      setIsBulkDeleting(false)
+    }
+  }, [selectedProxies, selectedProjectId, queryClient])
+
+  // Selection change handler
+  const handleSelectionChange = useCallback((rows: Proxy[]) => {
+    setSelectedProxies(rows)
+  }, [])
 
   const uploadMutation = useMutation({
     mutationFn: ({ file, connectorId }: { file: File; connectorId: string }) =>
@@ -143,6 +178,80 @@ export default function ProxyList() {
     })
   }
 
+  // Column definitions for DataTable
+  const columns: ColumnDef<Proxy>[] = useMemo(() => [
+    createSelectionColumn<Proxy>(),
+    {
+      accessorFn: (row) => `${row.host}:${row.port}`,
+      id: 'host',
+      header: 'Host',
+      cell: ({ row }) => (
+        <span className="font-mono text-sm">{row.original.host}:{row.original.port}</span>
+      ),
+    },
+    {
+      accessorKey: 'protocol',
+      header: 'Protocol',
+      cell: ({ getValue }) => (
+        <span className="uppercase text-xs font-medium">{getValue<string>()}</span>
+      ),
+    },
+    {
+      accessorKey: 'connector_name',
+      header: 'Connector',
+      enableSorting: false,
+      cell: ({ getValue }) => getValue<string>() || '-',
+    },
+    {
+      accessorKey: 'username',
+      header: 'Auth',
+      enableSorting: false,
+      cell: ({ getValue }) => getValue<string>() ? '✓' : '-',
+    },
+    {
+      accessorKey: 'status',
+      header: 'Status',
+      cell: ({ getValue }) => <StatusBadge status={getValue<string>()} />,
+    },
+    {
+      accessorKey: 'request_count',
+      header: 'Requests',
+    },
+    {
+      accessorKey: 'success_rate',
+      header: 'Success Rate',
+      cell: ({ getValue }) => `${getValue<number>().toFixed(1)}%`,
+    },
+    {
+      accessorKey: 'avg_latency_ms',
+      header: 'Latency',
+      cell: ({ getValue }) => `${getValue<number>().toFixed(0)}ms`,
+    },
+    {
+      id: 'actions',
+      header: 'Actions',
+      enableSorting: false,
+      cell: ({ row }) => (
+        <div className="flex gap-1">
+          <button
+            onClick={() => startEditing(row.original)}
+            className="p-1 text-blue-600 hover:text-blue-800 hover:bg-blue-50 rounded"
+            title="Edit"
+          >
+            <Pencil className="w-4 h-4" />
+          </button>
+          <button
+            onClick={() => deleteMutation.mutate(row.original.id)}
+            className="p-1 text-red-600 hover:text-red-800 hover:bg-red-50 rounded"
+            title="Delete"
+          >
+            <Trash2 className="w-4 h-4" />
+          </button>
+        </div>
+      ),
+    },
+  ], [deleteMutation])
+
   if (isLoading) return <div>Loading...</div>
 
   return (
@@ -150,6 +259,16 @@ export default function ProxyList() {
       <div className="flex justify-between items-center mb-8">
         <h1 className="text-3xl font-bold">Proxies</h1>
         <div className="flex gap-2">
+          {selectedProxies.length > 0 && (
+            <button
+              onClick={handleBulkDelete}
+              disabled={isBulkDeleting}
+              className="flex items-center gap-2 px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              <Trash2 className="w-5 h-5" />
+              {isBulkDeleting ? 'Deleting...' : `Delete ${selectedProxies.length} selected`}
+            </button>
+          )}
           <button
             onClick={() => setShowUploadModal(true)}
             className="flex items-center gap-2 px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700"
@@ -428,58 +547,15 @@ export default function ProxyList() {
         </div>
       )}
 
-      <div className="bg-white rounded-lg shadow overflow-x-auto">
-        <table className="w-full">
-          <thead>
-            <tr className="text-left text-gray-500 border-b">
-              <th className="p-4">Host</th>
-              <th className="p-4">Protocol</th>
-              <th className="p-4">Connector</th>
-              <th className="p-4">Auth</th>
-              <th className="p-4">Status</th>
-              <th className="p-4">Requests</th>
-              <th className="p-4">Success Rate</th>
-              <th className="p-4">Latency</th>
-              <th className="p-4">Actions</th>
-            </tr>
-          </thead>
-          <tbody>
-            {data?.proxies.map((proxy) => (
-              <tr key={proxy.id} className="border-b last:border-0 hover:bg-gray-50">
-                <td className="p-4 font-mono">{proxy.host}:{proxy.port}</td>
-                <td className="p-4 uppercase text-sm">{proxy.protocol}</td>
-                <td className="p-4 text-sm">{proxy.connector_name || '-'}</td>
-                <td className="p-4 text-sm">{proxy.username ? '✓' : '-'}</td>
-                <td className="p-4">
-                  <StatusBadge status={proxy.status} />
-                </td>
-                <td className="p-4">{proxy.request_count}</td>
-                <td className="p-4">{proxy.success_rate.toFixed(1)}%</td>
-                <td className="p-4">{proxy.avg_latency_ms.toFixed(0)}ms</td>
-                <td className="p-4">
-                  <div className="flex gap-2">
-                    <button
-                      onClick={() => startEditing(proxy)}
-                      className="text-blue-600 hover:text-blue-800"
-                    >
-                      <Pencil className="w-5 h-5" />
-                    </button>
-                    <button
-                      onClick={() => deleteMutation.mutate(proxy.id)}
-                      className="text-red-600 hover:text-red-800"
-                    >
-                      <Trash2 className="w-5 h-5" />
-                    </button>
-                  </div>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-        {data?.proxies.length === 0 && (
-          <p className="p-8 text-center text-gray-500">No proxies configured.</p>
-        )}
-      </div>
+      <DataTable
+        columns={columns}
+        data={data?.proxies ?? []}
+        defaultPageSize={10}
+        emptyMessage="No proxies configured."
+        enableRowSelection
+        onSelectionChange={handleSelectionChange}
+        getRowId={(row) => row.id}
+      />
     </div>
   )
 }
