@@ -194,6 +194,20 @@ export interface ProxyUpdate {
   tags?: string[]
 }
 
+export interface ProxyUploadError {
+  line_number: number
+  line: string
+  error: string
+}
+
+export interface ProxyUploadResponse {
+  total_lines: number
+  successful: number
+  failed: number
+  proxies: Proxy[]
+  errors: ProxyUploadError[]
+}
+
 // Credential types
 export type CredentialType = 'static_proxy_provider' | 'aws' | 'gcp' | 'azure'
 
@@ -343,6 +357,18 @@ export const updateProjectProxy = async (projectId: string, proxyId: string, dat
 
 export const deleteProjectProxy = async (projectId: string, proxyId: string): Promise<void> => {
   await api.delete(`/projects/${projectId}/proxies/${proxyId}`)
+}
+
+export const uploadProjectProxies = async (projectId: string, file: File, connectorId: string): Promise<ProxyUploadResponse> => {
+  const formData = new FormData()
+  formData.append('file', file)
+  formData.append('connector_id', connectorId)
+  const response = await api.post(`/projects/${projectId}/proxies/upload`, formData, {
+    headers: {
+      'Content-Type': 'multipart/form-data',
+    },
+  })
+  return response.data
 }
 
 export const fetchProjectMetrics = async (projectId: string): Promise<MetricsResponse> => {
