@@ -42,7 +42,7 @@ class RedisClient:
     async def close(self) -> None:
         """Close Redis connection."""
         if self._client:
-            await self._client.close()
+            await self._client.aclose()
             logger.info("Closed Redis connection")
     
     @property
