@@ -1,10 +1,14 @@
-import { useQuery } from '@tanstack/react-query'
-import { Activity, Server, CheckCircle, XCircle } from 'lucide-react'
-import { fetchProjectMetrics, fetchProjectProxies } from '../api/client'
+import { useState } from 'react'
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
+import { Activity, Server, CheckCircle, XCircle, Settings } from 'lucide-react'
+import { fetchProjectMetrics, updateProject, ProjectUpdate } from '../api/client'
 import { useProject } from '../contexts/ProjectContext'
+import EditProjectModal from './EditProjectModal'
 
 export default function Dashboard() {
-  const { selectedProjectId, selectedProject } = useProject()
+  const queryClient = useQueryClient()
+  const { selectedProjectId, selectedProject, refreshProject } = useProject()
+  const [showEditModal, setShowEditModal] = useState(false)
 
   const { data: metrics } = useQuery({
     queryKey: ['metrics', selectedProjectId],
@@ -12,22 +16,52 @@ export default function Dashboard() {
     enabled: !!selectedProjectId,
   })
 
-  const { data: proxies } = useQuery({
-    queryKey: ['proxies', selectedProjectId],
-    queryFn: () => fetchProjectProxies(selectedProjectId!),
-    enabled: !!selectedProjectId,
+  const updateMutation = useMutation({
+    mutationFn: (data: ProjectUpdate) => updateProject(selectedProjectId!, data),
+    onSuccess: async () => {
+      queryClient.invalidateQueries({ queryKey: ['metrics', selectedProjectId] })
+      queryClient.invalidateQueries({ queryKey: ['project', selectedProjectId] })
+      queryClient.invalidateQueries({ queryKey: ['projects'] })
+      await refreshProject()
+      setShowEditModal(false)
+    },
+  })
+
+  const strategyMutation = useMutation({
+    mutationFn: (strategy: string) => updateProject(selectedProjectId!, { routing_strategy: strategy }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['metrics', selectedProjectId] })
+      queryClient.invalidateQueries({ queryKey: ['project', selectedProjectId] })
+      queryClient.invalidateQueries({ queryKey: ['projects'] })
+    },
   })
 
   const pool = metrics?.pool
+  const strategy = metrics?.strategy
 
   return (
     <div>
-      <h1 className="text-3xl font-bold mb-2">Dashboard</h1>
+      {/* Header with Edit Button */}
+      <div className="flex items-center justify-between mb-2">
+        <h1 className="text-3xl font-bold">Dashboard</h1>
+        {selectedProject && (
+          <button
+            onClick={() => {
+              updateMutation.reset()
+              setShowEditModal(true)
+            }}
+            className="flex items-center gap-2 px-4 py-2 text-gray-600 hover:text-gray-800 hover:bg-gray-100 rounded-lg transition-colors"
+          >
+            <Settings className="w-5 h-5" />
+            Edit Project
+          </button>
+        )}
+      </div>
       {selectedProject && (
         <p className="text-gray-500 mb-6">Project: {selectedProject.name}</p>
       )}
 
-      {/* Stats Grid */}
+      {/* Pool Metrics */}
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-8">
         <StatCard
           title="Total Proxies"
@@ -45,57 +79,61 @@ export default function Dashboard() {
           icon={<XCircle className="w-8 h-8 text-red-500" />}
         />
         <StatCard
-          title="Success Rate"
-          value={`${pool?.overall_success_rate ?? 0}%`}
+          title="Avg Latency"
+          value={`${pool?.avg_latency_ms?.toFixed(0) ?? 0}ms`}
           icon={<Activity className="w-8 h-8 text-purple-500" />}
         />
       </div>
 
-      {/* Strategy Info */}
+      {/* Request Statistics */}
       <div className="bg-white rounded-lg shadow p-6 mb-8">
-        <h2 className="text-xl font-semibold mb-4">Routing Strategy</h2>
-        <div className="flex items-center gap-4">
-          <span className="text-gray-600">Current:</span>
-          <span className="px-3 py-1 bg-blue-100 text-blue-800 rounded-full font-medium">
-            {metrics?.strategy.current_strategy ?? 'N/A'}
-          </span>
+        <h2 className="text-xl font-semibold mb-4">Request Statistics</h2>
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-6">
+          <MetricItem label="Total Requests" value={pool?.total_requests ?? 0} />
+          <MetricItem label="Successes" value={pool?.total_successes ?? 0} color="text-green-600" />
+          <MetricItem label="Failures" value={pool?.total_failures ?? 0} color="text-red-600" />
+          <MetricItem
+            label="Success Rate"
+            value={`${pool?.overall_success_rate?.toFixed(1) ?? 0}%`}
+            color="text-blue-600"
+          />
         </div>
       </div>
 
-      {/* Recent Proxies */}
+      {/* Routing Strategy */}
       <div className="bg-white rounded-lg shadow p-6">
-        <h2 className="text-xl font-semibold mb-4">Proxy Pool</h2>
-        {proxies?.proxies.length === 0 ? (
-          <p className="text-gray-500">No proxies configured. Add proxies to get started.</p>
-        ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full">
-              <thead>
-                <tr className="text-left text-gray-500 border-b">
-                  <th className="pb-3">Host</th>
-                  <th className="pb-3">Status</th>
-                  <th className="pb-3">Requests</th>
-                  <th className="pb-3">Success Rate</th>
-                  <th className="pb-3">Latency</th>
-                </tr>
-              </thead>
-              <tbody>
-                {proxies?.proxies.slice(0, 5).map((proxy) => (
-                  <tr key={proxy.id} className="border-b last:border-0">
-                    <td className="py-3">{proxy.host}:{proxy.port}</td>
-                    <td className="py-3">
-                      <StatusBadge status={proxy.status} />
-                    </td>
-                    <td className="py-3">{proxy.request_count}</td>
-                    <td className="py-3">{proxy.success_rate.toFixed(1)}%</td>
-                    <td className="py-3">{proxy.avg_latency_ms.toFixed(0)}ms</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
+        <h2 className="text-xl font-semibold mb-4">Routing Strategy</h2>
+        <div className="flex flex-wrap gap-3">
+          {strategy?.available_strategies.map((s) => (
+            <button
+              key={s}
+              onClick={() => strategyMutation.mutate(s)}
+              disabled={strategyMutation.isPending}
+              className={`px-4 py-2 rounded-lg font-medium transition-colors ${
+                s === strategy.current_strategy
+                  ? 'bg-blue-600 text-white'
+                  : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+              } disabled:opacity-50`}
+            >
+              {formatStrategy(s)}
+            </button>
+          ))}
+        </div>
+        <p className="mt-4 text-gray-500 text-sm">
+          Current strategy: <strong>{formatStrategy(strategy?.current_strategy ?? '')}</strong>
+        </p>
       </div>
+
+      {/* Edit Project Modal */}
+      {showEditModal && selectedProject && (
+        <EditProjectModal
+          project={selectedProject}
+          onClose={() => setShowEditModal(false)}
+          onSave={(data) => updateMutation.mutate(data)}
+          isLoading={updateMutation.isPending}
+          error={updateMutation.error?.message}
+        />
+      )}
     </div>
   )
 }
@@ -114,17 +152,27 @@ function StatCard({ title, value, icon }: { title: string; value: string | numbe
   )
 }
 
-function StatusBadge({ status }: { status: string }) {
-  const colors: Record<string, string> = {
-    healthy: 'bg-green-100 text-green-800',
-    degraded: 'bg-yellow-100 text-yellow-800',
-    unhealthy: 'bg-red-100 text-red-800',
-    unknown: 'bg-gray-100 text-gray-800',
-  }
+function MetricItem({
+  label,
+  value,
+  color = 'text-gray-900',
+}: {
+  label: string
+  value: string | number
+  color?: string
+}) {
   return (
-    <span className={`px-2 py-1 rounded-full text-xs font-medium ${colors[status] ?? colors.unknown}`}>
-      {status}
-    </span>
+    <div>
+      <p className="text-gray-500 text-sm">{label}</p>
+      <p className={`text-2xl font-bold ${color}`}>{value}</p>
+    </div>
   )
+}
+
+function formatStrategy(strategy: string): string {
+  return strategy
+    .split('_')
+    .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
+    .join(' ')
 }
 

@@ -5,7 +5,6 @@ import Dashboard from './components/Dashboard'
 import ProxyList from './components/ProxyList'
 import CredentialsConfig from './components/CredentialsConfig'
 import ConnectorConfig from './components/ConnectorConfig'
-import Metrics from './components/Metrics'
 import Login from './components/Login'
 import ProjectSelection from './components/ProjectSelection'
 import { ProjectProvider, useProject } from './contexts/ProjectContext'
@@ -162,7 +161,6 @@ function ProjectLayout({
           <NavLink to={`/projects/${projectId}/proxies`} icon={<Server />} label="Proxies" />
           <NavLink to={`/projects/${projectId}/credentials`} icon={<Key />} label="Credentials" />
           <NavLink to={`/projects/${projectId}/connectors`} icon={<Link2 />} label="Connectors" />
-          <NavLink to={`/projects/${projectId}/metrics`} icon={<Activity />} label="Metrics" />
         </nav>
 
         {/* User info and logout */}
@@ -189,7 +187,6 @@ function ProjectLayout({
           <Route path="proxies" element={<ProxyList />} />
           <Route path="credentials" element={<CredentialsConfig />} />
           <Route path="connectors" element={<ConnectorConfig />} />
-          <Route path="metrics" element={<Metrics />} />
           <Route path="*" element={<Navigate to="dashboard" replace />} />
         </Routes>
       </main>
