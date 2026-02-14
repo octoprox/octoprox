@@ -14,9 +14,9 @@ from api.strategies.health_based import HealthBasedStrategy
 def sample_proxies() -> list[Proxy]:
     """Create a list of sample proxies for testing."""
     return [
-        Proxy(source_id="1", id="proxy-1", host="proxy1.example.com", port=8080, request_count=10, success_count=9, status=ProxyStatus.HEALTHY, avg_latency_ms=100),
-        Proxy(source_id="1", id="proxy-2", host="proxy2.example.com", port=8080, request_count=5, success_count=5, status=ProxyStatus.HEALTHY, avg_latency_ms=50),
-        Proxy(source_id="1", id="proxy-3", host="proxy3.example.com", port=8080, request_count=20, success_count=15, status=ProxyStatus.DEGRADED, avg_latency_ms=200),
+        Proxy(id="proxy-1", host="proxy1.example.com", port=8080, connector_id="conn-1", request_count=10, success_count=9, status=ProxyStatus.HEALTHY, avg_latency_ms=100),
+        Proxy(id="proxy-2", host="proxy2.example.com", port=8080, connector_id="conn-1", request_count=5, success_count=5, status=ProxyStatus.HEALTHY, avg_latency_ms=50),
+        Proxy(id="proxy-3", host="proxy3.example.com", port=8080, connector_id="conn-1", request_count=20, success_count=15, status=ProxyStatus.DEGRADED, avg_latency_ms=200),
     ]
 
 
@@ -75,10 +75,10 @@ class TestLeastUsedStrategy:
     def test_select_with_equal_counts(self):
         strategy = LeastUsedStrategy()
         proxies = [
-            Proxy(source_id="1", id="proxy-1", host="p1.example.com", port=8080, request_count=10),
-            Proxy(source_id="1", id="proxy-2", host="p2.example.com", port=8080, request_count=10),
+            Proxy(id="proxy-1", host="p1.example.com", port=8080, connector_id="conn-1", request_count=10),
+            Proxy(id="proxy-2", host="p2.example.com", port=8080, connector_id="conn-1", request_count=10),
         ]
-        
+
         result = strategy.select(proxies)
         assert result is not None
         assert result.request_count == 10
@@ -172,8 +172,8 @@ class TestHealthBasedStrategy:
     def test_select_prefers_healthy_proxies(self):
         strategy = HealthBasedStrategy()
         proxies = [
-            Proxy(source_id="1", id="healthy", host="h.example.com", port=8080, status=ProxyStatus.HEALTHY, success_count=90, request_count=100, avg_latency_ms=50),
-            Proxy(source_id="1", id="unhealthy", host="u.example.com", port=8080, status=ProxyStatus.UNHEALTHY, success_count=10, request_count=100, avg_latency_ms=500),
+            Proxy(id="healthy", host="h.example.com", port=8080, connector_id="conn-1", status=ProxyStatus.HEALTHY, success_count=90, request_count=100, avg_latency_ms=50),
+            Proxy(id="unhealthy", host="u.example.com", port=8080, connector_id="conn-1", status=ProxyStatus.UNHEALTHY, success_count=10, request_count=100, avg_latency_ms=500),
         ]
 
         # Run multiple times - should always prefer healthy
@@ -184,8 +184,8 @@ class TestHealthBasedStrategy:
     def test_select_falls_back_to_degraded(self):
         strategy = HealthBasedStrategy()
         proxies = [
-            Proxy(source_id="1", id="degraded", host="d.example.com", port=8080, status=ProxyStatus.DEGRADED, success_count=70, request_count=100),
-            Proxy(source_id="1", id="unhealthy", host="u.example.com", port=8080, status=ProxyStatus.UNHEALTHY, success_count=10, request_count=100),
+            Proxy(id="degraded", host="d.example.com", port=8080, connector_id="conn-1", status=ProxyStatus.DEGRADED, success_count=70, request_count=100),
+            Proxy(id="unhealthy", host="u.example.com", port=8080, connector_id="conn-1", status=ProxyStatus.UNHEALTHY, success_count=10, request_count=100),
         ]
 
         # Should prefer degraded over unhealthy
@@ -196,8 +196,8 @@ class TestHealthBasedStrategy:
     def test_select_considers_success_rate(self):
         strategy = HealthBasedStrategy()
         proxies = [
-            Proxy(source_id="1", id="high-success", host="h.example.com", port=8080, status=ProxyStatus.HEALTHY, success_count=95, request_count=100, avg_latency_ms=100),
-            Proxy(source_id="1", id="low-success", host="l.example.com", port=8080, status=ProxyStatus.HEALTHY, success_count=50, request_count=100, avg_latency_ms=100),
+            Proxy(id="high-success", host="h.example.com", port=8080, connector_id="conn-1", status=ProxyStatus.HEALTHY, success_count=95, request_count=100, avg_latency_ms=100),
+            Proxy(id="low-success", host="l.example.com", port=8080, connector_id="conn-1", status=ProxyStatus.HEALTHY, success_count=50, request_count=100, avg_latency_ms=100),
         ]
 
         # High success rate should be preferred
@@ -210,8 +210,8 @@ class TestHealthBasedStrategy:
     def test_select_considers_latency(self):
         strategy = HealthBasedStrategy()
         proxies = [
-            Proxy(source_id="1", id="fast", host="f.example.com", port=8080, status=ProxyStatus.HEALTHY, success_count=90, request_count=100, avg_latency_ms=50),
-            Proxy(source_id="1", id="slow", host="s.example.com", port=8080, status=ProxyStatus.HEALTHY, success_count=90, request_count=100, avg_latency_ms=500),
+            Proxy(id="fast", host="f.example.com", port=8080, connector_id="conn-1", status=ProxyStatus.HEALTHY, success_count=90, request_count=100, avg_latency_ms=50),
+            Proxy(id="slow", host="s.example.com", port=8080, connector_id="conn-1", status=ProxyStatus.HEALTHY, success_count=90, request_count=100, avg_latency_ms=500),
         ]
 
         # Fast proxy should be preferred
@@ -225,10 +225,10 @@ class TestHealthBasedStrategy:
         strategy = HealthBasedStrategy()
 
         # High success rate, low latency = high score
-        good_proxy = Proxy(source_id="1", id="good", host="g.example.com", port=8080, success_count=95, request_count=100, avg_latency_ms=50)
+        good_proxy = Proxy(id="good", host="g.example.com", port=8080, connector_id="conn-1", success_count=95, request_count=100, avg_latency_ms=50)
 
         # Low success rate, high latency = low score
-        bad_proxy = Proxy(source_id="1", id="bad", host="b.example.com", port=8080, success_count=30, request_count=100, avg_latency_ms=800)
+        bad_proxy = Proxy(id="bad", host="b.example.com", port=8080, connector_id="conn-1", success_count=30, request_count=100, avg_latency_ms=800)
 
         good_score = strategy._calculate_score(good_proxy)
         bad_score = strategy._calculate_score(bad_proxy)
