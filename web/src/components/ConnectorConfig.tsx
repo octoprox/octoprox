@@ -125,6 +125,10 @@ export default function ConnectorConfig() {
   const [credentialFormData, setCredentialFormData] = useState<CredentialFormData>({ name: '', type: 'static_proxy_provider', config: {} })
   const [credentialModalError, setCredentialModalError] = useState<string | null>(null)
 
+  // Error state for connector forms
+  const [createError, setCreateError] = useState<string | null>(null)
+  const [editError, setEditError] = useState<string | null>(null)
+
   const { data: connectorsData, isLoading: connectorsLoading } = useQuery({
     queryKey: ['connectors', selectedProjectId],
     queryFn: () => fetchProjectConnectors(selectedProjectId!),
@@ -149,6 +153,9 @@ export default function ConnectorConfig() {
       queryClient.invalidateQueries({ queryKey: ['project', selectedProjectId] })
       resetWizard()
     },
+    onError: (error: Error) => {
+      setCreateError(error.message || 'Failed to create connector')
+    },
   })
 
   const createCredentialMutation = useMutation({
@@ -171,6 +178,10 @@ export default function ConnectorConfig() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['connectors', selectedProjectId] })
       setEditingConnector(null)
+      setEditError(null)
+    },
+    onError: (error: Error) => {
+      setEditError(error.message || 'Failed to update connector')
     },
   })
 
@@ -188,6 +199,7 @@ export default function ConnectorConfig() {
     setWizardStep('select-type')
     setSelectedType(null)
     setFormData({ name: '', credential_id: '', config: {}, enabled: true })
+    setCreateError(null)
   }
 
   const handleTypeSelect = (type: CredentialType) => {
@@ -362,6 +374,11 @@ export default function ConnectorConfig() {
               {/* Step 3: Configure */}
               {wizardStep === 'configure' && (
                 <form onSubmit={handleSubmit}>
+                  {createError && (
+                    <div className="mb-4 p-3 bg-red-50 border border-red-200 rounded-lg text-red-700 text-sm">
+                      {createError}
+                    </div>
+                  )}
                   <div className="grid gap-4">
                     <div>
                       <label className="block text-sm font-medium text-gray-700 mb-1">Connector Name</label>
@@ -424,6 +441,11 @@ export default function ConnectorConfig() {
           <div key={connector.id} className="bg-white rounded-lg shadow p-6">
             {editingConnector?.id === connector.id ? (
               <form onSubmit={(e) => { e.preventDefault(); updateMutation.mutate({ id: connector.id, data: { name: editingConnector.name, enabled: editingConnector.enabled, config: editingConnector.config } }) }}>
+                {editError && (
+                  <div className="mb-4 p-3 bg-red-50 border border-red-200 rounded-lg text-red-700 text-sm">
+                    {editError}
+                  </div>
+                )}
                 <div className="space-y-4">
                   <div className="flex gap-4 items-center">
                     <div className="flex-1">
@@ -439,7 +461,7 @@ export default function ConnectorConfig() {
                   )}
                   <div className="flex gap-2 pt-4">
                     <button type="submit" className="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700">Save</button>
-                    <button type="button" onClick={() => setEditingConnector(null)} className="px-4 py-2 bg-gray-200 text-gray-700 rounded-lg hover:bg-gray-300">Cancel</button>
+                    <button type="button" onClick={() => { setEditingConnector(null); setEditError(null) }} className="px-4 py-2 bg-gray-200 text-gray-700 rounded-lg hover:bg-gray-300">Cancel</button>
                   </div>
                 </div>
               </form>
@@ -455,7 +477,7 @@ export default function ConnectorConfig() {
                 </div>
                 <div className="flex items-center gap-2">
                   <span className={`px-3 py-1 rounded-full text-sm font-medium ${connector.enabled ? 'bg-green-100 text-green-800' : 'bg-gray-100 text-gray-800'}`}>{connector.enabled ? 'Enabled' : 'Disabled'}</span>
-                  <button onClick={() => setEditingConnector(connector)} className="p-2 text-gray-500 hover:text-blue-600"><Pencil className="w-5 h-5" /></button>
+                  <button onClick={() => { setEditingConnector(connector); setEditError(null) }} className="p-2 text-gray-500 hover:text-blue-600"><Pencil className="w-5 h-5" /></button>
                   <button onClick={() => deleteMutation.mutate(connector.id)} className="p-2 text-gray-500 hover:text-red-600"><Trash2 className="w-5 h-5" /></button>
                 </div>
               </div>

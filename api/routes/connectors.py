@@ -87,7 +87,9 @@ async def create_connector(
     try:
         validated_config = validate_connector_config(credential_type_enum, connector_data.config)
     except ValidationError as e:
-        raise HTTPException(status_code=422, detail=f"Invalid connector config: {e}")
+        # Extract just the error messages from Pydantic validation errors
+        messages = [err.get('msg', str(err)) for err in e.errors()]
+        raise HTTPException(status_code=422, detail="; ".join(messages))
     except ValueError as e:
         raise HTTPException(status_code=422, detail=str(e))
 
@@ -153,7 +155,9 @@ async def update_connector(
                 validated_config = validate_connector_config(credential_type_enum, connector_data.config)
                 connector.config = validated_config
             except ValidationError as e:
-                raise HTTPException(status_code=422, detail=f"Invalid connector config: {e}")
+                # Extract just the error messages from Pydantic validation errors
+                messages = [err.get('msg', str(err)) for err in e.errors()]
+                raise HTTPException(status_code=422, detail="; ".join(messages))
             except ValueError as e:
                 raise HTTPException(status_code=422, detail=str(e))
         else:
