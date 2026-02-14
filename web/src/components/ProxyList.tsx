@@ -187,7 +187,10 @@ export default function ProxyList() {
       id: 'host',
       header: 'Host',
       cell: ({ row }) => (
-        <span className="font-mono text-sm">{row.original.host}:{row.original.port}</span>
+        <span className="font-mono text-sm">
+          {row.original.host}:{row.original.port}
+          {row.original.username && <span className="ml-1 text-gray-400" title="Authenticated">🔐</span>}
+        </span>
       ),
     },
     {
@@ -204,23 +207,17 @@ export default function ProxyList() {
       cell: ({ getValue }) => getValue<string>() || '-',
     },
     {
-      accessorKey: 'username',
-      header: 'Auth',
-      enableSorting: false,
-      cell: ({ getValue }) => getValue<string>() ? '✓' : '-',
-    },
-    {
       accessorKey: 'status',
       header: 'Status',
       cell: ({ getValue }) => <StatusBadge status={getValue<string>()} />,
     },
     {
       accessorKey: 'request_count',
-      header: 'Requests',
+      header: 'Reqs',
     },
     {
       accessorKey: 'success_rate',
-      header: 'Success Rate',
+      header: 'Success',
       cell: ({ getValue }) => `${getValue<number>().toFixed(1)}%`,
     },
     {
@@ -229,18 +226,20 @@ export default function ProxyList() {
       cell: ({ getValue }) => `${getValue<number>().toFixed(0)}ms`,
     },
     {
-      accessorKey: 'bytes_sent',
-      header: 'Sent',
-      cell: ({ getValue }) => formatBytes(getValue<number>()),
-    },
-    {
-      accessorKey: 'bytes_received',
-      header: 'Received',
-      cell: ({ getValue }) => formatBytes(getValue<number>()),
+      id: 'traffic',
+      header: 'Traffic',
+      enableSorting: false,
+      cell: ({ row }) => (
+        <span className="text-sm whitespace-nowrap">
+          <span className="text-orange-600">↑{formatBytes(row.original.bytes_sent)}</span>
+          {' '}
+          <span className="text-teal-600">↓{formatBytes(row.original.bytes_received)}</span>
+        </span>
+      ),
     },
     {
       id: 'actions',
-      header: 'Actions',
+      header: '',
       enableSorting: false,
       cell: ({ row }) => (
         <div className="flex gap-1">
