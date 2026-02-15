@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { X, Eye, EyeOff } from 'lucide-react'
-import { createProjectCredential, CredentialType, CredentialCreate, Credential } from '../api/client'
+import { createProjectCredential, updateProjectCredential, CredentialType, CredentialCreate, Credential, CredentialDetail } from '../api/client'
 import { useProject } from '../contexts/ProjectContext'
 
 export const CREDENTIAL_TYPES: { value: CredentialType; label: string }[] = [
@@ -31,11 +31,13 @@ interface AddCredentialModalProps {
   onClose: () => void
   onSuccess?: (credential: Credential) => void
   fixedType?: CredentialType // If provided, type selector is hidden and this type is used
+  credential?: CredentialDetail | null // If provided, modal is in edit mode
 }
 
-export default function AddCredentialModal({ isOpen, onClose, onSuccess, fixedType }: AddCredentialModalProps) {
+export default function AddCredentialModal({ isOpen, onClose, onSuccess, fixedType, credential }: AddCredentialModalProps) {
   const queryClient = useQueryClient()
   const { selectedProjectId } = useProject()
+  const isEditMode = !!credential
   const [formData, setFormData] = useState({
     name: '',
     type: fixedType || ('static_proxy_provider' as CredentialType),
@@ -44,15 +46,25 @@ export default function AddCredentialModal({ isOpen, onClose, onSuccess, fixedTy
   const [showSecrets, setShowSecrets] = useState<Record<string, boolean>>({})
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
 
-  // Reset form when modal opens or fixedType changes
+  // Reset form when modal opens, fixedType changes, or credential changes
   useEffect(() => {
     if (isOpen) {
-      const type = fixedType || 'static_proxy_provider'
-      setFormData({ name: '', type, config: getDefaultCredentialConfig(type) })
+      if (credential) {
+        // Edit mode: populate with existing credential data
+        setFormData({
+          name: credential.name,
+          type: credential.type,
+          config: credential.config as Record<string, string>,
+        })
+      } else {
+        // Create mode: reset to defaults
+        const type = fixedType || 'static_proxy_provider'
+        setFormData({ name: '', type, config: getDefaultCredentialConfig(type) })
+      }
       setErrorMessage(null)
       setShowSecrets({})
     }
-  }, [isOpen, fixedType])
+  }, [isOpen, fixedType, credential])
 
   const createMutation = useMutation({
     mutationFn: (data: CredentialCreate) => createProjectCredential(selectedProjectId!, data),
@@ -65,6 +77,21 @@ export default function AddCredentialModal({ isOpen, onClose, onSuccess, fixedTy
     },
     onError: (error: Error) => {
       setErrorMessage(error.message || 'Failed to create credential')
+    },
+  })
+
+  const updateMutation = useMutation({
+    mutationFn: (data: { name: string; config: Record<string, string> }) =>
+      updateProjectCredential(selectedProjectId!, credential!.id, data),
+    onSuccess: (updatedCredential) => {
+      queryClient.invalidateQueries({ queryKey: ['credentials', selectedProjectId] })
+      queryClient.invalidateQueries({ queryKey: ['project', selectedProjectId] })
+      resetForm()
+      onSuccess?.(updatedCredential)
+      onClose()
+    },
+    onError: (error: Error) => {
+      setErrorMessage(error.message || 'Failed to update credential')
     },
   })
 
@@ -90,7 +117,11 @@ export default function AddCredentialModal({ isOpen, onClose, onSuccess, fixedTy
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault()
-    createMutation.mutate({ name: formData.name, type: formData.type, config: formData.config })
+    if (isEditMode) {
+      updateMutation.mutate({ name: formData.name, config: formData.config })
+    } else {
+      createMutation.mutate({ name: formData.name, type: formData.type, config: formData.config })
+    }
   }
 
   const toggleSecret = (key: string) => {
@@ -143,7 +174,9 @@ export default function AddCredentialModal({ isOpen, onClose, onSuccess, fixedTy
     <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-[60]">
       <div className="bg-white rounded-lg shadow-xl max-w-lg w-full mx-4 max-h-[90vh] overflow-y-auto">
         <div className="p-6 border-b flex justify-between items-center">
-          <h2 className="text-xl font-semibold">{fixedType ? `Create ${typeLabel} Credential` : 'Create Credential'}</h2>
+          <h2 className="text-xl font-semibold">
+            {isEditMode ? `Edit ${typeLabel} Credential` : (fixedType ? `Create ${typeLabel} Credential` : 'Create Credential')}
+          </h2>
           <button onClick={handleClose} className="p-2 hover:bg-gray-100 rounded-lg">
             <X className="w-5 h-5" />
           </button>
@@ -158,7 +191,7 @@ export default function AddCredentialModal({ isOpen, onClose, onSuccess, fixedTy
             </div>
           )}
           <div className="grid gap-4">
-            <div className={fixedType ? '' : 'grid grid-cols-2 gap-4'}>
+            <div className={fixedType || isEditMode ? '' : 'grid grid-cols-2 gap-4'}>
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1">Credential Name</label>
                 <input
@@ -170,7 +203,7 @@ export default function AddCredentialModal({ isOpen, onClose, onSuccess, fixedTy
                   required
                 />
               </div>
-              {!fixedType && (
+              {!fixedType && !isEditMode && (
                 <div>
                   <label className="block text-sm font-medium text-gray-700 mb-1">Type</label>
                   <select
@@ -189,8 +222,10 @@ export default function AddCredentialModal({ isOpen, onClose, onSuccess, fixedTy
           </div>
           <div className="flex justify-end gap-4 mt-6">
             <button type="button" onClick={handleClose} className="px-4 py-2 border rounded-lg hover:bg-gray-50">Cancel</button>
-            <button type="submit" disabled={createMutation.isPending} className="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:opacity-50">
-              {createMutation.isPending ? 'Creating...' : 'Create Credential'}
+            <button type="submit" disabled={createMutation.isPending || updateMutation.isPending} className="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:opacity-50">
+              {isEditMode
+                ? (updateMutation.isPending ? 'Saving...' : 'Save Changes')
+                : (createMutation.isPending ? 'Creating...' : 'Create Credential')}
             </button>
           </div>
         </form>

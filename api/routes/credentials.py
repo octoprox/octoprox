@@ -3,12 +3,16 @@
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
+from pydantic import ValidationError
+
 from api.models.credential import (
     Credential,
     CredentialCreate,
     CredentialDetailResponse,
     CredentialResponse,
+    CredentialType,
     CredentialUpdate,
+    validate_credential_config,
 )
 
 router = APIRouter(prefix="/projects/{project_id}/credentials")
@@ -115,7 +119,17 @@ async def update_credential(
     if credential_data.name is not None:
         credential.name = credential_data.name
     if credential_data.config is not None:
-        credential.config = credential_data.config
+        # Validate config based on credential type
+        credential_type_enum = credential.type if isinstance(credential.type, CredentialType) else CredentialType(credential.type)
+        try:
+            validated_config = validate_credential_config(credential_type_enum, credential_data.config)
+            credential.config = validated_config
+        except ValidationError as e:
+            # Extract just the error messages from Pydantic validation errors
+            messages = [err.get('msg', str(err)) for err in e.errors()]
+            raise HTTPException(status_code=422, detail="; ".join(messages))
+        except ValueError as e:
+            raise HTTPException(status_code=422, detail=str(e))
 
     await proxy_manager.update_credential(credential)
     return _credential_to_detail_response(credential)

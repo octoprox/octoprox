@@ -139,6 +139,10 @@ export default function ConnectorConfig() {
       updateProjectConnector(selectedProjectId!, id, data),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['connectors', selectedProjectId] })
+      setShowWizard(false)
+      setWizardStep('select-type')
+      setSelectedType(null)
+      setFormData({ name: '', credential_id: '', config: {}, enabled: true })
       setEditingConnector(null)
       setEditError(null)
     },
@@ -162,6 +166,22 @@ export default function ConnectorConfig() {
     setSelectedType(null)
     setFormData({ name: '', credential_id: '', config: {}, enabled: true })
     setCreateError(null)
+    setEditingConnector(null)
+    setEditError(null)
+  }
+
+  const startEditing = (connector: Connector) => {
+    setEditingConnector(connector)
+    setSelectedType(connector.credential_type as CredentialType)
+    setFormData({
+      name: connector.name,
+      credential_id: connector.credential_id,
+      config: (connector.config || {}) as Record<string, string>,
+      enabled: connector.enabled,
+    })
+    setWizardStep('configure')
+    setShowWizard(true)
+    setEditError(null)
   }
 
   const handleTypeSelect = (type: CredentialType) => {
@@ -189,9 +209,18 @@ export default function ConnectorConfig() {
     setFormData({ ...formData, config: { ...formData.config, [key]: value } })
   }
 
+  const isEditMode = !!editingConnector
+
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault()
-    createMutation.mutate({ name: formData.name, credential_id: formData.credential_id, config: formData.config, enabled: formData.enabled })
+    if (isEditMode) {
+      updateMutation.mutate({
+        id: editingConnector.id,
+        data: { name: formData.name, enabled: formData.enabled, config: formData.config }
+      })
+    } else {
+      createMutation.mutate({ name: formData.name, credential_id: formData.credential_id, config: formData.config, enabled: formData.enabled })
+    }
   }
 
   const getCredentialTypeLabel = (type: string | null) => {
@@ -253,15 +282,19 @@ export default function ConnectorConfig() {
           <div className="bg-white rounded-lg shadow-xl max-w-4xl w-full mx-4 max-h-[90vh] overflow-y-auto">
             <div className="p-6 border-b flex justify-between items-center">
               <div className="flex items-center gap-4">
-                {wizardStep !== 'select-type' && (
+                {wizardStep !== 'select-type' && !isEditMode && (
                   <button onClick={() => setWizardStep(wizardStep === 'configure' ? 'select-credential' : 'select-type')} className="p-2 hover:bg-gray-100 rounded-lg">
                     <ArrowLeft className="w-5 h-5" />
                   </button>
                 )}
                 <h2 className="text-xl font-semibold">
-                  {wizardStep === 'select-type' && 'Select Connector Type'}
-                  {wizardStep === 'select-credential' && `Select ${getCredentialTypeLabel(selectedType)} Credential`}
-                  {wizardStep === 'configure' && 'Configure Connector'}
+                  {isEditMode ? 'Edit Connector' : (
+                    <>
+                      {wizardStep === 'select-type' && 'Select Connector Type'}
+                      {wizardStep === 'select-credential' && `Select ${getCredentialTypeLabel(selectedType)} Credential`}
+                      {wizardStep === 'configure' && 'Configure Connector'}
+                    </>
+                  )}
                 </h2>
               </div>
               <button onClick={resetWizard} className="p-2 hover:bg-gray-100 rounded-lg"><X className="w-5 h-5" /></button>
@@ -312,9 +345,9 @@ export default function ConnectorConfig() {
               {/* Step 3: Configure */}
               {wizardStep === 'configure' && (
                 <form onSubmit={handleSubmit}>
-                  {createError && (
+                  {(isEditMode ? editError : createError) && (
                     <div className="mb-4 p-3 bg-red-50 border border-red-200 rounded-lg text-red-700 text-sm">
-                      {createError}
+                      {isEditMode ? editError : createError}
                     </div>
                   )}
                   <div className="grid gap-4">
@@ -329,8 +362,10 @@ export default function ConnectorConfig() {
                   </div>
                   <div className="flex justify-end gap-4 mt-6">
                     <button type="button" onClick={resetWizard} className="px-4 py-2 border rounded-lg hover:bg-gray-50">Cancel</button>
-                    <button type="submit" disabled={createMutation.isPending} className="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:opacity-50">
-                      {createMutation.isPending ? 'Creating...' : 'Create Connector'}
+                    <button type="submit" disabled={createMutation.isPending || updateMutation.isPending} className="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:opacity-50">
+                      {isEditMode
+                        ? (updateMutation.isPending ? 'Saving...' : 'Save Changes')
+                        : (createMutation.isPending ? 'Creating...' : 'Create Connector')}
                     </button>
                   </div>
                 </form>
@@ -352,49 +387,21 @@ export default function ConnectorConfig() {
       <div className="grid gap-6">
         {connectorsData?.connectors.map((connector) => (
           <div key={connector.id} className="bg-white rounded-lg shadow p-6">
-            {editingConnector?.id === connector.id ? (
-              <form onSubmit={(e) => { e.preventDefault(); updateMutation.mutate({ id: connector.id, data: { name: editingConnector.name, enabled: editingConnector.enabled, config: editingConnector.config } }) }}>
-                {editError && (
-                  <div className="mb-4 p-3 bg-red-50 border border-red-200 rounded-lg text-red-700 text-sm">
-                    {editError}
-                  </div>
-                )}
-                <div className="space-y-4">
-                  <div className="flex gap-4 items-center">
-                    <div className="flex-1">
-                      <label className="block text-sm font-medium text-gray-700 mb-1">Connector Name</label>
-                      <input type="text" value={editingConnector.name} onChange={(e) => setEditingConnector({ ...editingConnector, name: e.target.value })} className="w-full px-4 py-2 border rounded-lg" required />
-                    </div>
-                    <label className="flex items-center gap-2 mt-6"><input type="checkbox" checked={editingConnector.enabled} onChange={(e) => setEditingConnector({ ...editingConnector, enabled: e.target.checked })} className="w-4 h-4" /> Enabled</label>
-                  </div>
-                  {renderConfigFields(
-                    editingConnector.credential_type as CredentialType,
-                    (editingConnector.config || {}) as Record<string, string>,
-                    (key, value) => setEditingConnector({ ...editingConnector, config: { ...editingConnector.config, [key]: value } })
-                  )}
-                  <div className="flex gap-2 pt-4">
-                    <button type="submit" className="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700">Save</button>
-                    <button type="button" onClick={() => { setEditingConnector(null); setEditError(null) }} className="px-4 py-2 bg-gray-200 text-gray-700 rounded-lg hover:bg-gray-300">Cancel</button>
-                  </div>
-                </div>
-              </form>
-            ) : (
-              <div className="flex justify-between items-start">
-                <div className="flex items-center gap-4">
-                  <img src={CONNECTOR_TYPES.find(ct => ct.type === connector.credential_type)?.logo} alt="" className="w-10 h-10 object-contain" />
-                  <div>
-                    <h3 className="text-xl font-semibold">{connector.name}</h3>
-                    <p className="text-gray-500 mt-1">Credential: {connector.credential_name || 'Unknown'} ({getCredentialTypeLabel(connector.credential_type)})</p>
-                    <p className="text-gray-400 text-sm mt-1">Proxies: {connector.proxy_count}</p>
-                  </div>
-                </div>
-                <div className="flex items-center gap-2">
-                  <span className={`px-3 py-1 rounded-full text-sm font-medium ${connector.enabled ? 'bg-green-100 text-green-800' : 'bg-gray-100 text-gray-800'}`}>{connector.enabled ? 'Enabled' : 'Disabled'}</span>
-                  <button onClick={() => { setEditingConnector(connector); setEditError(null) }} className="p-2 text-gray-500 hover:text-blue-600"><Pencil className="w-5 h-5" /></button>
-                  <button onClick={() => deleteMutation.mutate(connector.id)} className="p-2 text-gray-500 hover:text-red-600"><Trash2 className="w-5 h-5" /></button>
+            <div className="flex justify-between items-start">
+              <div className="flex items-center gap-4">
+                <img src={CONNECTOR_TYPES.find(ct => ct.type === connector.credential_type)?.logo} alt="" className="w-10 h-10 object-contain" />
+                <div>
+                  <h3 className="text-xl font-semibold">{connector.name}</h3>
+                  <p className="text-gray-500 mt-1">Credential: {connector.credential_name || 'Unknown'} ({getCredentialTypeLabel(connector.credential_type)})</p>
+                  <p className="text-gray-400 text-sm mt-1">Proxies: {connector.proxy_count}</p>
                 </div>
               </div>
-            )}
+              <div className="flex items-center gap-2">
+                <span className={`px-3 py-1 rounded-full text-sm font-medium ${connector.enabled ? 'bg-green-100 text-green-800' : 'bg-gray-100 text-gray-800'}`}>{connector.enabled ? 'Enabled' : 'Disabled'}</span>
+                <button onClick={() => startEditing(connector)} className="p-2 text-gray-500 hover:text-blue-600"><Pencil className="w-5 h-5" /></button>
+                <button onClick={() => deleteMutation.mutate(connector.id)} className="p-2 text-gray-500 hover:text-red-600"><Trash2 className="w-5 h-5" /></button>
+              </div>
+            </div>
           </div>
         ))}
 
