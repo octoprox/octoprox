@@ -36,6 +36,52 @@ const CONNECTOR_TYPES: { type: CredentialType; name: string; description: string
   { type: 'azure', name: 'Microsoft Azure', description: 'Virtual Machines as proxy servers', logo: azureLogo },
 ]
 
+// Component for editing key-value tags (AWS, Azure)
+function KeyValueTagsEditor({ value, onChange }: { value: string; onChange: (value: string) => void }) {
+  const parseTags = (val: string): Array<{ key: string; value: string }> => {
+    try {
+      const parsed = JSON.parse(val || '{}')
+      return Object.entries(parsed).map(([k, v]) => ({ key: k, value: String(v) }))
+    } catch {
+      return []
+    }
+  }
+
+  const [tags, setTags] = useState<Array<{ key: string; value: string }>>(parseTags(value))
+
+  const updateTags = (newTags: Array<{ key: string; value: string }>) => {
+    setTags(newTags)
+    const obj: Record<string, string> = {}
+    newTags.forEach(t => { if (t.key.trim()) obj[t.key.trim()] = t.value })
+    onChange(JSON.stringify(obj))
+  }
+
+  const addTag = () => updateTags([...tags, { key: '', value: '' }])
+  const removeTag = (index: number) => updateTags(tags.filter((_, i) => i !== index))
+  const updateTag = (index: number, field: 'key' | 'value', val: string) => {
+    const newTags = [...tags]
+    newTags[index] = { ...newTags[index], [field]: val }
+    updateTags(newTags)
+  }
+
+  return (
+    <div className="space-y-2">
+      {tags.map((tag, index) => (
+        <div key={index} className="flex gap-2 items-center">
+          <input type="text" value={tag.key} onChange={(e) => updateTag(index, 'key', e.target.value)} placeholder="Key" className="flex-1 px-3 py-1.5 border rounded-lg text-sm" />
+          <input type="text" value={tag.value} onChange={(e) => updateTag(index, 'value', e.target.value)} placeholder="Value" className="flex-1 px-3 py-1.5 border rounded-lg text-sm" />
+          <button type="button" onClick={() => removeTag(index)} className="p-1.5 text-gray-400 hover:text-red-500"><Trash2 className="w-4 h-4" /></button>
+        </div>
+      ))}
+      <button type="button" onClick={addTag} className="flex items-center gap-1 text-sm text-blue-600 hover:text-blue-700">
+        <Plus className="w-4 h-4" /> Add Tag
+      </button>
+    </div>
+  )
+}
+
+
+
 const getDefaultConfig = (type: CredentialType | null, options?: ConnectorOptions): Record<string, string> => {
   switch (type) {
     case 'static_proxy_provider':
@@ -47,6 +93,7 @@ const getDefaultConfig = (type: CredentialType | null, options?: ConnectorOption
         key_pair_name: '',
         security_group: '',
         ami_id: '',
+        tags: '{}',
         min_proxies: '1',
         max_proxies: '10',
         min_rotation_period_minutes: '60',
@@ -60,6 +107,7 @@ const getDefaultConfig = (type: CredentialType | null, options?: ConnectorOption
         network: 'default',
         subnetwork: '',
         ssh_key: '',
+        tags: '{}',
         min_proxies: '1',
         max_proxies: '10',
         min_rotation_period_minutes: '60',
@@ -73,6 +121,7 @@ const getDefaultConfig = (type: CredentialType | null, options?: ConnectorOption
         virtual_network: '',
         subnet: '',
         ssh_key_name: '',
+        tags: '{}',
         min_proxies: '1',
         max_proxies: '10',
         min_rotation_period_minutes: '60',
@@ -173,10 +222,20 @@ export default function ConnectorConfig() {
   const startEditing = (connector: Connector) => {
     setEditingConnector(connector)
     setSelectedType(connector.credential_type as CredentialType)
+    // Convert config values to strings for the form, including serializing tags
+    const configForForm: Record<string, string> = {}
+    const rawConfig = connector.config || {}
+    for (const [key, value] of Object.entries(rawConfig)) {
+      if (key === 'tags' && typeof value === 'object') {
+        configForForm[key] = JSON.stringify(value)
+      } else {
+        configForForm[key] = String(value ?? '')
+      }
+    }
     setFormData({
       name: connector.name,
       credential_id: connector.credential_id,
-      config: (connector.config || {}) as Record<string, string>,
+      config: configForForm,
       enabled: connector.enabled,
     })
     setWizardStep('configure')
@@ -211,15 +270,29 @@ export default function ConnectorConfig() {
 
   const isEditMode = !!editingConnector
 
+  // Parse tags from JSON string to actual object for submission
+  const prepareConfigForSubmit = (config: Record<string, string>): Record<string, unknown> => {
+    const result: Record<string, unknown> = { ...config }
+    if (config.tags) {
+      try {
+        result.tags = JSON.parse(config.tags)
+      } catch {
+        result.tags = {}
+      }
+    }
+    return result
+  }
+
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault()
+    const preparedConfig = prepareConfigForSubmit(formData.config)
     if (isEditMode) {
       updateMutation.mutate({
         id: editingConnector.id,
-        data: { name: formData.name, enabled: formData.enabled, config: formData.config }
+        data: { name: formData.name, enabled: formData.enabled, config: preparedConfig }
       })
     } else {
-      createMutation.mutate({ name: formData.name, credential_id: formData.credential_id, config: formData.config, enabled: formData.enabled })
+      createMutation.mutate({ name: formData.name, credential_id: formData.credential_id, config: preparedConfig, enabled: formData.enabled })
     }
   }
 
@@ -241,26 +314,43 @@ export default function ConnectorConfig() {
       vm_size: optionsData?.azure_vm_sizes,
     }
     const fields = getDefaultConfig(type, optionsData)
+    const isTagsField = (key: string) => key === 'tags'
+    const regularFields = Object.keys(fields).filter(k => !isTagsField(k))
+    const tagsField = Object.keys(fields).find(k => isTagsField(k))
+
     return (
-      <div className="grid grid-cols-2 gap-4 mt-4">
-        {Object.keys(fields).map((key) => {
-          const options = dropdownFields[key]
-          const isNumber = ['min_proxies', 'max_proxies', 'min_rotation_period_minutes', 'max_rotation_period_minutes'].includes(key)
-          return (
-            <div key={key}>
-              <label className="block text-sm font-medium text-gray-700 mb-1">
-                {key.replace(/_/g, ' ').replace(/\b\w/g, (l) => l.toUpperCase())}
-              </label>
-              {options ? (
-                <select value={config[key] || ''} onChange={(e) => onChange(key, e.target.value)} className="w-full px-4 py-2 border rounded-lg">
-                  {options.map((opt) => (<option key={opt} value={opt}>{opt}</option>))}
-                </select>
-              ) : (
-                <input type={isNumber ? 'number' : 'text'} value={config[key] || ''} onChange={(e) => onChange(key, e.target.value)} className="w-full px-4 py-2 border rounded-lg" placeholder={key.replace(/_/g, ' ')} />
-              )}
-            </div>
-          )
-        })}
+      <div className="mt-4">
+        <div className="grid grid-cols-2 gap-4">
+          {regularFields.map((key) => {
+            const options = dropdownFields[key]
+            const isNumber = ['min_proxies', 'max_proxies', 'min_rotation_period_minutes', 'max_rotation_period_minutes'].includes(key)
+            return (
+              <div key={key}>
+                <label className="block text-sm font-medium text-gray-700 mb-1">
+                  {key.replace(/_/g, ' ').replace(/\b\w/g, (l) => l.toUpperCase())}
+                </label>
+                {options ? (
+                  <select value={config[key] || ''} onChange={(e) => onChange(key, e.target.value)} className="w-full px-4 py-2 border rounded-lg">
+                    {options.map((opt) => (<option key={opt} value={opt}>{opt}</option>))}
+                  </select>
+                ) : (
+                  <input type={isNumber ? 'number' : 'text'} value={config[key] || ''} onChange={(e) => onChange(key, e.target.value)} className="w-full px-4 py-2 border rounded-lg" placeholder={key.replace(/_/g, ' ')} />
+                )}
+              </div>
+            )
+          })}
+        </div>
+        {tagsField && (
+          <div className="mt-4 col-span-2">
+            <label className="block text-sm font-medium text-gray-700 mb-2">
+              Instance Tags
+            </label>
+            <p className="text-xs text-gray-500 mb-2">
+              Key-value tags applied to instances
+            </p>
+            <KeyValueTagsEditor value={config[tagsField] || '{}'} onChange={(val) => onChange(tagsField, val)} />
+          </div>
+        )}
       </div>
     )
   }

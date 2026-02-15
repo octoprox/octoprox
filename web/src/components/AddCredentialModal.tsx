@@ -115,8 +115,39 @@ export default function AddCredentialModal({ isOpen, onClose, onSuccess, fixedTy
     setFormData({ ...formData, config: { ...formData.config, [key]: value } })
   }
 
+  // Validate service account JSON for GCP credentials
+  const validateServiceAccountJson = (json: string): string | null => {
+    if (!json || !json.trim()) {
+      return 'Service account JSON is required'
+    }
+    try {
+      const parsed = JSON.parse(json)
+      if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+        return 'Service account JSON must be a valid JSON object'
+      }
+      return null
+    } catch {
+      return 'Invalid JSON format. Please paste a valid service account JSON.'
+    }
+  }
+
+  const getServiceAccountJsonError = (): string | null => {
+    if (formData.type !== 'gcp') return null
+    const json = formData.config.service_account_json
+    if (!json || !json.trim()) return null // Don't show error for empty field until submit
+    return validateServiceAccountJson(json)
+  }
+
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault()
+    // Validate GCP service account JSON before submitting
+    if (formData.type === 'gcp') {
+      const jsonError = validateServiceAccountJson(formData.config.service_account_json || '')
+      if (jsonError) {
+        setErrorMessage(jsonError)
+        return
+      }
+    }
     if (isEditMode) {
       updateMutation.mutate({ name: formData.name, config: formData.config })
     } else {
@@ -130,6 +161,7 @@ export default function AddCredentialModal({ isOpen, onClose, onSuccess, fixedTy
 
   const renderConfigFields = () => {
     const fields = getDefaultCredentialConfig(formData.type)
+    const jsonError = getServiceAccountJsonError()
     return Object.keys(fields).map((key) => {
       const isSecret = ['password', 'secret_key', 'client_secret', 'service_account_json'].includes(key)
       return (
@@ -138,13 +170,18 @@ export default function AddCredentialModal({ isOpen, onClose, onSuccess, fixedTy
             {key.replace(/_/g, ' ').replace(/\b\w/g, (l) => l.toUpperCase())}
           </label>
           {key === 'service_account_json' ? (
-            <textarea
-              value={formData.config[key] || ''}
-              onChange={(e) => handleConfigChange(key, e.target.value)}
-              className="w-full px-4 py-2 border rounded-lg font-mono text-sm"
-              rows={4}
-              placeholder="Paste service account JSON here"
-            />
+            <div>
+              <textarea
+                value={formData.config[key] || ''}
+                onChange={(e) => handleConfigChange(key, e.target.value)}
+                className={`w-full px-4 py-2 border rounded-lg font-mono text-sm ${jsonError ? 'border-red-300 bg-red-50' : ''}`}
+                rows={4}
+                placeholder="Paste service account JSON here"
+              />
+              {jsonError && (
+                <p className="mt-1 text-xs text-red-600">{jsonError}</p>
+              )}
+            </div>
           ) : (
             <div className="relative">
               <input

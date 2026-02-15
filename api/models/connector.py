@@ -117,7 +117,7 @@ class GCPConnectorConfig(BaseModel):
     network: str | None = None
     subnetwork: str | None = None
     ssh_key: str | None = None
-    tags: list[str] = Field(default_factory=list)
+    tags: dict[str, str] = Field(default_factory=dict)
     min_proxies: int = 1
     max_proxies: int = 10
     min_rotation_period_minutes: int = 60

@@ -1,5 +1,6 @@
 """Credential model definitions for provider authentication."""
 
+import json
 from datetime import datetime
 from enum import Enum
 from typing import Any
@@ -48,11 +49,20 @@ class GCPCredentialConfig(BaseModel):
 
     @model_validator(mode='after')
     def validate_required_fields(self) -> 'GCPCredentialConfig':
-        """Ensure required fields are not empty."""
+        """Ensure required fields are not empty and service_account_json is valid JSON."""
         if not self.service_account_json or not self.service_account_json.strip():
             raise ValueError('service_account_json is required and cannot be empty')
         if not self.project_id or not self.project_id.strip():
             raise ValueError('project_id is required and cannot be empty')
+
+        # Validate that service_account_json is valid JSON
+        try:
+            parsed = json.loads(self.service_account_json)
+            if not isinstance(parsed, dict):
+                raise ValueError('service_account_json must be a valid JSON object')
+        except json.JSONDecodeError as e:
+            raise ValueError(f'service_account_json contains invalid JSON: {e}')
+
         return self
 
 
