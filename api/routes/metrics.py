@@ -34,7 +34,14 @@ class MetricsResponse(BaseModel):
 
 @router.get("", response_model=MetricsResponse)
 async def get_metrics(request: Request, project_id: str) -> MetricsResponse:
-    """Get current metrics for a project's proxy pool."""
+    """Get current metrics for a project's proxy pool.
+
+    Uses project-level metrics stored on the Project model which combines:
+    - Historical totals from Postgres (loaded on startup)
+    - Current window increments (updated in real-time)
+
+    These metrics persist across proxy rotation.
+    """
     proxy_manager = request.app.state.proxy_manager
 
     project = proxy_manager.get_project(project_id)
@@ -47,34 +54,23 @@ async def get_metrics(request: Request, project_id: str) -> MetricsResponse:
         project_id, proxy_manager._strategy
     ).name
 
-    # Calculate aggregate metrics
-    total_requests = sum(p.request_count for p in proxies)
-    total_successes = sum(p.success_count for p in proxies)
-    total_failures = sum(p.failure_count for p in proxies)
-    total_bytes_sent = sum(p.bytes_sent for p in proxies)
-    total_bytes_received = sum(p.bytes_received for p in proxies)
-
+    # Get project-level metrics directly from the Project model
     overall_success_rate = 0.0
-    if total_requests > 0:
-        overall_success_rate = (total_successes / total_requests) * 100
-
-    avg_latency = 0.0
-    latency_proxies = [p for p in proxies if p.avg_latency_ms > 0]
-    if latency_proxies:
-        avg_latency = sum(p.avg_latency_ms for p in latency_proxies) / len(latency_proxies)
+    if project.request_count > 0:
+        overall_success_rate = (project.success_count / project.request_count) * 100
 
     return MetricsResponse(
         pool=PoolMetrics(
             total_proxies=len(proxies),
             healthy_proxies=len(healthy),
             unhealthy_proxies=len(proxies) - len(healthy),
-            total_requests=total_requests,
-            total_successes=total_successes,
-            total_failures=total_failures,
+            total_requests=project.request_count,
+            total_successes=project.success_count,
+            total_failures=project.failure_count,
             overall_success_rate=round(overall_success_rate, 2),
-            avg_latency_ms=round(avg_latency, 2),
-            total_bytes_sent=total_bytes_sent,
-            total_bytes_received=total_bytes_received,
+            avg_latency_ms=round(project.avg_latency_ms, 2),
+            total_bytes_sent=project.bytes_sent,
+            total_bytes_received=project.bytes_received,
         ),
         strategy=StrategyMetrics(
             current_strategy=current_strategy,
@@ -91,7 +87,10 @@ async def get_metrics(request: Request, project_id: str) -> MetricsResponse:
 
 @router.get("/prometheus")
 async def prometheus_metrics(request: Request, project_id: str) -> str:
-    """Export metrics in Prometheus format for a project."""
+    """Export metrics in Prometheus format for a project.
+
+    Uses project-level metrics from the Project model which persist across proxy rotation.
+    """
     proxy_manager = request.app.state.proxy_manager
 
     project = proxy_manager.get_project(project_id)
@@ -100,12 +99,6 @@ async def prometheus_metrics(request: Request, project_id: str) -> str:
 
     proxies = proxy_manager.get_proxies_for_project(project_id)
     healthy = proxy_manager.get_healthy_proxies_for_project(project_id)
-
-    total_requests = sum(p.request_count for p in proxies)
-    total_successes = sum(p.success_count for p in proxies)
-    total_failures = sum(p.failure_count for p in proxies)
-    total_bytes_sent = sum(p.bytes_sent for p in proxies)
-    total_bytes_received = sum(p.bytes_received for p in proxies)
 
     label_str = f'{{project="{project_id}"}}'
 
@@ -120,23 +113,23 @@ async def prometheus_metrics(request: Request, project_id: str) -> str:
         "",
         "# HELP octoprox_requests_total Total number of requests processed",
         "# TYPE octoprox_requests_total counter",
-        f"octoprox_requests_total{label_str} {total_requests}",
+        f"octoprox_requests_total{label_str} {project.request_count}",
         "",
         "# HELP octoprox_requests_success_total Total successful requests",
         "# TYPE octoprox_requests_success_total counter",
-        f"octoprox_requests_success_total{label_str} {total_successes}",
+        f"octoprox_requests_success_total{label_str} {project.success_count}",
         "",
         "# HELP octoprox_requests_failure_total Total failed requests",
         "# TYPE octoprox_requests_failure_total counter",
-        f"octoprox_requests_failure_total{label_str} {total_failures}",
+        f"octoprox_requests_failure_total{label_str} {project.failure_count}",
         "",
         "# HELP octoprox_bytes_sent_total Total bytes sent through proxies",
         "# TYPE octoprox_bytes_sent_total counter",
-        f"octoprox_bytes_sent_total{label_str} {total_bytes_sent}",
+        f"octoprox_bytes_sent_total{label_str} {project.bytes_sent}",
         "",
         "# HELP octoprox_bytes_received_total Total bytes received through proxies",
         "# TYPE octoprox_bytes_received_total counter",
-        f"octoprox_bytes_received_total{label_str} {total_bytes_received}",
+        f"octoprox_bytes_received_total{label_str} {project.bytes_received}",
     ]
 
     return "\n".join(lines)

@@ -135,20 +135,22 @@ class ProxyManager:
         )
 
     async def _hydrate_from_redis(self) -> None:
-        """Hydrate proxy objects with operational data from Redis and Postgres.
+        """Hydrate proxy and project objects with operational data from Redis and Postgres.
 
         Combines cumulative totals from Postgres (historical snapshots) with
         the current window from Redis to get accurate total counts.
         """
         logger.info("Hydrating operational data")
         statuses = await self._redis_client.get_all_proxy_statuses()
-        redis_metrics = await self._redis_client.get_all_proxy_metrics()
+        redis_proxy_metrics = await self._redis_client.get_all_proxy_metrics()
 
         # Always load cumulative totals from Postgres
         async with self._session_factory() as session:
             repo = MetricsRepository(session)
-            postgres_metrics = await repo.get_cumulative_metrics_for_all_proxies()
+            postgres_proxy_metrics = await repo.get_cumulative_metrics_for_all_proxies()
+            postgres_project_metrics = await repo.get_cumulative_project_metrics()
 
+        # Hydrate proxy metrics
         for proxy_id, proxy in self._proxies.items():
             if proxy_id in statuses:
                 status_data = statuses[proxy_id]
@@ -157,8 +159,8 @@ class ProxyManager:
                 proxy.consecutive_failures = status_data["consecutive_failures"]
 
             # Combine Postgres (historical) + Redis (current window)
-            pg = postgres_metrics.get(proxy_id, {})
-            rd = redis_metrics.get(proxy_id, {})
+            pg = postgres_proxy_metrics.get(proxy_id, {})
+            rd = redis_proxy_metrics.get(proxy_id, {})
 
             pg_requests = pg.get("request_count", 0)
             rd_requests = rd.get("request_count", 0)
@@ -182,11 +184,40 @@ class ProxyManager:
             proxy.bytes_sent = pg.get("bytes_sent", 0) + rd.get("bytes_sent", 0)
             proxy.bytes_received = pg.get("bytes_received", 0) + rd.get("bytes_received", 0)
 
+        # Hydrate project metrics directly on Project objects
+        # Combines Postgres (historical) + Redis (current window)
+        redis_project_metrics = await self._redis_client.get_all_project_metrics()
+        for project_id, project in self._projects.items():
+            pg = postgres_project_metrics.get(project_id, {})
+            rd = redis_project_metrics.get(project_id, {})
+
+            pg_requests = pg.get("request_count", 0)
+            rd_requests = rd.get("request_count", 0)
+            total_requests = pg_requests + rd_requests
+
+            project.request_count = total_requests
+            project.success_count = pg.get("success_count", 0) + rd.get("success_count", 0)
+            project.failure_count = pg.get("failure_count", 0) + rd.get("failure_count", 0)
+
+            # Compute weighted average latency
+            pg_latency = pg.get("avg_latency_ms", 0)
+            rd_latency = rd.get("avg_latency_ms", 0)
+            if total_requests > 0:
+                project.avg_latency_ms = (
+                    pg_latency * pg_requests + rd_latency * rd_requests
+                ) / total_requests
+            else:
+                project.avg_latency_ms = 0.0
+
+            project.bytes_sent = pg.get("bytes_sent", 0) + rd.get("bytes_sent", 0)
+            project.bytes_received = pg.get("bytes_received", 0) + rd.get("bytes_received", 0)
+
         logger.info(
             "Hydrated operational data",
             proxy_count=len(self._proxies),
-            from_redis=len(redis_metrics),
-            from_postgres=len(postgres_metrics),
+            project_count=len(self._projects),
+            from_redis=len(redis_proxy_metrics),
+            from_postgres=len(postgres_proxy_metrics),
         )
 
     @property
@@ -481,10 +512,34 @@ class ProxyManager:
             proxy.bytes_sent += bytes_sent
             proxy.bytes_received += bytes_received
 
-            # Persist to Redis
+            # Persist to Redis (proxy-level)
             await self._redis_client.update_proxy_metrics(
                 proxy_id, success, latency_ms, bytes_sent, bytes_received
             )
+
+            # Also update project-level metrics (both in-memory and Redis)
+            connector = self._connectors.get(proxy.connector_id)
+            if connector:
+                project = self._projects.get(connector.project_id)
+                if project:
+                    # Update Redis (current window)
+                    await self._redis_client.update_project_metrics(
+                        project.id, success, latency_ms, bytes_sent, bytes_received
+                    )
+                    # Update in-memory Project object (cumulative totals)
+                    old_count = project.request_count
+                    project.request_count += 1
+                    if success:
+                        project.success_count += 1
+                    else:
+                        project.failure_count += 1
+                    # Compute weighted average latency
+                    if old_count == 0:
+                        project.avg_latency_ms = latency_ms
+                    else:
+                        project.avg_latency_ms = (project.avg_latency_ms * old_count + latency_ms) / project.request_count
+                    project.bytes_sent += bytes_sent
+                    project.bytes_received += bytes_received
 
     async def update_proxy_status(
         self,

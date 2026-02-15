@@ -240,3 +240,176 @@ class TestMetricsRepository:
         assert history[0]["request_count"] == 50
         assert history[1]["request_count"] == 40
 
+    # Project-level metrics tests
+
+    async def test_save_project_metrics_snapshot(
+        self,
+        metrics_repo: MetricsRepository,
+        project_repo: ProjectRepository,
+        db_session: AsyncSession,
+    ) -> None:
+        """Test saving a project-level metrics snapshot."""
+        project = Project(
+            name="Project Metrics Test",
+            username="projmetricsuser",
+            password="pass",
+        )
+        await project_repo.create(project)
+        await db_session.commit()
+
+        await metrics_repo.save_project_metrics_snapshot(
+            project_id=project.id,
+            request_count=100,
+            success_count=90,
+            failure_count=10,
+            avg_latency_ms=150.5,
+            bytes_sent=50000,
+            bytes_received=250000,
+        )
+        await db_session.commit()
+
+        # Verify by getting history
+        history = await metrics_repo.get_project_metrics_history(project.id)
+
+        assert len(history) == 1
+        assert history[0]["request_count"] == 100
+        assert history[0]["success_count"] == 90
+        assert history[0]["failure_count"] == 10
+        assert history[0]["avg_latency_ms"] == 150.5
+        assert history[0]["bytes_sent"] == 50000
+        assert history[0]["bytes_received"] == 250000
+
+    async def test_save_multiple_project_snapshots(
+        self,
+        metrics_repo: MetricsRepository,
+        project_repo: ProjectRepository,
+        db_session: AsyncSession,
+    ) -> None:
+        """Test saving multiple project metrics snapshots."""
+        project = Project(
+            name="Multi Snapshot Project",
+            username="multisnapshotuser",
+            password="pass",
+        )
+        await project_repo.create(project)
+        await db_session.commit()
+
+        # Save multiple snapshots
+        for i in range(3):
+            await metrics_repo.save_project_metrics_snapshot(
+                project_id=project.id,
+                request_count=100 * (i + 1),
+                success_count=90 * (i + 1),
+                failure_count=10 * (i + 1),
+                avg_latency_ms=100.0 + i * 10,
+                bytes_sent=10000 * (i + 1),
+                bytes_received=50000 * (i + 1),
+            )
+        await db_session.commit()
+
+        history = await metrics_repo.get_project_metrics_history(project.id)
+
+        assert len(history) == 3
+        # History is ordered by timestamp desc, so most recent first
+        assert history[0]["request_count"] == 300
+        assert history[2]["request_count"] == 100
+
+    async def test_get_cumulative_project_metrics(
+        self,
+        metrics_repo: MetricsRepository,
+        project_repo: ProjectRepository,
+        db_session: AsyncSession,
+    ) -> None:
+        """Test retrieving cumulative metrics for all projects."""
+        # Create two projects
+        project1 = Project(
+            name="Cumulative Project 1",
+            username="cumproj1user",
+            password="pass",
+        )
+        project2 = Project(
+            name="Cumulative Project 2",
+            username="cumproj2user",
+            password="pass",
+        )
+        await project_repo.create(project1)
+        await project_repo.create(project2)
+        await db_session.commit()
+
+        # Save metrics for both projects
+        await metrics_repo.save_project_metrics_snapshot(
+            project_id=project1.id,
+            request_count=100,
+            success_count=90,
+            failure_count=10,
+            avg_latency_ms=100.0,
+            bytes_sent=50000,
+            bytes_received=250000,
+        )
+        await metrics_repo.save_project_metrics_snapshot(
+            project_id=project2.id,
+            request_count=200,
+            success_count=180,
+            failure_count=20,
+            avg_latency_ms=200.0,
+            bytes_sent=100000,
+            bytes_received=500000,
+        )
+        await db_session.commit()
+
+        cumulative = await metrics_repo.get_cumulative_project_metrics()
+
+        assert len(cumulative) == 2
+        assert project1.id in cumulative
+        assert project2.id in cumulative
+        assert cumulative[project1.id]["request_count"] == 100
+        assert cumulative[project2.id]["request_count"] == 200
+        assert cumulative[project1.id]["bytes_sent"] == 50000
+        assert cumulative[project1.id]["bytes_received"] == 250000
+        assert cumulative[project2.id]["bytes_sent"] == 100000
+        assert cumulative[project2.id]["bytes_received"] == 500000
+
+    async def test_get_project_metrics_history_empty(
+        self,
+        metrics_repo: MetricsRepository,
+    ) -> None:
+        """Test retrieving project metrics history for non-existent project."""
+        history = await metrics_repo.get_project_metrics_history("non-existent-id")
+        assert history == []
+
+    async def test_get_project_metrics_history_with_limit(
+        self,
+        metrics_repo: MetricsRepository,
+        project_repo: ProjectRepository,
+        db_session: AsyncSession,
+    ) -> None:
+        """Test retrieving project metrics history with a limit."""
+        project = Project(
+            name="Limit Test Project",
+            username="limittestuser",
+            password="pass",
+        )
+        await project_repo.create(project)
+        await db_session.commit()
+
+        # Save 5 snapshots
+        for i in range(5):
+            await metrics_repo.save_project_metrics_snapshot(
+                project_id=project.id,
+                request_count=100 * (i + 1),
+                success_count=90 * (i + 1),
+                failure_count=10 * (i + 1),
+                avg_latency_ms=100.0,
+                bytes_sent=10000 * (i + 1),
+                bytes_received=50000 * (i + 1),
+            )
+        await db_session.commit()
+
+        # Get only 2 most recent
+        history = await metrics_repo.get_project_metrics_history(project.id, limit=2)
+
+        assert len(history) == 2
+        # Most recent should be first (request_count=500)
+        assert history[0]["request_count"] == 500
+        assert history[1]["request_count"] == 400
+

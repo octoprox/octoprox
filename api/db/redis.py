@@ -16,6 +16,7 @@ logger = structlog.get_logger()
 # Redis key prefixes
 PROXY_STATUS_KEY = "proxy:status:{proxy_id}"
 PROXY_METRICS_KEY = "proxy:metrics:{proxy_id}"
+PROJECT_METRICS_KEY = "project:metrics:{project_id}"
 SESSION_KEY = "session:{session_id}"
 
 
@@ -154,7 +155,73 @@ class RedisClient:
         """Reset proxy metrics after flushing to Postgres."""
         key = PROXY_METRICS_KEY.format(proxy_id=proxy_id)
         await self.client.delete(key)
-    
+
+    # Project metrics operations
+    async def update_project_metrics(
+        self,
+        project_id: str,
+        success: bool,
+        latency_ms: float,
+        bytes_sent: int = 0,
+        bytes_received: int = 0,
+    ) -> None:
+        """Update project-level metrics in Redis (incremental).
+
+        These metrics aggregate across all proxies in a project and persist
+        across proxy rotation.
+        """
+        key = PROJECT_METRICS_KEY.format(project_id=project_id)
+        pipe = self.client.pipeline()
+        pipe.hincrby(key, "request_count", 1)
+        if success:
+            pipe.hincrby(key, "success_count", 1)
+        else:
+            pipe.hincrby(key, "failure_count", 1)
+        # Store latency sum for computing true average during flush
+        pipe.hincrbyfloat(key, "latency_sum_ms", latency_ms)
+        # Track bytes transferred
+        if bytes_sent > 0:
+            pipe.hincrby(key, "bytes_sent", bytes_sent)
+        if bytes_received > 0:
+            pipe.hincrby(key, "bytes_received", bytes_received)
+        pipe.hset(key, "updated_at", utc_now().isoformat())
+        await pipe.execute()
+
+    async def get_project_metrics(self, project_id: str) -> dict[str, Any] | None:
+        """Get project-level metrics from Redis."""
+        key = PROJECT_METRICS_KEY.format(project_id=project_id)
+        data = await self.client.hgetall(key)
+        if not data:
+            return None
+        request_count = int(data.get("request_count", 0))
+        latency_sum = float(data.get("latency_sum_ms", 0))
+        avg_latency = latency_sum / request_count if request_count > 0 else 0.0
+        return {
+            "request_count": request_count,
+            "success_count": int(data.get("success_count", 0)),
+            "failure_count": int(data.get("failure_count", 0)),
+            "latency_sum_ms": latency_sum,
+            "avg_latency_ms": avg_latency,
+            "bytes_sent": int(data.get("bytes_sent", 0)),
+            "bytes_received": int(data.get("bytes_received", 0)),
+            "updated_at": data.get("updated_at"),
+        }
+
+    async def get_all_project_metrics(self) -> dict[str, dict[str, Any]]:
+        """Get all project-level metrics from Redis."""
+        metrics = {}
+        async for key in self.client.scan_iter(match="project:metrics:*"):
+            project_id = key.split(":")[-1]
+            m = await self.get_project_metrics(project_id)
+            if m:
+                metrics[project_id] = m
+        return metrics
+
+    async def reset_project_metrics(self, project_id: str) -> None:
+        """Reset project metrics after flushing to Postgres."""
+        key = PROJECT_METRICS_KEY.format(project_id=project_id)
+        await self.client.delete(key)
+
     # Session operations (for sticky routing)
     async def set_session(self, session_id: str, proxy_id: str, ttl_seconds: int = 3600) -> None:
         """Set session to proxy mapping."""

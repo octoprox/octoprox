@@ -150,3 +150,64 @@ class TestRedisClient:
         assert status["status"] == ProxyStatus.UNHEALTHY
         assert status["consecutive_failures"] == 5
 
+    # Project metrics tests
+
+    async def test_update_project_metrics(self, redis_client: RedisClient) -> None:
+        """Test updating project-level metrics."""
+        project_id = "metrics-project"
+
+        # Record some requests with bytes
+        await redis_client.update_project_metrics(
+            project_id, success=True, latency_ms=100, bytes_sent=1000, bytes_received=5000
+        )
+        await redis_client.update_project_metrics(
+            project_id, success=True, latency_ms=200, bytes_sent=2000, bytes_received=10000
+        )
+        await redis_client.update_project_metrics(
+            project_id, success=False, latency_ms=50, bytes_sent=500, bytes_received=0
+        )
+
+        metrics = await redis_client.get_project_metrics(project_id)
+
+        assert metrics is not None
+        assert metrics["request_count"] == 3
+        assert metrics["success_count"] == 2
+        assert metrics["failure_count"] == 1
+        assert metrics["latency_sum_ms"] == 350.0
+        # Average should be 350/3 ≈ 116.67
+        assert abs(metrics["avg_latency_ms"] - 116.67) < 1
+        # Check bytes tracking
+        assert metrics["bytes_sent"] == 3500
+        assert metrics["bytes_received"] == 15000
+
+    async def test_get_project_metrics_not_found(self, redis_client: RedisClient) -> None:
+        """Test getting metrics for non-existent project."""
+        metrics = await redis_client.get_project_metrics("non-existent-project")
+        assert metrics is None
+
+    async def test_get_all_project_metrics(self, redis_client: RedisClient) -> None:
+        """Test getting all project metrics."""
+        # Record metrics for multiple projects
+        for i in range(3):
+            await redis_client.update_project_metrics(
+                f"metrics-project-{i}",
+                success=True,
+                latency_ms=float(i * 50),
+            )
+
+        all_metrics = await redis_client.get_all_project_metrics()
+
+        assert len(all_metrics) == 3
+        assert "metrics-project-0" in all_metrics
+        assert "metrics-project-1" in all_metrics
+        assert "metrics-project-2" in all_metrics
+
+    async def test_reset_project_metrics(self, redis_client: RedisClient) -> None:
+        """Test resetting project metrics."""
+        project_id = "reset-project"
+
+        await redis_client.update_project_metrics(project_id, success=True, latency_ms=100)
+        await redis_client.reset_project_metrics(project_id)
+
+        metrics = await redis_client.get_project_metrics(project_id)
+        assert metrics is None

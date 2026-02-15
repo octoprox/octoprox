@@ -26,7 +26,15 @@ class Project(BaseModel):
     health_check_timeout: int = 30  # seconds
     connection_timeout: int = 30  # seconds
     max_retries: int = 3
-    
+
+    # Aggregate statistics (persists across proxy rotation)
+    request_count: int = 0
+    success_count: int = 0
+    failure_count: int = 0
+    avg_latency_ms: float = 0.0
+    bytes_sent: int = 0
+    bytes_received: int = 0
+
     # Metadata
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)

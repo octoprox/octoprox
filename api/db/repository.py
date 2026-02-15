@@ -7,7 +7,7 @@ from sqlalchemy import select, delete, func
 from api.core import utc_now
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from api.db.models import ProjectModel, ProxyModel, CredentialModel, ConnectorModel, ProxyMetricsModel
+from api.db.models import ProjectModel, ProxyModel, CredentialModel, ConnectorModel, ProxyMetricsModel, ProjectMetricsModel
 from api.models.project import Project
 from api.models.proxy import Proxy, ProxyProtocol, ProxyStatus
 from api.models.credential import Credential, CredentialType
@@ -484,6 +484,109 @@ class MetricsRepository:
                 "success_count": row.total_successes or 0,
                 "failure_count": row.total_failures or 0,
                 "avg_latency_ms": avg_latency,
+                "bytes_sent": row.total_bytes_sent or 0,
+                "bytes_received": row.total_bytes_received or 0,
+            }
+
+        return metrics
+
+    # Project-level metrics methods
+
+    async def save_project_metrics_snapshot(
+        self,
+        project_id: str,
+        request_count: int,
+        success_count: int,
+        failure_count: int,
+        avg_latency_ms: float,
+        bytes_sent: int = 0,
+        bytes_received: int = 0,
+    ) -> None:
+        """Save a project-level metrics snapshot to the database.
+
+        These metrics persist across proxy rotation.
+        """
+        model = ProjectMetricsModel(
+            project_id=project_id,
+            timestamp=utc_now(),
+            request_count=request_count,
+            success_count=success_count,
+            failure_count=failure_count,
+            avg_latency_ms=avg_latency_ms,
+            bytes_sent=bytes_sent,
+            bytes_received=bytes_received,
+        )
+        self._session.add(model)
+        await self._session.flush()
+
+    async def get_project_metrics_history(
+        self,
+        project_id: str,
+        since: datetime | None = None,
+        limit: int = 100,
+    ) -> list[dict]:
+        """Get historical metrics for a project."""
+        query = select(ProjectMetricsModel).where(
+            ProjectMetricsModel.project_id == project_id
+        )
+        if since:
+            query = query.where(ProjectMetricsModel.timestamp >= since)
+        query = query.order_by(ProjectMetricsModel.timestamp.desc()).limit(limit)
+
+        result = await self._session.execute(query)
+        models = result.scalars().all()
+        return [
+            {
+                "timestamp": m.timestamp,
+                "request_count": m.request_count,
+                "success_count": m.success_count,
+                "failure_count": m.failure_count,
+                "avg_latency_ms": m.avg_latency_ms,
+                "bytes_sent": m.bytes_sent,
+                "bytes_received": m.bytes_received,
+            }
+            for m in models
+        ]
+
+    async def get_cumulative_project_metrics(self) -> dict[str, dict]:
+        """Get cumulative metrics (sum of all snapshots) for each project.
+
+        Returns a dict mapping project_id to its total metrics across all snapshots.
+        Used to restore metrics on startup - these totals should be combined with
+        the current Redis window.
+        """
+        # Sum counts and compute weighted average for latency
+        # weighted_avg = sum(avg_latency * request_count) / sum(request_count)
+        query = (
+            select(
+                ProjectMetricsModel.project_id,
+                func.sum(ProjectMetricsModel.request_count).label("total_requests"),
+                func.sum(ProjectMetricsModel.success_count).label("total_successes"),
+                func.sum(ProjectMetricsModel.failure_count).label("total_failures"),
+                func.sum(
+                    ProjectMetricsModel.avg_latency_ms * ProjectMetricsModel.request_count
+                ).label("weighted_latency_sum"),
+                func.sum(ProjectMetricsModel.bytes_sent).label("total_bytes_sent"),
+                func.sum(ProjectMetricsModel.bytes_received).label("total_bytes_received"),
+            )
+            .group_by(ProjectMetricsModel.project_id)
+        )
+
+        result = await self._session.execute(query)
+        rows = result.all()
+
+        metrics = {}
+        for row in rows:
+            total_requests = row.total_requests or 0
+            weighted_latency_sum = row.weighted_latency_sum or 0
+            avg_latency = weighted_latency_sum / total_requests if total_requests > 0 else 0.0
+
+            metrics[row.project_id] = {
+                "request_count": total_requests,
+                "success_count": row.total_successes or 0,
+                "failure_count": row.total_failures or 0,
+                "avg_latency_ms": avg_latency,
+                "latency_sum_ms": weighted_latency_sum,
                 "bytes_sent": row.total_bytes_sent or 0,
                 "bytes_received": row.total_bytes_received or 0,
             }

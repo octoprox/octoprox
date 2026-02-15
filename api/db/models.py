@@ -121,3 +121,27 @@ class ProxyMetricsModel(Base):
     bytes_received: Mapped[int] = mapped_column(Integer, default=0)
     status: Mapped[str] = mapped_column(String(20), default="unknown")
 
+
+class ProjectMetricsModel(Base):
+    """SQLAlchemy model for historical project-level metrics (flushed from Redis).
+
+    These metrics persist across proxy rotation, providing aggregate metrics
+    at the project level that survive when proxies are deleted or replaced.
+    """
+
+    __tablename__ = "project_metrics"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    project_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    timestamp: Mapped[datetime] = mapped_column(DateTime, default=utc_now, index=True)
+
+    # Snapshot of metrics at flush time
+    request_count: Mapped[int] = mapped_column(Integer, default=0)
+    success_count: Mapped[int] = mapped_column(Integer, default=0)
+    failure_count: Mapped[int] = mapped_column(Integer, default=0)
+    avg_latency_ms: Mapped[float] = mapped_column(Float, default=0.0)
+    bytes_sent: Mapped[int] = mapped_column(Integer, default=0)
+    bytes_received: Mapped[int] = mapped_column(Integer, default=0)
+
