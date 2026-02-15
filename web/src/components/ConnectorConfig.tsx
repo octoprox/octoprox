@@ -36,6 +36,9 @@ const CONNECTOR_TYPES: { type: CredentialType; name: string; description: string
   { type: 'azure', name: 'Microsoft Azure', description: 'Virtual Machines as proxy servers', logo: azureLogo },
 ]
 
+// Tab type for config sections
+type ConfigTab = 'infrastructure' | 'scaling' | 'advanced'
+
 // Component for editing key-value tags (AWS, Azure)
 function KeyValueTagsEditor({ value, onChange }: { value: string; onChange: (value: string) => void }) {
   const parseTags = (val: string): Array<{ key: string; value: string }> => {
@@ -154,6 +157,9 @@ export default function ConnectorConfig() {
   const [createError, setCreateError] = useState<string | null>(null)
   const [editError, setEditError] = useState<string | null>(null)
 
+  // Config tab state
+  const [activeConfigTab, setActiveConfigTab] = useState<ConfigTab>('infrastructure')
+
   const { data: connectorsData, isLoading: connectorsLoading } = useQuery({
     queryKey: ['connectors', selectedProjectId],
     queryFn: () => fetchProjectConnectors(selectedProjectId!),
@@ -217,6 +223,7 @@ export default function ConnectorConfig() {
     setCreateError(null)
     setEditingConnector(null)
     setEditError(null)
+    setActiveConfigTab('infrastructure')
   }
 
   const startEditing = (connector: Connector) => {
@@ -305,52 +312,129 @@ export default function ConnectorConfig() {
     return credentialsData?.credentials.filter(c => c.type === selectedType) || []
   }
 
+  // Categorize fields by tab
+  const getFieldsByTab = (type: CredentialType): Record<ConfigTab, string[]> => {
+    const scalingFields = ['min_proxies', 'max_proxies', 'min_rotation_period_minutes', 'max_rotation_period_minutes']
+    const advancedFields = ['tags']
+
+    // Infrastructure fields vary by provider
+    const infraFields: Record<string, string[]> = {
+      aws: ['region', 'instance_type', 'key_pair_name', 'security_group', 'ami_id'],
+      gcp: ['region', 'zone', 'machine_type', 'network', 'subnetwork', 'ssh_key'],
+      azure: ['region', 'vm_size', 'resource_group', 'virtual_network', 'subnet', 'ssh_key_name'],
+    }
+
+    return {
+      infrastructure: infraFields[type] || [],
+      scaling: scalingFields,
+      advanced: advancedFields,
+    }
+  }
+
+  // Friendly field labels
+  const getFieldLabel = (key: string): string => {
+    const labels: Record<string, string> = {
+      region: 'Region',
+      instance_type: 'Instance Type',
+      key_pair_name: 'Key Pair',
+      security_group: 'Security Group',
+      ami_id: 'AMI ID',
+      zone: 'Zone',
+      machine_type: 'Machine Type',
+      network: 'Network',
+      subnetwork: 'Subnetwork',
+      ssh_key: 'SSH Key',
+      vm_size: 'VM Size',
+      resource_group: 'Resource Group',
+      virtual_network: 'Virtual Network',
+      subnet: 'Subnet',
+      ssh_key_name: 'SSH Key Name',
+      min_proxies: 'Min Proxies',
+      max_proxies: 'Max Proxies',
+      min_rotation_period_minutes: 'Min Rotation (min)',
+      max_rotation_period_minutes: 'Max Rotation (min)',
+    }
+    return labels[key] || key.replace(/_/g, ' ').replace(/\b\w/g, (l) => l.toUpperCase())
+  }
+
   const renderConfigFields = (type: CredentialType | null, config: Record<string, string>, onChange: (key: string, value: string) => void) => {
     if (!type || type === 'static_proxy_provider') return null
+
     const dropdownFields: Record<string, string[] | undefined> = {
       region: type === 'aws' ? optionsData?.aws_regions : type === 'gcp' ? optionsData?.gcp_regions : optionsData?.azure_regions,
       instance_type: optionsData?.aws_instance_types,
       machine_type: optionsData?.gcp_machine_types,
       vm_size: optionsData?.azure_vm_sizes,
     }
-    const fields = getDefaultConfig(type, optionsData)
-    const isTagsField = (key: string) => key === 'tags'
-    const regularFields = Object.keys(fields).filter(k => !isTagsField(k))
-    const tagsField = Object.keys(fields).find(k => isTagsField(k))
+
+    const fieldsByTab = getFieldsByTab(type)
+    const currentFields = fieldsByTab[activeConfigTab]
+    const isNumber = (key: string) => ['min_proxies', 'max_proxies', 'min_rotation_period_minutes', 'max_rotation_period_minutes'].includes(key)
+
+    const tabs: { id: ConfigTab; label: string }[] = [
+      { id: 'infrastructure', label: 'Infrastructure' },
+      { id: 'scaling', label: 'Scaling' },
+      { id: 'advanced', label: 'Advanced' },
+    ]
 
     return (
       <div className="mt-4">
-        <div className="grid grid-cols-2 gap-4">
-          {regularFields.map((key) => {
-            const options = dropdownFields[key]
-            const isNumber = ['min_proxies', 'max_proxies', 'min_rotation_period_minutes', 'max_rotation_period_minutes'].includes(key)
-            return (
-              <div key={key}>
-                <label className="block text-sm font-medium text-gray-700 mb-1">
-                  {key.replace(/_/g, ' ').replace(/\b\w/g, (l) => l.toUpperCase())}
-                </label>
-                {options ? (
-                  <select value={config[key] || ''} onChange={(e) => onChange(key, e.target.value)} className="w-full px-4 py-2 border rounded-lg">
-                    {options.map((opt) => (<option key={opt} value={opt}>{opt}</option>))}
-                  </select>
-                ) : (
-                  <input type={isNumber ? 'number' : 'text'} value={config[key] || ''} onChange={(e) => onChange(key, e.target.value)} className="w-full px-4 py-2 border rounded-lg" placeholder={key.replace(/_/g, ' ')} />
-                )}
-              </div>
-            )
-          })}
+        {/* Tab Navigation */}
+        <div className="flex border-b mb-4">
+          {tabs.map((tab) => (
+            <button
+              key={tab.id}
+              type="button"
+              onClick={() => setActiveConfigTab(tab.id)}
+              className={`px-4 py-2 text-sm font-medium border-b-2 transition-colors ${
+                activeConfigTab === tab.id
+                  ? 'border-blue-500 text-blue-600'
+                  : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
+              }`}
+            >
+              {tab.label}
+            </button>
+          ))}
         </div>
-        {tagsField && (
-          <div className="mt-4 col-span-2">
-            <label className="block text-sm font-medium text-gray-700 mb-2">
-              Instance Tags
-            </label>
-            <p className="text-xs text-gray-500 mb-2">
-              Key-value tags applied to instances
-            </p>
-            <KeyValueTagsEditor value={config[tagsField] || '{}'} onChange={(val) => onChange(tagsField, val)} />
-          </div>
-        )}
+
+        {/* Tab Content - fixed height to prevent modal jumping */}
+        <div className="min-h-[200px]">
+          {activeConfigTab === 'advanced' ? (
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Instance Tags</label>
+              <p className="text-xs text-gray-500 mb-2">Key-value tags applied to instances</p>
+              <KeyValueTagsEditor value={config.tags || '{}'} onChange={(val) => onChange('tags', val)} />
+            </div>
+          ) : (
+            <div className="grid grid-cols-2 gap-x-4 gap-y-3">
+              {currentFields.map((key) => {
+                const options = dropdownFields[key]
+                return (
+                  <div key={key}>
+                    <label className="block text-xs font-medium text-gray-600 mb-1">{getFieldLabel(key)}</label>
+                    {options ? (
+                      <select
+                        value={config[key] || ''}
+                        onChange={(e) => onChange(key, e.target.value)}
+                        className="w-full px-3 py-1.5 text-sm border rounded-lg focus:ring-1 focus:ring-blue-500 focus:border-blue-500"
+                      >
+                        {options.map((opt) => (<option key={opt} value={opt}>{opt}</option>))}
+                      </select>
+                    ) : (
+                      <input
+                        type={isNumber(key) ? 'number' : 'text'}
+                        value={config[key] || ''}
+                        onChange={(e) => onChange(key, e.target.value)}
+                        className="w-full px-3 py-1.5 text-sm border rounded-lg focus:ring-1 focus:ring-blue-500 focus:border-blue-500"
+                        placeholder={getFieldLabel(key)}
+                      />
+                    )}
+                  </div>
+                )
+              })}
+            </div>
+          )}
+        </div>
       </div>
     )
   }
