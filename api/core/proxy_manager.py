@@ -9,18 +9,19 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from api.core.config import Settings
 from api.core.health_checker import HealthChecker
 from api.core.metrics_flusher import MetricsFlusher
+from api.core.stats import apply_metrics, combine_metrics, increment_stats
 from api.db.redis import RedisClient
 from api.db.repository import (
+    ConnectorRepository,
+    CredentialRepository,
     MetricsRepository,
     ProjectRepository,
     ProxyRepository,
-    CredentialRepository,
-    ConnectorRepository,
 )
+from api.models.connector import Connector
+from api.models.credential import Credential
 from api.models.project import Project
 from api.models.proxy import Proxy, ProxyStatus
-from api.models.credential import Credential
-from api.models.connector import Connector
 from api.strategies import get_strategy
 
 if TYPE_CHECKING:
@@ -161,28 +162,7 @@ class ProxyManager:
             # Combine Postgres (historical) + Redis (current window)
             pg = postgres_proxy_metrics.get(proxy_id, {})
             rd = redis_proxy_metrics.get(proxy_id, {})
-
-            pg_requests = pg.get("request_count", 0)
-            rd_requests = rd.get("request_count", 0)
-            total_requests = pg_requests + rd_requests
-
-            proxy.request_count = total_requests
-            proxy.success_count = pg.get("success_count", 0) + rd.get("success_count", 0)
-            proxy.failure_count = pg.get("failure_count", 0) + rd.get("failure_count", 0)
-
-            # Compute weighted average latency
-            pg_latency = pg.get("avg_latency_ms", 0)
-            rd_latency = rd.get("avg_latency_ms", 0)
-            if total_requests > 0:
-                proxy.avg_latency_ms = (
-                    pg_latency * pg_requests + rd_latency * rd_requests
-                ) / total_requests
-            else:
-                proxy.avg_latency_ms = 0.0
-
-            # Combine bytes sent/received
-            proxy.bytes_sent = pg.get("bytes_sent", 0) + rd.get("bytes_sent", 0)
-            proxy.bytes_received = pg.get("bytes_received", 0) + rd.get("bytes_received", 0)
+            apply_metrics(proxy, combine_metrics(pg, rd))
 
         # Hydrate project metrics directly on Project objects
         # Combines Postgres (historical) + Redis (current window)
@@ -190,27 +170,7 @@ class ProxyManager:
         for project_id, project in self._projects.items():
             pg = postgres_project_metrics.get(project_id, {})
             rd = redis_project_metrics.get(project_id, {})
-
-            pg_requests = pg.get("request_count", 0)
-            rd_requests = rd.get("request_count", 0)
-            total_requests = pg_requests + rd_requests
-
-            project.request_count = total_requests
-            project.success_count = pg.get("success_count", 0) + rd.get("success_count", 0)
-            project.failure_count = pg.get("failure_count", 0) + rd.get("failure_count", 0)
-
-            # Compute weighted average latency
-            pg_latency = pg.get("avg_latency_ms", 0)
-            rd_latency = rd.get("avg_latency_ms", 0)
-            if total_requests > 0:
-                project.avg_latency_ms = (
-                    pg_latency * pg_requests + rd_latency * rd_requests
-                ) / total_requests
-            else:
-                project.avg_latency_ms = 0.0
-
-            project.bytes_sent = pg.get("bytes_sent", 0) + rd.get("bytes_sent", 0)
-            project.bytes_received = pg.get("bytes_received", 0) + rd.get("bytes_received", 0)
+            apply_metrics(project, combine_metrics(pg, rd))
 
         logger.info(
             "Hydrated operational data",
@@ -495,22 +455,8 @@ class ProxyManager:
         """Update proxy statistics after a request (stores in Redis)."""
         proxy = self._proxies.get(proxy_id)
         if proxy:
-            # Update in-memory cache with proper running average
-            old_count = proxy.request_count
-            proxy.request_count += 1
-            if success:
-                proxy.success_count += 1
-            else:
-                proxy.failure_count += 1
-            # Compute proper weighted average: new_avg = (old_avg * old_count + new_value) / new_count
-            if old_count == 0:
-                proxy.avg_latency_ms = latency_ms
-            else:
-                proxy.avg_latency_ms = (proxy.avg_latency_ms * old_count + latency_ms) / proxy.request_count
-
-            # Update byte counts
-            proxy.bytes_sent += bytes_sent
-            proxy.bytes_received += bytes_received
+            # Update in-memory cache
+            increment_stats(proxy, success, latency_ms, bytes_sent, bytes_received)
 
             # Persist to Redis (proxy-level)
             await self._redis_client.update_proxy_metrics(
@@ -526,20 +472,8 @@ class ProxyManager:
                     await self._redis_client.update_project_metrics(
                         project.id, success, latency_ms, bytes_sent, bytes_received
                     )
-                    # Update in-memory Project object (cumulative totals)
-                    old_count = project.request_count
-                    project.request_count += 1
-                    if success:
-                        project.success_count += 1
-                    else:
-                        project.failure_count += 1
-                    # Compute weighted average latency
-                    if old_count == 0:
-                        project.avg_latency_ms = latency_ms
-                    else:
-                        project.avg_latency_ms = (project.avg_latency_ms * old_count + latency_ms) / project.request_count
-                    project.bytes_sent += bytes_sent
-                    project.bytes_received += bytes_received
+                    # Update in-memory Project object
+                    increment_stats(project, success, latency_ms, bytes_sent, bytes_received)
 
     async def update_proxy_status(
         self,
