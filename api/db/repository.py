@@ -207,22 +207,31 @@ class ConnectorRepository:
 
     async def get_all(self) -> list[Connector]:
         """Get all connectors."""
-        result = await self._session.execute(select(ConnectorModel))
+        from sqlalchemy.orm import selectinload
+        result = await self._session.execute(
+            select(ConnectorModel).options(selectinload(ConnectorModel.credential))
+        )
         models = result.scalars().all()
         return [self._to_domain(m) for m in models]
 
     async def get_by_project(self, project_id: str) -> list[Connector]:
         """Get all connectors for a project."""
+        from sqlalchemy.orm import selectinload
         result = await self._session.execute(
-            select(ConnectorModel).where(ConnectorModel.project_id == project_id)
+            select(ConnectorModel)
+            .where(ConnectorModel.project_id == project_id)
+            .options(selectinload(ConnectorModel.credential))
         )
         models = result.scalars().all()
         return [self._to_domain(m) for m in models]
 
     async def get_by_id(self, connector_id: str) -> Connector | None:
         """Get connector by ID."""
+        from sqlalchemy.orm import selectinload
         result = await self._session.execute(
-            select(ConnectorModel).where(ConnectorModel.id == connector_id)
+            select(ConnectorModel)
+            .where(ConnectorModel.id == connector_id)
+            .options(selectinload(ConnectorModel.credential))
         )
         model = result.scalar_one_or_none()
         return self._to_domain(model) if model else None
@@ -278,6 +287,7 @@ class ConnectorRepository:
             id=model.id,
             name=model.name,
             credential_id=model.credential_id,
+            credential_type=CredentialType(model.credential.type),
             project_id=model.project_id,
             config=model.config,
             enabled=model.enabled,

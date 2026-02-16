@@ -14,6 +14,7 @@ def aws_connector() -> Connector:
         id="test-aws-connector",
         name="Test AWS Connector",
         credential_id="test-credential",
+        credential_type=CredentialType.AWS,
         project_id="test-project",
         config={
             "region": "us-east-1",
@@ -50,6 +51,7 @@ def gcp_connector() -> Connector:
         id="test-gcp-connector",
         name="Test GCP Connector",
         credential_id="test-credential",
+        credential_type=CredentialType.GCP,
         project_id="test-project",
         config={
             "project_id": "my-gcp-project",
@@ -82,6 +84,7 @@ def azure_connector() -> Connector:
         id="test-azure-connector",
         name="Test Azure Connector",
         credential_id="test-credential",
+        credential_type=CredentialType.AZURE,
         project_id="test-project",
         config={
             "subscription_id": "sub-12345",
@@ -132,6 +135,7 @@ class TestAWSProviderInit:
             id="minimal-connector",
             name="Minimal",
             credential_id="cred",
+            credential_type=CredentialType.AWS,
             project_id="proj",
             config={},
         )
@@ -163,6 +167,7 @@ class TestGCPProviderInit:
             id="minimal-connector",
             name="Minimal",
             credential_id="cred",
+            credential_type=CredentialType.GCP,
             project_id="proj",
             config={},
         )
@@ -195,6 +200,7 @@ class TestAzureProviderInit:
             id="minimal-connector",
             name="Minimal",
             credential_id="cred",
+            credential_type=CredentialType.AZURE,
             project_id="proj",
             config={},
         )
@@ -215,6 +221,7 @@ class TestStaticProvider:
             id="static-connector",
             name="Static Connector",
             credential_id="cred",
+            credential_type=CredentialType.STATIC_PROXY_PROVIDER,
             project_id="proj",
             config={
                 "proxies": [
@@ -235,6 +242,7 @@ class TestStaticProvider:
             id="static-connector",
             name="Static Connector",
             credential_id="cred",
+            credential_type=CredentialType.STATIC_PROXY_PROVIDER,
             project_id="proj",
             config={
                 "proxies": [
@@ -264,6 +272,7 @@ class TestAPIProvider:
             id="api-connector",
             name="API Connector",
             credential_id="cred",
+            credential_type=CredentialType.STATIC_PROXY_PROVIDER,
             project_id="proj",
             config={
                 "url": "https://api.example.com/proxies",

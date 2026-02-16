@@ -121,6 +121,7 @@ class TestProxyManager:
         connector = Connector(
             name="Test Connector",
             credential_id=credential.id,
+            credential_type=CredentialType.STATIC_PROXY_PROVIDER,
             project_id=project.id,
             config={},
         )
@@ -145,6 +146,7 @@ class TestProxyManager:
         connector = Connector(
             name="Proxy Connector",
             credential_id=credential.id,
+            credential_type=CredentialType.STATIC_PROXY_PROVIDER,
             project_id=project.id,
             config={},
         )
@@ -177,6 +179,7 @@ class TestProxyManager:
         connector = Connector(
             name="Multi Conn",
             credential_id=credential.id,
+            credential_type=CredentialType.STATIC_PROXY_PROVIDER,
             project_id=project.id,
             config={},
         )
@@ -211,6 +214,7 @@ class TestProxyManager:
         connector = Connector(
             name="Health Conn",
             credential_id=credential.id,
+            credential_type=CredentialType.STATIC_PROXY_PROVIDER,
             project_id=project.id,
             config={},
         )
@@ -257,6 +261,7 @@ class TestProxyManager:
         connector = Connector(
             name="Stats Conn",
             credential_id=credential.id,
+            credential_type=CredentialType.STATIC_PROXY_PROVIDER,
             project_id=project.id,
             config={},
         )
@@ -306,6 +311,7 @@ class TestProxyManager:
         connector = Connector(
             name="Status Conn",
             credential_id=credential.id,
+            credential_type=CredentialType.STATIC_PROXY_PROVIDER,
             project_id=project.id,
             config={},
         )
@@ -370,6 +376,7 @@ class TestProxyManager:
         connector = Connector(
             name="Cascade Conn",
             credential_id=credential.id,
+            credential_type=CredentialType.STATIC_PROXY_PROVIDER,
             project_id=project.id,
             config={},
         )

@@ -47,6 +47,7 @@ class TestMetricsRepository:
         connector = Connector(
             name=f"Test Connector{suffix}",
             credential_id=credential.id,
+            credential_type=CredentialType.STATIC_PROXY_PROVIDER,
             project_id=project.id,
             config={},
             enabled=True,

@@ -96,6 +96,7 @@ async def create_connector(
     connector = Connector(
         name=connector_data.name,
         credential_id=connector_data.credential_id,
+        credential_type=credential_type_enum,
         project_id=project_id,
         config=validated_config,
         enabled=connector_data.enabled,
