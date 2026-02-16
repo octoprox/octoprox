@@ -48,10 +48,20 @@ class HealthChecker:
         proxies = self._proxy_manager.proxies
         if not proxies:
             return
-        
-        logger.debug("Running health checks", proxy_count=len(proxies))
-        
-        tasks = [self._check_proxy(proxy) for proxy in proxies]
+
+        # Skip proxies that are draining or terminating - they should not be
+        # health checked as they are being removed from the pool
+        active_proxies = [
+            p for p in proxies
+            if p.status not in (ProxyStatus.DRAINING, ProxyStatus.TERMINATING)
+        ]
+
+        if not active_proxies:
+            return
+
+        logger.debug("Running health checks", proxy_count=len(active_proxies))
+
+        tasks = [self._check_proxy(proxy) for proxy in active_proxies]
         await asyncio.gather(*tasks, return_exceptions=True)
     
     def _get_proxy_mounts(
