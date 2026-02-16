@@ -3,11 +3,7 @@
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
-from api.models.credential import CredentialType
 from api.models.proxy import ProxyStatus
-
-# Cloud provider credential types that support auto-scaling
-CLOUD_PROVIDER_TYPES = {CredentialType.AWS, CredentialType.GCP, CredentialType.AZURE}
 
 router = APIRouter(prefix="/projects/{project_id}/metrics")
 
@@ -135,15 +131,14 @@ async def get_scaling_metrics(request: Request, project_id: str) -> ScalingMetri
     for connector in all_connectors:
         if not connector.enabled:
             continue
-        # Get credential to check type
-        credential = proxy_manager.get_credential(connector.credential_id)
-        if not credential or credential.type not in CLOUD_PROVIDER_TYPES:
+        # Check if this is a cloud connector using typed config
+        cloud_config = connector.cloud_config
+        if not cloud_config:
             continue
         # This is an enabled cloud provider connector
         cloud_connector_ids.add(connector.id)
-        config = connector.config or {}
-        min_instances += config.get("min_proxies", 1)
-        max_instances += config.get("max_proxies", 10)
+        min_instances += cloud_config.min_proxies
+        max_instances += cloud_config.max_proxies
 
     # Get proxies only from cloud provider connectors
     all_proxies = proxy_manager.get_proxies_for_project(project_id)

@@ -57,6 +57,7 @@ class TestConnectorRepository:
         connector = Connector(
             name="Test Connector",
             credential_id=credential.id,
+            credential_type=CredentialType.STATIC_PROXY_PROVIDER,
             project_id=project.id,
             config={"region": "us-east-1"},
             enabled=True,
@@ -85,6 +86,7 @@ class TestConnectorRepository:
             connector = Connector(
                 name=f"Connector {i}",
                 credential_id=credential.id,
+                credential_type=CredentialType.STATIC_PROXY_PROVIDER,
                 project_id=project.id,
                 config={},
             )
@@ -115,6 +117,7 @@ class TestConnectorRepository:
             conn = Connector(
                 name=f"P1 Conn {i}",
                 credential_id=cred1.id,
+                credential_type=CredentialType.STATIC_PROXY_PROVIDER,
                 project_id=project1.id,
                 config={},
             )
@@ -124,6 +127,7 @@ class TestConnectorRepository:
         conn = Connector(
             name="P2 Conn",
             credential_id=cred2.id,
+            credential_type=CredentialType.STATIC_PROXY_PROVIDER,
             project_id=project2.id,
             config={},
         )
@@ -151,6 +155,7 @@ class TestConnectorRepository:
         connector = Connector(
             name="Find Me",
             credential_id=credential.id,
+            credential_type=CredentialType.STATIC_PROXY_PROVIDER,
             project_id=project.id,
             config={"key": "value"},
         )
@@ -186,6 +191,7 @@ class TestConnectorRepository:
         connector = Connector(
             name="Original",
             credential_id=credential.id,
+            credential_type=CredentialType.STATIC_PROXY_PROVIDER,
             project_id=project.id,
             config={},
             enabled=True,
@@ -220,6 +226,7 @@ class TestConnectorRepository:
         connector = Connector(
             name="Delete Me",
             credential_id=credential.id,
+            credential_type=CredentialType.STATIC_PROXY_PROVIDER,
             project_id=project.id,
             config={},
         )

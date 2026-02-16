@@ -7,7 +7,7 @@ import pytest
 
 from api.core.auto_scaler import AutoScaler, CHECK_INTERVAL_SECONDS
 from api.core.demand_tracker import DemandLevel
-from api.models.connector import Connector
+from api.models.connector import CloudConnectorConfig, Connector
 from api.models.credential import Credential, CredentialType
 from api.models.proxy import Proxy, ProxyProtocol, ProxyStatus
 
@@ -42,10 +42,15 @@ def sample_connector() -> Connector:
         id="test-connector-1",
         name="Test AWS Connector",
         credential_id="test-credential-1",
+        credential_type=CredentialType.AWS,
         project_id="test-project-1",
         config={
             "region": "us-east-1",
             "instance_type": "t3.micro",
+            "instance_name": "test-proxy",
+            "key_pair_name": "test-key",
+            "security_group": "sg-12345",
+            "ami_id": "ami-12345",
             "min_proxies": 1,
             "max_proxies": 5,
             "min_rotation_period_minutes": 60,
@@ -134,7 +139,9 @@ class TestScheduleRotation:
         self, auto_scaler: AutoScaler, sample_proxy: Proxy, sample_connector: Connector
     ) -> None:
         """Test that schedule_rotation sets a rotation time."""
-        auto_scaler._schedule_rotation(sample_proxy, sample_connector.config)
+        cloud_config = sample_connector.cloud_config
+        assert cloud_config is not None
+        auto_scaler._schedule_rotation(sample_proxy, cloud_config)
 
         assert sample_proxy.id in auto_scaler._rotation_schedule
         rotation_time = auto_scaler._rotation_schedule[sample_proxy.id]
@@ -145,14 +152,14 @@ class TestScheduleRotation:
         self, auto_scaler: AutoScaler, sample_proxy: Proxy
     ) -> None:
         """Test that rotation time is within min/max bounds."""
-        config = {
-            "min_rotation_period_minutes": 60,
-            "max_rotation_period_minutes": 120,
-        }
+        cloud_config = CloudConnectorConfig(
+            min_rotation_period_minutes=60,
+            max_rotation_period_minutes=120,
+        )
         # Use naive datetime to match utc_now() which returns naive datetime
         now = datetime.now(timezone.utc).replace(tzinfo=None)
 
-        auto_scaler._schedule_rotation(sample_proxy, config)
+        auto_scaler._schedule_rotation(sample_proxy, cloud_config)
 
         rotation_time = auto_scaler._rotation_schedule[sample_proxy.id]
         min_time = now + timedelta(minutes=60)

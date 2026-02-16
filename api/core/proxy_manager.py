@@ -535,14 +535,15 @@ class ProxyManager:
             project_id, len(healthy_proxies)
         )
 
-        # Get min/max from connectors (aggregate across all AWS connectors)
+        # Get min/max from connectors (aggregate across all cloud connectors)
         min_instances = 0
         max_instances = 0
         for connector in self._connectors.values():
             if connector.project_id == project_id and connector.enabled:
-                config = connector.config
-                min_instances += config.get("min_proxies", 1)
-                max_instances += config.get("max_proxies", 10)
+                cloud_config = connector.cloud_config
+                if cloud_config:
+                    min_instances += cloud_config.min_proxies
+                    max_instances += cloud_config.max_proxies
 
         return {
             "demand_level": demand_info["demand_level"].value,

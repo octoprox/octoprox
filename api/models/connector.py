@@ -84,7 +84,15 @@ class StaticProxyProviderConnectorConfig(BaseModel):
     pass
 
 
-class AWSConnectorConfig(BaseModel):
+class CloudConnectorConfig(BaseModel):
+    """Base configuration for cloud connectors with common scaling fields."""
+    min_proxies: int = 1
+    max_proxies: int = 10
+    min_rotation_period_minutes: int = 60
+    max_rotation_period_minutes: int = 1440
+
+
+class AWSConnectorConfig(CloudConnectorConfig):
     """Configuration for AWS connectors."""
     instance_name: str
     region: str
@@ -93,10 +101,6 @@ class AWSConnectorConfig(BaseModel):
     security_group: str
     ami_id: str
     tags: dict[str, str] = Field(default_factory=dict)
-    min_proxies: int = 1
-    max_proxies: int = 10
-    min_rotation_period_minutes: int = 60
-    max_rotation_period_minutes: int = 1440
 
     @model_validator(mode='after')
     def validate_required_fields(self) -> 'AWSConnectorConfig':
@@ -116,7 +120,7 @@ class AWSConnectorConfig(BaseModel):
         return self
 
 
-class GCPConnectorConfig(BaseModel):
+class GCPConnectorConfig(CloudConnectorConfig):
     """Configuration for GCP connectors."""
     instance_name: str
     region: str
@@ -126,10 +130,6 @@ class GCPConnectorConfig(BaseModel):
     subnetwork: str | None = None
     ssh_key: str | None = None
     tags: dict[str, str] = Field(default_factory=dict)
-    min_proxies: int = 1
-    max_proxies: int = 10
-    min_rotation_period_minutes: int = 60
-    max_rotation_period_minutes: int = 1440
 
     @model_validator(mode='after')
     def validate_required_fields(self) -> 'GCPConnectorConfig':
@@ -143,7 +143,7 @@ class GCPConnectorConfig(BaseModel):
         return self
 
 
-class AzureConnectorConfig(BaseModel):
+class AzureConnectorConfig(CloudConnectorConfig):
     """Configuration for Azure connectors."""
     instance_name: str
     region: str
@@ -153,10 +153,6 @@ class AzureConnectorConfig(BaseModel):
     subnet: str | None = None
     ssh_key_name: str | None = None
     tags: dict[str, str] = Field(default_factory=dict)
-    min_proxies: int = 1
-    max_proxies: int = 10
-    min_rotation_period_minutes: int = 60
-    max_rotation_period_minutes: int = 1440
 
     @model_validator(mode='after')
     def validate_required_fields(self) -> 'AzureConnectorConfig':
@@ -185,12 +181,38 @@ def validate_connector_config(credential_type: CredentialType, config: dict[str,
     return validated.model_dump(exclude_none=True)
 
 
+def get_cloud_config(
+    credential_type: CredentialType, config: dict[str, Any]
+) -> CloudConnectorConfig | None:
+    """Get a typed cloud config model from a raw config dict.
+
+    Returns the appropriate CloudConnectorConfig subclass for cloud providers
+    (AWS, GCP, Azure), or None for non-cloud providers.
+
+    Args:
+        credential_type: The type of credential.
+        config: The raw configuration dictionary.
+
+    Returns:
+        A CloudConnectorConfig (or subclass) if it's a cloud provider, None otherwise.
+    """
+    if credential_type == CredentialType.AWS:
+        return AWSConnectorConfig(**config)
+    elif credential_type == CredentialType.GCP:
+        return GCPConnectorConfig(**config)
+    elif credential_type == CredentialType.AZURE:
+        return AzureConnectorConfig(**config)
+    else:
+        return None
+
+
 class Connector(BaseModel):
     """Represents a connector that provides proxies."""
 
     id: str = Field(default_factory=lambda: str(uuid4()))
     name: str
     credential_id: str
+    credential_type: CredentialType
     project_id: str
     config: dict[str, Any] = Field(default_factory=dict)
     enabled: bool = True
@@ -201,6 +223,11 @@ class Connector(BaseModel):
     # Metadata
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
+
+    @property
+    def cloud_config(self) -> CloudConnectorConfig | None:
+        """Get the cloud config if this is a cloud connector, None otherwise."""
+        return get_cloud_config(self.credential_type, self.config)
 
 
 class ConnectorCreate(BaseModel):

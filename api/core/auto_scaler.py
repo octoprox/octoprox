@@ -15,7 +15,7 @@ import structlog
 
 from api.core import utc_now
 from api.core.demand_tracker import DemandLevel
-from api.models.connector import Connector
+from api.models.connector import CloudConnectorConfig, Connector
 from api.models.credential import CredentialType
 from api.models.proxy import Proxy, ProxyProtocol, ProxyStatus
 
@@ -101,26 +101,29 @@ class AutoScaler:
         self, connector: Connector, credential
     ) -> None:
         """Check and apply scaling for a connector."""
-        config = connector.config
-        min_proxies = config.get("min_proxies", 1)
-        max_proxies = config.get("max_proxies", 10)
-        
+        cloud_config = connector.cloud_config
+        if not cloud_config:
+            return
+
         # Get current proxies (excluding terminating)
         proxies = self._proxy_manager.get_active_proxies_for_connector(connector.id)
         current_count = len(proxies)
-        
+
         # Get demand level for the project
         project_id = connector.project_id
         healthy_proxies = [p for p in proxies if p.status == ProxyStatus.HEALTHY]
         demand_level = await self._proxy_manager.demand_tracker.get_demand_level(
             project_id, len(healthy_proxies)
         )
-        
+
         # Determine target count based on demand
         target_count = self._calculate_target_count(
-            demand_level, min_proxies, max_proxies, current_count
+            demand_level,
+            cloud_config.min_proxies,
+            cloud_config.max_proxies,
+            current_count,
         )
-        
+
         # Scale up or down
         if target_count > current_count:
             await self._scale_up(connector, credential, target_count - current_count)
@@ -161,6 +164,10 @@ class AutoScaler:
         if not provider:
             return
 
+        cloud_config = connector.cloud_config
+        if not cloud_config:
+            return
+
         for _ in range(count):
             try:
                 proxy = await provider.create_instance()
@@ -168,7 +175,7 @@ class AutoScaler:
                     # Set connector_id on the proxy
                     proxy.connector_id = connector.id
                     # Schedule rotation for this new proxy
-                    self._schedule_rotation(proxy, connector.config)
+                    self._schedule_rotation(proxy, cloud_config)
                     # Add to proxy manager
                     await self._proxy_manager.add_proxy(proxy)
                     logger.info(
@@ -201,13 +208,13 @@ class AutoScaler:
         for proxy in proxies_to_remove:
             await self._proxy_manager.start_proxy_draining(proxy.id)
 
-    def _schedule_rotation(self, proxy: Proxy, config: dict) -> None:
+    def _schedule_rotation(self, proxy: Proxy, typed_config: CloudConnectorConfig) -> None:
         """Schedule rotation for a proxy based on config."""
-        min_minutes = config.get("min_rotation_period_minutes", 60)
-        max_minutes = config.get("max_rotation_period_minutes", 1440)
-
         # Random rotation time between min and max
-        rotation_minutes = random.randint(min_minutes, max_minutes)
+        rotation_minutes = random.randint(
+            typed_config.min_rotation_period_minutes,
+            typed_config.max_rotation_period_minutes,
+        )
         rotation_time = utc_now() + timedelta(minutes=rotation_minutes)
 
         self._rotation_schedule[proxy.id] = rotation_time
@@ -224,11 +231,13 @@ class AutoScaler:
         self, connector: Connector, credential
     ) -> None:
         """Check and execute rotation for proxies in a connector."""
+        cloud_config = connector.cloud_config
+        if not cloud_config:
+            return
+
         proxies = self._proxy_manager.get_proxies_for_connector(connector.id)
         now = utc_now()
-        config = connector.config
-        max_rotation_minutes = config.get("max_rotation_period_minutes", 1440)
-        draining_timeout = timedelta(minutes=max_rotation_minutes)
+        draining_timeout = timedelta(minutes=cloud_config.max_rotation_period_minutes)
 
         for proxy in proxies:
             # Ensure proxy has a rotation schedule
@@ -241,9 +250,9 @@ class AutoScaler:
                             scheduled_str
                         )
                     except ValueError:
-                        self._schedule_rotation(proxy, config)
+                        self._schedule_rotation(proxy, cloud_config)
                 else:
-                    self._schedule_rotation(proxy, config)
+                    self._schedule_rotation(proxy, cloud_config)
 
             # Handle different proxy states
             if proxy.status == ProxyStatus.DRAINING:
@@ -266,6 +275,10 @@ class AutoScaler:
             connector_id=connector.id,
         )
 
+        cloud_config = connector.cloud_config
+        if not cloud_config:
+            return
+
         # Create replacement instance first
         provider = self._get_cloud_provider(connector, credential)
         if provider:
@@ -273,7 +286,7 @@ class AutoScaler:
                 new_proxy = await provider.create_instance()
                 if new_proxy:
                     new_proxy.connector_id = connector.id
-                    self._schedule_rotation(new_proxy, connector.config)
+                    self._schedule_rotation(new_proxy, cloud_config)
                     await self._proxy_manager.add_proxy(new_proxy)
                     logger.info(
                         "Created replacement proxy",
