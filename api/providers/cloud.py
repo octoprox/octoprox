@@ -72,10 +72,9 @@ class AWSProvider(CloudProvider):
         - region: AWS region (default: us-east-1)
         - instance_type: EC2 instance type (default: t3.micro)
         - instance_name: Name prefix for created instances (required)
-        - ami_id: AMI ID for proxy instances (required for create)
-        - security_group: Security group ID (required for create)
-        - subnet_id: Subnet ID (optional)
-        - key_pair_name: SSH key pair name (optional)
+        - ami_id: AMI ID for proxy instances (required)
+        - security_group: Security group ID (required)
+        - key_pair_name: SSH key pair name (required)
         - tags: Custom tags to apply to instances (optional, dict)
 
     Credential config (secrets):
@@ -91,7 +90,6 @@ class AWSProvider(CloudProvider):
         self._instance_name = connector.config.get("instance_name")
         self._ami_id = connector.config.get("ami_id")
         self._security_group = connector.config.get("security_group")
-        self._subnet_id = connector.config.get("subnet_id")
         self._key_pair_name = connector.config.get("key_pair_name")
         self._tags = connector.config.get("tags", {})
         self._ec2_client = None
@@ -136,7 +134,6 @@ class AWSProvider(CloudProvider):
             connector_id=self.connector.id,
             ami_id=self._ami_id,
             security_group=self._security_group,
-            subnet_id=self._subnet_id,
             instance_name=self._instance_name,
             raw_config=self.connector.config,
         )
@@ -185,21 +182,11 @@ class AWSProvider(CloudProvider):
                 ],
             }
 
-            # Handle subnet and security group configuration
-            # When using a subnet, we need to use NetworkInterfaces
+            # Handle security group configuration
+            # The security group determines which VPC the instance will be launched in
             security_group = self._security_group.strip() if self._security_group else None
 
-            if self._subnet_id:
-                network_interface = {
-                    "DeviceIndex": 0,
-                    "SubnetId": self._subnet_id,
-                    "AssociatePublicIpAddress": True,
-                }
-                if security_group:
-                    network_interface["Groups"] = [security_group]
-                run_args["NetworkInterfaces"] = [network_interface]
-            elif security_group:
-                # Only add SecurityGroupIds if specified, otherwise use default
+            if security_group:
                 run_args["SecurityGroupIds"] = [security_group]
 
             if self._key_pair_name:
@@ -210,7 +197,6 @@ class AWSProvider(CloudProvider):
                 ami_id=self._ami_id,
                 instance_type=self._instance_type,
                 security_group=self._security_group,
-                subnet_id=self._subnet_id,
             )
 
             instances = ec2_resource.create_instances(**run_args)
