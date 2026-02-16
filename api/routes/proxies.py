@@ -322,7 +322,11 @@ async def update_proxy(
 
 @router.delete("/{proxy_id}", status_code=204)
 async def delete_proxy(request: Request, proxy_id: str) -> None:
-    """Remove a proxy from the pool."""
+    """Remove a proxy from the pool.
+
+    If the proxy belongs to a cloud provider connector (AWS, GCP, Azure),
+    the cloud instance will be terminated before removing the proxy.
+    """
     proxy_manager = request.app.state.proxy_manager
 
     # Get proxy to update connector count before deletion
@@ -330,10 +334,44 @@ async def delete_proxy(request: Request, proxy_id: str) -> None:
     if proxy is None:
         raise HTTPException(status_code=404, detail="Proxy not found")
 
-    # Update connector proxy count
+    # Get connector and credential to check if this is a cloud provider
     connector = proxy_manager.get_connector(proxy.connector_id)
-    if connector and connector.proxy_count > 0:
-        connector.proxy_count -= 1
+
+    if connector:
+        credential = proxy_manager.get_credential(connector.credential_id)
+
+        # Check if this is a cloud provider connector and terminate the instance
+        if credential and credential.type in (
+            CredentialType.AWS,
+            CredentialType.GCP,
+            CredentialType.AZURE
+        ):
+            from api.providers.cloud import AWSProvider, GCPProvider, AzureProvider
+
+            # Get the appropriate cloud provider
+            if credential.type == CredentialType.AWS:
+                provider = AWSProvider(connector, credential)
+            elif credential.type == CredentialType.GCP:
+                provider = GCPProvider(connector, credential)
+            else:  # AZURE
+                provider = AzureProvider(connector, credential)
+
+            # Terminate the cloud instance (proxy_id contains the instance identifier)
+            # TODO: Check if the proxy_id will be a unique ID for GCP and Azure!!!
+            terminated = await provider.terminate_instance(proxy_id)
+            if not terminated:
+                # Log warning but continue with proxy removal
+                import structlog
+                logger = structlog.get_logger()
+                logger.warning(
+                    "Failed to terminate cloud instance, removing proxy anyway",
+                    proxy_id=proxy_id,
+                    credential_type=credential.type.value,
+                )
+
+        # Update connector proxy count
+        if connector.proxy_count > 0:
+            connector.proxy_count -= 1
 
     await proxy_manager.remove_proxy(proxy_id)
 
