@@ -90,8 +90,8 @@ class AWSConnectorConfig(BaseModel):
     region: str
     instance_type: str
     key_pair_name: str
-    security_group: str | None = None
-    ami_id: str | None = None
+    security_group: str
+    ami_id: str
     tags: dict[str, str] = Field(default_factory=dict)
     min_proxies: int = 1
     max_proxies: int = 10
@@ -109,6 +109,10 @@ class AWSConnectorConfig(BaseModel):
             raise ValueError('instance_type is required and cannot be empty')
         if not self.key_pair_name or not self.key_pair_name.strip():
             raise ValueError('key_pair_name is required and cannot be empty')
+        if not self.security_group or not self.security_group.strip():
+            raise ValueError('security_group is required and cannot be empty')
+        if not self.ami_id or not self.ami_id.strip():
+            raise ValueError('ami_id is required and cannot be empty')
         return self
 
 

@@ -371,6 +371,28 @@ export default function ConnectorConfig() {
       vm_size: optionsData?.azure_vm_sizes,
     }
 
+    // Required fields for AWS connector
+    const awsRequiredFields = ['instance_name', 'region', 'instance_type', 'key_pair_name', 'security_group', 'ami_id']
+    const isRequired = (key: string) => type === 'aws' && awsRequiredFields.includes(key)
+
+    // Custom placeholders for specific fields
+    const getPlaceholder = (key: string): string => {
+      const placeholders: Record<string, string> = {
+        security_group: 'sg-xxxxxxxx',
+        ami_id: 'ami-xxxxxxxx',
+        key_pair_name: 'my-key-pair',
+        instance_name: 'proxy-instance',
+      }
+      return placeholders[key] || getFieldLabel(key)
+    }
+
+    // Helper text for specific fields
+    const getHelperText = (key: string): string | null => {
+      const helpers: Record<string, string> = {
+      }
+      return helpers[key] || null
+    }
+
     const fieldsByTab = getFieldsByTab(type)
     const currentFields = fieldsByTab[activeConfigTab]
     const isNumber = (key: string) => ['min_proxies', 'max_proxies', 'min_rotation_period_minutes', 'max_rotation_period_minutes'].includes(key)
@@ -413,14 +435,20 @@ export default function ConnectorConfig() {
             <div className="grid grid-cols-2 gap-x-4 gap-y-3">
               {currentFields.map((key) => {
                 const options = dropdownFields[key]
+                const helperText = getHelperText(key)
+                const required = isRequired(key)
                 return (
                   <div key={key}>
-                    <label className="block text-xs font-medium text-gray-600 mb-1">{getFieldLabel(key)}</label>
+                    <label className="block text-xs font-medium text-gray-600 mb-1">
+                      {getFieldLabel(key)}
+                      {required && <span className="text-red-500 ml-1">*</span>}
+                    </label>
                     {options ? (
                       <select
                         value={config[key] || ''}
                         onChange={(e) => onChange(key, e.target.value)}
                         className="w-full px-3 py-1.5 text-sm border rounded-lg focus:ring-1 focus:ring-blue-500 focus:border-blue-500"
+                        required={required}
                       >
                         {options.map((opt) => (<option key={opt} value={opt}>{opt}</option>))}
                       </select>
@@ -430,9 +458,11 @@ export default function ConnectorConfig() {
                         value={config[key] || ''}
                         onChange={(e) => onChange(key, e.target.value)}
                         className="w-full px-3 py-1.5 text-sm border rounded-lg focus:ring-1 focus:ring-blue-500 focus:border-blue-500"
-                        placeholder={getFieldLabel(key)}
+                        placeholder={getPlaceholder(key)}
+                        required={required}
                       />
                     )}
+                    {helperText && <p className="text-xs text-gray-500 mt-1">{helperText}</p>}
                   </div>
                 )
               })}
