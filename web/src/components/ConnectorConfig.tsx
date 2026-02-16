@@ -105,12 +105,13 @@ const getDefaultConfig = (type: CredentialType | null, options?: ConnectorOption
       }
     case 'gcp':
       return {
+        project_id: '',
         instance_name: '',
-        region: options?.gcp_regions[0] || 'us-central1',
-        zone: '',
+        zone: 'us-central1-a',
         machine_type: options?.gcp_machine_types[0] || 'e2-micro',
         network: 'default',
         subnetwork: '',
+        source_image: 'projects/debian-cloud/global/images/family/debian-11',
         ssh_key: '',
         tags: '{}',
         min_proxies: '1',
@@ -120,13 +121,13 @@ const getDefaultConfig = (type: CredentialType | null, options?: ConnectorOption
       }
     case 'azure':
       return {
-        instance_name: '',
-        region: options?.azure_regions[0] || 'eastus',
-        vm_size: options?.azure_vm_sizes[0] || 'Standard_B1s',
+        subscription_id: '',
         resource_group: '',
-        virtual_network: '',
-        subnet: '',
-        ssh_key_name: '',
+        instance_name: '',
+        location: options?.azure_regions[0] || 'eastus',
+        vm_size: options?.azure_vm_sizes[0] || 'Standard_B1s',
+        vnet_name: '',
+        subnet_name: '',
         tags: '{}',
         min_proxies: '1',
         max_proxies: '10',
@@ -320,11 +321,11 @@ export default function ConnectorConfig() {
     const scalingFields = ['min_proxies', 'max_proxies', 'min_rotation_period_minutes', 'max_rotation_period_minutes']
     const advancedFields = ['tags']
 
-    // Infrastructure fields vary by provider - instance_name is required and first
+    // Infrastructure fields vary by provider
     const infraFields: Record<string, string[]> = {
       aws: ['instance_name', 'region', 'instance_type', 'key_pair_name', 'security_group', 'ami_id'],
-      gcp: ['instance_name', 'region', 'zone', 'machine_type', 'network', 'subnetwork', 'ssh_key'],
-      azure: ['instance_name', 'region', 'vm_size', 'resource_group', 'virtual_network', 'subnet', 'ssh_key_name'],
+      gcp: ['project_id', 'instance_name', 'zone', 'machine_type', 'network', 'subnetwork', 'source_image', 'ssh_key'],
+      azure: ['subscription_id', 'resource_group', 'instance_name', 'location', 'vm_size', 'vnet_name', 'subnet_name'],
     }
 
     return {
@@ -343,16 +344,19 @@ export default function ConnectorConfig() {
       key_pair_name: 'Key Pair',
       security_group: 'Security Group',
       ami_id: 'AMI ID',
+      project_id: 'Project ID',
       zone: 'Zone',
       machine_type: 'Machine Type',
       network: 'Network',
       subnetwork: 'Subnetwork',
+      source_image: 'Source Image',
       ssh_key: 'SSH Key',
+      subscription_id: 'Subscription ID',
+      location: 'Location',
       vm_size: 'VM Size',
       resource_group: 'Resource Group',
-      virtual_network: 'Virtual Network',
-      subnet: 'Subnet',
-      ssh_key_name: 'SSH Key Name',
+      vnet_name: 'Virtual Network',
+      subnet_name: 'Subnet',
       min_proxies: 'Min Proxies',
       max_proxies: 'Max Proxies',
       min_rotation_period_minutes: 'Min Rotation (min)',
@@ -365,15 +369,20 @@ export default function ConnectorConfig() {
     if (!type || type === 'static_proxy_provider') return null
 
     const dropdownFields: Record<string, string[] | undefined> = {
-      region: type === 'aws' ? optionsData?.aws_regions : type === 'gcp' ? optionsData?.gcp_regions : optionsData?.azure_regions,
+      region: optionsData?.aws_regions,
+      location: optionsData?.azure_regions,
       instance_type: optionsData?.aws_instance_types,
       machine_type: optionsData?.gcp_machine_types,
       vm_size: optionsData?.azure_vm_sizes,
     }
 
-    // Required fields for AWS connector
-    const awsRequiredFields = ['instance_name', 'region', 'instance_type', 'key_pair_name', 'security_group', 'ami_id']
-    const isRequired = (key: string) => type === 'aws' && awsRequiredFields.includes(key)
+    // Required fields by provider
+    const requiredFields: Record<string, string[]> = {
+      aws: ['instance_name', 'region', 'instance_type', 'key_pair_name', 'security_group', 'ami_id'],
+      gcp: ['project_id', 'instance_name', 'zone', 'machine_type'],
+      azure: ['subscription_id', 'resource_group', 'instance_name', 'vm_size'],
+    }
+    const isRequired = (key: string) => requiredFields[type]?.includes(key) || false
 
     // Custom placeholders for specific fields
     const getPlaceholder = (key: string): string => {
@@ -382,6 +391,12 @@ export default function ConnectorConfig() {
         ami_id: 'ami-xxxxxxxx',
         key_pair_name: 'my-key-pair',
         instance_name: 'proxy-instance',
+        project_id: 'my-gcp-project',
+        source_image: 'projects/debian-cloud/global/images/family/debian-11',
+        subscription_id: 'xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx',
+        resource_group: 'my-resource-group',
+        vnet_name: 'my-vnet',
+        subnet_name: 'default',
       }
       return placeholders[key] || getFieldLabel(key)
     }

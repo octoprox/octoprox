@@ -84,14 +84,14 @@ class AWSProvider(CloudProvider):
 
     def __init__(self, connector: Connector, credential: Credential) -> None:
         super().__init__(connector, credential)
-        # AWS-specific config from connector
-        self._region = connector.config.get("region", "us-east-1")
-        self._instance_type = connector.config.get("instance_type", "t3.micro")
-        self._instance_name = connector.config.get("instance_name")
-        self._ami_id = connector.config.get("ami_id")
-        self._security_group = connector.config.get("security_group")
-        self._key_pair_name = connector.config.get("key_pair_name")
-        self._tags = connector.config.get("tags", {})
+        # AWS-specific config from connector using typed cloud_config
+        from api.models.connector import AWSConnectorConfig
+
+        cloud_config = connector.cloud_config
+        if not isinstance(cloud_config, AWSConnectorConfig):
+            raise ValueError("AWSProvider requires an AWS connector configuration")
+
+        self._config = cloud_config
         self._ec2_client = None
         self._ec2_resource = None
 
@@ -108,20 +108,20 @@ class AWSProvider(CloudProvider):
                 if access_key and secret_key:
                     self._ec2_client = boto3.client(
                         "ec2",
-                        region_name=self._region,
+                        region_name=self._config.region,
                         aws_access_key_id=access_key,
                         aws_secret_access_key=secret_key,
                     )
                     self._ec2_resource = boto3.resource(
                         "ec2",
-                        region_name=self._region,
+                        region_name=self._config.region,
                         aws_access_key_id=access_key,
                         aws_secret_access_key=secret_key,
                     )
                 else:
                     # Fall back to default credentials (env vars, IAM role, etc.)
-                    self._ec2_client = boto3.client("ec2", region_name=self._region)
-                    self._ec2_resource = boto3.resource("ec2", region_name=self._region)
+                    self._ec2_client = boto3.client("ec2", region_name=self._config.region)
+                    self._ec2_resource = boto3.resource("ec2", region_name=self._config.region)
             return self._ec2_client, self._ec2_resource
         except ImportError:
             logger.error("boto3 not installed. Install with: pip install octoprox[cloud]")
@@ -132,22 +132,13 @@ class AWSProvider(CloudProvider):
         logger.debug(
             "AWS create_instance called",
             connector_id=self.connector.id,
-            ami_id=self._ami_id,
-            security_group=self._security_group,
-            instance_name=self._instance_name,
-            raw_config=self.connector.config,
+            ami_id=self._config.ami_id,
+            security_group=self._config.security_group,
+            instance_name=self._config.instance_name,
         )
 
         _, ec2_resource = self._get_boto3_clients()
         if not ec2_resource:
-            return None
-
-        # Validate required fields (check for None and empty strings)
-        if not self._ami_id or not self._ami_id.strip():
-            logger.error("ami_id required for instance creation")
-            return None
-        if not self._instance_name or not self._instance_name.strip():
-            logger.error("instance_name required in connector config for instance creation")
             return None
 
         try:
@@ -157,7 +148,7 @@ class AWSProvider(CloudProvider):
             user_data = get_squid_setup_script()
 
             # Build instance name with timestamp for uniqueness
-            instance_name = f"{self._instance_name}-{int(time.time())}"
+            instance_name = f"{self._config.instance_name}-{int(time.time())}"
 
             # Build tags: start with required tags, then add custom tags
             tags = [
@@ -165,12 +156,12 @@ class AWSProvider(CloudProvider):
                 {"Key": "ManagedBy", "Value": "octoprox"},
             ]
             # Add custom tags from connector config
-            for key, value in self._tags.items():
+            for key, value in self._config.tags.items():
                 tags.append({"Key": key, "Value": str(value)})
 
             run_args = {
-                "ImageId": self._ami_id,
-                "InstanceType": self._instance_type,
+                "ImageId": self._config.ami_id,
+                "InstanceType": self._config.instance_type,
                 "MinCount": 1,
                 "MaxCount": 1,
                 "UserData": user_data,
@@ -184,19 +175,19 @@ class AWSProvider(CloudProvider):
 
             # Handle security group configuration
             # The security group determines which VPC the instance will be launched in
-            security_group = self._security_group.strip() if self._security_group else None
+            security_group = self._config.security_group.strip()
 
             if security_group:
                 run_args["SecurityGroupIds"] = [security_group]
 
-            if self._key_pair_name:
-                run_args["KeyName"] = self._key_pair_name
+            if self._config.key_pair_name:
+                run_args["KeyName"] = self._config.key_pair_name
 
             logger.debug(
                 "Creating EC2 instance",
-                ami_id=self._ami_id,
-                instance_type=self._instance_type,
-                security_group=self._security_group,
+                ami_id=self._config.ami_id,
+                instance_type=self._config.instance_type,
+                security_group=self._config.security_group,
             )
 
             instances = ec2_resource.create_instances(**run_args)
@@ -217,7 +208,7 @@ class AWSProvider(CloudProvider):
                 port=PROXY_PORT,
                 connector_id=self.connector.id,
                 status=ProxyStatus.INITIALIZING,
-                tags=["aws", self._region],
+                tags=["aws", self._config.region],
                 metadata={"instance_id": instance.id},
             )
 
@@ -266,17 +257,14 @@ class GCPProvider(CloudProvider):
 
     def __init__(self, connector: Connector, credential: Credential) -> None:
         super().__init__(connector, credential)
-        # GCP-specific config from connector
-        self._project_id = connector.config.get("project_id")
-        self._zone = connector.config.get("zone", "us-central1-a")
-        self._machine_type = connector.config.get("machine_type", "e2-micro")
-        self._instance_name = connector.config.get("instance_name")
-        self._network = connector.config.get("network", "default")
-        self._subnet = connector.config.get("subnet")
-        self._source_image = connector.config.get(
-            "source_image", "projects/debian-cloud/global/images/family/debian-11"
-        )
-        self._tags = connector.config.get("tags", {})
+        # GCP-specific config from connector using typed cloud_config
+        from api.models.connector import GCPConnectorConfig
+
+        cloud_config = connector.cloud_config
+        if not isinstance(cloud_config, GCPConnectorConfig):
+            raise ValueError("GCPProvider requires a GCP connector configuration")
+
+        self._config = cloud_config
         self._instances_client = None
 
     def _get_compute_client(self):
@@ -311,11 +299,7 @@ class GCPProvider(CloudProvider):
     async def create_instance(self) -> Proxy | None:
         """Create a new GCP Compute Engine instance configured as a proxy."""
         client = self._get_compute_client()
-        if not client or not self._project_id:
-            return None
-
-        if not self._instance_name:
-            logger.error("instance_name required in connector config for instance creation")
+        if not client:
             return None
 
         try:
@@ -323,7 +307,7 @@ class GCPProvider(CloudProvider):
             import time
 
             # Build instance name with timestamp for uniqueness
-            instance_name = f"{self._instance_name}-{int(time.time())}"
+            instance_name = f"{self._config.instance_name}-{int(time.time())}"
 
             # Use the external Squid setup script
             startup_script = get_squid_setup_script()
@@ -331,25 +315,25 @@ class GCPProvider(CloudProvider):
             # Build instance config
             instance = compute_v1.Instance()
             instance.name = instance_name
-            instance.machine_type = f"zones/{self._zone}/machineTypes/{self._machine_type}"
+            instance.machine_type = f"zones/{self._config.zone}/machineTypes/{self._config.machine_type}"
 
             # Boot disk
             disk = compute_v1.AttachedDisk()
             disk.boot = True
             disk.auto_delete = True
             initialize_params = compute_v1.AttachedDiskInitializeParams()
-            initialize_params.source_image = self._source_image
+            initialize_params.source_image = self._config.source_image
             initialize_params.disk_size_gb = 10
             disk.initialize_params = initialize_params
             instance.disks = [disk]
 
             # Network interface
             network_interface = compute_v1.NetworkInterface()
-            network_interface.network = f"global/networks/{self._network}"
-            if self._subnet:
+            network_interface.network = f"global/networks/{self._config.network}"
+            if self._config.subnetwork:
                 # Extract region from zone (e.g., us-central1-a -> us-central1)
-                region = "-".join(self._zone.split("-")[:-1])
-                network_interface.subnetwork = f"regions/{region}/subnetworks/{self._subnet}"
+                region = "-".join(self._config.zone.split("-")[:-1])
+                network_interface.subnetwork = f"regions/{region}/subnetworks/{self._config.subnetwork}"
 
             # Add external IP
             access_config = compute_v1.AccessConfig()
@@ -364,7 +348,7 @@ class GCPProvider(CloudProvider):
                 "managed-by": "octoprox",
             }
             # Add custom labels from connector config tags
-            for key, value in self._tags.items():
+            for key, value in self._config.tags.items():
                 # GCP labels must be lowercase, max 63 chars, only lowercase letters, numbers, hyphens
                 label_key = key.lower().replace(" ", "-").replace("_", "-")[:63]
                 label_value = str(value).lower().replace(" ", "-").replace("_", "-")[:63]
@@ -380,8 +364,8 @@ class GCPProvider(CloudProvider):
 
             # Create the instance
             operation = client.insert(
-                project=self._project_id,
-                zone=self._zone,
+                project=self._config.project_id,
+                zone=self._config.zone,
                 instance_resource=instance,
             )
 
@@ -391,15 +375,15 @@ class GCPProvider(CloudProvider):
             ops_client = ZoneOperationsClient()
             while operation.status != compute_v1.Operation.Status.DONE:
                 operation = ops_client.get(
-                    project=self._project_id,
-                    zone=self._zone,
+                    project=self._config.project_id,
+                    zone=self._config.zone,
                     operation=operation.name,
                 )
 
             # Get the created instance
             created_instance = client.get(
-                project=self._project_id,
-                zone=self._zone,
+                project=self._config.project_id,
+                zone=self._config.zone,
                 instance=instance_name,
             )
 
@@ -423,7 +407,7 @@ class GCPProvider(CloudProvider):
                 port=PROXY_PORT,
                 connector_id=self.connector.id,
                 status=ProxyStatus.INITIALIZING,
-                tags=["gcp", self._zone],
+                tags=["gcp", self._config.zone],
                 metadata={"instance_name": instance_name},
             )
 
@@ -437,15 +421,15 @@ class GCPProvider(CloudProvider):
     async def terminate_instance(self, instance_id: str) -> bool:
         """Terminate a GCP Compute Engine instance."""
         client = self._get_compute_client()
-        if not client or not self._project_id:
+        if not client:
             return False
 
         try:
             # Remove gcp- prefix if present
             instance_name = instance_id.replace("gcp-", "")
             client.delete(
-                project=self._project_id,
-                zone=self._zone,
+                project=self._config.project_id,
+                zone=self._config.zone,
                 instance=instance_name,
             )
             logger.info("Terminated GCP instance", instance_name=instance_name)
@@ -478,15 +462,14 @@ class AzureProvider(CloudProvider):
 
     def __init__(self, connector: Connector, credential: Credential) -> None:
         super().__init__(connector, credential)
-        # Azure-specific config from connector
-        self._subscription_id = connector.config.get("subscription_id")
-        self._resource_group = connector.config.get("resource_group")
-        self._location = connector.config.get("location", "eastus")
-        self._vm_size = connector.config.get("vm_size", "Standard_B1s")
-        self._instance_name = connector.config.get("instance_name")
-        self._vnet_name = connector.config.get("vnet_name")
-        self._subnet_name = connector.config.get("subnet_name")
-        self._tags = connector.config.get("tags", {})
+        # Azure-specific config from connector using typed cloud_config
+        from api.models.connector import AzureConnectorConfig
+
+        cloud_config = connector.cloud_config
+        if not isinstance(cloud_config, AzureConnectorConfig):
+            raise ValueError("AzureProvider requires an Azure connector configuration")
+
+        self._config = cloud_config
         self._compute_client = None
         self._network_client = None
 
@@ -517,10 +500,10 @@ class AzureProvider(CloudProvider):
                     azure_credential = DefaultAzureCredential()
 
                 self._compute_client = ComputeManagementClient(
-                    azure_credential, self._subscription_id
+                    azure_credential, self._config.subscription_id
                 )
                 self._network_client = NetworkManagementClient(
-                    azure_credential, self._subscription_id
+                    azure_credential, self._config.subscription_id
                 )
             return self._compute_client, self._network_client
         except ImportError:
@@ -535,12 +518,8 @@ class AzureProvider(CloudProvider):
         if not compute_client or not network_client:
             return None
 
-        if not self._vnet_name or not self._subnet_name:
+        if not self._config.vnet_name or not self._config.subnet_name:
             logger.error("vnet_name and subnet_name required for VM creation")
-            return None
-
-        if not self._instance_name:
-            logger.error("instance_name required in connector config for VM creation")
             return None
 
         try:
@@ -548,28 +527,28 @@ class AzureProvider(CloudProvider):
             import time
 
             # Build VM name with timestamp for uniqueness
-            vm_name = f"{self._instance_name}-{int(time.time())}"
+            vm_name = f"{self._config.instance_name}-{int(time.time())}"
 
             # Get subnet
             subnet = network_client.subnets.get(
-                self._resource_group, self._vnet_name, self._subnet_name
+                self._config.resource_group, self._config.vnet_name, self._config.subnet_name
             )
 
             # Create public IP
             pip_name = f"{vm_name}-pip"
             pip_params = {
-                "location": self._location,
+                "location": self._config.location,
                 "sku": {"name": "Basic"},
                 "public_ip_allocation_method": "Dynamic",
             }
             pip_result = network_client.public_ip_addresses.begin_create_or_update(
-                self._resource_group, pip_name, pip_params
+                self._config.resource_group, pip_name, pip_params
             ).result()
 
             # Create NIC
             nic_name = f"{vm_name}-nic"
             nic_params = {
-                "location": self._location,
+                "location": self._config.location,
                 "ip_configurations": [
                     {
                         "name": "ipconfig1",
@@ -579,7 +558,7 @@ class AzureProvider(CloudProvider):
                 ],
             }
             nic_result = network_client.network_interfaces.begin_create_or_update(
-                self._resource_group, nic_name, nic_params
+                self._config.resource_group, nic_name, nic_params
             ).result()
 
             # Use the external Squid setup script
@@ -591,14 +570,14 @@ class AzureProvider(CloudProvider):
                 "managed-by": "octoprox",
             }
             # Add custom tags from connector config
-            for key, value in self._tags.items():
+            for key, value in self._config.tags.items():
                 tags[key] = str(value)
 
             # Create VM
             vm_params = {
-                "location": self._location,
+                "location": self._config.location,
                 "tags": tags,
-                "hardware_profile": {"vm_size": self._vm_size},
+                "hardware_profile": {"vm_size": self._config.vm_size},
                 "storage_profile": {
                     "image_reference": {
                         "publisher": "Canonical",
@@ -630,17 +609,17 @@ class AzureProvider(CloudProvider):
             }
 
             vm_result = compute_client.virtual_machines.begin_create_or_update(
-                self._resource_group, vm_name, vm_params
+                self._config.resource_group, vm_name, vm_params
             ).result()
 
             # Get public IP (may need to wait for allocation)
-            pip = network_client.public_ip_addresses.get(self._resource_group, pip_name)
+            pip = network_client.public_ip_addresses.get(self._config.resource_group, pip_name)
             host = pip.ip_address
 
             if not host:
                 logger.warning("VM created but public IP not yet allocated")
                 # Try to get private IP
-                nic = network_client.network_interfaces.get(self._resource_group, nic_name)
+                nic = network_client.network_interfaces.get(self._config.resource_group, nic_name)
                 host = nic.ip_configurations[0].private_ip_address
 
             if not host:
@@ -653,7 +632,7 @@ class AzureProvider(CloudProvider):
                 port=PROXY_PORT,
                 connector_id=self.connector.id,
                 status=ProxyStatus.INITIALIZING,
-                tags=["azure", self._location],
+                tags=["azure", self._config.location],
                 metadata={"vm_name": vm_name, "vm_id": vm_result.vm_id},
             )
 
@@ -676,7 +655,7 @@ class AzureProvider(CloudProvider):
 
             # Delete VM
             compute_client.virtual_machines.begin_delete(
-                self._resource_group, vm_name
+                self._config.resource_group, vm_name
             ).result()
 
             # Clean up NIC and public IP
@@ -685,14 +664,14 @@ class AzureProvider(CloudProvider):
 
             try:
                 network_client.network_interfaces.begin_delete(
-                    self._resource_group, nic_name
+                    self._config.resource_group, nic_name
                 ).result()
             except Exception:
                 pass
 
             try:
                 network_client.public_ip_addresses.begin_delete(
-                    self._resource_group, pip_name
+                    self._config.resource_group, pip_name
                 ).result()
             except Exception:
                 pass

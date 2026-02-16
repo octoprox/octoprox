@@ -122,22 +122,25 @@ class AWSConnectorConfig(CloudConnectorConfig):
 
 class GCPConnectorConfig(CloudConnectorConfig):
     """Configuration for GCP connectors."""
+    project_id: str
     instance_name: str
-    region: str
-    zone: str | None = None
-    machine_type: str
-    network: str | None = None
+    zone: str = "us-central1-a"
+    machine_type: str = "e2-micro"
+    network: str = "default"
     subnetwork: str | None = None
+    source_image: str = "projects/debian-cloud/global/images/family/debian-11"
     ssh_key: str | None = None
     tags: dict[str, str] = Field(default_factory=dict)
 
     @model_validator(mode='after')
     def validate_required_fields(self) -> 'GCPConnectorConfig':
         """Ensure required fields are not empty."""
+        if not self.project_id or not self.project_id.strip():
+            raise ValueError('project_id is required and cannot be empty')
         if not self.instance_name or not self.instance_name.strip():
             raise ValueError('instance_name is required and cannot be empty')
-        if not self.region or not self.region.strip():
-            raise ValueError('region is required and cannot be empty')
+        if not self.zone or not self.zone.strip():
+            raise ValueError('zone is required and cannot be empty')
         if not self.machine_type or not self.machine_type.strip():
             raise ValueError('machine_type is required and cannot be empty')
         return self
@@ -145,22 +148,24 @@ class GCPConnectorConfig(CloudConnectorConfig):
 
 class AzureConnectorConfig(CloudConnectorConfig):
     """Configuration for Azure connectors."""
+    subscription_id: str
+    resource_group: str
     instance_name: str
-    region: str
-    vm_size: str
-    resource_group: str | None = None
-    virtual_network: str | None = None
-    subnet: str | None = None
-    ssh_key_name: str | None = None
+    location: str = "eastus"
+    vm_size: str = "Standard_B1s"
+    vnet_name: str | None = None
+    subnet_name: str | None = None
     tags: dict[str, str] = Field(default_factory=dict)
 
     @model_validator(mode='after')
     def validate_required_fields(self) -> 'AzureConnectorConfig':
         """Ensure required fields are not empty."""
+        if not self.subscription_id or not self.subscription_id.strip():
+            raise ValueError('subscription_id is required and cannot be empty')
+        if not self.resource_group or not self.resource_group.strip():
+            raise ValueError('resource_group is required and cannot be empty')
         if not self.instance_name or not self.instance_name.strip():
             raise ValueError('instance_name is required and cannot be empty')
-        if not self.region or not self.region.strip():
-            raise ValueError('region is required and cannot be empty')
         if not self.vm_size or not self.vm_size.strip():
             raise ValueError('vm_size is required and cannot be empty')
         return self

@@ -17,6 +17,7 @@ def aws_connector() -> Connector:
         credential_type=CredentialType.AWS,
         project_id="test-project",
         config={
+            "instance_name": "test-proxy",
             "region": "us-east-1",
             "instance_type": "t3.micro",
             "ami_id": "ami-12345678",
@@ -55,6 +56,7 @@ def gcp_connector() -> Connector:
         project_id="test-project",
         config={
             "project_id": "my-gcp-project",
+            "instance_name": "test-proxy",
             "zone": "us-central1-a",
             "machine_type": "e2-micro",
             "network": "default",
@@ -89,6 +91,7 @@ def azure_connector() -> Connector:
         config={
             "subscription_id": "sub-12345",
             "resource_group": "my-resource-group",
+            "instance_name": "test-proxy",
             "location": "eastus",
             "vm_size": "Standard_B1s",
         },
@@ -123,26 +126,35 @@ class TestAWSProviderInit:
 
         assert provider.connector == aws_connector
         assert provider.credential == aws_credential
-        assert provider._region == "us-east-1"
-        assert provider._instance_type == "t3.micro"
-        assert provider._ami_id == "ami-12345678"
-        assert provider._security_group == "sg-12345678"
-        assert provider._key_pair_name == "my-key-pair"
+        assert provider._config.region == "us-east-1"
+        assert provider._config.instance_type == "t3.micro"
+        assert provider._config.ami_id == "ami-12345678"
+        assert provider._config.security_group == "sg-12345678"
+        assert provider._config.key_pair_name == "my-key-pair"
+        assert provider._config.instance_name == "test-proxy"
 
-    def test_init_with_defaults(self, aws_credential: Credential) -> None:
-        """Test AWSProvider uses defaults for missing config values."""
+    def test_init_with_required_fields_only(self, aws_credential: Credential) -> None:
+        """Test AWSProvider initializes with only required fields."""
         connector = Connector(
             id="minimal-connector",
             name="Minimal",
             credential_id="cred",
             credential_type=CredentialType.AWS,
             project_id="proj",
-            config={},
+            config={
+                "instance_name": "minimal-proxy",
+                "region": "us-west-2",
+                "instance_type": "t3.small",
+                "key_pair_name": "minimal-key",
+                "security_group": "sg-minimal",
+                "ami_id": "ami-minimal",
+            },
         )
         provider = AWSProvider(connector, aws_credential)
 
-        assert provider._region == "us-east-1"  # default
-        assert provider._instance_type == "t3.micro"  # default
+        assert provider._config.instance_name == "minimal-proxy"
+        assert provider._config.region == "us-west-2"
+        assert provider._config.instance_type == "t3.small"
 
 
 class TestGCPProviderInit:
@@ -156,10 +168,11 @@ class TestGCPProviderInit:
 
         assert provider.connector == gcp_connector
         assert provider.credential == gcp_credential
-        assert provider._project_id == "my-gcp-project"
-        assert provider._zone == "us-central1-a"
-        assert provider._machine_type == "e2-micro"
-        assert provider._network == "default"
+        assert provider._config.project_id == "my-gcp-project"
+        assert provider._config.instance_name == "test-proxy"
+        assert provider._config.zone == "us-central1-a"
+        assert provider._config.machine_type == "e2-micro"
+        assert provider._config.network == "default"
 
     def test_init_with_defaults(self, gcp_credential: Credential) -> None:
         """Test GCPProvider uses defaults for missing config values."""
@@ -169,13 +182,16 @@ class TestGCPProviderInit:
             credential_id="cred",
             credential_type=CredentialType.GCP,
             project_id="proj",
-            config={},
+            config={
+                "project_id": "minimal-project",
+                "instance_name": "minimal-proxy",
+            },
         )
         provider = GCPProvider(connector, gcp_credential)
 
-        assert provider._zone == "us-central1-a"  # default
-        assert provider._machine_type == "e2-micro"  # default
-        assert provider._network == "default"  # default
+        assert provider._config.zone == "us-central1-a"  # default
+        assert provider._config.machine_type == "e2-micro"  # default
+        assert provider._config.network == "default"  # default
 
 
 class TestAzureProviderInit:
@@ -189,10 +205,11 @@ class TestAzureProviderInit:
 
         assert provider.connector == azure_connector
         assert provider.credential == azure_credential
-        assert provider._subscription_id == "sub-12345"
-        assert provider._resource_group == "my-resource-group"
-        assert provider._location == "eastus"
-        assert provider._vm_size == "Standard_B1s"
+        assert provider._config.subscription_id == "sub-12345"
+        assert provider._config.resource_group == "my-resource-group"
+        assert provider._config.instance_name == "test-proxy"
+        assert provider._config.location == "eastus"
+        assert provider._config.vm_size == "Standard_B1s"
 
     def test_init_with_defaults(self, azure_credential: Credential) -> None:
         """Test AzureProvider uses defaults for missing config values."""
@@ -202,12 +219,16 @@ class TestAzureProviderInit:
             credential_id="cred",
             credential_type=CredentialType.AZURE,
             project_id="proj",
-            config={},
+            config={
+                "subscription_id": "minimal-sub",
+                "resource_group": "minimal-rg",
+                "instance_name": "minimal-proxy",
+            },
         )
         provider = AzureProvider(connector, azure_credential)
 
-        assert provider._location == "eastus"  # default
-        assert provider._vm_size == "Standard_B1s"  # default
+        assert provider._config.location == "eastus"  # default
+        assert provider._config.vm_size == "Standard_B1s"  # default
 
 
 class TestStaticProvider:
