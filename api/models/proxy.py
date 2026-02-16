@@ -21,6 +21,7 @@ class ProxyProtocol(str, Enum):
 class ProxyStatus(str, Enum):
     """Proxy health status."""
     UNKNOWN = "unknown"
+    INITIALIZING = "initializing"  # Newly created, still starting up (grace period for health checks)
     HEALTHY = "healthy"
     DEGRADED = "degraded"
     UNHEALTHY = "unhealthy"
