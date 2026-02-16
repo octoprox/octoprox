@@ -11,7 +11,7 @@ import structlog
 
 from api.models.connector import Connector
 from api.models.credential import Credential
-from api.models.proxy import Proxy
+from api.models.proxy import Proxy, ProxyStatus
 from api.providers.base import ProxyProvider
 
 logger = structlog.get_logger()
@@ -216,6 +216,7 @@ class AWSProvider(CloudProvider):
                 host=host,
                 port=PROXY_PORT,
                 connector_id=self.connector.id,
+                status=ProxyStatus.INITIALIZING,
                 tags=["aws", self._region],
                 metadata={"instance_id": instance.id},
             )
@@ -421,6 +422,7 @@ class GCPProvider(CloudProvider):
                 host=host,
                 port=PROXY_PORT,
                 connector_id=self.connector.id,
+                status=ProxyStatus.INITIALIZING,
                 tags=["gcp", self._zone],
                 metadata={"instance_name": instance_name},
             )
@@ -650,6 +652,7 @@ class AzureProvider(CloudProvider):
                 host=host,
                 port=PROXY_PORT,
                 connector_id=self.connector.id,
+                status=ProxyStatus.INITIALIZING,
                 tags=["azure", self._location],
                 metadata={"vm_name": vm_name, "vm_id": vm_result.vm_id},
             )

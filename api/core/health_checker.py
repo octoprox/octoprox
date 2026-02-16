@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import asyncio
 import time
+from datetime import timedelta
 from typing import TYPE_CHECKING
 
 import httpx
 import structlog
 from httpx_socks import AsyncProxyTransport
 
+from api.core import utc_now
 from api.core.config import settings
 from api.models.proxy import ProxyProtocol, ProxyStatus
 
@@ -18,6 +20,9 @@ if TYPE_CHECKING:
     from api.models.proxy import Proxy
 
 logger = structlog.get_logger()
+
+# Grace period for initializing proxies before marking them unhealthy
+INITIALIZATION_GRACE_PERIOD = timedelta(minutes=5)
 
 
 class HealthChecker:
@@ -121,9 +126,40 @@ class HealthChecker:
         except Exception as e:
             await self._mark_unhealthy(proxy, f"Error: {e}")
 
+    def _is_within_initialization_grace_period(self, proxy: Proxy) -> bool:
+        """Check if proxy is still within the initialization grace period."""
+        if proxy.status != ProxyStatus.INITIALIZING:
+            return False
+
+        now = utc_now()
+        age = now - proxy.created_at
+        return age < INITIALIZATION_GRACE_PERIOD
+
     async def _mark_unhealthy(self, proxy: Proxy, reason: str) -> None:
-        """Mark a proxy as unhealthy."""
+        """Mark a proxy as unhealthy.
+
+        For proxies in INITIALIZING status that are still within the grace period,
+        failures are tracked but the status remains INITIALIZING until the grace
+        period expires.
+        """
         new_failures = proxy.consecutive_failures + 1
+
+        # Check if proxy is still initializing and within grace period
+        if self._is_within_initialization_grace_period(proxy):
+            logger.debug(
+                "Proxy initializing - health check failed but within grace period",
+                proxy_id=proxy.id,
+                reason=reason,
+                failures=new_failures,
+                created_at=proxy.created_at.isoformat(),
+            )
+            # Keep status as INITIALIZING but track failures
+            await self._proxy_manager.update_proxy_status(
+                proxy.id,
+                ProxyStatus.INITIALIZING,
+                consecutive_failures=new_failures,
+            )
+            return
 
         if new_failures >= 3:
             status = ProxyStatus.UNHEALTHY
