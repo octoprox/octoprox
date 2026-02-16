@@ -230,6 +230,7 @@ class ProxyServer:
 
             # Authenticate project using Proxy-Authorization header
             project = self._authenticate_project(headers)
+            logger.debug("Authenticated project", headers=headers, project=project)
             if not project:
                 await self._send_error(
                     client_writer,
@@ -293,11 +294,15 @@ class ProxyServer:
             if writer.is_closing():
                 return
             body_bytes = body.encode("utf-8")
-            response = (
-                f"HTTP/1.1 {status} {message}\r\n"
-                f"Content-Length: {len(body_bytes)}\r\n"
-                f"\r\n"
-            )
+            # Build headers
+            headers = [
+                f"HTTP/1.1 {status} {message}",
+                f"Content-Length: {len(body_bytes)}",
+            ]
+            if status == 407:
+                headers.append('Proxy-Authenticate: Basic realm="Proxy"')
+            response = "\r\n".join(headers) + "\r\n\r\n"
+
             writer.write(response.encode())
             if body_bytes:
                 writer.write(body_bytes)

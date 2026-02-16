@@ -6,7 +6,9 @@ from typing import TYPE_CHECKING
 import structlog
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from api.core.auto_scaler import AutoScaler
 from api.core.config import Settings
+from api.core.demand_tracker import DemandLevel, DemandTracker
 from api.core.health_checker import HealthChecker
 from api.core.metrics_flusher import MetricsFlusher
 from api.core.stats import apply_metrics, combine_metrics, increment_stats
@@ -63,6 +65,8 @@ class ProxyManager:
         self._strategy: RoutingStrategy = get_strategy(settings.default_strategy)
         self._health_checker = HealthChecker(self)
         self._metrics_flusher = MetricsFlusher(session_factory, redis_client, settings)
+        self._demand_tracker = DemandTracker(redis_client)
+        self._auto_scaler = AutoScaler(self)
         self._running = False
         self._tasks: list[asyncio.Task[None]] = []
 
@@ -85,12 +89,17 @@ class ProxyManager:
         task = asyncio.create_task(self._metrics_flusher.run())
         self._tasks.append(task)
 
+        # Start auto-scaler
+        task = asyncio.create_task(self._auto_scaler.run())
+        self._tasks.append(task)
+
     async def stop(self) -> None:
         """Stop the proxy manager and cleanup."""
         self._running = False
         logger.info("Stopping proxy manager")
 
         self._metrics_flusher.stop()
+        self._auto_scaler.stop()
 
         for task in self._tasks:
             task.cancel()
@@ -474,6 +483,8 @@ class ProxyManager:
                     )
                     # Update in-memory Project object
                     increment_stats(project, success, latency_ms, bytes_sent, bytes_received)
+                    # Track demand for auto-scaling
+                    await self._demand_tracker.record_request(project.id)
 
     async def update_proxy_status(
         self,
@@ -492,4 +503,123 @@ class ProxyManager:
             await self._redis_client.set_proxy_status(
                 proxy_id, status, latency_ms, consecutive_failures
             )
+
+    # Demand tracking and scaling methods
+
+    @property
+    def demand_tracker(self) -> DemandTracker:
+        """Get the demand tracker instance."""
+        return self._demand_tracker
+
+    async def get_demand_info(self, project_id: str) -> dict:
+        """Get demand level and instance counts for a project.
+
+        Returns:
+            Dict with demand_level, requests_per_minute, current/min/max instances,
+            and counts of draining/terminating instances.
+        """
+        project = self._projects.get(project_id)
+        if not project:
+            return {}
+
+        # Get all proxies for the project
+        proxies = self.get_proxies_for_project(project_id)
+        healthy_proxies = self.get_healthy_proxies_for_project(project_id)
+
+        # Count proxies by status
+        draining_count = sum(1 for p in proxies if p.status == ProxyStatus.DRAINING)
+        terminating_count = sum(1 for p in proxies if p.status == ProxyStatus.TERMINATING)
+
+        # Get demand info from tracker
+        demand_info = await self._demand_tracker.get_demand_info(
+            project_id, len(healthy_proxies)
+        )
+
+        # Get min/max from connectors (aggregate across all AWS connectors)
+        min_instances = 0
+        max_instances = 0
+        for connector in self._connectors.values():
+            if connector.project_id == project_id and connector.enabled:
+                config = connector.config
+                min_instances += config.get("min_proxies", 1)
+                max_instances += config.get("max_proxies", 10)
+
+        return {
+            "demand_level": demand_info["demand_level"].value,
+            "requests_per_minute": demand_info["requests_per_minute"],
+            "rate_per_proxy": demand_info["rate_per_proxy"],
+            "current_instances": len(proxies),
+            "healthy_instances": len(healthy_proxies),
+            "min_instances": min_instances,
+            "max_instances": max_instances,
+            "draining_instances": draining_count,
+            "terminating_instances": terminating_count,
+        }
+
+    async def start_proxy_draining(self, proxy_id: str) -> bool:
+        """Mark a proxy as draining - stop routing new requests to it.
+
+        Args:
+            proxy_id: The proxy ID to start draining.
+
+        Returns:
+            True if successful, False if proxy not found.
+        """
+        proxy = self._proxies.get(proxy_id)
+        if not proxy:
+            return False
+
+        proxy.status = ProxyStatus.DRAINING
+        # Store draining start time in metadata
+        from api.core import utc_now
+        proxy.metadata["draining_started_at"] = utc_now().isoformat()
+
+        # Update in Redis
+        await self._redis_client.set_proxy_status(
+            proxy_id, ProxyStatus.DRAINING, proxy.last_check_latency_ms, 0
+        )
+
+        # Persist to database
+        await self.update_proxy(proxy)
+
+        logger.info("Started draining proxy", proxy_id=proxy_id)
+        return True
+
+    async def mark_proxy_terminating(self, proxy_id: str) -> bool:
+        """Mark a proxy as terminating.
+
+        Args:
+            proxy_id: The proxy ID to mark as terminating.
+
+        Returns:
+            True if successful, False if proxy not found.
+        """
+        proxy = self._proxies.get(proxy_id)
+        if not proxy:
+            return False
+
+        proxy.status = ProxyStatus.TERMINATING
+
+        # Update in Redis
+        await self._redis_client.set_proxy_status(
+            proxy_id, ProxyStatus.TERMINATING, 0, 0
+        )
+
+        # Persist to database
+        await self.update_proxy(proxy)
+
+        logger.info("Marked proxy as terminating", proxy_id=proxy_id)
+        return True
+
+    def get_proxies_for_connector(self, connector_id: str) -> list[Proxy]:
+        """Get all proxies for a specific connector."""
+        return [p for p in self._proxies.values() if p.connector_id == connector_id]
+
+    def get_active_proxies_for_connector(self, connector_id: str) -> list[Proxy]:
+        """Get active (non-terminating) proxies for a connector."""
+        return [
+            p for p in self._proxies.values()
+            if p.connector_id == connector_id
+            and p.status not in (ProxyStatus.TERMINATING,)
+        ]
 
