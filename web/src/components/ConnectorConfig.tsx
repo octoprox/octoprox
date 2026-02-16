@@ -91,6 +91,7 @@ const getDefaultConfig = (type: CredentialType | null, options?: ConnectorOption
       return {}
     case 'aws':
       return {
+        instance_name: '',
         region: options?.aws_regions[0] || 'us-east-1',
         instance_type: options?.aws_instance_types[0] || 't3.micro',
         key_pair_name: '',
@@ -104,6 +105,7 @@ const getDefaultConfig = (type: CredentialType | null, options?: ConnectorOption
       }
     case 'gcp':
       return {
+        instance_name: '',
         region: options?.gcp_regions[0] || 'us-central1',
         zone: '',
         machine_type: options?.gcp_machine_types[0] || 'e2-micro',
@@ -118,6 +120,7 @@ const getDefaultConfig = (type: CredentialType | null, options?: ConnectorOption
       }
     case 'azure':
       return {
+        instance_name: '',
         region: options?.azure_regions[0] || 'eastus',
         vm_size: options?.azure_vm_sizes[0] || 'Standard_B1s',
         resource_group: '',
@@ -317,11 +320,11 @@ export default function ConnectorConfig() {
     const scalingFields = ['min_proxies', 'max_proxies', 'min_rotation_period_minutes', 'max_rotation_period_minutes']
     const advancedFields = ['tags']
 
-    // Infrastructure fields vary by provider
+    // Infrastructure fields vary by provider - instance_name is required and first
     const infraFields: Record<string, string[]> = {
-      aws: ['region', 'instance_type', 'key_pair_name', 'security_group', 'ami_id'],
-      gcp: ['region', 'zone', 'machine_type', 'network', 'subnetwork', 'ssh_key'],
-      azure: ['region', 'vm_size', 'resource_group', 'virtual_network', 'subnet', 'ssh_key_name'],
+      aws: ['instance_name', 'region', 'instance_type', 'key_pair_name', 'security_group', 'ami_id'],
+      gcp: ['instance_name', 'region', 'zone', 'machine_type', 'network', 'subnetwork', 'ssh_key'],
+      azure: ['instance_name', 'region', 'vm_size', 'resource_group', 'virtual_network', 'subnet', 'ssh_key_name'],
     }
 
     return {
@@ -334,6 +337,7 @@ export default function ConnectorConfig() {
   // Friendly field labels
   const getFieldLabel = (key: string): string => {
     const labels: Record<string, string> = {
+      instance_name: 'Instance Name',
       region: 'Region',
       instance_type: 'Instance Type',
       key_pair_name: 'Key Pair',

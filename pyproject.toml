@@ -26,6 +26,11 @@ dependencies = [
     "asyncpg==0.31.0",
     "alembic==1.18.4",
     "psycopg2-binary==2.9.11",
+    "boto3==1.42.49",
+    "google-cloud-compute==1.43.0",
+    "azure-mgmt-compute==37.2.0",
+    "azure-mgmt-network==30.1.0",
+    "azure-identity==1.25.2",
 ]
 
 [project.optional-dependencies]
@@ -37,13 +42,6 @@ dev = [
     "mypy==1.15.0",
     "httpx==0.28.1",
     "testcontainers[postgres,redis]==4.14.1",
-]
-cloud = [
-    "boto3==1.36.22",
-    "google-cloud-compute==1.23.0",
-    "azure-mgmt-compute==34.0.0",
-    "azure-mgmt-network==28.0.0",
-    "azure-identity==1.21.0",
 ]
 
 [project.scripts]

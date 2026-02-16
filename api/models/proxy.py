@@ -24,6 +24,8 @@ class ProxyStatus(str, Enum):
     HEALTHY = "healthy"
     DEGRADED = "degraded"
     UNHEALTHY = "unhealthy"
+    DRAINING = "draining"  # Not accepting new connections, waiting for existing to complete
+    TERMINATING = "terminating"  # Being terminated/removed
 
 
 class Proxy(BaseModel):

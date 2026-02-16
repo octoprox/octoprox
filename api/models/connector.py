@@ -86,6 +86,7 @@ class StaticProxyProviderConnectorConfig(BaseModel):
 
 class AWSConnectorConfig(BaseModel):
     """Configuration for AWS connectors."""
+    instance_name: str
     region: str
     instance_type: str
     key_pair_name: str
@@ -100,6 +101,8 @@ class AWSConnectorConfig(BaseModel):
     @model_validator(mode='after')
     def validate_required_fields(self) -> 'AWSConnectorConfig':
         """Ensure required fields are not empty."""
+        if not self.instance_name or not self.instance_name.strip():
+            raise ValueError('instance_name is required and cannot be empty')
         if not self.region or not self.region.strip():
             raise ValueError('region is required and cannot be empty')
         if not self.instance_type or not self.instance_type.strip():
@@ -111,6 +114,7 @@ class AWSConnectorConfig(BaseModel):
 
 class GCPConnectorConfig(BaseModel):
     """Configuration for GCP connectors."""
+    instance_name: str
     region: str
     zone: str | None = None
     machine_type: str
@@ -126,6 +130,8 @@ class GCPConnectorConfig(BaseModel):
     @model_validator(mode='after')
     def validate_required_fields(self) -> 'GCPConnectorConfig':
         """Ensure required fields are not empty."""
+        if not self.instance_name or not self.instance_name.strip():
+            raise ValueError('instance_name is required and cannot be empty')
         if not self.region or not self.region.strip():
             raise ValueError('region is required and cannot be empty')
         if not self.machine_type or not self.machine_type.strip():
@@ -135,6 +141,7 @@ class GCPConnectorConfig(BaseModel):
 
 class AzureConnectorConfig(BaseModel):
     """Configuration for Azure connectors."""
+    instance_name: str
     region: str
     vm_size: str
     resource_group: str | None = None
@@ -150,6 +157,8 @@ class AzureConnectorConfig(BaseModel):
     @model_validator(mode='after')
     def validate_required_fields(self) -> 'AzureConnectorConfig':
         """Ensure required fields are not empty."""
+        if not self.instance_name or not self.instance_name.strip():
+            raise ValueError('instance_name is required and cannot be empty')
         if not self.region or not self.region.strip():
             raise ValueError('region is required and cannot be empty')
         if not self.vm_size or not self.vm_size.strip():

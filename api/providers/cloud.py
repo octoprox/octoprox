@@ -5,38 +5,61 @@ Actual implementations require the 'cloud' optional dependencies.
 """
 
 from abc import abstractmethod
+from pathlib import Path
 
 import structlog
 
+from api.models.connector import Connector
+from api.models.credential import Credential
 from api.models.proxy import Proxy
-from api.models.source import ProxySource
 from api.providers.base import ProxyProvider
 
 logger = structlog.get_logger()
 
+# Standard proxy port for all cloud providers
+PROXY_PORT = 3128
+
+# Load Squid setup script from config file
+_SQUID_SETUP_SCRIPT: str | None = None
+
+
+def get_squid_setup_script() -> str:
+    """Load the Squid setup script from config file.
+
+    Raises:
+        FileNotFoundError: If the squid_setup.sh config file is not found.
+    """
+    global _SQUID_SETUP_SCRIPT
+    if _SQUID_SETUP_SCRIPT is None:
+        script_path = Path(__file__).parent.parent.parent / "config" / "squid_setup.sh"
+        if not script_path.exists():
+            raise FileNotFoundError(
+                f"Squid setup script not found at {script_path}. "
+                "This file is required for cloud provider instances."
+            )
+        _SQUID_SETUP_SCRIPT = script_path.read_text()
+    return _SQUID_SETUP_SCRIPT
+
 
 class CloudProvider(ProxyProvider):
-    """Base class for cloud-based proxy providers."""
-    
-    def __init__(self, source: ProxySource) -> None:
-        super().__init__(source)
-        self._region = source.config.get("region", "us-east-1")
-        self._instance_type = source.config.get("instance_type", "t3.micro")
-        self._max_instances = source.config.get("max_instances", 5)
-    
+    """Abstract base class for cloud-based proxy providers.
+
+    Cloud providers manage instances dynamically via create_instance/terminate_instance.
+    Each cloud provider implementation should define its own provider-specific
+    attributes (region, instance type, etc.) in its __init__ method.
+    """
+
+    def __init__(self, connector: Connector, credential: Credential) -> None:
+        super().__init__(connector, credential)
+
     @abstractmethod
     async def create_instance(self) -> Proxy | None:
         """Create a new proxy instance in the cloud."""
         ...
-    
+
     @abstractmethod
     async def terminate_instance(self, instance_id: str) -> bool:
         """Terminate a cloud proxy instance."""
-        ...
-    
-    @abstractmethod
-    async def list_instances(self) -> list[dict]:
-        """List all proxy instances."""
         ...
 
 
@@ -45,26 +68,32 @@ class AWSProvider(CloudProvider):
 
     Requires boto3 to be installed (pip install octoprox[cloud]).
 
-    Config options:
+    Connector config options:
         - region: AWS region (default: us-east-1)
         - instance_type: EC2 instance type (default: t3.micro)
-        - max_instances: Maximum number of proxy instances (default: 5)
+        - instance_name: Name prefix for created instances (required)
         - ami_id: AMI ID for proxy instances (required for create)
-        - security_group_id: Security group ID (required for create)
+        - security_group: Security group ID (required for create)
         - subnet_id: Subnet ID (optional)
-        - key_name: SSH key pair name (optional)
-        - proxy_port: Port the proxy runs on (default: 8080)
-        - tag_filter: Tag to identify proxy instances (default: octoprox-proxy)
+        - key_pair_name: SSH key pair name (optional)
+        - tags: Custom tags to apply to instances (optional, dict)
+
+    Credential config (secrets):
+        - access_key: AWS access key ID
+        - secret_key: AWS secret access key
     """
 
-    def __init__(self, source: ProxySource) -> None:
-        super().__init__(source)
-        self._ami_id = source.config.get("ami_id")
-        self._security_group_id = source.config.get("security_group_id")
-        self._subnet_id = source.config.get("subnet_id")
-        self._key_name = source.config.get("key_name")
-        self._proxy_port = source.config.get("proxy_port", 8080)
-        self._tag_filter = source.config.get("tag_filter", "octoprox-proxy")
+    def __init__(self, connector: Connector, credential: Credential) -> None:
+        super().__init__(connector, credential)
+        # AWS-specific config from connector
+        self._region = connector.config.get("region", "us-east-1")
+        self._instance_type = connector.config.get("instance_type", "t3.micro")
+        self._instance_name = connector.config.get("instance_name")
+        self._ami_id = connector.config.get("ami_id")
+        self._security_group = connector.config.get("security_group")
+        self._subnet_id = connector.config.get("subnet_id")
+        self._key_pair_name = connector.config.get("key_pair_name")
+        self._tags = connector.config.get("tags", {})
         self._ec2_client = None
         self._ec2_resource = None
 
@@ -72,121 +101,117 @@ class AWSProvider(CloudProvider):
         """Get or create boto3 clients."""
         try:
             import boto3
+
             if self._ec2_client is None:
-                self._ec2_client = boto3.client("ec2", region_name=self._region)
-                self._ec2_resource = boto3.resource("ec2", region_name=self._region)
+                # Get credentials from credential config
+                access_key = self.credential.config.get("access_key")
+                secret_key = self.credential.config.get("secret_key")
+
+                if access_key and secret_key:
+                    self._ec2_client = boto3.client(
+                        "ec2",
+                        region_name=self._region,
+                        aws_access_key_id=access_key,
+                        aws_secret_access_key=secret_key,
+                    )
+                    self._ec2_resource = boto3.resource(
+                        "ec2",
+                        region_name=self._region,
+                        aws_access_key_id=access_key,
+                        aws_secret_access_key=secret_key,
+                    )
+                else:
+                    # Fall back to default credentials (env vars, IAM role, etc.)
+                    self._ec2_client = boto3.client("ec2", region_name=self._region)
+                    self._ec2_resource = boto3.resource("ec2", region_name=self._region)
             return self._ec2_client, self._ec2_resource
         except ImportError:
             logger.error("boto3 not installed. Install with: pip install octoprox[cloud]")
             return None, None
 
-    async def fetch_proxies(self) -> list[Proxy]:
-        """Fetch proxies from AWS EC2 instances tagged as proxies."""
-        ec2_client, _ = self._get_boto3_clients()
-        if not ec2_client:
-            return []
-
-        proxies: list[Proxy] = []
-
-        try:
-            # Find instances with our tag that are running
-            response = ec2_client.describe_instances(
-                Filters=[
-                    {"Name": "tag:Name", "Values": [self._tag_filter]},
-                    {"Name": "instance-state-name", "Values": ["running"]},
-                ]
-            )
-
-            for reservation in response.get("Reservations", []):
-                for instance in reservation.get("Instances", []):
-                    instance_id = instance["InstanceId"]
-                    public_ip = instance.get("PublicIpAddress")
-                    private_ip = instance.get("PrivateIpAddress")
-
-                    # Prefer public IP, fall back to private
-                    host = public_ip or private_ip
-                    if not host:
-                        continue
-
-                    proxy = Proxy(
-                        id=f"aws-{instance_id}",
-                        host=host,
-                        port=self._proxy_port,
-                        source_id=self.source.id,
-                        tags=["aws", self._region],
-                        metadata={
-                            "instance_id": instance_id,
-                            "instance_type": instance.get("InstanceType"),
-                            "availability_zone": instance["Placement"]["AvailabilityZone"],
-                            "launch_time": str(instance.get("LaunchTime")),
-                        },
-                    )
-                    proxies.append(proxy)
-
-            logger.info("Fetched AWS proxies", count=len(proxies), region=self._region)
-
-        except Exception as e:
-            logger.error("Failed to fetch AWS proxies", error=str(e))
-
-        return proxies
-
-    async def validate(self) -> bool:
-        """Validate AWS configuration and credentials."""
-        ec2_client, _ = self._get_boto3_clients()
-        if not ec2_client:
-            return False
-
-        try:
-            # Try to describe instances to validate credentials
-            ec2_client.describe_instances(MaxResults=5)
-            return True
-        except Exception as e:
-            logger.error("AWS validation failed", error=str(e))
-            return False
-
     async def create_instance(self) -> Proxy | None:
         """Create a new EC2 instance configured as a proxy."""
+        logger.debug(
+            "AWS create_instance called",
+            connector_id=self.connector.id,
+            ami_id=self._ami_id,
+            security_group=self._security_group,
+            subnet_id=self._subnet_id,
+            instance_name=self._instance_name,
+            raw_config=self.connector.config,
+        )
+
         _, ec2_resource = self._get_boto3_clients()
         if not ec2_resource:
             return None
 
-        if not self._ami_id or not self._security_group_id:
-            logger.error("ami_id and security_group_id required for instance creation")
+        # Validate required fields (check for None and empty strings)
+        if not self._ami_id or not self._ami_id.strip():
+            logger.error("ami_id required for instance creation")
+            return None
+        if not self._instance_name or not self._instance_name.strip():
+            logger.error("instance_name required in connector config for instance creation")
             return None
 
         try:
-            # User data script to set up a simple proxy
-            user_data = f"""#!/bin/bash
-yum update -y || apt-get update -y
-yum install -y squid || apt-get install -y squid
-sed -i 's/http_port 3128/http_port {self._proxy_port}/' /etc/squid/squid.conf
-echo "http_access allow all" >> /etc/squid/squid.conf
-systemctl enable squid
-systemctl start squid
-"""
+            import time
+
+            # Use the external Squid setup script
+            user_data = get_squid_setup_script()
+
+            # Build instance name with timestamp for uniqueness
+            instance_name = f"{self._instance_name}-{int(time.time())}"
+
+            # Build tags: start with required tags, then add custom tags
+            tags = [
+                {"Key": "Name", "Value": instance_name},
+                {"Key": "ManagedBy", "Value": "octoprox"},
+            ]
+            # Add custom tags from connector config
+            for key, value in self._tags.items():
+                tags.append({"Key": key, "Value": str(value)})
 
             run_args = {
                 "ImageId": self._ami_id,
                 "InstanceType": self._instance_type,
                 "MinCount": 1,
                 "MaxCount": 1,
-                "SecurityGroupIds": [self._security_group_id],
                 "UserData": user_data,
                 "TagSpecifications": [
                     {
                         "ResourceType": "instance",
-                        "Tags": [
-                            {"Key": "Name", "Value": self._tag_filter},
-                            {"Key": "ManagedBy", "Value": "octoprox"},
-                        ],
+                        "Tags": tags,
                     }
                 ],
             }
 
+            # Handle subnet and security group configuration
+            # When using a subnet, we need to use NetworkInterfaces
+            security_group = self._security_group.strip() if self._security_group else None
+
             if self._subnet_id:
-                run_args["SubnetId"] = self._subnet_id
-            if self._key_name:
-                run_args["KeyName"] = self._key_name
+                network_interface = {
+                    "DeviceIndex": 0,
+                    "SubnetId": self._subnet_id,
+                    "AssociatePublicIpAddress": True,
+                }
+                if security_group:
+                    network_interface["Groups"] = [security_group]
+                run_args["NetworkInterfaces"] = [network_interface]
+            elif security_group:
+                # Only add SecurityGroupIds if specified, otherwise use default
+                run_args["SecurityGroupIds"] = [security_group]
+
+            if self._key_pair_name:
+                run_args["KeyName"] = self._key_pair_name
+
+            logger.debug(
+                "Creating EC2 instance",
+                ami_id=self._ami_id,
+                instance_type=self._instance_type,
+                security_group=self._security_group,
+                subnet_id=self._subnet_id,
+            )
 
             instances = ec2_resource.create_instances(**run_args)
             instance = instances[0]
@@ -203,8 +228,8 @@ systemctl start squid
             proxy = Proxy(
                 id=f"aws-{instance.id}",
                 host=host,
-                port=self._proxy_port,
-                source_id=self.source.id,
+                port=PROXY_PORT,
+                connector_id=self.connector.id,
                 tags=["aws", self._region],
                 metadata={"instance_id": instance.id},
             )
@@ -232,157 +257,69 @@ systemctl start squid
             logger.error("Failed to terminate AWS instance", error=str(e))
             return False
 
-    async def list_instances(self) -> list[dict]:
-        """List all EC2 proxy instances."""
-        ec2_client, _ = self._get_boto3_clients()
-        if not ec2_client:
-            return []
-
-        try:
-            response = ec2_client.describe_instances(
-                Filters=[
-                    {"Name": "tag:Name", "Values": [self._tag_filter]},
-                ]
-            )
-
-            instances = []
-            for reservation in response.get("Reservations", []):
-                for instance in reservation.get("Instances", []):
-                    instances.append({
-                        "id": instance["InstanceId"],
-                        "state": instance["State"]["Name"],
-                        "type": instance.get("InstanceType"),
-                        "public_ip": instance.get("PublicIpAddress"),
-                        "private_ip": instance.get("PrivateIpAddress"),
-                        "launch_time": str(instance.get("LaunchTime")),
-                    })
-
-            return instances
-        except Exception as e:
-            logger.error("Failed to list AWS instances", error=str(e))
-            return []
-
 
 class GCPProvider(CloudProvider):
     """Google Cloud Compute Engine proxy provider.
 
     Requires google-cloud-compute to be installed (pip install octoprox[cloud]).
 
-    Config options:
+    Connector config options:
         - project_id: GCP project ID (required)
-        - region: GCP region (default: us-central1)
         - zone: GCP zone (default: us-central1-a)
         - machine_type: Machine type (default: e2-micro)
-        - max_instances: Maximum number of proxy instances (default: 5)
+        - instance_name: Name prefix for created instances (required)
         - network: VPC network name (default: default)
         - subnet: Subnet name (optional)
-        - proxy_port: Port the proxy runs on (default: 8080)
-        - label_filter: Label to identify proxy instances (default: octoprox-proxy)
         - source_image: Source image for instances (default: debian-cloud/debian-11)
+        - tags: Custom labels to apply to instances (optional, dict)
+
+    Credential config (secrets):
+        - service_account_json: GCP service account JSON key (optional, uses default credentials if not provided)
     """
 
-    def __init__(self, source: ProxySource) -> None:
-        super().__init__(source)
-        self._project_id = source.config.get("project_id")
-        self._zone = source.config.get("zone", "us-central1-a")
-        self._machine_type = source.config.get("machine_type", "e2-micro")
-        self._network = source.config.get("network", "default")
-        self._subnet = source.config.get("subnet")
-        self._proxy_port = source.config.get("proxy_port", 8080)
-        self._label_filter = source.config.get("label_filter", "octoprox-proxy")
-        self._source_image = source.config.get(
+    def __init__(self, connector: Connector, credential: Credential) -> None:
+        super().__init__(connector, credential)
+        # GCP-specific config from connector
+        self._project_id = connector.config.get("project_id")
+        self._zone = connector.config.get("zone", "us-central1-a")
+        self._machine_type = connector.config.get("machine_type", "e2-micro")
+        self._instance_name = connector.config.get("instance_name")
+        self._network = connector.config.get("network", "default")
+        self._subnet = connector.config.get("subnet")
+        self._source_image = connector.config.get(
             "source_image", "projects/debian-cloud/global/images/family/debian-11"
         )
+        self._tags = connector.config.get("tags", {})
         self._instances_client = None
 
     def _get_compute_client(self):
         """Get or create GCP compute client."""
         try:
             from google.cloud import compute_v1
+
             if self._instances_client is None:
+                # Check if service account JSON is provided in credentials
+                service_account_json = self.credential.config.get("service_account_json")
+                if service_account_json:
+                    import json
+                    import tempfile
+                    import os
+
+                    # Write service account JSON to temp file for authentication
+                    with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
+                        if isinstance(service_account_json, str):
+                            f.write(service_account_json)
+                        else:
+                            json.dump(service_account_json, f)
+                        temp_path = f.name
+
+                    os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = temp_path
+
                 self._instances_client = compute_v1.InstancesClient()
             return self._instances_client
         except ImportError:
             logger.error("google-cloud-compute not installed. Install with: pip install octoprox[cloud]")
             return None
-
-    async def fetch_proxies(self) -> list[Proxy]:
-        """Fetch proxies from GCP Compute Engine instances."""
-        client = self._get_compute_client()
-        if not client or not self._project_id:
-            return []
-
-        proxies: list[Proxy] = []
-
-        try:
-            # List instances with our label
-            request = {
-                "project": self._project_id,
-                "zone": self._zone,
-                "filter": f"labels.managed-by=octoprox AND labels.role={self._label_filter}",
-            }
-
-            instances = client.list(**request)
-
-            for instance in instances:
-                if instance.status != "RUNNING":
-                    continue
-
-                # Get external IP if available
-                external_ip = None
-                internal_ip = None
-
-                for interface in instance.network_interfaces:
-                    internal_ip = interface.network_i_p
-                    for access_config in interface.access_configs:
-                        if access_config.nat_i_p:
-                            external_ip = access_config.nat_i_p
-                            break
-
-                host = external_ip or internal_ip
-                if not host:
-                    continue
-
-                proxy = Proxy(
-                    id=f"gcp-{instance.name}",
-                    host=host,
-                    port=self._proxy_port,
-                    source_id=self.source.id,
-                    tags=["gcp", self._zone],
-                    metadata={
-                        "instance_name": instance.name,
-                        "machine_type": instance.machine_type,
-                        "zone": self._zone,
-                        "creation_timestamp": instance.creation_timestamp,
-                    },
-                )
-                proxies.append(proxy)
-
-            logger.info("Fetched GCP proxies", count=len(proxies), zone=self._zone)
-
-        except Exception as e:
-            logger.error("Failed to fetch GCP proxies", error=str(e))
-
-        return proxies
-
-    async def validate(self) -> bool:
-        """Validate GCP configuration and credentials."""
-        client = self._get_compute_client()
-        if not client:
-            return False
-
-        if not self._project_id:
-            logger.error("GCP project_id is required")
-            return False
-
-        try:
-            # Try to list instances to validate credentials
-            request = {"project": self._project_id, "zone": self._zone, "max_results": 1}
-            list(client.list(**request))
-            return True
-        except Exception as e:
-            logger.error("GCP validation failed", error=str(e))
-            return False
 
     async def create_instance(self) -> Proxy | None:
         """Create a new GCP Compute Engine instance configured as a proxy."""
@@ -390,20 +327,19 @@ class GCPProvider(CloudProvider):
         if not client or not self._project_id:
             return None
 
+        if not self._instance_name:
+            logger.error("instance_name required in connector config for instance creation")
+            return None
+
         try:
             from google.cloud import compute_v1
+            import time
 
-            instance_name = f"octoprox-proxy-{int(__import__('time').time())}"
+            # Build instance name with timestamp for uniqueness
+            instance_name = f"{self._instance_name}-{int(time.time())}"
 
-            # Startup script to set up proxy
-            startup_script = f"""#!/bin/bash
-apt-get update
-apt-get install -y squid
-sed -i 's/http_port 3128/http_port {self._proxy_port}/' /etc/squid/squid.conf
-echo "http_access allow all" >> /etc/squid/squid.conf
-systemctl enable squid
-systemctl start squid
-"""
+            # Use the external Squid setup script
+            startup_script = get_squid_setup_script()
 
             # Build instance config
             instance = compute_v1.Instance()
@@ -424,7 +360,9 @@ systemctl start squid
             network_interface = compute_v1.NetworkInterface()
             network_interface.network = f"global/networks/{self._network}"
             if self._subnet:
-                network_interface.subnetwork = f"regions/{self._region}/subnetworks/{self._subnet}"
+                # Extract region from zone (e.g., us-central1-a -> us-central1)
+                region = "-".join(self._zone.split("-")[:-1])
+                network_interface.subnetwork = f"regions/{region}/subnetworks/{self._subnet}"
 
             # Add external IP
             access_config = compute_v1.AccessConfig()
@@ -433,11 +371,18 @@ systemctl start squid
             network_interface.access_configs = [access_config]
             instance.network_interfaces = [network_interface]
 
-            # Labels
-            instance.labels = {
+            # Labels - start with required labels, then add custom labels from tags
+            # GCP labels must be lowercase with hyphens
+            labels = {
                 "managed-by": "octoprox",
-                "role": self._label_filter,
             }
+            # Add custom labels from connector config tags
+            for key, value in self._tags.items():
+                # GCP labels must be lowercase, max 63 chars, only lowercase letters, numbers, hyphens
+                label_key = key.lower().replace(" ", "-").replace("_", "-")[:63]
+                label_value = str(value).lower().replace(" ", "-").replace("_", "-")[:63]
+                labels[label_key] = label_value
+            instance.labels = labels
 
             # Metadata with startup script
             metadata = compute_v1.Metadata()
@@ -455,6 +400,7 @@ systemctl start squid
 
             # Wait for operation to complete
             from google.cloud.compute_v1.services.zone_operations import ZoneOperationsClient
+
             ops_client = ZoneOperationsClient()
             while operation.status != compute_v1.Operation.Status.DONE:
                 operation = ops_client.get(
@@ -487,8 +433,8 @@ systemctl start squid
             proxy = Proxy(
                 id=f"gcp-{instance_name}",
                 host=host,
-                port=self._proxy_port,
-                source_id=self.source.id,
+                port=PROXY_PORT,
+                connector_id=self.connector.id,
                 tags=["gcp", self._zone],
                 metadata={"instance_name": instance_name},
             )
@@ -520,194 +466,80 @@ systemctl start squid
             logger.error("Failed to terminate GCP instance", error=str(e))
             return False
 
-    async def list_instances(self) -> list[dict]:
-        """List all GCP proxy instances."""
-        client = self._get_compute_client()
-        if not client or not self._project_id:
-            return []
-
-        try:
-            request = {
-                "project": self._project_id,
-                "zone": self._zone,
-                "filter": f"labels.managed-by=octoprox AND labels.role={self._label_filter}",
-            }
-
-            instances = []
-            for instance in client.list(**request):
-                external_ip = None
-                internal_ip = None
-
-                for interface in instance.network_interfaces:
-                    internal_ip = interface.network_i_p
-                    for access_config in interface.access_configs:
-                        if access_config.nat_i_p:
-                            external_ip = access_config.nat_i_p
-
-                instances.append({
-                    "id": instance.name,
-                    "state": instance.status,
-                    "machine_type": instance.machine_type.split("/")[-1],
-                    "external_ip": external_ip,
-                    "internal_ip": internal_ip,
-                    "creation_timestamp": instance.creation_timestamp,
-                })
-
-            return instances
-        except Exception as e:
-            logger.error("Failed to list GCP instances", error=str(e))
-            return []
-
 
 class AzureProvider(CloudProvider):
     """Azure VM proxy provider.
 
     Requires azure-mgmt-compute and azure-identity to be installed (pip install octoprox[cloud]).
 
-    Config options:
+    Connector config options:
         - subscription_id: Azure subscription ID (required)
         - resource_group: Resource group name (required)
         - location: Azure region (default: eastus)
         - vm_size: VM size (default: Standard_B1s)
-        - max_instances: Maximum number of proxy instances (default: 5)
+        - instance_name: Name prefix for created VMs (required)
         - vnet_name: Virtual network name (required for create)
         - subnet_name: Subnet name (required for create)
-        - proxy_port: Port the proxy runs on (default: 8080)
-        - tag_filter: Tag to identify proxy VMs (default: octoprox-proxy)
-        - image_reference: VM image reference (default: Ubuntu 22.04 LTS)
+        - tags: Custom tags to apply to VMs (optional, dict)
+
+    Credential config (secrets):
+        - client_id: Azure service principal client ID
+        - client_secret: Azure service principal client secret
+        - tenant_id: Azure tenant ID
     """
 
-    def __init__(self, source: ProxySource) -> None:
-        super().__init__(source)
-        self._subscription_id = source.config.get("subscription_id")
-        self._resource_group = source.config.get("resource_group")
-        self._location = source.config.get("location", "eastus")
-        self._vm_size = source.config.get("vm_size", "Standard_B1s")
-        self._vnet_name = source.config.get("vnet_name")
-        self._subnet_name = source.config.get("subnet_name")
-        self._proxy_port = source.config.get("proxy_port", 8080)
-        self._tag_filter = source.config.get("tag_filter", "octoprox-proxy")
+    def __init__(self, connector: Connector, credential: Credential) -> None:
+        super().__init__(connector, credential)
+        # Azure-specific config from connector
+        self._subscription_id = connector.config.get("subscription_id")
+        self._resource_group = connector.config.get("resource_group")
+        self._location = connector.config.get("location", "eastus")
+        self._vm_size = connector.config.get("vm_size", "Standard_B1s")
+        self._instance_name = connector.config.get("instance_name")
+        self._vnet_name = connector.config.get("vnet_name")
+        self._subnet_name = connector.config.get("subnet_name")
+        self._tags = connector.config.get("tags", {})
         self._compute_client = None
         self._network_client = None
 
     def _get_azure_clients(self):
         """Get or create Azure clients."""
         try:
-            from azure.identity import DefaultAzureCredential
             from azure.mgmt.compute import ComputeManagementClient
             from azure.mgmt.network import NetworkManagementClient
 
             if self._compute_client is None:
-                credential = DefaultAzureCredential()
+                # Check if service principal credentials are provided
+                client_id = self.credential.config.get("client_id")
+                client_secret = self.credential.config.get("client_secret")
+                tenant_id = self.credential.config.get("tenant_id")
+
+                if client_id and client_secret and tenant_id:
+                    from azure.identity import ClientSecretCredential
+
+                    azure_credential = ClientSecretCredential(
+                        tenant_id=tenant_id,
+                        client_id=client_id,
+                        client_secret=client_secret,
+                    )
+                else:
+                    # Fall back to default credentials
+                    from azure.identity import DefaultAzureCredential
+
+                    azure_credential = DefaultAzureCredential()
+
                 self._compute_client = ComputeManagementClient(
-                    credential, self._subscription_id
+                    azure_credential, self._subscription_id
                 )
                 self._network_client = NetworkManagementClient(
-                    credential, self._subscription_id
+                    azure_credential, self._subscription_id
                 )
             return self._compute_client, self._network_client
         except ImportError:
             logger.error(
-                "Azure SDK not installed. Install with: pip install octoprox[cloud] azure-identity"
+                "Azure SDK not installed. Install with: pip install octoprox[cloud]"
             )
             return None, None
-
-    async def fetch_proxies(self) -> list[Proxy]:
-        """Fetch proxies from Azure VMs tagged as proxies."""
-        compute_client, network_client = self._get_azure_clients()
-        if not compute_client or not self._resource_group:
-            return []
-
-        proxies: list[Proxy] = []
-
-        try:
-            # List VMs in resource group
-            vms = compute_client.virtual_machines.list(self._resource_group)
-
-            for vm in vms:
-                # Check if VM has our tag
-                if not vm.tags or vm.tags.get("role") != self._tag_filter:
-                    continue
-
-                # Get VM instance view for power state
-                instance_view = compute_client.virtual_machines.instance_view(
-                    self._resource_group, vm.name
-                )
-
-                # Check if running
-                is_running = False
-                for status in instance_view.statuses:
-                    if status.code == "PowerState/running":
-                        is_running = True
-                        break
-
-                if not is_running:
-                    continue
-
-                # Get public IP if available
-                public_ip = None
-                private_ip = None
-
-                if vm.network_profile and vm.network_profile.network_interfaces:
-                    for nic_ref in vm.network_profile.network_interfaces:
-                        nic_name = nic_ref.id.split("/")[-1]
-                        nic = network_client.network_interfaces.get(
-                            self._resource_group, nic_name
-                        )
-
-                        for ip_config in nic.ip_configurations:
-                            private_ip = ip_config.private_ip_address
-
-                            if ip_config.public_ip_address:
-                                pip_name = ip_config.public_ip_address.id.split("/")[-1]
-                                pip = network_client.public_ip_addresses.get(
-                                    self._resource_group, pip_name
-                                )
-                                public_ip = pip.ip_address
-
-                host = public_ip or private_ip
-                if not host:
-                    continue
-
-                proxy = Proxy(
-                    id=f"azure-{vm.name}",
-                    host=host,
-                    port=self._proxy_port,
-                    source_id=self.source.id,
-                    tags=["azure", self._location],
-                    metadata={
-                        "vm_name": vm.name,
-                        "vm_size": vm.hardware_profile.vm_size,
-                        "location": vm.location,
-                        "vm_id": vm.vm_id,
-                    },
-                )
-                proxies.append(proxy)
-
-            logger.info("Fetched Azure proxies", count=len(proxies), location=self._location)
-
-        except Exception as e:
-            logger.error("Failed to fetch Azure proxies", error=str(e))
-
-        return proxies
-
-    async def validate(self) -> bool:
-        """Validate Azure configuration and credentials."""
-        compute_client, _ = self._get_azure_clients()
-        if not compute_client:
-            return False
-
-        if not self._subscription_id or not self._resource_group:
-            logger.error("Azure subscription_id and resource_group are required")
-            return False
-
-        try:
-            # Try to list VMs to validate credentials
-            list(compute_client.virtual_machines.list(self._resource_group))
-            return True
-        except Exception as e:
-            logger.error("Azure validation failed", error=str(e))
-            return False
 
     async def create_instance(self) -> Proxy | None:
         """Create a new Azure VM configured as a proxy."""
@@ -719,9 +551,16 @@ class AzureProvider(CloudProvider):
             logger.error("vnet_name and subnet_name required for VM creation")
             return None
 
+        if not self._instance_name:
+            logger.error("instance_name required in connector config for VM creation")
+            return None
+
         try:
+            import base64
             import time
-            vm_name = f"octoprox-proxy-{int(time.time())}"
+
+            # Build VM name with timestamp for uniqueness
+            vm_name = f"{self._instance_name}-{int(time.time())}"
 
             # Get subnet
             subnet = network_client.subnets.get(
@@ -755,25 +594,22 @@ class AzureProvider(CloudProvider):
                 self._resource_group, nic_name, nic_params
             ).result()
 
-            # Custom data script to set up proxy
-            import base64
-            custom_data = f"""#!/bin/bash
-apt-get update
-apt-get install -y squid
-sed -i 's/http_port 3128/http_port {self._proxy_port}/' /etc/squid/squid.conf
-echo "http_access allow all" >> /etc/squid/squid.conf
-systemctl enable squid
-systemctl start squid
-"""
+            # Use the external Squid setup script
+            custom_data = get_squid_setup_script()
             custom_data_b64 = base64.b64encode(custom_data.encode()).decode()
+
+            # Build tags: start with required tags, then add custom tags
+            tags = {
+                "managed-by": "octoprox",
+            }
+            # Add custom tags from connector config
+            for key, value in self._tags.items():
+                tags[key] = str(value)
 
             # Create VM
             vm_params = {
                 "location": self._location,
-                "tags": {
-                    "managed-by": "octoprox",
-                    "role": self._tag_filter,
-                },
+                "tags": tags,
                 "hardware_profile": {"vm_size": self._vm_size},
                 "storage_profile": {
                     "image_reference": {
@@ -826,8 +662,8 @@ systemctl start squid
             proxy = Proxy(
                 id=f"azure-{vm_name}",
                 host=host,
-                port=self._proxy_port,
-                source_id=self.source.id,
+                port=PROXY_PORT,
+                connector_id=self.connector.id,
                 tags=["azure", self._location],
                 metadata={"vm_name": vm_name, "vm_id": vm_result.vm_id},
             )
@@ -877,63 +713,4 @@ systemctl start squid
         except Exception as e:
             logger.error("Failed to terminate Azure VM", error=str(e))
             return False
-
-    async def list_instances(self) -> list[dict]:
-        """List all Azure proxy VMs."""
-        compute_client, network_client = self._get_azure_clients()
-        if not compute_client or not self._resource_group:
-            return []
-
-        try:
-            instances = []
-            vms = compute_client.virtual_machines.list(self._resource_group)
-
-            for vm in vms:
-                if not vm.tags or vm.tags.get("role") != self._tag_filter:
-                    continue
-
-                # Get power state
-                instance_view = compute_client.virtual_machines.instance_view(
-                    self._resource_group, vm.name
-                )
-                power_state = "unknown"
-                for status in instance_view.statuses:
-                    if status.code.startswith("PowerState/"):
-                        power_state = status.code.replace("PowerState/", "")
-
-                # Get IPs
-                public_ip = None
-                private_ip = None
-
-                if vm.network_profile and vm.network_profile.network_interfaces:
-                    for nic_ref in vm.network_profile.network_interfaces:
-                        nic_name = nic_ref.id.split("/")[-1]
-                        try:
-                            nic = network_client.network_interfaces.get(
-                                self._resource_group, nic_name
-                            )
-                            for ip_config in nic.ip_configurations:
-                                private_ip = ip_config.private_ip_address
-                                if ip_config.public_ip_address:
-                                    pip_name = ip_config.public_ip_address.id.split("/")[-1]
-                                    pip = network_client.public_ip_addresses.get(
-                                        self._resource_group, pip_name
-                                    )
-                                    public_ip = pip.ip_address
-                        except Exception:
-                            pass
-
-                instances.append({
-                    "id": vm.name,
-                    "state": power_state,
-                    "vm_size": vm.hardware_profile.vm_size,
-                    "public_ip": public_ip,
-                    "private_ip": private_ip,
-                    "location": vm.location,
-                })
-
-            return instances
-        except Exception as e:
-            logger.error("Failed to list Azure VMs", error=str(e))
-            return []
 

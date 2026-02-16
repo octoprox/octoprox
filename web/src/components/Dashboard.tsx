@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { Activity, Server, CheckCircle, XCircle, Settings, ArrowUpCircle, ArrowDownCircle } from 'lucide-react'
-import { fetchProjectMetrics, updateProject, ProjectUpdate } from '../api/client'
+import { Activity, Server, CheckCircle, XCircle, Settings, ArrowUpCircle, ArrowDownCircle, TrendingUp, Loader, Power } from 'lucide-react'
+import { fetchProjectMetrics, fetchProjectScalingMetrics, updateProject, ProjectUpdate, ScalingMetrics } from '../api/client'
 import { useProject } from '../contexts/ProjectContext'
 import EditProjectModal from './EditProjectModal'
 import { formatBytes } from '../utils/format'
@@ -15,6 +15,13 @@ export default function Dashboard() {
     queryKey: ['metrics', selectedProjectId],
     queryFn: () => fetchProjectMetrics(selectedProjectId!),
     enabled: !!selectedProjectId,
+  })
+
+  const { data: scalingMetrics } = useQuery({
+    queryKey: ['scaling-metrics', selectedProjectId],
+    queryFn: () => fetchProjectScalingMetrics(selectedProjectId!),
+    enabled: !!selectedProjectId,
+    refetchInterval: 10000, // Refresh every 10 seconds
   })
 
   const updateMutation = useMutation({
@@ -113,6 +120,53 @@ export default function Dashboard() {
         </div>
       </div>
 
+      {/* Auto-Scaling Status */}
+      {scalingMetrics && (
+        <div className="bg-white rounded-lg shadow p-6 mb-8">
+          <h2 className="text-xl font-semibold mb-4">Auto-Scaling Status</h2>
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-6">
+            <div>
+              <p className="text-gray-500 text-sm mb-1">Demand Level</p>
+              <DemandBadge level={scalingMetrics.demand_level} />
+            </div>
+            <MetricItem
+              label="Requests/min"
+              value={scalingMetrics.requests_per_minute.toFixed(1)}
+              icon={<TrendingUp className="w-4 h-4 text-blue-500" />}
+            />
+            <MetricItem
+              label="Rate/Proxy"
+              value={scalingMetrics.rate_per_proxy.toFixed(1)}
+            />
+            <MetricItem
+              label="Instances"
+              value={`${scalingMetrics.current_instances} / ${scalingMetrics.max_instances}`}
+              color="text-blue-600"
+            />
+          </div>
+          {(scalingMetrics.draining_instances > 0 || scalingMetrics.terminating_instances > 0) && (
+            <div className="mt-4 pt-4 border-t border-gray-100 flex gap-6">
+              {scalingMetrics.draining_instances > 0 && (
+                <div className="flex items-center gap-2">
+                  <Loader className="w-4 h-4 text-orange-500 animate-spin" />
+                  <span className="text-sm text-orange-600">
+                    {scalingMetrics.draining_instances} draining
+                  </span>
+                </div>
+              )}
+              {scalingMetrics.terminating_instances > 0 && (
+                <div className="flex items-center gap-2">
+                  <Power className="w-4 h-4 text-purple-500" />
+                  <span className="text-sm text-purple-600">
+                    {scalingMetrics.terminating_instances} terminating
+                  </span>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+
       {/* Routing Strategy */}
       <div className="bg-white rounded-lg shadow p-6">
         <h2 className="text-xl font-semibold mb-4">Routing Strategy</h2>
@@ -194,3 +248,15 @@ function formatStrategy(strategy: string): string {
     .join(' ')
 }
 
+function DemandBadge({ level }: { level: ScalingMetrics['demand_level'] }) {
+  const styles: Record<string, string> = {
+    LOW: 'bg-green-100 text-green-800',
+    MEDIUM: 'bg-yellow-100 text-yellow-800',
+    HIGH: 'bg-red-100 text-red-800',
+  }
+  return (
+    <span className={`px-3 py-1 rounded-full text-sm font-semibold ${styles[level] ?? styles.LOW}`}>
+      {level}
+    </span>
+  )
+}

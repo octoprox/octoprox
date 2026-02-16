@@ -291,6 +291,8 @@ export interface PoolMetrics {
   total_proxies: number
   healthy_proxies: number
   unhealthy_proxies: number
+  draining_proxies: number
+  terminating_proxies: number
   total_requests: number
   total_successes: number
   total_failures: number
@@ -298,6 +300,18 @@ export interface PoolMetrics {
   avg_latency_ms: number
   total_bytes_sent: number
   total_bytes_received: number
+}
+
+export interface ScalingMetrics {
+  demand_level: 'LOW' | 'MEDIUM' | 'HIGH'
+  requests_per_minute: number
+  rate_per_proxy: number
+  current_instances: number
+  healthy_instances: number
+  min_instances: number
+  max_instances: number
+  draining_instances: number
+  terminating_instances: number
 }
 
 export interface MetricsResponse {
@@ -377,6 +391,11 @@ export const uploadProjectProxies = async (projectId: string, file: File, connec
 
 export const fetchProjectMetrics = async (projectId: string): Promise<MetricsResponse> => {
   const response = await api.get(`/projects/${projectId}/metrics`)
+  return response.data
+}
+
+export const fetchProjectScalingMetrics = async (projectId: string): Promise<ScalingMetrics> => {
+  const response = await api.get(`/projects/${projectId}/metrics/scaling`)
   return response.data
 }
 
