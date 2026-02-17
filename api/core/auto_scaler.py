@@ -237,7 +237,6 @@ class AutoScaler:
 
         proxies = self._proxy_manager.get_proxies_for_connector(connector.id)
         now = utc_now()
-        draining_timeout = timedelta(minutes=cloud_config.max_rotation_period_minutes)
 
         for proxy in proxies:
             # Ensure proxy has a rotation schedule
@@ -256,7 +255,7 @@ class AutoScaler:
 
             # Handle different proxy states
             if proxy.status == ProxyStatus.DRAINING:
-                await self._handle_draining_proxy(proxy, draining_timeout, credential)
+                await self._handle_draining_proxy(proxy)
             elif proxy.status == ProxyStatus.TERMINATING:
                 await self._handle_terminating_proxy(proxy, connector, credential)
             elif proxy.status in (ProxyStatus.HEALTHY, ProxyStatus.DEGRADED, ProxyStatus.UNKNOWN):
@@ -304,29 +303,53 @@ class AutoScaler:
         # Start draining the old proxy
         await self._proxy_manager.start_proxy_draining(proxy.id)
 
-    async def _handle_draining_proxy(
-        self, proxy: Proxy, draining_timeout: timedelta, credential
-    ) -> None:
-        """Handle a proxy that is draining - check if timeout reached."""
-        draining_started_str = proxy.metadata.get("draining_started_at")
-        if not draining_started_str:
-            # No start time recorded, mark as terminating
-            await self._proxy_manager.mark_proxy_terminating(proxy.id)
-            return
+    async def _handle_draining_proxy(self, proxy: Proxy) -> None:
+        """Handle a proxy that is draining - check if traffic has stopped.
 
-        try:
-            draining_started = datetime.fromisoformat(draining_started_str)
-        except ValueError:
-            await self._proxy_manager.mark_proxy_terminating(proxy.id)
-            return
+        The proxy is marked as terminating when there are no changes in bytes
+        sent and received between two consecutive check periods.
+        """
+        # Get current traffic stats
+        current_bytes_sent = proxy.bytes_sent
+        current_bytes_received = proxy.bytes_received
 
-        # Check if draining timeout has passed
-        if utc_now() >= draining_started + draining_timeout:
-            logger.info(
-                "Draining timeout reached, marking as terminating",
+        # Get previous traffic stats from metadata
+        prev_bytes_sent = proxy.metadata.get("draining_prev_bytes_sent")
+        prev_bytes_received = proxy.metadata.get("draining_prev_bytes_received")
+
+        if prev_bytes_sent is None or prev_bytes_received is None:
+            # First check - store current values for next comparison
+            proxy.metadata["draining_prev_bytes_sent"] = current_bytes_sent
+            proxy.metadata["draining_prev_bytes_received"] = current_bytes_received
+            logger.debug(
+                "Draining proxy: recording initial traffic stats",
                 proxy_id=proxy.id,
+                bytes_sent=current_bytes_sent,
+                bytes_received=current_bytes_received,
+            )
+            return
+
+        # Check if traffic has stopped (no change since last check)
+        if current_bytes_sent == prev_bytes_sent and current_bytes_received == prev_bytes_received:
+            logger.info(
+                "Draining complete: no traffic change detected, marking as terminating",
+                proxy_id=proxy.id,
+                bytes_sent=current_bytes_sent,
+                bytes_received=current_bytes_received,
             )
             await self._proxy_manager.mark_proxy_terminating(proxy.id)
+        else:
+            # Traffic still flowing - update previous values for next check
+            proxy.metadata["draining_prev_bytes_sent"] = current_bytes_sent
+            proxy.metadata["draining_prev_bytes_received"] = current_bytes_received
+            logger.debug(
+                "Draining proxy: traffic still flowing",
+                proxy_id=proxy.id,
+                prev_bytes_sent=prev_bytes_sent,
+                prev_bytes_received=prev_bytes_received,
+                current_bytes_sent=current_bytes_sent,
+                current_bytes_received=current_bytes_received,
+            )
 
     async def _handle_terminating_proxy(
         self, proxy: Proxy, connector: Connector, credential

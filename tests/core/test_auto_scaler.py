@@ -291,3 +291,165 @@ class TestStopMethod:
         auto_scaler.stop()
         assert auto_scaler._running is False
 
+
+class TestHandleDrainingProxy:
+    """Tests for _handle_draining_proxy method."""
+
+    @pytest.mark.asyncio
+    async def test_first_check_records_initial_stats(
+        self,
+        auto_scaler: AutoScaler,
+        mock_proxy_manager: MagicMock,
+    ) -> None:
+        """Test that first check records initial traffic stats in metadata."""
+        proxy = Proxy(
+            id="draining-proxy",
+            host="1.2.3.4",
+            port=8080,
+            connector_id="test-connector-1",
+            status=ProxyStatus.DRAINING,
+            bytes_sent=1000,
+            bytes_received=5000,
+        )
+
+        await auto_scaler._handle_draining_proxy(proxy)
+
+        # Should record initial stats, not mark as terminating
+        assert proxy.metadata["draining_prev_bytes_sent"] == 1000
+        assert proxy.metadata["draining_prev_bytes_received"] == 5000
+        mock_proxy_manager.mark_proxy_terminating.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_no_traffic_change_marks_terminating(
+        self,
+        auto_scaler: AutoScaler,
+        mock_proxy_manager: MagicMock,
+    ) -> None:
+        """Test that no traffic change between checks marks proxy as terminating."""
+        proxy = Proxy(
+            id="draining-proxy",
+            host="1.2.3.4",
+            port=8080,
+            connector_id="test-connector-1",
+            status=ProxyStatus.DRAINING,
+            bytes_sent=1000,
+            bytes_received=5000,
+            metadata={
+                "draining_prev_bytes_sent": 1000,
+                "draining_prev_bytes_received": 5000,
+            },
+        )
+
+        await auto_scaler._handle_draining_proxy(proxy)
+
+        # Should mark as terminating since no traffic change
+        mock_proxy_manager.mark_proxy_terminating.assert_called_once_with("draining-proxy")
+
+    @pytest.mark.asyncio
+    async def test_traffic_still_flowing_updates_stats(
+        self,
+        auto_scaler: AutoScaler,
+        mock_proxy_manager: MagicMock,
+    ) -> None:
+        """Test that ongoing traffic updates previous stats for next check."""
+        proxy = Proxy(
+            id="draining-proxy",
+            host="1.2.3.4",
+            port=8080,
+            connector_id="test-connector-1",
+            status=ProxyStatus.DRAINING,
+            bytes_sent=2000,  # Increased from 1000
+            bytes_received=10000,  # Increased from 5000
+            metadata={
+                "draining_prev_bytes_sent": 1000,
+                "draining_prev_bytes_received": 5000,
+            },
+        )
+
+        await auto_scaler._handle_draining_proxy(proxy)
+
+        # Should update stats, not mark as terminating
+        assert proxy.metadata["draining_prev_bytes_sent"] == 2000
+        assert proxy.metadata["draining_prev_bytes_received"] == 10000
+        mock_proxy_manager.mark_proxy_terminating.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_only_bytes_sent_changed(
+        self,
+        auto_scaler: AutoScaler,
+        mock_proxy_manager: MagicMock,
+    ) -> None:
+        """Test that change in only bytes_sent keeps proxy draining."""
+        proxy = Proxy(
+            id="draining-proxy",
+            host="1.2.3.4",
+            port=8080,
+            connector_id="test-connector-1",
+            status=ProxyStatus.DRAINING,
+            bytes_sent=2000,  # Changed
+            bytes_received=5000,  # Same
+            metadata={
+                "draining_prev_bytes_sent": 1000,
+                "draining_prev_bytes_received": 5000,
+            },
+        )
+
+        await auto_scaler._handle_draining_proxy(proxy)
+
+        # Should not mark as terminating
+        mock_proxy_manager.mark_proxy_terminating.assert_not_called()
+        assert proxy.metadata["draining_prev_bytes_sent"] == 2000
+
+    @pytest.mark.asyncio
+    async def test_only_bytes_received_changed(
+        self,
+        auto_scaler: AutoScaler,
+        mock_proxy_manager: MagicMock,
+    ) -> None:
+        """Test that change in only bytes_received keeps proxy draining."""
+        proxy = Proxy(
+            id="draining-proxy",
+            host="1.2.3.4",
+            port=8080,
+            connector_id="test-connector-1",
+            status=ProxyStatus.DRAINING,
+            bytes_sent=1000,  # Same
+            bytes_received=10000,  # Changed
+            metadata={
+                "draining_prev_bytes_sent": 1000,
+                "draining_prev_bytes_received": 5000,
+            },
+        )
+
+        await auto_scaler._handle_draining_proxy(proxy)
+
+        # Should not mark as terminating
+        mock_proxy_manager.mark_proxy_terminating.assert_not_called()
+        assert proxy.metadata["draining_prev_bytes_received"] == 10000
+
+    @pytest.mark.asyncio
+    async def test_zero_traffic_from_start(
+        self,
+        auto_scaler: AutoScaler,
+        mock_proxy_manager: MagicMock,
+    ) -> None:
+        """Test proxy with zero traffic from start terminates after two checks."""
+        proxy = Proxy(
+            id="draining-proxy",
+            host="1.2.3.4",
+            port=8080,
+            connector_id="test-connector-1",
+            status=ProxyStatus.DRAINING,
+            bytes_sent=0,
+            bytes_received=0,
+        )
+
+        # First check - records initial stats
+        await auto_scaler._handle_draining_proxy(proxy)
+        assert proxy.metadata["draining_prev_bytes_sent"] == 0
+        assert proxy.metadata["draining_prev_bytes_received"] == 0
+        mock_proxy_manager.mark_proxy_terminating.assert_not_called()
+
+        # Second check - no change, should terminate
+        await auto_scaler._handle_draining_proxy(proxy)
+        mock_proxy_manager.mark_proxy_terminating.assert_called_once_with("draining-proxy")
