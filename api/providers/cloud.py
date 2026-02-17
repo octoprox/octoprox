@@ -535,11 +535,13 @@ class AzureProvider(CloudProvider):
             )
 
             # Create public IP
+            # Note: Standard SKU is required (Basic SKU is deprecated)
+            # Standard SKU requires Static allocation
             pip_name = f"{vm_name}-pip"
             pip_params = {
                 "location": self._config.location,
-                "sku": {"name": "Basic"},
-                "public_ip_allocation_method": "Dynamic",
+                "sku": {"name": "Standard"},
+                "public_ip_allocation_method": "Static",
             }
             pip_result = network_client.public_ip_addresses.begin_create_or_update(
                 self._config.resource_group, pip_name, pip_params
@@ -597,9 +599,14 @@ class AzureProvider(CloudProvider):
                     "admin_username": "octoprox",
                     "custom_data": custom_data_b64,
                     "linux_configuration": {
-                        "disable_password_authentication": True,
+                        "disable_password_authentication": bool(self._config.ssh_public_key),
                         "ssh": {
-                            "public_keys": []  # Would need SSH key config
+                            "public_keys": [
+                                {
+                                    "path": "/home/octoprox/.ssh/authorized_keys",
+                                    "key_data": self._config.ssh_public_key,
+                                }
+                            ] if self._config.ssh_public_key else [],
                         },
                     },
                 },
