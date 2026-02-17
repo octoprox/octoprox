@@ -128,6 +128,7 @@ const getDefaultConfig = (type: CredentialType | null, options?: ConnectorOption
         vm_size: options?.azure_vm_sizes[0] || 'Standard_B1s',
         vnet_name: '',
         subnet_name: '',
+        ssh_public_key: '',
         tags: '{}',
         min_proxies: '1',
         max_proxies: '10',
@@ -325,7 +326,7 @@ export default function ConnectorConfig() {
     const infraFields: Record<string, string[]> = {
       aws: ['instance_name', 'region', 'instance_type', 'key_pair_name', 'security_group', 'ami_id'],
       gcp: ['project_id', 'instance_name', 'zone', 'machine_type', 'network', 'subnetwork', 'source_image', 'ssh_key'],
-      azure: ['subscription_id', 'resource_group', 'instance_name', 'location', 'vm_size', 'vnet_name', 'subnet_name'],
+      azure: ['subscription_id', 'resource_group', 'instance_name', 'location', 'vm_size', 'vnet_name', 'subnet_name', 'ssh_public_key'],
     }
 
     return {
@@ -351,6 +352,7 @@ export default function ConnectorConfig() {
       subnetwork: 'Subnetwork',
       source_image: 'Source Image',
       ssh_key: 'SSH Key',
+      ssh_public_key: 'SSH Public Key',
       subscription_id: 'Subscription ID',
       location: 'Location',
       vm_size: 'VM Size',
@@ -380,7 +382,7 @@ export default function ConnectorConfig() {
     const requiredFields: Record<string, string[]> = {
       aws: ['instance_name', 'region', 'instance_type', 'key_pair_name', 'security_group', 'ami_id'],
       gcp: ['project_id', 'instance_name', 'zone', 'machine_type'],
-      azure: ['subscription_id', 'resource_group', 'instance_name', 'vm_size'],
+      azure: ['subscription_id', 'resource_group', 'instance_name', 'vm_size', 'ssh_public_key'],
     }
     const isRequired = (key: string) => requiredFields[type]?.includes(key) || false
 
@@ -397,6 +399,7 @@ export default function ConnectorConfig() {
         resource_group: 'my-resource-group',
         vnet_name: 'my-vnet',
         subnet_name: 'default',
+        ssh_public_key: 'ssh-rsa AAAA... user@host',
       }
       return placeholders[key] || getFieldLabel(key)
     }

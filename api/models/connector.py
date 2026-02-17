@@ -155,6 +155,7 @@ class AzureConnectorConfig(CloudConnectorConfig):
     vm_size: str = "Standard_B1s"
     vnet_name: str | None = None
     subnet_name: str | None = None
+    ssh_public_key: str
     tags: dict[str, str] = Field(default_factory=dict)
 
     @model_validator(mode='after')
@@ -168,6 +169,8 @@ class AzureConnectorConfig(CloudConnectorConfig):
             raise ValueError('instance_name is required and cannot be empty')
         if not self.vm_size or not self.vm_size.strip():
             raise ValueError('vm_size is required and cannot be empty')
+        if not self.ssh_public_key or not self.ssh_public_key.strip():
+            raise ValueError('ssh_public_key is required and cannot be empty')
         return self
 
 
