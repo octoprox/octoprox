@@ -2,7 +2,12 @@
 
 import pytest
 
-from api.models.connector import Connector
+from api.models.connector import (
+    Connector,
+    AWSConnectorConfig,
+    GCPConnectorConfig,
+    AzureConnectorConfig,
+)
 from api.models.credential import Credential, CredentialType
 from api.providers.cloud import AWSProvider, AzureProvider, GCPProvider, PROXY_PORT
 
@@ -20,7 +25,6 @@ def aws_connector() -> Connector:
             "instance_name": "test-proxy",
             "region": "us-east-1",
             "instance_type": "t3.micro",
-            "ami_id": "ami-12345678",
             "security_group": "sg-12345678",
             "key_pair_name": "my-key-pair",
             "min_proxies": 1,
@@ -93,7 +97,8 @@ def azure_connector() -> Connector:
             "resource_group": "my-resource-group",
             "instance_name": "test-proxy",
             "location": "eastus",
-            "vm_size": "Standard_B1s",
+            "vm_size": "Standard_B2ls_v2",
+            "ssh_public_key": "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQ... test@example.com",
         },
         enabled=True,
     )
@@ -128,7 +133,6 @@ class TestAWSProviderInit:
         assert provider.credential == aws_credential
         assert provider._config.region == "us-east-1"
         assert provider._config.instance_type == "t3.micro"
-        assert provider._config.ami_id == "ami-12345678"
         assert provider._config.security_group == "sg-12345678"
         assert provider._config.key_pair_name == "my-key-pair"
         assert provider._config.instance_name == "test-proxy"
@@ -147,7 +151,6 @@ class TestAWSProviderInit:
                 "instance_type": "t3.small",
                 "key_pair_name": "minimal-key",
                 "security_group": "sg-minimal",
-                "ami_id": "ami-minimal",
             },
         )
         provider = AWSProvider(connector, aws_credential)
@@ -209,7 +212,7 @@ class TestAzureProviderInit:
         assert provider._config.resource_group == "my-resource-group"
         assert provider._config.instance_name == "test-proxy"
         assert provider._config.location == "eastus"
-        assert provider._config.vm_size == "Standard_B1s"
+        assert provider._config.vm_size == "Standard_B2ls_v2"
 
     def test_init_with_defaults(self, azure_credential: Credential) -> None:
         """Test AzureProvider uses defaults for missing config values."""
@@ -223,12 +226,13 @@ class TestAzureProviderInit:
                 "subscription_id": "minimal-sub",
                 "resource_group": "minimal-rg",
                 "instance_name": "minimal-proxy",
+                "ssh_public_key": "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQ... test@example.com",
             },
         )
         provider = AzureProvider(connector, azure_credential)
 
         assert provider._config.location == "eastus"  # default
-        assert provider._config.vm_size == "Standard_B1s"  # default
+        assert provider._config.vm_size == "Standard_B2ls_v2"  # default
 
 
 class TestStaticProvider:
@@ -307,3 +311,181 @@ class TestAPIProvider:
         assert provider._url == "https://api.example.com/proxies"
         assert provider._api_key == "secret-key"
         assert provider._headers == {"X-Custom": "value"}
+
+
+class TestAWSConnectorConfigImageResolution:
+    """Tests for AWSConnectorConfig.get_ami() method."""
+
+    def test_get_ami_returns_amd64_ami_for_t3_instance(self) -> None:
+        """Test get_ami returns correct AMI for t3 (x86_64) instance type."""
+        config = AWSConnectorConfig(
+            instance_name="test",
+            region="us-east-1",
+            instance_type="t3.micro",
+            key_pair_name="key",
+            security_group="sg-123",
+        )
+        ami = config.get_ami()
+        assert ami is not None
+        assert ami.startswith("ami-")
+
+    def test_get_ami_returns_arm64_ami_for_t4g_instance(self) -> None:
+        """Test get_ami returns correct AMI for t4g (arm64) instance type."""
+        config = AWSConnectorConfig(
+            instance_name="test",
+            region="us-east-1",
+            instance_type="t4g.micro",
+            key_pair_name="key",
+            security_group="sg-123",
+        )
+        ami = config.get_ami()
+        assert ami is not None
+        assert ami.startswith("ami-")
+
+    def test_get_ami_returns_different_amis_for_different_architectures(self) -> None:
+        """Test that t3 and t4g instances get different AMIs (different architectures)."""
+        config_t3 = AWSConnectorConfig(
+            instance_name="test",
+            region="us-east-1",
+            instance_type="t3.micro",
+            key_pair_name="key",
+            security_group="sg-123",
+        )
+        config_t4g = AWSConnectorConfig(
+            instance_name="test",
+            region="us-east-1",
+            instance_type="t4g.micro",
+            key_pair_name="key",
+            security_group="sg-123",
+        )
+        ami_t3 = config_t3.get_ami()
+        ami_t4g = config_t4g.get_ami()
+        assert ami_t3 != ami_t4g
+
+    def test_get_ami_returns_none_for_unsupported_region(self) -> None:
+        """Test get_ami returns None for unsupported region."""
+        config = AWSConnectorConfig(
+            instance_name="test",
+            region="invalid-region-1",
+            instance_type="t3.micro",
+            key_pair_name="key",
+            security_group="sg-123",
+        )
+        ami = config.get_ami()
+        assert ami is None
+
+
+class TestGCPConnectorConfigImageResolution:
+    """Tests for GCPConnectorConfig.get_source_image() method."""
+
+    def test_get_source_image_returns_x86_image_for_e2_instance(self) -> None:
+        """Test get_source_image returns x86_64 image for e2 machine type."""
+        config = GCPConnectorConfig(
+            project_id="my-project",
+            instance_name="test",
+            zone="us-central1-a",
+            machine_type="e2-micro",
+        )
+        image = config.get_source_image()
+        assert "ubuntu-2404-lts-amd64" in image
+
+    def test_get_source_image_returns_arm64_image_for_t2a_instance(self) -> None:
+        """Test get_source_image returns arm64 image for t2a machine type."""
+        config = GCPConnectorConfig(
+            project_id="my-project",
+            instance_name="test",
+            zone="us-central1-a",
+            machine_type="t2a-standard-1",
+        )
+        image = config.get_source_image()
+        assert "ubuntu-2404-lts-arm64" in image
+
+    def test_get_source_image_returns_different_images_for_different_architectures(self) -> None:
+        """Test that e2 and t2a instances get different images."""
+        config_e2 = GCPConnectorConfig(
+            project_id="my-project",
+            instance_name="test",
+            zone="us-central1-a",
+            machine_type="e2-micro",
+        )
+        config_t2a = GCPConnectorConfig(
+            project_id="my-project",
+            instance_name="test",
+            zone="us-central1-a",
+            machine_type="t2a-standard-1",
+        )
+        image_e2 = config_e2.get_source_image()
+        image_t2a = config_t2a.get_source_image()
+        assert image_e2 != image_t2a
+
+
+class TestAzureConnectorConfigImageResolution:
+    """Tests for AzureConnectorConfig.get_image_reference() method."""
+
+    def test_get_image_reference_returns_x86_image_for_bsv2_series(self) -> None:
+        """Test get_image_reference returns x86_64 image for Bsv2 VM."""
+        config = AzureConnectorConfig(
+            subscription_id="sub-123",
+            resource_group="rg",
+            instance_name="test",
+            location="eastus",
+            vm_size="Standard_B2ls_v2",
+            ssh_public_key="ssh-rsa AAAA...",
+        )
+        image_ref = config.get_image_reference()
+        assert image_ref["publisher"] == "Canonical"
+        assert image_ref["offer"] == "ubuntu-24_04-lts"
+        assert image_ref["sku"] == "server"
+        assert "arm64" not in image_ref["sku"]
+
+    def test_get_image_reference_returns_arm64_image_for_bpsv2_series(self) -> None:
+        """Test get_image_reference returns arm64 image for Bpsv2 VM."""
+        config = AzureConnectorConfig(
+            subscription_id="sub-123",
+            resource_group="rg",
+            instance_name="test",
+            location="eastus",
+            vm_size="Standard_B2ps_v2",
+            ssh_public_key="ssh-rsa AAAA...",
+        )
+        image_ref = config.get_image_reference()
+        assert image_ref["publisher"] == "Canonical"
+        assert "arm64" in image_ref["sku"]
+
+    def test_get_image_reference_returns_different_images_for_different_architectures(self) -> None:
+        """Test that Bsv2 and Bpsv2 VMs get different images."""
+        config_x86 = AzureConnectorConfig(
+            subscription_id="sub-123",
+            resource_group="rg",
+            instance_name="test",
+            location="eastus",
+            vm_size="Standard_B2ls_v2",
+            ssh_public_key="ssh-rsa AAAA...",
+        )
+        config_arm = AzureConnectorConfig(
+            subscription_id="sub-123",
+            resource_group="rg",
+            instance_name="test",
+            location="eastus",
+            vm_size="Standard_B2ps_v2",
+            ssh_public_key="ssh-rsa AAAA...",
+        )
+        image_x86 = config_x86.get_image_reference()
+        image_arm = config_arm.get_image_reference()
+        assert image_x86["sku"] != image_arm["sku"]
+
+    def test_get_image_reference_returns_copy(self) -> None:
+        """Test that get_image_reference returns a copy, not the original dict."""
+        config = AzureConnectorConfig(
+            subscription_id="sub-123",
+            resource_group="rg",
+            instance_name="test",
+            location="eastus",
+            vm_size="Standard_B2ls_v2",
+            ssh_public_key="ssh-rsa AAAA...",
+        )
+        image_ref1 = config.get_image_reference()
+        image_ref2 = config.get_image_reference()
+        assert image_ref1 is not image_ref2
+        image_ref1["publisher"] = "Modified"
+        assert image_ref2["publisher"] == "Canonical"

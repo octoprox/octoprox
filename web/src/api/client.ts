@@ -278,13 +278,27 @@ export interface ConnectorUpdate {
   enabled?: boolean
 }
 
+// Rich option types for dropdowns
+export interface RegionOption {
+  code: string
+  name: string
+}
+
+export interface InstanceTypeOption {
+  code: string
+  vcpus: number
+  memory_gb: number
+  architecture: string  // "x86_64" or "arm64"
+  description: string
+}
+
 export interface ConnectorOptions {
-  aws_regions: string[]
-  aws_instance_types: string[]
-  gcp_regions: string[]
-  gcp_machine_types: string[]
-  azure_regions: string[]
-  azure_vm_sizes: string[]
+  aws_regions: RegionOption[]
+  aws_instance_types: InstanceTypeOption[]
+  gcp_zones: RegionOption[]
+  gcp_machine_types: InstanceTypeOption[]
+  azure_locations: RegionOption[]
+  azure_vm_sizes: InstanceTypeOption[]
 }
 
 export interface PoolMetrics {

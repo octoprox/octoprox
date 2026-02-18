@@ -9,72 +9,24 @@ from pydantic import BaseModel, Field, model_validator
 from api.core import utc_now
 
 from api.models.credential import CredentialType
-
-
-# --- Cloud Provider Options ---
-
-AWS_REGIONS = [
-    "us-east-1", "us-east-2", "us-west-1", "us-west-2",
-    "af-south-1", "ap-east-1", "ap-south-1", "ap-south-2",
-    "ap-southeast-1", "ap-southeast-2", "ap-southeast-3", "ap-southeast-4",
-    "ap-northeast-1", "ap-northeast-2", "ap-northeast-3",
-    "ca-central-1", "ca-west-1",
-    "eu-central-1", "eu-central-2", "eu-west-1", "eu-west-2", "eu-west-3",
-    "eu-south-1", "eu-south-2", "eu-north-1",
-    "il-central-1", "me-south-1", "me-central-1",
-    "sa-east-1",
-]
-
-AWS_INSTANCE_TYPES = [
-    "t2.micro", "t2.small", "t2.medium", "t2.large", "t2.xlarge", "t2.2xlarge",
-    "t3.micro", "t3.small", "t3.medium", "t3.large", "t3.xlarge", "t3.2xlarge",
-    "t3a.micro", "t3a.small", "t3a.medium", "t3a.large", "t3a.xlarge", "t3a.2xlarge",
-    "m5.large", "m5.xlarge", "m5.2xlarge", "m5.4xlarge",
-    "m6i.large", "m6i.xlarge", "m6i.2xlarge", "m6i.4xlarge",
-    "c5.large", "c5.xlarge", "c5.2xlarge", "c5.4xlarge",
-    "c6i.large", "c6i.xlarge", "c6i.2xlarge", "c6i.4xlarge",
-]
-
-GCP_REGIONS = [
-    "us-central1", "us-east1", "us-east4", "us-east5", "us-south1", "us-west1", "us-west2", "us-west3", "us-west4",
-    "northamerica-northeast1", "northamerica-northeast2", "southamerica-east1", "southamerica-west1",
-    "europe-central2", "europe-north1", "europe-southwest1", "europe-west1", "europe-west2", "europe-west3",
-    "europe-west4", "europe-west6", "europe-west8", "europe-west9", "europe-west10", "europe-west12",
-    "asia-east1", "asia-east2", "asia-northeast1", "asia-northeast2", "asia-northeast3",
-    "asia-south1", "asia-south2", "asia-southeast1", "asia-southeast2",
-    "australia-southeast1", "australia-southeast2",
-    "me-central1", "me-central2", "me-west1",
-    "africa-south1",
-]
-
-GCP_MACHINE_TYPES = [
-    "e2-micro", "e2-small", "e2-medium", "e2-standard-2", "e2-standard-4", "e2-standard-8",
-    "n1-standard-1", "n1-standard-2", "n1-standard-4", "n1-standard-8",
-    "n2-standard-2", "n2-standard-4", "n2-standard-8", "n2-standard-16",
-    "n2d-standard-2", "n2d-standard-4", "n2d-standard-8", "n2d-standard-16",
-    "c2-standard-4", "c2-standard-8", "c2-standard-16",
-    "c3-standard-4", "c3-standard-8", "c3-standard-22",
-]
-
-AZURE_REGIONS = [
-    "eastus", "eastus2", "southcentralus", "westus2", "westus3",
-    "australiaeast", "southeastasia", "northeurope", "swedencentral", "uksouth",
-    "westeurope", "centralus", "southafricanorth", "centralindia", "eastasia",
-    "japaneast", "koreacentral", "canadacentral", "francecentral", "germanywestcentral",
-    "italynorth", "norwayeast", "polandcentral", "switzerlandnorth", "uaenorth",
-    "brazilsouth", "israelcentral", "qatarcentral", "centralusstage", "eastusstage",
-    "westus", "northcentralus", "westcentralus", "australiasoutheast", "japanwest",
-    "koreasouth", "southindia", "westindia", "canadaeast", "ukwest",
-]
-
-AZURE_VM_SIZES = [
-    "Standard_B1s", "Standard_B1ms", "Standard_B2s", "Standard_B2ms", "Standard_B4ms",
-    "Standard_D2s_v3", "Standard_D4s_v3", "Standard_D8s_v3", "Standard_D16s_v3",
-    "Standard_D2s_v4", "Standard_D4s_v4", "Standard_D8s_v4", "Standard_D16s_v4",
-    "Standard_D2s_v5", "Standard_D4s_v5", "Standard_D8s_v5", "Standard_D16s_v5",
-    "Standard_E2s_v3", "Standard_E4s_v3", "Standard_E8s_v3",
-    "Standard_F2s_v2", "Standard_F4s_v2", "Standard_F8s_v2", "Standard_F16s_v2",
-]
+from api.models.cloud_options import (
+    RegionOption,
+    InstanceTypeOption,
+    AWS_REGIONS,
+    AWS_INSTANCE_TYPES,
+    AWS_UBUNTU_AMIS,
+    GCP_ZONES,
+    GCP_MACHINE_TYPES,
+    GCP_UBUNTU_IMAGE_X86,
+    GCP_UBUNTU_IMAGE_ARM,
+    AZURE_LOCATIONS,
+    AZURE_VM_SIZES,
+    AZURE_UBUNTU_IMAGE_X86,
+    AZURE_UBUNTU_IMAGE_ARM,
+    get_aws_architecture,
+    get_gcp_architecture,
+    get_azure_architecture,
+)
 
 
 # --- Typed Config Models for Validation ---
@@ -93,13 +45,16 @@ class CloudConnectorConfig(BaseModel):
 
 
 class AWSConnectorConfig(CloudConnectorConfig):
-    """Configuration for AWS connectors."""
+    """Configuration for AWS connectors.
+
+    Note: AMI is automatically determined based on region and instance type
+    (architecture). Ubuntu 24.04 LTS is used for all instances.
+    """
     instance_name: str
     region: str
     instance_type: str
     key_pair_name: str
     security_group: str
-    ami_id: str
     tags: dict[str, str] = Field(default_factory=dict)
 
     @model_validator(mode='after')
@@ -115,20 +70,29 @@ class AWSConnectorConfig(CloudConnectorConfig):
             raise ValueError('key_pair_name is required and cannot be empty')
         if not self.security_group or not self.security_group.strip():
             raise ValueError('security_group is required and cannot be empty')
-        if not self.ami_id or not self.ami_id.strip():
-            raise ValueError('ami_id is required and cannot be empty')
         return self
+
+    def get_ami(self) -> str | None:
+        """Get the Ubuntu 24.04 LTS AMI ID for this config's region and instance type.
+
+        Returns None if the region/architecture combination is not supported.
+        """
+        arch = get_aws_architecture(self.instance_type)
+        return AWS_UBUNTU_AMIS.get((self.region, arch))
 
 
 class GCPConnectorConfig(CloudConnectorConfig):
-    """Configuration for GCP connectors."""
+    """Configuration for GCP connectors.
+
+    Note: Source image is automatically determined based on machine type
+    (architecture). Ubuntu 24.04 LTS is used for all instances.
+    """
     project_id: str
     instance_name: str
     zone: str = "us-central1-a"
     machine_type: str = "e2-micro"
     network: str = "default"
     subnetwork: str | None = None
-    source_image: str = "projects/debian-cloud/global/images/family/debian-11"
     ssh_key: str | None = None
     tags: dict[str, str] = Field(default_factory=dict)
 
@@ -145,6 +109,13 @@ class GCPConnectorConfig(CloudConnectorConfig):
             raise ValueError('machine_type is required and cannot be empty')
         return self
 
+    def get_source_image(self) -> str:
+        """Get the Ubuntu 24.04 LTS source image for this config's machine type."""
+        arch = get_gcp_architecture(self.machine_type)
+        if arch == "arm64":
+            return GCP_UBUNTU_IMAGE_ARM
+        return GCP_UBUNTU_IMAGE_X86
+
 
 class AzureConnectorConfig(CloudConnectorConfig):
     """Configuration for Azure connectors."""
@@ -152,7 +123,7 @@ class AzureConnectorConfig(CloudConnectorConfig):
     resource_group: str
     instance_name: str
     location: str = "eastus"
-    vm_size: str = "Standard_B1s"
+    vm_size: str = "Standard_B2ls_v2"
     vnet_name: str | None = None
     subnet_name: str | None = None
     ssh_public_key: str
@@ -172,6 +143,13 @@ class AzureConnectorConfig(CloudConnectorConfig):
         if not self.ssh_public_key or not self.ssh_public_key.strip():
             raise ValueError('ssh_public_key is required and cannot be empty')
         return self
+
+    def get_image_reference(self) -> dict[str, str]:
+        """Get the Ubuntu 24.04 LTS image reference for this config's VM size."""
+        arch = get_azure_architecture(self.vm_size)
+        if arch == "arm64":
+            return AZURE_UBUNTU_IMAGE_ARM.copy()
+        return AZURE_UBUNTU_IMAGE_X86.copy()
 
 
 def validate_connector_config(credential_type: CredentialType, config: dict[str, Any]) -> dict[str, Any]:
@@ -273,11 +251,16 @@ class ConnectorResponse(BaseModel):
 # --- Options Response for Frontend ---
 
 class ConnectorOptionsResponse(BaseModel):
-    """Response containing available options for connector configuration."""
-    aws_regions: list[str] = AWS_REGIONS
-    aws_instance_types: list[str] = AWS_INSTANCE_TYPES
-    gcp_regions: list[str] = GCP_REGIONS
-    gcp_machine_types: list[str] = GCP_MACHINE_TYPES
-    azure_regions: list[str] = AZURE_REGIONS
-    azure_vm_sizes: list[str] = AZURE_VM_SIZES
+    """Response containing available options for connector configuration.
+
+    All options are rich objects with metadata for frontend display:
+    - Regions/zones/locations include code and friendly name
+    - Instance types include code, vCPUs, memory, architecture, and description
+    """
+    aws_regions: list[RegionOption] = Field(default_factory=lambda: AWS_REGIONS)
+    aws_instance_types: list[InstanceTypeOption] = Field(default_factory=lambda: AWS_INSTANCE_TYPES)
+    gcp_zones: list[RegionOption] = Field(default_factory=lambda: GCP_ZONES)
+    gcp_machine_types: list[InstanceTypeOption] = Field(default_factory=lambda: GCP_MACHINE_TYPES)
+    azure_locations: list[RegionOption] = Field(default_factory=lambda: AZURE_LOCATIONS)
+    azure_vm_sizes: list[InstanceTypeOption] = Field(default_factory=lambda: AZURE_VM_SIZES)
 

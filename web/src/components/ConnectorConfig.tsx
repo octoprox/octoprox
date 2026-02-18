@@ -15,6 +15,7 @@ import {
 } from '../api/client'
 import { useProject } from '../contexts/ProjectContext'
 import AddCredentialModal from './AddCredentialModal'
+import { RichSelect, RichSelectOption } from './RichSelect'
 
 // Import logos
 import awsLogo from '../assets/logos/aws.svg'
@@ -92,11 +93,10 @@ const getDefaultConfig = (type: CredentialType | null, options?: ConnectorOption
     case 'aws':
       return {
         instance_name: '',
-        region: options?.aws_regions[0] || 'us-east-1',
-        instance_type: options?.aws_instance_types[0] || 't3.micro',
+        region: options?.aws_regions[0]?.code || 'us-east-1',
+        instance_type: options?.aws_instance_types[0]?.code || 't3.micro',
         key_pair_name: '',
         security_group: '',
-        ami_id: '',
         tags: '{}',
         min_proxies: '1',
         max_proxies: '10',
@@ -107,11 +107,10 @@ const getDefaultConfig = (type: CredentialType | null, options?: ConnectorOption
       return {
         project_id: '',
         instance_name: '',
-        zone: 'us-central1-a',
-        machine_type: options?.gcp_machine_types[0] || 'e2-micro',
+        zone: options?.gcp_zones[0]?.code || 'us-central1-a',
+        machine_type: options?.gcp_machine_types[0]?.code || 'e2-micro',
         network: 'default',
         subnetwork: '',
-        source_image: 'projects/debian-cloud/global/images/family/debian-11',
         ssh_key: '',
         tags: '{}',
         min_proxies: '1',
@@ -124,8 +123,8 @@ const getDefaultConfig = (type: CredentialType | null, options?: ConnectorOption
         subscription_id: '',
         resource_group: '',
         instance_name: '',
-        location: options?.azure_regions[0] || 'eastus',
-        vm_size: options?.azure_vm_sizes[0] || 'Standard_B1s',
+        location: options?.azure_locations[0]?.code || 'eastus',
+        vm_size: options?.azure_vm_sizes[0]?.code || 'Standard_B1s',
         vnet_name: '',
         subnet_name: '',
         ssh_public_key: '',
@@ -324,8 +323,8 @@ export default function ConnectorConfig() {
 
     // Infrastructure fields vary by provider
     const infraFields: Record<string, string[]> = {
-      aws: ['instance_name', 'region', 'instance_type', 'key_pair_name', 'security_group', 'ami_id'],
-      gcp: ['project_id', 'instance_name', 'zone', 'machine_type', 'network', 'subnetwork', 'source_image', 'ssh_key'],
+      aws: ['instance_name', 'region', 'instance_type', 'key_pair_name', 'security_group'],
+      gcp: ['project_id', 'instance_name', 'zone', 'machine_type', 'network', 'subnetwork', 'ssh_key'],
       azure: ['subscription_id', 'resource_group', 'instance_name', 'location', 'vm_size', 'vnet_name', 'subnet_name', 'ssh_public_key'],
     }
 
@@ -344,13 +343,11 @@ export default function ConnectorConfig() {
       instance_type: 'Instance Type',
       key_pair_name: 'Key Pair',
       security_group: 'Security Group',
-      ami_id: 'AMI ID',
       project_id: 'Project ID',
       zone: 'Zone',
       machine_type: 'Machine Type',
       network: 'Network',
       subnetwork: 'Subnetwork',
-      source_image: 'Source Image',
       ssh_key: 'SSH Key',
       ssh_public_key: 'SSH Public Key',
       subscription_id: 'Subscription ID',
@@ -367,20 +364,44 @@ export default function ConnectorConfig() {
     return labels[key] || key.replace(/_/g, ' ').replace(/\b\w/g, (l) => l.toUpperCase())
   }
 
+  // Convert instance type options to RichSelectOption format
+  const toInstanceTypeOptions = (opts: { code: string; vcpus: number; memory_gb: number; architecture: string; description: string }[] | undefined): RichSelectOption[] => {
+    if (!opts) return []
+    return opts.map((opt) => ({
+      value: opt.code,
+      label: opt.code,
+      description: opt.description,
+      badge: opt.architecture,
+    }))
+  }
+
+  // Convert region options to RichSelectOption format
+  const toRegionOptions = (opts: { code: string; name: string }[] | undefined): RichSelectOption[] => {
+    if (!opts) return []
+    return opts.map((opt) => ({
+      value: opt.code,
+      label: opt.name,
+      description: opt.code,
+    }))
+  }
+
   const renderConfigFields = (type: CredentialType | null, config: Record<string, string>, onChange: (key: string, value: string) => void) => {
     if (!type || type === 'static_proxy_provider') return null
 
-    const dropdownFields: Record<string, string[] | undefined> = {
-      region: optionsData?.aws_regions,
-      location: optionsData?.azure_regions,
-      instance_type: optionsData?.aws_instance_types,
-      machine_type: optionsData?.gcp_machine_types,
-      vm_size: optionsData?.azure_vm_sizes,
+    const regionDropdownFields: Record<string, RichSelectOption[]> = {
+      region: toRegionOptions(optionsData?.aws_regions),
+      zone: toRegionOptions(optionsData?.gcp_zones),
+      location: toRegionOptions(optionsData?.azure_locations),
     }
 
-    // Required fields by provider
+    const instanceTypeDropdownFields: Record<string, RichSelectOption[]> = {
+      instance_type: toInstanceTypeOptions(optionsData?.aws_instance_types),
+      machine_type: toInstanceTypeOptions(optionsData?.gcp_machine_types),
+      vm_size: toInstanceTypeOptions(optionsData?.azure_vm_sizes),
+    }
+
     const requiredFields: Record<string, string[]> = {
-      aws: ['instance_name', 'region', 'instance_type', 'key_pair_name', 'security_group', 'ami_id'],
+      aws: ['instance_name', 'region', 'instance_type', 'key_pair_name', 'security_group'],
       gcp: ['project_id', 'instance_name', 'zone', 'machine_type'],
       azure: ['subscription_id', 'resource_group', 'instance_name', 'vm_size', 'ssh_public_key'],
     }
@@ -390,11 +411,9 @@ export default function ConnectorConfig() {
     const getPlaceholder = (key: string): string => {
       const placeholders: Record<string, string> = {
         security_group: 'sg-xxxxxxxx',
-        ami_id: 'ami-xxxxxxxx',
         key_pair_name: 'my-key-pair',
         instance_name: 'proxy-instance',
         project_id: 'my-gcp-project',
-        source_image: 'projects/debian-cloud/global/images/family/debian-11',
         subscription_id: 'xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx',
         resource_group: 'my-resource-group',
         vnet_name: 'my-vnet',
@@ -452,7 +471,8 @@ export default function ConnectorConfig() {
           ) : (
             <div className="grid grid-cols-2 gap-x-4 gap-y-3">
               {currentFields.map((key) => {
-                const options = dropdownFields[key]
+                const regionOptions = regionDropdownFields[key]
+                const instanceTypeOptions = instanceTypeDropdownFields[key]
                 const helperText = getHelperText(key)
                 const required = isRequired(key)
                 return (
@@ -461,15 +481,22 @@ export default function ConnectorConfig() {
                       {getFieldLabel(key)}
                       {required && <span className="text-red-500 ml-1">*</span>}
                     </label>
-                    {options ? (
-                      <select
+                    {regionOptions && regionOptions.length > 0 ? (
+                      <RichSelect
+                        options={regionOptions}
                         value={config[key] || ''}
-                        onChange={(e) => onChange(key, e.target.value)}
-                        className="w-full px-3 py-1.5 text-sm border rounded-lg focus:ring-1 focus:ring-blue-500 focus:border-blue-500"
+                        onChange={(val) => onChange(key, val)}
+                        placeholder={`Select ${getFieldLabel(key).toLowerCase()}`}
                         required={required}
-                      >
-                        {options.map((opt) => (<option key={opt} value={opt}>{opt}</option>))}
-                      </select>
+                      />
+                    ) : instanceTypeOptions && instanceTypeOptions.length > 0 ? (
+                      <RichSelect
+                        options={instanceTypeOptions}
+                        value={config[key] || ''}
+                        onChange={(val) => onChange(key, val)}
+                        placeholder={`Select ${getFieldLabel(key).toLowerCase()}`}
+                        required={required}
+                      />
                     ) : (
                       <input
                         type={isNumber(key) ? 'number' : 'text'}
