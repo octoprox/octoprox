@@ -66,7 +66,11 @@ def _parse_proxy_url(url: str) -> dict | None:
     }
 
 
-def _proxy_to_response(proxy: Proxy, connector_name: str | None = None) -> ProxyResponse:
+def _proxy_to_response(
+    proxy: Proxy,
+    connector_name: str | None = None,
+    connector_enabled: bool = True,
+) -> ProxyResponse:
     """Convert a Proxy to ProxyResponse."""
     return ProxyResponse(
         id=proxy.id,
@@ -77,6 +81,7 @@ def _proxy_to_response(proxy: Proxy, connector_name: str | None = None) -> Proxy
         password=proxy.password,
         connector_id=proxy.connector_id,
         connector_name=connector_name,
+        connector_enabled=connector_enabled,
         status=proxy.status.value if hasattr(proxy.status, 'value') else proxy.status,
         request_count=proxy.request_count,
         success_count=proxy.success_count,
@@ -92,25 +97,28 @@ def _proxy_to_response(proxy: Proxy, connector_name: str | None = None) -> Proxy
 
 @router.get("", response_model=ProxyListResponse)
 async def list_proxies(request: Request, project_id: str) -> ProxyListResponse:
-    """List all proxies for a project."""
+    """List all proxies for a project (including those from disabled connectors)."""
     proxy_manager = request.app.state.proxy_manager
 
     project = proxy_manager.get_project(project_id)
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
 
-    proxies = proxy_manager.get_proxies_for_project(project_id)
+    # Get ALL proxies (including from disabled connectors) for display
+    all_proxies = proxy_manager.get_all_proxies_for_project(project_id)
+    # Get healthy proxies (only from enabled connectors) for the count
     healthy_proxies = proxy_manager.get_healthy_proxies_for_project(project_id)
 
-    # Build responses with connector names
+    # Build responses with connector names and enabled status
     responses = []
-    for p in proxies:
+    for p in all_proxies:
         connector = proxy_manager.get_connector(p.connector_id)
         connector_name = connector.name if connector else None
-        responses.append(_proxy_to_response(p, connector_name))
+        connector_enabled = connector.enabled if connector else True
+        responses.append(_proxy_to_response(p, connector_name, connector_enabled))
 
     return ProxyListResponse(
-        total=len(proxies),
+        total=len(all_proxies),
         healthy=len(healthy_proxies),
         proxies=responses,
     )
@@ -163,7 +171,7 @@ async def create_proxy(request: Request, proxy_data: ProxyCreate, project_id: st
     # Update connector proxy count
     connector.proxy_count += 1
 
-    return _proxy_to_response(proxy, connector.name)
+    return _proxy_to_response(proxy, connector.name, connector.enabled)
 
 
 @router.post("/upload", response_model=ProxyUploadResponse, status_code=201)
@@ -260,7 +268,7 @@ async def upload_proxies(
 
         await proxy_manager.add_proxy(proxy)
         connector.proxy_count += 1
-        successful_proxies.append(_proxy_to_response(proxy, connector.name))
+        successful_proxies.append(_proxy_to_response(proxy, connector.name, connector.enabled))
 
     return ProxyUploadResponse(
         total_lines=len([l for l in lines if l.strip()]),
@@ -282,7 +290,8 @@ async def get_proxy(request: Request, proxy_id: str) -> ProxyResponse:
 
     connector = proxy_manager.get_connector(proxy.connector_id)
     connector_name = connector.name if connector else None
-    return _proxy_to_response(proxy, connector_name)
+    connector_enabled = connector.enabled if connector else True
+    return _proxy_to_response(proxy, connector_name, connector_enabled)
 
 
 @router.patch("/{proxy_id}", response_model=ProxyResponse)
@@ -317,7 +326,8 @@ async def update_proxy(
 
     connector = proxy_manager.get_connector(proxy.connector_id)
     connector_name = connector.name if connector else None
-    return _proxy_to_response(proxy, connector_name)
+    connector_enabled = connector.enabled if connector else True
+    return _proxy_to_response(proxy, connector_name, connector_enabled)
 
 
 @router.delete("/{proxy_id}", status_code=204)

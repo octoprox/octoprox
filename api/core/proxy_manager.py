@@ -340,6 +340,11 @@ class ProxyManager:
         """Get a connector by ID."""
         return self._connectors.get(connector_id)
 
+    def is_connector_enabled(self, connector_id: str) -> bool:
+        """Check if a connector is enabled."""
+        connector = self._connectors.get(connector_id)
+        return connector.enabled if connector else False
+
     async def add_connector(self, connector: Connector) -> None:
         """Add a connector (persists to Postgres)."""
         async with self._session_factory() as session:
@@ -380,14 +385,26 @@ class ProxyManager:
         logger.info("Removed connector", connector_id=connector_id)
         return True
 
+    def _get_enabled_connector_ids(self, project_id: str) -> set[str]:
+        """Get IDs of enabled connectors for a project."""
+        return {
+            c.id for c in self._connectors.values()
+            if c.project_id == project_id and c.enabled
+        }
+
     def get_proxies_for_project(self, project_id: str) -> list[Proxy]:
-        """Get all proxies for a project (via connectors)."""
+        """Get all proxies for a project (via enabled connectors only)."""
+        connector_ids = self._get_enabled_connector_ids(project_id)
+        return [p for p in self._proxies.values() if p.connector_id in connector_ids]
+
+    def get_all_proxies_for_project(self, project_id: str) -> list[Proxy]:
+        """Get all proxies for a project, including those from disabled connectors."""
         connector_ids = {c.id for c in self._connectors.values() if c.project_id == project_id}
         return [p for p in self._proxies.values() if p.connector_id in connector_ids]
 
     def get_healthy_proxies_for_project(self, project_id: str) -> list[Proxy]:
-        """Get healthy proxies for a project."""
-        connector_ids = {c.id for c in self._connectors.values() if c.project_id == project_id}
+        """Get healthy proxies for a project (from enabled connectors only)."""
+        connector_ids = self._get_enabled_connector_ids(project_id)
         return [
             p for p in self._proxies.values()
             if p.connector_id in connector_ids and p.status == ProxyStatus.HEALTHY
