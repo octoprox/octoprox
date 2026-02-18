@@ -22,6 +22,7 @@ import structlog
 from api.core import utc_now
 from api.core.demand_tracker import DemandLevel
 from api.core.signals import (
+    connector_remove_requested,
     proxy_add_requested,
     proxy_draining_requested,
     proxy_instance_terminated,
@@ -155,10 +156,18 @@ class AutoScaler:
         - Active proxies → start draining
         - Draining proxies → check if traffic stopped, mark as terminating
         - Terminating proxies → terminate the cloud instance
+        - No proxies left → request connector removal
         """
         proxies = self._data_provider.get_proxies_for_connector(connector.id)
 
         if not proxies:
+            # All proxies terminated - only remove if marked for deletion
+            if connector.pending_deletion:
+                logger.info(
+                    "All proxies terminated for connector pending deletion, requesting removal",
+                    connector_id=connector.id,
+                )
+                await connector_remove_requested.send_async(self, connector_id=connector.id)
             return
 
         for proxy in proxies:

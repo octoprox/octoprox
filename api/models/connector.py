@@ -200,8 +200,9 @@ class Connector(BaseModel):
     project_id: str
     config: dict[str, Any] = Field(default_factory=dict)
     enabled: bool = True
+    pending_deletion: bool = False  # Set when connector is marked for async deletion
 
-    # Statistics
+    # Statistics (computed dynamically, not persisted)
     proxy_count: int = 0
 
     # Metadata

@@ -16,6 +16,7 @@ from api.core.demand_tracker import DemandTracker
 from api.core.health_checker import HealthChecker
 from api.core.metrics_flusher import MetricsFlusher
 from api.core.signals import (
+    connector_remove_requested,
     health_check_completed,
     proxy_add_requested,
     proxy_added,
@@ -38,7 +39,7 @@ from api.db.repository import (
     ProxyRepository,
 )
 from api.models.connector import Connector
-from api.models.credential import Credential
+from api.models.credential import Credential, CredentialType
 from api.models.project import Project
 from api.models.proxy import Proxy, ProxyStatus
 from api.strategies import get_strategy
@@ -124,6 +125,7 @@ class ProxyManager:
         proxy_remove_requested.connect(self._on_proxy_remove_requested)
         proxy_draining_requested.connect(self._on_proxy_draining_requested)
         proxy_terminating_requested.connect(self._on_proxy_terminating_requested)
+        connector_remove_requested.connect(self._on_connector_remove_requested)
 
         # Also subscribe DemandTracker to request_completed signal
         self._demand_tracker.subscribe_to_signals()
@@ -188,6 +190,14 @@ class ProxyManager:
     ) -> None:
         """Handle proxy terminating request signal from AutoScaler."""
         await self.mark_proxy_terminating(proxy_id)
+
+    async def _on_connector_remove_requested(
+        self,
+        sender: object,
+        connector_id: str,
+    ) -> None:
+        """Handle connector remove request signal from AutoScaler."""
+        await self.remove_connector(connector_id)
 
     async def _handle_request_stats(
         self,
@@ -511,6 +521,55 @@ class ProxyManager:
         logger.info("Removed connector", connector_id=connector_id)
         return True
 
+    async def delete_connector_async(self, connector_id: str) -> bool:
+        """Delete a connector, handling cloud instances appropriately.
+
+        For cloud connectors (AWS, GCP, Azure): marks all proxies as TERMINATING
+        and disables the connector. The auto-scaler will handle instance
+        termination and the connector will be cleaned up when all proxies are gone.
+
+        For non-cloud connectors: directly removes the connector and its proxies.
+
+        Args:
+            connector_id: The connector ID to delete.
+
+        Returns:
+            True if the connector was found and deletion initiated,
+            False if connector not found.
+        """
+        connector = self._connectors.get(connector_id)
+        if not connector:
+            return False
+
+        credential = self.get_credential(connector.credential_id)
+
+        # Check if this is a cloud provider connector
+        if credential and credential.type in (
+            CredentialType.AWS,
+            CredentialType.GCP,
+            CredentialType.AZURE,
+        ):
+            # Mark all proxies as terminating - auto-scaler will handle termination
+            proxies = self.get_proxies_for_connector(connector_id)
+            for proxy in proxies:
+                await self.mark_proxy_terminating(proxy.id)
+
+            # Disable the connector and mark for deletion so auto-scaler knows to clean it up
+            # The connector will be removed once all proxies are terminated
+            connector.enabled = False
+            connector.pending_deletion = True
+            await self.update_connector(connector)
+
+            logger.info(
+                "Marked cloud connector for deletion",
+                connector_id=connector_id,
+                proxy_count=len(proxies),
+            )
+            return True
+
+        # Non-cloud connector: remove directly
+        return await self.remove_connector(connector_id)
+
     def _get_enabled_connector_ids(self, project_id: str) -> set[str]:
         """Get IDs of enabled connectors for a project."""
         return {
@@ -779,6 +838,47 @@ class ProxyManager:
         )
 
         return True
+
+    async def delete_proxy_async(self, proxy_id: str) -> bool:
+        """Delete a proxy, handling cloud instances appropriately.
+
+        For cloud proxies (AWS, GCP, Azure): marks as TERMINATING so the
+        auto-scaler will handle instance termination.
+
+        For non-cloud proxies: directly removes the proxy.
+
+        Args:
+            proxy_id: The proxy ID to delete.
+
+        Returns:
+            True if the proxy was found and deletion initiated,
+            False if proxy not found.
+        """
+        proxy = self._proxies.get(proxy_id)
+        if not proxy:
+            return False
+
+        # Get connector and credential to check if this is a cloud provider
+        connector = self.get_connector(proxy.connector_id)
+        if connector:
+            credential = self.get_credential(connector.credential_id)
+
+            # Check if this is a cloud provider connector
+            if credential and credential.type in (
+                CredentialType.AWS,
+                CredentialType.GCP,
+                CredentialType.AZURE,
+            ):
+                # Mark as terminating - auto-scaler will handle the actual termination
+                logger.info(
+                    "Marking cloud proxy for termination",
+                    proxy_id=proxy_id,
+                    credential_type=credential.type.value,
+                )
+                return await self.mark_proxy_terminating(proxy_id)
+
+        # Non-cloud proxy: remove directly
+        return await self.remove_proxy(proxy_id)
 
     def get_proxies_for_connector(self, connector_id: str) -> list[Proxy]:
         """Get all proxies for a specific connector."""

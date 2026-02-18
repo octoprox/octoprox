@@ -109,3 +109,8 @@ proxy_rotation_started = signal("proxy-rotation-started")
 # Args: proxy_id (str), connector_id (str), instance_id (str)
 proxy_instance_terminated = signal("proxy-instance-terminated")
 
+# Emitted when AutoScaler wants to remove a connector (after all proxies terminated)
+# Sender: AutoScaler
+# Args: connector_id (str)
+connector_remove_requested = signal("connector-remove-requested")
+
