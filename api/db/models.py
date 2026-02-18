@@ -69,6 +69,11 @@ class ConnectorModel(Base):
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     config: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    pending_deletion: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Cloud provider error tracking
+    last_error: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+    last_error_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    consecutive_errors: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now, onupdate=utc_now)
 

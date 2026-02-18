@@ -10,22 +10,23 @@ from api.core.health_checker import (
     INITIALIZATION_GRACE_PERIOD,
     HealthChecker,
 )
+from api.core.signals import health_check_completed
 from api.models.proxy import Proxy, ProxyStatus
 
 
 @pytest.fixture
-def mock_proxy_manager() -> MagicMock:
-    """Create a mock ProxyManager for testing."""
-    manager = MagicMock()
-    manager.proxies = []
-    manager.update_proxy_status = AsyncMock()
-    return manager
+def mock_proxy_data_provider() -> MagicMock:
+    """Create a mock ProxyDataProvider for testing."""
+    provider = MagicMock()
+    provider.proxies = []
+    provider.is_connector_enabled = MagicMock(return_value=True)
+    return provider
 
 
 @pytest.fixture
-def health_checker(mock_proxy_manager: MagicMock) -> HealthChecker:
+def health_checker(mock_proxy_data_provider: MagicMock) -> HealthChecker:
     """Create a HealthChecker instance for testing."""
-    return HealthChecker(mock_proxy_manager)
+    return HealthChecker(mock_proxy_data_provider)
 
 
 @pytest.fixture
@@ -96,73 +97,101 @@ class TestInitializationGracePeriod:
         assert not health_checker._is_within_initialization_grace_period(healthy_proxy)
 
     @pytest.mark.asyncio
-    async def test_mark_unhealthy_keeps_initializing_within_grace_period(
+    async def test_handle_check_failure_keeps_initializing_within_grace_period(
         self,
         health_checker: HealthChecker,
-        mock_proxy_manager: MagicMock,
         initializing_proxy: Proxy,
     ) -> None:
         """Test that failures during grace period keep status as INITIALIZING."""
-        await health_checker._mark_unhealthy(initializing_proxy, "Timeout")
+        received_signals: list[dict] = []
 
-        mock_proxy_manager.update_proxy_status.assert_called_once_with(
-            initializing_proxy.id,
-            ProxyStatus.INITIALIZING,
-            consecutive_failures=1,
-        )
+        async def signal_receiver(sender, **kwargs):
+            received_signals.append(kwargs)
+
+        health_check_completed.connect(signal_receiver)
+        try:
+            await health_checker._handle_check_failure(initializing_proxy, "Timeout")
+
+            assert len(received_signals) == 1
+            assert received_signals[0]["proxy_id"] == initializing_proxy.id
+            assert received_signals[0]["status"] == ProxyStatus.INITIALIZING
+            assert received_signals[0]["consecutive_failures"] == 1
+        finally:
+            health_check_completed.disconnect(signal_receiver)
 
     @pytest.mark.asyncio
-    async def test_mark_unhealthy_degrades_after_grace_period(
+    async def test_handle_check_failure_degrades_after_grace_period(
         self,
         health_checker: HealthChecker,
-        mock_proxy_manager: MagicMock,
         old_initializing_proxy: Proxy,
     ) -> None:
         """Test that failures after grace period mark proxy as DEGRADED."""
-        await health_checker._mark_unhealthy(old_initializing_proxy, "Timeout")
+        received_signals: list[dict] = []
 
-        mock_proxy_manager.update_proxy_status.assert_called_once_with(
-            old_initializing_proxy.id,
-            ProxyStatus.DEGRADED,
-            consecutive_failures=1,
-        )
+        async def signal_receiver(sender, **kwargs):
+            received_signals.append(kwargs)
+
+        health_check_completed.connect(signal_receiver)
+        try:
+            await health_checker._handle_check_failure(old_initializing_proxy, "Timeout")
+
+            assert len(received_signals) == 1
+            assert received_signals[0]["proxy_id"] == old_initializing_proxy.id
+            assert received_signals[0]["status"] == ProxyStatus.DEGRADED
+            assert received_signals[0]["consecutive_failures"] == 1
+        finally:
+            health_check_completed.disconnect(signal_receiver)
 
     @pytest.mark.asyncio
-    async def test_mark_unhealthy_marks_unhealthy_after_three_failures(
+    async def test_handle_check_failure_marks_unhealthy_after_three_failures(
         self,
         health_checker: HealthChecker,
-        mock_proxy_manager: MagicMock,
         old_initializing_proxy: Proxy,
     ) -> None:
         """Test that 3+ failures after grace period mark proxy as UNHEALTHY."""
         old_initializing_proxy.consecutive_failures = 2  # Will become 3
 
-        await health_checker._mark_unhealthy(old_initializing_proxy, "Timeout")
+        received_signals: list[dict] = []
 
-        mock_proxy_manager.update_proxy_status.assert_called_once_with(
-            old_initializing_proxy.id,
-            ProxyStatus.UNHEALTHY,
-            consecutive_failures=3,
-        )
+        async def signal_receiver(sender, **kwargs):
+            received_signals.append(kwargs)
+
+        health_check_completed.connect(signal_receiver)
+        try:
+            await health_checker._handle_check_failure(old_initializing_proxy, "Timeout")
+
+            assert len(received_signals) == 1
+            assert received_signals[0]["proxy_id"] == old_initializing_proxy.id
+            assert received_signals[0]["status"] == ProxyStatus.UNHEALTHY
+            assert received_signals[0]["consecutive_failures"] == 3
+        finally:
+            health_check_completed.disconnect(signal_receiver)
 
     @pytest.mark.asyncio
     async def test_failures_tracked_during_grace_period(
         self,
         health_checker: HealthChecker,
-        mock_proxy_manager: MagicMock,
         initializing_proxy: Proxy,
     ) -> None:
         """Test that consecutive failures are tracked even during grace period."""
         initializing_proxy.consecutive_failures = 5
 
-        await health_checker._mark_unhealthy(initializing_proxy, "Connection refused")
+        received_signals: list[dict] = []
 
-        # Should still be INITIALIZING but with incremented failure count
-        mock_proxy_manager.update_proxy_status.assert_called_once_with(
-            initializing_proxy.id,
-            ProxyStatus.INITIALIZING,
-            consecutive_failures=6,
-        )
+        async def signal_receiver(sender, **kwargs):
+            received_signals.append(kwargs)
+
+        health_check_completed.connect(signal_receiver)
+        try:
+            await health_checker._handle_check_failure(initializing_proxy, "Connection refused")
+
+            # Should still be INITIALIZING but with incremented failure count
+            assert len(received_signals) == 1
+            assert received_signals[0]["proxy_id"] == initializing_proxy.id
+            assert received_signals[0]["status"] == ProxyStatus.INITIALIZING
+            assert received_signals[0]["consecutive_failures"] == 6
+        finally:
+            health_check_completed.disconnect(signal_receiver)
 
 
 class TestCheckAllProxies:
@@ -172,11 +201,11 @@ class TestCheckAllProxies:
     async def test_initializing_proxies_are_health_checked(
         self,
         health_checker: HealthChecker,
-        mock_proxy_manager: MagicMock,
+        mock_proxy_data_provider: MagicMock,
         initializing_proxy: Proxy,
     ) -> None:
         """Test that INITIALIZING proxies are included in health checks."""
-        mock_proxy_manager.proxies = [initializing_proxy]
+        mock_proxy_data_provider.proxies = [initializing_proxy]
 
         with patch.object(
             health_checker, "_check_proxy", new_callable=AsyncMock
@@ -188,7 +217,7 @@ class TestCheckAllProxies:
     async def test_draining_proxies_are_skipped(
         self,
         health_checker: HealthChecker,
-        mock_proxy_manager: MagicMock,
+        mock_proxy_data_provider: MagicMock,
     ) -> None:
         """Test that DRAINING proxies are not health checked."""
         draining_proxy = Proxy(
@@ -198,7 +227,7 @@ class TestCheckAllProxies:
             connector_id="test-connector",
             status=ProxyStatus.DRAINING,
         )
-        mock_proxy_manager.proxies = [draining_proxy]
+        mock_proxy_data_provider.proxies = [draining_proxy]
 
         with patch.object(
             health_checker, "_check_proxy", new_callable=AsyncMock
@@ -210,7 +239,7 @@ class TestCheckAllProxies:
     async def test_terminating_proxies_are_skipped(
         self,
         health_checker: HealthChecker,
-        mock_proxy_manager: MagicMock,
+        mock_proxy_data_provider: MagicMock,
     ) -> None:
         """Test that TERMINATING proxies are not health checked."""
         terminating_proxy = Proxy(
@@ -220,7 +249,7 @@ class TestCheckAllProxies:
             connector_id="test-connector",
             status=ProxyStatus.TERMINATING,
         )
-        mock_proxy_manager.proxies = [terminating_proxy]
+        mock_proxy_data_provider.proxies = [terminating_proxy]
 
         with patch.object(
             health_checker, "_check_proxy", new_callable=AsyncMock

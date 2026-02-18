@@ -8,6 +8,8 @@ It supports:
 - Regular HTTP request forwarding
 - Upstream proxy selection via ProxyManager strategies
 - Project-based authentication via HTTP Basic Auth (Proxy-Authorization header)
+
+Emits request_completed signals instead of directly calling ProxyManager.
 """
 
 import asyncio
@@ -19,6 +21,7 @@ import structlog
 from python_socks.async_.asyncio import Proxy as SocksProxy
 
 from api.core.config import settings
+from api.core.signals import request_completed
 from api.models.project import Project
 from api.models.proxy import Proxy, ProxyProtocol
 
@@ -388,8 +391,14 @@ class ProxyServer:
                 upstream_writer.close()
                 await upstream_writer.wait_closed()
             if proxy:
-                await self._proxy_manager.update_proxy_stats(
-                    proxy.id, success, latency_ms, bytes_sent, bytes_received
+                await request_completed.send_async(
+                    self,
+                    proxy_id=proxy.id,
+                    project_id=project_id,
+                    success=success,
+                    latency_ms=latency_ms,
+                    bytes_sent=bytes_sent,
+                    bytes_received=bytes_received,
                 )
 
     async def _tunnel(
@@ -633,8 +642,14 @@ class ProxyServer:
                 upstream_writer.close()
                 await upstream_writer.wait_closed()
             if proxy:
-                await self._proxy_manager.update_proxy_stats(
-                    proxy.id, success, latency_ms, bytes_sent, bytes_received
+                await request_completed.send_async(
+                    self,
+                    proxy_id=proxy.id,
+                    project_id=project_id,
+                    success=success,
+                    latency_ms=latency_ms,
+                    bytes_sent=bytes_sent,
+                    bytes_received=bytes_received,
                 )
 
     async def _forward_chunked(

@@ -2,6 +2,12 @@
 
 This module provides automatic scaling and rotation of cloud proxy instances
 based on demand levels and configured rotation periods.
+
+Emits signals for decoupled communication with ProxyManager:
+- proxy_add_requested: when a new proxy instance is created
+- proxy_remove_requested: when a proxy should be removed
+- proxy_draining_requested: when a proxy should start draining
+- proxy_terminating_requested: when a proxy should be marked as terminating
 """
 
 from __future__ import annotations
@@ -9,12 +15,24 @@ from __future__ import annotations
 import asyncio
 import random
 from datetime import datetime, timedelta
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol
 
 import structlog
 
 from api.core import utc_now
 from api.core.demand_tracker import DemandLevel
+from api.core.signals import (
+    connector_error_updated,
+    connector_remove_requested,
+    proxy_add_requested,
+    proxy_draining_requested,
+    proxy_instance_terminated,
+    proxy_remove_requested,
+    proxy_rotation_started,
+    proxy_terminating_requested,
+    scale_down_requested,
+    scale_up_requested,
+)
 from api.models.connector import CloudConnectorConfig, Connector
 from api.models.credential import CredentialType
 from api.models.proxy import Proxy, ProxyProtocol, ProxyStatus
@@ -22,27 +40,59 @@ from api.models.proxy import Proxy, ProxyProtocol, ProxyStatus
 if TYPE_CHECKING:
     from api.core.proxy_manager import ProxyManager
 
+
+class AutoScalerDataProvider(Protocol):
+    """Protocol for read-only access to data needed by AutoScaler."""
+
+    @property
+    def connectors(self) -> list[Connector]:
+        """Get all connectors."""
+        ...
+
+    @property
+    def demand_tracker(self):
+        """Get the demand tracker."""
+        ...
+
+    def get_credential(self, credential_id: str):
+        """Get a credential by ID."""
+        ...
+
+    def get_proxies_for_connector(self, connector_id: str) -> list[Proxy]:
+        """Get all proxies for a connector."""
+        ...
+
+    def get_active_proxies_for_connector(self, connector_id: str) -> list[Proxy]:
+        """Get active (non-terminating) proxies for a connector."""
+        ...
+
 logger = structlog.get_logger()
 
 # How often to check scaling and rotation (seconds)
 CHECK_INTERVAL_SECONDS = 30
 
+# Maximum backoff time in minutes for cloud provider errors
+MAX_ERROR_BACKOFF_MINUTES = 30
+
 
 class AutoScaler:
     """Manages automatic scaling and rotation of cloud proxy instances.
-    
+
     Responsibilities:
     - Monitor demand levels per project
     - Scale up/down based on demand and min/max configuration
     - Schedule and execute instance rotation based on configured periods
     - Handle graceful draining before termination
-    
+
+    Communicates with ProxyManager via signals instead of direct method calls.
+
     Args:
-        proxy_manager: The proxy manager instance for accessing proxies and connectors.
+        data_provider: Provider for read-only access to connectors, proxies, and credentials.
+                       Typically the ProxyManager instance.
     """
-    
-    def __init__(self, proxy_manager: ProxyManager) -> None:
-        self._proxy_manager = proxy_manager
+
+    def __init__(self, data_provider: AutoScalerDataProvider) -> None:
+        self._data_provider = data_provider
         self._running = False
         # Track scheduled rotation times per proxy: proxy_id -> rotation_time
         self._rotation_schedule: dict[str, datetime] = {}
@@ -66,14 +116,88 @@ class AutoScaler:
     def stop(self) -> None:
         """Signal the auto-scaler to stop."""
         self._running = False
-    
+
+    def _should_skip_scaling(self, connector: Connector) -> bool:
+        """Check if scaling should be skipped due to recent errors.
+
+        Uses exponential backoff: 2^consecutive_errors minutes, capped at MAX_ERROR_BACKOFF_MINUTES.
+
+        Returns:
+            True if scaling should be skipped, False otherwise.
+        """
+        if not connector.last_error_at or connector.consecutive_errors == 0:
+            return False
+
+        # Calculate backoff time: 2^consecutive_errors minutes, capped
+        backoff_minutes = min(
+            2 ** connector.consecutive_errors,
+            MAX_ERROR_BACKOFF_MINUTES,
+        )
+        backoff_until = connector.last_error_at + timedelta(minutes=backoff_minutes)
+
+        now = utc_now()
+        if now < backoff_until:
+            logger.debug(
+                "Skipping scaling due to error backoff",
+                connector_id=connector.id,
+                consecutive_errors=connector.consecutive_errors,
+                backoff_minutes=backoff_minutes,
+                backoff_until=backoff_until.isoformat(),
+            )
+            return True
+
+        return False
+
+    async def _record_connector_error(
+        self, connector: Connector, error: str
+    ) -> None:
+        """Record a cloud provider error for a connector.
+
+        Emits connector_error_updated signal - ProxyManager handles persistence.
+        """
+        new_consecutive_errors = connector.consecutive_errors + 1
+
+        # Emit signal - ProxyManager will persist the error
+        await connector_error_updated.send_async(
+            self,
+            connector_id=connector.id,
+            error=error,
+            consecutive_errors=new_consecutive_errors,
+        )
+
+        # Update local connector state for backoff calculations
+        connector.last_error = error
+        connector.last_error_at = utc_now()
+        connector.consecutive_errors = new_consecutive_errors
+
+    async def _clear_connector_error(self, connector: Connector) -> None:
+        """Clear error state for a connector after successful operation.
+
+        Emits connector_error_updated signal - ProxyManager handles persistence.
+        """
+        if connector.last_error is None and connector.consecutive_errors == 0:
+            return  # No error to clear
+
+        # Emit signal - ProxyManager will persist the cleared state
+        await connector_error_updated.send_async(
+            self,
+            connector_id=connector.id,
+            error=None,
+            consecutive_errors=0,
+        )
+
+        # Update local connector state
+        connector.last_error = None
+        connector.last_error_at = None
+        connector.consecutive_errors = 0
+
     async def _check_all_connectors(self) -> None:
         """Check scaling and rotation for all cloud connectors."""
-        connectors = self._proxy_manager.connectors
+        connectors = self._data_provider.connectors
 
         for connector in connectors:
             # Only process cloud connectors (AWS, GCP, Azure)
-            credential = self._proxy_manager.get_credential(connector.credential_id)
+            credential = self._data_provider.get_credential(connector.credential_id)
             if not credential:
                 continue
 
@@ -110,10 +234,18 @@ class AutoScaler:
         - Active proxies → start draining
         - Draining proxies → check if traffic stopped, mark as terminating
         - Terminating proxies → terminate the cloud instance
+        - No proxies left → request connector removal
         """
-        proxies = self._proxy_manager.get_proxies_for_connector(connector.id)
+        proxies = self._data_provider.get_proxies_for_connector(connector.id)
 
         if not proxies:
+            # All proxies terminated - only remove if marked for deletion
+            if connector.pending_deletion:
+                logger.info(
+                    "All proxies terminated for connector pending deletion, requesting removal",
+                    connector_id=connector.id,
+                )
+                await connector_remove_requested.send_async(self, connector_id=connector.id)
             return
 
         for proxy in proxies:
@@ -128,7 +260,7 @@ class AutoScaler:
                     connector_id=connector.id,
                     proxy_id=proxy.id,
                 )
-                await self._proxy_manager.start_proxy_draining(proxy.id)
+                await proxy_draining_requested.send_async(self, proxy_id=proxy.id)
     
     async def _check_connector_scaling(
         self, connector: Connector, credential
@@ -139,13 +271,13 @@ class AutoScaler:
             return
 
         # Get current proxies (excluding terminating)
-        proxies = self._proxy_manager.get_active_proxies_for_connector(connector.id)
+        proxies = self._data_provider.get_active_proxies_for_connector(connector.id)
         current_count = len(proxies)
 
         # Get demand level for the project
         project_id = connector.project_id
         healthy_proxies = [p for p in proxies if p.status == ProxyStatus.HEALTHY]
-        demand_level = await self._proxy_manager.demand_tracker.get_demand_level(
+        demand_level = await self._data_provider.demand_tracker.get_demand_level(
             project_id, len(healthy_proxies)
         )
 
@@ -156,6 +288,11 @@ class AutoScaler:
             cloud_config.max_proxies,
             current_count,
         )
+
+        # Check if we should skip scaling due to recent errors
+        # (applies to both scale-up and scale-down since both involve cloud API calls)
+        if self._should_skip_scaling(connector):
+            return
 
         # Scale up or down
         if target_count > current_count:
@@ -186,11 +323,23 @@ class AutoScaler:
     async def _scale_up(
         self, connector: Connector, credential, count: int
     ) -> None:
-        """Scale up by creating new proxy instances."""
+        """Scale up by creating new proxy instances.
+
+        Emits scale_up_requested signal before scaling.
+        Tracks errors and clears them on success.
+        """
         logger.info(
             "Scaling up",
             connector_id=connector.id,
             count=count,
+        )
+
+        # Emit signal for observability
+        await scale_up_requested.send_async(
+            self,
+            connector_id=connector.id,
+            count=count,
+            reason="demand-based",
         )
 
         provider = self._get_cloud_provider(connector, credential)
@@ -201,6 +350,7 @@ class AutoScaler:
         if not cloud_config:
             return
 
+        had_success = False
         for _ in range(count):
             try:
                 proxy = await provider.create_instance()
@@ -209,26 +359,45 @@ class AutoScaler:
                     proxy.connector_id = connector.id
                     # Schedule rotation for this new proxy
                     self._schedule_rotation(proxy, cloud_config)
-                    # Add to proxy manager
-                    await self._proxy_manager.add_proxy(proxy)
+                    # Request proxy manager to add the proxy
+                    await proxy_add_requested.send_async(self, proxy=proxy)
                     logger.info(
                         "Created new proxy instance",
                         proxy_id=proxy.id,
                         connector_id=connector.id,
                     )
+                    had_success = True
             except Exception as e:
                 logger.error("Failed to create proxy instance", error=str(e))
+                await self._record_connector_error(connector, str(e))
+                # Stop trying to create more instances after an error
+                break
+
+        # Clear error state if we had at least one success
+        if had_success:
+            await self._clear_connector_error(connector)
 
     async def _scale_down(self, connector: Connector, count: int) -> None:
-        """Scale down by draining and terminating proxy instances."""
+        """Scale down by draining and terminating proxy instances.
+
+        Emits scale_down_requested signal before scaling.
+        """
         logger.info(
             "Scaling down",
             connector_id=connector.id,
             count=count,
         )
 
+        # Emit signal for observability
+        await scale_down_requested.send_async(
+            self,
+            connector_id=connector.id,
+            count=count,
+            reason="demand-based",
+        )
+
         # Get proxies that can be terminated (prefer unhealthy, then oldest)
-        proxies = self._proxy_manager.get_active_proxies_for_connector(connector.id)
+        proxies = self._data_provider.get_active_proxies_for_connector(connector.id)
 
         # Sort: unhealthy first, then by creation time (oldest first)
         def sort_key(p: Proxy) -> tuple:
@@ -239,7 +408,7 @@ class AutoScaler:
         proxies_to_remove = sorted(proxies, key=sort_key)[:count]
 
         for proxy in proxies_to_remove:
-            await self._proxy_manager.start_proxy_draining(proxy.id)
+            await proxy_draining_requested.send_async(self, proxy_id=proxy.id)
 
     def _schedule_rotation(self, proxy: Proxy, typed_config: CloudConnectorConfig) -> None:
         """Schedule rotation for a proxy based on config."""
@@ -268,7 +437,7 @@ class AutoScaler:
         if not cloud_config:
             return
 
-        proxies = self._proxy_manager.get_proxies_for_connector(connector.id)
+        proxies = self._data_provider.get_proxies_for_connector(connector.id)
         now = utc_now()
 
         for proxy in proxies:
@@ -290,20 +459,33 @@ class AutoScaler:
             if proxy.status == ProxyStatus.DRAINING:
                 await self._handle_draining_proxy(proxy)
             elif proxy.status == ProxyStatus.TERMINATING:
-                await self._handle_terminating_proxy(proxy, connector, credential)
+                # Check backoff before attempting termination (cloud API call)
+                if not self._should_skip_scaling(connector):
+                    await self._handle_terminating_proxy(proxy, connector, credential)
             elif proxy.status in (ProxyStatus.HEALTHY, ProxyStatus.DEGRADED, ProxyStatus.UNKNOWN):
-                # Check if rotation is due
+                # Check if rotation is due (skip if in error backoff since rotation involves cloud API calls)
                 rotation_time = self._rotation_schedule.get(proxy.id)
                 if rotation_time and now >= rotation_time:
-                    await self._start_rotation(proxy, connector, credential)
+                    if not self._should_skip_scaling(connector):
+                        await self._start_rotation(proxy, connector, credential)
 
     async def _start_rotation(
         self, proxy: Proxy, connector: Connector, credential
     ) -> None:
-        """Start rotation for a proxy - create replacement first, then drain."""
+        """Start rotation for a proxy - create replacement first, then drain.
+
+        Emits proxy_rotation_started signal.
+        """
         logger.info(
             "Starting proxy rotation",
             proxy_id=proxy.id,
+            connector_id=connector.id,
+        )
+
+        # Emit signal for observability
+        await proxy_rotation_started.send_async(
+            self,
+            old_proxy_id=proxy.id,
             connector_id=connector.id,
         )
 
@@ -319,22 +501,26 @@ class AutoScaler:
                 if new_proxy:
                     new_proxy.connector_id = connector.id
                     self._schedule_rotation(new_proxy, cloud_config)
-                    await self._proxy_manager.add_proxy(new_proxy)
+                    await proxy_add_requested.send_async(self, proxy=new_proxy)
                     logger.info(
                         "Created replacement proxy",
                         old_proxy_id=proxy.id,
                         new_proxy_id=new_proxy.id,
                     )
+                    # Clear any previous errors on successful creation
+                    await self._clear_connector_error(connector)
             except Exception as e:
                 logger.error(
                     "Failed to create replacement proxy",
                     proxy_id=proxy.id,
                     error=str(e),
                 )
+                # Track the error
+                await self._record_connector_error(connector, str(e))
                 # Continue with draining anyway - we'll try again next cycle
 
         # Start draining the old proxy
-        await self._proxy_manager.start_proxy_draining(proxy.id)
+        await proxy_draining_requested.send_async(self, proxy_id=proxy.id)
 
     async def _handle_draining_proxy(self, proxy: Proxy) -> None:
         """Handle a proxy that is draining - check if traffic has stopped.
@@ -370,7 +556,7 @@ class AutoScaler:
                 bytes_sent=current_bytes_sent,
                 bytes_received=current_bytes_received,
             )
-            await self._proxy_manager.mark_proxy_terminating(proxy.id)
+            await proxy_terminating_requested.send_async(self, proxy_id=proxy.id)
         else:
             # Traffic still flowing - update previous values for next check
             proxy.metadata["draining_prev_bytes_sent"] = current_bytes_sent
@@ -387,7 +573,11 @@ class AutoScaler:
     async def _handle_terminating_proxy(
         self, proxy: Proxy, connector: Connector, credential
     ) -> None:
-        """Handle a proxy that is terminating - actually terminate it."""
+        """Handle a proxy that is terminating - actually terminate it.
+
+        Emits proxy_instance_terminated signal on successful termination.
+        Tracks errors on failure.
+        """
         provider = self._get_cloud_provider(connector, credential)
         if not provider:
             return
@@ -400,20 +590,31 @@ class AutoScaler:
             if success:
                 # Remove from rotation schedule
                 self._rotation_schedule.pop(proxy.id, None)
-                # Remove from proxy manager
-                await self._proxy_manager.remove_proxy(proxy.id)
+                # Request proxy manager to remove the proxy
+                await proxy_remove_requested.send_async(self, proxy_id=proxy.id)
                 logger.info("Terminated proxy instance", proxy_id=proxy.id)
+
+                # Emit signal for observability
+                await proxy_instance_terminated.send_async(
+                    self,
+                    proxy_id=proxy.id,
+                    connector_id=connector.id,
+                    instance_id=instance_id,
+                )
             else:
+                error_msg = f"Failed to terminate instance {instance_id}"
                 logger.warning(
                     "Failed to terminate proxy instance",
                     proxy_id=proxy.id,
                 )
+                await self._record_connector_error(connector, error_msg)
         except Exception as e:
             logger.error(
                 "Error terminating proxy instance",
                 proxy_id=proxy.id,
                 error=str(e),
             )
+            await self._record_connector_error(connector, str(e))
 
     def _get_cloud_provider(self, connector: Connector, credential):
         """Get the appropriate cloud provider for a connector."""

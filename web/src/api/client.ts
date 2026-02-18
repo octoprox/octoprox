@@ -256,6 +256,10 @@ export interface Connector {
   config: Record<string, unknown>
   enabled: boolean
   proxy_count: number
+  // Cloud provider error tracking
+  last_error: string | null
+  last_error_at: string | null
+  consecutive_errors: number
   created_at: string
   updated_at: string
 }

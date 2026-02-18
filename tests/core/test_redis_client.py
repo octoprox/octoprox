@@ -150,6 +150,28 @@ class TestRedisClient:
         assert status["status"] == ProxyStatus.UNHEALTHY
         assert status["consecutive_failures"] == 5
 
+    async def test_delete_proxy_status(self, redis_client: RedisClient) -> None:
+        """Test deleting proxy status."""
+        proxy_id = "delete-status-proxy"
+
+        # Set status first
+        await redis_client.set_proxy_status(
+            proxy_id=proxy_id,
+            status=ProxyStatus.HEALTHY,
+            latency_ms=50.0,
+        )
+
+        # Verify it exists
+        status = await redis_client.get_proxy_status(proxy_id)
+        assert status is not None
+
+        # Delete it
+        await redis_client.delete_proxy_status(proxy_id)
+
+        # Verify it's gone
+        status = await redis_client.get_proxy_status(proxy_id)
+        assert status is None
+
     # Project metrics tests
 
     async def test_update_project_metrics(self, redis_client: RedisClient) -> None:
