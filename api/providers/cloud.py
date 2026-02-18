@@ -70,12 +70,14 @@ class AWSProvider(CloudProvider):
 
     Connector config options:
         - region: AWS region (default: us-east-1)
-        - instance_type: EC2 instance type (default: t3.micro)
+        - instance_type: EC2 instance type (t3.* for x86_64, t4g.* for arm64)
         - instance_name: Name prefix for created instances (required)
-        - ami_id: AMI ID for proxy instances (required)
         - security_group: Security group ID (required)
         - key_pair_name: SSH key pair name (required)
         - tags: Custom tags to apply to instances (optional, dict)
+
+    Note: AMI is automatically determined based on region and instance type.
+    Ubuntu 24.04 LTS is used for all instances.
 
     Credential config (secrets):
         - access_key: AWS access key ID
@@ -129,10 +131,20 @@ class AWSProvider(CloudProvider):
 
     async def create_instance(self) -> Proxy | None:
         """Create a new EC2 instance configured as a proxy."""
+        # Get the AMI for this region and instance type from the config
+        ami_id = self._config.get_ami()
+        if not ami_id:
+            logger.error(
+                "No AMI found for region/instance type combination",
+                region=self._config.region,
+                instance_type=self._config.instance_type,
+            )
+            return None
+
         logger.debug(
             "AWS create_instance called",
             connector_id=self.connector.id,
-            ami_id=self._config.ami_id,
+            ami_id=ami_id,
             security_group=self._config.security_group,
             instance_name=self._config.instance_name,
         )
@@ -160,7 +172,7 @@ class AWSProvider(CloudProvider):
                 tags.append({"Key": key, "Value": str(value)})
 
             run_args = {
-                "ImageId": self._config.ami_id,
+                "ImageId": ami_id,
                 "InstanceType": self._config.instance_type,
                 "MinCount": 1,
                 "MaxCount": 1,
@@ -185,7 +197,7 @@ class AWSProvider(CloudProvider):
 
             logger.debug(
                 "Creating EC2 instance",
-                ami_id=self._config.ami_id,
+                ami_id=ami_id,
                 instance_type=self._config.instance_type,
                 security_group=self._config.security_group,
             )
@@ -244,12 +256,14 @@ class GCPProvider(CloudProvider):
     Connector config options:
         - project_id: GCP project ID (required)
         - zone: GCP zone (default: us-central1-a)
-        - machine_type: Machine type (default: e2-micro)
+        - machine_type: Machine type (e2-* for x86_64, t2a-* for arm64)
         - instance_name: Name prefix for created instances (required)
         - network: VPC network name (default: default)
         - subnet: Subnet name (optional)
-        - source_image: Source image for instances (default: debian-cloud/debian-11)
         - tags: Custom labels to apply to instances (optional, dict)
+
+    Note: Source image is automatically determined based on machine type.
+    Ubuntu 24.04 LTS is used for all instances.
 
     Credential config (secrets):
         - service_account_json: GCP service account JSON key (optional, uses default credentials if not provided)
@@ -302,6 +316,9 @@ class GCPProvider(CloudProvider):
         if not client:
             return None
 
+        # Get the source image for this machine type from the config
+        source_image = self._config.get_source_image()
+
         try:
             from google.cloud import compute_v1
             import time
@@ -311,6 +328,14 @@ class GCPProvider(CloudProvider):
 
             # Use the external Squid setup script
             startup_script = get_squid_setup_script()
+
+            logger.debug(
+                "GCP create_instance called",
+                connector_id=self.connector.id,
+                source_image=source_image,
+                zone=self._config.zone,
+                instance_name=instance_name,
+            )
 
             # Build instance config
             instance = compute_v1.Instance()
@@ -322,7 +347,7 @@ class GCPProvider(CloudProvider):
             disk.boot = True
             disk.auto_delete = True
             initialize_params = compute_v1.AttachedDiskInitializeParams()
-            initialize_params.source_image = self._config.source_image
+            initialize_params.source_image = source_image
             initialize_params.disk_size_gb = 10
             disk.initialize_params = initialize_params
             instance.disks = [disk]
@@ -448,11 +473,14 @@ class AzureProvider(CloudProvider):
         - subscription_id: Azure subscription ID (required)
         - resource_group: Resource group name (required)
         - location: Azure region (default: eastus)
-        - vm_size: VM size (default: Standard_B1s)
+        - vm_size: VM size (B-series for x86_64, Bps v2 for arm64)
         - instance_name: Name prefix for created VMs (required)
         - vnet_name: Virtual network name (required for create)
         - subnet_name: Subnet name (required for create)
         - tags: Custom tags to apply to VMs (optional, dict)
+
+    Note: OS image is automatically determined based on VM size.
+    Ubuntu 24.04 LTS is used for all instances.
 
     Credential config (secrets):
         - client_id: Azure service principal client ID
@@ -522,12 +550,27 @@ class AzureProvider(CloudProvider):
             logger.error("vnet_name and subnet_name required for VM creation")
             return None
 
+        # Get the image reference for this VM size from the config
+        image_reference = self._config.get_image_reference()
+
+        # Track created resources for cleanup on failure
+        pip_name: str | None = None
+        nic_name: str | None = None
+
         try:
             import base64
             import time
 
             # Build VM name with timestamp for uniqueness
             vm_name = f"{self._config.instance_name}-{int(time.time())}"
+
+            logger.debug(
+                "Azure create_instance called",
+                connector_id=self.connector.id,
+                image_reference=image_reference,
+                location=self._config.location,
+                vm_name=vm_name,
+            )
 
             # Get subnet
             subnet = network_client.subnets.get(
@@ -581,12 +624,7 @@ class AzureProvider(CloudProvider):
                 "tags": tags,
                 "hardware_profile": {"vm_size": self._config.vm_size},
                 "storage_profile": {
-                    "image_reference": {
-                        "publisher": "Canonical",
-                        "offer": "0001-com-ubuntu-server-jammy",
-                        "sku": "22_04-lts",
-                        "version": "latest",
-                    },
+                    "image_reference": image_reference,
                     "os_disk": {
                         "name": f"{vm_name}-osdisk",
                         "caching": "ReadWrite",
@@ -648,6 +686,64 @@ class AzureProvider(CloudProvider):
 
         except Exception as e:
             logger.error("Failed to create Azure VM", error=str(e))
+
+            # Clean up any resources that were created before the failure
+            # Must delete NIC before public IP (NIC references the public IP)
+            # Azure reserves the NIC for 180 seconds after a failed VM creation,
+            # so we wait and retry to ensure cleanup
+            import asyncio
+
+            nic_deleted = False
+            if nic_name:
+                # Try immediately first, then wait 180 seconds and retry if needed
+                for attempt in range(2):
+                    try:
+                        if attempt > 0:
+                            logger.info(
+                                "Waiting 180 seconds for Azure NIC reservation to expire",
+                                nic_name=nic_name,
+                            )
+                            await asyncio.sleep(180)
+                        logger.debug("Cleaning up NIC after VM creation failure", nic_name=nic_name)
+                        network_client.network_interfaces.begin_delete(
+                            self._config.resource_group, nic_name
+                        ).result()
+                        nic_deleted = True
+                        logger.info("Successfully cleaned up NIC", nic_name=nic_name)
+                        break
+                    except Exception as cleanup_error:
+                        error_str = str(cleanup_error)
+                        if "NicReservedForAnotherVm" in error_str and attempt == 0:
+                            # Azure reserves NIC for 180 seconds, will retry after wait
+                            continue
+                        logger.warning(
+                            "Failed to clean up NIC after VM creation failure",
+                            nic_name=nic_name,
+                            error=error_str,
+                        )
+
+            if pip_name:
+                if not nic_deleted:
+                    # If NIC wasn't deleted, we can't delete the public IP either
+                    logger.warning(
+                        "Cannot clean up public IP because NIC cleanup failed",
+                        pip_name=pip_name,
+                        nic_name=nic_name,
+                    )
+                else:
+                    try:
+                        logger.debug("Cleaning up public IP after VM creation failure", pip_name=pip_name)
+                        network_client.public_ip_addresses.begin_delete(
+                            self._config.resource_group, pip_name
+                        ).result()
+                        logger.info("Successfully cleaned up public IP", pip_name=pip_name)
+                    except Exception as cleanup_error:
+                        logger.warning(
+                            "Failed to clean up public IP after VM creation failure",
+                            pip_name=pip_name,
+                            error=str(cleanup_error),
+                        )
+
             return None
 
     async def terminate_instance(self, instance_id: str) -> bool:
@@ -673,15 +769,23 @@ class AzureProvider(CloudProvider):
                 network_client.network_interfaces.begin_delete(
                     self._config.resource_group, nic_name
                 ).result()
-            except Exception:
-                pass
+            except Exception as cleanup_error:
+                logger.warning(
+                    "Failed to clean up NIC during VM termination",
+                    nic_name=nic_name,
+                    error=str(cleanup_error),
+                )
 
             try:
                 network_client.public_ip_addresses.begin_delete(
                     self._config.resource_group, pip_name
                 ).result()
-            except Exception:
-                pass
+            except Exception as cleanup_error:
+                logger.warning(
+                    "Failed to clean up public IP during VM termination",
+                    pip_name=pip_name,
+                    error=str(cleanup_error),
+                )
 
             logger.info("Terminated Azure VM", vm_name=vm_name)
             return True
