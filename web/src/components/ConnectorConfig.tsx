@@ -110,8 +110,6 @@ const getDefaultConfig = (type: CredentialType | null, options?: ConnectorOption
         zone: options?.gcp_zones[0]?.code || 'us-central1-a',
         machine_type: options?.gcp_machine_types[0]?.code || 'e2-micro',
         network: 'default',
-        subnetwork: '',
-        ssh_key: '',
         tags: '{}',
         min_proxies: '1',
         max_proxies: '10',
@@ -324,7 +322,7 @@ export default function ConnectorConfig() {
     // Infrastructure fields vary by provider
     const infraFields: Record<string, string[]> = {
       aws: ['instance_name', 'region', 'instance_type', 'key_pair_name', 'security_group'],
-      gcp: ['project_id', 'instance_name', 'zone', 'machine_type', 'network', 'subnetwork', 'ssh_key'],
+      gcp: ['project_id', 'instance_name', 'zone', 'machine_type', 'network'],
       azure: ['subscription_id', 'resource_group', 'instance_name', 'location', 'vm_size', 'vnet_name', 'subnet_name', 'ssh_public_key'],
     }
 
