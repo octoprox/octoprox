@@ -352,3 +352,199 @@ class TestProxyManager:
         assert proxy_manager.get_connector(connector.id) is None
         assert proxy_manager.get_proxy(proxy.id) is None
 
+    async def test_remove_proxy_cleans_up_redis(
+        self, proxy_manager: ProxyManager, redis_client: RedisClient
+    ) -> None:
+        """Test that removing a proxy cleans up Redis data."""
+        # Create project, credential, connector, and proxy
+        project = Project(name="Redis Cleanup", username="rediscleanup", password="pass")
+        await proxy_manager.add_project(project)
+
+        credential = Credential(
+            name="Redis Cred",
+            type=CredentialType.STATIC_PROXY_PROVIDER,
+            project_id=project.id,
+            config={},
+        )
+        await proxy_manager.add_credential(credential)
+
+        connector = Connector(
+            name="Redis Conn",
+            credential_id=credential.id,
+            credential_type=CredentialType.STATIC_PROXY_PROVIDER,
+            project_id=project.id,
+            config={},
+        )
+        await proxy_manager.add_connector(connector)
+
+        proxy = Proxy(
+            host="redis-cleanup.example.com",
+            port=8080,
+            protocol=ProxyProtocol.HTTP,
+            connector_id=connector.id,
+        )
+        await proxy_manager.add_proxy(proxy)
+
+        # Add Redis data for the proxy
+        await redis_client.set_proxy_status(proxy.id, ProxyStatus.HEALTHY, 50.0, 0)
+        await redis_client.update_proxy_metrics(proxy.id, success=True, latency_ms=100)
+
+        # Verify Redis data exists
+        assert await redis_client.get_proxy_status(proxy.id) is not None
+        assert await redis_client.get_proxy_metrics(proxy.id) is not None
+
+        # Remove the proxy
+        await proxy_manager.remove_proxy(proxy.id)
+
+        # Verify Redis data is cleaned up
+        assert await redis_client.get_proxy_status(proxy.id) is None
+        assert await redis_client.get_proxy_metrics(proxy.id) is None
+
+    async def test_remove_connector_cleans_up_redis(
+        self, proxy_manager: ProxyManager, redis_client: RedisClient
+    ) -> None:
+        """Test that removing a connector cleans up Redis data for all its proxies."""
+        # Create project, credential, connector, and proxies
+        project = Project(name="Conn Cleanup", username="conncleanup", password="pass")
+        await proxy_manager.add_project(project)
+
+        credential = Credential(
+            name="Conn Cleanup Cred",
+            type=CredentialType.STATIC_PROXY_PROVIDER,
+            project_id=project.id,
+            config={},
+        )
+        await proxy_manager.add_credential(credential)
+
+        connector = Connector(
+            name="Conn Cleanup Conn",
+            credential_id=credential.id,
+            credential_type=CredentialType.STATIC_PROXY_PROVIDER,
+            project_id=project.id,
+            config={},
+        )
+        await proxy_manager.add_connector(connector)
+
+        # Add multiple proxies
+        proxy1 = Proxy(
+            host="conn-cleanup1.example.com",
+            port=8080,
+            protocol=ProxyProtocol.HTTP,
+            connector_id=connector.id,
+        )
+        proxy2 = Proxy(
+            host="conn-cleanup2.example.com",
+            port=8080,
+            protocol=ProxyProtocol.HTTP,
+            connector_id=connector.id,
+        )
+        await proxy_manager.add_proxy(proxy1)
+        await proxy_manager.add_proxy(proxy2)
+
+        # Add Redis data for the proxies
+        await redis_client.set_proxy_status(proxy1.id, ProxyStatus.HEALTHY, 50.0, 0)
+        await redis_client.update_proxy_metrics(proxy1.id, success=True, latency_ms=100)
+        await redis_client.set_proxy_status(proxy2.id, ProxyStatus.HEALTHY, 60.0, 0)
+        await redis_client.update_proxy_metrics(proxy2.id, success=True, latency_ms=200)
+
+        # Verify Redis data exists
+        assert await redis_client.get_proxy_status(proxy1.id) is not None
+        assert await redis_client.get_proxy_status(proxy2.id) is not None
+
+        # Store proxy IDs before removal
+        proxy1_id = proxy1.id
+        proxy2_id = proxy2.id
+
+        # Remove proxies first (required due to FK constraints), then connector
+        # Note: remove_proxy also cleans up Redis, but we're testing the full flow
+        await proxy_manager.remove_proxy(proxy1.id)
+        await proxy_manager.remove_proxy(proxy2.id)
+        await proxy_manager.remove_connector(connector.id)
+
+        # Verify Redis data is cleaned up for both proxies
+        assert await redis_client.get_proxy_status(proxy1_id) is None
+        assert await redis_client.get_proxy_metrics(proxy1_id) is None
+        assert await redis_client.get_proxy_status(proxy2_id) is None
+        assert await redis_client.get_proxy_metrics(proxy2_id) is None
+
+    async def test_remove_project_cleans_up_redis(
+        self, proxy_manager: ProxyManager, redis_client: RedisClient
+    ) -> None:
+        """Test that removing a project cleans up Redis data for project metrics."""
+        # Create a project without children to test project metrics cleanup
+        project = Project(name="Proj Cleanup", username="projcleanup", password="pass")
+        await proxy_manager.add_project(project)
+
+        # Add Redis data for the project
+        await redis_client.update_project_metrics(project.id, success=True, latency_ms=100)
+
+        # Verify Redis data exists
+        assert await redis_client.get_project_metrics(project.id) is not None
+
+        # Store project ID before removal
+        project_id = project.id
+
+        # Remove the project
+        await proxy_manager.remove_project(project.id)
+
+        # Verify Redis data is cleaned up for project
+        assert await redis_client.get_project_metrics(project_id) is None
+
+    async def test_remove_project_with_proxies_cleans_up_redis(
+        self, proxy_manager: ProxyManager, redis_client: RedisClient
+    ) -> None:
+        """Test that removing a project with proxies cleans up all Redis data."""
+        # Create project, credential, connector, and proxy
+        project = Project(name="Full Cleanup", username="fullcleanup", password="pass")
+        await proxy_manager.add_project(project)
+
+        credential = Credential(
+            name="Full Cleanup Cred",
+            type=CredentialType.STATIC_PROXY_PROVIDER,
+            project_id=project.id,
+            config={},
+        )
+        await proxy_manager.add_credential(credential)
+
+        connector = Connector(
+            name="Full Cleanup Conn",
+            credential_id=credential.id,
+            credential_type=CredentialType.STATIC_PROXY_PROVIDER,
+            project_id=project.id,
+            config={},
+        )
+        await proxy_manager.add_connector(connector)
+
+        proxy = Proxy(
+            host="full-cleanup.example.com",
+            port=8080,
+            protocol=ProxyProtocol.HTTP,
+            connector_id=connector.id,
+        )
+        await proxy_manager.add_proxy(proxy)
+
+        # Add Redis data for the proxy and project
+        await redis_client.set_proxy_status(proxy.id, ProxyStatus.HEALTHY, 50.0, 0)
+        await redis_client.update_proxy_metrics(proxy.id, success=True, latency_ms=100)
+        await redis_client.update_project_metrics(project.id, success=True, latency_ms=100)
+
+        # Verify Redis data exists
+        assert await redis_client.get_proxy_status(proxy.id) is not None
+        assert await redis_client.get_proxy_metrics(proxy.id) is not None
+        assert await redis_client.get_project_metrics(project.id) is not None
+
+        # Store IDs before removal
+        proxy_id = proxy.id
+        project_id = project.id
+
+        # Delete in reverse order of dependencies to respect foreign key constraints
+        await proxy_manager.remove_proxy(proxy.id)
+        await proxy_manager.remove_connector(connector.id)
+        await proxy_manager.remove_credential(credential.id)
+        await proxy_manager.remove_project(project.id)
+
+        # Verify Redis data is cleaned up for proxy and project
+        assert await redis_client.get_proxy_status(proxy_id) is None
+        assert await redis_client.get_proxy_metrics(proxy_id) is None
+        assert await redis_client.get_project_metrics(project_id) is None
+
