@@ -244,56 +244,6 @@ class TestProxyManager:
         assert len(healthy) == 1
         assert healthy[0].host == "healthy.example.com"
 
-    async def test_update_proxy_stats(self, proxy_manager: ProxyManager) -> None:
-        """Test updating proxy statistics."""
-        # Create full chain
-        project = Project(name="Stats Project", username="statsuser", password="pass")
-        await proxy_manager.add_project(project)
-
-        credential = Credential(
-            name="Stats Cred",
-            type=CredentialType.STATIC_PROXY_PROVIDER,
-            project_id=project.id,
-            config={},
-        )
-        await proxy_manager.add_credential(credential)
-
-        connector = Connector(
-            name="Stats Conn",
-            credential_id=credential.id,
-            credential_type=CredentialType.STATIC_PROXY_PROVIDER,
-            project_id=project.id,
-            config={},
-        )
-        await proxy_manager.add_connector(connector)
-
-        proxy = Proxy(
-            host="stats.example.com",
-            port=8080,
-            protocol=ProxyProtocol.HTTP,
-            connector_id=connector.id,
-        )
-        await proxy_manager.add_proxy(proxy)
-
-        # Update stats with bytes tracking
-        await proxy_manager.update_proxy_stats(
-            proxy.id, success=True, latency_ms=100, bytes_sent=1000, bytes_received=5000
-        )
-        await proxy_manager.update_proxy_stats(
-            proxy.id, success=True, latency_ms=200, bytes_sent=2000, bytes_received=10000
-        )
-        await proxy_manager.update_proxy_stats(
-            proxy.id, success=False, latency_ms=50, bytes_sent=500, bytes_received=0
-        )
-
-        updated_proxy = proxy_manager.get_proxy(proxy.id)
-        assert updated_proxy is not None
-        assert updated_proxy.request_count == 3
-        assert updated_proxy.success_count == 2
-        assert updated_proxy.failure_count == 1
-        assert updated_proxy.bytes_sent == 3500
-        assert updated_proxy.bytes_received == 15000
-
     async def test_update_proxy_status(self, proxy_manager: ProxyManager) -> None:
         """Test updating proxy health status."""
         # Create full chain

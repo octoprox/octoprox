@@ -7,32 +7,29 @@ import pytest
 
 from api.core.auto_scaler import AutoScaler, CHECK_INTERVAL_SECONDS
 from api.core.demand_tracker import DemandLevel
+from api.core import signals
 from api.models.connector import CloudConnectorConfig, Connector
 from api.models.credential import Credential, CredentialType
 from api.models.proxy import Proxy, ProxyProtocol, ProxyStatus
 
 
 @pytest.fixture
-def mock_proxy_manager() -> MagicMock:
-    """Create a mock ProxyManager for testing."""
-    manager = MagicMock()
-    manager.connectors = []
-    manager.get_credential = MagicMock(return_value=None)
-    manager.get_active_proxies_for_connector = MagicMock(return_value=[])
-    manager.get_proxies_for_connector = MagicMock(return_value=[])
-    manager.demand_tracker = MagicMock()
-    manager.demand_tracker.get_demand_level = AsyncMock(return_value=DemandLevel.LOW)
-    manager.add_proxy = AsyncMock()
-    manager.remove_proxy = AsyncMock(return_value=True)
-    manager.start_proxy_draining = AsyncMock()
-    manager.mark_proxy_terminating = AsyncMock()
-    return manager
+def mock_data_provider() -> MagicMock:
+    """Create a mock data provider for testing."""
+    provider = MagicMock()
+    provider.connectors = []
+    provider.get_credential = MagicMock(return_value=None)
+    provider.get_active_proxies_for_connector = MagicMock(return_value=[])
+    provider.get_proxies_for_connector = MagicMock(return_value=[])
+    provider.demand_tracker = MagicMock()
+    provider.demand_tracker.get_demand_level = AsyncMock(return_value=DemandLevel.LOW)
+    return provider
 
 
 @pytest.fixture
-def auto_scaler(mock_proxy_manager: MagicMock) -> AutoScaler:
+def auto_scaler(mock_data_provider: MagicMock) -> AutoScaler:
     """Create an AutoScaler instance for testing."""
-    return AutoScaler(mock_proxy_manager)
+    return AutoScaler(mock_data_provider)
 
 
 @pytest.fixture
@@ -89,10 +86,10 @@ def sample_proxy() -> Proxy:
 class TestAutoScalerInit:
     """Tests for AutoScaler initialization."""
 
-    def test_init(self, mock_proxy_manager: MagicMock) -> None:
+    def test_init(self, mock_data_provider: MagicMock) -> None:
         """Test AutoScaler initialization."""
-        scaler = AutoScaler(mock_proxy_manager)
-        assert scaler._proxy_manager == mock_proxy_manager
+        scaler = AutoScaler(mock_data_provider)
+        assert scaler._data_provider == mock_data_provider
         assert scaler._running is False
         assert scaler._rotation_schedule == {}
 
@@ -177,13 +174,13 @@ class TestCheckConnectorScaling:
     async def test_scale_up_when_below_min(
         self,
         auto_scaler: AutoScaler,
-        mock_proxy_manager: MagicMock,
+        mock_data_provider: MagicMock,
         sample_connector: Connector,
         sample_credential: Credential,
     ) -> None:
         """Test scaling up when current count is below minimum."""
-        mock_proxy_manager.get_active_proxies_for_connector.return_value = []
-        mock_proxy_manager.demand_tracker.get_demand_level = AsyncMock(
+        mock_data_provider.get_active_proxies_for_connector.return_value = []
+        mock_data_provider.demand_tracker.get_demand_level = AsyncMock(
             return_value=DemandLevel.LOW
         )
 
@@ -195,7 +192,7 @@ class TestCheckConnectorScaling:
     async def test_scale_down_when_above_target(
         self,
         auto_scaler: AutoScaler,
-        mock_proxy_manager: MagicMock,
+        mock_data_provider: MagicMock,
         sample_connector: Connector,
         sample_credential: Credential,
         sample_proxy: Proxy,
@@ -206,8 +203,8 @@ class TestCheckConnectorScaling:
             Proxy(id=f"proxy-{i}", host=f"1.2.3.{i}", port=8080, status=ProxyStatus.HEALTHY, connector_id="test-connector-1")
             for i in range(3)
         ]
-        mock_proxy_manager.get_active_proxies_for_connector.return_value = proxies
-        mock_proxy_manager.demand_tracker.get_demand_level = AsyncMock(
+        mock_data_provider.get_active_proxies_for_connector.return_value = proxies
+        mock_data_provider.demand_tracker.get_demand_level = AsyncMock(
             return_value=DemandLevel.LOW
         )
 
@@ -219,7 +216,7 @@ class TestCheckConnectorScaling:
     async def test_no_scaling_when_at_target(
         self,
         auto_scaler: AutoScaler,
-        mock_proxy_manager: MagicMock,
+        mock_data_provider: MagicMock,
         sample_connector: Connector,
         sample_credential: Credential,
     ) -> None:
@@ -228,8 +225,8 @@ class TestCheckConnectorScaling:
         proxies = [
             Proxy(id="proxy-1", host="1.2.3.4", port=8080, status=ProxyStatus.HEALTHY, connector_id="test-connector-1")
         ]
-        mock_proxy_manager.get_active_proxies_for_connector.return_value = proxies
-        mock_proxy_manager.demand_tracker.get_demand_level = AsyncMock(
+        mock_data_provider.get_active_proxies_for_connector.return_value = proxies
+        mock_data_provider.demand_tracker.get_demand_level = AsyncMock(
             return_value=DemandLevel.LOW
         )
 
@@ -247,25 +244,25 @@ class TestScaleDown:
     async def test_scale_down_starts_draining(
         self,
         auto_scaler: AutoScaler,
-        mock_proxy_manager: MagicMock,
+        mock_data_provider: MagicMock,
         sample_connector: Connector,
     ) -> None:
-        """Test that scale_down starts draining proxies."""
+        """Test that scale_down emits draining signals for proxies."""
         proxies = [
             Proxy(id=f"proxy-{i}", host=f"1.2.3.{i}", port=8080, status=ProxyStatus.HEALTHY, connector_id="test-connector-1")
             for i in range(3)
         ]
-        mock_proxy_manager.get_active_proxies_for_connector.return_value = proxies
+        mock_data_provider.get_active_proxies_for_connector.return_value = proxies
 
-        await auto_scaler._scale_down(sample_connector, 2)
-
-        assert mock_proxy_manager.start_proxy_draining.call_count == 2
+        with patch.object(signals.proxy_draining_requested, "send_async", new_callable=AsyncMock) as mock_signal:
+            await auto_scaler._scale_down(sample_connector, 2)
+            assert mock_signal.call_count == 2
 
     @pytest.mark.asyncio
     async def test_scale_down_prefers_unhealthy(
         self,
         auto_scaler: AutoScaler,
-        mock_proxy_manager: MagicMock,
+        mock_data_provider: MagicMock,
         sample_connector: Connector,
     ) -> None:
         """Test that scale_down prefers unhealthy proxies."""
@@ -274,12 +271,14 @@ class TestScaleDown:
             Proxy(id="unhealthy-1", host="1.2.3.2", port=8080, status=ProxyStatus.UNHEALTHY, connector_id="test-connector-1"),
             Proxy(id="healthy-2", host="1.2.3.3", port=8080, status=ProxyStatus.HEALTHY, connector_id="test-connector-1"),
         ]
-        mock_proxy_manager.get_active_proxies_for_connector.return_value = proxies
+        mock_data_provider.get_active_proxies_for_connector.return_value = proxies
 
-        await auto_scaler._scale_down(sample_connector, 1)
-
-        # Should drain the unhealthy proxy first
-        mock_proxy_manager.start_proxy_draining.assert_called_once_with("unhealthy-1")
+        with patch.object(signals.proxy_draining_requested, "send_async", new_callable=AsyncMock) as mock_signal:
+            await auto_scaler._scale_down(sample_connector, 1)
+            # Should drain the unhealthy proxy first
+            mock_signal.assert_called_once()
+            call_kwargs = mock_signal.call_args[1]
+            assert call_kwargs["proxy_id"] == "unhealthy-1"
 
 
 class TestStopMethod:
@@ -299,7 +298,6 @@ class TestHandleDrainingProxy:
     async def test_first_check_records_initial_stats(
         self,
         auto_scaler: AutoScaler,
-        mock_proxy_manager: MagicMock,
     ) -> None:
         """Test that first check records initial traffic stats in metadata."""
         proxy = Proxy(
@@ -312,18 +310,18 @@ class TestHandleDrainingProxy:
             bytes_received=5000,
         )
 
-        await auto_scaler._handle_draining_proxy(proxy)
+        with patch.object(signals.proxy_terminating_requested, "send_async", new_callable=AsyncMock) as mock_signal:
+            await auto_scaler._handle_draining_proxy(proxy)
 
-        # Should record initial stats, not mark as terminating
-        assert proxy.metadata["draining_prev_bytes_sent"] == 1000
-        assert proxy.metadata["draining_prev_bytes_received"] == 5000
-        mock_proxy_manager.mark_proxy_terminating.assert_not_called()
+            # Should record initial stats, not mark as terminating
+            assert proxy.metadata["draining_prev_bytes_sent"] == 1000
+            assert proxy.metadata["draining_prev_bytes_received"] == 5000
+            mock_signal.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_no_traffic_change_marks_terminating(
         self,
         auto_scaler: AutoScaler,
-        mock_proxy_manager: MagicMock,
     ) -> None:
         """Test that no traffic change between checks marks proxy as terminating."""
         proxy = Proxy(
@@ -340,16 +338,18 @@ class TestHandleDrainingProxy:
             },
         )
 
-        await auto_scaler._handle_draining_proxy(proxy)
+        with patch.object(signals.proxy_terminating_requested, "send_async", new_callable=AsyncMock) as mock_signal:
+            await auto_scaler._handle_draining_proxy(proxy)
 
-        # Should mark as terminating since no traffic change
-        mock_proxy_manager.mark_proxy_terminating.assert_called_once_with("draining-proxy")
+            # Should mark as terminating since no traffic change
+            mock_signal.assert_called_once()
+            call_kwargs = mock_signal.call_args[1]
+            assert call_kwargs["proxy_id"] == "draining-proxy"
 
     @pytest.mark.asyncio
     async def test_traffic_still_flowing_updates_stats(
         self,
         auto_scaler: AutoScaler,
-        mock_proxy_manager: MagicMock,
     ) -> None:
         """Test that ongoing traffic updates previous stats for next check."""
         proxy = Proxy(
@@ -366,18 +366,18 @@ class TestHandleDrainingProxy:
             },
         )
 
-        await auto_scaler._handle_draining_proxy(proxy)
+        with patch.object(signals.proxy_terminating_requested, "send_async", new_callable=AsyncMock) as mock_signal:
+            await auto_scaler._handle_draining_proxy(proxy)
 
-        # Should update stats, not mark as terminating
-        assert proxy.metadata["draining_prev_bytes_sent"] == 2000
-        assert proxy.metadata["draining_prev_bytes_received"] == 10000
-        mock_proxy_manager.mark_proxy_terminating.assert_not_called()
+            # Should update stats, not mark as terminating
+            assert proxy.metadata["draining_prev_bytes_sent"] == 2000
+            assert proxy.metadata["draining_prev_bytes_received"] == 10000
+            mock_signal.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_only_bytes_sent_changed(
         self,
         auto_scaler: AutoScaler,
-        mock_proxy_manager: MagicMock,
     ) -> None:
         """Test that change in only bytes_sent keeps proxy draining."""
         proxy = Proxy(
@@ -394,17 +394,17 @@ class TestHandleDrainingProxy:
             },
         )
 
-        await auto_scaler._handle_draining_proxy(proxy)
+        with patch.object(signals.proxy_terminating_requested, "send_async", new_callable=AsyncMock) as mock_signal:
+            await auto_scaler._handle_draining_proxy(proxy)
 
-        # Should not mark as terminating
-        mock_proxy_manager.mark_proxy_terminating.assert_not_called()
-        assert proxy.metadata["draining_prev_bytes_sent"] == 2000
+            # Should not mark as terminating
+            mock_signal.assert_not_called()
+            assert proxy.metadata["draining_prev_bytes_sent"] == 2000
 
     @pytest.mark.asyncio
     async def test_only_bytes_received_changed(
         self,
         auto_scaler: AutoScaler,
-        mock_proxy_manager: MagicMock,
     ) -> None:
         """Test that change in only bytes_received keeps proxy draining."""
         proxy = Proxy(
@@ -421,17 +421,17 @@ class TestHandleDrainingProxy:
             },
         )
 
-        await auto_scaler._handle_draining_proxy(proxy)
+        with patch.object(signals.proxy_terminating_requested, "send_async", new_callable=AsyncMock) as mock_signal:
+            await auto_scaler._handle_draining_proxy(proxy)
 
-        # Should not mark as terminating
-        mock_proxy_manager.mark_proxy_terminating.assert_not_called()
-        assert proxy.metadata["draining_prev_bytes_received"] == 10000
+            # Should not mark as terminating
+            mock_signal.assert_not_called()
+            assert proxy.metadata["draining_prev_bytes_received"] == 10000
 
     @pytest.mark.asyncio
     async def test_zero_traffic_from_start(
         self,
         auto_scaler: AutoScaler,
-        mock_proxy_manager: MagicMock,
     ) -> None:
         """Test proxy with zero traffic from start terminates after two checks."""
         proxy = Proxy(
@@ -444,12 +444,15 @@ class TestHandleDrainingProxy:
             bytes_received=0,
         )
 
-        # First check - records initial stats
-        await auto_scaler._handle_draining_proxy(proxy)
-        assert proxy.metadata["draining_prev_bytes_sent"] == 0
-        assert proxy.metadata["draining_prev_bytes_received"] == 0
-        mock_proxy_manager.mark_proxy_terminating.assert_not_called()
+        with patch.object(signals.proxy_terminating_requested, "send_async", new_callable=AsyncMock) as mock_signal:
+            # First check - records initial stats
+            await auto_scaler._handle_draining_proxy(proxy)
+            assert proxy.metadata["draining_prev_bytes_sent"] == 0
+            assert proxy.metadata["draining_prev_bytes_received"] == 0
+            mock_signal.assert_not_called()
 
-        # Second check - no change, should terminate
-        await auto_scaler._handle_draining_proxy(proxy)
-        mock_proxy_manager.mark_proxy_terminating.assert_called_once_with("draining-proxy")
+            # Second check - no change, should terminate
+            await auto_scaler._handle_draining_proxy(proxy)
+            mock_signal.assert_called_once()
+            call_kwargs = mock_signal.call_args[1]
+            assert call_kwargs["proxy_id"] == "draining-proxy"

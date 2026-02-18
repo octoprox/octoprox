@@ -1,4 +1,8 @@
-"""Proxy pool manager for Octoprox."""
+"""Proxy pool manager for Octoprox.
+
+Subscribes to signals from HealthChecker and ProxyServer.
+Emits proxy lifecycle signals (proxy_added, proxy_removed, proxy_status_changed).
+"""
 
 import asyncio
 from typing import TYPE_CHECKING
@@ -8,9 +12,22 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from api.core.auto_scaler import AutoScaler
 from api.core.config import Settings
-from api.core.demand_tracker import DemandLevel, DemandTracker
+from api.core.demand_tracker import DemandTracker
 from api.core.health_checker import HealthChecker
 from api.core.metrics_flusher import MetricsFlusher
+from api.core.signals import (
+    health_check_completed,
+    proxy_add_requested,
+    proxy_added,
+    proxy_draining_requested,
+    proxy_draining_started,
+    proxy_marked_terminating,
+    proxy_remove_requested,
+    proxy_removed,
+    proxy_status_changed,
+    proxy_terminating_requested,
+    request_completed,
+)
 from api.core.stats import apply_metrics, combine_metrics, increment_stats
 from api.db.redis import RedisClient
 from api.db.repository import (
@@ -75,6 +92,9 @@ class ProxyManager:
         self._running = True
         logger.info("Starting proxy manager")
 
+        # Subscribe to signals
+        self._subscribe_to_signals()
+
         # Load data from Postgres into memory cache
         await self._load_from_database()
 
@@ -92,6 +112,112 @@ class ProxyManager:
         # Start auto-scaler
         task = asyncio.create_task(self._auto_scaler.run())
         self._tasks.append(task)
+
+    def _subscribe_to_signals(self) -> None:
+        """Subscribe to signals from other components."""
+        # Health check and request signals
+        health_check_completed.connect(self._on_health_check_completed)
+        request_completed.connect(self._on_request_completed)
+
+        # AutoScaler request signals
+        proxy_add_requested.connect(self._on_proxy_add_requested)
+        proxy_remove_requested.connect(self._on_proxy_remove_requested)
+        proxy_draining_requested.connect(self._on_proxy_draining_requested)
+        proxy_terminating_requested.connect(self._on_proxy_terminating_requested)
+
+        # Also subscribe DemandTracker to request_completed signal
+        self._demand_tracker.subscribe_to_signals()
+        logger.debug("ProxyManager subscribed to signals")
+
+    async def _on_health_check_completed(
+        self,
+        sender: object,
+        proxy_id: str,
+        status: ProxyStatus,
+        latency_ms: float,
+        consecutive_failures: int,
+    ) -> None:
+        """Handle health check completed signal from HealthChecker."""
+        await self.update_proxy_status(
+            proxy_id, status, latency_ms, consecutive_failures
+        )
+
+    async def _on_request_completed(
+        self,
+        sender: object,
+        proxy_id: str,
+        project_id: str,
+        success: bool,
+        latency_ms: float,
+        bytes_sent: int,
+        bytes_received: int,
+    ) -> None:
+        """Handle request completed signal from ProxyServer."""
+        await self._handle_request_stats(
+            proxy_id, project_id, success, latency_ms, bytes_sent, bytes_received
+        )
+
+    async def _on_proxy_add_requested(
+        self,
+        sender: object,
+        proxy: Proxy,
+    ) -> None:
+        """Handle proxy add request signal from AutoScaler."""
+        await self.add_proxy(proxy)
+
+    async def _on_proxy_remove_requested(
+        self,
+        sender: object,
+        proxy_id: str,
+    ) -> None:
+        """Handle proxy remove request signal from AutoScaler."""
+        await self.remove_proxy(proxy_id)
+
+    async def _on_proxy_draining_requested(
+        self,
+        sender: object,
+        proxy_id: str,
+    ) -> None:
+        """Handle proxy draining request signal from AutoScaler."""
+        await self.start_proxy_draining(proxy_id)
+
+    async def _on_proxy_terminating_requested(
+        self,
+        sender: object,
+        proxy_id: str,
+    ) -> None:
+        """Handle proxy terminating request signal from AutoScaler."""
+        await self.mark_proxy_terminating(proxy_id)
+
+    async def _handle_request_stats(
+        self,
+        proxy_id: str,
+        project_id: str,
+        success: bool,
+        latency_ms: float,
+        bytes_sent: int,
+        bytes_received: int,
+    ) -> None:
+        """Handle request statistics update (internal implementation)."""
+        proxy = self._proxies.get(proxy_id)
+        if proxy:
+            # Update in-memory cache
+            increment_stats(proxy, success, latency_ms, bytes_sent, bytes_received)
+
+            # Persist to Redis (proxy-level)
+            await self._redis_client.update_proxy_metrics(
+                proxy_id, success, latency_ms, bytes_sent, bytes_received
+            )
+
+        # Update project-level metrics
+        project = self._projects.get(project_id)
+        if project:
+            # Update Redis (current window)
+            await self._redis_client.update_project_metrics(
+                project_id, success, latency_ms, bytes_sent, bytes_received
+            )
+            # Update in-memory Project object
+            increment_stats(project, success, latency_ms, bytes_sent, bytes_received)
 
     async def stop(self) -> None:
         """Stop the proxy manager and cleanup."""
@@ -428,7 +554,10 @@ class ProxyManager:
         return self._proxies.get(proxy_id)
 
     async def add_proxy(self, proxy: Proxy) -> None:
-        """Add a proxy to the pool (persists to Postgres)."""
+        """Add a proxy to the pool (persists to Postgres).
+
+        Emits proxy_added signal after successful addition.
+        """
         async with self._session_factory() as session:
             repo = ProxyRepository(session)
             await repo.create(proxy)
@@ -436,6 +565,13 @@ class ProxyManager:
 
         self._proxies[proxy.id] = proxy
         logger.info("Added proxy", proxy_id=proxy.id, host=proxy.host)
+
+        # Emit signal for subscribers
+        await proxy_added.send_async(
+            self,
+            proxy_id=proxy.id,
+            connector_id=proxy.connector_id,
+        )
 
     async def update_proxy(self, proxy: Proxy) -> None:
         """Update a proxy in the pool (persists to Postgres)."""
@@ -448,9 +584,15 @@ class ProxyManager:
         logger.info("Updated proxy", proxy_id=proxy.id, host=proxy.host)
 
     async def remove_proxy(self, proxy_id: str) -> bool:
-        """Remove a proxy from the pool (deletes from Postgres)."""
+        """Remove a proxy from the pool (deletes from Postgres).
+
+        Emits proxy_removed signal after successful removal.
+        """
         if proxy_id not in self._proxies:
             return False
+
+        proxy = self._proxies[proxy_id]
+        connector_id = proxy.connector_id
 
         async with self._session_factory() as session:
             repo = ProxyRepository(session)
@@ -459,6 +601,14 @@ class ProxyManager:
 
         del self._proxies[proxy_id]
         logger.info("Removed proxy", proxy_id=proxy_id)
+
+        # Emit signal for subscribers
+        await proxy_removed.send_async(
+            self,
+            proxy_id=proxy_id,
+            connector_id=connector_id,
+        )
+
         return True
 
     def select_proxy(self, session_id: str | None = None) -> Proxy | None:
@@ -470,39 +620,6 @@ class ProxyManager:
         self._strategy = get_strategy(strategy_name)
         logger.info("Changed routing strategy", strategy=strategy_name)
 
-    async def update_proxy_stats(
-        self,
-        proxy_id: str,
-        success: bool,
-        latency_ms: float,
-        bytes_sent: int = 0,
-        bytes_received: int = 0,
-    ) -> None:
-        """Update proxy statistics after a request (stores in Redis)."""
-        proxy = self._proxies.get(proxy_id)
-        if proxy:
-            # Update in-memory cache
-            increment_stats(proxy, success, latency_ms, bytes_sent, bytes_received)
-
-            # Persist to Redis (proxy-level)
-            await self._redis_client.update_proxy_metrics(
-                proxy_id, success, latency_ms, bytes_sent, bytes_received
-            )
-
-            # Also update project-level metrics (both in-memory and Redis)
-            connector = self._connectors.get(proxy.connector_id)
-            if connector:
-                project = self._projects.get(connector.project_id)
-                if project:
-                    # Update Redis (current window)
-                    await self._redis_client.update_project_metrics(
-                        project.id, success, latency_ms, bytes_sent, bytes_received
-                    )
-                    # Update in-memory Project object
-                    increment_stats(project, success, latency_ms, bytes_sent, bytes_received)
-                    # Track demand for auto-scaling
-                    await self._demand_tracker.record_request(project.id)
-
     async def update_proxy_status(
         self,
         proxy_id: str,
@@ -510,9 +627,13 @@ class ProxyManager:
         latency_ms: float = 0.0,
         consecutive_failures: int = 0,
     ) -> None:
-        """Update proxy health status (stores in Redis)."""
+        """Update proxy health status (stores in Redis).
+
+        Emits proxy_status_changed signal after successful update.
+        """
         proxy = self._proxies.get(proxy_id)
         if proxy:
+            old_status = proxy.status
             proxy.status = status
             proxy.last_check_latency_ms = latency_ms
             proxy.consecutive_failures = consecutive_failures
@@ -520,6 +641,15 @@ class ProxyManager:
             await self._redis_client.set_proxy_status(
                 proxy_id, status, latency_ms, consecutive_failures
             )
+
+            # Emit signal if status actually changed
+            if old_status != status:
+                await proxy_status_changed.send_async(
+                    self,
+                    proxy_id=proxy_id,
+                    old_status=old_status,
+                    new_status=status,
+                )
 
     # Demand tracking and scaling methods
 
@@ -582,6 +712,8 @@ class ProxyManager:
 
         Returns:
             True if successful, False if proxy not found.
+
+        Emits proxy_draining_started signal after successful update.
         """
         proxy = self._proxies.get(proxy_id)
         if not proxy:
@@ -590,6 +722,7 @@ class ProxyManager:
         proxy.status = ProxyStatus.DRAINING
         # Store draining start time in metadata
         from api.core import utc_now
+
         proxy.metadata["draining_started_at"] = utc_now().isoformat()
 
         # Update in Redis
@@ -601,6 +734,14 @@ class ProxyManager:
         await self.update_proxy(proxy)
 
         logger.info("Started draining proxy", proxy_id=proxy_id)
+
+        # Emit signal for subscribers
+        await proxy_draining_started.send_async(
+            self,
+            proxy_id=proxy_id,
+            connector_id=proxy.connector_id,
+        )
+
         return True
 
     async def mark_proxy_terminating(self, proxy_id: str) -> bool:
@@ -611,6 +752,8 @@ class ProxyManager:
 
         Returns:
             True if successful, False if proxy not found.
+
+        Emits proxy_marked_terminating signal after successful update.
         """
         proxy = self._proxies.get(proxy_id)
         if not proxy:
@@ -627,6 +770,14 @@ class ProxyManager:
         await self.update_proxy(proxy)
 
         logger.info("Marked proxy as terminating", proxy_id=proxy_id)
+
+        # Emit signal for subscribers
+        await proxy_marked_terminating.send_async(
+            self,
+            proxy_id=proxy_id,
+            connector_id=proxy.connector_id,
+        )
+
         return True
 
     def get_proxies_for_connector(self, connector_id: str) -> list[Proxy]:

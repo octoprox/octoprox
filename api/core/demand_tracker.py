@@ -2,14 +2,16 @@
 
 This module tracks request rates per project using a sliding window
 approach stored in Redis, enabling demand-based auto-scaling decisions.
+
+Subscribes to request_completed signals to track demand automatically.
 """
 
-import asyncio
 from enum import Enum
 
 import structlog
 
 from api.core import utc_now
+from api.core.signals import request_completed
 from api.db.redis import RedisClient
 
 logger = structlog.get_logger()
@@ -39,17 +41,37 @@ DEMAND_THRESHOLDS = {
 
 class DemandTracker:
     """Tracks request demand per project using a sliding window in Redis.
-    
+
     Uses Redis sorted sets to store request timestamps, allowing efficient
     calculation of request rates over a sliding time window.
-    
+
+    Subscribes to request_completed signals to automatically track demand.
+
     Args:
         redis_client: Redis client for storing demand data.
     """
-    
+
     def __init__(self, redis_client: RedisClient) -> None:
         self._redis_client = redis_client
-    
+
+    def subscribe_to_signals(self) -> None:
+        """Subscribe to signals for automatic demand tracking."""
+        request_completed.connect(self._on_request_completed)
+        logger.debug("DemandTracker subscribed to request_completed signal")
+
+    async def _on_request_completed(
+        self,
+        sender: object,
+        proxy_id: str,
+        project_id: str,
+        success: bool,
+        latency_ms: float,
+        bytes_sent: int,
+        bytes_received: int,
+    ) -> None:
+        """Handle request completed signal to track demand."""
+        await self.record_request(project_id)
+
     async def record_request(self, project_id: str) -> None:
         """Record a request for demand tracking.
         
