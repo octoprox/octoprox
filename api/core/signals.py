@@ -114,3 +114,13 @@ proxy_instance_terminated = signal("proxy-instance-terminated")
 # Args: connector_id (str)
 connector_remove_requested = signal("connector-remove-requested")
 
+
+# =============================================================================
+# Connector Error Signals
+# =============================================================================
+
+# Emitted when a connector's error state changes (error occurred or cleared)
+# Sender: AutoScaler
+# Args: connector_id (str), error (str | None), consecutive_errors (int)
+connector_error_updated = signal("connector-error-updated")
+

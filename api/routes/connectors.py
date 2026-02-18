@@ -39,6 +39,9 @@ def _connector_to_response(
         config=connector.config,
         enabled=connector.enabled,
         proxy_count=proxy_count,
+        last_error=connector.last_error,
+        last_error_at=connector.last_error_at,
+        consecutive_errors=connector.consecutive_errors,
         created_at=connector.created_at,
         updated_at=connector.updated_at,
     )

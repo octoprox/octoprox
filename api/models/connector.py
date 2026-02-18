@@ -202,6 +202,11 @@ class Connector(BaseModel):
     enabled: bool = True
     pending_deletion: bool = False  # Set when connector is marked for async deletion
 
+    # Cloud provider error tracking
+    last_error: str | None = None  # Last error message from cloud provider operations
+    last_error_at: datetime | None = None  # When the error occurred
+    consecutive_errors: int = 0  # Count of consecutive failures (for backoff)
+
     # Statistics (computed dynamically, not persisted)
     proxy_count: int = 0
 
@@ -243,6 +248,10 @@ class ConnectorResponse(BaseModel):
     config: dict[str, Any]
     enabled: bool
     proxy_count: int
+    # Cloud provider error tracking
+    last_error: str | None = None
+    last_error_at: datetime | None = None
+    consecutive_errors: int = 0
     created_at: datetime
     updated_at: datetime
 

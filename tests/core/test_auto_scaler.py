@@ -5,9 +5,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from api.core.auto_scaler import AutoScaler, CHECK_INTERVAL_SECONDS
+from api.core.auto_scaler import AutoScaler, CHECK_INTERVAL_SECONDS, MAX_ERROR_BACKOFF_MINUTES
 from api.core.demand_tracker import DemandLevel
-from api.core import signals
+from api.core import signals, utc_now
 from api.models.connector import CloudConnectorConfig, Connector
 from api.models.credential import Credential, CredentialType
 from api.models.proxy import Proxy, ProxyProtocol, ProxyStatus
@@ -456,3 +456,324 @@ class TestHandleDrainingProxy:
             mock_signal.assert_called_once()
             call_kwargs = mock_signal.call_args[1]
             assert call_kwargs["proxy_id"] == "draining-proxy"
+
+
+class TestShouldSkipScaling:
+    """Tests for _should_skip_scaling method (error backoff logic)."""
+
+    def test_returns_false_when_no_error(
+        self, auto_scaler: AutoScaler, sample_connector: Connector
+    ) -> None:
+        """Test that scaling is not skipped when there's no error."""
+        sample_connector.last_error = None
+        sample_connector.consecutive_errors = 0
+        assert auto_scaler._should_skip_scaling(sample_connector) is False
+
+    def test_returns_false_when_consecutive_errors_is_zero(
+        self, auto_scaler: AutoScaler, sample_connector: Connector
+    ) -> None:
+        """Test that scaling is not skipped when consecutive_errors is 0."""
+        sample_connector.last_error = "Some old error"
+        sample_connector.last_error_at = utc_now() - timedelta(minutes=1)
+        sample_connector.consecutive_errors = 0
+        assert auto_scaler._should_skip_scaling(sample_connector) is False
+
+    def test_returns_true_when_within_backoff_period(
+        self, auto_scaler: AutoScaler, sample_connector: Connector
+    ) -> None:
+        """Test that scaling is skipped when within backoff period."""
+        # 1 consecutive error = 2^1 = 2 minutes backoff
+        sample_connector.last_error = "Cloud provider error"
+        sample_connector.last_error_at = utc_now() - timedelta(minutes=1)  # 1 min ago
+        sample_connector.consecutive_errors = 1
+        assert auto_scaler._should_skip_scaling(sample_connector) is True
+
+    def test_returns_false_when_backoff_period_passed(
+        self, auto_scaler: AutoScaler, sample_connector: Connector
+    ) -> None:
+        """Test that scaling is not skipped when backoff period has passed."""
+        # 1 consecutive error = 2^1 = 2 minutes backoff
+        sample_connector.last_error = "Cloud provider error"
+        sample_connector.last_error_at = utc_now() - timedelta(minutes=3)  # 3 min ago
+        sample_connector.consecutive_errors = 1
+        assert auto_scaler._should_skip_scaling(sample_connector) is False
+
+    def test_exponential_backoff_calculation(
+        self, auto_scaler: AutoScaler, sample_connector: Connector
+    ) -> None:
+        """Test that backoff is calculated exponentially (2^n minutes)."""
+        sample_connector.last_error = "Cloud provider error"
+
+        # 2 consecutive errors = 2^2 = 4 minutes backoff
+        sample_connector.last_error_at = utc_now() - timedelta(minutes=3)
+        sample_connector.consecutive_errors = 2
+        assert auto_scaler._should_skip_scaling(sample_connector) is True  # 3 < 4
+
+        sample_connector.last_error_at = utc_now() - timedelta(minutes=5)
+        assert auto_scaler._should_skip_scaling(sample_connector) is False  # 5 > 4
+
+        # 3 consecutive errors = 2^3 = 8 minutes backoff
+        sample_connector.last_error_at = utc_now() - timedelta(minutes=7)
+        sample_connector.consecutive_errors = 3
+        assert auto_scaler._should_skip_scaling(sample_connector) is True  # 7 < 8
+
+        sample_connector.last_error_at = utc_now() - timedelta(minutes=9)
+        assert auto_scaler._should_skip_scaling(sample_connector) is False  # 9 > 8
+
+    def test_backoff_caps_at_max(
+        self, auto_scaler: AutoScaler, sample_connector: Connector
+    ) -> None:
+        """Test that backoff is capped at MAX_ERROR_BACKOFF_MINUTES."""
+        sample_connector.last_error = "Cloud provider error"
+        # 10 consecutive errors would be 2^10 = 1024 minutes, but should cap at 30
+        sample_connector.consecutive_errors = 10
+
+        # Should still be in backoff at 29 minutes
+        sample_connector.last_error_at = utc_now() - timedelta(minutes=29)
+        assert auto_scaler._should_skip_scaling(sample_connector) is True
+
+        # Should not be in backoff after 31 minutes
+        sample_connector.last_error_at = utc_now() - timedelta(minutes=31)
+        assert auto_scaler._should_skip_scaling(sample_connector) is False
+
+    def test_returns_false_when_last_error_at_is_none(
+        self, auto_scaler: AutoScaler, sample_connector: Connector
+    ) -> None:
+        """Test that scaling is not skipped when last_error_at is None."""
+        sample_connector.last_error = "Some error"
+        sample_connector.last_error_at = None
+        sample_connector.consecutive_errors = 5
+        assert auto_scaler._should_skip_scaling(sample_connector) is False
+
+
+class TestRecordConnectorError:
+    """Tests for _record_connector_error method."""
+
+    @pytest.mark.asyncio
+    async def test_emits_signal_with_correct_args(
+        self, auto_scaler: AutoScaler, sample_connector: Connector
+    ) -> None:
+        """Test that _record_connector_error emits connector_error_updated signal."""
+        sample_connector.consecutive_errors = 0
+        error_msg = "Failed to create instance"
+
+        with patch.object(signals.connector_error_updated, "send_async", new_callable=AsyncMock) as mock_signal:
+            await auto_scaler._record_connector_error(sample_connector, error_msg)
+
+            mock_signal.assert_called_once()
+            call_kwargs = mock_signal.call_args[1]
+            assert call_kwargs["connector_id"] == sample_connector.id
+            assert call_kwargs["error"] == error_msg
+            assert call_kwargs["consecutive_errors"] == 1
+
+    @pytest.mark.asyncio
+    async def test_increments_consecutive_errors(
+        self, auto_scaler: AutoScaler, sample_connector: Connector
+    ) -> None:
+        """Test that consecutive_errors is incremented."""
+        sample_connector.consecutive_errors = 3
+
+        with patch.object(signals.connector_error_updated, "send_async", new_callable=AsyncMock):
+            await auto_scaler._record_connector_error(sample_connector, "error")
+
+        assert sample_connector.consecutive_errors == 4
+
+    @pytest.mark.asyncio
+    async def test_updates_local_connector_state(
+        self, auto_scaler: AutoScaler, sample_connector: Connector
+    ) -> None:
+        """Test that local connector state is updated."""
+        sample_connector.last_error = None
+        sample_connector.last_error_at = None
+        sample_connector.consecutive_errors = 0
+        error_msg = "Test error"
+
+        with patch.object(signals.connector_error_updated, "send_async", new_callable=AsyncMock):
+            await auto_scaler._record_connector_error(sample_connector, error_msg)
+
+        assert sample_connector.last_error == error_msg
+        assert sample_connector.last_error_at is not None
+        assert sample_connector.consecutive_errors == 1
+
+
+class TestClearConnectorError:
+    """Tests for _clear_connector_error method."""
+
+    @pytest.mark.asyncio
+    async def test_does_nothing_when_no_error(
+        self, auto_scaler: AutoScaler, sample_connector: Connector
+    ) -> None:
+        """Test that _clear_connector_error does nothing when no error exists."""
+        sample_connector.consecutive_errors = 0
+
+        with patch.object(signals.connector_error_updated, "send_async", new_callable=AsyncMock) as mock_signal:
+            await auto_scaler._clear_connector_error(sample_connector)
+            mock_signal.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_emits_signal_when_error_exists(
+        self, auto_scaler: AutoScaler, sample_connector: Connector
+    ) -> None:
+        """Test that signal is emitted with error=None and consecutive_errors=0."""
+        sample_connector.last_error = "Previous error"
+        sample_connector.consecutive_errors = 5
+
+        with patch.object(signals.connector_error_updated, "send_async", new_callable=AsyncMock) as mock_signal:
+            await auto_scaler._clear_connector_error(sample_connector)
+
+            mock_signal.assert_called_once()
+            call_kwargs = mock_signal.call_args[1]
+            assert call_kwargs["connector_id"] == sample_connector.id
+            assert call_kwargs["error"] is None
+            assert call_kwargs["consecutive_errors"] == 0
+
+    @pytest.mark.asyncio
+    async def test_clears_local_connector_state(
+        self, auto_scaler: AutoScaler, sample_connector: Connector
+    ) -> None:
+        """Test that local connector state is cleared."""
+        sample_connector.last_error = "Some error"
+        sample_connector.last_error_at = utc_now()
+        sample_connector.consecutive_errors = 3
+
+        with patch.object(signals.connector_error_updated, "send_async", new_callable=AsyncMock):
+            await auto_scaler._clear_connector_error(sample_connector)
+
+        assert sample_connector.last_error is None
+        assert sample_connector.last_error_at is None
+        assert sample_connector.consecutive_errors == 0
+
+
+class TestScalingWithBackoff:
+    """Tests for scaling operations respecting error backoff."""
+
+    @pytest.mark.asyncio
+    async def test_scale_up_skipped_when_in_backoff(
+        self,
+        auto_scaler: AutoScaler,
+        mock_data_provider: MagicMock,
+        sample_connector: Connector,
+        sample_credential: Credential,
+    ) -> None:
+        """Test that scale up is skipped when connector is in error backoff."""
+        # Set up connector with recent error
+        sample_connector.last_error = "Cloud provider error"
+        sample_connector.last_error_at = utc_now() - timedelta(minutes=1)
+        sample_connector.consecutive_errors = 2  # 4 minute backoff
+
+        mock_data_provider.get_active_proxies_for_connector.return_value = []
+        mock_data_provider.demand_tracker.get_demand_level = AsyncMock(
+            return_value=DemandLevel.HIGH
+        )
+
+        with patch.object(auto_scaler, "_scale_up", new_callable=AsyncMock) as mock_scale_up:
+            await auto_scaler._check_connector_scaling(sample_connector, sample_credential)
+            mock_scale_up.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_scale_down_skipped_when_in_backoff(
+        self,
+        auto_scaler: AutoScaler,
+        mock_data_provider: MagicMock,
+        sample_connector: Connector,
+        sample_credential: Credential,
+    ) -> None:
+        """Test that scale down is skipped when connector is in error backoff."""
+        # Set up connector with recent error
+        sample_connector.last_error = "Cloud provider error"
+        sample_connector.last_error_at = utc_now() - timedelta(minutes=1)
+        sample_connector.consecutive_errors = 2  # 4 minute backoff
+
+        # 3 proxies with LOW demand should scale down, but backoff prevents it
+        proxies = [
+            Proxy(id=f"proxy-{i}", host=f"1.2.3.{i}", port=8080, status=ProxyStatus.HEALTHY, connector_id="test-connector-1")
+            for i in range(3)
+        ]
+        mock_data_provider.get_active_proxies_for_connector.return_value = proxies
+        mock_data_provider.demand_tracker.get_demand_level = AsyncMock(
+            return_value=DemandLevel.LOW
+        )
+
+        with patch.object(auto_scaler, "_scale_down", new_callable=AsyncMock) as mock_scale_down:
+            await auto_scaler._check_connector_scaling(sample_connector, sample_credential)
+            mock_scale_down.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_scaling_proceeds_after_backoff_expires(
+        self,
+        auto_scaler: AutoScaler,
+        mock_data_provider: MagicMock,
+        sample_connector: Connector,
+        sample_credential: Credential,
+    ) -> None:
+        """Test that scaling proceeds after backoff period expires."""
+        # Set up connector with old error (backoff expired)
+        sample_connector.last_error = "Cloud provider error"
+        sample_connector.last_error_at = utc_now() - timedelta(minutes=10)
+        sample_connector.consecutive_errors = 2  # 4 minute backoff, but 10 min passed
+
+        mock_data_provider.get_active_proxies_for_connector.return_value = []
+        mock_data_provider.demand_tracker.get_demand_level = AsyncMock(
+            return_value=DemandLevel.LOW
+        )
+
+        with patch.object(auto_scaler, "_scale_up", new_callable=AsyncMock) as mock_scale_up:
+            await auto_scaler._check_connector_scaling(sample_connector, sample_credential)
+            mock_scale_up.assert_called_once()
+
+
+class TestRotationWithBackoff:
+    """Tests for rotation operations respecting error backoff."""
+
+    @pytest.mark.asyncio
+    async def test_rotation_skipped_when_in_backoff(
+        self,
+        auto_scaler: AutoScaler,
+        mock_data_provider: MagicMock,
+        sample_connector: Connector,
+        sample_credential: Credential,
+        sample_proxy: Proxy,
+    ) -> None:
+        """Test that rotation is skipped when connector is in error backoff."""
+        # Set up connector with recent error
+        sample_connector.last_error = "Cloud provider error"
+        sample_connector.last_error_at = utc_now() - timedelta(minutes=1)
+        sample_connector.consecutive_errors = 2  # 4 minute backoff
+
+        # Set up proxy with rotation due
+        sample_proxy.status = ProxyStatus.HEALTHY
+        auto_scaler._rotation_schedule[sample_proxy.id] = utc_now() - timedelta(minutes=5)
+
+        mock_data_provider.get_proxies_for_connector.return_value = [sample_proxy]
+        mock_data_provider.get_credential.return_value = sample_credential
+        mock_data_provider.connectors = [sample_connector]
+
+        with patch.object(auto_scaler, "_start_rotation", new_callable=AsyncMock) as mock_rotation:
+            await auto_scaler._check_connector_rotation(sample_connector, sample_credential)
+            mock_rotation.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_termination_skipped_when_in_backoff(
+        self,
+        auto_scaler: AutoScaler,
+        mock_data_provider: MagicMock,
+        sample_connector: Connector,
+        sample_credential: Credential,
+        sample_proxy: Proxy,
+    ) -> None:
+        """Test that termination is skipped when connector is in error backoff."""
+        # Set up connector with recent error
+        sample_connector.last_error = "Cloud provider error"
+        sample_connector.last_error_at = utc_now() - timedelta(minutes=1)
+        sample_connector.consecutive_errors = 2  # 4 minute backoff
+
+        # Set up proxy in terminating state
+        sample_proxy.status = ProxyStatus.TERMINATING
+
+        mock_data_provider.get_proxies_for_connector.return_value = [sample_proxy]
+        mock_data_provider.get_credential.return_value = sample_credential
+        mock_data_provider.connectors = [sample_connector]
+
+        with patch.object(auto_scaler, "_handle_terminating_proxy", new_callable=AsyncMock) as mock_terminate:
+            await auto_scaler._check_connector_rotation(sample_connector, sample_credential)
+            mock_terminate.assert_not_called()

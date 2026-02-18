@@ -16,6 +16,7 @@ from api.core.demand_tracker import DemandTracker
 from api.core.health_checker import HealthChecker
 from api.core.metrics_flusher import MetricsFlusher
 from api.core.signals import (
+    connector_error_updated,
     connector_remove_requested,
     health_check_completed,
     proxy_add_requested,
@@ -126,6 +127,7 @@ class ProxyManager:
         proxy_draining_requested.connect(self._on_proxy_draining_requested)
         proxy_terminating_requested.connect(self._on_proxy_terminating_requested)
         connector_remove_requested.connect(self._on_connector_remove_requested)
+        connector_error_updated.connect(self._on_connector_error_updated)
 
         # Also subscribe DemandTracker to request_completed signal
         self._demand_tracker.subscribe_to_signals()
@@ -198,6 +200,16 @@ class ProxyManager:
     ) -> None:
         """Handle connector remove request signal from AutoScaler."""
         await self.remove_connector(connector_id)
+
+    async def _on_connector_error_updated(
+        self,
+        sender: object,
+        connector_id: str,
+        error: str | None,
+        consecutive_errors: int,
+    ) -> None:
+        """Handle connector error updated signal from AutoScaler."""
+        await self.update_connector_error(connector_id, error, consecutive_errors)
 
     async def _handle_request_stats(
         self,
@@ -517,6 +529,55 @@ class ProxyManager:
 
         self._connectors[connector.id] = connector
         logger.info("Updated connector", connector_id=connector.id, name=connector.name)
+
+    async def update_connector_error(
+        self,
+        connector_id: str,
+        error: str | None,
+        consecutive_errors: int,
+    ) -> None:
+        """Update a connector's error state (persists to Postgres).
+
+        Args:
+            connector_id: The connector ID to update.
+            error: The error message, or None to clear the error.
+            consecutive_errors: The count of consecutive errors.
+        """
+        from api.core import utc_now
+
+        connector = self._connectors.get(connector_id)
+        if not connector:
+            logger.warning(
+                "Cannot update error for unknown connector",
+                connector_id=connector_id,
+            )
+            return
+
+        # Update error fields
+        connector.last_error = error
+        connector.last_error_at = utc_now() if error else None
+        connector.consecutive_errors = consecutive_errors
+
+        # Persist to database
+        async with self._session_factory() as session:
+            repo = ConnectorRepository(session)
+            await repo.update(connector)
+            await session.commit()
+
+        self._connectors[connector.id] = connector
+
+        if error:
+            logger.warning(
+                "Connector error recorded",
+                connector_id=connector_id,
+                error=error,
+                consecutive_errors=consecutive_errors,
+            )
+        else:
+            logger.info(
+                "Connector error cleared",
+                connector_id=connector_id,
+            )
 
     async def remove_connector(self, connector_id: str) -> bool:
         """Remove a connector (deletes from Postgres, cascades to proxies).

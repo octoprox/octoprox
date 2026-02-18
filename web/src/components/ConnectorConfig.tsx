@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { Link2, Trash2, Pencil, X, Plus, ArrowLeft } from 'lucide-react'
+import { Link2, Trash2, Pencil, X, Plus, ArrowLeft, AlertTriangle } from 'lucide-react'
 import {
   fetchProjectConnectors,
   fetchProjectCredentials,
@@ -308,6 +308,20 @@ export default function ConnectorConfig() {
   const getCredentialTypeLabel = (type: string | null) => {
     const labels: Record<string, string> = { static_proxy_provider: 'Static Proxy Provider', aws: 'AWS', gcp: 'GCP', azure: 'Azure' }
     return type ? labels[type] || type : 'Unknown'
+  }
+
+  const formatErrorTime = (isoString: string | null) => {
+    if (!isoString) return ''
+    const date = new Date(isoString)
+    const now = new Date()
+    const diffMs = now.getTime() - date.getTime()
+    const diffMins = Math.floor(diffMs / 60000)
+    if (diffMins < 1) return 'just now'
+    if (diffMins < 60) return `${diffMins}m ago`
+    const diffHours = Math.floor(diffMins / 60)
+    if (diffHours < 24) return `${diffHours}h ago`
+    const diffDays = Math.floor(diffHours / 24)
+    return `${diffDays}d ago`
   }
 
   const getCredentialsForType = () => {
@@ -648,11 +662,32 @@ export default function ConnectorConfig() {
                 </div>
               </div>
               <div className="flex items-center gap-2">
+                {connector.last_error && (
+                  <span className="px-3 py-1 rounded-full text-sm font-medium bg-red-100 text-red-800 flex items-center gap-1">
+                    <AlertTriangle className="w-4 h-4" />
+                    Error
+                  </span>
+                )}
                 <span className={`px-3 py-1 rounded-full text-sm font-medium ${connector.enabled ? 'bg-green-100 text-green-800' : 'bg-gray-100 text-gray-800'}`}>{connector.enabled ? 'Enabled' : 'Disabled'}</span>
                 <button onClick={() => startEditing(connector)} className="p-2 text-gray-500 hover:text-blue-600"><Pencil className="w-5 h-5" /></button>
                 <button onClick={() => deleteMutation.mutate(connector.id)} className="p-2 text-gray-500 hover:text-red-600"><Trash2 className="w-5 h-5" /></button>
               </div>
             </div>
+            {/* Error message display */}
+            {connector.last_error && (
+              <div className="mt-4 p-3 bg-red-50 border border-red-200 rounded-lg">
+                <div className="flex items-start gap-2">
+                  <AlertTriangle className="w-5 h-5 text-red-500 flex-shrink-0 mt-0.5" />
+                  <div className="flex-1 min-w-0">
+                    <p className="text-sm font-medium text-red-800">
+                      Cloud provider error {connector.consecutive_errors > 1 && `(${connector.consecutive_errors} consecutive failures)`}
+                    </p>
+                    <p className="text-sm text-red-700 mt-1 break-words">{connector.last_error}</p>
+                    <p className="text-xs text-red-500 mt-1">{formatErrorTime(connector.last_error_at)}</p>
+                  </div>
+                </div>
+              </div>
+            )}
           </div>
         ))}
 

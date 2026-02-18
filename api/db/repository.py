@@ -246,6 +246,9 @@ class ConnectorRepository:
             config=connector.config,
             enabled=connector.enabled,
             pending_deletion=connector.pending_deletion,
+            last_error=connector.last_error,
+            last_error_at=connector.last_error_at,
+            consecutive_errors=connector.consecutive_errors,
             created_at=connector.created_at,
             updated_at=connector.updated_at,
         )
@@ -265,6 +268,9 @@ class ConnectorRepository:
             model.config = connector.config
             model.enabled = connector.enabled
             model.pending_deletion = connector.pending_deletion
+            model.last_error = connector.last_error
+            model.last_error_at = connector.last_error_at
+            model.consecutive_errors = connector.consecutive_errors
             model.updated_at = utc_now()
             await self._session.flush()
         return connector
@@ -294,6 +300,9 @@ class ConnectorRepository:
             config=model.config,
             enabled=model.enabled,
             pending_deletion=model.pending_deletion,
+            last_error=model.last_error,
+            last_error_at=model.last_error_at,
+            consecutive_errors=model.consecutive_errors,
             created_at=model.created_at,
             updated_at=model.updated_at,
         )
