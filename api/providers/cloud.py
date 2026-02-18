@@ -355,10 +355,6 @@ class GCPProvider(CloudProvider):
             # Network interface
             network_interface = compute_v1.NetworkInterface()
             network_interface.network = f"global/networks/{self._config.network}"
-            if self._config.subnetwork:
-                # Extract region from zone (e.g., us-central1-a -> us-central1)
-                region = "-".join(self._config.zone.split("-")[:-1])
-                network_interface.subnetwork = f"regions/{region}/subnetworks/{self._config.subnetwork}"
 
             # Add external IP
             access_config = compute_v1.AccessConfig()

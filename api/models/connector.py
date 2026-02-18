@@ -92,8 +92,6 @@ class GCPConnectorConfig(CloudConnectorConfig):
     zone: str = "us-central1-a"
     machine_type: str = "e2-micro"
     network: str = "default"
-    subnetwork: str | None = None
-    ssh_key: str | None = None
     tags: dict[str, str] = Field(default_factory=dict)
 
     @model_validator(mode='after')
