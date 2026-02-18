@@ -93,7 +93,12 @@ class RedisClient:
             if status:
                 statuses[proxy_id] = status
         return statuses
-    
+
+    async def delete_proxy_status(self, proxy_id: str) -> None:
+        """Delete proxy status from Redis."""
+        key = PROXY_STATUS_KEY.format(proxy_id=proxy_id)
+        await self.client.delete(key)
+
     # Proxy metrics operations
     async def update_proxy_metrics(
         self,

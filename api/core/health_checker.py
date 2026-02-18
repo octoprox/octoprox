@@ -1,11 +1,14 @@
-"""Health checker for proxy pool."""
+"""Health checker for proxy pool.
+
+Emits health_check_completed signals instead of directly calling ProxyManager.
+"""
 
 from __future__ import annotations
 
 import asyncio
 import time
 from datetime import timedelta
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol
 
 import httpx
 import structlog
@@ -13,23 +16,46 @@ from httpx_socks import AsyncProxyTransport
 
 from api.core import utc_now
 from api.core.config import settings
-from api.models.proxy import ProxyProtocol, ProxyStatus
+from api.core.signals import health_check_completed
+from api.models.proxy import Proxy, ProxyProtocol, ProxyStatus
 
 if TYPE_CHECKING:
-    from api.core.proxy_manager import ProxyManager
-    from api.models.proxy import Proxy
+    pass
 
 logger = structlog.get_logger()
+
+
+class ProxyDataProvider(Protocol):
+    """Protocol for read-only access to proxy data."""
+
+    @property
+    def proxies(self) -> list[Proxy]:
+        """Get all proxies."""
+        ...
+
+    def is_connector_enabled(self, connector_id: str) -> bool:
+        """Check if a connector is enabled."""
+        ...
 
 # Grace period for initializing proxies before marking them unhealthy
 INITIALIZATION_GRACE_PERIOD = timedelta(minutes=5)
 
 
 class HealthChecker:
-    """Performs health checks on proxies in the pool."""
-    
-    def __init__(self, proxy_manager: ProxyManager) -> None:
-        self._proxy_manager = proxy_manager
+    """Performs health checks on proxies in the pool.
+
+    Emits health_check_completed signals for each proxy check result.
+    Subscribers (like ProxyManager) handle updating proxy status.
+    """
+
+    def __init__(self, proxy_data_provider: ProxyDataProvider) -> None:
+        """Initialize the health checker.
+
+        Args:
+            proxy_data_provider: Provider for read-only access to proxy data.
+                                 Typically the ProxyManager instance.
+        """
+        self._proxy_data_provider = proxy_data_provider
         self._interval = settings.health_check_interval
         self._timeout = settings.health_check_timeout
     
@@ -50,7 +76,7 @@ class HealthChecker:
     
     async def _check_all_proxies(self) -> None:
         """Check health of all proxies."""
-        proxies = self._proxy_manager.proxies
+        proxies = self._proxy_data_provider.proxies
         if not proxies:
             return
 
@@ -60,7 +86,7 @@ class HealthChecker:
         active_proxies = [
             p for p in proxies
             if p.status not in (ProxyStatus.DRAINING, ProxyStatus.TERMINATING)
-            and self._proxy_manager.is_connector_enabled(p.connector_id)
+            and self._proxy_data_provider.is_connector_enabled(p.connector_id)
         ]
 
         if not active_proxies:
@@ -93,7 +119,7 @@ class HealthChecker:
             raise ValueError(f"Unsupported proxy protocol: {proxy.protocol}")
 
     async def _check_proxy(self, proxy: Proxy) -> None:
-        """Check health of a single proxy."""
+        """Check health of a single proxy and emit signal with result."""
         start_time = time.monotonic()
 
         try:
@@ -103,30 +129,33 @@ class HealthChecker:
                 timeout=self._timeout,
             ) as client:
                 response = await client.get("https://httpbin.org/ip")
-                
+
                 latency_ms = (time.monotonic() - start_time) * 1000
-                
+
                 if response.status_code == 200:
-                    await self._proxy_manager.update_proxy_status(
-                        proxy.id,
-                        ProxyStatus.HEALTHY,
-                        latency_ms=latency_ms,
-                        consecutive_failures=0,
-                    )
                     logger.debug(
                         "Proxy healthy",
                         proxy_id=proxy.id,
                         latency_ms=round(latency_ms, 2),
                     )
+                    await health_check_completed.send_async(
+                        self,
+                        proxy_id=proxy.id,
+                        status=ProxyStatus.HEALTHY,
+                        latency_ms=latency_ms,
+                        consecutive_failures=0,
+                    )
                 else:
-                    await self._mark_unhealthy(proxy, f"HTTP {response.status_code}")
-                    
+                    await self._handle_check_failure(
+                        proxy, f"HTTP {response.status_code}"
+                    )
+
         except httpx.TimeoutException:
-            await self._mark_unhealthy(proxy, "Timeout")
+            await self._handle_check_failure(proxy, "Timeout")
         except httpx.ProxyError as e:
-            await self._mark_unhealthy(proxy, f"Proxy error: {e}")
+            await self._handle_check_failure(proxy, f"Proxy error: {e}")
         except Exception as e:
-            await self._mark_unhealthy(proxy, f"Error: {e}")
+            await self._handle_check_failure(proxy, f"Error: {e}")
 
     def _is_within_initialization_grace_period(self, proxy: Proxy) -> bool:
         """Check if proxy is still within the initialization grace period."""
@@ -137,8 +166,8 @@ class HealthChecker:
         age = now - proxy.created_at
         return age < INITIALIZATION_GRACE_PERIOD
 
-    async def _mark_unhealthy(self, proxy: Proxy, reason: str) -> None:
-        """Mark a proxy as unhealthy.
+    async def _handle_check_failure(self, proxy: Proxy, reason: str) -> None:
+        """Handle a health check failure and emit appropriate signal.
 
         For proxies in INITIALIZING status that are still within the grace period,
         failures are tracked but the status remains INITIALIZING until the grace
@@ -156,9 +185,11 @@ class HealthChecker:
                 created_at=proxy.created_at.isoformat(),
             )
             # Keep status as INITIALIZING but track failures
-            await self._proxy_manager.update_proxy_status(
-                proxy.id,
-                ProxyStatus.INITIALIZING,
+            await health_check_completed.send_async(
+                self,
+                proxy_id=proxy.id,
+                status=ProxyStatus.INITIALIZING,
+                latency_ms=0.0,
                 consecutive_failures=new_failures,
             )
             return
@@ -180,9 +211,10 @@ class HealthChecker:
                 failures=new_failures,
             )
 
-        await self._proxy_manager.update_proxy_status(
-            proxy.id,
-            status,
+        await health_check_completed.send_async(
+            self,
+            proxy_id=proxy.id,
+            status=status,
+            latency_ms=0.0,
             consecutive_failures=new_failures,
         )
-
