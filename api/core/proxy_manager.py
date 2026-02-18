@@ -384,14 +384,34 @@ class ProxyManager:
         logger.info("Updated project", project_id=project.id, name=project.name)
 
     async def remove_project(self, project_id: str) -> bool:
-        """Remove a project (deletes from Postgres, cascades to credentials, connectors and proxies)."""
+        """Remove a project (deletes from Postgres, cascades to credentials, connectors and proxies).
+
+        Also cleans up Redis data (project metrics and all associated proxy data)
+        to prevent foreign key violations in the metrics flusher.
+        """
         if project_id not in self._projects:
             return False
+
+        # Collect proxy IDs before deletion for Redis cleanup
+        connector_ids_to_remove = [
+            cid for cid, c in self._connectors.items() if c.project_id == project_id
+        ]
+        proxy_ids_to_remove = [
+            pid for pid, p in self._proxies.items()
+            if p.connector_id in connector_ids_to_remove
+        ]
 
         async with self._session_factory() as session:
             repo = ProjectRepository(session)
             await repo.delete(project_id)
             await session.commit()
+
+        # Clean up Redis data to prevent metrics flusher from trying to insert
+        # metrics for deleted proxies/project (which would cause foreign key violations)
+        for proxy_id in proxy_ids_to_remove:
+            await self._redis_client.delete_proxy_status(proxy_id)
+            await self._redis_client.reset_proxy_metrics(proxy_id)
+        await self._redis_client.reset_project_metrics(project_id)
 
         # Remove from cache
         del self._projects[project_id]
@@ -406,9 +426,6 @@ class ProxyManager:
             del self._credentials[cid]
 
         # Remove associated connectors and proxies from cache
-        connector_ids_to_remove = [
-            cid for cid, c in self._connectors.items() if c.project_id == project_id
-        ]
         for cid in connector_ids_to_remove:
             del self._connectors[cid]
 
@@ -502,14 +519,30 @@ class ProxyManager:
         logger.info("Updated connector", connector_id=connector.id, name=connector.name)
 
     async def remove_connector(self, connector_id: str) -> bool:
-        """Remove a connector (deletes from Postgres, cascades to proxies)."""
+        """Remove a connector (deletes from Postgres, cascades to proxies).
+
+        Also cleans up Redis data for all associated proxies to prevent
+        foreign key violations in the metrics flusher.
+        """
         if connector_id not in self._connectors:
             return False
+
+        # Collect proxy IDs before deletion for Redis cleanup
+        proxy_ids_to_remove = [
+            pid for pid, p in self._proxies.items()
+            if p.connector_id == connector_id
+        ]
 
         async with self._session_factory() as session:
             repo = ConnectorRepository(session)
             await repo.delete(connector_id)
             await session.commit()
+
+        # Clean up Redis data to prevent metrics flusher from trying to insert
+        # metrics for deleted proxies (which would cause foreign key violations)
+        for proxy_id in proxy_ids_to_remove:
+            await self._redis_client.delete_proxy_status(proxy_id)
+            await self._redis_client.reset_proxy_metrics(proxy_id)
 
         # Remove from cache
         del self._connectors[connector_id]
@@ -646,6 +679,8 @@ class ProxyManager:
         """Remove a proxy from the pool (deletes from Postgres).
 
         Emits proxy_removed signal after successful removal.
+        Also cleans up Redis data (status and metrics) to prevent
+        foreign key violations in the metrics flusher.
         """
         if proxy_id not in self._proxies:
             return False
@@ -657,6 +692,11 @@ class ProxyManager:
             repo = ProxyRepository(session)
             await repo.delete(proxy_id)
             await session.commit()
+
+        # Clean up Redis data to prevent metrics flusher from trying to insert
+        # metrics for a deleted proxy (which would cause foreign key violations)
+        await self._redis_client.delete_proxy_status(proxy_id)
+        await self._redis_client.reset_proxy_metrics(proxy_id)
 
         del self._proxies[proxy_id]
         logger.info("Removed proxy", proxy_id=proxy_id)
