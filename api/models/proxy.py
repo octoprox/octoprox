@@ -108,6 +108,7 @@ class ProxyResponse(BaseModel):
     password: str | None = None
     connector_id: str
     connector_name: str | None = None
+    connector_enabled: bool = True
     status: str
     request_count: int
     success_count: int

@@ -176,9 +176,60 @@ async def update_connector(
 
 @router.delete("/{connector_id}", status_code=204)
 async def delete_connector(request: Request, connector_id: str) -> None:
-    """Delete a connector and all its proxies."""
+    """Delete a connector and all its proxies.
+
+    For cloud connectors (AWS, GCP, Azure), this will terminate all cloud
+    instances immediately before deleting the connector from the database.
+    """
     proxy_manager = request.app.state.proxy_manager
 
+    # Get connector before deletion to check if it's a cloud connector
+    connector = proxy_manager.get_connector(connector_id)
+    if connector is None:
+        raise HTTPException(status_code=404, detail="Connector not found")
+
+    # Check if this is a cloud connector and terminate instances
+    credential = proxy_manager.get_credential(connector.credential_id)
+    if credential:
+        credential_type_enum = (
+            credential.type
+            if isinstance(credential.type, CredentialType)
+            else CredentialType(credential.type)
+        )
+        if credential_type_enum in (CredentialType.AWS, CredentialType.GCP, CredentialType.AZURE):
+            from api.providers.cloud import AWSProvider, GCPProvider, AzureProvider
+            import structlog
+            logger = structlog.get_logger()
+
+            # Get the appropriate cloud provider
+            if credential_type_enum == CredentialType.AWS:
+                provider = AWSProvider(connector, credential)
+            elif credential_type_enum == CredentialType.GCP:
+                provider = GCPProvider(connector, credential)
+            else:  # AZURE
+                provider = AzureProvider(connector, credential)
+
+            # Terminate all cloud instances for this connector
+            proxies = proxy_manager.get_proxies_for_connector(connector_id)
+            for proxy in proxies:
+                try:
+                    terminated = await provider.terminate_instance(proxy.id)
+                    if not terminated:
+                        logger.warning(
+                            "Failed to terminate cloud instance during connector deletion",
+                            proxy_id=proxy.id,
+                            connector_id=connector_id,
+                        )
+                except Exception as e:
+                    # Log error but continue with deletion
+                    logger.error(
+                        "Error terminating cloud instance during connector deletion",
+                        proxy_id=proxy.id,
+                        connector_id=connector_id,
+                        error=str(e),
+                    )
+
+    # Now delete the connector (cascades to proxies in DB)
     if not await proxy_manager.remove_connector(connector_id):
         raise HTTPException(status_code=404, detail="Connector not found")
 

@@ -54,11 +54,13 @@ class HealthChecker:
         if not proxies:
             return
 
-        # Skip proxies that are draining or terminating - they should not be
-        # health checked as they are being removed from the pool
+        # Skip proxies that are:
+        # - draining or terminating (being removed from the pool)
+        # - belonging to disabled connectors (not in use)
         active_proxies = [
             p for p in proxies
             if p.status not in (ProxyStatus.DRAINING, ProxyStatus.TERMINATING)
+            and self._proxy_manager.is_connector_enabled(p.connector_id)
         ]
 
         if not active_proxies:

@@ -209,7 +209,12 @@ export default function ProxyList() {
     {
       accessorKey: 'status',
       header: 'Status',
-      cell: ({ getValue }) => <StatusBadge status={getValue<string>()} />,
+      cell: ({ row }) => (
+        <StatusBadge
+          status={row.original.status}
+          connectorEnabled={row.original.connector_enabled}
+        />
+      ),
     },
     {
       accessorKey: 'request_count',
@@ -586,7 +591,10 @@ export default function ProxyList() {
   )
 }
 
-function StatusBadge({ status }: { status: string }) {
+function StatusBadge({ status, connectorEnabled = true }: { status: string; connectorEnabled?: boolean }) {
+  // If connector is disabled, show "disabled" status regardless of actual health status
+  const displayStatus = connectorEnabled ? status : 'disabled'
+
   const colors: Record<string, string> = {
     healthy: 'bg-green-100 text-green-800',
     initializing: 'bg-blue-100 text-blue-800',
@@ -595,10 +603,11 @@ function StatusBadge({ status }: { status: string }) {
     unknown: 'bg-gray-100 text-gray-800',
     draining: 'bg-orange-100 text-orange-800',
     terminating: 'bg-purple-100 text-purple-800',
+    disabled: 'bg-slate-200 text-slate-600',
   }
   return (
-    <span className={`px-2 py-1 rounded-full text-xs font-medium ${colors[status] ?? colors.unknown}`}>
-      {status}
+    <span className={`px-2 py-1 rounded-full text-xs font-medium ${colors[displayStatus] ?? colors.unknown}`}>
+      {displayStatus}
     </span>
   )
 }

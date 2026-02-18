@@ -159,6 +159,7 @@ export interface Proxy {
   password: string | null
   connector_id: string
   connector_name: string | null
+  connector_enabled: boolean
   status: string
   request_count: number
   success_count: number

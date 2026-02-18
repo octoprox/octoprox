@@ -70,24 +70,26 @@ class AutoScaler:
     async def _check_all_connectors(self) -> None:
         """Check scaling and rotation for all cloud connectors."""
         connectors = self._proxy_manager.connectors
-        
+
         for connector in connectors:
-            if not connector.enabled:
-                continue
-            
             # Only process cloud connectors (AWS, GCP, Azure)
             credential = self._proxy_manager.get_credential(connector.credential_id)
             if not credential:
                 continue
-            
+
             if credential.type not in (
                 CredentialType.AWS,
                 CredentialType.GCP,
                 CredentialType.AZURE,
             ):
                 continue
-            
+
             try:
+                # If connector is disabled, drain and terminate all its proxies
+                if not connector.enabled:
+                    await self._drain_disabled_connector(connector, credential)
+                    continue
+
                 await self._check_connector_scaling(connector, credential)
                 await self._check_connector_rotation(connector, credential)
             except Exception as e:
@@ -96,6 +98,37 @@ class AutoScaler:
                     connector_id=connector.id,
                     error=str(e),
                 )
+
+    async def _drain_disabled_connector(self, connector: Connector, credential) -> None:
+        """Drain and terminate all proxies for a disabled connector.
+
+        When a connector is disabled, we want to gracefully drain all its
+        proxies and then terminate them. This is called by the auto-scaler
+        on each cycle until all proxies are terminated.
+
+        Handles the full lifecycle:
+        - Active proxies → start draining
+        - Draining proxies → check if traffic stopped, mark as terminating
+        - Terminating proxies → terminate the cloud instance
+        """
+        proxies = self._proxy_manager.get_proxies_for_connector(connector.id)
+
+        if not proxies:
+            return
+
+        for proxy in proxies:
+            if proxy.status == ProxyStatus.DRAINING:
+                await self._handle_draining_proxy(proxy)
+            elif proxy.status == ProxyStatus.TERMINATING:
+                await self._handle_terminating_proxy(proxy, connector, credential)
+            elif proxy.status not in (ProxyStatus.DRAINING, ProxyStatus.TERMINATING):
+                # Active proxy - start draining
+                logger.info(
+                    "Draining proxy for disabled connector",
+                    connector_id=connector.id,
+                    proxy_id=proxy.id,
+                )
+                await self._proxy_manager.start_proxy_draining(proxy.id)
     
     async def _check_connector_scaling(
         self, connector: Connector, credential
