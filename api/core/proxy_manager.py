@@ -986,10 +986,10 @@ class ProxyManager:
         return [p for p in self._proxies.values() if p.connector_id == connector_id]
 
     def get_active_proxies_for_connector(self, connector_id: str) -> list[Proxy]:
-        """Get active (non-terminating) proxies for a connector."""
+        """Get active (non-draining, non-terminating) proxies for a connector."""
         return [
             p for p in self._proxies.values()
             if p.connector_id == connector_id
-            and p.status not in (ProxyStatus.TERMINATING,)
+            and p.status not in (ProxyStatus.DRAINING, ProxyStatus.TERMINATING)
         ]
 

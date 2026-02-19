@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from api.core.auto_scaler import AutoScaler, CHECK_INTERVAL_SECONDS, MAX_ERROR_BACKOFF_MINUTES
+from api.core.auto_scaler import AutoScaler, CHECK_INTERVAL_SECONDS, MAX_ERROR_BACKOFF_MINUTES, SCALING_COOLDOWN_SECONDS
 from api.core.demand_tracker import DemandLevel
 from api.core import signals, utc_now
 from api.models.connector import CloudConnectorConfig, Connector
@@ -23,6 +23,7 @@ def mock_data_provider() -> MagicMock:
     provider.get_proxies_for_connector = MagicMock(return_value=[])
     provider.demand_tracker = MagicMock()
     provider.demand_tracker.get_demand_level = AsyncMock(return_value=DemandLevel.LOW)
+    provider.demand_tracker.has_recent_activity = AsyncMock(return_value=True)
     return provider
 
 
@@ -92,6 +93,8 @@ class TestAutoScalerInit:
         assert scaler._data_provider == mock_data_provider
         assert scaler._running is False
         assert scaler._rotation_schedule == {}
+        assert scaler._last_scale_action_at == {}
+        assert scaler._last_demand_level == {}
 
 
 class TestCalculateTargetCount:
@@ -112,21 +115,55 @@ class TestCalculateTargetCount:
         assert result == 10
 
     def test_medium_demand_returns_midpoint(self, auto_scaler: AutoScaler) -> None:
-        """Test that MEDIUM demand returns midpoint or current count."""
+        """Test that MEDIUM demand returns midpoint."""
         # When current is below midpoint, return midpoint
         result = auto_scaler._calculate_target_count(
             DemandLevel.MEDIUM, min_proxies=2, max_proxies=10, current_count=3
         )
         assert result == 6  # midpoint of 2 and 10
 
-    def test_medium_demand_keeps_current_if_above_midpoint(
+    def test_medium_demand_returns_midpoint_even_if_above(
         self, auto_scaler: AutoScaler
     ) -> None:
-        """Test that MEDIUM demand keeps current count if above midpoint."""
+        """Test that MEDIUM demand always targets midpoint (allows gradual step-down)."""
         result = auto_scaler._calculate_target_count(
             DemandLevel.MEDIUM, min_proxies=2, max_proxies=10, current_count=8
         )
-        assert result == 8  # keeps current since above midpoint
+        assert result == 6  # midpoint, not current count
+
+
+class TestGetMaxStepSizes:
+    """Tests for _get_max_step_sizes static method."""
+
+    def test_small_pool(self) -> None:
+        """Test step sizes for a small pool (range=4)."""
+        up, down = AutoScaler._get_max_step_sizes(1, 5)
+        assert up == 2   # ceil(4/3)
+        assert down == 1  # ceil(4/6)
+
+    def test_medium_pool(self) -> None:
+        """Test step sizes for a medium pool (range=9)."""
+        up, down = AutoScaler._get_max_step_sizes(1, 10)
+        assert up == 3   # ceil(9/3)
+        assert down == 2  # ceil(9/6)
+
+    def test_large_pool(self) -> None:
+        """Test step sizes for a large pool (range=18)."""
+        up, down = AutoScaler._get_max_step_sizes(2, 20)
+        assert up == 6   # ceil(18/3)
+        assert down == 3  # ceil(18/6)
+
+    def test_minimum_step_size(self) -> None:
+        """Test that step sizes are at least 1."""
+        up, down = AutoScaler._get_max_step_sizes(1, 2)
+        assert up >= 1
+        assert down >= 1
+
+    def test_equal_min_max(self) -> None:
+        """Test step sizes when min == max (range=0)."""
+        up, down = AutoScaler._get_max_step_sizes(5, 5)
+        assert up == 1  # max(1, ceil(0/3))
+        assert down == 1  # max(1, ceil(0/6))
 
 
 class TestScheduleRotation:
@@ -199,6 +236,7 @@ class TestCheckConnectorScaling:
     ) -> None:
         """Test scaling down when current count is above target."""
         # 3 proxies with LOW demand should scale down to min (1)
+        # max_down = ceil(4/6) = 1, so only 1 proxy drained per cycle
         proxies = [
             Proxy(id=f"proxy-{i}", host=f"1.2.3.{i}", port=8080, status=ProxyStatus.HEALTHY, connector_id="test-connector-1")
             for i in range(3)
@@ -210,7 +248,8 @@ class TestCheckConnectorScaling:
 
         with patch.object(auto_scaler, "_scale_down", new_callable=AsyncMock) as mock_scale_down:
             await auto_scaler._check_connector_scaling(sample_connector, sample_credential)
-            mock_scale_down.assert_called_once_with(sample_connector, 2)  # 3 - 1 = 2
+            # Delta is 3-1=2, but capped by max_down=1
+            mock_scale_down.assert_called_once_with(sample_connector, 1)
 
     @pytest.mark.asyncio
     async def test_no_scaling_when_at_target(
@@ -235,6 +274,255 @@ class TestCheckConnectorScaling:
                 await auto_scaler._check_connector_scaling(sample_connector, sample_credential)
                 mock_scale_up.assert_not_called()
                 mock_scale_down.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_passes_previous_demand_level(
+        self,
+        auto_scaler: AutoScaler,
+        mock_data_provider: MagicMock,
+        sample_connector: Connector,
+        sample_credential: Credential,
+    ) -> None:
+        """Test that previous demand level is passed to demand tracker."""
+        proxies = [
+            Proxy(id="proxy-1", host="1.2.3.4", port=8080, status=ProxyStatus.HEALTHY, connector_id="test-connector-1")
+        ]
+        mock_data_provider.get_active_proxies_for_connector.return_value = proxies
+        mock_data_provider.demand_tracker.get_demand_level = AsyncMock(
+            return_value=DemandLevel.MEDIUM
+        )
+
+        # First call: no previous level
+        await auto_scaler._check_connector_scaling(sample_connector, sample_credential)
+        call_args = mock_data_provider.demand_tracker.get_demand_level.call_args
+        assert call_args[0][2] is None  # previous_level
+
+        # Second call: should pass MEDIUM as previous level
+        await auto_scaler._check_connector_scaling(sample_connector, sample_credential)
+        call_args = mock_data_provider.demand_tracker.get_demand_level.call_args
+        assert call_args[0][2] == DemandLevel.MEDIUM
+
+    @pytest.mark.asyncio
+    async def test_incremental_scale_up_capped(
+        self,
+        auto_scaler: AutoScaler,
+        mock_data_provider: MagicMock,
+        sample_connector: Connector,
+        sample_credential: Credential,
+    ) -> None:
+        """Test that scale-up delta is capped by max step size."""
+        # min=1, max=5 → max_up = ceil(4/3) = 2
+        # 1 proxy with HIGH demand → target=5, delta=4, capped to 2
+        proxies = [
+            Proxy(id="proxy-1", host="1.2.3.4", port=8080, status=ProxyStatus.HEALTHY, connector_id="test-connector-1")
+        ]
+        mock_data_provider.get_active_proxies_for_connector.return_value = proxies
+        mock_data_provider.demand_tracker.get_demand_level = AsyncMock(
+            return_value=DemandLevel.HIGH
+        )
+
+        with patch.object(auto_scaler, "_scale_up", new_callable=AsyncMock) as mock_scale_up:
+            await auto_scaler._check_connector_scaling(sample_connector, sample_credential)
+            mock_scale_up.assert_called_once_with(sample_connector, sample_credential, 2)
+
+
+class TestScalingCooldown:
+    """Tests for scaling cooldown behavior."""
+
+    @pytest.mark.asyncio
+    async def test_scaling_skipped_during_cooldown(
+        self,
+        auto_scaler: AutoScaler,
+        mock_data_provider: MagicMock,
+        sample_connector: Connector,
+        sample_credential: Credential,
+    ) -> None:
+        """Test that scaling is skipped when in cooldown period."""
+        # Set a recent scale action
+        auto_scaler._last_scale_action_at[sample_connector.id] = utc_now() - timedelta(seconds=60)
+
+        mock_data_provider.get_active_proxies_for_connector.return_value = []
+        mock_data_provider.demand_tracker.get_demand_level = AsyncMock(
+            return_value=DemandLevel.HIGH
+        )
+
+        with patch.object(auto_scaler, "_scale_up", new_callable=AsyncMock) as mock_scale_up:
+            await auto_scaler._check_connector_scaling(sample_connector, sample_credential)
+            mock_scale_up.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_scaling_proceeds_after_cooldown_expires(
+        self,
+        auto_scaler: AutoScaler,
+        mock_data_provider: MagicMock,
+        sample_connector: Connector,
+        sample_credential: Credential,
+    ) -> None:
+        """Test that scaling proceeds after cooldown period expires."""
+        # Set a scale action that happened more than SCALING_COOLDOWN_SECONDS ago
+        auto_scaler._last_scale_action_at[sample_connector.id] = (
+            utc_now() - timedelta(seconds=SCALING_COOLDOWN_SECONDS + 10)
+        )
+
+        mock_data_provider.get_active_proxies_for_connector.return_value = []
+        mock_data_provider.demand_tracker.get_demand_level = AsyncMock(
+            return_value=DemandLevel.LOW
+        )
+
+        with patch.object(auto_scaler, "_scale_up", new_callable=AsyncMock) as mock_scale_up:
+            await auto_scaler._check_connector_scaling(sample_connector, sample_credential)
+            # Should scale up to min (1) since current is 0
+            mock_scale_up.assert_called_once()
+
+    def test_is_in_scaling_cooldown_no_history(
+        self, auto_scaler: AutoScaler
+    ) -> None:
+        """Test cooldown returns False when no previous action."""
+        assert auto_scaler._is_in_scaling_cooldown("unknown-connector") is False
+
+    def test_is_in_scaling_cooldown_recent_action(
+        self, auto_scaler: AutoScaler
+    ) -> None:
+        """Test cooldown returns True for recent action."""
+        auto_scaler._last_scale_action_at["conn-1"] = utc_now() - timedelta(seconds=30)
+        assert auto_scaler._is_in_scaling_cooldown("conn-1") is True
+
+    def test_is_in_scaling_cooldown_expired(
+        self, auto_scaler: AutoScaler
+    ) -> None:
+        """Test cooldown returns False when expired."""
+        auto_scaler._last_scale_action_at["conn-1"] = (
+            utc_now() - timedelta(seconds=SCALING_COOLDOWN_SECONDS + 1)
+        )
+        assert auto_scaler._is_in_scaling_cooldown("conn-1") is False
+
+
+class TestRotationAwareness:
+    """Tests for rotation-awareness: skip scaling when proxy is initializing."""
+
+    @pytest.mark.asyncio
+    async def test_scaling_skipped_when_initializing_proxy_exists(
+        self,
+        auto_scaler: AutoScaler,
+        mock_data_provider: MagicMock,
+        sample_connector: Connector,
+        sample_credential: Credential,
+    ) -> None:
+        """Test that scaling is skipped when an INITIALIZING proxy exists."""
+        proxies = [
+            Proxy(id="proxy-1", host="1.2.3.4", port=8080, status=ProxyStatus.HEALTHY, connector_id="test-connector-1"),
+            Proxy(id="proxy-2", host="1.2.3.5", port=8080, status=ProxyStatus.INITIALIZING, connector_id="test-connector-1"),
+        ]
+        mock_data_provider.get_active_proxies_for_connector.return_value = proxies
+        mock_data_provider.demand_tracker.get_demand_level = AsyncMock(
+            return_value=DemandLevel.HIGH
+        )
+
+        with patch.object(auto_scaler, "_scale_up", new_callable=AsyncMock) as mock_scale_up:
+            await auto_scaler._check_connector_scaling(sample_connector, sample_credential)
+            mock_scale_up.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_scaling_proceeds_when_no_initializing_proxy(
+        self,
+        auto_scaler: AutoScaler,
+        mock_data_provider: MagicMock,
+        sample_connector: Connector,
+        sample_credential: Credential,
+    ) -> None:
+        """Test that scaling proceeds when all proxies are past initialization."""
+        proxies = [
+            Proxy(id="proxy-1", host="1.2.3.4", port=8080, status=ProxyStatus.HEALTHY, connector_id="test-connector-1"),
+        ]
+        mock_data_provider.get_active_proxies_for_connector.return_value = proxies
+        mock_data_provider.demand_tracker.get_demand_level = AsyncMock(
+            return_value=DemandLevel.HIGH
+        )
+
+        with patch.object(auto_scaler, "_scale_up", new_callable=AsyncMock) as mock_scale_up:
+            await auto_scaler._check_connector_scaling(sample_connector, sample_credential)
+            mock_scale_up.assert_called_once()
+
+
+class TestRecentActivityGating:
+    """Tests for scale-up gated on recent activity."""
+
+    @pytest.mark.asyncio
+    async def test_scale_up_blocked_without_recent_activity(
+        self,
+        auto_scaler: AutoScaler,
+        mock_data_provider: MagicMock,
+        sample_connector: Connector,
+        sample_credential: Credential,
+    ) -> None:
+        """Test that scale-up is blocked when there is no recent activity."""
+        # 1 proxy, HIGH demand → target=5 → wants to scale up
+        proxies = [
+            Proxy(id="proxy-1", host="1.2.3.4", port=8080, status=ProxyStatus.HEALTHY, connector_id="test-connector-1")
+        ]
+        mock_data_provider.get_active_proxies_for_connector.return_value = proxies
+        mock_data_provider.demand_tracker.get_demand_level = AsyncMock(
+            return_value=DemandLevel.HIGH
+        )
+        # No recent activity (stale burst)
+        mock_data_provider.demand_tracker.has_recent_activity = AsyncMock(
+            return_value=False
+        )
+
+        with patch.object(auto_scaler, "_scale_up", new_callable=AsyncMock) as mock_scale_up:
+            await auto_scaler._check_connector_scaling(sample_connector, sample_credential)
+            mock_scale_up.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_scale_up_proceeds_with_recent_activity(
+        self,
+        auto_scaler: AutoScaler,
+        mock_data_provider: MagicMock,
+        sample_connector: Connector,
+        sample_credential: Credential,
+    ) -> None:
+        """Test that scale-up proceeds when there is recent activity."""
+        proxies = [
+            Proxy(id="proxy-1", host="1.2.3.4", port=8080, status=ProxyStatus.HEALTHY, connector_id="test-connector-1")
+        ]
+        mock_data_provider.get_active_proxies_for_connector.return_value = proxies
+        mock_data_provider.demand_tracker.get_demand_level = AsyncMock(
+            return_value=DemandLevel.HIGH
+        )
+        mock_data_provider.demand_tracker.has_recent_activity = AsyncMock(
+            return_value=True
+        )
+
+        with patch.object(auto_scaler, "_scale_up", new_callable=AsyncMock) as mock_scale_up:
+            await auto_scaler._check_connector_scaling(sample_connector, sample_credential)
+            mock_scale_up.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_scale_down_not_gated_by_recent_activity(
+        self,
+        auto_scaler: AutoScaler,
+        mock_data_provider: MagicMock,
+        sample_connector: Connector,
+        sample_credential: Credential,
+    ) -> None:
+        """Test that scale-down is NOT gated by recent activity."""
+        # 3 proxies with LOW demand → target=1 → scale down
+        proxies = [
+            Proxy(id=f"proxy-{i}", host=f"1.2.3.{i}", port=8080, status=ProxyStatus.HEALTHY, connector_id="test-connector-1")
+            for i in range(3)
+        ]
+        mock_data_provider.get_active_proxies_for_connector.return_value = proxies
+        mock_data_provider.demand_tracker.get_demand_level = AsyncMock(
+            return_value=DemandLevel.LOW
+        )
+        # Even with no recent activity, scale-down should proceed
+        mock_data_provider.demand_tracker.has_recent_activity = AsyncMock(
+            return_value=False
+        )
+
+        with patch.object(auto_scaler, "_scale_down", new_callable=AsyncMock) as mock_scale_down:
+            await auto_scaler._check_connector_scaling(sample_connector, sample_credential)
+            mock_scale_down.assert_called_once()
 
 
 class TestScaleDown:
@@ -279,6 +567,24 @@ class TestScaleDown:
             mock_signal.assert_called_once()
             call_kwargs = mock_signal.call_args[1]
             assert call_kwargs["proxy_id"] == "unhealthy-1"
+
+    @pytest.mark.asyncio
+    async def test_scale_down_records_cooldown(
+        self,
+        auto_scaler: AutoScaler,
+        mock_data_provider: MagicMock,
+        sample_connector: Connector,
+    ) -> None:
+        """Test that scale_down records cooldown timestamp."""
+        proxies = [
+            Proxy(id="proxy-1", host="1.2.3.1", port=8080, status=ProxyStatus.HEALTHY, connector_id="test-connector-1"),
+        ]
+        mock_data_provider.get_active_proxies_for_connector.return_value = proxies
+
+        with patch.object(signals.proxy_draining_requested, "send_async", new_callable=AsyncMock):
+            await auto_scaler._scale_down(sample_connector, 1)
+
+        assert sample_connector.id in auto_scaler._last_scale_action_at
 
 
 class TestStopMethod:

@@ -13,6 +13,7 @@ Emits signals for decoupled communication with ProxyManager:
 from __future__ import annotations
 
 import asyncio
+import math
 import random
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Protocol
@@ -74,6 +75,9 @@ CHECK_INTERVAL_SECONDS = 30
 # Maximum backoff time in minutes for cloud provider errors
 MAX_ERROR_BACKOFF_MINUTES = 30
 
+# Cooldown period after a scaling action before another is allowed (seconds)
+SCALING_COOLDOWN_SECONDS = 180
+
 
 class AutoScaler:
     """Manages automatic scaling and rotation of cloud proxy instances.
@@ -96,6 +100,10 @@ class AutoScaler:
         self._running = False
         # Track scheduled rotation times per proxy: proxy_id -> rotation_time
         self._rotation_schedule: dict[str, datetime] = {}
+        # Track last scaling action time per connector: connector_id -> datetime
+        self._last_scale_action_at: dict[str, datetime] = {}
+        # Track last demand level per connector: connector_id -> DemandLevel
+        self._last_demand_level: dict[str, DemandLevel] = {}
     
     async def run(self) -> None:
         """Run the auto-scaler loop."""
@@ -147,6 +155,39 @@ class AutoScaler:
             return True
 
         return False
+
+    def _is_in_scaling_cooldown(self, connector_id: str) -> bool:
+        """Check if a connector is in scaling cooldown.
+
+        Returns True if a scaling action happened less than SCALING_COOLDOWN_SECONDS ago.
+        """
+        last_action = self._last_scale_action_at.get(connector_id)
+        if not last_action:
+            return False
+
+        elapsed = (utc_now() - last_action).total_seconds()
+        if elapsed < SCALING_COOLDOWN_SECONDS:
+            logger.debug(
+                "Skipping scaling due to cooldown",
+                connector_id=connector_id,
+                seconds_remaining=SCALING_COOLDOWN_SECONDS - elapsed,
+            )
+            return True
+        return False
+
+    @staticmethod
+    def _get_max_step_sizes(min_proxies: int, max_proxies: int) -> tuple[int, int]:
+        """Calculate maximum scale-up and scale-down step sizes.
+
+        Returns step sizes proportional to the pool range with a 2:1 up/down ratio.
+
+        Returns:
+            Tuple of (max_scale_up, max_scale_down).
+        """
+        pool_range = max_proxies - min_proxies
+        max_scale_up = max(1, math.ceil(pool_range / 3))
+        max_scale_down = max(1, math.ceil(pool_range / 6))
+        return max_scale_up, max_scale_down
 
     async def _record_connector_error(
         self, connector: Connector, error: str
@@ -270,16 +311,36 @@ class AutoScaler:
         if not cloud_config:
             return
 
-        # Get current proxies (excluding terminating)
+        # Check if we should skip scaling due to recent errors
+        if self._should_skip_scaling(connector):
+            return
+
+        # Check scaling cooldown (only for demand-based scaling)
+        if self._is_in_scaling_cooldown(connector.id):
+            return
+
+        # Get current proxies (excluding draining/terminating)
         proxies = self._data_provider.get_active_proxies_for_connector(connector.id)
         current_count = len(proxies)
 
-        # Get demand level for the project
+        # Rotation-awareness: skip if any proxy is still initializing
+        initializing = [p for p in proxies if p.status == ProxyStatus.INITIALIZING]
+        if initializing:
+            logger.debug(
+                "Skipping scaling: proxy still initializing",
+                connector_id=connector.id,
+                initializing_count=len(initializing),
+            )
+            return
+
+        # Get demand level for the project (with hysteresis)
         project_id = connector.project_id
         healthy_proxies = [p for p in proxies if p.status == ProxyStatus.HEALTHY]
+        previous_level = self._last_demand_level.get(connector.id)
         demand_level = await self._data_provider.demand_tracker.get_demand_level(
-            project_id, len(healthy_proxies)
+            project_id, len(healthy_proxies), previous_level
         )
+        self._last_demand_level[connector.id] = demand_level
 
         # Determine target count based on demand
         target_count = self._calculate_target_count(
@@ -289,16 +350,30 @@ class AutoScaler:
             current_count,
         )
 
-        # Check if we should skip scaling due to recent errors
-        # (applies to both scale-up and scale-down since both involve cloud API calls)
-        if self._should_skip_scaling(connector):
-            return
+        # Cap deltas using incremental step sizes
+        max_up, max_down = self._get_max_step_sizes(
+            cloud_config.min_proxies, cloud_config.max_proxies
+        )
 
-        # Scale up or down
+        # Scale up or down (incrementally)
         if target_count > current_count:
-            await self._scale_up(connector, credential, target_count - current_count)
+            # Gate scale-up on recent activity to avoid scaling on stale burst data
+            has_recent = await self._data_provider.demand_tracker.has_recent_activity(
+                project_id
+            )
+            if not has_recent:
+                logger.debug(
+                    "Skipping scale-up: no recent activity",
+                    connector_id=connector.id,
+                    demand_level=demand_level,
+                )
+                return
+
+            count = min(target_count - current_count, max_up)
+            await self._scale_up(connector, credential, count)
         elif target_count < current_count:
-            await self._scale_down(connector, current_count - target_count)
+            count = min(current_count - target_count, max_down)
+            await self._scale_down(connector, count)
     
     def _calculate_target_count(
         self,
@@ -309,15 +384,10 @@ class AutoScaler:
     ) -> int:
         """Calculate target proxy count based on demand level."""
         if demand_level == DemandLevel.LOW:
-            # Scale down to minimum
             return min_proxies
         elif demand_level == DemandLevel.MEDIUM:
-            # Stay at current or scale to midpoint
-            midpoint = (min_proxies + max_proxies) // 2
-            # Don't scale down if already above midpoint
-            return max(midpoint, min(current_count, max_proxies))
+            return (min_proxies + max_proxies) // 2
         else:  # HIGH
-            # Scale up to maximum
             return max_proxies
 
     async def _scale_up(
@@ -373,9 +443,10 @@ class AutoScaler:
                 # Stop trying to create more instances after an error
                 break
 
-        # Clear error state if we had at least one success
+        # Clear error state and record cooldown if we had at least one success
         if had_success:
             await self._clear_connector_error(connector)
+            self._last_scale_action_at[connector.id] = utc_now()
 
     async def _scale_down(self, connector: Connector, count: int) -> None:
         """Scale down by draining and terminating proxy instances.
@@ -409,6 +480,9 @@ class AutoScaler:
 
         for proxy in proxies_to_remove:
             await proxy_draining_requested.send_async(self, proxy_id=proxy.id)
+
+        if proxies_to_remove:
+            self._last_scale_action_at[connector.id] = utc_now()
 
     def _schedule_rotation(self, proxy: Proxy, typed_config: CloudConnectorConfig) -> None:
         """Schedule rotation for a proxy based on config."""

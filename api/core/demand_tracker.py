@@ -19,9 +19,13 @@ logger = structlog.get_logger()
 # Redis key for demand tracking (sorted set with timestamps)
 DEMAND_KEY = "project:demand:{project_id}"
 # Window size for demand calculation (in seconds)
-DEMAND_WINDOW_SECONDS = 60
+DEMAND_WINDOW_SECONDS = 300
+# Short window for recent activity confirmation (in seconds)
+RECENT_ACTIVITY_WINDOW_SECONDS = 60
+# Minimum recent req/min to confirm demand is still active (not a stale burst)
+RECENT_ACTIVITY_MIN_RPM = 1.0
 # TTL for demand entries (slightly longer than window to allow cleanup)
-DEMAND_TTL_SECONDS = 120
+DEMAND_TTL_SECONDS = 360
 
 
 class DemandLevel(str, Enum):
@@ -31,11 +35,13 @@ class DemandLevel(str, Enum):
     HIGH = "high"
 
 
-# Thresholds for demand classification (requests per minute per proxy)
-# These can be adjusted based on real-world usage patterns
+# Hysteresis thresholds for demand classification (requests per minute per proxy)
+# Directional thresholds prevent oscillation between levels
 DEMAND_THRESHOLDS = {
-    "low_max": 10,      # <= 10 req/min/proxy = LOW
-    "medium_max": 30,   # <= 30 req/min/proxy = MEDIUM, > 30 = HIGH
+    "low_to_medium": 12,     # Must exceed 12 to leave LOW
+    "medium_to_low": 8,      # Must drop below 8 to enter LOW
+    "medium_to_high": 35,    # Must exceed 35 to enter HIGH
+    "high_to_medium": 25,    # Must drop below 25 to leave HIGH
 }
 
 
@@ -124,67 +130,128 @@ class DemandTracker:
         rate = count * (60.0 / DEMAND_WINDOW_SECONDS)
         
         return rate
-    
+
+    async def get_recent_requests_per_minute(self, project_id: str) -> float:
+        """Get the request rate using only the recent activity window.
+
+        Uses RECENT_ACTIVITY_WINDOW_SECONDS to detect whether traffic is
+        currently active, as opposed to stale burst data in the longer window.
+
+        Args:
+            project_id: The project ID to get the rate for.
+
+        Returns:
+            Requests per minute based on the recent window (float).
+        """
+        key = DEMAND_KEY.format(project_id=project_id)
+        now = utc_now()
+        timestamp = now.timestamp()
+        cutoff = timestamp - RECENT_ACTIVITY_WINDOW_SECONDS
+
+        count = await self._redis_client.client.zcount(key, cutoff, timestamp)
+        return count * (60.0 / RECENT_ACTIVITY_WINDOW_SECONDS)
+
+    async def has_recent_activity(self, project_id: str) -> bool:
+        """Check if a project has recent request activity.
+
+        Returns True if the request rate in the recent window meets
+        RECENT_ACTIVITY_MIN_RPM. Used to gate scale-up decisions so that
+        stale burst data in the longer window doesn't trigger scaling.
+
+        Args:
+            project_id: The project ID to check.
+
+        Returns:
+            True if there is recent activity, False otherwise.
+        """
+        recent_rpm = await self.get_recent_requests_per_minute(project_id)
+        return recent_rpm >= RECENT_ACTIVITY_MIN_RPM
+
     async def get_demand_level(
-        self, 
-        project_id: str, 
-        current_proxy_count: int
+        self,
+        project_id: str,
+        current_proxy_count: int,
+        previous_level: DemandLevel | None = None,
     ) -> DemandLevel:
         """Calculate the current demand level for a project.
-        
-        Demand level is based on requests per minute per proxy:
-        - LOW: <= 10 req/min/proxy
-        - MEDIUM: 10-30 req/min/proxy  
-        - HIGH: > 30 req/min/proxy
-        
+
+        Uses hysteresis thresholds to prevent oscillation between levels.
+        The thresholds for transitioning up are higher than those for
+        transitioning down, creating a dead zone that stabilizes scaling.
+
         Args:
             project_id: The project ID to calculate demand for.
             current_proxy_count: Number of active proxies for the project.
-            
+            previous_level: The previous demand level (for hysteresis).
+                If None (first check), uses conservative thresholds.
+
         Returns:
             DemandLevel enum value.
         """
         requests_per_minute = await self.get_requests_per_minute(project_id)
-        
+
         # Avoid division by zero
         if current_proxy_count <= 0:
             # No proxies - if there are requests, demand is HIGH
             if requests_per_minute > 0:
                 return DemandLevel.HIGH
             return DemandLevel.LOW
-        
+
         # Calculate per-proxy rate
         rate_per_proxy = requests_per_minute / current_proxy_count
-        
-        if rate_per_proxy <= DEMAND_THRESHOLDS["low_max"]:
-            return DemandLevel.LOW
-        elif rate_per_proxy <= DEMAND_THRESHOLDS["medium_max"]:
-            return DemandLevel.MEDIUM
-        else:
-            return DemandLevel.HIGH
+
+        # Apply hysteresis based on previous level
+        if previous_level is None or previous_level == DemandLevel.LOW:
+            # From LOW (or first check): use scale-up thresholds
+            if rate_per_proxy > DEMAND_THRESHOLDS["medium_to_high"]:
+                return DemandLevel.HIGH
+            elif rate_per_proxy > DEMAND_THRESHOLDS["low_to_medium"]:
+                return DemandLevel.MEDIUM
+            else:
+                return DemandLevel.LOW
+        elif previous_level == DemandLevel.MEDIUM:
+            # From MEDIUM: need to clearly break out in either direction
+            if rate_per_proxy > DEMAND_THRESHOLDS["medium_to_high"]:
+                return DemandLevel.HIGH
+            elif rate_per_proxy < DEMAND_THRESHOLDS["medium_to_low"]:
+                return DemandLevel.LOW
+            else:
+                return DemandLevel.MEDIUM
+        else:  # HIGH
+            # From HIGH: need to clearly drop to leave
+            if rate_per_proxy < DEMAND_THRESHOLDS["medium_to_low"]:
+                return DemandLevel.LOW
+            elif rate_per_proxy < DEMAND_THRESHOLDS["high_to_medium"]:
+                return DemandLevel.MEDIUM
+            else:
+                return DemandLevel.HIGH
     
     async def get_demand_info(
-        self, 
-        project_id: str, 
-        current_proxy_count: int
+        self,
+        project_id: str,
+        current_proxy_count: int,
+        previous_level: DemandLevel | None = None,
     ) -> dict:
         """Get comprehensive demand information for a project.
-        
+
         Args:
             project_id: The project ID.
             current_proxy_count: Number of active proxies.
-            
+            previous_level: The previous demand level (for hysteresis).
+
         Returns:
             Dict with demand_level, requests_per_minute, rate_per_proxy.
         """
         requests_per_minute = await self.get_requests_per_minute(project_id)
-        
+
         rate_per_proxy = 0.0
         if current_proxy_count > 0:
             rate_per_proxy = requests_per_minute / current_proxy_count
-        
-        demand_level = await self.get_demand_level(project_id, current_proxy_count)
-        
+
+        demand_level = await self.get_demand_level(
+            project_id, current_proxy_count, previous_level
+        )
+
         return {
             "demand_level": demand_level,
             "requests_per_minute": requests_per_minute,
