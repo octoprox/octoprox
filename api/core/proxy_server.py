@@ -340,6 +340,7 @@ class ProxyServer:
 
         start_time = time.monotonic()
         success = False
+        client_disconnected = False
         latency_ms = 0.0
         bytes_sent = 0
         bytes_received = 0
@@ -380,17 +381,25 @@ class ProxyServer:
             )
         except ConnectionError as e:
             latency_ms = (time.monotonic() - start_time) * 1000
-            logger.error("CONNECT error", error=str(e), target=target)
-            await self._send_error(client_writer, 502, "Bad Gateway", str(e))
+            if client_writer.transport.is_closing():
+                client_disconnected = True
+                logger.debug("Client disconnected", target=target)
+            else:
+                logger.error("CONNECT error", error=str(e), target=target)
+                await self._send_error(client_writer, 502, "Bad Gateway", str(e))
         except Exception as e:
             latency_ms = (time.monotonic() - start_time) * 1000
-            logger.error("CONNECT error", error=str(e), target=target)
-            await self._send_error(client_writer, 502, "Bad Gateway", str(e))
+            if client_writer.transport.is_closing():
+                client_disconnected = True
+                logger.debug("Client disconnected", target=target)
+            else:
+                logger.error("CONNECT error", error=str(e), target=target)
+                await self._send_error(client_writer, 502, "Bad Gateway", str(e))
         finally:
             if upstream_writer:
                 upstream_writer.close()
                 await upstream_writer.wait_closed()
-            if proxy:
+            if proxy and not client_disconnected:
                 await request_completed.send_async(
                     self,
                     proxy_id=proxy.id,
