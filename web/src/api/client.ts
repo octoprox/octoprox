@@ -418,6 +418,25 @@ export const fetchProjectScalingMetrics = async (projectId: string): Promise<Sca
   return response.data
 }
 
+export interface MetricsSnapshot {
+  timestamp: string
+  request_count: number
+  success_count: number
+  failure_count: number
+  avg_latency_ms: number
+  bytes_sent: number
+  bytes_received: number
+}
+
+export interface MetricsHistoryResponse {
+  snapshots: MetricsSnapshot[]
+}
+
+export const fetchProjectMetricsHistory = async (projectId: string, range: string): Promise<MetricsHistoryResponse> => {
+  const response = await api.get(`/projects/${projectId}/metrics/history`, { params: { range } })
+  return response.data
+}
+
 // Project-scoped Credential API functions
 export const fetchProjectCredentials = async (projectId: string): Promise<CredentialListResponse> => {
   const response = await api.get(`/projects/${projectId}/credentials`)

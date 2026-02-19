@@ -1,8 +1,13 @@
 """Metrics endpoints."""
 
-from fastapi import APIRouter, HTTPException, Request
+from datetime import datetime, timedelta
+from typing import Literal
+
+from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel
 
+from api.core import utc_now
+from api.db.repository import MetricsRepository
 from api.models.proxy import ProxyStatus
 
 router = APIRouter(prefix="/projects/{project_id}/metrics")
@@ -171,6 +176,69 @@ async def get_scaling_metrics(request: Request, project_id: str) -> ScalingMetri
         draining_instances=draining_count,
         terminating_instances=terminating_count,
     )
+
+
+class MetricsSnapshot(BaseModel):
+    """A single metrics snapshot."""
+    timestamp: datetime
+    request_count: int
+    success_count: int
+    failure_count: int
+    avg_latency_ms: float
+    bytes_sent: int
+    bytes_received: int
+
+
+class MetricsHistoryResponse(BaseModel):
+    """Historical metrics response."""
+    snapshots: list[MetricsSnapshot]
+
+
+# (delta, limit for raw queries, bucket_seconds for aggregated queries)
+# Raw ranges return individual snapshots; aggregated ranges group into time buckets.
+RANGE_CONFIG: dict[str, tuple[timedelta, int, int | None]] = {
+    "1h":  (timedelta(hours=1),  60,   None),
+    "6h":  (timedelta(hours=6),  360,  None),
+    "24h": (timedelta(hours=24), 1440, None),
+    "7d":  (timedelta(days=7),   0,    3600),      # 1-hour buckets → ~168 points
+    "30d": (timedelta(days=30),  0,    3600 * 6),   # 6-hour buckets → ~120 points
+}
+
+
+@router.get("/history", response_model=MetricsHistoryResponse)
+async def get_metrics_history(
+    request: Request,
+    project_id: str,
+    range: Literal["1h", "6h", "24h", "7d", "30d"] = Query("24h", alias="range"),
+) -> MetricsHistoryResponse:
+    """Get historical metrics snapshots for a project."""
+    proxy_manager = request.app.state.proxy_manager
+
+    project = proxy_manager.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    delta, limit, bucket_seconds = RANGE_CONFIG[range]
+    since = utc_now() - delta
+
+    async with proxy_manager._session_factory() as session:
+        repo = MetricsRepository(session)
+        if bucket_seconds:
+            rows = await repo.get_project_metrics_history_aggregated(
+                project_id=project_id,
+                since=since,
+                bucket_seconds=bucket_seconds,
+            )
+        else:
+            rows = await repo.get_project_metrics_history(
+                project_id=project_id,
+                since=since,
+                limit=limit,
+            )
+
+    # Rows come back in descending order; reverse to chronological
+    snapshots = [MetricsSnapshot(**row) for row in reversed(rows)]
+    return MetricsHistoryResponse(snapshots=snapshots)
 
 
 @router.get("/prometheus")

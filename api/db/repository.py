@@ -2,7 +2,7 @@
 
 from datetime import datetime
 
-from sqlalchemy import select, delete, func
+from sqlalchemy import select, delete, func, text
 
 from api.core import utc_now
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -497,17 +497,17 @@ class MetricsRepository:
 
         metrics = {}
         for row in rows:
-            total_requests = row.total_requests or 0
-            weighted_latency_sum = row.weighted_latency_sum or 0
+            total_requests = int(row.total_requests or 0)
+            weighted_latency_sum = float(row.weighted_latency_sum or 0)
             avg_latency = weighted_latency_sum / total_requests if total_requests > 0 else 0.0
 
             metrics[row.proxy_id] = {
                 "request_count": total_requests,
-                "success_count": row.total_successes or 0,
-                "failure_count": row.total_failures or 0,
-                "avg_latency_ms": avg_latency,
-                "bytes_sent": row.total_bytes_sent or 0,
-                "bytes_received": row.total_bytes_received or 0,
+                "success_count": int(row.total_successes or 0),
+                "failure_count": int(row.total_failures or 0),
+                "avg_latency_ms": float(avg_latency),
+                "bytes_sent": int(row.total_bytes_sent or 0),
+                "bytes_received": int(row.total_bytes_received or 0),
             }
 
         return metrics
@@ -570,6 +570,54 @@ class MetricsRepository:
             for m in models
         ]
 
+    async def get_project_metrics_history_aggregated(
+        self,
+        project_id: str,
+        since: datetime,
+        bucket_seconds: int,
+    ) -> list[dict]:
+        """Get historical metrics aggregated into fixed-size time buckets.
+
+        Uses floor division on the epoch to group rows into buckets of
+        ``bucket_seconds`` width, then SUMs counters and AVGs latency.
+        """
+        bucket = text(str(bucket_seconds))
+        # Bucket expression: floor(epoch / bucket_seconds) * bucket_seconds
+        ts_col = func.extract("epoch", ProjectMetricsModel.timestamp)
+        bucket_epoch = (func.floor(ts_col / bucket) * bucket)
+        bucket_ts = func.to_timestamp(bucket_epoch).label("bucket_ts")
+
+        query = (
+            select(
+                bucket_ts,
+                func.sum(ProjectMetricsModel.request_count).label("request_count"),
+                func.sum(ProjectMetricsModel.success_count).label("success_count"),
+                func.sum(ProjectMetricsModel.failure_count).label("failure_count"),
+                func.avg(ProjectMetricsModel.avg_latency_ms).label("avg_latency_ms"),
+                func.sum(ProjectMetricsModel.bytes_sent).label("bytes_sent"),
+                func.sum(ProjectMetricsModel.bytes_received).label("bytes_received"),
+            )
+            .where(ProjectMetricsModel.project_id == project_id)
+            .where(ProjectMetricsModel.timestamp >= since)
+            .group_by(bucket_epoch)
+            .order_by(bucket_epoch.desc())
+        )
+
+        result = await self._session.execute(query)
+        rows = result.all()
+        return [
+            {
+                "timestamp": row.bucket_ts,
+                "request_count": row.request_count,
+                "success_count": row.success_count,
+                "failure_count": row.failure_count,
+                "avg_latency_ms": float(row.avg_latency_ms or 0),
+                "bytes_sent": row.bytes_sent,
+                "bytes_received": row.bytes_received,
+            }
+            for row in rows
+        ]
+
     async def get_cumulative_project_metrics(self) -> dict[str, dict]:
         """Get cumulative metrics (sum of all snapshots) for each project.
 
@@ -599,18 +647,18 @@ class MetricsRepository:
 
         metrics = {}
         for row in rows:
-            total_requests = row.total_requests or 0
-            weighted_latency_sum = row.weighted_latency_sum or 0
+            total_requests = int(row.total_requests or 0)
+            weighted_latency_sum = float(row.weighted_latency_sum or 0)
             avg_latency = weighted_latency_sum / total_requests if total_requests > 0 else 0.0
 
             metrics[row.project_id] = {
                 "request_count": total_requests,
-                "success_count": row.total_successes or 0,
-                "failure_count": row.total_failures or 0,
-                "avg_latency_ms": avg_latency,
-                "latency_sum_ms": weighted_latency_sum,
-                "bytes_sent": row.total_bytes_sent or 0,
-                "bytes_received": row.total_bytes_received or 0,
+                "success_count": int(row.total_successes or 0),
+                "failure_count": int(row.total_failures or 0),
+                "avg_latency_ms": float(avg_latency),
+                "latency_sum_ms": float(weighted_latency_sum),
+                "bytes_sent": int(row.total_bytes_sent or 0),
+                "bytes_received": int(row.total_bytes_received or 0),
             }
 
         return metrics
