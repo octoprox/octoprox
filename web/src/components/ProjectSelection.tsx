@@ -5,6 +5,7 @@ import { Plus, Server, Activity, Trash2, FolderOpen, Settings } from 'lucide-rea
 import { fetchProjects, createProject, deleteProject, updateProject, ProjectCreate, ProjectUpdate, ProjectSummary } from '../api/client'
 import { useProject } from '../contexts/ProjectContext'
 import EditProjectModal from './EditProjectModal'
+import octoproxLogo from '../assets/logos/octoprox_horizontal.svg'
 
 export default function ProjectSelection() {
   const navigate = useNavigate()
@@ -83,10 +84,7 @@ export default function ProjectSelection() {
       <div className="max-w-6xl mx-auto">
         <div className="flex items-center justify-between mb-8">
           <div>
-            <h1 className="text-3xl font-bold text-gray-900 flex items-center gap-3">
-              <Activity className="w-10 h-10 text-blue-500" />
-              Octoprox
-            </h1>
+            <img src={octoproxLogo} alt="Octoprox" className="h-10 mb-1" />
             <p className="text-gray-600 mt-1">Select a project to manage</p>
           </div>
           <button

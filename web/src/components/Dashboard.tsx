@@ -65,9 +65,6 @@ export default function Dashboard() {
           </button>
         )}
       </div>
-      {selectedProject && (
-        <p className="text-gray-500 mb-6">Project: {selectedProject.name}</p>
-      )}
 
       {/* Pool Metrics */}
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-8">

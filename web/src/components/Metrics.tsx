@@ -110,10 +110,6 @@ export default function Metrics() {
       <div className="flex items-center justify-between mb-2">
         <h1 className="text-3xl font-bold">Metrics</h1>
       </div>
-      {selectedProject && (
-        <p className="text-gray-500 mb-6">Project: {selectedProject.name}</p>
-      )}
-
       {/* Time range selector */}
       <div className="flex gap-2 mb-6">
         {TIME_RANGES.map((r) => (

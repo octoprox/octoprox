@@ -1,5 +1,6 @@
 import { useState } from 'react'
-import { Activity, Lock, User, AlertCircle } from 'lucide-react'
+import { Lock, User, AlertCircle } from 'lucide-react'
+import octoproxLogo from '../assets/logos/octoprox_horizontal.svg'
 
 interface LoginProps {
   onLogin: (username: string, password: string) => Promise<void>
@@ -27,9 +28,8 @@ export default function Login({ onLogin, error }: LoginProps) {
         <div className="bg-white rounded-lg shadow-lg p-8">
           {/* Logo */}
           <div className="text-center mb-8">
-            <div className="flex items-center justify-center gap-2 mb-2">
-              <Activity className="w-10 h-10 text-blue-600" />
-              <h1 className="text-3xl font-bold text-gray-900">Octoprox</h1>
+            <div className="flex items-center justify-center mb-2">
+              <img src={octoproxLogo} alt="Octoprox" className="h-12" />
             </div>
             <p className="text-gray-500">Sign in to your account</p>
           </div>
