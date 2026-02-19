@@ -145,10 +145,11 @@ class AutoScaler:
 
         now = utc_now()
         if now < backoff_until:
-            logger.debug(
+            logger.warning(
                 "Skipping scaling due to error backoff",
                 connector_id=connector.id,
                 consecutive_errors=connector.consecutive_errors,
+                last_error=connector.last_error,
                 backoff_minutes=backoff_minutes,
                 backoff_until=backoff_until.isoformat(),
             )
@@ -438,7 +439,11 @@ class AutoScaler:
                     )
                     had_success = True
             except Exception as e:
-                logger.error("Failed to create proxy instance", error=str(e))
+                logger.error(
+                    "Failed to create proxy instance",
+                    connector_id=connector.id,
+                    error=str(e),
+                )
                 await self._record_connector_error(connector, str(e))
                 # Stop trying to create more instances after an error
                 break
@@ -587,6 +592,7 @@ class AutoScaler:
                 logger.error(
                     "Failed to create replacement proxy",
                     proxy_id=proxy.id,
+                    connector_id=connector.id,
                     error=str(e),
                 )
                 # Track the error

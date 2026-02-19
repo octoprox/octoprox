@@ -153,83 +153,78 @@ class AWSProvider(CloudProvider):
         if not ec2_resource:
             return None
 
-        try:
-            import time
+        import time
 
-            # Use the external Squid setup script
-            user_data = get_squid_setup_script()
+        # Use the external Squid setup script
+        user_data = get_squid_setup_script()
 
-            # Build instance name with timestamp for uniqueness
-            instance_name = f"{self._config.instance_name}-{int(time.time())}"
+        # Build instance name with timestamp for uniqueness
+        instance_name = f"{self._config.instance_name}-{int(time.time())}"
 
-            # Build tags: start with required tags, then add custom tags
-            tags = [
-                {"Key": "Name", "Value": instance_name},
-                {"Key": "ManagedBy", "Value": "octoprox"},
-            ]
-            # Add custom tags from connector config
-            for key, value in self._config.tags.items():
-                tags.append({"Key": key, "Value": str(value)})
+        # Build tags: start with required tags, then add custom tags
+        tags = [
+            {"Key": "Name", "Value": instance_name},
+            {"Key": "ManagedBy", "Value": "octoprox"},
+        ]
+        # Add custom tags from connector config
+        for key, value in self._config.tags.items():
+            tags.append({"Key": key, "Value": str(value)})
 
-            run_args = {
-                "ImageId": ami_id,
-                "InstanceType": self._config.instance_type,
-                "MinCount": 1,
-                "MaxCount": 1,
-                "UserData": user_data,
-                "TagSpecifications": [
-                    {
-                        "ResourceType": "instance",
-                        "Tags": tags,
-                    }
-                ],
-            }
+        run_args = {
+            "ImageId": ami_id,
+            "InstanceType": self._config.instance_type,
+            "MinCount": 1,
+            "MaxCount": 1,
+            "UserData": user_data,
+            "TagSpecifications": [
+                {
+                    "ResourceType": "instance",
+                    "Tags": tags,
+                }
+            ],
+        }
 
-            # Handle security group configuration
-            # The security group determines which VPC the instance will be launched in
-            security_group = self._config.security_group.strip()
+        # Handle security group configuration
+        # The security group determines which VPC the instance will be launched in
+        security_group = self._config.security_group.strip()
 
-            if security_group:
-                run_args["SecurityGroupIds"] = [security_group]
+        if security_group:
+            run_args["SecurityGroupIds"] = [security_group]
 
-            if self._config.key_pair_name:
-                run_args["KeyName"] = self._config.key_pair_name
+        if self._config.key_pair_name:
+            run_args["KeyName"] = self._config.key_pair_name
 
-            logger.debug(
-                "Creating EC2 instance",
-                ami_id=ami_id,
-                instance_type=self._config.instance_type,
-                security_group=self._config.security_group,
-            )
+        logger.debug(
+            "Creating EC2 instance",
+            ami_id=ami_id,
+            instance_type=self._config.instance_type,
+            security_group=self._config.security_group,
+        )
 
-            instances = ec2_resource.create_instances(**run_args)
-            instance = instances[0]
+        instances = ec2_resource.create_instances(**run_args)
+        instance = instances[0]
 
-            # Wait for instance to be running
-            instance.wait_until_running()
-            instance.reload()
+        # Wait for instance to be running
+        instance.wait_until_running()
+        instance.reload()
 
-            host = instance.public_ip_address or instance.private_ip_address
-            if not host:
-                logger.error("Instance created but no IP address available")
-                return None
-
-            proxy = Proxy(
-                id=f"aws-{instance.id}",
-                host=host,
-                port=PROXY_PORT,
-                connector_id=self.connector.id,
-                status=ProxyStatus.INITIALIZING,
-                tags=["aws", self._config.region],
-                metadata={"instance_id": instance.id},
-            )
-
-            logger.info("Created AWS proxy instance", instance_id=instance.id, host=host)
-            return proxy
-
-        except Exception as e:
-            logger.error("Failed to create AWS instance", error=str(e))
+        host = instance.public_ip_address or instance.private_ip_address
+        if not host:
+            logger.error("Instance created but no IP address available")
             return None
+
+        proxy = Proxy(
+            id=f"aws-{instance.id}",
+            host=host,
+            port=PROXY_PORT,
+            connector_id=self.connector.id,
+            status=ProxyStatus.INITIALIZING,
+            tags=["aws", self._config.region],
+            metadata={"instance_id": instance.id},
+        )
+
+        logger.info("Created AWS proxy instance", instance_id=instance.id, host=host)
+        return proxy
 
     async def terminate_instance(self, instance_id: str) -> bool:
         """Terminate an EC2 instance."""
@@ -237,15 +232,11 @@ class AWSProvider(CloudProvider):
         if not ec2_client:
             return False
 
-        try:
-            # Remove aws- prefix if present
-            ec2_instance_id = instance_id.replace("aws-", "")
-            ec2_client.terminate_instances(InstanceIds=[ec2_instance_id])
-            logger.info("Terminated AWS instance", instance_id=ec2_instance_id)
-            return True
-        except Exception as e:
-            logger.error("Failed to terminate AWS instance", error=str(e))
-            return False
+        # Remove aws- prefix if present
+        ec2_instance_id = instance_id.replace("aws-", "")
+        ec2_client.terminate_instances(InstanceIds=[ec2_instance_id])
+        logger.info("Terminated AWS instance", instance_id=ec2_instance_id)
+        return True
 
 
 class GCPProvider(CloudProvider):
@@ -319,125 +310,120 @@ class GCPProvider(CloudProvider):
         # Get the source image for this machine type from the config
         source_image = self._config.get_source_image()
 
-        try:
-            from google.cloud import compute_v1
-            import time
+        from google.cloud import compute_v1
+        import time
 
-            # Build instance name with timestamp for uniqueness
-            instance_name = f"{self._config.instance_name}-{int(time.time())}"
+        # Build instance name with timestamp for uniqueness
+        instance_name = f"{self._config.instance_name}-{int(time.time())}"
 
-            # Use the external Squid setup script
-            startup_script = get_squid_setup_script()
+        # Use the external Squid setup script
+        startup_script = get_squid_setup_script()
 
-            logger.debug(
-                "GCP create_instance called",
-                connector_id=self.connector.id,
-                source_image=source_image,
-                zone=self._config.zone,
-                instance_name=instance_name,
-            )
+        logger.debug(
+            "GCP create_instance called",
+            connector_id=self.connector.id,
+            source_image=source_image,
+            zone=self._config.zone,
+            instance_name=instance_name,
+        )
 
-            # Build instance config
-            instance = compute_v1.Instance()
-            instance.name = instance_name
-            instance.machine_type = f"zones/{self._config.zone}/machineTypes/{self._config.machine_type}"
+        # Build instance config
+        instance = compute_v1.Instance()
+        instance.name = instance_name
+        instance.machine_type = f"zones/{self._config.zone}/machineTypes/{self._config.machine_type}"
 
-            # Boot disk
-            disk = compute_v1.AttachedDisk()
-            disk.boot = True
-            disk.auto_delete = True
-            initialize_params = compute_v1.AttachedDiskInitializeParams()
-            initialize_params.source_image = source_image
-            initialize_params.disk_size_gb = 10
-            disk.initialize_params = initialize_params
-            instance.disks = [disk]
+        # Boot disk
+        disk = compute_v1.AttachedDisk()
+        disk.boot = True
+        disk.auto_delete = True
+        initialize_params = compute_v1.AttachedDiskInitializeParams()
+        initialize_params.source_image = source_image
+        initialize_params.disk_size_gb = 10
+        disk.initialize_params = initialize_params
+        instance.disks = [disk]
 
-            # Network interface
-            network_interface = compute_v1.NetworkInterface()
-            network_interface.network = f"global/networks/{self._config.network}"
+        # Network interface
+        network_interface = compute_v1.NetworkInterface()
+        network_interface.network = f"global/networks/{self._config.network}"
 
-            # Add external IP
-            access_config = compute_v1.AccessConfig()
-            access_config.name = "External NAT"
-            access_config.type_ = "ONE_TO_ONE_NAT"
-            network_interface.access_configs = [access_config]
-            instance.network_interfaces = [network_interface]
+        # Add external IP
+        access_config = compute_v1.AccessConfig()
+        access_config.name = "External NAT"
+        access_config.type_ = "ONE_TO_ONE_NAT"
+        network_interface.access_configs = [access_config]
+        instance.network_interfaces = [network_interface]
 
-            # Labels - start with required labels, then add custom labels from tags
-            # GCP labels must be lowercase with hyphens
-            labels = {
-                "managed-by": "octoprox",
-            }
-            # Add custom labels from connector config tags
-            for key, value in self._config.tags.items():
-                # GCP labels must be lowercase, max 63 chars, only lowercase letters, numbers, hyphens
-                label_key = key.lower().replace(" ", "-").replace("_", "-")[:63]
-                label_value = str(value).lower().replace(" ", "-").replace("_", "-")[:63]
-                labels[label_key] = label_value
-            instance.labels = labels
+        # Labels - start with required labels, then add custom labels from tags
+        # GCP labels must be lowercase with hyphens
+        labels = {
+            "managed-by": "octoprox",
+        }
+        # Add custom labels from connector config tags
+        for key, value in self._config.tags.items():
+            # GCP labels must be lowercase, max 63 chars, only lowercase letters, numbers, hyphens
+            label_key = key.lower().replace(" ", "-").replace("_", "-")[:63]
+            label_value = str(value).lower().replace(" ", "-").replace("_", "-")[:63]
+            labels[label_key] = label_value
+        instance.labels = labels
 
-            # Metadata with startup script
-            metadata = compute_v1.Metadata()
-            metadata.items = [
-                compute_v1.Items(key="startup-script", value=startup_script)
-            ]
-            instance.metadata = metadata
+        # Metadata with startup script
+        metadata = compute_v1.Metadata()
+        metadata.items = [
+            compute_v1.Items(key="startup-script", value=startup_script)
+        ]
+        instance.metadata = metadata
 
-            # Create the instance
-            operation = client.insert(
+        # Create the instance
+        operation = client.insert(
+            project=self._config.project_id,
+            zone=self._config.zone,
+            instance_resource=instance,
+        )
+
+        # Wait for operation to complete
+        from google.cloud.compute_v1.services.zone_operations import ZoneOperationsClient
+
+        ops_client = ZoneOperationsClient()
+        while operation.status != compute_v1.Operation.Status.DONE:
+            operation = ops_client.get(
                 project=self._config.project_id,
                 zone=self._config.zone,
-                instance_resource=instance,
+                operation=operation.name,
             )
 
-            # Wait for operation to complete
-            from google.cloud.compute_v1.services.zone_operations import ZoneOperationsClient
+        # Get the created instance
+        created_instance = client.get(
+            project=self._config.project_id,
+            zone=self._config.zone,
+            instance=instance_name,
+        )
 
-            ops_client = ZoneOperationsClient()
-            while operation.status != compute_v1.Operation.Status.DONE:
-                operation = ops_client.get(
-                    project=self._config.project_id,
-                    zone=self._config.zone,
-                    operation=operation.name,
-                )
-
-            # Get the created instance
-            created_instance = client.get(
-                project=self._config.project_id,
-                zone=self._config.zone,
-                instance=instance_name,
-            )
-
-            # Get IP address
-            host = None
-            for interface in created_instance.network_interfaces:
-                for access_config in interface.access_configs:
-                    if access_config.nat_i_p:
-                        host = access_config.nat_i_p
-                        break
-                if not host:
-                    host = interface.network_i_p
-
+        # Get IP address
+        host = None
+        for interface in created_instance.network_interfaces:
+            for access_config in interface.access_configs:
+                if access_config.nat_i_p:
+                    host = access_config.nat_i_p
+                    break
             if not host:
-                logger.error("Instance created but no IP address available")
-                return None
+                host = interface.network_i_p
 
-            proxy = Proxy(
-                id=f"gcp-{instance_name}",
-                host=host,
-                port=PROXY_PORT,
-                connector_id=self.connector.id,
-                status=ProxyStatus.INITIALIZING,
-                tags=["gcp", self._config.zone],
-                metadata={"instance_name": instance_name},
-            )
-
-            logger.info("Created GCP proxy instance", instance_name=instance_name, host=host)
-            return proxy
-
-        except Exception as e:
-            logger.error("Failed to create GCP instance", error=str(e))
+        if not host:
+            logger.error("Instance created but no IP address available")
             return None
+
+        proxy = Proxy(
+            id=f"gcp-{instance_name}",
+            host=host,
+            port=PROXY_PORT,
+            connector_id=self.connector.id,
+            status=ProxyStatus.INITIALIZING,
+            tags=["gcp", self._config.zone],
+            metadata={"instance_name": instance_name},
+        )
+
+        logger.info("Created GCP proxy instance", instance_name=instance_name, host=host)
+        return proxy
 
     async def terminate_instance(self, instance_id: str) -> bool:
         """Terminate a GCP Compute Engine instance."""
@@ -445,19 +431,15 @@ class GCPProvider(CloudProvider):
         if not client:
             return False
 
-        try:
-            # Remove gcp- prefix if present
-            instance_name = instance_id.replace("gcp-", "")
-            client.delete(
-                project=self._config.project_id,
-                zone=self._config.zone,
-                instance=instance_name,
-            )
-            logger.info("Terminated GCP instance", instance_name=instance_name)
-            return True
-        except Exception as e:
-            logger.error("Failed to terminate GCP instance", error=str(e))
-            return False
+        # Remove gcp- prefix if present
+        instance_name = instance_id.replace("gcp-", "")
+        client.delete(
+            project=self._config.project_id,
+            zone=self._config.zone,
+            instance=instance_name,
+        )
+        logger.info("Terminated GCP instance", instance_name=instance_name)
+        return True
 
 
 class AzureProvider(CloudProvider):
@@ -680,9 +662,7 @@ class AzureProvider(CloudProvider):
             logger.info("Created Azure proxy VM", vm_name=vm_name, host=host)
             return proxy
 
-        except Exception as e:
-            logger.error("Failed to create Azure VM", error=str(e))
-
+        except Exception:
             # Clean up any resources that were created before the failure
             # Must delete NIC before public IP (NIC references the public IP)
             # Azure reserves the NIC for 180 seconds after a failed VM creation,
@@ -740,7 +720,7 @@ class AzureProvider(CloudProvider):
                             error=str(cleanup_error),
                         )
 
-            return None
+            raise
 
     async def terminate_instance(self, instance_id: str) -> bool:
         """Terminate an Azure VM."""
@@ -748,44 +728,40 @@ class AzureProvider(CloudProvider):
         if not compute_client:
             return False
 
+        # Remove azure- prefix if present
+        vm_name = instance_id.replace("azure-", "")
+
+        # Delete VM
+        compute_client.virtual_machines.begin_delete(
+            self._config.resource_group, vm_name
+        ).result()
+
+        # Clean up NIC and public IP
+        nic_name = f"{vm_name}-nic"
+        pip_name = f"{vm_name}-pip"
+
         try:
-            # Remove azure- prefix if present
-            vm_name = instance_id.replace("azure-", "")
-
-            # Delete VM
-            compute_client.virtual_machines.begin_delete(
-                self._config.resource_group, vm_name
+            network_client.network_interfaces.begin_delete(
+                self._config.resource_group, nic_name
             ).result()
+        except Exception as cleanup_error:
+            logger.warning(
+                "Failed to clean up NIC during VM termination",
+                nic_name=nic_name,
+                error=str(cleanup_error),
+            )
 
-            # Clean up NIC and public IP
-            nic_name = f"{vm_name}-nic"
-            pip_name = f"{vm_name}-pip"
+        try:
+            network_client.public_ip_addresses.begin_delete(
+                self._config.resource_group, pip_name
+            ).result()
+        except Exception as cleanup_error:
+            logger.warning(
+                "Failed to clean up public IP during VM termination",
+                pip_name=pip_name,
+                error=str(cleanup_error),
+            )
 
-            try:
-                network_client.network_interfaces.begin_delete(
-                    self._config.resource_group, nic_name
-                ).result()
-            except Exception as cleanup_error:
-                logger.warning(
-                    "Failed to clean up NIC during VM termination",
-                    nic_name=nic_name,
-                    error=str(cleanup_error),
-                )
-
-            try:
-                network_client.public_ip_addresses.begin_delete(
-                    self._config.resource_group, pip_name
-                ).result()
-            except Exception as cleanup_error:
-                logger.warning(
-                    "Failed to clean up public IP during VM termination",
-                    pip_name=pip_name,
-                    error=str(cleanup_error),
-                )
-
-            logger.info("Terminated Azure VM", vm_name=vm_name)
-            return True
-        except Exception as e:
-            logger.error("Failed to terminate Azure VM", error=str(e))
-            return False
+        logger.info("Terminated Azure VM", vm_name=vm_name)
+        return True
 

@@ -292,15 +292,16 @@ class TestCheckConnectorScaling:
             return_value=DemandLevel.MEDIUM
         )
 
-        # First call: no previous level
-        await auto_scaler._check_connector_scaling(sample_connector, sample_credential)
-        call_args = mock_data_provider.demand_tracker.get_demand_level.call_args
-        assert call_args[0][2] is None  # previous_level
+        with patch.object(auto_scaler, "_scale_up", new_callable=AsyncMock):
+            # First call: no previous level
+            await auto_scaler._check_connector_scaling(sample_connector, sample_credential)
+            call_args = mock_data_provider.demand_tracker.get_demand_level.call_args
+            assert call_args[0][2] is None  # previous_level
 
-        # Second call: should pass MEDIUM as previous level
-        await auto_scaler._check_connector_scaling(sample_connector, sample_credential)
-        call_args = mock_data_provider.demand_tracker.get_demand_level.call_args
-        assert call_args[0][2] == DemandLevel.MEDIUM
+            # Second call: should pass MEDIUM as previous level
+            await auto_scaler._check_connector_scaling(sample_connector, sample_credential)
+            call_args = mock_data_provider.demand_tracker.get_demand_level.call_args
+            assert call_args[0][2] == DemandLevel.MEDIUM
 
     @pytest.mark.asyncio
     async def test_incremental_scale_up_capped(
@@ -948,6 +949,62 @@ class TestClearConnectorError:
         assert sample_connector.last_error is None
         assert sample_connector.last_error_at is None
         assert sample_connector.consecutive_errors == 0
+
+
+class TestScaleUpErrorRecording:
+    """Tests that scale_up records errors when create_instance raises."""
+
+    @pytest.mark.asyncio
+    async def test_scale_up_records_error_when_create_raises(
+        self,
+        auto_scaler: AutoScaler,
+        mock_data_provider: MagicMock,
+        sample_connector: Connector,
+        sample_credential: Credential,
+    ) -> None:
+        """Test that _scale_up records a connector error when create_instance raises."""
+        sample_connector.consecutive_errors = 0
+
+        with patch.object(auto_scaler, "_get_cloud_provider") as mock_get_provider:
+            mock_provider = MagicMock()
+            mock_provider.create_instance = AsyncMock(
+                side_effect=RuntimeError("AWS AuthFailure: invalid credentials")
+            )
+            mock_get_provider.return_value = mock_provider
+
+            with patch.object(signals.connector_error_updated, "send_async", new_callable=AsyncMock) as mock_signal:
+                await auto_scaler._scale_up(sample_connector, sample_credential, 1)
+
+                # Should have recorded an error with the actual exception message
+                mock_signal.assert_called_once()
+                call_kwargs = mock_signal.call_args[1]
+                assert call_kwargs["connector_id"] == sample_connector.id
+                assert "AWS AuthFailure" in call_kwargs["error"]
+                assert call_kwargs["consecutive_errors"] == 1
+
+    @pytest.mark.asyncio
+    async def test_scale_up_stops_after_exception(
+        self,
+        auto_scaler: AutoScaler,
+        mock_data_provider: MagicMock,
+        sample_connector: Connector,
+        sample_credential: Credential,
+    ) -> None:
+        """Test that _scale_up stops creating instances after an exception."""
+        sample_connector.consecutive_errors = 0
+
+        with patch.object(auto_scaler, "_get_cloud_provider") as mock_get_provider:
+            mock_provider = MagicMock()
+            mock_provider.create_instance = AsyncMock(
+                side_effect=RuntimeError("Cloud API error")
+            )
+            mock_get_provider.return_value = mock_provider
+
+            with patch.object(signals.connector_error_updated, "send_async", new_callable=AsyncMock):
+                await auto_scaler._scale_up(sample_connector, sample_credential, 3)
+
+                # Should only attempt once, then stop
+                assert mock_provider.create_instance.call_count == 1
 
 
 class TestScalingWithBackoff:
