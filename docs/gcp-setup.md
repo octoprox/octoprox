@@ -1,3 +1,8 @@
+---
+layout: default
+title: GCP Connector Setup
+---
+
 # GCP Connector Setup
 
 The GCP Connector allows Octoprox to dynamically provision Compute Engine instances as proxy servers. This guide covers how to obtain the required GCP credentials and configure the connector.

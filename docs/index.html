@@ -1,0 +1,203 @@
+---
+layout: null
+---
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Octoprox - Dynamic Proxy Manager</title>
+  <meta name="description" content="A dynamic and flexible proxy manager that acts as an intelligent proxy aggregator, accepting client requests and routing them through managed proxy pools.">
+  <link rel="icon" type="image/svg+xml" href="assets/favicon/favicon.svg">
+  <link rel="icon" type="image/png" sizes="96x96" href="assets/favicon/favicon-96x96.png">
+  <link rel="apple-touch-icon" sizes="180x180" href="assets/favicon/apple-touch-icon.png">
+  <style>
+    :root {
+      --primary: #6366f1;
+      --primary-dark: #4f46e5;
+      --bg: #0f172a;
+      --bg-card: #1e293b;
+      --text: #f1f5f9;
+      --text-muted: #94a3b8;
+      --border: #334155;
+    }
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.6;
+    }
+    .container { max-width: 1100px; margin: 0 auto; padding: 0 24px; }
+    header {
+      padding: 20px 0;
+      border-bottom: 1px solid var(--border);
+    }
+    header .container { display: flex; justify-content: space-between; align-items: center; }
+    .logo { height: 40px; }
+    nav a {
+      color: var(--text-muted);
+      text-decoration: none;
+      margin-left: 24px;
+      transition: color 0.2s;
+    }
+    nav a:hover { color: var(--text); }
+    .hero {
+      padding: 80px 0;
+      text-align: center;
+    }
+    .hero h1 {
+      font-size: 3rem;
+      margin-bottom: 16px;
+      background: linear-gradient(135deg, var(--primary), #a855f7);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+    }
+    .hero p {
+      font-size: 1.25rem;
+      color: var(--text-muted);
+      max-width: 600px;
+      margin: 0 auto 32px;
+    }
+    .btn {
+      display: inline-block;
+      padding: 12px 28px;
+      background: var(--primary);
+      color: white;
+      text-decoration: none;
+      border-radius: 8px;
+      font-weight: 500;
+      transition: background 0.2s;
+      margin: 8px;
+    }
+    .btn:hover { background: var(--primary-dark); }
+    .btn-outline {
+      background: transparent;
+      border: 1px solid var(--border);
+    }
+    .btn-outline:hover { background: var(--bg-card); }
+    .features {
+      padding: 60px 0;
+    }
+    .features h2 {
+      text-align: center;
+      margin-bottom: 48px;
+      font-size: 2rem;
+    }
+    .feature-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+      gap: 24px;
+    }
+    .feature-card {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 24px;
+    }
+    .feature-card h3 {
+      color: var(--primary);
+      margin-bottom: 8px;
+    }
+    .feature-card p { color: var(--text-muted); }
+    .cloud-providers {
+      padding: 60px 0;
+      text-align: center;
+    }
+    .cloud-providers h2 { margin-bottom: 32px; font-size: 2rem; }
+    .provider-links { display: flex; justify-content: center; gap: 16px; flex-wrap: wrap; }
+    .provider-links a {
+      padding: 12px 24px;
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      color: var(--text);
+      text-decoration: none;
+      transition: border-color 0.2s;
+    }
+    .provider-links a:hover { border-color: var(--primary); }
+    footer {
+      padding: 40px 0;
+      border-top: 1px solid var(--border);
+      text-align: center;
+      color: var(--text-muted);
+    }
+    footer a { color: var(--primary); text-decoration: none; }
+    @media (max-width: 640px) {
+      .hero h1 { font-size: 2rem; }
+      .hero p { font-size: 1rem; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="container">
+      <img src="assets/logo/octoprox_horizontal_dark.svg" alt="Octoprox" class="logo">
+      <nav>
+        <a href="https://github.com/octoprox/octoprox">GitHub</a>
+        <a href="https://github.com/octoprox/octoprox#quick-start">Docs</a>
+      </nav>
+    </div>
+  </header>
+
+  <section class="hero">
+    <div class="container">
+      <h1>Dynamic Proxy Management</h1>
+      <p>An intelligent proxy aggregator that accepts client requests and routes them through managed proxy pools with cloud provider integrations.</p>
+      <a href="https://github.com/octoprox/octoprox#quick-start" class="btn">Get Started</a>
+      <a href="https://github.com/octoprox/octoprox" class="btn btn-outline">View on GitHub</a>
+    </div>
+  </section>
+
+  <section class="features">
+    <div class="container">
+      <h2>Features</h2>
+      <div class="feature-grid">
+        <div class="feature-card">
+          <h3>☁️ Cloud Integrations</h3>
+          <p>Dynamically provision proxy instances on AWS, GCP, and Azure with automatic setup.</p>
+        </div>
+        <div class="feature-card">
+          <h3>🔄 Smart Routing</h3>
+          <p>Round-robin, least-used, random, sticky session, and health-based routing strategies.</p>
+        </div>
+        <div class="feature-card">
+          <h3>💓 Health Monitoring</h3>
+          <p>Automatic health checks with configurable intervals and failure thresholds.</p>
+        </div>
+        <div class="feature-card">
+          <h3>📊 Performance Metrics</h3>
+          <p>Track latency, success rates, and request counts per proxy in real-time.</p>
+        </div>
+        <div class="feature-card">
+          <h3>🔌 REST API</h3>
+          <p>Full CRUD operations for managing projects, credentials, connectors, and proxies.</p>
+        </div>
+        <div class="feature-card">
+          <h3>🖥️ Web Dashboard</h3>
+          <p>React-based UI for monitoring and configuration with real-time updates.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="cloud-providers">
+    <div class="container">
+      <h2>Cloud Provider Setup</h2>
+      <div class="provider-links">
+        <a href="aws-setup">AWS Setup</a>
+        <a href="gcp-setup">GCP Setup</a>
+        <a href="azure-setup">Azure Setup</a>
+      </div>
+    </div>
+  </section>
+
+  <footer>
+    <div class="container">
+      <p>Licensed under <a href="https://opensource.org/licenses/Apache-2.0">Apache 2.0</a></p>
+    </div>
+  </footer>
+</body>
+</html>
+

@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{{ page.title }} - Octoprox</title>
+  <meta name="description" content="{{ page.description | default: site.description }}">
+  <link rel="icon" type="image/svg+xml" href="{{ site.baseurl }}/assets/favicon/favicon.svg">
+  <link rel="icon" type="image/png" sizes="96x96" href="{{ site.baseurl }}/assets/favicon/favicon-96x96.png">
+  <link rel="apple-touch-icon" sizes="180x180" href="{{ site.baseurl }}/assets/favicon/apple-touch-icon.png">
+  <style>
+    :root {
+      --primary: #6366f1;
+      --primary-dark: #4f46e5;
+      --bg: #0f172a;
+      --bg-card: #1e293b;
+      --text: #f1f5f9;
+      --text-muted: #94a3b8;
+      --border: #334155;
+    }
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.6;
+    }
+    .container { max-width: 900px; margin: 0 auto; padding: 0 24px; }
+    header {
+      padding: 20px 0;
+      border-bottom: 1px solid var(--border);
+    }
+    header .header-container { 
+      max-width: 1100px; 
+      margin: 0 auto; 
+      padding: 0 24px;
+      display: flex; 
+      justify-content: space-between; 
+      align-items: center; 
+    }
+    .logo { height: 40px; }
+    nav a {
+      color: var(--text-muted);
+      text-decoration: none;
+      margin-left: 24px;
+      transition: color 0.2s;
+    }
+    nav a:hover { color: var(--text); }
+    main {
+      padding: 48px 0;
+    }
+    .content h1 {
+      font-size: 2.5rem;
+      margin-bottom: 24px;
+      color: var(--text);
+    }
+    .content h2 {
+      font-size: 1.5rem;
+      margin-top: 48px;
+      margin-bottom: 16px;
+      color: var(--text);
+      border-bottom: 1px solid var(--border);
+      padding-bottom: 8px;
+    }
+    .content h3 {
+      font-size: 1.25rem;
+      margin-top: 32px;
+      margin-bottom: 12px;
+      color: var(--primary);
+    }
+    .content p {
+      margin-bottom: 16px;
+      color: var(--text-muted);
+    }
+    .content a {
+      color: var(--primary);
+      text-decoration: none;
+    }
+    .content a:hover { text-decoration: underline; }
+    .content ul, .content ol {
+      margin-bottom: 16px;
+      padding-left: 24px;
+      color: var(--text-muted);
+    }
+    .content li { margin-bottom: 8px; }
+    .content code {
+      background: var(--bg-card);
+      padding: 2px 6px;
+      border-radius: 4px;
+      font-size: 0.9em;
+    }
+    .content pre {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 16px;
+      overflow-x: auto;
+      margin-bottom: 16px;
+    }
+    .content pre code {
+      background: none;
+      padding: 0;
+    }
+    .content blockquote {
+      border-left: 4px solid var(--primary);
+      padding-left: 16px;
+      margin: 16px 0;
+      color: var(--text-muted);
+      font-style: italic;
+    }
+    .content table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-bottom: 16px;
+    }
+    .content th, .content td {
+      border: 1px solid var(--border);
+      padding: 12px;
+      text-align: left;
+    }
+    .content th {
+      background: var(--bg-card);
+      color: var(--text);
+    }
+    .content td { color: var(--text-muted); }
+    .content strong { color: var(--text); }
+    footer {
+      padding: 40px 0;
+      border-top: 1px solid var(--border);
+      text-align: center;
+      color: var(--text-muted);
+    }
+    footer a { color: var(--primary); text-decoration: none; }
+    .back-link {
+      display: inline-block;
+      margin-bottom: 24px;
+      color: var(--text-muted);
+      text-decoration: none;
+    }
+    .back-link:hover { color: var(--text); }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="header-container">
+      <a href="{{ site.baseurl }}/"><img src="{{ site.baseurl }}/assets/logo/octoprox_horizontal_dark.svg" alt="Octoprox" class="logo"></a>
+      <nav>
+        <a href="https://github.com/octoprox/octoprox">GitHub</a>
+        <a href="https://github.com/octoprox/octoprox#quick-start">Docs</a>
+      </nav>
+    </div>
+  </header>
+
+  <main>
+    <div class="container">
+      <a href="{{ site.baseurl }}/" class="back-link">← Back to Home</a>
+      <div class="content">
+        {{ content }}
+      </div>
+    </div>
+  </main>
+
+  <footer>
+    <div class="container">
+      <p>Licensed under <a href="https://opensource.org/licenses/Apache-2.0">Apache 2.0</a></p>
+    </div>
+  </footer>
+</body>
+</html>
+

@@ -1,3 +1,8 @@
+---
+layout: default
+title: AWS Connector Setup
+---
+
 # AWS Connector Setup
 
 The AWS Connector allows Octoprox to dynamically provision EC2 instances as proxy servers. This guide covers how to obtain the required AWS credentials and configure the connector.

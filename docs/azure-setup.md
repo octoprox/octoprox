@@ -1,3 +1,8 @@
+---
+layout: default
+title: Azure Connector Setup
+---
+
 # Azure Connector Setup
 
 The Azure Connector allows Octoprox to dynamically provision Azure Virtual Machines as proxy servers. This guide covers how to obtain the required Azure credentials and configure the connector.
