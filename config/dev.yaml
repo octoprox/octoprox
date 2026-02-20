@@ -39,37 +39,3 @@ proxy:
     timeout_seconds: 30
     max_retries: 3
     retry_delay_seconds: 1
-    
-  # Session settings (for sticky sessions)
-  session:
-    ttl_seconds: 3600
-    cookie_name: "octoprox_session"
-
-# Proxy sources configuration
-sources:
-  # Example static proxy list
-  - name: "static-proxies"
-    type: static
-    enabled: true
-    proxies:
-      - host: "proxy1.example.com"
-        port: 8080
-        protocol: http
-      - host: "proxy2.example.com"
-        port: 8080
-        protocol: http
-        
-  # Example API-based provider (disabled by default)
-  # - name: "proxy-api"
-  #   type: api
-  #   enabled: false
-  #   config:
-  #     url: "https://api.proxyservice.com/v1/proxies"
-  #     api_key: "${PROXY_API_KEY}"
-  #     refresh_interval_seconds: 300
-
-metrics:
-  enabled: true
-  port: 9100
-  path: /metrics
-

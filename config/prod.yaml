@@ -36,15 +36,3 @@ proxy:
     timeout_seconds: 30
     max_retries: 3
     retry_delay_seconds: 1
-    
-  session:
-    ttl_seconds: 3600
-    cookie_name: "octoprox_session"
-
-sources: []
-
-metrics:
-  enabled: true
-  port: 9100
-  path: /metrics
-
