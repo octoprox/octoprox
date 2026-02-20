@@ -3,14 +3,14 @@
 
 """Tests for AutoScaler class."""
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from api.core.auto_scaler import AutoScaler, CHECK_INTERVAL_SECONDS, MAX_ERROR_BACKOFF_MINUTES, SCALING_COOLDOWN_SECONDS
-from api.core.demand_tracker import DemandLevel
 from api.core import signals, utc_now
+from api.core.auto_scaler import SCALING_COOLDOWN_SECONDS, AutoScaler
+from api.core.demand_tracker import DemandLevel
 from api.models.connector import CloudConnectorConfig, Connector
 from api.models.credential import Credential, CredentialType
 from api.models.proxy import Proxy, ProxyProtocol, ProxyStatus
@@ -194,7 +194,7 @@ class TestScheduleRotation:
             max_rotation_period_minutes=120,
         )
         # Use naive datetime to match utc_now() which returns naive datetime
-        now = datetime.now(timezone.utc).replace(tzinfo=None)
+        now = datetime.now(UTC).replace(tzinfo=None)
 
         auto_scaler._schedule_rotation(sample_proxy, cloud_config)
 
@@ -272,11 +272,13 @@ class TestCheckConnectorScaling:
             return_value=DemandLevel.LOW
         )
 
-        with patch.object(auto_scaler, "_scale_up", new_callable=AsyncMock) as mock_scale_up:
-            with patch.object(auto_scaler, "_scale_down", new_callable=AsyncMock) as mock_scale_down:
-                await auto_scaler._check_connector_scaling(sample_connector, sample_credential)
-                mock_scale_up.assert_not_called()
-                mock_scale_down.assert_not_called()
+        with (
+            patch.object(auto_scaler, "_scale_up", new_callable=AsyncMock) as mock_scale_up,
+            patch.object(auto_scaler, "_scale_down", new_callable=AsyncMock) as mock_scale_down,
+        ):
+            await auto_scaler._check_connector_scaling(sample_connector, sample_credential)
+            mock_scale_up.assert_not_called()
+            mock_scale_down.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_passes_previous_demand_level(

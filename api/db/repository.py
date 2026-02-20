@@ -5,16 +5,22 @@
 
 from datetime import datetime
 
-from sqlalchemy import select, delete, func, text
-
-from api.core import utc_now
+from sqlalchemy import delete, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from api.db.models import ProjectModel, ProxyModel, CredentialModel, ConnectorModel, ProxyMetricsModel, ProjectMetricsModel
-from api.models.project import Project
-from api.models.proxy import Proxy, ProxyProtocol, ProxyStatus
-from api.models.credential import Credential, CredentialType
+from api.core import utc_now
+from api.db.models import (
+    ConnectorModel,
+    CredentialModel,
+    ProjectMetricsModel,
+    ProjectModel,
+    ProxyMetricsModel,
+    ProxyModel,
+)
 from api.models.connector import Connector
+from api.models.credential import Credential, CredentialType
+from api.models.project import Project
+from api.models.proxy import Proxy, ProxyProtocol
 
 
 class ProjectRepository:

@@ -3,7 +3,6 @@
 
 """Tests for authentication endpoints."""
 
-import pytest
 from starlette.testclient import TestClient
 
 

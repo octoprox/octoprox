@@ -3,15 +3,13 @@
 
 """Redis client for operational data storage."""
 
-from datetime import datetime
 from functools import lru_cache
 from typing import Any
-
-from api.core import utc_now
 
 import redis.asyncio as redis
 import structlog
 
+from api.core import utc_now
 from api.models.proxy import ProxyStatus
 
 logger = structlog.get_logger()
@@ -42,20 +40,20 @@ class RedisClient:
             decode_responses=True,
         )
         logger.info("Connected to Redis", url=self._redis_url)
-    
+
     async def close(self) -> None:
         """Close Redis connection."""
         if self._client:
             await self._client.aclose()
             logger.info("Closed Redis connection")
-    
+
     @property
     def client(self) -> redis.Redis:
         """Get Redis client, raising if not connected."""
         if self._client is None:
             raise RuntimeError("Redis client not connected")
         return self._client
-    
+
     # Proxy status operations
     async def set_proxy_status(
         self,
@@ -73,7 +71,7 @@ class RedisClient:
             "updated_at": utc_now().isoformat(),
         }
         await self.client.hset(key, mapping=data)
-    
+
     async def get_proxy_status(self, proxy_id: str) -> dict[str, Any] | None:
         """Get proxy health status from Redis."""
         key = PROXY_STATUS_KEY.format(proxy_id=proxy_id)
@@ -86,7 +84,7 @@ class RedisClient:
             "consecutive_failures": int(data["consecutive_failures"]),
             "updated_at": data["updated_at"],
         }
-    
+
     async def get_all_proxy_statuses(self) -> dict[str, dict[str, Any]]:
         """Get all proxy statuses from Redis."""
         statuses = {}
@@ -148,7 +146,7 @@ class RedisClient:
             "bytes_received": int(data.get("bytes_received", 0)),
             "updated_at": data.get("updated_at"),
         }
-    
+
     async def get_all_proxy_metrics(self) -> dict[str, dict[str, Any]]:
         """Get all proxy metrics from Redis."""
         metrics = {}
@@ -158,7 +156,7 @@ class RedisClient:
             if m:
                 metrics[proxy_id] = m
         return metrics
-    
+
     async def reset_proxy_metrics(self, proxy_id: str) -> None:
         """Reset proxy metrics after flushing to Postgres."""
         key = PROXY_METRICS_KEY.format(proxy_id=proxy_id)
@@ -235,12 +233,12 @@ class RedisClient:
         """Set session to proxy mapping."""
         key = SESSION_KEY.format(session_id=session_id)
         await self.client.setex(key, ttl_seconds, proxy_id)
-    
+
     async def get_session(self, session_id: str) -> str | None:
         """Get proxy ID for a session."""
         key = SESSION_KEY.format(session_id=session_id)
         return await self.client.get(key)
-    
+
     async def delete_session(self, session_id: str) -> None:
         """Delete a session."""
         key = SESSION_KEY.format(session_id=session_id)

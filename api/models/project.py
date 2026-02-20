@@ -4,7 +4,6 @@
 """Project model definitions for multi-tenancy."""
 
 from datetime import datetime
-from typing import Any
 from uuid import uuid4
 
 from pydantic import BaseModel, Field
@@ -14,15 +13,15 @@ from api.core import utc_now
 
 class Project(BaseModel):
     """Represents a project for multi-tenancy."""
-    
+
     id: str = Field(default_factory=lambda: str(uuid4()))
     name: str
     description: str = ""
-    
+
     # Proxy authentication credentials (plain text as per requirements)
     username: str
     password: str
-    
+
     # Project-level settings (override global defaults)
     routing_strategy: str = "round_robin"
     health_check_interval: int = 60  # seconds

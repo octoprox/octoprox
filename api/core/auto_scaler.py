@@ -39,10 +39,10 @@ from api.core.signals import (
 )
 from api.models.connector import CloudConnectorConfig, Connector
 from api.models.credential import CredentialType
-from api.models.proxy import Proxy, ProxyProtocol, ProxyStatus
+from api.models.proxy import Proxy, ProxyStatus
 
 if TYPE_CHECKING:
-    from api.core.proxy_manager import ProxyManager
+    pass
 
 
 class AutoScalerDataProvider(Protocol):
@@ -107,12 +107,12 @@ class AutoScaler:
         self._last_scale_action_at: dict[str, datetime] = {}
         # Track last demand level per connector: connector_id -> DemandLevel
         self._last_demand_level: dict[str, DemandLevel] = {}
-    
+
     async def run(self) -> None:
         """Run the auto-scaler loop."""
         logger.info("Starting auto-scaler", interval=CHECK_INTERVAL_SECONDS)
         self._running = True
-        
+
         while self._running:
             try:
                 await self._check_all_connectors()
@@ -123,7 +123,7 @@ class AutoScaler:
             except Exception as e:
                 logger.error("Auto-scaler error", error=str(e))
                 await asyncio.sleep(CHECK_INTERVAL_SECONDS)
-    
+
     def stop(self) -> None:
         """Signal the auto-scaler to stop."""
         self._running = False
@@ -306,7 +306,7 @@ class AutoScaler:
                     proxy_id=proxy.id,
                 )
                 await proxy_draining_requested.send_async(self, proxy_id=proxy.id)
-    
+
     async def _check_connector_scaling(
         self, connector: Connector, credential
     ) -> None:
@@ -380,7 +380,7 @@ class AutoScaler:
         elif target_count < current_count:
             count = min(current_count - target_count, max_down)
             await self._scale_down(connector, count)
-    
+
     def _calculate_target_count(
         self,
         demand_level: DemandLevel,
@@ -549,9 +549,8 @@ class AutoScaler:
             elif proxy.status in (ProxyStatus.HEALTHY, ProxyStatus.DEGRADED, ProxyStatus.UNKNOWN):
                 # Check if rotation is due (skip if in error backoff since rotation involves cloud API calls)
                 rotation_time = self._rotation_schedule.get(proxy.id)
-                if rotation_time and now >= rotation_time:
-                    if not self._should_skip_scaling(connector):
-                        await self._start_rotation(proxy, connector, credential)
+                if rotation_time and now >= rotation_time and not self._should_skip_scaling(connector):
+                    await self._start_rotation(proxy, connector, credential)
 
     async def _start_rotation(
         self, proxy: Proxy, connector: Connector, credential

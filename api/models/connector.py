@@ -10,27 +10,25 @@ from uuid import uuid4
 from pydantic import BaseModel, Field, model_validator
 
 from api.core import utc_now
-
-from api.models.credential import CredentialType
 from api.models.cloud_options import (
-    RegionOption,
-    InstanceTypeOption,
-    AWS_REGIONS,
     AWS_INSTANCE_TYPES,
+    AWS_REGIONS,
     AWS_UBUNTU_AMIS,
-    GCP_ZONES,
-    GCP_MACHINE_TYPES,
-    GCP_UBUNTU_IMAGE_X86,
-    GCP_UBUNTU_IMAGE_ARM,
     AZURE_LOCATIONS,
-    AZURE_VM_SIZES,
-    AZURE_UBUNTU_IMAGE_X86,
     AZURE_UBUNTU_IMAGE_ARM,
+    AZURE_UBUNTU_IMAGE_X86,
+    AZURE_VM_SIZES,
+    GCP_MACHINE_TYPES,
+    GCP_UBUNTU_IMAGE_ARM,
+    GCP_UBUNTU_IMAGE_X86,
+    GCP_ZONES,
+    InstanceTypeOption,
+    RegionOption,
     get_aws_architecture,
-    get_gcp_architecture,
     get_azure_architecture,
+    get_gcp_architecture,
 )
-
+from api.models.credential import CredentialType
 
 # --- Typed Config Models for Validation ---
 

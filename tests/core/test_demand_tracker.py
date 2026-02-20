@@ -3,14 +3,11 @@
 
 """Tests for DemandTracker class."""
 
-import time
-from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from api.core.demand_tracker import (
     DEMAND_KEY,
-    DEMAND_THRESHOLDS,
     DEMAND_WINDOW_SECONDS,
     RECENT_ACTIVITY_MIN_RPM,
     RECENT_ACTIVITY_WINDOW_SECONDS,

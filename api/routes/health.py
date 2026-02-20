@@ -21,7 +21,7 @@ class HealthResponse(BaseModel):
 async def health_check(request: Request) -> HealthResponse:
     """Check the health of the service."""
     proxy_manager = request.app.state.proxy_manager
-    
+
     return HealthResponse(
         status="healthy",
         version="0.1.0",

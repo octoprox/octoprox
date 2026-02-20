@@ -4,11 +4,13 @@
 """Proxy management endpoints."""
 
 import re
-from fastapi import APIRouter, HTTPException, Request, UploadFile, File, Form
+from typing import Annotated
+
+from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
 from pydantic import BaseModel
 
-from api.models.proxy import Proxy, ProxyCreate, ProxyProtocol, ProxyResponse, ProxyUpdate
 from api.models.credential import CredentialType
+from api.models.proxy import Proxy, ProxyCreate, ProxyProtocol, ProxyResponse, ProxyUpdate
 
 router = APIRouter(prefix="/projects/{project_id}/proxies")
 
@@ -181,8 +183,8 @@ async def create_proxy(request: Request, proxy_data: ProxyCreate, project_id: st
 async def upload_proxies(
     request: Request,
     project_id: str,
-    file: UploadFile = File(...),
-    connector_id: str = Form(...),
+    file: Annotated[UploadFile, File(...)],
+    connector_id: Annotated[str, Form(...)],
 ) -> ProxyUploadResponse:
     """
     Upload proxies from a CSV file.
@@ -228,8 +230,8 @@ async def upload_proxies(
     content = await file.read()
     try:
         text = content.decode('utf-8')
-    except UnicodeDecodeError:
-        raise HTTPException(status_code=400, detail="File must be UTF-8 encoded")
+    except UnicodeDecodeError as e:
+        raise HTTPException(status_code=400, detail="File must be UTF-8 encoded") from e
 
     lines = text.strip().split('\n')
 
@@ -274,7 +276,7 @@ async def upload_proxies(
         successful_proxies.append(_proxy_to_response(proxy, connector.name, connector.enabled))
 
     return ProxyUploadResponse(
-        total_lines=len([l for l in lines if l.strip()]),
+        total_lines=len([line for line in lines if line.strip()]),
         successful=len(successful_proxies),
         failed=len(errors),
         proxies=successful_proxies,
@@ -358,4 +360,4 @@ async def set_strategy(request: Request, strategy_req: StrategyRequest) -> dict[
         proxy_manager.set_strategy(strategy_req.strategy)
         return {"status": "ok", "strategy": strategy_req.strategy}
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(e)) from None

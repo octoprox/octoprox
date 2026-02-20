@@ -3,9 +3,9 @@
 
 """Main entry point for Octoprox API server."""
 
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import AsyncGenerator
 
 import structlog
 import uvicorn
@@ -22,7 +22,7 @@ from api.core.proxy_server import ProxyServer
 from api.db.migrations import run_migrations
 from api.db.redis import get_redis_client
 from api.db.session import get_async_session_factory
-from api.routes import auth, health, metrics, projects, proxies, credentials, connectors
+from api.routes import auth, connectors, credentials, health, metrics, projects, proxies
 
 # Configure logging before getting the logger
 log_level = "DEBUG" if settings.debug else "INFO"

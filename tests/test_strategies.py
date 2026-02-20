@@ -6,11 +6,11 @@
 import pytest
 
 from api.models.proxy import Proxy, ProxyStatus
-from api.strategies.round_robin import RoundRobinStrategy
+from api.strategies.health_based import HealthBasedStrategy
 from api.strategies.least_used import LeastUsedStrategy
 from api.strategies.random import RandomStrategy
+from api.strategies.round_robin import RoundRobinStrategy
 from api.strategies.sticky import StickySessionStrategy
-from api.strategies.health_based import HealthBasedStrategy
 
 
 @pytest.fixture
@@ -37,21 +37,21 @@ class TestRoundRobinStrategy:
 
     def test_select_cycles_through_proxies(self, sample_proxies: list[Proxy]):
         strategy = RoundRobinStrategy()
-        
+
         # First cycle
         assert strategy.select(sample_proxies).id == "proxy-1"
         assert strategy.select(sample_proxies).id == "proxy-2"
         assert strategy.select(sample_proxies).id == "proxy-3"
-        
+
         # Second cycle - should wrap around
         assert strategy.select(sample_proxies).id == "proxy-1"
 
     def test_reset(self, sample_proxies: list[Proxy]):
         strategy = RoundRobinStrategy()
-        
+
         strategy.select(sample_proxies)  # Move to index 1
         strategy.reset()
-        
+
         # Should start from beginning again
         assert strategy.select(sample_proxies).id == "proxy-1"
 
@@ -70,7 +70,7 @@ class TestLeastUsedStrategy:
 
     def test_select_returns_least_used(self, sample_proxies: list[Proxy]):
         strategy = LeastUsedStrategy()
-        
+
         # proxy-2 has the lowest request_count (5)
         result = strategy.select(sample_proxies)
         assert result.id == "proxy-2"
@@ -101,7 +101,7 @@ class TestRandomStrategy:
 
     def test_select_returns_valid_proxy(self, sample_proxies: list[Proxy]):
         strategy = RandomStrategy()
-        
+
         for _ in range(10):
             result = strategy.select(sample_proxies)
             assert result is not None
@@ -122,7 +122,7 @@ class TestStickySessionStrategy:
 
     def test_select_without_session_returns_random(self, sample_proxies: list[Proxy]):
         strategy = StickySessionStrategy()
-        
+
         result = strategy.select(sample_proxies, session_id=None)
         assert result is not None
         assert result in sample_proxies
@@ -130,9 +130,9 @@ class TestStickySessionStrategy:
     def test_select_same_session_returns_same_proxy(self, sample_proxies: list[Proxy]):
         strategy = StickySessionStrategy()
         session_id = "user-session-123"
-        
+
         first_result = strategy.select(sample_proxies, session_id=session_id)
-        
+
         # Same session should return same proxy
         for _ in range(5):
             result = strategy.select(sample_proxies, session_id=session_id)
@@ -140,10 +140,10 @@ class TestStickySessionStrategy:
 
     def test_select_different_sessions_can_differ(self, sample_proxies: list[Proxy]):
         strategy = StickySessionStrategy()
-        
+
         result1 = strategy.select(sample_proxies, session_id="session-1")
         result2 = strategy.select(sample_proxies, session_id="session-2")
-        
+
         # Both should be valid proxies (may or may not be the same)
         assert result1 in sample_proxies
         assert result2 in sample_proxies

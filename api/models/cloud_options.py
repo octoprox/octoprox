@@ -13,7 +13,6 @@ All data is structured as rich objects with metadata for frontend display.
 
 from pydantic import BaseModel
 
-
 # --- Rich Option Models ---
 
 class RegionOption(BaseModel):

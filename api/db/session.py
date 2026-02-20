@@ -5,9 +5,7 @@
 
 from collections.abc import AsyncGenerator
 from functools import lru_cache
-from typing import Annotated
 
-from fastapi import Depends
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,

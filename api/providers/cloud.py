@@ -382,8 +382,9 @@ class GCPProvider(CloudProvider):
         # Get the source image for this machine type from the config
         source_image = self._config.get_source_image()
 
-        from google.cloud import compute_v1
         import time
+
+        from google.cloud import compute_v1
 
         # Build instance name with timestamp for uniqueness
         instance_name = f"{self._config.instance_name}-{int(time.time())}"

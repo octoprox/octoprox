@@ -3,7 +3,7 @@
 
 """Authentication routes for Octoprox."""
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import structlog
@@ -52,7 +52,7 @@ def create_jwt(payload: dict[str, Any], secret: str, expiry_hours: int) -> str:
         JWT token string
     """
     to_encode = payload.copy()
-    expire = datetime.now(timezone.utc) + timedelta(hours=expiry_hours)
+    expire = datetime.now(UTC) + timedelta(hours=expiry_hours)
     to_encode.update({"exp": expire})
     return jwt.encode(to_encode, secret, algorithm=ALGORITHM)
 
@@ -82,25 +82,25 @@ async def login(login_req: LoginRequest) -> LoginResponse:
             status_code=400,
             detail="Authentication is not enabled"
         )
-    
+
     # Validate credentials
-    if (login_req.username != settings.auth_username or 
+    if (login_req.username != settings.auth_username or
         login_req.password != settings.auth_password):
         logger.warning("Failed login attempt", username=login_req.username)
         raise HTTPException(
             status_code=401,
             detail="Invalid username or password"
         )
-    
+
     # Create JWT token
     token = create_jwt(
         payload={"sub": login_req.username},
         secret=settings.jwt_secret,
         expiry_hours=settings.jwt_expiry_hours,
     )
-    
+
     logger.info("User logged in", username=login_req.username)
-    
+
     return LoginResponse(
         access_token=token,
         expires_in=settings.jwt_expiry_hours * 3600,
@@ -112,7 +112,7 @@ async def auth_status(request: Request) -> AuthStatus:
     """Get current authentication status."""
     if not settings.auth_enabled:
         return AuthStatus(enabled=False)
-    
+
     # Check for token in Authorization header
     auth_header = request.headers.get("Authorization", "")
     if auth_header.startswith("Bearer "):
@@ -124,6 +124,6 @@ async def auth_status(request: Request) -> AuthStatus:
                 authenticated=True,
                 username=payload.get("sub"),
             )
-    
+
     return AuthStatus(enabled=True, authenticated=False)
 

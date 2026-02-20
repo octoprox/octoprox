@@ -3,6 +3,8 @@
 
 """API-based proxy provider for external proxy services."""
 
+import contextlib
+
 import httpx
 import structlog
 
@@ -102,10 +104,8 @@ class APIProvider(ProxyProvider):
 
         if "://" in proxy_str:
             proto, rest = proxy_str.split("://", 1)
-            try:
+            with contextlib.suppress(ValueError):
                 protocol = ProxyProtocol(proto)
-            except ValueError:
-                pass
             proxy_str = rest
 
         if ":" in proxy_str:

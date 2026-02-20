@@ -4,9 +4,7 @@
 """Credential management endpoints."""
 
 from fastapi import APIRouter, HTTPException, Request
-from pydantic import BaseModel
-
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 
 from api.models.credential import (
     Credential,
@@ -130,9 +128,9 @@ async def update_credential(
         except ValidationError as e:
             # Extract just the error messages from Pydantic validation errors
             messages = [err.get('msg', str(err)) for err in e.errors()]
-            raise HTTPException(status_code=422, detail="; ".join(messages))
+            raise HTTPException(status_code=422, detail="; ".join(messages)) from None
         except ValueError as e:
-            raise HTTPException(status_code=422, detail=str(e))
+            raise HTTPException(status_code=422, detail=str(e)) from None
 
     await proxy_manager.update_credential(credential)
     return _credential_to_detail_response(credential)

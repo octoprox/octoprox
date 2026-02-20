@@ -8,6 +8,7 @@ Emits proxy lifecycle signals (proxy_added, proxy_removed, proxy_status_changed)
 """
 
 import asyncio
+import contextlib
 from typing import TYPE_CHECKING
 
 import structlog
@@ -82,7 +83,7 @@ class ProxyManager:
         self._credentials: dict[str, Credential] = {}
         self._connectors: dict[str, Connector] = {}
         # Per-project strategies (project_id -> strategy)
-        self._project_strategies: dict[str, "RoutingStrategy"] = {}
+        self._project_strategies: dict[str, RoutingStrategy] = {}
         # Default strategy for backward compatibility
         self._strategy: RoutingStrategy = get_strategy(settings.default_strategy)
         self._health_checker = HealthChecker(self)
@@ -254,10 +255,8 @@ class ProxyManager:
 
         for task in self._tasks:
             task.cancel()
-            try:
+            with contextlib.suppress(asyncio.CancelledError):
                 await task
-            except asyncio.CancelledError:
-                pass
         self._tasks.clear()
 
     async def _load_from_database(self) -> None:

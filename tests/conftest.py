@@ -20,7 +20,6 @@ from testcontainers.redis import RedisContainer
 from api.core.config import Settings
 from api.db.redis import RedisClient
 
-
 # =============================================================================
 # Session-scoped containers (shared across all tests for performance)
 # =============================================================================

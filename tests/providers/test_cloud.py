@@ -6,19 +6,18 @@
 import pytest
 
 from api.models.connector import (
-    Connector,
     AWSConnectorConfig,
-    GCPConnectorConfig,
     AzureConnectorConfig,
+    Connector,
+    GCPConnectorConfig,
 )
 from api.models.credential import Credential, CredentialType
 from api.providers.cloud import (
     AWSProvider,
     AzureProvider,
     GCPProvider,
-    PROXY_PORT,
-    build_squid_setup_script,
     _generate_proxy_credentials,
+    build_squid_setup_script,
 )
 
 

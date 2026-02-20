@@ -3,12 +3,17 @@
 
 """Alembic environment configuration."""
 
+from alembic import context
 from sqlalchemy import create_engine, pool
 
-from alembic import context
-
 from api.db.base import Base
-from api.db.models import ProjectModel, ProxyModel, CredentialModel, ConnectorModel, ProxyMetricsModel  # noqa: F401
+from api.db.models import (  # noqa: F401
+    ConnectorModel,
+    CredentialModel,
+    ProjectModel,
+    ProxyMetricsModel,
+    ProxyModel,
+)
 
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.

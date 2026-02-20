@@ -9,9 +9,9 @@ from pydantic import BaseModel, ValidationError
 from api.models.connector import (
     Connector,
     ConnectorCreate,
+    ConnectorOptionsResponse,
     ConnectorResponse,
     ConnectorUpdate,
-    ConnectorOptionsResponse,
     validate_connector_config,
 )
 from api.models.credential import CredentialType
@@ -101,9 +101,9 @@ async def create_connector(
     except ValidationError as e:
         # Extract just the error messages from Pydantic validation errors
         messages = [err.get('msg', str(err)) for err in e.errors()]
-        raise HTTPException(status_code=422, detail="; ".join(messages))
+        raise HTTPException(status_code=422, detail="; ".join(messages)) from None
     except ValueError as e:
-        raise HTTPException(status_code=422, detail=str(e))
+        raise HTTPException(status_code=422, detail=str(e)) from None
 
     connector = Connector(
         name=connector_data.name,
@@ -172,9 +172,9 @@ async def update_connector(
             except ValidationError as e:
                 # Extract just the error messages from Pydantic validation errors
                 messages = [err.get('msg', str(err)) for err in e.errors()]
-                raise HTTPException(status_code=422, detail="; ".join(messages))
+                raise HTTPException(status_code=422, detail="; ".join(messages)) from None
             except ValueError as e:
-                raise HTTPException(status_code=422, detail=str(e))
+                raise HTTPException(status_code=422, detail=str(e)) from None
         else:
             connector.config = connector_data.config
     if connector_data.enabled is not None:

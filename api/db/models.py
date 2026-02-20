@@ -6,11 +6,10 @@
 from datetime import datetime
 from typing import Any
 
-from api.core import utc_now
-
-from sqlalchemy import JSON, Boolean, DateTime, Float, Integer, String, Text, ForeignKey
+from sqlalchemy import JSON, Boolean, DateTime, Float, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
+from api.core import utc_now
 from api.db.base import Base
 from api.models.proxy import ProxyProtocol
 

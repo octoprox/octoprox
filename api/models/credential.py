@@ -64,7 +64,7 @@ class GCPCredentialConfig(BaseModel):
             if not isinstance(parsed, dict):
                 raise ValueError('service_account_json must be a valid JSON object')
         except json.JSONDecodeError as e:
-            raise ValueError(f'service_account_json contains invalid JSON: {e}')
+            raise ValueError(f'service_account_json contains invalid JSON: {e}') from None
 
         return self
 

@@ -3,7 +3,6 @@
 
 """Tests for ConnectorRepository."""
 
-import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.db.repository import (

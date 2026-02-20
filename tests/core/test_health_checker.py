@@ -79,7 +79,7 @@ class TestInitializationGracePeriod:
 
     def test_grace_period_is_five_minutes(self) -> None:
         """Test that the grace period constant is 5 minutes."""
-        assert INITIALIZATION_GRACE_PERIOD == timedelta(minutes=5)
+        assert timedelta(minutes=5) == INITIALIZATION_GRACE_PERIOD
 
     def test_is_within_grace_period_new_proxy(
         self, health_checker: HealthChecker, initializing_proxy: Proxy

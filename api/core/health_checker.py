@@ -61,11 +61,11 @@ class HealthChecker:
         self._proxy_data_provider = proxy_data_provider
         self._interval = settings.health_check_interval
         self._timeout = settings.health_check_timeout
-    
+
     async def run(self) -> None:
         """Run the health check loop."""
         logger.info("Starting health checker", interval=self._interval)
-        
+
         while True:
             try:
                 await self._check_all_proxies()
@@ -76,7 +76,7 @@ class HealthChecker:
             except Exception as e:
                 logger.error("Health check error", error=str(e))
                 await asyncio.sleep(self._interval)
-    
+
     async def _check_all_proxies(self) -> None:
         """Check health of all proxies."""
         proxies = self._proxy_data_provider.proxies
@@ -99,7 +99,7 @@ class HealthChecker:
 
         tasks = [self._check_proxy(proxy) for proxy in active_proxies]
         await asyncio.gather(*tasks, return_exceptions=True)
-    
+
     def _get_proxy_mounts(
         self, proxy: Proxy
     ) -> dict[str, httpx.AsyncHTTPTransport | AsyncProxyTransport]:

@@ -108,40 +108,40 @@ class DemandTracker:
 
     async def record_request(self, project_id: str) -> None:
         """Record a request for demand tracking.
-        
+
         Adds the current timestamp to a sorted set for the project.
         Old entries are automatically cleaned up.
-        
+
         Args:
             project_id: The project ID to record the request for.
         """
         key = DEMAND_KEY.format(project_id=project_id)
         now = utc_now()
         timestamp = now.timestamp()
-        
+
         # Use pipeline for efficiency
         pipe = self._redis_client.client.pipeline()
-        
+
         # Add current request with timestamp as score
         pipe.zadd(key, {f"{timestamp}": timestamp})
-        
+
         # Remove entries older than the window
         cutoff = timestamp - DEMAND_WINDOW_SECONDS
         pipe.zremrangebyscore(key, "-inf", cutoff)
-        
+
         # Set TTL on the key
         pipe.expire(key, DEMAND_TTL_SECONDS)
-        
+
         await pipe.execute()
-    
+
     async def get_requests_per_minute(self, project_id: str) -> float:
         """Get the current request rate for a project.
-        
+
         Counts requests in the sliding window and extrapolates to per-minute.
-        
+
         Args:
             project_id: The project ID to get the rate for.
-            
+
         Returns:
             Requests per minute (float).
         """
@@ -149,14 +149,14 @@ class DemandTracker:
         now = utc_now()
         timestamp = now.timestamp()
         cutoff = timestamp - DEMAND_WINDOW_SECONDS
-        
+
         # Count requests in the window
         count = await self._redis_client.client.zcount(key, cutoff, timestamp)
-        
+
         # Extrapolate to per-minute rate
         # If window is 60 seconds, count is already per-minute
         rate = count * (60.0 / DEMAND_WINDOW_SECONDS)
-        
+
         return rate
 
     async def get_recent_requests_per_minute(self, project_id: str) -> float:
@@ -253,7 +253,7 @@ class DemandTracker:
                 return DemandLevel.MEDIUM
             else:
                 return DemandLevel.HIGH
-    
+
     async def get_demand_info(
         self,
         project_id: str,
