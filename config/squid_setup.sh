@@ -1,6 +1,6 @@
 #!/bin/bash
 # Stealth Squid Proxy Setup Script for Octoprox
-# This script installs and configures Squid as an open proxy.
+# This script installs and configures Squid as a proxy with optional authentication.
 
 set -ex
 
@@ -24,14 +24,15 @@ systemctl stop squid || true
 rm -f /etc/squid/squid.conf
 rm -rf /etc/squid/conf.d/*
 
-# Create stealthy open proxy configuration
-cat > /etc/squid/squid.conf << 'SQUIDCONF'
+##OCTOPROX_AUTH_PREAMBLE##
+
+# Create stealthy proxy configuration
+cat > /etc/squid/squid.conf << SQUIDCONF
 # Stealth proxy config for Octoprox
 
 http_port 3128
 
-# Allow all connections
-http_access allow all
+##OCTOPROX_AUTH_CONFIG##
 
 # === STEALTH SETTINGS ===
 
@@ -96,4 +97,3 @@ systemctl restart squid
 systemctl status squid --no-pager || true
 
 echo "Squid setup complete"
-

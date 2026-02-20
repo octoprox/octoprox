@@ -9,7 +9,14 @@ from api.models.connector import (
     AzureConnectorConfig,
 )
 from api.models.credential import Credential, CredentialType
-from api.providers.cloud import AWSProvider, AzureProvider, GCPProvider, PROXY_PORT
+from api.providers.cloud import (
+    AWSProvider,
+    AzureProvider,
+    GCPProvider,
+    PROXY_PORT,
+    build_squid_setup_script,
+    _generate_proxy_credentials,
+)
 
 
 @pytest.fixture
@@ -489,3 +496,103 @@ class TestAzureConnectorConfigImageResolution:
         assert image_ref1 is not image_ref2
         image_ref1["publisher"] = "Modified"
         assert image_ref2["publisher"] == "Canonical"
+
+
+class TestGenerateProxyCredentials:
+    """Tests for _generate_proxy_credentials."""
+
+    def test_returns_username_and_password(self) -> None:
+        """Test that credentials are returned as a tuple of two strings."""
+        username, password = _generate_proxy_credentials()
+        assert isinstance(username, str)
+        assert isinstance(password, str)
+
+    def test_username_starts_with_u(self) -> None:
+        """Test that username starts with 'u' prefix."""
+        username, _ = _generate_proxy_credentials()
+        assert username.startswith("u")
+
+    def test_username_length(self) -> None:
+        """Test that username is 8 characters (1 prefix + 7 random)."""
+        username, _ = _generate_proxy_credentials()
+        assert len(username) == 8
+
+    def test_password_length(self) -> None:
+        """Test that password is 24 characters."""
+        _, password = _generate_proxy_credentials()
+        assert len(password) == 24
+
+    def test_credentials_are_alphanumeric(self) -> None:
+        """Test that credentials contain only alphanumeric characters."""
+        username, password = _generate_proxy_credentials()
+        assert username.isalnum()
+        assert password.isalnum()
+
+    def test_credentials_are_unique(self) -> None:
+        """Test that successive calls produce different credentials."""
+        creds1 = _generate_proxy_credentials()
+        creds2 = _generate_proxy_credentials()
+        assert creds1 != creds2
+
+
+class TestBuildSquidSetupScript:
+    """Tests for build_squid_setup_script."""
+
+    def test_no_auth_produces_allow_all(self) -> None:
+        """Test that no credentials produces an open proxy config."""
+        script = build_squid_setup_script()
+        assert "http_access allow all" in script
+        assert "auth_param" not in script
+        assert "##OCTOPROX_AUTH_PREAMBLE##" not in script
+        assert "##OCTOPROX_AUTH_CONFIG##" not in script
+
+    def test_with_auth_includes_auth_param(self) -> None:
+        """Test that credentials produce auth_param directives."""
+        script = build_squid_setup_script("testuser", "testpass123")
+        assert "auth_param basic program" in script
+        assert "auth_param basic children" in script
+        assert "proxy_auth REQUIRED" in script
+        assert "http_access allow authenticated" in script
+        assert "http_access deny all" in script
+
+    def test_with_auth_does_not_allow_all(self) -> None:
+        """Test that auth mode does not contain 'allow all'."""
+        script = build_squid_setup_script("testuser", "testpass123")
+        assert "http_access allow all" not in script
+
+    def test_with_auth_includes_htpasswd_creation(self) -> None:
+        """Test that auth mode creates htpasswd file with the correct username."""
+        script = build_squid_setup_script("testuser", "testpass123")
+        assert "openssl passwd -apr1" in script
+        assert "testuser:" in script
+        assert "/etc/squid/passwd" in script
+
+    def test_with_auth_includes_password_in_openssl_command(self) -> None:
+        """Test that the password is injected into the openssl command."""
+        script = build_squid_setup_script("testuser", "mySecretP4ss")
+        assert "mySecretP4ss" in script
+
+    def test_with_auth_includes_ncsa_auth_detection(self) -> None:
+        """Test that auth mode detects ncsa_auth path."""
+        script = build_squid_setup_script("testuser", "testpass123")
+        assert "basic_ncsa_auth" in script
+        assert "NCSA_AUTH_PATH" in script
+
+    def test_placeholders_are_fully_replaced(self) -> None:
+        """Test that no placeholders remain in the output."""
+        script = build_squid_setup_script("testuser", "testpass123")
+        assert "##OCTOPROX_AUTH_PREAMBLE##" not in script
+        assert "##OCTOPROX_AUTH_CONFIG##" not in script
+
+    def test_script_is_valid_bash(self) -> None:
+        """Test that the script starts with a shebang and has key structure."""
+        script = build_squid_setup_script("testuser", "testpass123")
+        assert script.startswith("#!/bin/bash")
+        assert "squid.conf" in script
+        assert "systemctl restart squid" in script
+
+    def test_none_username_produces_no_auth(self) -> None:
+        """Test that None username produces the same result as no args."""
+        script_none = build_squid_setup_script(None, None)
+        script_default = build_squid_setup_script()
+        assert script_none == script_default

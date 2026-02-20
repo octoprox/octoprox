@@ -5,6 +5,8 @@ Actual implementations require the 'cloud' optional dependencies.
 """
 
 import asyncio
+import secrets
+import string
 from abc import abstractmethod
 from pathlib import Path
 
@@ -20,26 +22,94 @@ logger = structlog.get_logger()
 # Standard proxy port for all cloud providers
 PROXY_PORT = 3128
 
-# Load Squid setup script from config file
-_SQUID_SETUP_SCRIPT: str | None = None
+# Cached Squid setup script template
+_SQUID_SETUP_TEMPLATE: str | None = None
 
 
-def get_squid_setup_script() -> str:
-    """Load the Squid setup script from config file.
+def _load_squid_setup_template() -> str:
+    """Load the Squid setup script template from config file.
 
     Raises:
         FileNotFoundError: If the squid_setup.sh config file is not found.
     """
-    global _SQUID_SETUP_SCRIPT
-    if _SQUID_SETUP_SCRIPT is None:
+    global _SQUID_SETUP_TEMPLATE
+    if _SQUID_SETUP_TEMPLATE is None:
         script_path = Path(__file__).parent.parent.parent / "config" / "squid_setup.sh"
         if not script_path.exists():
             raise FileNotFoundError(
                 f"Squid setup script not found at {script_path}. "
                 "This file is required for cloud provider instances."
             )
-        _SQUID_SETUP_SCRIPT = script_path.read_text()
-    return _SQUID_SETUP_SCRIPT
+        _SQUID_SETUP_TEMPLATE = script_path.read_text()
+    return _SQUID_SETUP_TEMPLATE
+
+
+def _generate_proxy_credentials() -> tuple[str, str]:
+    """Generate random username and password for proxy authentication."""
+    alphabet = string.ascii_letters + string.digits
+    username = "u" + "".join(secrets.choice(alphabet) for _ in range(7))
+    password = "".join(secrets.choice(alphabet) for _ in range(24))
+    return username, password
+
+
+# Auth preamble: bash commands to detect ncsa_auth path and create htpasswd file
+_AUTH_PREAMBLE = """\
+# Detect ncsa_auth helper path for Squid basic authentication
+if [ -f /usr/lib/squid/basic_ncsa_auth ]; then
+    NCSA_AUTH_PATH=/usr/lib/squid/basic_ncsa_auth
+elif [ -f /usr/lib64/squid/basic_ncsa_auth ]; then
+    NCSA_AUTH_PATH=/usr/lib64/squid/basic_ncsa_auth
+else
+    NCSA_AUTH_PATH=$(find /usr -name basic_ncsa_auth 2>/dev/null | head -1)
+fi
+
+# Create htpasswd file for proxy authentication
+HASHED=$(openssl passwd -apr1 '{password}')
+echo '{username}:'"$HASHED" > /etc/squid/passwd
+chmod 640 /etc/squid/passwd
+chown root:squid /etc/squid/passwd || true"""
+
+# Auth config: squid.conf directives for basic authentication
+_AUTH_CONFIG = """\
+# Proxy authentication
+auth_param basic program $NCSA_AUTH_PATH /etc/squid/passwd
+auth_param basic children 5
+auth_param basic credentialsttl 1 hour
+auth_param basic casesensitive on
+acl authenticated proxy_auth REQUIRED
+http_access allow authenticated
+http_access deny all"""
+
+# No-auth config: allow all connections (original behavior)
+_NO_AUTH_CONFIG = """\
+# Allow all connections
+http_access allow all"""
+
+
+def build_squid_setup_script(
+    username: str | None = None, password: str | None = None
+) -> str:
+    """Build a Squid setup script, optionally with per-instance authentication.
+
+    Args:
+        username: Proxy auth username. If None, proxy allows all connections.
+        password: Proxy auth password. Required if username is provided.
+
+    Returns:
+        Complete bash setup script with auth configuration baked in.
+    """
+    template = _load_squid_setup_template()
+
+    if username and password:
+        preamble = _AUTH_PREAMBLE.format(username=username, password=password)
+        auth_config = _AUTH_CONFIG
+    else:
+        preamble = ""
+        auth_config = _NO_AUTH_CONFIG
+
+    script = template.replace("##OCTOPROX_AUTH_PREAMBLE##", preamble)
+    script = script.replace("##OCTOPROX_AUTH_CONFIG##", auth_config)
+    return script
 
 
 class CloudProvider(ProxyProvider):
@@ -156,8 +226,9 @@ class AWSProvider(CloudProvider):
 
         import time
 
-        # Use the external Squid setup script
-        user_data = get_squid_setup_script()
+        # Generate per-instance proxy credentials and build setup script
+        proxy_username, proxy_password = _generate_proxy_credentials()
+        user_data = build_squid_setup_script(proxy_username, proxy_password)
 
         # Build instance name with timestamp for uniqueness
         instance_name = f"{self._config.instance_name}-{int(time.time())}"
@@ -220,6 +291,8 @@ class AWSProvider(CloudProvider):
             id=f"aws-{instance.id}",
             host=host,
             port=PROXY_PORT,
+            username=proxy_username,
+            password=proxy_password,
             connector_id=self.connector.id,
             status=ProxyStatus.INITIALIZING,
             tags=["aws", self._config.region],
@@ -327,8 +400,9 @@ class GCPProvider(CloudProvider):
         # Build instance name with timestamp for uniqueness
         instance_name = f"{self._config.instance_name}-{int(time.time())}"
 
-        # Use the external Squid setup script
-        startup_script = get_squid_setup_script()
+        # Generate per-instance proxy credentials and build setup script
+        proxy_username, proxy_password = _generate_proxy_credentials()
+        startup_script = build_squid_setup_script(proxy_username, proxy_password)
 
         logger.debug(
             "GCP create_instance called",
@@ -430,6 +504,8 @@ class GCPProvider(CloudProvider):
             id=f"gcp-{instance_name}",
             host=host,
             port=PROXY_PORT,
+            username=proxy_username,
+            password=proxy_password,
             connector_id=self.connector.id,
             status=ProxyStatus.INITIALIZING,
             tags=["gcp", self._config.zone],
@@ -565,8 +641,9 @@ class AzureProvider(CloudProvider):
                 vm_name=vm_name,
             )
 
-            # Use the external Squid setup script
-            custom_data = get_squid_setup_script()
+            # Generate per-instance proxy credentials and build setup script
+            proxy_username, proxy_password = _generate_proxy_credentials()
+            custom_data = build_squid_setup_script(proxy_username, proxy_password)
             custom_data_b64 = base64.b64encode(custom_data.encode()).decode()
 
             # Build tags: start with required tags, then add custom tags
@@ -676,6 +753,8 @@ class AzureProvider(CloudProvider):
                 id=f"azure-{vm_name}",
                 host=host,
                 port=PROXY_PORT,
+                username=proxy_username,
+                password=proxy_password,
                 connector_id=self.connector.id,
                 status=ProxyStatus.INITIALIZING,
                 tags=["azure", self._config.location],
