@@ -3,15 +3,18 @@
 This module tracks request rates per project using a sliding window
 approach stored in Redis, enabling demand-based auto-scaling decisions.
 
-Subscribes to request_completed signals to track demand automatically.
+Subscribes to request_completed and request_rejected signals to track demand
+automatically, including demand from rejected requests (e.g., when no proxy
+is available).
 """
 
+import time
 from enum import Enum
 
 import structlog
 
 from api.core import utc_now
-from api.core.signals import request_completed
+from api.core.signals import request_completed, request_rejected
 from api.db.redis import RedisClient
 
 logger = structlog.get_logger()
@@ -26,6 +29,8 @@ RECENT_ACTIVITY_WINDOW_SECONDS = 60
 RECENT_ACTIVITY_MIN_RPM = 1.0
 # TTL for demand entries (slightly longer than window to allow cleanup)
 DEMAND_TTL_SECONDS = 360
+# Rate limit for recording rejected requests (seconds between records per project)
+REJECTION_RECORD_INTERVAL_SECONDS = 1.0
 
 
 class DemandLevel(str, Enum):
@@ -59,11 +64,13 @@ class DemandTracker:
 
     def __init__(self, redis_client: RedisClient) -> None:
         self._redis_client = redis_client
+        self._last_rejection_recorded: dict[str, float] = {}
 
     def subscribe_to_signals(self) -> None:
         """Subscribe to signals for automatic demand tracking."""
         request_completed.connect(self._on_request_completed)
-        logger.debug("DemandTracker subscribed to request_completed signal")
+        request_rejected.connect(self._on_request_rejected)
+        logger.debug("DemandTracker subscribed to request signals")
 
     async def _on_request_completed(
         self,
@@ -76,6 +83,24 @@ class DemandTracker:
         bytes_received: int,
     ) -> None:
         """Handle request completed signal to track demand."""
+        await self.record_request(project_id)
+
+    async def _on_request_rejected(
+        self,
+        sender: object,
+        project_id: str,
+        reason: str,
+    ) -> None:
+        """Handle request rejected signal to track demand from 503s.
+
+        Rate-limited to avoid flooding Redis during sustained outages
+        where clients may retry aggressively.
+        """
+        now = time.monotonic()
+        last = self._last_rejection_recorded.get(project_id, 0.0)
+        if now - last < REJECTION_RECORD_INTERVAL_SECONDS:
+            return
+        self._last_rejection_recorded[project_id] = now
         await self.record_request(project_id)
 
     async def record_request(self, project_id: str) -> None:

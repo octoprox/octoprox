@@ -1,5 +1,8 @@
 """Tests for DemandTracker class."""
 
+import time
+from unittest.mock import AsyncMock, MagicMock
+
 import pytest
 
 from api.core.demand_tracker import (
@@ -8,9 +11,11 @@ from api.core.demand_tracker import (
     DEMAND_WINDOW_SECONDS,
     RECENT_ACTIVITY_MIN_RPM,
     RECENT_ACTIVITY_WINDOW_SECONDS,
+    REJECTION_RECORD_INTERVAL_SECONDS,
     DemandLevel,
     DemandTracker,
 )
+from api.core.signals import request_rejected
 from api.db.redis import RedisClient
 
 
@@ -426,3 +431,108 @@ class TestRecentActivity:
     async def test_recent_activity_min_rpm_constant(self) -> None:
         """Test that the minimum RPM threshold is 1.0."""
         assert RECENT_ACTIVITY_MIN_RPM == 1.0
+
+
+class TestRejectedRequestDemand:
+    """Tests for demand tracking from rejected requests (503s)."""
+
+    @pytest.fixture
+    def demand_tracker(self, redis_client: RedisClient) -> DemandTracker:
+        """Create a DemandTracker instance for testing."""
+        return DemandTracker(redis_client)
+
+    @pytest.mark.asyncio
+    async def test_rejected_request_records_demand(self, demand_tracker: DemandTracker) -> None:
+        """Test that a rejected request records demand via the signal handler."""
+        project_id = "test-rejected-demand"
+
+        await demand_tracker._on_request_rejected(
+            sender=None, project_id=project_id, reason="no_proxy_available"
+        )
+
+        rate = await demand_tracker.get_requests_per_minute(project_id)
+        assert rate > 0
+
+    @pytest.mark.asyncio
+    async def test_rejected_request_triggers_recent_activity(
+        self, demand_tracker: DemandTracker
+    ) -> None:
+        """Test that a rejected request makes has_recent_activity return True."""
+        project_id = "test-rejected-recent"
+
+        await demand_tracker._on_request_rejected(
+            sender=None, project_id=project_id, reason="no_proxy_available"
+        )
+
+        assert await demand_tracker.has_recent_activity(project_id) is True
+
+    @pytest.mark.asyncio
+    async def test_rejected_request_rate_limiting(self, demand_tracker: DemandTracker) -> None:
+        """Test that rapid rejections are rate-limited to avoid Redis flood."""
+        project_id = "test-rejected-ratelimit"
+
+        # First rejection should be recorded
+        await demand_tracker._on_request_rejected(
+            sender=None, project_id=project_id, reason="no_proxy_available"
+        )
+
+        # Rapid subsequent rejections should be dropped
+        for _ in range(50):
+            await demand_tracker._on_request_rejected(
+                sender=None, project_id=project_id, reason="no_proxy_available"
+            )
+
+        # Only 1 request should be recorded (the rest were rate-limited)
+        key = DEMAND_KEY.format(project_id=project_id)
+        count = await demand_tracker._redis_client.client.zcard(key)
+        assert count == 1
+
+    @pytest.mark.asyncio
+    async def test_rejected_request_rate_limit_expires(
+        self, demand_tracker: DemandTracker, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Test that rate limit allows recording again after the interval."""
+        project_id = "test-rejected-expire"
+
+        # Record first rejection
+        await demand_tracker._on_request_rejected(
+            sender=None, project_id=project_id, reason="no_proxy_available"
+        )
+
+        # Simulate time passing beyond the rate limit interval
+        demand_tracker._last_rejection_recorded[project_id] -= (
+            REJECTION_RECORD_INTERVAL_SECONDS + 0.1
+        )
+
+        # Next rejection should be recorded
+        await demand_tracker._on_request_rejected(
+            sender=None, project_id=project_id, reason="no_proxy_available"
+        )
+
+        key = DEMAND_KEY.format(project_id=project_id)
+        count = await demand_tracker._redis_client.client.zcard(key)
+        assert count == 2
+
+    @pytest.mark.asyncio
+    async def test_demand_level_high_after_rejection_with_zero_proxies(
+        self, demand_tracker: DemandTracker
+    ) -> None:
+        """Test that demand level is HIGH after rejection when there are 0 proxies."""
+        project_id = "test-rejected-demand-level"
+
+        await demand_tracker._on_request_rejected(
+            sender=None, project_id=project_id, reason="no_proxy_available"
+        )
+
+        level = await demand_tracker.get_demand_level(project_id, current_proxy_count=0)
+        assert level == DemandLevel.HIGH
+
+    @pytest.mark.asyncio
+    async def test_subscribe_connects_to_request_rejected(
+        self, demand_tracker: DemandTracker
+    ) -> None:
+        """Test that subscribe_to_signals connects to request_rejected signal."""
+        demand_tracker.subscribe_to_signals()
+        assert demand_tracker._on_request_rejected in request_rejected.receivers_for(
+            demand_tracker
+        )

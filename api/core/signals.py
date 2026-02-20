@@ -29,6 +29,11 @@ health_check_completed = signal("health-check-completed")
 #       bytes_sent (int), bytes_received (int)
 request_completed = signal("request-completed")
 
+# Emitted when a request is rejected (e.g., no upstream proxy available)
+# Sender: ProxyServer
+# Args: project_id (str), reason (str)
+request_rejected = signal("request-rejected")
+
 
 # =============================================================================
 # Proxy Lifecycle Signals

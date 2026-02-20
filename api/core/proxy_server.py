@@ -21,7 +21,7 @@ import structlog
 from python_socks.async_.asyncio import Proxy as SocksProxy
 
 from api.core.config import settings
-from api.core.signals import request_completed
+from api.core.signals import request_completed, request_rejected
 from api.models.project import Project
 from api.models.proxy import Proxy, ProxyProtocol
 
@@ -328,6 +328,9 @@ class ProxyServer:
         proxy = self._get_upstream_proxy(project_id=project_id, session_id=client_ip)
         if not proxy:
             await self._send_error(client_writer, 503, "No upstream proxy available for project")
+            await request_rejected.send_async(
+                self, project_id=project_id, reason="no_proxy_available"
+            )
             return
 
         # Parse target host:port
@@ -524,6 +527,9 @@ class ProxyServer:
         proxy = self._get_upstream_proxy(project_id=project_id, session_id=client_ip)
         if not proxy:
             await self._send_error(client_writer, 503, "No upstream proxy available for project")
+            await request_rejected.send_async(
+                self, project_id=project_id, reason="no_proxy_available"
+            )
             return
 
         start_time = time.monotonic()

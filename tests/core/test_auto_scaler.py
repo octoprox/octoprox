@@ -525,6 +525,82 @@ class TestRecentActivityGating:
             await auto_scaler._check_connector_scaling(sample_connector, sample_credential)
             mock_scale_down.assert_called_once()
 
+    @pytest.mark.asyncio
+    async def test_scale_up_to_min_proxies_without_recent_activity(
+        self,
+        auto_scaler: AutoScaler,
+        mock_data_provider: MagicMock,
+        sample_connector: Connector,
+        sample_credential: Credential,
+    ) -> None:
+        """Test that scaling up to min_proxies is allowed even without recent activity.
+
+        When the service has been off for a while and there are fewer proxies
+        than min_proxies, the recent activity gate should not prevent reaching
+        the configured minimum.
+        """
+        # 0 proxies, LOW demand → target=min_proxies(1) → scale up
+        mock_data_provider.get_active_proxies_for_connector.return_value = []
+        mock_data_provider.demand_tracker.get_demand_level = AsyncMock(
+            return_value=DemandLevel.LOW
+        )
+        # No recent activity (service was off)
+        mock_data_provider.demand_tracker.has_recent_activity = AsyncMock(
+            return_value=False
+        )
+
+        with patch.object(auto_scaler, "_scale_up", new_callable=AsyncMock) as mock_scale_up:
+            await auto_scaler._check_connector_scaling(sample_connector, sample_credential)
+            mock_scale_up.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_scale_from_zero_with_rejection_demand(
+        self,
+        auto_scaler: AutoScaler,
+        mock_data_provider: MagicMock,
+        sample_credential: Credential,
+    ) -> None:
+        """Test scale-from-zero when min_proxies=0 and rejected requests create demand.
+
+        When min_proxies=0, 0 proxies exist, and rejected requests have been
+        recorded as demand, the auto-scaler should scale up.
+        """
+        # Create a connector with min_proxies=0
+        connector = Connector(
+            id="test-connector-zero",
+            name="Test Zero Min Connector",
+            credential_id="test-credential-1",
+            credential_type=CredentialType.AWS,
+            project_id="test-project-1",
+            config={
+                "region": "us-east-1",
+                "instance_type": "t3.micro",
+                "instance_name": "test-proxy",
+                "key_pair_name": "test-key",
+                "security_group": "sg-12345",
+                "ami_id": "ami-12345",
+                "min_proxies": 0,
+                "max_proxies": 5,
+                "min_rotation_period_minutes": 60,
+                "max_rotation_period_minutes": 120,
+            },
+            enabled=True,
+        )
+
+        # 0 proxies, HIGH demand (from rejected requests recording demand)
+        mock_data_provider.get_active_proxies_for_connector.return_value = []
+        mock_data_provider.demand_tracker.get_demand_level = AsyncMock(
+            return_value=DemandLevel.HIGH
+        )
+        # Recent activity exists (rejected requests were just recorded)
+        mock_data_provider.demand_tracker.has_recent_activity = AsyncMock(
+            return_value=True
+        )
+
+        with patch.object(auto_scaler, "_scale_up", new_callable=AsyncMock) as mock_scale_up:
+            await auto_scaler._check_connector_scaling(connector, sample_credential)
+            mock_scale_up.assert_called_once()
+
 
 class TestScaleDown:
     """Tests for _scale_down method."""

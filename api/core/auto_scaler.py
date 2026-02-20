@@ -358,17 +358,19 @@ class AutoScaler:
 
         # Scale up or down (incrementally)
         if target_count > current_count:
-            # Gate scale-up on recent activity to avoid scaling on stale burst data
-            has_recent = await self._data_provider.demand_tracker.has_recent_activity(
-                project_id
-            )
-            if not has_recent:
-                logger.debug(
-                    "Skipping scale-up: no recent activity",
-                    connector_id=connector.id,
-                    demand_level=demand_level,
+            # Gate scale-up on recent activity to avoid scaling on stale burst data,
+            # but always allow scaling up to min_proxies even without recent traffic
+            if current_count >= cloud_config.min_proxies:
+                has_recent = await self._data_provider.demand_tracker.has_recent_activity(
+                    project_id
                 )
-                return
+                if not has_recent:
+                    logger.debug(
+                        "Skipping scale-up: no recent activity",
+                        connector_id=connector.id,
+                        demand_level=demand_level,
+                    )
+                    return
 
             count = min(target_count - current_count, max_up)
             await self._scale_up(connector, credential, count)
