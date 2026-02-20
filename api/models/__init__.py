@@ -1,3 +1,6 @@
+# Copyright 2025 Octoprox Authors
+# SPDX-License-Identifier: Apache-2.0
+
 """Data models for Octoprox."""
 
 from api.models.project import Project, ProjectCreate, ProjectResponse, ProjectSummary, ProjectUpdate

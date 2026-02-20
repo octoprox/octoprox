@@ -1,3 +1,6 @@
+# Copyright 2025 Octoprox Authors
+# SPDX-License-Identifier: Apache-2.0
+
 """Pytest configuration and fixtures for Octoprox tests.
 
 This module provides shared fixtures using testcontainers for PostgreSQL and Redis,

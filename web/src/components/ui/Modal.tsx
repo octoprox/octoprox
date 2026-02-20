@@ -1,3 +1,6 @@
+// Copyright 2025 Octoprox Authors
+// SPDX-License-Identifier: Apache-2.0
+
 import { type HTMLAttributes, type ReactNode } from 'react'
 import { X } from 'lucide-react'
 import { cn } from '../../utils/cn'

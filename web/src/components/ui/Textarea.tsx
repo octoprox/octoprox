@@ -1,3 +1,6 @@
+// Copyright 2025 Octoprox Authors
+// SPDX-License-Identifier: Apache-2.0
+
 import { forwardRef, type TextareaHTMLAttributes } from 'react'
 import { cn } from '../../utils/cn'
 

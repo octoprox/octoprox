@@ -1,3 +1,6 @@
+# Copyright 2025 Octoprox Authors
+# SPDX-License-Identifier: Apache-2.0
+
 """Health checker for proxy pool.
 
 Emits health_check_completed signals instead of directly calling ProxyManager.

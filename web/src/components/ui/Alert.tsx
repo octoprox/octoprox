@@ -1,3 +1,6 @@
+// Copyright 2025 Octoprox Authors
+// SPDX-License-Identifier: Apache-2.0
+
 import { type HTMLAttributes } from 'react'
 import { cn } from '../../utils/cn'
 

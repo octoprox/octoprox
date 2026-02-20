@@ -1,3 +1,6 @@
+# Copyright 2025 Octoprox Authors
+# SPDX-License-Identifier: Apache-2.0
+
 """Authentication middleware and dependencies for Octoprox."""
 
 from fastapi import Depends, HTTPException, Request

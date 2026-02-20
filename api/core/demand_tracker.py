@@ -1,3 +1,6 @@
+# Copyright 2025 Octoprox Authors
+# SPDX-License-Identifier: Apache-2.0
+
 """Demand tracking for auto-scaling decisions.
 
 This module tracks request rates per project using a sliding window

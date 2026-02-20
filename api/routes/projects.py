@@ -1,3 +1,6 @@
+# Copyright 2025 Octoprox Authors
+# SPDX-License-Identifier: Apache-2.0
+
 """Project management endpoints."""
 
 from fastapi import APIRouter, HTTPException, Request

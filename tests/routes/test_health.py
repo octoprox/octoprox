@@ -1,3 +1,6 @@
+# Copyright 2025 Octoprox Authors
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for health check endpoints."""
 
 from starlette.testclient import TestClient

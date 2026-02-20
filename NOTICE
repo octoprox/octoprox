@@ -1,0 +1,45 @@
+Octoprox
+Copyright 2025 Octoprox Authors
+
+This product includes software developed by the Octoprox Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+
+================================================================================
+
+This project includes the following third-party dependencies:
+
+Backend (Python):
+- FastAPI (MIT License) - https://github.com/tiangolo/fastapi
+- Uvicorn (BSD License) - https://github.com/encode/uvicorn
+- Pydantic (MIT License) - https://github.com/pydantic/pydantic
+- httpx (BSD License) - https://github.com/encode/httpx
+- SQLAlchemy (MIT License) - https://github.com/sqlalchemy/sqlalchemy
+- Redis-py (MIT License) - https://github.com/redis/redis-py
+- boto3 (Apache 2.0 License) - https://github.com/boto/boto3
+- google-cloud-compute (Apache 2.0 License) - https://github.com/googleapis/google-cloud-python
+- azure-mgmt-compute (MIT License) - https://github.com/Azure/azure-sdk-for-python
+
+Frontend (TypeScript/JavaScript):
+- React (MIT License) - https://github.com/facebook/react
+- Vite (MIT License) - https://github.com/vitejs/vite
+- TailwindCSS (MIT License) - https://github.com/tailwindlabs/tailwindcss
+- TanStack Query (MIT License) - https://github.com/TanStack/query
+- TanStack Table (MIT License) - https://github.com/TanStack/table
+- Recharts (MIT License) - https://github.com/recharts/recharts
+- Lucide React (ISC License) - https://github.com/lucide-icons/lucide
+
+For the full list of dependencies and their licenses, see:
+- pyproject.toml (Python dependencies)
+- web/package.json (JavaScript dependencies)
+

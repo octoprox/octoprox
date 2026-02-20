@@ -1,3 +1,6 @@
+# Copyright 2025 Octoprox Authors
+# SPDX-License-Identifier: Apache-2.0
+
 """Cloud provider integrations for dynamic proxy instances.
 
 This module provides base classes and stubs for cloud provider integrations.

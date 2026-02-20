@@ -1,3 +1,6 @@
+# Copyright 2025 Octoprox Authors
+# SPDX-License-Identifier: Apache-2.0
+
 """Proxy providers for different source types."""
 
 from api.providers.base import ProxyProvider

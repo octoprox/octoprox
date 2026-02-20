@@ -1,3 +1,6 @@
+// Copyright 2025 Octoprox Authors
+// SPDX-License-Identifier: Apache-2.0
+
 import { useState } from 'react'
 import { Lock, User, AlertCircle, Moon, Sun } from 'lucide-react'
 import octoproxLogo from '../assets/logos/octoprox_horizontal.svg'

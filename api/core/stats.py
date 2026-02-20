@@ -1,3 +1,6 @@
+# Copyright 2025 Octoprox Authors
+# SPDX-License-Identifier: Apache-2.0
+
 """Stats calculation helpers for proxies and projects."""
 
 from typing import Any, Protocol, TypedDict

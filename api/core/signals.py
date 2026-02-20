@@ -1,3 +1,6 @@
+# Copyright 2025 Octoprox Authors
+# SPDX-License-Identifier: Apache-2.0
+
 """Signal definitions for decoupled component communication.
 
 This module defines blinker signals used for event-driven communication

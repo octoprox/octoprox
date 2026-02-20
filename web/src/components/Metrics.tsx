@@ -1,3 +1,6 @@
+// Copyright 2025 Octoprox Authors
+// SPDX-License-Identifier: Apache-2.0
+
 import { useState, useMemo } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import {

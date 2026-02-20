@@ -1,3 +1,6 @@
+# Copyright 2025 Octoprox Authors
+# SPDX-License-Identifier: Apache-2.0
+
 """Database module for Octoprox."""
 
 from api.db.models import ProjectModel, ProxyMetricsModel, ProxyModel, CredentialModel, ConnectorModel

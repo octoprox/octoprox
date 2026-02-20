@@ -1,3 +1,6 @@
+// Copyright 2025 Octoprox Authors
+// SPDX-License-Identifier: Apache-2.0
+
 import { useState } from 'react'
 import { Eye, EyeOff } from 'lucide-react'
 import { ProjectUpdate, ProjectSummary } from '../api/client'

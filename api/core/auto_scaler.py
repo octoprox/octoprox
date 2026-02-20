@@ -1,3 +1,6 @@
+# Copyright 2025 Octoprox Authors
+# SPDX-License-Identifier: Apache-2.0
+
 """Auto-scaler service for dynamic proxy instance management.
 
 This module provides automatic scaling and rotation of cloud proxy instances

@@ -1,3 +1,6 @@
+# Copyright 2025 Octoprox Authors
+# SPDX-License-Identifier: Apache-2.0
+
 """Main entry point for Octoprox API server."""
 
 from contextlib import asynccontextmanager

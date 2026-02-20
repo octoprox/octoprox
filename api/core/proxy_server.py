@@ -1,3 +1,6 @@
+# Copyright 2025 Octoprox Authors
+# SPDX-License-Identifier: Apache-2.0
+
 """HTTP Proxy Server for Octoprox.
 
 This module implements a real HTTP proxy server that can be used directly

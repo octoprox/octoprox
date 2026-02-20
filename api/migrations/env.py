@@ -1,3 +1,6 @@
+# Copyright 2025 Octoprox Authors
+# SPDX-License-Identifier: Apache-2.0
+
 """Alembic environment configuration."""
 
 from sqlalchemy import create_engine, pool

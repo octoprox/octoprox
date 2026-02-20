@@ -1,3 +1,6 @@
+# Copyright 2025 Octoprox Authors
+# SPDX-License-Identifier: Apache-2.0
+
 """Add bytes_sent and bytes_received tracking to proxy_metrics.
 
 Revision ID: 004

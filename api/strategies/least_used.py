@@ -1,3 +1,6 @@
+# Copyright 2025 Octoprox Authors
+# SPDX-License-Identifier: Apache-2.0
+
 """Least-used routing strategy."""
 
 from api.models.proxy import Proxy
