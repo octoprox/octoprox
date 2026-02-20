@@ -4,6 +4,7 @@ This module provides base classes and stubs for cloud provider integrations.
 Actual implementations require the 'cloud' optional dependencies.
 """
 
+import asyncio
 from abc import abstractmethod
 from pathlib import Path
 
@@ -201,12 +202,14 @@ class AWSProvider(CloudProvider):
             security_group=self._config.security_group,
         )
 
-        instances = ec2_resource.create_instances(**run_args)
-        instance = instances[0]
+        def _create_and_wait():
+            instances = ec2_resource.create_instances(**run_args)
+            instance = instances[0]
+            instance.wait_until_running()
+            instance.reload()
+            return instance
 
-        # Wait for instance to be running
-        instance.wait_until_running()
-        instance.reload()
+        instance = await asyncio.to_thread(_create_and_wait)
 
         host = instance.public_ip_address or instance.private_ip_address
         if not host:
@@ -234,7 +237,9 @@ class AWSProvider(CloudProvider):
 
         # Remove aws- prefix if present
         ec2_instance_id = instance_id.replace("aws-", "")
-        ec2_client.terminate_instances(InstanceIds=[ec2_instance_id])
+        await asyncio.to_thread(
+            ec2_client.terminate_instances, InstanceIds=[ec2_instance_id]
+        )
         logger.info("Terminated AWS instance", instance_id=ec2_instance_id)
         return True
 
@@ -273,7 +278,13 @@ class GCPProvider(CloudProvider):
         self._instances_client = None
 
     def _get_compute_client(self):
-        """Get or create GCP compute client."""
+        """Get or create GCP compute client.
+
+        Note: Client creation involves synchronous file I/O when service account
+        JSON is provided. This is acceptable because it only runs once (cached),
+        and the temp file write is fast. The actual blocking API calls in
+        create_instance/terminate_instance are offloaded via asyncio.to_thread.
+        """
         try:
             from google.cloud import compute_v1
 
@@ -282,8 +293,8 @@ class GCPProvider(CloudProvider):
                 service_account_json = self.credential.config.get("service_account_json")
                 if service_account_json:
                     import json
-                    import tempfile
                     import os
+                    import tempfile
 
                     # Write service account JSON to temp file for authentication
                     with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
@@ -373,30 +384,33 @@ class GCPProvider(CloudProvider):
         ]
         instance.metadata = metadata
 
-        # Create the instance
-        operation = client.insert(
-            project=self._config.project_id,
-            zone=self._config.zone,
-            instance_resource=instance,
-        )
+        # Create the instance and wait for completion in a thread to avoid
+        # blocking the event loop (GCP SDK is synchronous)
+        def _insert_and_wait():
+            import time as _time
 
-        # Wait for operation to complete
-        from google.cloud.compute_v1.services.zone_operations import ZoneOperationsClient
+            from google.cloud.compute_v1.services.zone_operations import ZoneOperationsClient
 
-        ops_client = ZoneOperationsClient()
-        while operation.status != compute_v1.Operation.Status.DONE:
-            operation = ops_client.get(
+            operation = client.insert(
                 project=self._config.project_id,
                 zone=self._config.zone,
-                operation=operation.name,
+                instance_resource=instance,
+            )
+            ops_client = ZoneOperationsClient()
+            while operation.status != compute_v1.Operation.Status.DONE:
+                _time.sleep(2)
+                operation = ops_client.get(
+                    project=self._config.project_id,
+                    zone=self._config.zone,
+                    operation=operation.name,
+                )
+            return client.get(
+                project=self._config.project_id,
+                zone=self._config.zone,
+                instance=instance_name,
             )
 
-        # Get the created instance
-        created_instance = client.get(
-            project=self._config.project_id,
-            zone=self._config.zone,
-            instance=instance_name,
-        )
+        created_instance = await asyncio.to_thread(_insert_and_wait)
 
         # Get IP address
         host = None
@@ -433,7 +447,8 @@ class GCPProvider(CloudProvider):
 
         # Remove gcp- prefix if present
         instance_name = instance_id.replace("gcp-", "")
-        client.delete(
+        await asyncio.to_thread(
+            client.delete,
             project=self._config.project_id,
             zone=self._config.zone,
             instance=instance_name,
@@ -550,40 +565,6 @@ class AzureProvider(CloudProvider):
                 vm_name=vm_name,
             )
 
-            # Get subnet
-            subnet = network_client.subnets.get(
-                self._config.resource_group, self._config.vnet_name, self._config.subnet_name
-            )
-
-            # Create public IP
-            # Note: Standard SKU is required (Basic SKU is deprecated)
-            # Standard SKU requires Static allocation
-            pip_name = f"{vm_name}-pip"
-            pip_params = {
-                "location": self._config.location,
-                "sku": {"name": "Standard"},
-                "public_ip_allocation_method": "Static",
-            }
-            pip_result = network_client.public_ip_addresses.begin_create_or_update(
-                self._config.resource_group, pip_name, pip_params
-            ).result()
-
-            # Create NIC
-            nic_name = f"{vm_name}-nic"
-            nic_params = {
-                "location": self._config.location,
-                "ip_configurations": [
-                    {
-                        "name": "ipconfig1",
-                        "subnet": {"id": subnet.id},
-                        "public_ip_address": {"id": pip_result.id},
-                    }
-                ],
-            }
-            nic_result = network_client.network_interfaces.begin_create_or_update(
-                self._config.resource_group, nic_name, nic_params
-            ).result()
-
             # Use the external Squid setup script
             custom_data = get_squid_setup_script()
             custom_data_b64 = base64.b64encode(custom_data.encode()).decode()
@@ -596,54 +577,96 @@ class AzureProvider(CloudProvider):
             for key, value in self._config.tags.items():
                 tags[key] = str(value)
 
-            # Create VM
-            vm_params = {
-                "location": self._config.location,
-                "tags": tags,
-                "hardware_profile": {"vm_size": self._config.vm_size},
-                "storage_profile": {
-                    "image_reference": image_reference,
-                    "os_disk": {
-                        "name": f"{vm_name}-osdisk",
-                        "caching": "ReadWrite",
-                        "create_option": "FromImage",
-                        "managed_disk": {"storage_account_type": "Standard_LRS"},
-                    },
-                },
-                "os_profile": {
-                    "computer_name": vm_name,
-                    "admin_username": "octoprox",
-                    "custom_data": custom_data_b64,
-                    "linux_configuration": {
-                        "disable_password_authentication": bool(self._config.ssh_public_key),
-                        "ssh": {
-                            "public_keys": [
-                                {
-                                    "path": "/home/octoprox/.ssh/authorized_keys",
-                                    "key_data": self._config.ssh_public_key,
-                                }
-                            ] if self._config.ssh_public_key else [],
+            # Run all blocking Azure SDK calls in a thread to avoid blocking
+            # the event loop. Each .result() call blocks waiting for the Azure
+            # operation to complete (5-30+ seconds each).
+            def _provision_vm():
+                # Get subnet
+                subnet = network_client.subnets.get(
+                    self._config.resource_group, self._config.vnet_name, self._config.subnet_name
+                )
+
+                # Create public IP
+                # Note: Standard SKU is required (Basic SKU is deprecated)
+                # Standard SKU requires Static allocation
+                pip_params = {
+                    "location": self._config.location,
+                    "sku": {"name": "Standard"},
+                    "public_ip_allocation_method": "Static",
+                }
+                pip_result = network_client.public_ip_addresses.begin_create_or_update(
+                    self._config.resource_group, pip_name, pip_params
+                ).result()
+
+                # Create NIC
+                nic_params = {
+                    "location": self._config.location,
+                    "ip_configurations": [
+                        {
+                            "name": "ipconfig1",
+                            "subnet": {"id": subnet.id},
+                            "public_ip_address": {"id": pip_result.id},
+                        }
+                    ],
+                }
+                nic_result = network_client.network_interfaces.begin_create_or_update(
+                    self._config.resource_group, nic_name, nic_params
+                ).result()
+
+                # Create VM
+                vm_params = {
+                    "location": self._config.location,
+                    "tags": tags,
+                    "hardware_profile": {"vm_size": self._config.vm_size},
+                    "storage_profile": {
+                        "image_reference": image_reference,
+                        "os_disk": {
+                            "name": f"{vm_name}-osdisk",
+                            "caching": "ReadWrite",
+                            "create_option": "FromImage",
+                            "managed_disk": {"storage_account_type": "Standard_LRS"},
                         },
                     },
-                },
-                "network_profile": {
-                    "network_interfaces": [{"id": nic_result.id, "primary": True}]
-                },
-            }
+                    "os_profile": {
+                        "computer_name": vm_name,
+                        "admin_username": "octoprox",
+                        "custom_data": custom_data_b64,
+                        "linux_configuration": {
+                            "disable_password_authentication": bool(self._config.ssh_public_key),
+                            "ssh": {
+                                "public_keys": [
+                                    {
+                                        "path": "/home/octoprox/.ssh/authorized_keys",
+                                        "key_data": self._config.ssh_public_key,
+                                    }
+                                ] if self._config.ssh_public_key else [],
+                            },
+                        },
+                    },
+                    "network_profile": {
+                        "network_interfaces": [{"id": nic_result.id, "primary": True}]
+                    },
+                }
 
-            vm_result = compute_client.virtual_machines.begin_create_or_update(
-                self._config.resource_group, vm_name, vm_params
-            ).result()
+                vm_result = compute_client.virtual_machines.begin_create_or_update(
+                    self._config.resource_group, vm_name, vm_params
+                ).result()
 
-            # Get public IP (may need to wait for allocation)
-            pip = network_client.public_ip_addresses.get(self._config.resource_group, pip_name)
-            host = pip.ip_address
+                # Get public IP (may need to wait for allocation)
+                pip = network_client.public_ip_addresses.get(self._config.resource_group, pip_name)
+                host = pip.ip_address
 
-            if not host:
-                logger.warning("VM created but public IP not yet allocated")
-                # Try to get private IP
-                nic = network_client.network_interfaces.get(self._config.resource_group, nic_name)
-                host = nic.ip_configurations[0].private_ip_address
+                if not host:
+                    # Try to get private IP
+                    nic = network_client.network_interfaces.get(self._config.resource_group, nic_name)
+                    host = nic.ip_configurations[0].private_ip_address
+
+                return vm_result, host
+
+            pip_name = f"{vm_name}-pip"
+            nic_name = f"{vm_name}-nic"
+
+            vm_result, host = await asyncio.to_thread(_provision_vm)
 
             if not host:
                 logger.error("VM created but no IP address available")
@@ -667,8 +690,6 @@ class AzureProvider(CloudProvider):
             # Must delete NIC before public IP (NIC references the public IP)
             # Azure reserves the NIC for 180 seconds after a failed VM creation,
             # so we wait and retry to ensure cleanup
-            import asyncio
-
             nic_deleted = False
             if nic_name:
                 # Try immediately first, then wait 180 seconds and retry if needed
@@ -681,9 +702,11 @@ class AzureProvider(CloudProvider):
                             )
                             await asyncio.sleep(180)
                         logger.debug("Cleaning up NIC after VM creation failure", nic_name=nic_name)
-                        network_client.network_interfaces.begin_delete(
-                            self._config.resource_group, nic_name
-                        ).result()
+                        await asyncio.to_thread(
+                            lambda: network_client.network_interfaces.begin_delete(
+                                self._config.resource_group, nic_name
+                            ).result()
+                        )
                         nic_deleted = True
                         logger.info("Successfully cleaned up NIC", nic_name=nic_name)
                         break
@@ -709,9 +732,11 @@ class AzureProvider(CloudProvider):
                 else:
                     try:
                         logger.debug("Cleaning up public IP after VM creation failure", pip_name=pip_name)
-                        network_client.public_ip_addresses.begin_delete(
-                            self._config.resource_group, pip_name
-                        ).result()
+                        await asyncio.to_thread(
+                            lambda: network_client.public_ip_addresses.begin_delete(
+                                self._config.resource_group, pip_name
+                            ).result()
+                        )
                         logger.info("Successfully cleaned up public IP", pip_name=pip_name)
                     except Exception as cleanup_error:
                         logger.warning(
@@ -731,36 +756,40 @@ class AzureProvider(CloudProvider):
         # Remove azure- prefix if present
         vm_name = instance_id.replace("azure-", "")
 
-        # Delete VM
-        compute_client.virtual_machines.begin_delete(
-            self._config.resource_group, vm_name
-        ).result()
-
-        # Clean up NIC and public IP
-        nic_name = f"{vm_name}-nic"
-        pip_name = f"{vm_name}-pip"
-
-        try:
-            network_client.network_interfaces.begin_delete(
-                self._config.resource_group, nic_name
+        # Run all blocking Azure SDK delete calls in a thread
+        def _delete_vm_resources():
+            # Delete VM
+            compute_client.virtual_machines.begin_delete(
+                self._config.resource_group, vm_name
             ).result()
-        except Exception as cleanup_error:
-            logger.warning(
-                "Failed to clean up NIC during VM termination",
-                nic_name=nic_name,
-                error=str(cleanup_error),
-            )
 
-        try:
-            network_client.public_ip_addresses.begin_delete(
-                self._config.resource_group, pip_name
-            ).result()
-        except Exception as cleanup_error:
-            logger.warning(
-                "Failed to clean up public IP during VM termination",
-                pip_name=pip_name,
-                error=str(cleanup_error),
-            )
+            # Clean up NIC and public IP
+            nic_name = f"{vm_name}-nic"
+            pip_name = f"{vm_name}-pip"
+
+            try:
+                network_client.network_interfaces.begin_delete(
+                    self._config.resource_group, nic_name
+                ).result()
+            except Exception as cleanup_error:
+                logger.warning(
+                    "Failed to clean up NIC during VM termination",
+                    nic_name=nic_name,
+                    error=str(cleanup_error),
+                )
+
+            try:
+                network_client.public_ip_addresses.begin_delete(
+                    self._config.resource_group, pip_name
+                ).result()
+            except Exception as cleanup_error:
+                logger.warning(
+                    "Failed to clean up public IP during VM termination",
+                    pip_name=pip_name,
+                    error=str(cleanup_error),
+                )
+
+        await asyncio.to_thread(_delete_vm_resources)
 
         logger.info("Terminated Azure VM", vm_name=vm_name)
         return True
