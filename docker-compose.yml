@@ -7,10 +7,14 @@ services:
       - "8000:8000"
       - "8080:8080"
     environment:
-      - OCTOPROX_ENV=development
+      - OCTOPROX_ENV=production
       - OCTOPROX_REDIS_URL=redis://redis:6379/0
-      - OCTOPROX_DATABASE_URL=postgresql+asyncpg://octoprox:octoprox@postgres:5433/octoprox
-      - OCTOPROX_LOG_LEVEL=DEBUG
+      - OCTOPROX_DB_HOST=postgres
+      - OCTOPROX_DB_PORT=5432
+      - OCTOPROX_DB_USER=octoprox
+      - OCTOPROX_DB_PASSWORD=octoprox
+      - OCTOPROX_DB_NAME=octoprox
+      - OCTOPROX_LOG_LEVEL=INFO
     volumes:
       - ./config:/app/config:ro
     depends_on:
