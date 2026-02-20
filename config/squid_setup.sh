@@ -24,8 +24,6 @@ systemctl stop squid || true
 rm -f /etc/squid/squid.conf
 rm -rf /etc/squid/conf.d/*
 
-##OCTOPROX_AUTH_PREAMBLE##
-
 # Create stealthy proxy configuration
 cat > /etc/squid/squid.conf << SQUIDCONF
 # Stealth proxy config for Octoprox
@@ -55,6 +53,7 @@ reply_header_access X-Cache deny all
 reply_header_access X-Cache-Lookup deny all
 reply_header_access Via deny all
 reply_header_access Server deny all
+reply_header_access Proxy-Authenticate deny all
 
 # Hide the proxy hostname
 visible_hostname unknown

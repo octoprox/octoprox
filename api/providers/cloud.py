@@ -5,6 +5,7 @@ Actual implementations require the 'cloud' optional dependencies.
 """
 
 import asyncio
+import base64
 import secrets
 import string
 from abc import abstractmethod
@@ -52,40 +53,15 @@ def _generate_proxy_credentials() -> tuple[str, str]:
     return username, password
 
 
-# Auth preamble: bash commands to detect ncsa_auth path and create htpasswd file
-_AUTH_PREAMBLE = """\
-# Detect ncsa_auth helper path for Squid basic authentication
-if [ -f /usr/lib/squid/basic_ncsa_auth ]; then
-    NCSA_AUTH_PATH=/usr/lib/squid/basic_ncsa_auth
-elif [ -f /usr/lib64/squid/basic_ncsa_auth ]; then
-    NCSA_AUTH_PATH=/usr/lib64/squid/basic_ncsa_auth
-else
-    NCSA_AUTH_PATH=$(find /usr -name basic_ncsa_auth 2>/dev/null | head -1)
-fi
-
-# Create htpasswd file for proxy authentication
-# Detect the Squid runtime user: proxy on Ubuntu/Debian, squid on RHEL/CentOS
-if id -u proxy &>/dev/null; then
-    SQUID_USER=proxy
-elif id -u squid &>/dev/null; then
-    SQUID_USER=squid
-else
-    SQUID_USER=root
-fi
-HASHED=$(openssl passwd -apr1 '{password}')
-echo '{username}:'"$HASHED" > /etc/squid/passwd
-chmod 640 /etc/squid/passwd
-chown root:"$SQUID_USER" /etc/squid/passwd"""
-
-# Auth config: squid.conf directives for basic authentication
+# Auth config: squid.conf directives for header-based authentication.
+# Uses req_header ACL to match the exact Proxy-Authorization header value
+# instead of auth_param basic, which avoids 407 challenge responses that
+# reveal the server is a proxy. Invalid/missing auth gets TCP_RESET.
 _AUTH_CONFIG = """\
-# Proxy authentication
-auth_param basic program $NCSA_AUTH_PATH /etc/squid/passwd
-auth_param basic children 5
-auth_param basic credentialsttl 1 hour
-auth_param basic casesensitive on
-acl authenticated proxy_auth REQUIRED
-http_access allow authenticated
+# Header-based proxy authentication (no 407 challenges)
+acl has_valid_auth req_header Proxy-Authorization ^Basic\\s+{auth_b64}$
+http_access allow has_valid_auth
+deny_info TCP_RESET all
 http_access deny all"""
 
 # No-auth config: allow all connections (original behavior)
@@ -109,14 +85,15 @@ def build_squid_setup_script(
     template = _load_squid_setup_template()
 
     if username and password:
-        preamble = _AUTH_PREAMBLE.format(username=username, password=password)
-        auth_config = _AUTH_CONFIG
+        # Compute base64-encoded credentials for the Proxy-Authorization header
+        auth_b64 = base64.b64encode(f"{username}:{password}".encode()).decode()
+        # Escape regex-special chars in base64 output (+ is the only one possible)
+        auth_b64_escaped = auth_b64.replace("+", "\\+")
+        auth_config = _AUTH_CONFIG.format(auth_b64=auth_b64_escaped)
     else:
-        preamble = ""
         auth_config = _NO_AUTH_CONFIG
 
-    script = template.replace("##OCTOPROX_AUTH_PREAMBLE##", preamble)
-    script = script.replace("##OCTOPROX_AUTH_CONFIG##", auth_config)
+    script = template.replace("##OCTOPROX_AUTH_CONFIG##", auth_config)
     return script
 
 
