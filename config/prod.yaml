@@ -1,4 +1,9 @@
 # Production configuration for Octoprox
+#
+# Note: Environment variables (OCTOPROX_*) take precedence over values in this file.
+# Database and Redis settings can be overridden via:
+#   OCTOPROX_REDIS_URL, OCTOPROX_DB_HOST, OCTOPROX_DB_USER, OCTOPROX_DB_PASSWORD, OCTOPROX_DB_NAME
+
 server:
   host: "0.0.0.0"
   api_port: 8000
@@ -9,29 +14,29 @@ server:
 logging:
   level: INFO
   format: json
-  
+
 redis:
-  url: "${OCTOPROX_REDIS_URL}"
+  url: "redis://localhost:6379/0"
 
 database:
-  host: "${OCTOPROX_DB_HOST}"
+  host: "localhost"
   port: 5432
-  user: "${OCTOPROX_DB_USER}"
-  password: "${OCTOPROX_DB_PASSWORD}"
-  name: "${OCTOPROX_DB_NAME}"
+  user: "octoprox"
+  password: "octoprox"
+  name: "octoprox"
   application_name: "octoprox"
-  metrics_flush_interval: 300
+  metrics_flush_interval: 60
 
 proxy:
   default_strategy: health_based
-  
+
   health_check:
     enabled: true
     interval_seconds: 60
     timeout_seconds: 30
     unhealthy_threshold: 3
     healthy_threshold: 2
-    
+
   connection:
     timeout_seconds: 30
     max_retries: 3

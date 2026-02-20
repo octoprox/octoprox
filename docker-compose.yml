@@ -7,6 +7,10 @@ services:
       - "8000:8000"
       - "8080:8080"
     environment:
+      - OCTOPROX_AUTH_ENABLED=true
+      - OCTOPROX_AUTH_USERNAME=admin
+      - OCTOPROX_AUTH_PASSWORD=admin
+      - OCTOPROX_JWT_SECRET=change-me-in-production
       - OCTOPROX_ENV=production
       - OCTOPROX_REDIS_URL=redis://redis:6379/0
       - OCTOPROX_DB_HOST=postgres

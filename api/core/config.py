@@ -7,7 +7,7 @@ from typing import Any
 
 import yaml
 from pydantic import Field
-from pydantic_settings import BaseSettings
+from pydantic_settings import BaseSettings, PydanticBaseSettingsSource
 
 
 def _load_yaml_config(config_path: Path) -> dict[str, Any]:
@@ -51,8 +51,30 @@ def _load_yaml_config(config_path: Path) -> dict[str, Any]:
     return {k: v for k, v in flat_config.items() if v is not None}
 
 
-# Global to store YAML config for settings sources
-_yaml_config: dict[str, Any] = {}
+# Global to store YAML config path for settings sources
+_yaml_config_path: Path | None = None
+
+
+class YamlConfigSettingsSource(PydanticBaseSettingsSource):
+    """Custom settings source that reads from YAML config file."""
+
+    def get_field_value(
+        self, field: Any, field_name: str
+    ) -> tuple[Any, str, bool]:
+        """Get field value from YAML config."""
+        if _yaml_config_path is None:
+            return None, field_name, False
+
+        yaml_config = _load_yaml_config(_yaml_config_path)
+        if field_name in yaml_config:
+            return yaml_config[field_name], field_name, False
+        return None, field_name, False
+
+    def __call__(self) -> dict[str, Any]:
+        """Return all values from YAML config."""
+        if _yaml_config_path is None:
+            return {}
+        return _load_yaml_config(_yaml_config_path)
 
 
 class Settings(BaseSettings):
@@ -149,11 +171,30 @@ class Settings(BaseSettings):
         "extra": "ignore",
     }
 
-    def __init__(self, **kwargs: Any) -> None:
-        # Merge YAML config with any explicit kwargs
-        # kwargs (explicit) take precedence over YAML
-        merged = {**_yaml_config, **kwargs}
-        super().__init__(**merged)
+    @classmethod
+    def settings_customise_sources(
+        cls,
+        settings_cls: type[BaseSettings],
+        init_settings: PydanticBaseSettingsSource,
+        env_settings: PydanticBaseSettingsSource,
+        dotenv_settings: PydanticBaseSettingsSource,
+        file_secret_settings: PydanticBaseSettingsSource,
+    ) -> tuple[PydanticBaseSettingsSource, ...]:
+        """Customize settings sources priority.
+
+        Priority (highest to lowest):
+        1. Init settings (explicit kwargs)
+        2. Environment variables (OCTOPROX_*)
+        3. .env file
+        4. YAML config file
+        5. Default values (handled by pydantic)
+        """
+        return (
+            init_settings,
+            env_settings,
+            dotenv_settings,
+            YamlConfigSettingsSource(settings_cls),
+        )
 
 
 @lru_cache
@@ -165,7 +206,7 @@ def get_settings() -> Settings:
     2. YAML config file (config/dev.yaml or config/prod.yaml)
     3. Default values
     """
-    global _yaml_config
+    global _yaml_config_path
 
     env = os.getenv("OCTOPROX_ENV", "development")
 
@@ -176,8 +217,8 @@ def get_settings() -> Settings:
     else:
         config_path = Path("config") / f"{env.lower()}.yaml"
 
-    # Load YAML config into global so Settings.__init__ can use it
-    _yaml_config = _load_yaml_config(config_path)
+    # Store path globally so YamlConfigSettingsSource can access it
+    _yaml_config_path = config_path
 
     return Settings()
 

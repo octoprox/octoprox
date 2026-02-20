@@ -1,12 +1,15 @@
 """Main entry point for Octoprox API server."""
 
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import AsyncGenerator
 
 import structlog
 import uvicorn
 from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 
 from api.core.auth import require_auth
 from api.core.config import settings
@@ -106,6 +109,24 @@ def create_app() -> FastAPI:
     app.include_router(connectors.options_router, prefix="/api/v1", tags=["Connectors"], dependencies=auth_dependency)
     app.include_router(proxies.router, prefix="/api/v1", tags=["Proxies"], dependencies=auth_dependency)
     app.include_router(metrics.router, prefix="/api/v1", tags=["Metrics"], dependencies=auth_dependency)
+
+    # Serve frontend static files in production (when web/dist exists)
+    static_dir = Path(__file__).parent.parent / "web" / "dist"
+    if static_dir.exists():
+        # Serve static assets (JS, CSS, images)
+        assets_dir = static_dir / "assets"
+        if assets_dir.exists():
+            app.mount("/assets", StaticFiles(directory=assets_dir), name="assets")
+
+        # SPA fallback - serve index.html for all non-API routes
+        @app.get("/{full_path:path}")
+        async def serve_spa(full_path: str) -> FileResponse:
+            # If it's a file that exists in dist, serve it (e.g., favicon, robots.txt)
+            file_path = static_dir / full_path
+            if file_path.is_file():
+                return FileResponse(file_path)
+            # Otherwise serve index.html for SPA routing
+            return FileResponse(static_dir / "index.html")
 
     return app
 
