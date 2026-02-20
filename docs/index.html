@@ -28,14 +28,13 @@ layout: null
       color: var(--text);
       line-height: 1.6;
     }
-    .container { max-width: 1100px; margin: 0 auto; padding: 0 24px; }
+    .container { max-width: 1100px; margin: 0 auto; padding: 0 24px; box-sizing: border-box; }
     header {
       padding: 20px 0;
       border-bottom: 1px solid var(--border);
-      overflow: hidden;
     }
     header .container { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 12px; }
-    .logo { height: 40px; width: auto; }
+    .logo { height: 40px; }
     nav a {
       color: var(--text-muted);
       text-decoration: none;
@@ -131,9 +130,8 @@ layout: null
     }
     @media (max-width: 500px) {
       .container { padding: 0 16px; }
-      header .container { justify-content: center; }
-      .logo { height: 28px; width: auto; }
-      nav { width: 100%; text-align: center; }
+      header .container { flex-direction: column; align-items: center; gap: 8px; }
+      .logo { height: 32px; }
       nav a { margin: 0 12px; font-size: 0.9rem; }
     }
   </style>
