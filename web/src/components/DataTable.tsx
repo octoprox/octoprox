@@ -69,16 +69,16 @@ export function DataTable<TData, TValue>({
 
   return (
     <div className="space-y-3">
-      <div className="bg-white rounded-lg shadow overflow-hidden">
+      <div className="bg-white dark:bg-gray-800 rounded-lg shadow overflow-hidden">
         <table className="w-full text-sm">
           <thead>
-            <tr className="bg-gray-50 border-b border-gray-200">
+            <tr className="bg-gray-50 dark:bg-gray-700 border-b border-gray-200 dark:border-gray-600">
               {table.getHeaderGroups().map((headerGroup) =>
                 headerGroup.headers.map((header) => (
                   <th
                     key={header.id}
-                    className={`px-3 py-2 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider ${
-                      header.column.getCanSort() ? 'cursor-pointer select-none hover:bg-gray-100' : ''
+                    className={`px-3 py-2 text-left text-xs font-semibold text-gray-600 dark:text-gray-300 uppercase tracking-wider ${
+                      header.column.getCanSort() ? 'cursor-pointer select-none hover:bg-gray-100 dark:hover:bg-gray-600' : ''
                     }`}
                     onClick={header.column.getToggleSortingHandler()}
                   >
@@ -102,17 +102,17 @@ export function DataTable<TData, TValue>({
               )}
             </tr>
           </thead>
-          <tbody className="divide-y divide-gray-100">
+          <tbody className="divide-y divide-gray-100 dark:divide-gray-700">
             {table.getRowModel().rows.length > 0 ? (
               table.getRowModel().rows.map((row) => (
                 <tr
                   key={row.id}
-                  className={`hover:bg-gray-50 transition-colors ${
-                    row.getIsSelected() ? 'bg-blue-50' : ''
+                  className={`hover:bg-gray-50 dark:hover:bg-gray-700/50 transition-colors ${
+                    row.getIsSelected() ? 'bg-blue-50 dark:bg-blue-900/20' : ''
                   }`}
                 >
                   {row.getVisibleCells().map((cell) => (
-                    <td key={cell.id} className="px-3 py-2 text-gray-700">
+                    <td key={cell.id} className="px-3 py-2 text-gray-700 dark:text-gray-300">
                       {flexRender(cell.column.columnDef.cell, cell.getContext())}
                     </td>
                   ))}
@@ -120,7 +120,7 @@ export function DataTable<TData, TValue>({
               ))
             ) : (
               <tr>
-                <td colSpan={columns.length} className="px-3 py-8 text-center text-gray-500">
+                <td colSpan={columns.length} className="px-3 py-8 text-center text-gray-500 dark:text-gray-400">
                   {emptyMessage}
                 </td>
               </tr>
@@ -132,17 +132,17 @@ export function DataTable<TData, TValue>({
       {/* Pagination Controls */}
       {totalRows > 0 && (
         <div className="flex items-center justify-between text-sm">
-          <div className="flex items-center gap-4 text-gray-600">
+          <div className="flex items-center gap-4 text-gray-600 dark:text-gray-400">
             <span>
               Showing {pageIndex * pageSize + 1}-{Math.min((pageIndex + 1) * pageSize, totalRows)} of {totalRows}
             </span>
             <div className="flex items-center gap-2">
-              <label htmlFor="pageSize" className="text-gray-500">Rows:</label>
+              <label htmlFor="pageSize" className="text-gray-500 dark:text-gray-400">Rows:</label>
               <select
                 id="pageSize"
                 value={pageSize}
                 onChange={(e) => table.setPageSize(Number(e.target.value))}
-                className="px-2 py-1 border border-gray-300 rounded text-sm focus:outline-none focus:ring-1 focus:ring-blue-500"
+                className="px-2 py-1 border border-gray-300 dark:border-gray-600 rounded text-sm bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 focus:outline-none focus:ring-1 focus:ring-blue-500"
               >
                 {[10, 20, 50, 100].map((size) => (
                   <option key={size} value={size}>{size}</option>
@@ -152,7 +152,7 @@ export function DataTable<TData, TValue>({
           </div>
 
           <div className="flex items-center gap-2">
-            <div className="flex items-center gap-1 text-gray-600">
+            <div className="flex items-center gap-1 text-gray-600 dark:text-gray-400">
               <span>Page</span>
               <input
                 type="number"
@@ -163,7 +163,7 @@ export function DataTable<TData, TValue>({
                   const page = e.target.value ? Number(e.target.value) - 1 : 0
                   table.setPageIndex(Math.max(0, Math.min(page, pageCount - 1)))
                 }}
-                className="w-14 px-2 py-1 border border-gray-300 rounded text-sm text-center focus:outline-none focus:ring-1 focus:ring-blue-500"
+                className="w-14 px-2 py-1 border border-gray-300 dark:border-gray-600 rounded text-sm text-center bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 focus:outline-none focus:ring-1 focus:ring-blue-500"
               />
               <span>of {pageCount}</span>
             </div>
@@ -172,7 +172,7 @@ export function DataTable<TData, TValue>({
               <button
                 onClick={() => table.setPageIndex(0)}
                 disabled={!table.getCanPreviousPage()}
-                className="p-1 rounded hover:bg-gray-100 disabled:opacity-40 disabled:cursor-not-allowed"
+                className="p-1 rounded hover:bg-gray-100 dark:hover:bg-gray-700 disabled:opacity-40 disabled:cursor-not-allowed"
                 title="First page"
               >
                 <ChevronsLeft className="w-4 h-4" />
@@ -180,7 +180,7 @@ export function DataTable<TData, TValue>({
               <button
                 onClick={() => table.previousPage()}
                 disabled={!table.getCanPreviousPage()}
-                className="p-1 rounded hover:bg-gray-100 disabled:opacity-40 disabled:cursor-not-allowed"
+                className="p-1 rounded hover:bg-gray-100 dark:hover:bg-gray-700 disabled:opacity-40 disabled:cursor-not-allowed"
                 title="Previous page"
               >
                 <ChevronLeft className="w-4 h-4" />
@@ -188,7 +188,7 @@ export function DataTable<TData, TValue>({
               <button
                 onClick={() => table.nextPage()}
                 disabled={!table.getCanNextPage()}
-                className="p-1 rounded hover:bg-gray-100 disabled:opacity-40 disabled:cursor-not-allowed"
+                className="p-1 rounded hover:bg-gray-100 dark:hover:bg-gray-700 disabled:opacity-40 disabled:cursor-not-allowed"
                 title="Next page"
               >
                 <ChevronRight className="w-4 h-4" />
@@ -196,7 +196,7 @@ export function DataTable<TData, TValue>({
               <button
                 onClick={() => table.setPageIndex(pageCount - 1)}
                 disabled={!table.getCanNextPage()}
-                className="p-1 rounded hover:bg-gray-100 disabled:opacity-40 disabled:cursor-not-allowed"
+                className="p-1 rounded hover:bg-gray-100 dark:hover:bg-gray-700 disabled:opacity-40 disabled:cursor-not-allowed"
                 title="Last page"
               >
                 <ChevronsRight className="w-4 h-4" />
@@ -239,25 +239,25 @@ export function createSelectionColumn<TData>(): ColumnDef<TData, unknown> {
             <div className="relative group">
               <button
                 type="button"
-                className="p-0.5 text-gray-400 hover:text-gray-600"
+                className="p-0.5 text-gray-400 hover:text-gray-600 dark:hover:text-gray-300"
                 aria-label="Selection options"
               >
                 <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
                 </svg>
               </button>
-              <div className="absolute left-0 top-full mt-1 bg-white border border-gray-200 rounded shadow-lg opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all z-50 whitespace-nowrap">
+              <div className="absolute left-0 top-full mt-1 bg-white dark:bg-gray-700 border border-gray-200 dark:border-gray-600 rounded shadow-lg opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all z-50 whitespace-nowrap">
                 <button
                   type="button"
                   onClick={() => table.toggleAllPageRowsSelected(true)}
-                  className="block w-full px-3 py-1.5 text-left text-xs hover:bg-gray-100"
+                  className="block w-full px-3 py-1.5 text-left text-xs hover:bg-gray-100 dark:hover:bg-gray-600"
                 >
                   Select page ({pageRows})
                 </button>
                 <button
                   type="button"
                   onClick={() => table.toggleAllRowsSelected(true)}
-                  className="block w-full px-3 py-1.5 text-left text-xs hover:bg-gray-100"
+                  className="block w-full px-3 py-1.5 text-left text-xs hover:bg-gray-100 dark:hover:bg-gray-600"
                 >
                   Select all ({totalRows})
                 </button>
@@ -265,7 +265,7 @@ export function createSelectionColumn<TData>(): ColumnDef<TData, unknown> {
                   <button
                     type="button"
                     onClick={() => table.toggleAllRowsSelected(false)}
-                    className="block w-full px-3 py-1.5 text-left text-xs hover:bg-gray-100 text-red-600"
+                    className="block w-full px-3 py-1.5 text-left text-xs hover:bg-gray-100 dark:hover:bg-gray-600 text-red-600"
                   >
                     Clear selection
                   </button>

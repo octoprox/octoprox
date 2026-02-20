@@ -6,6 +6,7 @@ import {
 import { ArrowUpCircle, ArrowDownCircle } from 'lucide-react'
 import { fetchProjectMetricsHistory, MetricsSnapshot } from '../api/client'
 import { useProject } from '../contexts/ProjectContext'
+import { useTheme } from '../contexts/ThemeContext'
 import { formatBytes } from '../utils/format'
 
 const TIME_RANGES = ['1h', '6h', '24h', '7d', '30d'] as const
@@ -90,7 +91,8 @@ function computeTotals(snapshots: MetricsSnapshot[]) {
 }
 
 export default function Metrics() {
-  const { selectedProjectId, selectedProject } = useProject()
+  const { selectedProjectId } = useProject()
+  const { theme } = useTheme()
   const [range, setRange] = useState<TimeRange>('24h')
 
   const { data } = useQuery({
@@ -105,6 +107,9 @@ export default function Metrics() {
 
   const chartData = useMemo(() => buildChartData(snapshots, range), [snapshots, range])
 
+  const gridColor = theme === 'dark' ? '#374151' : '#e5e7eb'
+  const tickColor = theme === 'dark' ? '#9ca3af' : undefined
+
   return (
     <div>
       <div className="flex items-center justify-between mb-2">
@@ -118,8 +123,8 @@ export default function Metrics() {
             onClick={() => setRange(r)}
             className={`px-4 py-2 rounded-lg font-medium transition-colors ${
               r === range
-                ? 'bg-blue-600 text-white'
-                : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+                ? 'bg-blue-600 text-white dark:bg-violet-600'
+                : 'bg-gray-100 dark:bg-gray-700 text-gray-700 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-gray-600'
             }`}
           >
             {r}
@@ -148,24 +153,27 @@ export default function Metrics() {
       </div>
 
       {/* Requests Over Time */}
-      <div className="bg-white rounded-lg shadow p-6 mb-8">
+      <div className="bg-white dark:bg-gray-800 rounded-lg shadow p-6 mb-8">
         <h2 className="text-xl font-semibold mb-4">Requests Over Time</h2>
         {chartData.length === 0 ? (
           <p className="text-gray-400 text-center py-12">No data for this time range</p>
         ) : (
           <ResponsiveContainer width="100%" height={300}>
             <AreaChart data={chartData}>
-              <CartesianGrid strokeDasharray="3 3" />
+              <CartesianGrid strokeDasharray="3 3" stroke={gridColor} />
               <XAxis
                 dataKey="time"
                 type="number"
                 scale="time"
                 domain={['dataMin', 'dataMax']}
                 tickFormatter={(v: number) => formatTickByRange(v, range)}
-                tick={{ fontSize: 12 }}
+                tick={{ fontSize: 12, fill: tickColor }}
               />
-              <YAxis allowDecimals={false} />
-              <Tooltip labelFormatter={(v: number) => new Date(v).toLocaleString()} />
+              <YAxis allowDecimals={false} tick={{ fill: tickColor }} />
+              <Tooltip
+                labelFormatter={(v: number) => new Date(v).toLocaleString()}
+                contentStyle={theme === 'dark' ? { backgroundColor: '#1f2937', border: '1px solid #374151', color: '#f3f4f6' } : undefined}
+              />
               <Legend />
               <Area connectNulls={false} type="monotone" dataKey="request_count" name="Requests" stroke="#6366f1" fill="#6366f1" fillOpacity={0.1} />
               <Area connectNulls={false} type="monotone" dataKey="success_count" name="Successes" stroke="#22c55e" fill="#22c55e" fillOpacity={0.1} />
@@ -176,26 +184,27 @@ export default function Metrics() {
       </div>
 
       {/* Bytes Over Time */}
-      <div className="bg-white rounded-lg shadow p-6">
+      <div className="bg-white dark:bg-gray-800 rounded-lg shadow p-6">
         <h2 className="text-xl font-semibold mb-4">Bytes Over Time</h2>
         {chartData.length === 0 ? (
           <p className="text-gray-400 text-center py-12">No data for this time range</p>
         ) : (
           <ResponsiveContainer width="100%" height={300}>
             <AreaChart data={chartData}>
-              <CartesianGrid strokeDasharray="3 3" />
+              <CartesianGrid strokeDasharray="3 3" stroke={gridColor} />
               <XAxis
                 dataKey="time"
                 type="number"
                 scale="time"
                 domain={['dataMin', 'dataMax']}
                 tickFormatter={(v: number) => formatTickByRange(v, range)}
-                tick={{ fontSize: 12 }}
+                tick={{ fontSize: 12, fill: tickColor }}
               />
-              <YAxis tickFormatter={(v: number) => formatBytes(v)} />
+              <YAxis tickFormatter={(v: number) => formatBytes(v)} tick={{ fill: tickColor }} />
               <Tooltip
                 labelFormatter={(v: number) => new Date(v).toLocaleString()}
                 formatter={(value: number) => formatBytes(value)}
+                contentStyle={theme === 'dark' ? { backgroundColor: '#1f2937', border: '1px solid #374151', color: '#f3f4f6' } : undefined}
               />
               <Legend />
               <Area connectNulls={false} type="monotone" dataKey="bytes_sent" name="Bytes Sent" stroke="#f97316" fill="#f97316" fillOpacity={0.1} />
@@ -211,7 +220,7 @@ export default function Metrics() {
 function StatCard({
   title,
   value,
-  color = 'text-gray-900',
+  color = 'text-gray-900 dark:text-gray-100',
   icon,
 }: {
   title: string
@@ -220,10 +229,10 @@ function StatCard({
   icon?: React.ReactNode
 }) {
   return (
-    <div className="bg-white rounded-lg shadow p-4">
+    <div className="bg-white dark:bg-gray-800 rounded-lg shadow p-4">
       <div className="flex items-center gap-1 mb-1">
         {icon}
-        <p className="text-gray-500 text-sm">{title}</p>
+        <p className="text-gray-500 dark:text-gray-400 text-sm">{title}</p>
       </div>
       <p className={`text-2xl font-bold ${color}`}>{value}</p>
     </div>

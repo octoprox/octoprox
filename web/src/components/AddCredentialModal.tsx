@@ -159,6 +159,8 @@ export default function AddCredentialModal({ isOpen, onClose, onSuccess, fixedTy
     setShowSecrets({ ...showSecrets, [key]: !showSecrets[key] })
   }
 
+  const inputClasses = "w-full px-4 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100"
+
   const renderConfigFields = () => {
     const fields = getDefaultCredentialConfig(formData.type)
     const jsonError = getServiceAccountJsonError()
@@ -166,7 +168,7 @@ export default function AddCredentialModal({ isOpen, onClose, onSuccess, fixedTy
       const isSecret = ['password', 'secret_key', 'client_secret', 'service_account_json'].includes(key)
       return (
         <div key={key} className="relative">
-          <label className="block text-sm font-medium text-gray-700 mb-1">
+          <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
             {key.replace(/_/g, ' ').replace(/\b\w/g, (l) => l.toUpperCase())}
           </label>
           {key === 'service_account_json' ? (
@@ -174,12 +176,12 @@ export default function AddCredentialModal({ isOpen, onClose, onSuccess, fixedTy
               <textarea
                 value={formData.config[key] || ''}
                 onChange={(e) => handleConfigChange(key, e.target.value)}
-                className={`w-full px-4 py-2 border rounded-lg font-mono text-sm ${jsonError ? 'border-red-300 bg-red-50' : ''}`}
+                className={`${inputClasses} font-mono text-sm ${jsonError ? 'border-red-300 dark:border-red-600 bg-red-50 dark:bg-red-900/20' : ''}`}
                 rows={4}
                 placeholder="Paste service account JSON here"
               />
               {jsonError && (
-                <p className="mt-1 text-xs text-red-600">{jsonError}</p>
+                <p className="mt-1 text-xs text-red-600 dark:text-red-400">{jsonError}</p>
               )}
             </div>
           ) : (
@@ -188,11 +190,11 @@ export default function AddCredentialModal({ isOpen, onClose, onSuccess, fixedTy
                 type={isSecret && !showSecrets[key] ? 'password' : 'text'}
                 value={formData.config[key] || ''}
                 onChange={(e) => handleConfigChange(key, e.target.value)}
-                className="w-full px-4 py-2 border rounded-lg pr-10"
+                className={`${inputClasses} pr-10`}
                 placeholder={key.replace(/_/g, ' ')}
               />
               {isSecret && (
-                <button type="button" onClick={() => toggleSecret(key)} className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-500 hover:text-gray-700">
+                <button type="button" onClick={() => toggleSecret(key)} className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-500 hover:text-gray-700 dark:hover:text-gray-300">
                   {showSecrets[key] ? <EyeOff className="w-5 h-5" /> : <Eye className="w-5 h-5" />}
                 </button>
               )}
@@ -209,18 +211,18 @@ export default function AddCredentialModal({ isOpen, onClose, onSuccess, fixedTy
 
   return (
     <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-[60]">
-      <div className="bg-white rounded-lg shadow-xl max-w-lg w-full mx-4 max-h-[90vh] overflow-y-auto">
-        <div className="p-6 border-b flex justify-between items-center">
+      <div className="bg-white dark:bg-gray-800 rounded-lg shadow-xl max-w-lg w-full mx-4 max-h-[90vh] overflow-y-auto">
+        <div className="p-6 border-b border-gray-200 dark:border-gray-700 flex justify-between items-center">
           <h2 className="text-xl font-semibold">
             {isEditMode ? `Edit ${typeLabel} Credential` : (fixedType ? `Create ${typeLabel} Credential` : 'Create Credential')}
           </h2>
-          <button onClick={handleClose} className="p-2 hover:bg-gray-100 rounded-lg">
+          <button onClick={handleClose} className="p-2 hover:bg-gray-100 dark:hover:bg-gray-700 rounded-lg">
             <X className="w-5 h-5" />
           </button>
         </div>
         <form onSubmit={handleSubmit} className="p-6">
           {errorMessage && (
-            <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-lg mb-4 flex justify-between items-center">
+            <div className="bg-red-50 dark:bg-red-900/30 border border-red-200 dark:border-red-800 text-red-700 dark:text-red-400 px-4 py-3 rounded-lg mb-4 flex justify-between items-center">
               <span className="text-sm">{errorMessage}</span>
               <button type="button" onClick={() => setErrorMessage(null)} className="text-red-500 hover:text-red-700">
                 <X className="w-4 h-4" />
@@ -230,23 +232,23 @@ export default function AddCredentialModal({ isOpen, onClose, onSuccess, fixedTy
           <div className="grid gap-4">
             <div className={fixedType || isEditMode ? '' : 'grid grid-cols-2 gap-4'}>
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Credential Name</label>
+                <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Credential Name</label>
                 <input
                   type="text"
                   placeholder="My Credential"
                   value={formData.name}
                   onChange={(e) => setFormData({ ...formData, name: e.target.value })}
-                  className="w-full px-4 py-2 border rounded-lg"
+                  className={inputClasses}
                   required
                 />
               </div>
               {!fixedType && !isEditMode && (
                 <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">Type</label>
+                  <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Type</label>
                   <select
                     value={formData.type}
                     onChange={(e) => handleTypeChange(e.target.value as CredentialType)}
-                    className="w-full px-4 py-2 border rounded-lg"
+                    className={inputClasses}
                   >
                     {CREDENTIAL_TYPES.map((type) => (
                       <option key={type.value} value={type.value}>{type.label}</option>
@@ -258,8 +260,8 @@ export default function AddCredentialModal({ isOpen, onClose, onSuccess, fixedTy
             <div className="grid grid-cols-2 gap-4">{renderConfigFields()}</div>
           </div>
           <div className="flex justify-end gap-4 mt-6">
-            <button type="button" onClick={handleClose} className="px-4 py-2 border rounded-lg hover:bg-gray-50">Cancel</button>
-            <button type="submit" disabled={createMutation.isPending || updateMutation.isPending} className="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:opacity-50">
+            <button type="button" onClick={handleClose} className="px-4 py-2 border border-gray-300 dark:border-gray-600 rounded-lg hover:bg-gray-50 dark:hover:bg-gray-700 text-gray-700 dark:text-gray-300">Cancel</button>
+            <button type="submit" disabled={createMutation.isPending || updateMutation.isPending} className="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 dark:bg-emerald-700 dark:hover:bg-emerald-800 disabled:opacity-50">
               {isEditMode
                 ? (updateMutation.isPending ? 'Saving...' : 'Save Changes')
                 : (createMutation.isPending ? 'Creating...' : 'Create Credential')}
@@ -270,4 +272,3 @@ export default function AddCredentialModal({ isOpen, onClose, onSuccess, fixedTy
     </div>
   )
 }
-

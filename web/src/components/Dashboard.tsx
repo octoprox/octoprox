@@ -58,7 +58,7 @@ export default function Dashboard() {
               updateMutation.reset()
               setShowEditModal(true)
             }}
-            className="flex items-center gap-2 px-4 py-2 text-gray-600 hover:text-gray-800 hover:bg-gray-100 rounded-lg transition-colors"
+            className="flex items-center gap-2 px-4 py-2 text-gray-600 dark:text-gray-400 hover:text-gray-800 dark:hover:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700 rounded-lg transition-colors"
           >
             <Settings className="w-5 h-5" />
             Edit Project
@@ -91,7 +91,7 @@ export default function Dashboard() {
       </div>
 
       {/* Request Statistics */}
-      <div className="bg-white rounded-lg shadow p-6 mb-8">
+      <div className="bg-white dark:bg-gray-800 rounded-lg shadow p-6 mb-8">
         <h2 className="text-xl font-semibold mb-4">Request Statistics</h2>
         <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-6">
           <MetricItem label="Total Requests" value={pool?.total_requests ?? 0} />
@@ -119,11 +119,11 @@ export default function Dashboard() {
 
       {/* Auto-Scaling Status */}
       {scalingMetrics && (
-        <div className="bg-white rounded-lg shadow p-6 mb-8">
+        <div className="bg-white dark:bg-gray-800 rounded-lg shadow p-6 mb-8">
           <h2 className="text-xl font-semibold mb-4">Auto-Scaling Status</h2>
           <div className="grid grid-cols-2 md:grid-cols-4 gap-6">
             <div>
-              <p className="text-gray-500 text-sm mb-1">Demand Level</p>
+              <p className="text-gray-500 dark:text-gray-400 text-sm mb-1">Demand Level</p>
               <DemandBadge level={scalingMetrics.demand_level} />
             </div>
             <MetricItem
@@ -142,7 +142,7 @@ export default function Dashboard() {
             />
           </div>
           {(scalingMetrics.draining_instances > 0 || scalingMetrics.terminating_instances > 0) && (
-            <div className="mt-4 pt-4 border-t border-gray-100 flex gap-6">
+            <div className="mt-4 pt-4 border-t border-gray-100 dark:border-gray-700 flex gap-6">
               {scalingMetrics.draining_instances > 0 && (
                 <div className="flex items-center gap-2">
                   <Loader className="w-4 h-4 text-orange-500 animate-spin" />
@@ -165,7 +165,7 @@ export default function Dashboard() {
       )}
 
       {/* Routing Strategy */}
-      <div className="bg-white rounded-lg shadow p-6">
+      <div className="bg-white dark:bg-gray-800 rounded-lg shadow p-6">
         <h2 className="text-xl font-semibold mb-4">Routing Strategy</h2>
         <div className="flex flex-wrap gap-3">
           {strategy?.available_strategies.map((s) => (
@@ -175,15 +175,15 @@ export default function Dashboard() {
               disabled={strategyMutation.isPending}
               className={`px-4 py-2 rounded-lg font-medium transition-colors ${
                 s === strategy.current_strategy
-                  ? 'bg-blue-600 text-white'
-                  : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+                  ? 'bg-blue-600 text-white dark:bg-violet-600'
+                  : 'bg-gray-100 dark:bg-gray-700 text-gray-700 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-gray-600'
               } disabled:opacity-50`}
             >
               {formatStrategy(s)}
             </button>
           ))}
         </div>
-        <p className="mt-4 text-gray-500 text-sm">
+        <p className="mt-4 text-gray-500 dark:text-gray-400 text-sm">
           Current strategy: <strong>{formatStrategy(strategy?.current_strategy ?? '')}</strong>
         </p>
       </div>
@@ -204,10 +204,10 @@ export default function Dashboard() {
 
 function StatCard({ title, value, icon }: { title: string; value: string | number; icon: React.ReactNode }) {
   return (
-    <div className="bg-white rounded-lg shadow p-6">
+    <div className="bg-white dark:bg-gray-800 rounded-lg shadow p-6">
       <div className="flex items-center justify-between">
         <div>
-          <p className="text-gray-500 text-sm">{title}</p>
+          <p className="text-gray-500 dark:text-gray-400 text-sm">{title}</p>
           <p className="text-3xl font-bold mt-1">{value}</p>
         </div>
         {icon}
@@ -219,7 +219,7 @@ function StatCard({ title, value, icon }: { title: string; value: string | numbe
 function MetricItem({
   label,
   value,
-  color = 'text-gray-900',
+  color = 'text-gray-900 dark:text-gray-100',
   icon,
 }: {
   label: string
@@ -231,7 +231,7 @@ function MetricItem({
     <div>
       <div className="flex items-center gap-1">
         {icon}
-        <p className="text-gray-500 text-sm">{label}</p>
+        <p className="text-gray-500 dark:text-gray-400 text-sm">{label}</p>
       </div>
       <p className={`text-2xl font-bold ${color}`}>{value}</p>
     </div>
@@ -247,9 +247,9 @@ function formatStrategy(strategy: string): string {
 
 function DemandBadge({ level }: { level: ScalingMetrics['demand_level'] }) {
   const styles: Record<string, string> = {
-    LOW: 'bg-green-100 text-green-800',
-    MEDIUM: 'bg-yellow-100 text-yellow-800',
-    HIGH: 'bg-red-100 text-red-800',
+    LOW: 'bg-green-100 text-green-800 dark:bg-green-900/40 dark:text-green-400',
+    MEDIUM: 'bg-yellow-100 text-yellow-800 dark:bg-yellow-900/40 dark:text-yellow-400',
+    HIGH: 'bg-red-100 text-red-800 dark:bg-red-900/40 dark:text-red-400',
   }
   return (
     <span className={`px-3 py-1 rounded-full text-sm font-semibold ${styles[level] ?? styles.LOW}`}>

@@ -67,7 +67,9 @@ export function RichSelect({
         className={clsx(
           'w-full flex items-center justify-between px-3 py-1.5 text-sm border rounded-lg transition-colors text-left',
           'focus:outline-none focus:ring-1 focus:ring-blue-500 focus:border-blue-500',
-          disabled ? 'bg-gray-100 cursor-not-allowed text-gray-500' : 'bg-white hover:border-gray-400',
+          disabled
+            ? 'bg-gray-100 dark:bg-gray-700 cursor-not-allowed text-gray-500'
+            : 'bg-white dark:bg-gray-700 border-gray-300 dark:border-gray-600 hover:border-gray-400 dark:hover:border-gray-500 text-gray-900 dark:text-gray-100',
           isOpen && 'ring-1 ring-blue-500 border-blue-500'
         )}
         disabled={disabled}
@@ -87,30 +89,30 @@ export function RichSelect({
 
       {/* Dropdown menu */}
       {isOpen && (
-        <div className="absolute z-50 w-full mt-1 bg-white border rounded-lg shadow-lg max-h-60 overflow-auto">
+        <div className="absolute z-50 w-full mt-1 bg-white dark:bg-gray-700 border border-gray-200 dark:border-gray-600 rounded-lg shadow-lg max-h-60 overflow-auto">
           {options.map((option) => (
             <button
               key={option.value}
               type="button"
               onClick={() => handleSelect(option.value)}
               className={clsx(
-                'w-full flex items-start gap-2 px-3 py-2 text-left hover:bg-blue-50 transition-colors',
-                option.value === value && 'bg-blue-50'
+                'w-full flex items-start gap-2 px-3 py-2 text-left hover:bg-blue-50 dark:hover:bg-blue-900/30 transition-colors',
+                option.value === value && 'bg-blue-50 dark:bg-blue-900/30'
               )}
             >
               <div className="flex-1 min-w-0">
                 <div className="flex items-center gap-2">
-                  <span className="text-sm font-medium text-gray-900 truncate">
+                  <span className="text-sm font-medium text-gray-900 dark:text-gray-100 truncate">
                     {option.label}
                   </span>
                   {option.badge && (
-                    <span className="inline-flex items-center px-1.5 py-0.5 text-xs font-medium rounded bg-gray-100 text-gray-600">
+                    <span className="inline-flex items-center px-1.5 py-0.5 text-xs font-medium rounded bg-gray-100 dark:bg-gray-600 text-gray-600 dark:text-gray-300">
                       {option.badge}
                     </span>
                   )}
                 </div>
                 {option.description && (
-                  <p className="text-xs text-gray-500 truncate mt-0.5">{option.description}</p>
+                  <p className="text-xs text-gray-500 dark:text-gray-400 truncate mt-0.5">{option.description}</p>
                 )}
               </div>
               {option.value === value && (
@@ -125,4 +127,3 @@ export function RichSelect({
 }
 
 export default RichSelect
-

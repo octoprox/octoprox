@@ -1,9 +1,11 @@
 import { useState, useEffect } from 'react'
 import { BrowserRouter, Routes, Route, Link, Navigate, useParams, useNavigate } from 'react-router-dom'
-import { Server, BarChart3, LineChart, LogOut, FolderOpen, ChevronDown, ChevronLeft, ChevronRight, Key, Link2 } from 'lucide-react'
+import { Server, BarChart3, LineChart, LogOut, FolderOpen, ChevronDown, ChevronLeft, Key, Link2, Moon, Sun } from 'lucide-react'
 import Dashboard from './components/Dashboard'
 import octoproxLogo from './assets/logos/octoprox_horizontal.svg'
+import octoproxLogoDark from './assets/logos/octoprox_horizontal_dark.svg'
 import octoproxLogoOnly from './assets/logos/octoprox_logo_only.svg'
+import octoproxLogoOnlyDark from './assets/logos/octoprox_logo_only_dark.svg'
 import ProxyList from './components/ProxyList'
 import CredentialsConfig from './components/CredentialsConfig'
 import ConnectorConfig from './components/ConnectorConfig'
@@ -11,6 +13,7 @@ import Metrics from './components/Metrics'
 import Login from './components/Login'
 import ProjectSelection from './components/ProjectSelection'
 import { ProjectProvider, useProject } from './contexts/ProjectContext'
+import { useTheme } from './contexts/ThemeContext'
 import { checkAuthStatus, login, logout, AuthStatus } from './api/client'
 
 function App() {
@@ -60,8 +63,8 @@ function App() {
   // Show loading state
   if (isLoading) {
     return (
-      <div className="min-h-screen flex items-center justify-center bg-gray-100">
-        <div className="text-gray-500">Loading...</div>
+      <div className="min-h-screen flex items-center justify-center bg-gray-100 dark:bg-gray-900">
+        <div className="text-gray-500 dark:text-gray-400">Loading...</div>
       </div>
     )
   }
@@ -104,6 +107,7 @@ function ProjectLayout({
   const { projectId } = useParams()
   const navigate = useNavigate()
   const { selectedProject, setSelectedProjectId, isLoading } = useProject()
+  const { theme, toggleTheme } = useTheme()
   const [showProjectDropdown, setShowProjectDropdown] = useState(false)
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
 
@@ -121,8 +125,8 @@ function ProjectLayout({
 
   if (isLoading) {
     return (
-      <div className="min-h-screen flex items-center justify-center bg-gray-100">
-        <div className="text-gray-500">Loading project...</div>
+      <div className="min-h-screen flex items-center justify-center bg-gray-100 dark:bg-gray-900">
+        <div className="text-gray-500 dark:text-gray-400">Loading project...</div>
       </div>
     )
   }
@@ -130,7 +134,7 @@ function ProjectLayout({
   return (
     <div className="min-h-screen flex">
       {/* Sidebar */}
-      <aside className={`${sidebarCollapsed ? 'w-16' : 'w-64'} bg-white border-r border-gray-200 flex flex-col transition-all duration-300 h-screen sticky top-0`}>
+      <aside className={`${sidebarCollapsed ? 'w-16' : 'w-64'} bg-white dark:bg-gray-800 border-r border-gray-200 dark:border-gray-700 flex flex-col transition-all duration-300 h-screen sticky top-0`}>
         <div className={`${sidebarCollapsed ? 'p-1 pt-3' : 'p-4'}`}>
           {/* Header with logo and collapse toggle */}
           <div className={`flex items-center ${sidebarCollapsed ? 'justify-center' : 'justify-between'}`}>
@@ -140,14 +144,14 @@ function ProjectLayout({
                 className="p-1 hover:opacity-80 transition-opacity"
                 title="Expand sidebar"
               >
-                <img src={octoproxLogoOnly} alt="Octoprox" className="h-8" />
+                <img src={theme === 'dark' ? octoproxLogoOnlyDark : octoproxLogoOnly} alt="Octoprox" className="h-8" />
               </button>
             ) : (
               <>
-                <img src={octoproxLogo} alt="Octoprox" className="h-10" />
+                <img src={theme === 'dark' ? octoproxLogoDark : octoproxLogo} alt="Octoprox" className="h-10" />
                 <button
                   onClick={() => setSidebarCollapsed(true)}
-                  className="p-2 text-gray-500 hover:text-gray-900 hover:bg-gray-100 rounded-lg transition-colors"
+                  className="p-2 text-gray-500 hover:text-gray-900 dark:hover:text-gray-100 hover:bg-gray-100 dark:hover:bg-gray-700 rounded-lg transition-colors"
                   title="Collapse sidebar"
                 >
                   <ChevronLeft className="w-5 h-5" />
@@ -161,16 +165,16 @@ function ProjectLayout({
             <div className="mt-3 relative">
               <button
                 onClick={() => setShowProjectDropdown(!showProjectDropdown)}
-                className="w-full flex items-center justify-between bg-gray-100 rounded-lg px-3 py-2 text-sm text-gray-700 hover:bg-gray-200 transition-colors"
+                className="w-full flex items-center justify-between bg-gray-100 dark:bg-gray-700 rounded-lg px-3 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-200 dark:hover:bg-gray-600 transition-colors"
               >
                 <span className="truncate">{selectedProject?.name || 'Select Project'}</span>
                 <ChevronDown className="w-4 h-4 flex-shrink-0" />
               </button>
               {showProjectDropdown && (
-                <div className="absolute top-full left-0 right-0 mt-1 bg-white border border-gray-200 rounded-lg shadow-lg z-10">
+                <div className="absolute top-full left-0 right-0 mt-1 bg-white dark:bg-gray-700 border border-gray-200 dark:border-gray-600 rounded-lg shadow-lg z-10">
                   <button
                     onClick={handleSwitchProject}
-                    className="w-full flex items-center gap-2 px-3 py-2 text-sm text-gray-600 hover:bg-gray-100 rounded-lg"
+                    className="w-full flex items-center gap-2 px-3 py-2 text-sm text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-600 rounded-lg"
                   >
                     <FolderOpen className="w-4 h-4" />
                     Switch Project
@@ -184,7 +188,7 @@ function ProjectLayout({
           {sidebarCollapsed && (
             <button
               onClick={handleSwitchProject}
-              className="mt-3 w-full flex justify-center p-2 text-gray-600 hover:bg-gray-100 rounded-lg transition-colors"
+              className="mt-3 w-full flex justify-center p-2 text-gray-600 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-700 rounded-lg transition-colors"
               title="Switch Project"
             >
               <FolderOpen className="w-5 h-5" />
@@ -200,33 +204,57 @@ function ProjectLayout({
           <NavLink to={`/projects/${projectId}/connectors`} icon={<Link2 />} label="Connectors" collapsed={sidebarCollapsed} />
         </nav>
 
-        {/* User info and logout */}
-        {authStatus?.enabled && authStatus.authenticated && (
-          <div className={`p-4 border-t border-gray-200 ${sidebarCollapsed ? 'flex justify-center' : ''}`}>
+        {/* Bottom section: theme toggle + user info */}
+        <div className="border-t border-gray-200 dark:border-gray-700">
+          {/* Theme toggle */}
+          <div className={`p-4 ${sidebarCollapsed ? 'flex justify-center' : ''}`}>
             {sidebarCollapsed ? (
               <button
-                onClick={onLogout}
-                className="p-2 text-gray-500 hover:text-gray-900 hover:bg-gray-100 rounded-lg transition-colors"
-                title="Sign out"
+                onClick={toggleTheme}
+                className="p-2 text-gray-500 dark:text-gray-400 hover:text-gray-900 dark:hover:text-gray-100 hover:bg-gray-100 dark:hover:bg-gray-700 rounded-lg transition-colors"
+                title={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
               >
-                <LogOut className="w-5 h-5" />
+                {theme === 'dark' ? <Sun className="w-5 h-5" /> : <Moon className="w-5 h-5" />}
               </button>
             ) : (
-              <>
-                <div className="text-sm text-gray-500 mb-2">
-                  Signed in as <span className="text-gray-900">{authStatus.username}</span>
-                </div>
-                <button
-                  onClick={onLogout}
-                  className="flex items-center gap-2 text-gray-500 hover:text-gray-900 transition-colors text-sm"
-                >
-                  <LogOut className="w-4 h-4" />
-                  Sign out
-                </button>
-              </>
+              <button
+                onClick={toggleTheme}
+                className="flex items-center gap-2 text-gray-500 dark:text-gray-400 hover:text-gray-900 dark:hover:text-gray-100 transition-colors text-sm"
+              >
+                {theme === 'dark' ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}
+                {theme === 'dark' ? 'Light mode' : 'Dark mode'}
+              </button>
             )}
           </div>
-        )}
+
+          {/* User info and logout */}
+          {authStatus?.enabled && authStatus.authenticated && (
+            <div className={`p-4 border-t border-gray-200 dark:border-gray-700 ${sidebarCollapsed ? 'flex justify-center' : ''}`}>
+              {sidebarCollapsed ? (
+                <button
+                  onClick={onLogout}
+                  className="p-2 text-gray-500 dark:text-gray-400 hover:text-gray-900 dark:hover:text-gray-100 hover:bg-gray-100 dark:hover:bg-gray-700 rounded-lg transition-colors"
+                  title="Sign out"
+                >
+                  <LogOut className="w-5 h-5" />
+                </button>
+              ) : (
+                <>
+                  <div className="text-sm text-gray-500 dark:text-gray-400 mb-2">
+                    Signed in as <span className="text-gray-900 dark:text-gray-100">{authStatus.username}</span>
+                  </div>
+                  <button
+                    onClick={onLogout}
+                    className="flex items-center gap-2 text-gray-500 dark:text-gray-400 hover:text-gray-900 dark:hover:text-gray-100 transition-colors text-sm"
+                  >
+                    <LogOut className="w-4 h-4" />
+                    Sign out
+                  </button>
+                </>
+              )}
+            </div>
+          )}
+        </div>
 
       </aside>
 
@@ -249,7 +277,7 @@ function NavLink({ to, icon, label, collapsed }: { to: string; icon: React.React
   return (
     <Link
       to={to}
-      className={`flex items-center gap-3 py-3 text-gray-600 hover:bg-gray-100 hover:text-gray-900 transition-colors ${collapsed ? 'justify-center px-2' : 'px-4'}`}
+      className={`flex items-center gap-3 py-3 text-gray-600 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-700 hover:text-gray-900 dark:hover:text-gray-100 transition-colors ${collapsed ? 'justify-center px-2' : 'px-4'}`}
       title={collapsed ? label : undefined}
     >
       {icon}
@@ -259,4 +287,3 @@ function NavLink({ to, icon, label, collapsed }: { to: string; icon: React.React
 }
 
 export default App
-

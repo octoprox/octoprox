@@ -14,13 +14,17 @@ import {
   ConnectorOptions,
 } from '../api/client'
 import { useProject } from '../contexts/ProjectContext'
+import { useTheme } from '../contexts/ThemeContext'
 import AddCredentialModal from './AddCredentialModal'
 import { RichSelect, RichSelectOption } from './RichSelect'
 
 // Import logos
 import awsLogo from '../assets/logos/aws.svg'
+import awsLogoDark from '../assets/logos/aws_dark.svg'
 import gcpLogo from '../assets/logos/gcp.svg'
+import gcpLogoDark from '../assets/logos/gcp_dark.svg'
 import azureLogo from '../assets/logos/azure.svg'
+import azureLogoDark from '../assets/logos/azure_dark.svg'
 import staticProxyLogo from '../assets/logos/static-proxy.svg'
 
 interface ConnectorFormData {
@@ -30,11 +34,11 @@ interface ConnectorFormData {
   enabled: boolean
 }
 
-const CONNECTOR_TYPES: { type: CredentialType; name: string; description: string; logo: string }[] = [
-  { type: 'static_proxy_provider', name: 'Static Proxy Provider', description: 'Manually managed proxy servers', logo: staticProxyLogo },
-  { type: 'aws', name: 'Amazon Web Services', description: 'EC2 instances as proxy servers', logo: awsLogo },
-  { type: 'gcp', name: 'Google Cloud Platform', description: 'Compute Engine VMs as proxy servers', logo: gcpLogo },
-  { type: 'azure', name: 'Microsoft Azure', description: 'Virtual Machines as proxy servers', logo: azureLogo },
+const CONNECTOR_TYPES: { type: CredentialType; name: string; description: string; logo: string; logoDark: string }[] = [
+  { type: 'static_proxy_provider', name: 'Static Proxy Provider', description: 'Manually managed proxy servers', logo: staticProxyLogo, logoDark: staticProxyLogo },
+  { type: 'aws', name: 'Amazon Web Services', description: 'EC2 instances as proxy servers', logo: awsLogo, logoDark: awsLogoDark },
+  { type: 'gcp', name: 'Google Cloud Platform', description: 'Compute Engine VMs as proxy servers', logo: gcpLogo, logoDark: gcpLogoDark },
+  { type: 'azure', name: 'Microsoft Azure', description: 'Virtual Machines as proxy servers', logo: azureLogo, logoDark: azureLogoDark },
 ]
 
 // Tab type for config sections
@@ -72,12 +76,12 @@ function KeyValueTagsEditor({ value, onChange }: { value: string; onChange: (val
     <div className="space-y-2">
       {tags.map((tag, index) => (
         <div key={index} className="flex gap-2 items-center">
-          <input type="text" value={tag.key} onChange={(e) => updateTag(index, 'key', e.target.value)} placeholder="Key" className="flex-1 px-3 py-1.5 border rounded-lg text-sm" />
-          <input type="text" value={tag.value} onChange={(e) => updateTag(index, 'value', e.target.value)} placeholder="Value" className="flex-1 px-3 py-1.5 border rounded-lg text-sm" />
+          <input type="text" value={tag.key} onChange={(e) => updateTag(index, 'key', e.target.value)} placeholder="Key" className="flex-1 px-3 py-1.5 border border-gray-300 dark:border-gray-600 rounded-lg text-sm bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100" />
+          <input type="text" value={tag.value} onChange={(e) => updateTag(index, 'value', e.target.value)} placeholder="Value" className="flex-1 px-3 py-1.5 border border-gray-300 dark:border-gray-600 rounded-lg text-sm bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100" />
           <button type="button" onClick={() => removeTag(index)} className="p-1.5 text-gray-400 hover:text-red-500"><Trash2 className="w-4 h-4" /></button>
         </div>
       ))}
-      <button type="button" onClick={addTag} className="flex items-center gap-1 text-sm text-blue-600 hover:text-blue-700">
+      <button type="button" onClick={addTag} className="flex items-center gap-1 text-sm text-blue-600 hover:text-blue-700 dark:text-blue-400 dark:hover:text-blue-300">
         <Plus className="w-4 h-4" /> Add Tag
       </button>
     </div>
@@ -142,6 +146,9 @@ type WizardStep = 'select-type' | 'select-credential' | 'configure'
 export default function ConnectorConfig() {
   const queryClient = useQueryClient()
   const { selectedProjectId } = useProject()
+  const { theme } = useTheme()
+
+  const getlogo = (ct: typeof CONNECTOR_TYPES[number]) => theme === 'dark' ? ct.logoDark : ct.logo
 
   // Wizard state
   const [showWizard, setShowWizard] = useState(false)
@@ -455,7 +462,7 @@ export default function ConnectorConfig() {
     return (
       <div className="mt-4">
         {/* Tab Navigation */}
-        <div className="flex border-b mb-4">
+        <div className="flex border-b border-gray-200 dark:border-gray-600 mb-4">
           {tabs.map((tab) => (
             <button
               key={tab.id}
@@ -463,8 +470,8 @@ export default function ConnectorConfig() {
               onClick={() => setActiveConfigTab(tab.id)}
               className={`px-4 py-2 text-sm font-medium border-b-2 transition-colors ${
                 activeConfigTab === tab.id
-                  ? 'border-blue-500 text-blue-600'
-                  : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
+                  ? 'border-blue-500 text-blue-600 dark:text-blue-400'
+                  : 'border-transparent text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-300 hover:border-gray-300 dark:hover:border-gray-500'
               }`}
             >
               {tab.label}
@@ -476,8 +483,8 @@ export default function ConnectorConfig() {
         <div className="min-h-[200px]">
           {activeConfigTab === 'advanced' ? (
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">Instance Tags</label>
-              <p className="text-xs text-gray-500 mb-2">Key-value tags applied to instances</p>
+              <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Instance Tags</label>
+              <p className="text-xs text-gray-500 dark:text-gray-400 mb-2">Key-value tags applied to instances</p>
               <KeyValueTagsEditor value={config.tags || '{}'} onChange={(val) => onChange('tags', val)} />
             </div>
           ) : (
@@ -489,7 +496,7 @@ export default function ConnectorConfig() {
                 const required = isRequired(key)
                 return (
                   <div key={key}>
-                    <label className="block text-xs font-medium text-gray-600 mb-1">
+                    <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">
                       {getFieldLabel(key)}
                       {required && <span className="text-red-500 ml-1">*</span>}
                     </label>
@@ -514,12 +521,12 @@ export default function ConnectorConfig() {
                         type={isNumber(key) ? 'number' : 'text'}
                         value={config[key] || ''}
                         onChange={(e) => onChange(key, e.target.value)}
-                        className="w-full px-3 py-1.5 text-sm border rounded-lg focus:ring-1 focus:ring-blue-500 focus:border-blue-500"
+                        className="w-full px-3 py-1.5 text-sm border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 focus:ring-1 focus:ring-blue-500 focus:border-blue-500"
                         placeholder={getPlaceholder(key)}
                         required={required}
                       />
                     )}
-                    {helperText && <p className="text-xs text-gray-500 mt-1">{helperText}</p>}
+                    {helperText && <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">{helperText}</p>}
                   </div>
                 )
               })}
@@ -536,7 +543,7 @@ export default function ConnectorConfig() {
     <div>
       <div className="flex justify-between items-center mb-8">
         <h1 className="text-3xl font-bold">Connectors</h1>
-        <button onClick={() => setShowWizard(true)} className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700">
+        <button onClick={() => setShowWizard(true)} className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 dark:bg-violet-600 dark:hover:bg-violet-700">
           <Link2 className="w-5 h-5" /> Add Connector
         </button>
       </div>
@@ -544,11 +551,11 @@ export default function ConnectorConfig() {
       {/* Wizard Modal */}
       {showWizard && (
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-          <div className="bg-white rounded-lg shadow-xl max-w-4xl w-full mx-4 max-h-[90vh] overflow-y-auto">
-            <div className="p-6 border-b flex justify-between items-center">
+          <div className="bg-white dark:bg-gray-800 rounded-lg shadow-xl max-w-4xl w-full mx-4 max-h-[90vh] overflow-y-auto">
+            <div className="p-6 border-b border-gray-200 dark:border-gray-700 flex justify-between items-center">
               <div className="flex items-center gap-4">
                 {wizardStep !== 'select-type' && !isEditMode && (
-                  <button onClick={() => setWizardStep(wizardStep === 'configure' ? 'select-credential' : 'select-type')} className="p-2 hover:bg-gray-100 rounded-lg">
+                  <button onClick={() => setWizardStep(wizardStep === 'configure' ? 'select-credential' : 'select-type')} className="p-2 hover:bg-gray-100 dark:hover:bg-gray-700 rounded-lg">
                     <ArrowLeft className="w-5 h-5" />
                   </button>
                 )}
@@ -562,7 +569,7 @@ export default function ConnectorConfig() {
                   )}
                 </h2>
               </div>
-              <button onClick={resetWizard} className="p-2 hover:bg-gray-100 rounded-lg"><X className="w-5 h-5" /></button>
+              <button onClick={resetWizard} className="p-2 hover:bg-gray-100 dark:hover:bg-gray-700 rounded-lg"><X className="w-5 h-5" /></button>
             </div>
 
             <div className="p-6">
@@ -570,11 +577,11 @@ export default function ConnectorConfig() {
               {wizardStep === 'select-type' && (
                 <div className="grid grid-cols-2 gap-4">
                   {CONNECTOR_TYPES.map((ct) => (
-                    <button key={ct.type} onClick={() => handleTypeSelect(ct.type)} className="flex items-center gap-4 p-6 border-2 rounded-xl hover:border-blue-500 hover:bg-blue-50 transition-all text-left">
-                      <img src={ct.logo} alt={ct.name} className="w-16 h-16 object-contain" />
+                    <button key={ct.type} onClick={() => handleTypeSelect(ct.type)} className="flex items-center gap-4 p-6 border-2 border-gray-200 dark:border-gray-600 rounded-xl hover:border-blue-500 hover:bg-blue-50 dark:hover:bg-blue-900/30 transition-all text-left">
+                      <img src={getlogo(ct)} alt={ct.name} className="w-16 h-16 object-contain" />
                       <div>
                         <h3 className="text-lg font-semibold">{ct.name}</h3>
-                        <p className="text-gray-500 text-sm">{ct.description}</p>
+                        <p className="text-gray-500 dark:text-gray-400 text-sm">{ct.description}</p>
                       </div>
                     </button>
                   ))}
@@ -586,20 +593,20 @@ export default function ConnectorConfig() {
                 <div className="space-y-4">
                   {getCredentialsForType().length === 0 ? (
                     <div className="text-center py-8">
-                      <p className="text-gray-500 mb-4">No {getCredentialTypeLabel(selectedType)} credentials found.</p>
-                      <button onClick={() => handleCredentialSelect('create-new')} className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 mx-auto">
+                      <p className="text-gray-500 dark:text-gray-400 mb-4">No {getCredentialTypeLabel(selectedType)} credentials found.</p>
+                      <button onClick={() => handleCredentialSelect('create-new')} className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 dark:bg-violet-600 dark:hover:bg-violet-700 mx-auto">
                         <Plus className="w-5 h-5" /> Create New Credential
                       </button>
                     </div>
                   ) : (
                     <>
                       {getCredentialsForType().map((cred) => (
-                        <button key={cred.id} onClick={() => handleCredentialSelect(cred.id)} className={`w-full flex items-center justify-between p-4 border-2 rounded-lg hover:border-blue-500 transition-all ${formData.credential_id === cred.id ? 'border-blue-500 bg-blue-50' : ''}`}>
+                        <button key={cred.id} onClick={() => handleCredentialSelect(cred.id)} className={`w-full flex items-center justify-between p-4 border-2 rounded-lg hover:border-blue-500 transition-all ${formData.credential_id === cred.id ? 'border-blue-500 bg-blue-50 dark:bg-blue-900/30' : 'border-gray-200 dark:border-gray-600'}`}>
                           <span className="font-medium">{cred.name}</span>
-                          <span className="text-gray-500 text-sm">Created {new Date(cred.created_at).toLocaleDateString()}</span>
+                          <span className="text-gray-500 dark:text-gray-400 text-sm">Created {new Date(cred.created_at).toLocaleDateString()}</span>
                         </button>
                       ))}
-                      <button onClick={() => handleCredentialSelect('create-new')} className="w-full flex items-center justify-center gap-2 p-4 border-2 border-dashed rounded-lg hover:border-blue-500 hover:bg-blue-50 transition-all text-gray-600">
+                      <button onClick={() => handleCredentialSelect('create-new')} className="w-full flex items-center justify-center gap-2 p-4 border-2 border-dashed border-gray-300 dark:border-gray-600 rounded-lg hover:border-blue-500 hover:bg-blue-50 dark:hover:bg-blue-900/30 transition-all text-gray-600 dark:text-gray-400">
                         <Plus className="w-5 h-5" /> Create New Credential
                       </button>
                     </>
@@ -611,14 +618,14 @@ export default function ConnectorConfig() {
               {wizardStep === 'configure' && (
                 <form onSubmit={handleSubmit}>
                   {(isEditMode ? editError : createError) && (
-                    <div className="mb-4 p-3 bg-red-50 border border-red-200 rounded-lg text-red-700 text-sm">
+                    <div className="mb-4 p-3 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-lg text-red-700 dark:text-red-400 text-sm">
                       {isEditMode ? editError : createError}
                     </div>
                   )}
                   <div className="grid gap-4">
                     <div>
-                      <label className="block text-sm font-medium text-gray-700 mb-1">Connector Name</label>
-                      <input type="text" value={formData.name} onChange={(e) => setFormData({ ...formData, name: e.target.value })} className="w-full px-4 py-2 border rounded-lg" placeholder="My Connector" required />
+                      <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Connector Name</label>
+                      <input type="text" value={formData.name} onChange={(e) => setFormData({ ...formData, name: e.target.value })} className="w-full px-4 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100" placeholder="My Connector" required />
                     </div>
                     <label className="flex items-center gap-2">
                       <input type="checkbox" checked={formData.enabled} onChange={(e) => setFormData({ ...formData, enabled: e.target.checked })} className="w-4 h-4" /> Enabled
@@ -626,8 +633,8 @@ export default function ConnectorConfig() {
                     {renderConfigFields(selectedType, formData.config, handleConfigChange)}
                   </div>
                   <div className="flex justify-end gap-4 mt-6">
-                    <button type="button" onClick={resetWizard} className="px-4 py-2 border rounded-lg hover:bg-gray-50">Cancel</button>
-                    <button type="submit" disabled={createMutation.isPending || updateMutation.isPending} className="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:opacity-50">
+                    <button type="button" onClick={resetWizard} className="px-4 py-2 border border-gray-300 dark:border-gray-600 rounded-lg hover:bg-gray-50 dark:hover:bg-gray-700 text-gray-700 dark:text-gray-300">Cancel</button>
+                    <button type="submit" disabled={createMutation.isPending || updateMutation.isPending} className="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 dark:bg-emerald-700 dark:hover:bg-emerald-800 disabled:opacity-50">
                       {isEditMode
                         ? (updateMutation.isPending ? 'Saving...' : 'Save Changes')
                         : (createMutation.isPending ? 'Creating...' : 'Create Connector')}
@@ -651,39 +658,39 @@ export default function ConnectorConfig() {
       {/* Connector List */}
       <div className="grid gap-6">
         {connectorsData?.connectors.map((connector) => (
-          <div key={connector.id} className="bg-white rounded-lg shadow p-6">
+          <div key={connector.id} className="bg-white dark:bg-gray-800 rounded-lg shadow p-6">
             <div className="flex justify-between items-start">
               <div className="flex items-center gap-4">
-                <img src={CONNECTOR_TYPES.find(ct => ct.type === connector.credential_type)?.logo} alt="" className="w-10 h-10 object-contain" />
+                <img src={(() => { const ct = CONNECTOR_TYPES.find(ct => ct.type === connector.credential_type); return ct ? getlogo(ct) : undefined })()} alt="" className="w-10 h-10 object-contain" />
                 <div>
                   <h3 className="text-xl font-semibold">{connector.name}</h3>
-                  <p className="text-gray-500 mt-1">Credential: {connector.credential_name || 'Unknown'} ({getCredentialTypeLabel(connector.credential_type)})</p>
-                  <p className="text-gray-400 text-sm mt-1">Proxies: {connector.proxy_count}</p>
+                  <p className="text-gray-500 dark:text-gray-400 mt-1">Credential: {connector.credential_name || 'Unknown'} ({getCredentialTypeLabel(connector.credential_type)})</p>
+                  <p className="text-gray-400 dark:text-gray-500 text-sm mt-1">Proxies: {connector.proxy_count}</p>
                 </div>
               </div>
               <div className="flex items-center gap-2">
                 {connector.last_error && (
-                  <span className="px-3 py-1 rounded-full text-sm font-medium bg-red-100 text-red-800 flex items-center gap-1">
+                  <span className="px-3 py-1 rounded-full text-sm font-medium bg-red-100 text-red-800 dark:bg-red-900/40 dark:text-red-400 flex items-center gap-1">
                     <AlertTriangle className="w-4 h-4" />
                     Error
                   </span>
                 )}
-                <span className={`px-3 py-1 rounded-full text-sm font-medium ${connector.enabled ? 'bg-green-100 text-green-800' : 'bg-gray-100 text-gray-800'}`}>{connector.enabled ? 'Enabled' : 'Disabled'}</span>
+                <span className={`px-3 py-1 rounded-full text-sm font-medium ${connector.enabled ? 'bg-green-100 text-green-800 dark:bg-green-900/40 dark:text-green-400' : 'bg-gray-100 text-gray-800 dark:bg-gray-700 dark:text-gray-300'}`}>{connector.enabled ? 'Enabled' : 'Disabled'}</span>
                 <button onClick={() => startEditing(connector)} className="p-2 text-gray-500 hover:text-blue-600"><Pencil className="w-5 h-5" /></button>
                 <button onClick={() => deleteMutation.mutate(connector.id)} className="p-2 text-gray-500 hover:text-red-600"><Trash2 className="w-5 h-5" /></button>
               </div>
             </div>
             {/* Error message display */}
             {connector.last_error && (
-              <div className="mt-4 p-3 bg-red-50 border border-red-200 rounded-lg">
+              <div className="mt-4 p-3 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-lg">
                 <div className="flex items-start gap-2">
                   <AlertTriangle className="w-5 h-5 text-red-500 flex-shrink-0 mt-0.5" />
                   <div className="flex-1 min-w-0">
-                    <p className="text-sm font-medium text-red-800">
+                    <p className="text-sm font-medium text-red-800 dark:text-red-400">
                       Cloud provider error {connector.consecutive_errors > 1 && `(${connector.consecutive_errors} consecutive failures)`}
                     </p>
-                    <p className="text-sm text-red-700 mt-1 break-words">{connector.last_error}</p>
-                    <p className="text-xs text-red-500 mt-1">{formatErrorTime(connector.last_error_at)}</p>
+                    <p className="text-sm text-red-700 dark:text-red-300 mt-1 break-words">{connector.last_error}</p>
+                    <p className="text-xs text-red-500 dark:text-red-500 mt-1">{formatErrorTime(connector.last_error_at)}</p>
                   </div>
                 </div>
               </div>
@@ -692,10 +699,10 @@ export default function ConnectorConfig() {
         ))}
 
         {connectorsData?.connectors.length === 0 && (
-          <div className="bg-white rounded-lg shadow p-8 text-center">
+          <div className="bg-white dark:bg-gray-800 rounded-lg shadow p-8 text-center">
             <Link2 className="w-12 h-12 text-gray-400 mx-auto mb-4" />
-            <h3 className="text-lg font-medium text-gray-900">No connectors configured</h3>
-            <p className="text-gray-500 mt-2">Add a connector to start managing proxies from your credentials.</p>
+            <h3 className="text-lg font-medium text-gray-900 dark:text-gray-100">No connectors configured</h3>
+            <p className="text-gray-500 dark:text-gray-400 mt-2">Add a connector to start managing proxies from your credentials.</p>
           </div>
         )}
       </div>

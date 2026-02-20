@@ -31,58 +31,60 @@ export default function EditProjectModal({
     onSave(formData)
   }
 
+  const inputClasses = "w-full border border-gray-300 dark:border-gray-600 rounded-lg px-3 py-2 bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100"
+
   return (
     <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
-      <div className="bg-white rounded-lg shadow-xl max-w-md w-full p-6 max-h-[90vh] overflow-y-auto">
+      <div className="bg-white dark:bg-gray-800 rounded-lg shadow-xl max-w-md w-full p-6 max-h-[90vh] overflow-y-auto">
         <h2 className="text-xl font-semibold mb-4">Edit Project</h2>
         <form onSubmit={handleSubmit}>
           <div className="space-y-4">
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">Name</label>
+              <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Name</label>
               <input
                 type="text"
                 required
                 value={formData.name}
                 onChange={(e) => setFormData({ ...formData, name: e.target.value })}
-                className="w-full border rounded-lg px-3 py-2"
+                className={inputClasses}
               />
             </div>
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">Description</label>
+              <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Description</label>
               <textarea
                 value={formData.description}
                 onChange={(e) => setFormData({ ...formData, description: e.target.value })}
-                className="w-full border rounded-lg px-3 py-2"
+                className={inputClasses}
                 rows={2}
               />
             </div>
-            <div className="border rounded-lg p-4 bg-gray-50">
-              <h3 className="text-sm font-medium text-gray-700 mb-3">Proxy Credentials</h3>
+            <div className="border border-gray-200 dark:border-gray-600 rounded-lg p-4 bg-gray-50 dark:bg-gray-700/50">
+              <h3 className="text-sm font-medium text-gray-700 dark:text-gray-300 mb-3">Proxy Credentials</h3>
               <div className="space-y-3">
                 <div>
-                  <label className="block text-xs font-medium text-gray-500 mb-1">Username</label>
+                  <label className="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">Username</label>
                   <input
                     type="text"
                     required
                     value={formData.username}
                     onChange={(e) => setFormData({ ...formData, username: e.target.value })}
-                    className="w-full border rounded-lg px-3 py-2 font-mono text-sm"
+                    className={`${inputClasses} font-mono text-sm`}
                   />
                 </div>
                 <div>
-                  <label className="block text-xs font-medium text-gray-500 mb-1">Password</label>
+                  <label className="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">Password</label>
                   <div className="relative">
                     <input
                       type={showPassword ? 'text' : 'password'}
                       required
                       value={formData.password}
                       onChange={(e) => setFormData({ ...formData, password: e.target.value })}
-                      className="w-full border rounded-lg px-3 py-2 pr-10 font-mono text-sm"
+                      className={`${inputClasses} pr-10 font-mono text-sm`}
                     />
                     <button
                       type="button"
                       onClick={() => setShowPassword(!showPassword)}
-                      className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600"
+                      className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600 dark:hover:text-gray-300"
                     >
                       {showPassword ? <EyeOff className="w-5 h-5" /> : <Eye className="w-5 h-5" />}
                     </button>
@@ -91,13 +93,13 @@ export default function EditProjectModal({
               </div>
             </div>
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">
+              <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
                 Routing Strategy
               </label>
               <select
                 value={formData.routing_strategy}
                 onChange={(e) => setFormData({ ...formData, routing_strategy: e.target.value })}
-                className="w-full border rounded-lg px-3 py-2"
+                className={inputClasses}
               >
                 <option value="round_robin">Round Robin</option>
                 <option value="least_used">Least Used</option>
@@ -112,14 +114,14 @@ export default function EditProjectModal({
             <button
               type="button"
               onClick={onClose}
-              className="px-4 py-2 text-gray-600 hover:text-gray-800"
+              className="px-4 py-2 text-gray-600 dark:text-gray-400 hover:text-gray-800 dark:hover:text-gray-200"
             >
               Cancel
             </button>
             <button
               type="submit"
               disabled={isLoading}
-              className="px-4 py-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600 disabled:opacity-50"
+              className="px-4 py-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600 dark:bg-violet-600 dark:hover:bg-violet-700 disabled:opacity-50"
             >
               {isLoading ? 'Saving...' : 'Save Changes'}
             </button>
@@ -129,4 +131,3 @@ export default function EditProjectModal({
     </div>
   )
 }
-
