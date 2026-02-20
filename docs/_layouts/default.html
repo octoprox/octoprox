@@ -38,7 +38,8 @@
       justify-content: space-between; 
       align-items: center; 
     }
-    .logo { height: 40px; }
+    .logo { height: 40px; flex-shrink: 0; }
+    nav { flex-shrink: 0; }
     nav a {
       color: var(--text-muted);
       text-decoration: none;
@@ -138,10 +139,11 @@
       text-decoration: none;
     }
     .back-link:hover { color: var(--text); }
-    @media (max-width: 640px) {
-      header .header-container { flex-wrap: wrap; gap: 12px; }
+    @media (max-width: 480px) {
+      header .header-container { flex-wrap: wrap; justify-content: center; gap: 8px; }
       .logo { height: 32px; }
-      nav a { margin-left: 16px; font-size: 0.9rem; }
+      nav { width: 100%; text-align: center; }
+      nav a { margin: 0 12px; font-size: 0.9rem; }
     }
   </style>
 </head>
