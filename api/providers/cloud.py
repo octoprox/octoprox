@@ -64,10 +64,18 @@ else
 fi
 
 # Create htpasswd file for proxy authentication
+# Detect the Squid runtime user: proxy on Ubuntu/Debian, squid on RHEL/CentOS
+if id -u proxy &>/dev/null; then
+    SQUID_USER=proxy
+elif id -u squid &>/dev/null; then
+    SQUID_USER=squid
+else
+    SQUID_USER=root
+fi
 HASHED=$(openssl passwd -apr1 '{password}')
 echo '{username}:'"$HASHED" > /etc/squid/passwd
 chmod 640 /etc/squid/passwd
-chown root:squid /etc/squid/passwd || true"""
+chown root:"$SQUID_USER" /etc/squid/passwd"""
 
 # Auth config: squid.conf directives for basic authentication
 _AUTH_CONFIG = """\
