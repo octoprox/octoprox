@@ -16,7 +16,42 @@ A dynamic and flexible proxy manager that acts as an intelligent proxy aggregato
 
 ## Quick Start
 
-### Prerequisites
+### Quick Start with Docker (Recommended)
+
+The fastest way to get Octoprox running is using the pre-built Docker image from GitHub Container Registry:
+
+```bash
+# Download the docker-compose file
+curl -O https://raw.githubusercontent.com/octoprox/octoprox/main/docker-compose.ghcr.yml
+
+# Start all services
+docker compose -f docker-compose.ghcr.yml up -d
+
+# View logs
+docker compose -f docker-compose.ghcr.yml logs -f octoprox
+```
+
+Once started:
+- **Web UI**: http://localhost:8000
+- **API**: http://localhost:8000/api/v1
+- **Proxy Server**: http://localhost:8080
+
+Default credentials: `admin` / `admin`
+
+> **Important**: For production, update the environment variables in `docker-compose.ghcr.yml`:
+> - Set a strong `OCTOPROX_AUTH_PASSWORD`
+> - Set a secure random `OCTOPROX_JWT_SECRET`
+> - Change `OCTOPROX_DB_PASSWORD` and update `POSTGRES_PASSWORD` to match
+
+To stop the services:
+
+```bash
+docker compose -f docker-compose.ghcr.yml down
+```
+
+---
+
+### Prerequisites (for local development)
 
 - Python 3.12+ (use `pyenv` for version management)
 - Node.js 20+ (for frontend development, use `nvm` for version management)
