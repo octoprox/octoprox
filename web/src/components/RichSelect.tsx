@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect } from 'react'
 import { ChevronDown, Check } from 'lucide-react'
-import { clsx } from 'clsx'
+import { cn } from '../utils/cn'
 
 export interface RichSelectOption {
   value: string
@@ -59,12 +59,12 @@ export function RichSelect({
   }
 
   return (
-    <div ref={containerRef} className={clsx('relative', className)}>
+    <div ref={containerRef} className={cn('relative', className)}>
       {/* Trigger button */}
       <button
         type="button"
         onClick={() => !disabled && setIsOpen(!isOpen)}
-        className={clsx(
+        className={cn(
           'w-full flex items-center justify-between px-3 py-1.5 text-sm border rounded-lg transition-colors text-left',
           'focus:outline-none focus:ring-1 focus:ring-blue-500 focus:border-blue-500',
           disabled
@@ -76,11 +76,11 @@ export function RichSelect({
         aria-required={required}
         aria-expanded={isOpen}
       >
-        <span className={clsx('truncate', !selectedOption && 'text-gray-400')}>
+        <span className={cn('truncate', !selectedOption && 'text-gray-400')}>
           {selectedOption ? selectedOption.label : placeholder}
         </span>
         <ChevronDown
-          className={clsx(
+          className={cn(
             'w-4 h-4 text-gray-400 transition-transform flex-shrink-0 ml-2',
             isOpen && 'rotate-180'
           )}
@@ -95,7 +95,7 @@ export function RichSelect({
               key={option.value}
               type="button"
               onClick={() => handleSelect(option.value)}
-              className={clsx(
+              className={cn(
                 'w-full flex items-start gap-2 px-3 py-2 text-left hover:bg-blue-50 dark:hover:bg-blue-900/30 transition-colors',
                 option.value === value && 'bg-blue-50 dark:bg-blue-900/30'
               )}

@@ -8,6 +8,7 @@ import { useTheme } from '../contexts/ThemeContext'
 import EditProjectModal from './EditProjectModal'
 import octoproxLogo from '../assets/logos/octoprox_horizontal.svg'
 import octoproxLogoDark from '../assets/logos/octoprox_horizontal_dark.svg'
+import { Button, Input, Select, Textarea, Label, Modal, ModalHeader, ModalFooter, Card, Alert } from './ui'
 
 export default function ProjectSelection() {
   const navigate = useNavigate()
@@ -98,16 +99,15 @@ export default function ProjectSelection() {
             >
               {theme === 'dark' ? <Sun className="w-5 h-5" /> : <Moon className="w-5 h-5" />}
             </button>
-            <button
+            <Button
               onClick={() => {
                 createMutation.reset()
                 setShowCreateModal(true)
               }}
-              className="flex items-center gap-2 bg-blue-500 text-white px-4 py-2 rounded-lg hover:bg-blue-600 dark:bg-violet-600 dark:hover:bg-violet-700 transition-colors"
             >
               <Plus className="w-5 h-5" />
               New Project
-            </button>
+            </Button>
           </div>
         </div>
 
@@ -181,7 +181,7 @@ function ProjectCard({
   onDelete: () => void
 }) {
   return (
-    <div className="bg-white dark:bg-gray-800 rounded-lg shadow-md p-6 hover:shadow-lg transition-shadow flex flex-col h-full">
+    <Card className="shadow-md p-6 hover:shadow-lg transition-shadow flex flex-col h-full">
       <div className="flex items-start justify-between mb-4">
         <h3 className="text-xl font-semibold text-gray-900 dark:text-gray-100">{project.name}</h3>
         <div className="flex items-center gap-2">
@@ -225,13 +225,10 @@ function ProjectCard({
           Strategy: {project.routing_strategy?.replace('_', ' ') || 'round robin'}
         </div>
       </div>
-      <button
-        onClick={onSelect}
-        className="w-full bg-blue-500 text-white py-2 rounded-lg hover:bg-blue-600 dark:bg-violet-600 dark:hover:bg-violet-700 transition-colors mt-auto"
-      >
+      <Button onClick={onSelect} className="w-full mt-auto">
         Open Project
-      </button>
-    </div>
+      </Button>
+    </Card>
   )
 }
 
@@ -260,96 +257,75 @@ function CreateProjectModal({
   }
 
   return (
-    <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4">
-      <div className="bg-white dark:bg-gray-800 rounded-lg shadow-xl max-w-md w-full p-6">
-        <h2 className="text-xl font-semibold mb-4">Create New Project</h2>
-        <form onSubmit={handleSubmit}>
-          <div className="space-y-4">
-            <div>
-              <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Name</label>
-              <input
-                type="text"
-                required
-                value={formData.name}
-                onChange={(e) => setFormData({ ...formData, name: e.target.value })}
-                className="w-full border border-gray-300 dark:border-gray-600 rounded-lg px-3 py-2 bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100"
-                placeholder="My Project"
-              />
-            </div>
-            <div>
-              <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Description</label>
-              <textarea
-                value={formData.description}
-                onChange={(e) => setFormData({ ...formData, description: e.target.value })}
-                className="w-full border border-gray-300 dark:border-gray-600 rounded-lg px-3 py-2 bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100"
-                rows={2}
-                placeholder="Optional description"
-              />
-            </div>
-            <div>
-              <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
-                Proxy Username
-              </label>
-              <input
-                type="text"
-                required
-                value={formData.username}
-                onChange={(e) => setFormData({ ...formData, username: e.target.value })}
-                className="w-full border border-gray-300 dark:border-gray-600 rounded-lg px-3 py-2 bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100"
-                placeholder="proxy_user"
-              />
-              <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">Used for proxy authentication</p>
-            </div>
-            <div>
-              <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
-                Proxy Password
-              </label>
-              <input
-                type="password"
-                required
-                value={formData.password}
-                onChange={(e) => setFormData({ ...formData, password: e.target.value })}
-                className="w-full border border-gray-300 dark:border-gray-600 rounded-lg px-3 py-2 bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100"
-                placeholder="••••••••"
-              />
-            </div>
-            <div>
-              <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
-                Routing Strategy
-              </label>
-              <select
-                value={formData.routing_strategy}
-                onChange={(e) => setFormData({ ...formData, routing_strategy: e.target.value })}
-                className="w-full border border-gray-300 dark:border-gray-600 rounded-lg px-3 py-2 bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100"
-              >
-                <option value="round_robin">Round Robin</option>
-                <option value="least_used">Least Used</option>
-                <option value="random">Random</option>
-                <option value="sticky">Sticky</option>
-                <option value="health_based">Health Based</option>
-              </select>
-            </div>
+    <Modal onClose={onClose} className="p-6">
+      <ModalHeader title="Create New Project" onClose={onClose} />
+      <form onSubmit={handleSubmit}>
+        <div className="space-y-4">
+          <div>
+            <Label>Name</Label>
+            <Input
+              type="text"
+              required
+              value={formData.name}
+              onChange={(e) => setFormData({ ...formData, name: e.target.value })}
+              placeholder="My Project"
+            />
           </div>
-          {error && <p className="text-red-500 text-sm mt-4">{error}</p>}
-          <div className="flex justify-end gap-3 mt-6">
-            <button
-              type="button"
-              onClick={onClose}
-              className="px-4 py-2 text-gray-600 dark:text-gray-400 hover:text-gray-800 dark:hover:text-gray-200"
-            >
-              Cancel
-            </button>
-            <button
-              type="submit"
-              disabled={isLoading}
-              className="px-4 py-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600 dark:bg-violet-600 dark:hover:bg-violet-700 disabled:opacity-50"
-            >
-              {isLoading ? 'Creating...' : 'Create Project'}
-            </button>
+          <div>
+            <Label>Description</Label>
+            <Textarea
+              value={formData.description}
+              onChange={(e) => setFormData({ ...formData, description: e.target.value })}
+              rows={2}
+              placeholder="Optional description"
+            />
           </div>
-        </form>
-      </div>
-    </div>
+          <div>
+            <Label>Proxy Username</Label>
+            <Input
+              type="text"
+              required
+              value={formData.username}
+              onChange={(e) => setFormData({ ...formData, username: e.target.value })}
+              placeholder="proxy_user"
+            />
+            <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">Used for proxy authentication</p>
+          </div>
+          <div>
+            <Label>Proxy Password</Label>
+            <Input
+              type="password"
+              required
+              value={formData.password}
+              onChange={(e) => setFormData({ ...formData, password: e.target.value })}
+              placeholder="••••••••"
+            />
+          </div>
+          <div>
+            <Label>Routing Strategy</Label>
+            <Select
+              value={formData.routing_strategy}
+              onChange={(e) => setFormData({ ...formData, routing_strategy: e.target.value })}
+            >
+              <option value="round_robin">Round Robin</option>
+              <option value="least_used">Least Used</option>
+              <option value="random">Random</option>
+              <option value="sticky">Sticky</option>
+              <option value="health_based">Health Based</option>
+            </Select>
+          </div>
+        </div>
+        {error && <Alert className="mt-4">{error}</Alert>}
+        <ModalFooter>
+          <Button type="button" variant="ghost" onClick={onClose}>
+            Cancel
+          </Button>
+          <Button type="submit" disabled={isLoading}>
+            {isLoading ? 'Creating...' : 'Create Project'}
+          </Button>
+        </ModalFooter>
+      </form>
+    </Modal>
   )
 }
 
@@ -371,40 +347,34 @@ function DeleteProjectModal({
   const isValid = confirmation === 'permanently delete'
 
   return (
-    <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4">
-      <div className="bg-white dark:bg-gray-800 rounded-lg shadow-xl max-w-md w-full p-6">
-        <h2 className="text-xl font-semibold text-red-600 mb-4">Delete Project</h2>
-        <p className="text-gray-600 dark:text-gray-400 mb-4">
-          Are you sure you want to delete <strong>{project.name}</strong>? This will also delete
-          all credentials, connectors, and proxies associated with this project.
-        </p>
-        <p className="text-sm text-gray-500 dark:text-gray-400 mb-4">
-          Type <strong>permanently delete</strong> to confirm:
-        </p>
-        <input
-          type="text"
-          value={confirmation}
-          onChange={(e) => onConfirmationChange(e.target.value)}
-          className="w-full border border-gray-300 dark:border-gray-600 rounded-lg px-3 py-2 mb-4 bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100"
-          placeholder="permanently delete"
-        />
-        <div className="flex justify-end gap-3">
-          <button
-            type="button"
-            onClick={onClose}
-            className="px-4 py-2 text-gray-600 dark:text-gray-400 hover:text-gray-800 dark:hover:text-gray-200"
-          >
-            Cancel
-          </button>
-          <button
-            onClick={onDelete}
-            disabled={!isValid || isLoading}
-            className="px-4 py-2 bg-red-500 text-white rounded-lg hover:bg-red-600 disabled:opacity-50"
-          >
-            {isLoading ? 'Deleting...' : 'Delete Project'}
-          </button>
-        </div>
-      </div>
-    </div>
+    <Modal onClose={onClose} className="p-6">
+      <h2 className="text-xl font-semibold text-red-600 mb-4">Delete Project</h2>
+      <p className="text-gray-600 dark:text-gray-400 mb-4">
+        Are you sure you want to delete <strong>{project.name}</strong>? This will also delete
+        all credentials, connectors, and proxies associated with this project.
+      </p>
+      <p className="text-sm text-gray-500 dark:text-gray-400 mb-4">
+        Type <strong>permanently delete</strong> to confirm:
+      </p>
+      <Input
+        type="text"
+        value={confirmation}
+        onChange={(e) => onConfirmationChange(e.target.value)}
+        className="mb-4"
+        placeholder="permanently delete"
+      />
+      <ModalFooter>
+        <Button type="button" variant="ghost" onClick={onClose}>
+          Cancel
+        </Button>
+        <Button
+          variant="danger"
+          onClick={onDelete}
+          disabled={!isValid || isLoading}
+        >
+          {isLoading ? 'Deleting...' : 'Delete Project'}
+        </Button>
+      </ModalFooter>
+    </Modal>
   )
 }

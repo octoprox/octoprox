@@ -17,6 +17,7 @@ import { useProject } from '../contexts/ProjectContext'
 import { useTheme } from '../contexts/ThemeContext'
 import AddCredentialModal from './AddCredentialModal'
 import { RichSelect, RichSelectOption } from './RichSelect'
+import { Button, Input, Label, Card, Badge, Alert, ModalFooter } from './ui'
 
 // Import logos
 import awsLogo from '../assets/logos/aws.svg'
@@ -76,8 +77,8 @@ function KeyValueTagsEditor({ value, onChange }: { value: string; onChange: (val
     <div className="space-y-2">
       {tags.map((tag, index) => (
         <div key={index} className="flex gap-2 items-center">
-          <input type="text" value={tag.key} onChange={(e) => updateTag(index, 'key', e.target.value)} placeholder="Key" className="flex-1 px-3 py-1.5 border border-gray-300 dark:border-gray-600 rounded-lg text-sm bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100" />
-          <input type="text" value={tag.value} onChange={(e) => updateTag(index, 'value', e.target.value)} placeholder="Value" className="flex-1 px-3 py-1.5 border border-gray-300 dark:border-gray-600 rounded-lg text-sm bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100" />
+          <Input type="text" value={tag.key} onChange={(e) => updateTag(index, 'key', e.target.value)} placeholder="Key" className="flex-1 px-3 py-1.5 text-sm" />
+          <Input type="text" value={tag.value} onChange={(e) => updateTag(index, 'value', e.target.value)} placeholder="Value" className="flex-1 px-3 py-1.5 text-sm" />
           <button type="button" onClick={() => removeTag(index)} className="p-1.5 text-gray-400 hover:text-red-500"><Trash2 className="w-4 h-4" /></button>
         </div>
       ))}
@@ -238,7 +239,6 @@ export default function ConnectorConfig() {
   const startEditing = (connector: Connector) => {
     setEditingConnector(connector)
     setSelectedType(connector.credential_type as CredentialType)
-    // Convert config values to strings for the form, including serializing tags
     const configForForm: Record<string, string> = {}
     const rawConfig = connector.config || {}
     for (const [key, value] of Object.entries(rawConfig)) {
@@ -286,7 +286,6 @@ export default function ConnectorConfig() {
 
   const isEditMode = !!editingConnector
 
-  // Parse tags from JSON string to actual object for submission
   const prepareConfigForSubmit = (config: Record<string, string>): Record<string, unknown> => {
     const result: Record<string, unknown> = { ...config }
     if (config.tags) {
@@ -335,18 +334,14 @@ export default function ConnectorConfig() {
     return credentialsData?.credentials.filter(c => c.type === selectedType) || []
   }
 
-  // Categorize fields by tab
   const getFieldsByTab = (type: CredentialType): Record<ConfigTab, string[]> => {
     const scalingFields = ['min_proxies', 'max_proxies', 'min_rotation_period_minutes', 'max_rotation_period_minutes']
     const advancedFields = ['tags']
-
-    // Infrastructure fields vary by provider
     const infraFields: Record<string, string[]> = {
       aws: ['instance_name', 'region', 'instance_type', 'key_pair_name', 'security_group'],
       gcp: ['project_id', 'instance_name', 'zone', 'machine_type', 'network'],
       azure: ['subscription_id', 'resource_group', 'instance_name', 'location', 'vm_size', 'vnet_name', 'subnet_name', 'ssh_public_key'],
     }
-
     return {
       infrastructure: infraFields[type] || [],
       scaling: scalingFields,
@@ -354,54 +349,28 @@ export default function ConnectorConfig() {
     }
   }
 
-  // Friendly field labels
   const getFieldLabel = (key: string): string => {
     const labels: Record<string, string> = {
-      instance_name: 'Instance Name',
-      region: 'Region',
-      instance_type: 'Instance Type',
-      key_pair_name: 'Key Pair',
-      security_group: 'Security Group',
-      project_id: 'Project ID',
-      zone: 'Zone',
-      machine_type: 'Machine Type',
-      network: 'Network',
-      subnetwork: 'Subnetwork',
-      ssh_key: 'SSH Key',
-      ssh_public_key: 'SSH Public Key',
-      subscription_id: 'Subscription ID',
-      location: 'Location',
-      vm_size: 'VM Size',
-      resource_group: 'Resource Group',
-      vnet_name: 'Virtual Network',
-      subnet_name: 'Subnet',
-      min_proxies: 'Min Proxies',
-      max_proxies: 'Max Proxies',
-      min_rotation_period_minutes: 'Min Rotation (min)',
+      instance_name: 'Instance Name', region: 'Region', instance_type: 'Instance Type',
+      key_pair_name: 'Key Pair', security_group: 'Security Group', project_id: 'Project ID',
+      zone: 'Zone', machine_type: 'Machine Type', network: 'Network', subnetwork: 'Subnetwork',
+      ssh_key: 'SSH Key', ssh_public_key: 'SSH Public Key', subscription_id: 'Subscription ID',
+      location: 'Location', vm_size: 'VM Size', resource_group: 'Resource Group',
+      vnet_name: 'Virtual Network', subnet_name: 'Subnet', min_proxies: 'Min Proxies',
+      max_proxies: 'Max Proxies', min_rotation_period_minutes: 'Min Rotation (min)',
       max_rotation_period_minutes: 'Max Rotation (min)',
     }
     return labels[key] || key.replace(/_/g, ' ').replace(/\b\w/g, (l) => l.toUpperCase())
   }
 
-  // Convert instance type options to RichSelectOption format
   const toInstanceTypeOptions = (opts: { code: string; vcpus: number; memory_gb: number; architecture: string; description: string }[] | undefined): RichSelectOption[] => {
     if (!opts) return []
-    return opts.map((opt) => ({
-      value: opt.code,
-      label: opt.code,
-      description: opt.description,
-      badge: opt.architecture,
-    }))
+    return opts.map((opt) => ({ value: opt.code, label: opt.code, description: opt.description, badge: opt.architecture }))
   }
 
-  // Convert region options to RichSelectOption format
   const toRegionOptions = (opts: { code: string; name: string }[] | undefined): RichSelectOption[] => {
     if (!opts) return []
-    return opts.map((opt) => ({
-      value: opt.code,
-      label: opt.name,
-      description: opt.code,
-    }))
+    return opts.map((opt) => ({ value: opt.code, label: opt.name, description: opt.code }))
   }
 
   const renderConfigFields = (type: CredentialType | null, config: Record<string, string>, onChange: (key: string, value: string) => void) => {
@@ -412,13 +381,11 @@ export default function ConnectorConfig() {
       zone: toRegionOptions(optionsData?.gcp_zones),
       location: toRegionOptions(optionsData?.azure_locations),
     }
-
     const instanceTypeDropdownFields: Record<string, RichSelectOption[]> = {
       instance_type: toInstanceTypeOptions(optionsData?.aws_instance_types),
       machine_type: toInstanceTypeOptions(optionsData?.gcp_machine_types),
       vm_size: toInstanceTypeOptions(optionsData?.azure_vm_sizes),
     }
-
     const requiredFields: Record<string, string[]> = {
       aws: ['instance_name', 'region', 'instance_type', 'key_pair_name', 'security_group'],
       gcp: ['project_id', 'instance_name', 'zone', 'machine_type'],
@@ -426,26 +393,18 @@ export default function ConnectorConfig() {
     }
     const isRequired = (key: string) => requiredFields[type]?.includes(key) || false
 
-    // Custom placeholders for specific fields
     const getPlaceholder = (key: string): string => {
       const placeholders: Record<string, string> = {
-        security_group: 'sg-xxxxxxxx',
-        key_pair_name: 'my-key-pair',
-        instance_name: 'proxy-instance',
-        project_id: 'my-gcp-project',
-        subscription_id: 'xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx',
-        resource_group: 'my-resource-group',
-        vnet_name: 'my-vnet',
-        subnet_name: 'default',
+        security_group: 'sg-xxxxxxxx', key_pair_name: 'my-key-pair', instance_name: 'proxy-instance',
+        project_id: 'my-gcp-project', subscription_id: 'xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx',
+        resource_group: 'my-resource-group', vnet_name: 'my-vnet', subnet_name: 'default',
         ssh_public_key: 'ssh-rsa AAAA... user@host',
       }
       return placeholders[key] || getFieldLabel(key)
     }
 
-    // Helper text for specific fields
     const getHelperText = (key: string): string | null => {
-      const helpers: Record<string, string> = {
-      }
+      const helpers: Record<string, string> = {}
       return helpers[key] || null
     }
 
@@ -479,11 +438,11 @@ export default function ConnectorConfig() {
           ))}
         </div>
 
-        {/* Tab Content - fixed height to prevent modal jumping */}
+        {/* Tab Content */}
         <div className="min-h-[200px]">
           {activeConfigTab === 'advanced' ? (
             <div>
-              <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Instance Tags</label>
+              <Label>Instance Tags</Label>
               <p className="text-xs text-gray-500 dark:text-gray-400 mb-2">Key-value tags applied to instances</p>
               <KeyValueTagsEditor value={config.tags || '{}'} onChange={(val) => onChange('tags', val)} />
             </div>
@@ -496,10 +455,10 @@ export default function ConnectorConfig() {
                 const required = isRequired(key)
                 return (
                   <div key={key}>
-                    <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">
+                    <Label className="text-xs text-gray-600 dark:text-gray-400">
                       {getFieldLabel(key)}
                       {required && <span className="text-red-500 ml-1">*</span>}
-                    </label>
+                    </Label>
                     {regionOptions && regionOptions.length > 0 ? (
                       <RichSelect
                         options={regionOptions}
@@ -517,11 +476,11 @@ export default function ConnectorConfig() {
                         required={required}
                       />
                     ) : (
-                      <input
+                      <Input
                         type={isNumber(key) ? 'number' : 'text'}
                         value={config[key] || ''}
                         onChange={(e) => onChange(key, e.target.value)}
-                        className="w-full px-3 py-1.5 text-sm border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 focus:ring-1 focus:ring-blue-500 focus:border-blue-500"
+                        className="px-3 py-1.5 text-sm"
                         placeholder={getPlaceholder(key)}
                         required={required}
                       />
@@ -543,21 +502,21 @@ export default function ConnectorConfig() {
     <div>
       <div className="flex justify-between items-center mb-8">
         <h1 className="text-3xl font-bold">Connectors</h1>
-        <button onClick={() => setShowWizard(true)} className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 dark:bg-violet-600 dark:hover:bg-violet-700">
+        <Button onClick={() => setShowWizard(true)}>
           <Link2 className="w-5 h-5" /> Add Connector
-        </button>
+        </Button>
       </div>
 
-      {/* Wizard Modal */}
+      {/* Wizard Modal - custom layout for multi-step wizard */}
       {showWizard && (
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
           <div className="bg-white dark:bg-gray-800 rounded-lg shadow-xl max-w-4xl w-full mx-4 max-h-[90vh] overflow-y-auto">
             <div className="p-6 border-b border-gray-200 dark:border-gray-700 flex justify-between items-center">
               <div className="flex items-center gap-4">
                 {wizardStep !== 'select-type' && !isEditMode && (
-                  <button onClick={() => setWizardStep(wizardStep === 'configure' ? 'select-credential' : 'select-type')} className="p-2 hover:bg-gray-100 dark:hover:bg-gray-700 rounded-lg">
+                  <Button variant="ghost" size="icon" onClick={() => setWizardStep(wizardStep === 'configure' ? 'select-credential' : 'select-type')}>
                     <ArrowLeft className="w-5 h-5" />
-                  </button>
+                  </Button>
                 )}
                 <h2 className="text-xl font-semibold">
                   {isEditMode ? 'Edit Connector' : (
@@ -569,7 +528,7 @@ export default function ConnectorConfig() {
                   )}
                 </h2>
               </div>
-              <button onClick={resetWizard} className="p-2 hover:bg-gray-100 dark:hover:bg-gray-700 rounded-lg"><X className="w-5 h-5" /></button>
+              <Button variant="ghost" size="icon" onClick={resetWizard}><X className="w-5 h-5" /></Button>
             </div>
 
             <div className="p-6">
@@ -594,9 +553,9 @@ export default function ConnectorConfig() {
                   {getCredentialsForType().length === 0 ? (
                     <div className="text-center py-8">
                       <p className="text-gray-500 dark:text-gray-400 mb-4">No {getCredentialTypeLabel(selectedType)} credentials found.</p>
-                      <button onClick={() => handleCredentialSelect('create-new')} className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 dark:bg-violet-600 dark:hover:bg-violet-700 mx-auto">
+                      <Button onClick={() => handleCredentialSelect('create-new')} className="mx-auto">
                         <Plus className="w-5 h-5" /> Create New Credential
-                      </button>
+                      </Button>
                     </div>
                   ) : (
                     <>
@@ -618,28 +577,28 @@ export default function ConnectorConfig() {
               {wizardStep === 'configure' && (
                 <form onSubmit={handleSubmit}>
                   {(isEditMode ? editError : createError) && (
-                    <div className="mb-4 p-3 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-lg text-red-700 dark:text-red-400 text-sm">
+                    <Alert className="mb-4">
                       {isEditMode ? editError : createError}
-                    </div>
+                    </Alert>
                   )}
                   <div className="grid gap-4">
                     <div>
-                      <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Connector Name</label>
-                      <input type="text" value={formData.name} onChange={(e) => setFormData({ ...formData, name: e.target.value })} className="w-full px-4 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100" placeholder="My Connector" required />
+                      <Label>Connector Name</Label>
+                      <Input type="text" value={formData.name} onChange={(e) => setFormData({ ...formData, name: e.target.value })} placeholder="My Connector" required />
                     </div>
                     <label className="flex items-center gap-2">
                       <input type="checkbox" checked={formData.enabled} onChange={(e) => setFormData({ ...formData, enabled: e.target.checked })} className="w-4 h-4" /> Enabled
                     </label>
                     {renderConfigFields(selectedType, formData.config, handleConfigChange)}
                   </div>
-                  <div className="flex justify-end gap-4 mt-6">
-                    <button type="button" onClick={resetWizard} className="px-4 py-2 border border-gray-300 dark:border-gray-600 rounded-lg hover:bg-gray-50 dark:hover:bg-gray-700 text-gray-700 dark:text-gray-300">Cancel</button>
-                    <button type="submit" disabled={createMutation.isPending || updateMutation.isPending} className="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 dark:bg-emerald-700 dark:hover:bg-emerald-800 disabled:opacity-50">
+                  <ModalFooter className="gap-4">
+                    <Button type="button" variant="outline" onClick={resetWizard}>Cancel</Button>
+                    <Button type="submit" variant="success" disabled={createMutation.isPending || updateMutation.isPending}>
                       {isEditMode
                         ? (updateMutation.isPending ? 'Saving...' : 'Save Changes')
                         : (createMutation.isPending ? 'Creating...' : 'Create Connector')}
-                    </button>
-                  </div>
+                    </Button>
+                  </ModalFooter>
                 </form>
               )}
             </div>
@@ -658,7 +617,7 @@ export default function ConnectorConfig() {
       {/* Connector List */}
       <div className="grid gap-6">
         {connectorsData?.connectors.map((connector) => (
-          <div key={connector.id} className="bg-white dark:bg-gray-800 rounded-lg shadow p-6">
+          <Card key={connector.id} className="p-6">
             <div className="flex justify-between items-start">
               <div className="flex items-center gap-4">
                 <img src={(() => { const ct = CONNECTOR_TYPES.find(ct => ct.type === connector.credential_type); return ct ? getlogo(ct) : undefined })()} alt="" className="w-10 h-10 object-contain" />
@@ -670,19 +629,25 @@ export default function ConnectorConfig() {
               </div>
               <div className="flex items-center gap-2">
                 {connector.last_error && (
-                  <span className="px-3 py-1 rounded-full text-sm font-medium bg-red-100 text-red-800 dark:bg-red-900/40 dark:text-red-400 flex items-center gap-1">
+                  <Badge color="red" className="px-3 text-sm flex items-center gap-1">
                     <AlertTriangle className="w-4 h-4" />
                     Error
-                  </span>
+                  </Badge>
                 )}
-                <span className={`px-3 py-1 rounded-full text-sm font-medium ${connector.enabled ? 'bg-green-100 text-green-800 dark:bg-green-900/40 dark:text-green-400' : 'bg-gray-100 text-gray-800 dark:bg-gray-700 dark:text-gray-300'}`}>{connector.enabled ? 'Enabled' : 'Disabled'}</span>
-                <button onClick={() => startEditing(connector)} className="p-2 text-gray-500 hover:text-blue-600"><Pencil className="w-5 h-5" /></button>
-                <button onClick={() => deleteMutation.mutate(connector.id)} className="p-2 text-gray-500 hover:text-red-600"><Trash2 className="w-5 h-5" /></button>
+                <Badge color={connector.enabled ? 'green' : 'gray'} className="px-3 text-sm">
+                  {connector.enabled ? 'Enabled' : 'Disabled'}
+                </Badge>
+                <Button variant="ghost" size="icon" onClick={() => startEditing(connector)} className="text-gray-500 hover:text-blue-600">
+                  <Pencil className="w-5 h-5" />
+                </Button>
+                <Button variant="ghost" size="icon" onClick={() => deleteMutation.mutate(connector.id)} className="text-gray-500 hover:text-red-600">
+                  <Trash2 className="w-5 h-5" />
+                </Button>
               </div>
             </div>
             {/* Error message display */}
             {connector.last_error && (
-              <div className="mt-4 p-3 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-lg">
+              <Alert className="mt-4">
                 <div className="flex items-start gap-2">
                   <AlertTriangle className="w-5 h-5 text-red-500 flex-shrink-0 mt-0.5" />
                   <div className="flex-1 min-w-0">
@@ -693,20 +658,19 @@ export default function ConnectorConfig() {
                     <p className="text-xs text-red-500 dark:text-red-500 mt-1">{formatErrorTime(connector.last_error_at)}</p>
                   </div>
                 </div>
-              </div>
+              </Alert>
             )}
-          </div>
+          </Card>
         ))}
 
         {connectorsData?.connectors.length === 0 && (
-          <div className="bg-white dark:bg-gray-800 rounded-lg shadow p-8 text-center">
+          <Card className="p-8 text-center">
             <Link2 className="w-12 h-12 text-gray-400 mx-auto mb-4" />
             <h3 className="text-lg font-medium text-gray-900 dark:text-gray-100">No connectors configured</h3>
             <p className="text-gray-500 dark:text-gray-400 mt-2">Add a connector to start managing proxies from your credentials.</p>
-          </div>
+          </Card>
         )}
       </div>
     </div>
   )
 }
-

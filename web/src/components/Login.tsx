@@ -3,6 +3,7 @@ import { Lock, User, AlertCircle, Moon, Sun } from 'lucide-react'
 import octoproxLogo from '../assets/logos/octoprox_horizontal.svg'
 import octoproxLogoDark from '../assets/logos/octoprox_horizontal_dark.svg'
 import { useTheme } from '../contexts/ThemeContext'
+import { Button, Input, Label, Alert } from './ui'
 
 interface LoginProps {
   onLogin: (username: string, password: string) => Promise<void>
@@ -47,28 +48,26 @@ export default function Login({ onLogin, error }: LoginProps) {
 
           {/* Error message */}
           {error && (
-            <div className="mb-6 p-4 bg-red-50 dark:bg-red-900/30 border border-red-200 dark:border-red-800 rounded-lg flex items-center gap-3">
+            <Alert variant="error" className="mb-6 flex items-center gap-3">
               <AlertCircle className="w-5 h-5 text-red-500 flex-shrink-0" />
-              <p className="text-red-700 dark:text-red-400 text-sm">{error}</p>
-            </div>
+              <p className="text-sm">{error}</p>
+            </Alert>
           )}
 
           {/* Login form */}
           <form onSubmit={handleSubmit} className="space-y-6">
             <div>
-              <label htmlFor="username" className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
-                Username
-              </label>
+              <Label htmlFor="username" className="mb-2">Username</Label>
               <div className="relative">
                 <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
                   <User className="h-5 w-5 text-gray-400" />
                 </div>
-                <input
+                <Input
                   id="username"
                   type="text"
                   value={username}
                   onChange={(e) => setUsername(e.target.value)}
-                  className="block w-full pl-10 pr-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                  className="pl-10 focus:ring-2"
                   placeholder="Enter your username"
                   required
                   autoComplete="username"
@@ -77,19 +76,17 @@ export default function Login({ onLogin, error }: LoginProps) {
             </div>
 
             <div>
-              <label htmlFor="password" className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
-                Password
-              </label>
+              <Label htmlFor="password" className="mb-2">Password</Label>
               <div className="relative">
                 <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
                   <Lock className="h-5 w-5 text-gray-400" />
                 </div>
-                <input
+                <Input
                   id="password"
                   type="password"
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
-                  className="block w-full pl-10 pr-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                  className="pl-10 focus:ring-2"
                   placeholder="Enter your password"
                   required
                   autoComplete="current-password"
@@ -97,13 +94,13 @@ export default function Login({ onLogin, error }: LoginProps) {
               </div>
             </div>
 
-            <button
+            <Button
               type="submit"
               disabled={isLoading}
-              className="w-full flex justify-center py-2 px-4 border border-transparent rounded-lg shadow-sm text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 dark:bg-violet-600 dark:hover:bg-violet-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 dark:focus:ring-violet-500 disabled:opacity-50 disabled:cursor-not-allowed"
+              className="w-full shadow-sm focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 dark:focus:ring-violet-500"
             >
               {isLoading ? 'Signing in...' : 'Sign in'}
-            </button>
+            </Button>
           </form>
         </div>
       </div>

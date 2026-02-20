@@ -8,6 +8,7 @@ import { fetchProjectMetricsHistory, MetricsSnapshot } from '../api/client'
 import { useProject } from '../contexts/ProjectContext'
 import { useTheme } from '../contexts/ThemeContext'
 import { formatBytes } from '../utils/format'
+import { Card, Button } from './ui'
 
 const TIME_RANGES = ['1h', '6h', '24h', '7d', '30d'] as const
 type TimeRange = (typeof TIME_RANGES)[number]
@@ -118,17 +119,13 @@ export default function Metrics() {
       {/* Time range selector */}
       <div className="flex gap-2 mb-6">
         {TIME_RANGES.map((r) => (
-          <button
+          <Button
             key={r}
+            variant={r === range ? 'primary' : 'secondary'}
             onClick={() => setRange(r)}
-            className={`px-4 py-2 rounded-lg font-medium transition-colors ${
-              r === range
-                ? 'bg-blue-600 text-white dark:bg-violet-600'
-                : 'bg-gray-100 dark:bg-gray-700 text-gray-700 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-gray-600'
-            }`}
           >
             {r}
-          </button>
+          </Button>
         ))}
       </div>
 
@@ -153,7 +150,7 @@ export default function Metrics() {
       </div>
 
       {/* Requests Over Time */}
-      <div className="bg-white dark:bg-gray-800 rounded-lg shadow p-6 mb-8">
+      <Card className="p-6 mb-8">
         <h2 className="text-xl font-semibold mb-4">Requests Over Time</h2>
         {chartData.length === 0 ? (
           <p className="text-gray-400 text-center py-12">No data for this time range</p>
@@ -181,10 +178,10 @@ export default function Metrics() {
             </AreaChart>
           </ResponsiveContainer>
         )}
-      </div>
+      </Card>
 
       {/* Bytes Over Time */}
-      <div className="bg-white dark:bg-gray-800 rounded-lg shadow p-6">
+      <Card className="p-6">
         <h2 className="text-xl font-semibold mb-4">Bytes Over Time</h2>
         {chartData.length === 0 ? (
           <p className="text-gray-400 text-center py-12">No data for this time range</p>
@@ -212,7 +209,7 @@ export default function Metrics() {
             </AreaChart>
           </ResponsiveContainer>
         )}
-      </div>
+      </Card>
     </div>
   )
 }
@@ -229,12 +226,12 @@ function StatCard({
   icon?: React.ReactNode
 }) {
   return (
-    <div className="bg-white dark:bg-gray-800 rounded-lg shadow p-4">
+    <Card className="p-4">
       <div className="flex items-center gap-1 mb-1">
         {icon}
         <p className="text-gray-500 dark:text-gray-400 text-sm">{title}</p>
       </div>
       <p className={`text-2xl font-bold ${color}`}>{value}</p>
-    </div>
+    </Card>
   )
 }

@@ -3,6 +3,7 @@ import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { X, Eye, EyeOff } from 'lucide-react'
 import { createProjectCredential, updateProjectCredential, CredentialType, CredentialCreate, Credential, CredentialDetail } from '../api/client'
 import { useProject } from '../contexts/ProjectContext'
+import { Button, Input, Select, Textarea, Label, Alert, ModalFooter } from './ui'
 
 export const CREDENTIAL_TYPES: { value: CredentialType; label: string }[] = [
   { value: 'static_proxy_provider', label: 'Static Proxy Provider' },
@@ -159,8 +160,6 @@ export default function AddCredentialModal({ isOpen, onClose, onSuccess, fixedTy
     setShowSecrets({ ...showSecrets, [key]: !showSecrets[key] })
   }
 
-  const inputClasses = "w-full px-4 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100"
-
   const renderConfigFields = () => {
     const fields = getDefaultCredentialConfig(formData.type)
     const jsonError = getServiceAccountJsonError()
@@ -168,15 +167,15 @@ export default function AddCredentialModal({ isOpen, onClose, onSuccess, fixedTy
       const isSecret = ['password', 'secret_key', 'client_secret', 'service_account_json'].includes(key)
       return (
         <div key={key} className="relative">
-          <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
+          <Label>
             {key.replace(/_/g, ' ').replace(/\b\w/g, (l) => l.toUpperCase())}
-          </label>
+          </Label>
           {key === 'service_account_json' ? (
             <div>
-              <textarea
+              <Textarea
                 value={formData.config[key] || ''}
                 onChange={(e) => handleConfigChange(key, e.target.value)}
-                className={`${inputClasses} font-mono text-sm ${jsonError ? 'border-red-300 dark:border-red-600 bg-red-50 dark:bg-red-900/20' : ''}`}
+                className={`font-mono text-sm ${jsonError ? 'border-red-300 dark:border-red-600 bg-red-50 dark:bg-red-900/20' : ''}`}
                 rows={4}
                 placeholder="Paste service account JSON here"
               />
@@ -186,11 +185,11 @@ export default function AddCredentialModal({ isOpen, onClose, onSuccess, fixedTy
             </div>
           ) : (
             <div className="relative">
-              <input
+              <Input
                 type={isSecret && !showSecrets[key] ? 'password' : 'text'}
                 value={formData.config[key] || ''}
                 onChange={(e) => handleConfigChange(key, e.target.value)}
-                className={`${inputClasses} pr-10`}
+                className="pr-10"
                 placeholder={key.replace(/_/g, ' ')}
               />
               {isSecret && (
@@ -222,51 +221,49 @@ export default function AddCredentialModal({ isOpen, onClose, onSuccess, fixedTy
         </div>
         <form onSubmit={handleSubmit} className="p-6">
           {errorMessage && (
-            <div className="bg-red-50 dark:bg-red-900/30 border border-red-200 dark:border-red-800 text-red-700 dark:text-red-400 px-4 py-3 rounded-lg mb-4 flex justify-between items-center">
+            <Alert className="mb-4 flex justify-between items-center">
               <span className="text-sm">{errorMessage}</span>
               <button type="button" onClick={() => setErrorMessage(null)} className="text-red-500 hover:text-red-700">
                 <X className="w-4 h-4" />
               </button>
-            </div>
+            </Alert>
           )}
           <div className="grid gap-4">
             <div className={fixedType || isEditMode ? '' : 'grid grid-cols-2 gap-4'}>
               <div>
-                <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Credential Name</label>
-                <input
+                <Label>Credential Name</Label>
+                <Input
                   type="text"
                   placeholder="My Credential"
                   value={formData.name}
                   onChange={(e) => setFormData({ ...formData, name: e.target.value })}
-                  className={inputClasses}
                   required
                 />
               </div>
               {!fixedType && !isEditMode && (
                 <div>
-                  <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Type</label>
-                  <select
+                  <Label>Type</Label>
+                  <Select
                     value={formData.type}
                     onChange={(e) => handleTypeChange(e.target.value as CredentialType)}
-                    className={inputClasses}
                   >
                     {CREDENTIAL_TYPES.map((type) => (
                       <option key={type.value} value={type.value}>{type.label}</option>
                     ))}
-                  </select>
+                  </Select>
                 </div>
               )}
             </div>
             <div className="grid grid-cols-2 gap-4">{renderConfigFields()}</div>
           </div>
-          <div className="flex justify-end gap-4 mt-6">
-            <button type="button" onClick={handleClose} className="px-4 py-2 border border-gray-300 dark:border-gray-600 rounded-lg hover:bg-gray-50 dark:hover:bg-gray-700 text-gray-700 dark:text-gray-300">Cancel</button>
-            <button type="submit" disabled={createMutation.isPending || updateMutation.isPending} className="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 dark:bg-emerald-700 dark:hover:bg-emerald-800 disabled:opacity-50">
+          <ModalFooter>
+            <Button type="button" variant="outline" onClick={handleClose}>Cancel</Button>
+            <Button type="submit" variant="success" disabled={createMutation.isPending || updateMutation.isPending}>
               {isEditMode
                 ? (updateMutation.isPending ? 'Saving...' : 'Save Changes')
                 : (createMutation.isPending ? 'Creating...' : 'Create Credential')}
-            </button>
-          </div>
+            </Button>
+          </ModalFooter>
         </form>
       </div>
     </div>

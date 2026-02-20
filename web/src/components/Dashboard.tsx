@@ -5,6 +5,7 @@ import { fetchProjectMetrics, fetchProjectScalingMetrics, updateProject, Project
 import { useProject } from '../contexts/ProjectContext'
 import EditProjectModal from './EditProjectModal'
 import { formatBytes } from '../utils/format'
+import { Card, Badge, Button } from './ui'
 
 export default function Dashboard() {
   const queryClient = useQueryClient()
@@ -53,16 +54,16 @@ export default function Dashboard() {
       <div className="flex items-center justify-between mb-2">
         <h1 className="text-3xl font-bold">Dashboard</h1>
         {selectedProject && (
-          <button
+          <Button
+            variant="ghost"
             onClick={() => {
               updateMutation.reset()
               setShowEditModal(true)
             }}
-            className="flex items-center gap-2 px-4 py-2 text-gray-600 dark:text-gray-400 hover:text-gray-800 dark:hover:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700 rounded-lg transition-colors"
           >
             <Settings className="w-5 h-5" />
             Edit Project
-          </button>
+          </Button>
         )}
       </div>
 
@@ -91,7 +92,7 @@ export default function Dashboard() {
       </div>
 
       {/* Request Statistics */}
-      <div className="bg-white dark:bg-gray-800 rounded-lg shadow p-6 mb-8">
+      <Card className="p-6 mb-8">
         <h2 className="text-xl font-semibold mb-4">Request Statistics</h2>
         <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-6">
           <MetricItem label="Total Requests" value={pool?.total_requests ?? 0} />
@@ -115,11 +116,11 @@ export default function Dashboard() {
             icon={<ArrowDownCircle className="w-4 h-4 text-teal-500" />}
           />
         </div>
-      </div>
+      </Card>
 
       {/* Auto-Scaling Status */}
       {scalingMetrics && (
-        <div className="bg-white dark:bg-gray-800 rounded-lg shadow p-6 mb-8">
+        <Card className="p-6 mb-8">
           <h2 className="text-xl font-semibold mb-4">Auto-Scaling Status</h2>
           <div className="grid grid-cols-2 md:grid-cols-4 gap-6">
             <div>
@@ -161,32 +162,28 @@ export default function Dashboard() {
               )}
             </div>
           )}
-        </div>
+        </Card>
       )}
 
       {/* Routing Strategy */}
-      <div className="bg-white dark:bg-gray-800 rounded-lg shadow p-6">
+      <Card className="p-6">
         <h2 className="text-xl font-semibold mb-4">Routing Strategy</h2>
         <div className="flex flex-wrap gap-3">
           {strategy?.available_strategies.map((s) => (
-            <button
+            <Button
               key={s}
+              variant={s === strategy.current_strategy ? 'primary' : 'secondary'}
               onClick={() => strategyMutation.mutate(s)}
               disabled={strategyMutation.isPending}
-              className={`px-4 py-2 rounded-lg font-medium transition-colors ${
-                s === strategy.current_strategy
-                  ? 'bg-blue-600 text-white dark:bg-violet-600'
-                  : 'bg-gray-100 dark:bg-gray-700 text-gray-700 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-gray-600'
-              } disabled:opacity-50`}
             >
               {formatStrategy(s)}
-            </button>
+            </Button>
           ))}
         </div>
         <p className="mt-4 text-gray-500 dark:text-gray-400 text-sm">
           Current strategy: <strong>{formatStrategy(strategy?.current_strategy ?? '')}</strong>
         </p>
-      </div>
+      </Card>
 
       {/* Edit Project Modal */}
       {showEditModal && selectedProject && (
@@ -204,7 +201,7 @@ export default function Dashboard() {
 
 function StatCard({ title, value, icon }: { title: string; value: string | number; icon: React.ReactNode }) {
   return (
-    <div className="bg-white dark:bg-gray-800 rounded-lg shadow p-6">
+    <Card className="p-6">
       <div className="flex items-center justify-between">
         <div>
           <p className="text-gray-500 dark:text-gray-400 text-sm">{title}</p>
@@ -212,7 +209,7 @@ function StatCard({ title, value, icon }: { title: string; value: string | numbe
         </div>
         {icon}
       </div>
-    </div>
+    </Card>
   )
 }
 
@@ -245,15 +242,16 @@ function formatStrategy(strategy: string): string {
     .join(' ')
 }
 
+const DEMAND_COLORS: Record<string, 'green' | 'yellow' | 'red'> = {
+  LOW: 'green',
+  MEDIUM: 'yellow',
+  HIGH: 'red',
+}
+
 function DemandBadge({ level }: { level: ScalingMetrics['demand_level'] }) {
-  const styles: Record<string, string> = {
-    LOW: 'bg-green-100 text-green-800 dark:bg-green-900/40 dark:text-green-400',
-    MEDIUM: 'bg-yellow-100 text-yellow-800 dark:bg-yellow-900/40 dark:text-yellow-400',
-    HIGH: 'bg-red-100 text-red-800 dark:bg-red-900/40 dark:text-red-400',
-  }
   return (
-    <span className={`px-3 py-1 rounded-full text-sm font-semibold ${styles[level] ?? styles.LOW}`}>
+    <Badge color={DEMAND_COLORS[level] ?? 'green'} className="px-3 text-sm font-semibold">
       {level}
-    </span>
+    </Badge>
   )
 }
