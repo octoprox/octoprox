@@ -32,9 +32,10 @@ layout: null
     header {
       padding: 20px 0;
       border-bottom: 1px solid var(--border);
+      overflow: hidden;
     }
     header .container { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 12px; }
-    .logo { height: 40px; width: auto; max-width: 100%; }
+    .logo { height: 40px; width: auto; }
     nav a {
       color: var(--text-muted);
       text-decoration: none;
@@ -129,8 +130,9 @@ layout: null
       .hero p { font-size: 1rem; }
     }
     @media (max-width: 500px) {
+      .container { padding: 0 16px; }
       header .container { justify-content: center; }
-      .logo { height: auto; width: 100%; max-width: 250px; }
+      .logo { height: 28px; width: auto; }
       nav { width: 100%; text-align: center; }
       nav a { margin: 0 12px; font-size: 0.9rem; }
     }
