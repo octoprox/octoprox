@@ -2,7 +2,6 @@ name: CI/CD
 
 on:
   push:
-    branches: [main]
     tags:
       - 'v*'
   pull_request:
@@ -68,10 +67,8 @@ jobs:
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
-            # Set latest tag for default branch
-            type=raw,value=latest,enable={{is_default_branch}}
-            # Tag with branch name
-            type=ref,event=branch
+            # Set latest tag for version tags
+            type=raw,value=latest
             # Tag with semver (v1.2.3 -> 1.2.3, 1.2, 1)
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
