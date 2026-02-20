@@ -4,6 +4,7 @@
 """API-based proxy provider for external proxy services."""
 
 import contextlib
+from typing import Any
 
 import httpx
 import structlog
@@ -59,7 +60,7 @@ class APIProvider(ProxyProvider):
 
         return proxies
 
-    def _extract_proxy_list(self, data: dict | list) -> list:
+    def _extract_proxy_list(self, data: dict[str, Any] | list[Any]) -> list[Any]:
         """Extract proxy list from API response."""
         if isinstance(data, list):
             return data
@@ -67,11 +68,12 @@ class APIProvider(ProxyProvider):
         # Common response formats
         for key in ["proxies", "data", "results", "items"]:
             if key in data and isinstance(data[key], list):
-                return data[key]
+                result: list[Any] = data[key]
+                return result
 
         return []
 
-    def _parse_proxy(self, proxy_data: dict | str) -> Proxy | None:
+    def _parse_proxy(self, proxy_data: dict[str, Any] | str) -> Proxy | None:
         """Parse proxy data into a Proxy object."""
         try:
             if isinstance(proxy_data, str):

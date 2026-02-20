@@ -19,7 +19,7 @@ import asyncio
 import math
 import random
 from datetime import datetime, timedelta
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
 import structlog
 
@@ -54,11 +54,11 @@ class AutoScalerDataProvider(Protocol):
         ...
 
     @property
-    def demand_tracker(self):
+    def demand_tracker(self) -> Any:
         """Get the demand tracker."""
         ...
 
-    def get_credential(self, credential_id: str):
+    def get_credential(self, credential_id: str) -> Any:
         """Get a credential by ID."""
         ...
 
@@ -268,7 +268,7 @@ class AutoScaler:
                     error=str(e),
                 )
 
-    async def _drain_disabled_connector(self, connector: Connector, credential) -> None:
+    async def _drain_disabled_connector(self, connector: Connector, credential: Any) -> None:
         """Drain and terminate all proxies for a disabled connector.
 
         When a connector is disabled, we want to gracefully drain all its
@@ -308,7 +308,7 @@ class AutoScaler:
                 await proxy_draining_requested.send_async(self, proxy_id=proxy.id)
 
     async def _check_connector_scaling(
-        self, connector: Connector, credential
+        self, connector: Connector, credential: Any
     ) -> None:
         """Check and apply scaling for a connector."""
         cloud_config = connector.cloud_config
@@ -397,7 +397,7 @@ class AutoScaler:
             return max_proxies
 
     async def _scale_up(
-        self, connector: Connector, credential, count: int
+        self, connector: Connector, credential: Any, count: int
     ) -> None:
         """Scale up by creating new proxy instances.
 
@@ -481,7 +481,7 @@ class AutoScaler:
         proxies = self._data_provider.get_active_proxies_for_connector(connector.id)
 
         # Sort: unhealthy first, then by creation time (oldest first)
-        def sort_key(p: Proxy) -> tuple:
+        def sort_key(p: Proxy) -> tuple[bool, str]:
             is_healthy = p.status == ProxyStatus.HEALTHY
             created_at = p.metadata.get("created_at", "")
             return (is_healthy, created_at)
@@ -514,7 +514,7 @@ class AutoScaler:
         )
 
     async def _check_connector_rotation(
-        self, connector: Connector, credential
+        self, connector: Connector, credential: Any
     ) -> None:
         """Check and execute rotation for proxies in a connector."""
         cloud_config = connector.cloud_config
@@ -553,7 +553,7 @@ class AutoScaler:
                     await self._start_rotation(proxy, connector, credential)
 
     async def _start_rotation(
-        self, proxy: Proxy, connector: Connector, credential
+        self, proxy: Proxy, connector: Connector, credential: Any
     ) -> None:
         """Start rotation for a proxy - create replacement first, then drain.
 
@@ -655,7 +655,7 @@ class AutoScaler:
             )
 
     async def _handle_terminating_proxy(
-        self, proxy: Proxy, connector: Connector, credential
+        self, proxy: Proxy, connector: Connector, credential: Any
     ) -> None:
         """Handle a proxy that is terminating - actually terminate it.
 
@@ -700,7 +700,7 @@ class AutoScaler:
             )
             await self._record_connector_error(connector, str(e))
 
-    def _get_cloud_provider(self, connector: Connector, credential):
+    def _get_cloud_provider(self, connector: Connector, credential: Any) -> Any:
         """Get the appropriate cloud provider for a connector."""
         from api.providers.cloud import AWSProvider, AzureProvider, GCPProvider
 

@@ -4,7 +4,7 @@
 """Proxy management endpoints."""
 
 import re
-from typing import Annotated
+from typing import Annotated, Any
 
 from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
 from pydantic import BaseModel
@@ -52,7 +52,7 @@ class ProxyUploadResponse(BaseModel):
     errors: list[ProxyUploadError]
 
 
-def _parse_proxy_url(url: str) -> dict | None:
+def _parse_proxy_url(url: str) -> dict[str, Any] | None:
     """Parse a proxy URL and return its components."""
     url = url.strip()
     if not url:

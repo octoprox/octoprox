@@ -563,6 +563,9 @@ class ProxyServer:
                 # Send request with full URL (proxy style)
                 request_line = f"{method} {target} {version}\r\n"
 
+            # At this point upstream_writer is always assigned
+            assert upstream_writer is not None
+
             request_line_bytes = request_line.encode()
             upstream_writer.write(request_line_bytes)
             bytes_sent += len(request_line_bytes)

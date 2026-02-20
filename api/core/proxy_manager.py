@@ -9,7 +9,7 @@ Emits proxy lifecycle signals (proxy_added, proxy_removed, proxy_status_changed)
 
 import asyncio
 import contextlib
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import structlog
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -820,7 +820,7 @@ class ProxyManager:
         """Get the demand tracker instance."""
         return self._demand_tracker
 
-    async def get_demand_info(self, project_id: str) -> dict:
+    async def get_demand_info(self, project_id: str) -> dict[str, Any]:
         """Get demand level and instance counts for a project.
 
         Returns:

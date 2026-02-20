@@ -36,7 +36,6 @@ jobs:
 
       - name: Run type checker
         run: mypy api
-        continue-on-error: true
 
       - name: Run tests
         run: pytest

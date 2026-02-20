@@ -57,6 +57,8 @@ def run_migrations_online() -> None:
     and associate a connection with the context.
     """
     url = config.get_main_option("sqlalchemy.url")
+    if url is None:
+        raise RuntimeError("sqlalchemy.url is not set in alembic configuration")
     connectable = create_engine(
         url,
         poolclass=pool.NullPool,

@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING, Protocol
 
 import httpx
 import structlog
-from httpx_socks import AsyncProxyTransport
+from httpx_socks import AsyncProxyTransport  # type: ignore[import-untyped]
 
 from api.core import utc_now
 from api.core.config import settings

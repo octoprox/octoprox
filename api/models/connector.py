@@ -153,6 +153,7 @@ class AzureConnectorConfig(CloudConnectorConfig):
 
 def validate_connector_config(credential_type: CredentialType, config: dict[str, Any]) -> dict[str, Any]:
     """Validate connector config based on credential type and return validated config."""
+    validated: StaticProxyProviderConnectorConfig | AWSConnectorConfig | GCPConnectorConfig | AzureConnectorConfig
     if credential_type == CredentialType.STATIC_PROXY_PROVIDER:
         validated = StaticProxyProviderConnectorConfig(**config)
     elif credential_type == CredentialType.AWS:

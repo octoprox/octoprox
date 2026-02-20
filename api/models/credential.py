@@ -93,6 +93,7 @@ class AzureCredentialConfig(BaseModel):
 
 def validate_credential_config(credential_type: CredentialType, config: dict[str, Any]) -> dict[str, Any]:
     """Validate credential config based on type and return validated config."""
+    validated: StaticProxyProviderConfig | AWSCredentialConfig | GCPCredentialConfig | AzureCredentialConfig
     if credential_type == CredentialType.STATIC_PROXY_PROVIDER:
         validated = StaticProxyProviderConfig(**config)
     elif credential_type == CredentialType.AWS:

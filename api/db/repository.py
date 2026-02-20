@@ -4,6 +4,7 @@
 """Repository layer for database operations."""
 
 from datetime import datetime
+from typing import Any
 
 from sqlalchemy import delete, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -96,7 +97,7 @@ class ProjectRepository:
         result = await self._session.execute(
             delete(ProjectModel).where(ProjectModel.id == project_id)
         )
-        return result.rowcount > 0
+        return bool(result.rowcount and result.rowcount > 0)  # type: ignore[attr-defined]
 
     async def get_connector_count(self, project_id: str) -> int:
         """Get the number of connectors for a project."""
@@ -193,7 +194,7 @@ class CredentialRepository:
         result = await self._session.execute(
             delete(CredentialModel).where(CredentialModel.id == credential_id)
         )
-        return result.rowcount > 0
+        return bool(result.rowcount and result.rowcount > 0)  # type: ignore[attr-defined]
 
     def _to_domain(self, model: CredentialModel) -> Credential:
         """Convert database model to domain model."""
@@ -289,7 +290,7 @@ class ConnectorRepository:
         result = await self._session.execute(
             delete(ConnectorModel).where(ConnectorModel.id == connector_id)
         )
-        return result.rowcount > 0
+        return bool(result.rowcount and result.rowcount > 0)  # type: ignore[attr-defined]
 
     async def get_proxy_count(self, connector_id: str) -> int:
         """Get the number of proxies for a connector."""
@@ -387,14 +388,14 @@ class ProxyRepository:
         result = await self._session.execute(
             delete(ProxyModel).where(ProxyModel.id == proxy_id)
         )
-        return result.rowcount > 0
+        return bool(result.rowcount and result.rowcount > 0)  # type: ignore[attr-defined]
 
     async def delete_by_connector(self, connector_id: str) -> int:
         """Delete all proxies for a connector."""
         result = await self._session.execute(
             delete(ProxyModel).where(ProxyModel.connector_id == connector_id)
         )
-        return result.rowcount
+        return int(result.rowcount or 0)  # type: ignore[attr-defined]
 
     def _to_domain(self, model: ProxyModel) -> Proxy:
         """Convert database model to domain model."""
@@ -450,7 +451,7 @@ class MetricsRepository:
         proxy_id: str,
         since: datetime | None = None,
         limit: int = 100,
-    ) -> list[dict]:
+    ) -> list[dict[str, Any]]:
         """Get historical metrics for a proxy."""
         query = select(ProxyMetricsModel).where(
             ProxyMetricsModel.proxy_id == proxy_id
@@ -475,7 +476,7 @@ class MetricsRepository:
             for m in models
         ]
 
-    async def get_cumulative_metrics_for_all_proxies(self) -> dict[str, dict]:
+    async def get_cumulative_metrics_for_all_proxies(self) -> dict[str, dict[str, Any]]:
         """Get cumulative metrics (sum of all snapshots) for each proxy.
 
         Returns a dict mapping proxy_id to its total metrics across all snapshots.
@@ -555,7 +556,7 @@ class MetricsRepository:
         project_id: str,
         since: datetime | None = None,
         limit: int = 100,
-    ) -> list[dict]:
+    ) -> list[dict[str, Any]]:
         """Get historical metrics for a project."""
         query = select(ProjectMetricsModel).where(
             ProjectMetricsModel.project_id == project_id
@@ -584,7 +585,7 @@ class MetricsRepository:
         project_id: str,
         since: datetime,
         bucket_seconds: int,
-    ) -> list[dict]:
+    ) -> list[dict[str, Any]]:
         """Get historical metrics aggregated into fixed-size time buckets.
 
         Uses floor division on the epoch to group rows into buckets of
@@ -627,7 +628,7 @@ class MetricsRepository:
             for row in rows
         ]
 
-    async def get_cumulative_project_metrics(self) -> dict[str, dict]:
+    async def get_cumulative_project_metrics(self) -> dict[str, dict[str, Any]]:
         """Get cumulative metrics (sum of all snapshots) for each project.
 
         Returns a dict mapping project_id to its total metrics across all snapshots.

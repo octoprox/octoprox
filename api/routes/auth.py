@@ -8,7 +8,7 @@ from typing import Any
 
 import structlog
 from fastapi import APIRouter, HTTPException, Request
-from jose import JWTError, jwt
+from jose import JWTError, jwt  # type: ignore[import-untyped]
 from pydantic import BaseModel
 
 from api.core.config import settings
@@ -54,7 +54,8 @@ def create_jwt(payload: dict[str, Any], secret: str, expiry_hours: int) -> str:
     to_encode = payload.copy()
     expire = datetime.now(UTC) + timedelta(hours=expiry_hours)
     to_encode.update({"exp": expire})
-    return jwt.encode(to_encode, secret, algorithm=ALGORITHM)
+    encoded: str = jwt.encode(to_encode, secret, algorithm=ALGORITHM)
+    return encoded
 
 
 def verify_jwt(token: str, secret: str) -> dict[str, Any] | None:
@@ -68,7 +69,7 @@ def verify_jwt(token: str, secret: str) -> dict[str, Any] | None:
         Token payload if valid, None otherwise
     """
     try:
-        payload = jwt.decode(token, secret, algorithms=[ALGORITHM])
+        payload: dict[str, Any] = jwt.decode(token, secret, algorithms=[ALGORITHM])
         return payload
     except JWTError:
         return None

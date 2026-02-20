@@ -34,7 +34,7 @@ class RedisClient:
 
     async def connect(self) -> None:
         """Connect to Redis."""
-        self._client = redis.from_url(
+        self._client = redis.from_url(  # type: ignore[no-untyped-call]
             self._redis_url,
             encoding="utf-8",
             decode_responses=True,
@@ -70,12 +70,12 @@ class RedisClient:
             "consecutive_failures": consecutive_failures,
             "updated_at": utc_now().isoformat(),
         }
-        await self.client.hset(key, mapping=data)
+        await self.client.hset(key, mapping=data)  # type: ignore[misc]
 
     async def get_proxy_status(self, proxy_id: str) -> dict[str, Any] | None:
         """Get proxy health status from Redis."""
         key = PROXY_STATUS_KEY.format(proxy_id=proxy_id)
-        data = await self.client.hgetall(key)
+        data = await self.client.hgetall(key)  # type: ignore[misc]
         if not data:
             return None
         return {
@@ -130,7 +130,7 @@ class RedisClient:
     async def get_proxy_metrics(self, proxy_id: str) -> dict[str, Any] | None:
         """Get proxy metrics from Redis."""
         key = PROXY_METRICS_KEY.format(proxy_id=proxy_id)
-        data = await self.client.hgetall(key)
+        data = await self.client.hgetall(key)  # type: ignore[misc]
         if not data:
             return None
         request_count = int(data.get("request_count", 0))
@@ -196,7 +196,7 @@ class RedisClient:
     async def get_project_metrics(self, project_id: str) -> dict[str, Any] | None:
         """Get project-level metrics from Redis."""
         key = PROJECT_METRICS_KEY.format(project_id=project_id)
-        data = await self.client.hgetall(key)
+        data = await self.client.hgetall(key)  # type: ignore[misc]
         if not data:
             return None
         request_count = int(data.get("request_count", 0))
@@ -237,7 +237,8 @@ class RedisClient:
     async def get_session(self, session_id: str) -> str | None:
         """Get proxy ID for a session."""
         key = SESSION_KEY.format(session_id=session_id)
-        return await self.client.get(key)
+        result: str | None = await self.client.get(key)
+        return result
 
     async def delete_session(self, session_id: str) -> None:
         """Delete a session."""

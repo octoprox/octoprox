@@ -13,6 +13,7 @@ import secrets
 import string
 from abc import abstractmethod
 from pathlib import Path
+from typing import Any
 
 import structlog
 
@@ -156,15 +157,16 @@ class AWSProvider(CloudProvider):
         self._ec2_client = None
         self._ec2_resource = None
 
-    def _get_boto3_clients(self):
+    def _get_boto3_clients(self) -> tuple[Any, Any]:
         """Get or create boto3 clients."""
         try:
-            import boto3
+            import boto3  # type: ignore[import-untyped]
 
             if self._ec2_client is None:
                 # Get credentials from credential config
-                access_key = self.credential.config.get("access_key")
-                secret_key = self.credential.config.get("secret_key")
+                cred_config = self.credential.config if self.credential else {}
+                access_key = cred_config.get("access_key")
+                secret_key = cred_config.get("secret_key")
 
                 if access_key and secret_key:
                     self._ec2_client = boto3.client(
@@ -261,7 +263,7 @@ class AWSProvider(CloudProvider):
             security_group=self._config.security_group,
         )
 
-        def _create_and_wait():
+        def _create_and_wait() -> Any:
             instances = ec2_resource.create_instances(**run_args)
             instance = instances[0]
             instance.wait_until_running()
@@ -338,7 +340,7 @@ class GCPProvider(CloudProvider):
         self._config = cloud_config
         self._instances_client = None
 
-    def _get_compute_client(self):
+    def _get_compute_client(self) -> Any:
         """Get or create GCP compute client.
 
         Note: Client creation involves synchronous file I/O when service account
@@ -351,7 +353,8 @@ class GCPProvider(CloudProvider):
 
             if self._instances_client is None:
                 # Check if service account JSON is provided in credentials
-                service_account_json = self.credential.config.get("service_account_json")
+                cred_config = self.credential.config if self.credential else {}
+                service_account_json = cred_config.get("service_account_json")
                 if service_account_json:
                     import json
                     import os
@@ -367,7 +370,7 @@ class GCPProvider(CloudProvider):
 
                     os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = temp_path
 
-                self._instances_client = compute_v1.InstancesClient()
+                self._instances_client = compute_v1.InstancesClient()  # type: ignore[assignment]
             return self._instances_client
         except ImportError:
             logger.error("google-cloud-compute not installed. Install with: pip install octoprox[cloud]")
@@ -449,10 +452,12 @@ class GCPProvider(CloudProvider):
 
         # Create the instance and wait for completion in a thread to avoid
         # blocking the event loop (GCP SDK is synchronous)
-        def _insert_and_wait():
+        def _insert_and_wait() -> Any:
             import time as _time
 
-            from google.cloud.compute_v1.services.zone_operations import ZoneOperationsClient
+            from google.cloud.compute_v1.services.zone_operations import (
+                ZoneOperationsClient,
+            )
 
             operation = client.insert(
                 project=self._config.project_id,
@@ -559,7 +564,7 @@ class AzureProvider(CloudProvider):
         self._compute_client = None
         self._network_client = None
 
-    def _get_azure_clients(self):
+    def _get_azure_clients(self) -> tuple[Any, Any]:
         """Get or create Azure clients."""
         try:
             from azure.mgmt.compute import ComputeManagementClient
@@ -567,10 +572,12 @@ class AzureProvider(CloudProvider):
 
             if self._compute_client is None:
                 # Check if service principal credentials are provided
-                client_id = self.credential.config.get("client_id")
-                client_secret = self.credential.config.get("client_secret")
-                tenant_id = self.credential.config.get("tenant_id")
+                cred_config = self.credential.config if self.credential else {}
+                client_id = cred_config.get("client_id")
+                client_secret = cred_config.get("client_secret")
+                tenant_id = cred_config.get("tenant_id")
 
+                azure_credential: Any
                 if client_id and client_secret and tenant_id:
                     from azure.identity import ClientSecretCredential
 
@@ -585,10 +592,10 @@ class AzureProvider(CloudProvider):
 
                     azure_credential = DefaultAzureCredential()
 
-                self._compute_client = ComputeManagementClient(
+                self._compute_client = ComputeManagementClient(  # type: ignore[assignment]
                     azure_credential, self._config.subscription_id
                 )
-                self._network_client = NetworkManagementClient(
+                self._network_client = NetworkManagementClient(  # type: ignore[assignment]
                     azure_credential, self._config.subscription_id
                 )
             return self._compute_client, self._network_client
@@ -646,7 +653,7 @@ class AzureProvider(CloudProvider):
             # Run all blocking Azure SDK calls in a thread to avoid blocking
             # the event loop. Each .result() call blocks waiting for the Azure
             # operation to complete (5-30+ seconds each).
-            def _provision_vm():
+            def _provision_vm() -> tuple[Any, str | None]:
                 # Get subnet
                 subnet = network_client.subnets.get(
                     self._config.resource_group, self._config.vnet_name, self._config.subnet_name
@@ -825,7 +832,7 @@ class AzureProvider(CloudProvider):
         vm_name = instance_id.replace("azure-", "")
 
         # Run all blocking Azure SDK delete calls in a thread
-        def _delete_vm_resources():
+        def _delete_vm_resources() -> None:
             # Delete VM
             compute_client.virtual_machines.begin_delete(
                 self._config.resource_group, vm_name

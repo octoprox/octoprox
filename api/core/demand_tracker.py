@@ -13,6 +13,7 @@ is available).
 
 import time
 from enum import Enum
+from typing import Any
 
 import structlog
 
@@ -151,11 +152,11 @@ class DemandTracker:
         cutoff = timestamp - DEMAND_WINDOW_SECONDS
 
         # Count requests in the window
-        count = await self._redis_client.client.zcount(key, cutoff, timestamp)
+        count: int = await self._redis_client.client.zcount(key, cutoff, timestamp)
 
         # Extrapolate to per-minute rate
         # If window is 60 seconds, count is already per-minute
-        rate = count * (60.0 / DEMAND_WINDOW_SECONDS)
+        rate = float(count) * (60.0 / DEMAND_WINDOW_SECONDS)
 
         return rate
 
@@ -176,8 +177,8 @@ class DemandTracker:
         timestamp = now.timestamp()
         cutoff = timestamp - RECENT_ACTIVITY_WINDOW_SECONDS
 
-        count = await self._redis_client.client.zcount(key, cutoff, timestamp)
-        return count * (60.0 / RECENT_ACTIVITY_WINDOW_SECONDS)
+        count: int = await self._redis_client.client.zcount(key, cutoff, timestamp)
+        return float(count) * (60.0 / RECENT_ACTIVITY_WINDOW_SECONDS)
 
     async def has_recent_activity(self, project_id: str) -> bool:
         """Check if a project has recent request activity.
@@ -259,7 +260,7 @@ class DemandTracker:
         project_id: str,
         current_proxy_count: int,
         previous_level: DemandLevel | None = None,
-    ) -> dict:
+    ) -> dict[str, Any]:
         """Get comprehensive demand information for a project.
 
         Args:
