@@ -1,6 +1,7 @@
 ---
 layout: docs
 title: GCP Connector Setup
+nav_id: gcp-setup
 ---
 
 # GCP Connector Setup

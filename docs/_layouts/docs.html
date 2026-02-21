@@ -203,18 +203,18 @@
     <aside class="sidebar" id="sidebar">
       <div class="sidebar-section">
         <h4>Getting Started</h4>
-        <a href="{{ site.baseurl }}/getting-started" {% if page.url == '/getting-started' or page.url == '/getting-started/' %}class="active"{% endif %}>Quick Start</a>
-        <a href="{{ site.baseurl }}/configuration" {% if page.url == '/configuration' or page.url == '/configuration/' %}class="active"{% endif %}>Configuration</a>
+        <a href="{{ site.baseurl }}/getting-started" {% if page.nav_id == 'getting-started' %}class="active"{% endif %}>Quick Start</a>
+        <a href="{{ site.baseurl }}/configuration" {% if page.nav_id == 'configuration' %}class="active"{% endif %}>Configuration</a>
       </div>
       <div class="sidebar-section">
         <h4>Cloud Providers</h4>
-        <a href="{{ site.baseurl }}/aws-setup" {% if page.url == '/aws-setup' or page.url == '/aws-setup/' %}class="active"{% endif %}>AWS Setup</a>
-        <a href="{{ site.baseurl }}/gcp-setup" {% if page.url == '/gcp-setup' or page.url == '/gcp-setup/' %}class="active"{% endif %}>GCP Setup</a>
-        <a href="{{ site.baseurl }}/azure-setup" {% if page.url == '/azure-setup' or page.url == '/azure-setup/' %}class="active"{% endif %}>Azure Setup</a>
+        <a href="{{ site.baseurl }}/aws-setup" {% if page.nav_id == 'aws-setup' %}class="active"{% endif %}>AWS Setup</a>
+        <a href="{{ site.baseurl }}/gcp-setup" {% if page.nav_id == 'gcp-setup' %}class="active"{% endif %}>GCP Setup</a>
+        <a href="{{ site.baseurl }}/azure-setup" {% if page.nav_id == 'azure-setup' %}class="active"{% endif %}>Azure Setup</a>
       </div>
       <div class="sidebar-section">
         <h4>Reference</h4>
-        <a href="{{ site.baseurl }}/api" {% if page.url == '/api' or page.url == '/api/' %}class="active"{% endif %}>API Reference</a>
+        <a href="{{ site.baseurl }}/api" {% if page.nav_id == 'api' %}class="active"{% endif %}>API Reference</a>
       </div>
     </aside>
 

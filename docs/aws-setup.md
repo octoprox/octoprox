@@ -1,6 +1,7 @@
 ---
 layout: docs
 title: AWS Connector Setup
+nav_id: aws-setup
 ---
 
 # AWS Connector Setup

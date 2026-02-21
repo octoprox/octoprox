@@ -1,6 +1,7 @@
 ---
 layout: docs
 title: API Reference
+nav_id: api
 ---
 
 # API Reference

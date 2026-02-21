@@ -1,6 +1,7 @@
 ---
 layout: docs
 title: Configuration
+nav_id: configuration
 ---
 
 # Configuration

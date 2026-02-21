@@ -1,6 +1,7 @@
 ---
 layout: docs
 title: Getting Started
+nav_id: getting-started
 ---
 
 # Getting Started

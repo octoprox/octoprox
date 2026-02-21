@@ -1,6 +1,7 @@
 ---
 layout: docs
 title: Azure Connector Setup
+nav_id: azure-setup
 ---
 
 # Azure Connector Setup
