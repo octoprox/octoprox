@@ -1,0 +1,235 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{{ page.title }} - Octoprox Docs</title>
+  <meta name="description" content="{{ page.description | default: site.description }}">
+  <link rel="icon" type="image/svg+xml" href="{{ site.baseurl }}/assets/favicon/favicon.svg">
+  <link rel="icon" type="image/png" sizes="96x96" href="{{ site.baseurl }}/assets/favicon/favicon-96x96.png">
+  <link rel="apple-touch-icon" sizes="180x180" href="{{ site.baseurl }}/assets/favicon/apple-touch-icon.png">
+  <style>
+    :root {
+      --primary: #6366f1;
+      --primary-dark: #4f46e5;
+      --bg: #0f172a;
+      --bg-card: #1e293b;
+      --bg-sidebar: #1a2332;
+      --text: #f1f5f9;
+      --text-muted: #94a3b8;
+      --border: #334155;
+      --sidebar-width: 260px;
+    }
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { overflow-x: hidden; height: 100%; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.6;
+    }
+    /* Header */
+    header {
+      position: fixed;
+      top: 0;
+      left: 0;
+      right: 0;
+      height: 60px;
+      padding: 0 24px;
+      background: var(--bg);
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      z-index: 100;
+    }
+    .logo { height: 36px; width: auto; }
+    header nav a {
+      color: var(--text-muted);
+      text-decoration: none;
+      margin-left: 24px;
+      transition: color 0.2s;
+    }
+    header nav a:hover { color: var(--text); }
+    .menu-toggle {
+      display: none;
+      background: none;
+      border: none;
+      color: var(--text);
+      font-size: 1.5rem;
+      cursor: pointer;
+    }
+    /* Layout */
+    .docs-layout {
+      display: flex;
+      margin-top: 60px;
+      min-height: calc(100vh - 60px);
+    }
+    /* Sidebar */
+    .sidebar {
+      position: fixed;
+      top: 60px;
+      left: 0;
+      width: var(--sidebar-width);
+      height: calc(100vh - 60px);
+      background: var(--bg-sidebar);
+      border-right: 1px solid var(--border);
+      overflow-y: auto;
+      padding: 24px 0;
+    }
+    .sidebar-section { margin-bottom: 24px; }
+    .sidebar-section h4 {
+      padding: 0 20px;
+      margin-bottom: 8px;
+      font-size: 0.75rem;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: var(--text-muted);
+    }
+    .sidebar-section a {
+      display: block;
+      padding: 8px 20px;
+      color: var(--text-muted);
+      text-decoration: none;
+      font-size: 0.9rem;
+      transition: all 0.2s;
+      border-left: 3px solid transparent;
+    }
+    .sidebar-section a:hover {
+      color: var(--text);
+      background: rgba(99, 102, 241, 0.1);
+    }
+    .sidebar-section a.active {
+      color: var(--primary);
+      background: rgba(99, 102, 241, 0.1);
+      border-left-color: var(--primary);
+    }
+    /* Main content */
+    .docs-main {
+      flex: 1;
+      margin-left: var(--sidebar-width);
+      padding: 48px;
+      max-width: 900px;
+    }
+    .content h1 {
+      font-size: 2.25rem;
+      margin-bottom: 8px;
+      color: var(--text);
+    }
+    .content .subtitle {
+      font-size: 1.1rem;
+      color: var(--text-muted);
+      margin-bottom: 32px;
+    }
+    .content h2 {
+      font-size: 1.5rem;
+      margin-top: 48px;
+      margin-bottom: 16px;
+      color: var(--text);
+      border-bottom: 1px solid var(--border);
+      padding-bottom: 8px;
+    }
+    .content h3 {
+      font-size: 1.25rem;
+      margin-top: 32px;
+      margin-bottom: 12px;
+      color: var(--primary);
+    }
+    .content p { margin-bottom: 16px; color: var(--text-muted); }
+    .content a { color: var(--primary); text-decoration: none; }
+    .content a:hover { text-decoration: underline; }
+    .content ul, .content ol {
+      margin-bottom: 16px;
+      padding-left: 24px;
+      color: var(--text-muted);
+    }
+    .content li { margin-bottom: 8px; }
+    .content code {
+      background: var(--bg-card);
+      padding: 2px 6px;
+      border-radius: 4px;
+      font-size: 0.9em;
+    }
+    .content pre {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 16px;
+      overflow-x: auto;
+      margin-bottom: 16px;
+    }
+    .content pre code { background: none; padding: 0; }
+    .content blockquote {
+      border-left: 4px solid var(--primary);
+      padding-left: 16px;
+      margin: 16px 0;
+      color: var(--text-muted);
+      font-style: italic;
+    }
+    .content table { width: 100%; border-collapse: collapse; margin-bottom: 16px; }
+    .content th, .content td { border: 1px solid var(--border); padding: 12px; text-align: left; }
+    .content th { background: var(--bg-card); color: var(--text); }
+    .content td { color: var(--text-muted); }
+    .content strong { color: var(--text); }
+    /* Responsive */
+    @media (max-width: 900px) {
+      .sidebar {
+        transform: translateX(-100%);
+        transition: transform 0.3s ease;
+      }
+      .sidebar.open { transform: translateX(0); }
+      .docs-main { margin-left: 0; padding: 32px 24px; }
+      .menu-toggle { display: block; }
+      .header-nav { display: none; }
+    }
+    @media (max-width: 600px) {
+      .content h1 { font-size: 1.75rem; }
+      .content h2 { font-size: 1.25rem; }
+      .docs-main { padding: 24px 16px; }
+    }
+</style>
+</head>
+<body>
+  <header>
+    <a href="{{ site.baseurl }}/"><img src="{{ site.baseurl }}/assets/logo/octoprox_horizontal_dark.svg" alt="Octoprox" class="logo"></a>
+    <button class="menu-toggle" onclick="toggleSidebar()">☰</button>
+    <nav class="header-nav">
+      <a href="{{ site.baseurl }}/getting-started">Docs</a>
+      <a href="https://github.com/octoprox/octoprox">GitHub</a>
+    </nav>
+  </header>
+
+  <div class="docs-layout">
+    <aside class="sidebar" id="sidebar">
+      <div class="sidebar-section">
+        <h4>Getting Started</h4>
+        <a href="{{ site.baseurl }}/getting-started" {% if page.url == '/getting-started' or page.url == '/getting-started/' %}class="active"{% endif %}>Quick Start</a>
+        <a href="{{ site.baseurl }}/configuration" {% if page.url == '/configuration' or page.url == '/configuration/' %}class="active"{% endif %}>Configuration</a>
+      </div>
+      <div class="sidebar-section">
+        <h4>Cloud Providers</h4>
+        <a href="{{ site.baseurl }}/aws-setup" {% if page.url == '/aws-setup' or page.url == '/aws-setup/' %}class="active"{% endif %}>AWS Setup</a>
+        <a href="{{ site.baseurl }}/gcp-setup" {% if page.url == '/gcp-setup' or page.url == '/gcp-setup/' %}class="active"{% endif %}>GCP Setup</a>
+        <a href="{{ site.baseurl }}/azure-setup" {% if page.url == '/azure-setup' or page.url == '/azure-setup/' %}class="active"{% endif %}>Azure Setup</a>
+      </div>
+      <div class="sidebar-section">
+        <h4>Reference</h4>
+        <a href="{{ site.baseurl }}/api" {% if page.url == '/api' or page.url == '/api/' %}class="active"{% endif %}>API Reference</a>
+      </div>
+    </aside>
+
+    <main class="docs-main">
+      <div class="content">
+        {{ content }}
+      </div>
+    </main>
+  </div>
+
+  <script>
+    function toggleSidebar() {
+      document.getElementById('sidebar').classList.toggle('open');
+    }
+  </script>
+</body>
+</html>
+
