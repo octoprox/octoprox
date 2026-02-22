@@ -4,7 +4,7 @@
 import { useState, useEffect } from 'react'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { X, Eye, EyeOff } from 'lucide-react'
-import { createProjectCredential, updateProjectCredential, CredentialType, CredentialCreate, Credential, CredentialDetail } from '../api/client'
+import { createProjectCredential, updateProjectCredential, CredentialType, CredentialCreate, Credential, CredentialDetail, OxylabsProxyType } from '../api/client'
 import { useProject } from '../contexts/ProjectContext'
 import { Button, Input, Select, Textarea, Label, Alert, ModalFooter } from './ui'
 
@@ -13,6 +13,16 @@ export const CREDENTIAL_TYPES: { value: CredentialType; label: string }[] = [
   { value: 'aws', label: 'AWS' },
   { value: 'gcp', label: 'GCP' },
   { value: 'azure', label: 'Azure' },
+  { value: 'oxylabs', label: 'Oxylabs' },
+]
+
+export const OXYLABS_PROXY_TYPES: { value: OxylabsProxyType; label: string }[] = [
+  { value: 'residential', label: 'Residential' },
+  { value: 'mobile', label: 'Mobile' },
+  { value: 'isp', label: 'ISP' },
+  { value: 'dedicated_isp', label: 'Dedicated ISP' },
+  { value: 'datacenter', label: 'Datacenter' },
+  { value: 'datacenter_dedicated', label: 'Datacenter Dedicated' },
 ]
 
 export const getDefaultCredentialConfig = (type: CredentialType): Record<string, string> => {
@@ -25,6 +35,8 @@ export const getDefaultCredentialConfig = (type: CredentialType): Record<string,
       return { service_account_json: '', project_id: '' }
     case 'azure':
       return { subscription_id: '', tenant_id: '', client_id: '', client_secret: '', key_vault_name: '' }
+    case 'oxylabs':
+      return { proxy_type: 'residential', username: '', password: '' }
     default:
       return {}
   }
@@ -168,6 +180,24 @@ export default function AddCredentialModal({ isOpen, onClose, onSuccess, fixedTy
     const jsonError = getServiceAccountJsonError()
     return Object.keys(fields).map((key) => {
       const isSecret = ['password', 'secret_key', 'client_secret', 'service_account_json'].includes(key)
+
+      // Special handling for Oxylabs proxy_type field
+      if (key === 'proxy_type' && formData.type === 'oxylabs') {
+        return (
+          <div key={key} className="relative">
+            <Label>Proxy Type</Label>
+            <Select
+              value={formData.config[key] || 'residential'}
+              onChange={(e) => handleConfigChange(key, e.target.value)}
+            >
+              {OXYLABS_PROXY_TYPES.map((pt) => (
+                <option key={pt.value} value={pt.value}>{pt.label}</option>
+              ))}
+            </Select>
+          </div>
+        )
+      }
+
       return (
         <div key={key} className="relative">
           <Label>

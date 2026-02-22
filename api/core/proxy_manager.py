@@ -19,6 +19,7 @@ from api.core.config import Settings
 from api.core.demand_tracker import DemandTracker
 from api.core.health_checker import HealthChecker
 from api.core.metrics_flusher import MetricsFlusher
+from api.core.oxylabs_syncer import OxylabsSyncer
 from api.core.signals import (
     connector_error_updated,
     connector_remove_requested,
@@ -32,6 +33,7 @@ from api.core.signals import (
     proxy_removed,
     proxy_status_changed,
     proxy_terminating_requested,
+    proxy_update_requested,
     request_completed,
 )
 from api.core.stats import apply_metrics, combine_metrics, increment_stats
@@ -90,6 +92,7 @@ class ProxyManager:
         self._metrics_flusher = MetricsFlusher(session_factory, redis_client, settings)
         self._demand_tracker = DemandTracker(redis_client)
         self._auto_scaler = AutoScaler(self)
+        self._oxylabs_syncer = OxylabsSyncer(self)
         self._running = False
         self._tasks: list[asyncio.Task[None]] = []
 
@@ -119,6 +122,10 @@ class ProxyManager:
         task = asyncio.create_task(self._auto_scaler.run())
         self._tasks.append(task)
 
+        # Start Oxylabs syncer
+        task = asyncio.create_task(self._oxylabs_syncer.run())
+        self._tasks.append(task)
+
     def _subscribe_to_signals(self) -> None:
         """Subscribe to signals from other components."""
         # Health check and request signals
@@ -132,6 +139,9 @@ class ProxyManager:
         proxy_terminating_requested.connect(self._on_proxy_terminating_requested)
         connector_remove_requested.connect(self._on_connector_remove_requested)
         connector_error_updated.connect(self._on_connector_error_updated)
+
+        # Oxylabs syncer signals
+        proxy_update_requested.connect(self._on_proxy_update_requested)
 
         # Also subscribe DemandTracker to request_completed signal
         self._demand_tracker.subscribe_to_signals()
@@ -214,6 +224,14 @@ class ProxyManager:
     ) -> None:
         """Handle connector error updated signal from AutoScaler."""
         await self.update_connector_error(connector_id, error, consecutive_errors)
+
+    async def _on_proxy_update_requested(
+        self,
+        sender: object,
+        proxy: Proxy,
+    ) -> None:
+        """Handle proxy update request signal from OxylabsSyncer."""
+        await self.update_proxy(proxy)
 
     async def _handle_request_stats(
         self,
@@ -597,6 +615,8 @@ class ProxyManager:
         ]
 
         async with self._session_factory() as session:
+            # Database has ON DELETE CASCADE on proxies.connector_id,
+            # so deleting the connector will automatically delete its proxies
             repo = ConnectorRepository(session)
             await repo.delete(connector_id)
             await session.commit()

@@ -432,3 +432,73 @@ def get_azure_architecture(vm_size: str) -> str:
     Defaults to "x86_64" if VM size is not found.
     """
     return _AZURE_VM_SIZE_ARCH.get(vm_size, "x86_64")
+
+
+# --- Oxylabs Country Options ---
+
+class CountryOption(BaseModel):
+    """A country option with display metadata."""
+    code: str
+    name: str
+
+
+OXYLABS_COUNTRIES: list[CountryOption] = [
+    # "All" option for no geo-targeting
+    CountryOption(code="", name="All (No geo-targeting)"),
+    # North America
+    CountryOption(code="US", name="United States"),
+    CountryOption(code="CA", name="Canada"),
+    CountryOption(code="MX", name="Mexico"),
+    # Europe
+    CountryOption(code="GB", name="United Kingdom"),
+    CountryOption(code="DE", name="Germany"),
+    CountryOption(code="FR", name="France"),
+    CountryOption(code="IT", name="Italy"),
+    CountryOption(code="ES", name="Spain"),
+    CountryOption(code="NL", name="Netherlands"),
+    CountryOption(code="BE", name="Belgium"),
+    CountryOption(code="AT", name="Austria"),
+    CountryOption(code="CH", name="Switzerland"),
+    CountryOption(code="PL", name="Poland"),
+    CountryOption(code="SE", name="Sweden"),
+    CountryOption(code="NO", name="Norway"),
+    CountryOption(code="DK", name="Denmark"),
+    CountryOption(code="FI", name="Finland"),
+    CountryOption(code="IE", name="Ireland"),
+    CountryOption(code="PT", name="Portugal"),
+    CountryOption(code="CZ", name="Czech Republic"),
+    CountryOption(code="RO", name="Romania"),
+    CountryOption(code="HU", name="Hungary"),
+    CountryOption(code="GR", name="Greece"),
+    CountryOption(code="UA", name="Ukraine"),
+    CountryOption(code="RU", name="Russia"),
+    # Asia Pacific
+    CountryOption(code="JP", name="Japan"),
+    CountryOption(code="KR", name="South Korea"),
+    CountryOption(code="CN", name="China"),
+    CountryOption(code="HK", name="Hong Kong"),
+    CountryOption(code="TW", name="Taiwan"),
+    CountryOption(code="SG", name="Singapore"),
+    CountryOption(code="AU", name="Australia"),
+    CountryOption(code="NZ", name="New Zealand"),
+    CountryOption(code="IN", name="India"),
+    CountryOption(code="ID", name="Indonesia"),
+    CountryOption(code="TH", name="Thailand"),
+    CountryOption(code="VN", name="Vietnam"),
+    CountryOption(code="MY", name="Malaysia"),
+    CountryOption(code="PH", name="Philippines"),
+    # South America
+    CountryOption(code="BR", name="Brazil"),
+    CountryOption(code="AR", name="Argentina"),
+    CountryOption(code="CL", name="Chile"),
+    CountryOption(code="CO", name="Colombia"),
+    CountryOption(code="PE", name="Peru"),
+    # Middle East & Africa
+    CountryOption(code="IL", name="Israel"),
+    CountryOption(code="AE", name="United Arab Emirates"),
+    CountryOption(code="SA", name="Saudi Arabia"),
+    CountryOption(code="TR", name="Turkey"),
+    CountryOption(code="ZA", name="South Africa"),
+    CountryOption(code="EG", name="Egypt"),
+    CountryOption(code="NG", name="Nigeria"),
+]

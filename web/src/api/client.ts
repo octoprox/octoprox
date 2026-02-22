@@ -160,6 +160,7 @@ export interface Proxy {
   protocol: string
   username: string | null
   password: string | null
+  display_host: string  // The host to display in UI (may differ from host for Oxylabs)
   connector_id: string
   connector_name: string | null
   connector_enabled: boolean
@@ -215,7 +216,22 @@ export interface ProxyUploadResponse {
 }
 
 // Credential types
-export type CredentialType = 'static_proxy_provider' | 'aws' | 'gcp' | 'azure'
+export type CredentialType = 'static_proxy_provider' | 'aws' | 'gcp' | 'azure' | 'oxylabs'
+
+// Oxylabs proxy types
+export type OxylabsProxyType = 'residential' | 'mobile' | 'isp' | 'dedicated_isp' | 'datacenter' | 'datacenter_dedicated'
+
+export interface OxylabsCredentialConfig {
+  proxy_type: OxylabsProxyType
+  username: string
+  password: string
+}
+
+export interface OxylabsConnectorConfig {
+  num_proxies: number
+  country_code?: string | null
+  session_duration_minutes: number
+}
 
 export interface Credential {
   id: string
@@ -300,6 +316,11 @@ export interface InstanceTypeOption {
   description: string
 }
 
+export interface CountryOption {
+  code: string
+  name: string
+}
+
 export interface ConnectorOptions {
   aws_regions: RegionOption[]
   aws_instance_types: InstanceTypeOption[]
@@ -307,6 +328,7 @@ export interface ConnectorOptions {
   gcp_machine_types: InstanceTypeOption[]
   azure_locations: RegionOption[]
   azure_vm_sizes: InstanceTypeOption[]
+  oxylabs_countries: CountryOption[]
 }
 
 export interface PoolMetrics {

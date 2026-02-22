@@ -42,6 +42,11 @@ class Proxy(BaseModel):
     username: str | None = None
     password: str | None = None
 
+    # Display host - for UI display purposes
+    # For most proxies this equals host, but for Oxylabs port-based proxies
+    # this contains the discovered IP while host keeps the Oxylabs endpoint for routing
+    display_host: str | None = None
+
     # Status and health
     status: ProxyStatus = ProxyStatus.UNKNOWN
     consecutive_failures: int = 0
@@ -69,6 +74,11 @@ class Proxy(BaseModel):
         if self.username and self.password:
             auth = f"{self.username}:{self.password}@"
         return f"{self.protocol.value}://{auth}{self.host}:{self.port}"
+
+    @property
+    def effective_display_host(self) -> str:
+        """Get the host to display in UI. Falls back to host if display_host is not set."""
+        return self.display_host if self.display_host else self.host
 
     @property
     def success_rate(self) -> float:
@@ -109,6 +119,7 @@ class ProxyResponse(BaseModel):
     protocol: str
     username: str | None = None
     password: str | None = None
+    display_host: str  # The host to display in UI (falls back to host if not set)
     connector_id: str
     connector_name: str | None = None
     connector_enabled: bool = True
