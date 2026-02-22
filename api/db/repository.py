@@ -140,15 +140,19 @@ class CredentialRepository:
         self._session = session
 
     async def get_all(self) -> list[Credential]:
-        """Get all credentials."""
-        result = await self._session.execute(select(CredentialModel))
+        """Get all credentials, ordered by creation time."""
+        result = await self._session.execute(
+            select(CredentialModel).order_by(CredentialModel.created_at)
+        )
         models = result.scalars().all()
         return [self._to_domain(m) for m in models]
 
     async def get_by_project(self, project_id: str) -> list[Credential]:
-        """Get all credentials for a project."""
+        """Get all credentials for a project, ordered by creation time."""
         result = await self._session.execute(
-            select(CredentialModel).where(CredentialModel.project_id == project_id)
+            select(CredentialModel)
+            .where(CredentialModel.project_id == project_id)
+            .order_by(CredentialModel.created_at)
         )
         models = result.scalars().all()
         return [self._to_domain(m) for m in models]
@@ -216,21 +220,24 @@ class ConnectorRepository:
         self._session = session
 
     async def get_all(self) -> list[Connector]:
-        """Get all connectors."""
+        """Get all connectors, ordered by creation time."""
         from sqlalchemy.orm import selectinload
         result = await self._session.execute(
-            select(ConnectorModel).options(selectinload(ConnectorModel.credential))
+            select(ConnectorModel)
+            .options(selectinload(ConnectorModel.credential))
+            .order_by(ConnectorModel.created_at)
         )
         models = result.scalars().all()
         return [self._to_domain(m) for m in models]
 
     async def get_by_project(self, project_id: str) -> list[Connector]:
-        """Get all connectors for a project."""
+        """Get all connectors for a project, ordered by creation time."""
         from sqlalchemy.orm import selectinload
         result = await self._session.execute(
             select(ConnectorModel)
             .where(ConnectorModel.project_id == project_id)
             .options(selectinload(ConnectorModel.credential))
+            .order_by(ConnectorModel.created_at)
         )
         models = result.scalars().all()
         return [self._to_domain(m) for m in models]

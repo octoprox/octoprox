@@ -8,7 +8,7 @@ import asyncio
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, ValidationError
 
-from api.core.signals import oxylabs_connector_sync_requested
+from api.core.signals import brightdata_connector_sync_requested, oxylabs_connector_sync_requested
 from api.models.connector import (
     Connector,
     ConnectorCreate,
@@ -126,6 +126,12 @@ async def create_connector(
             oxylabs_connector_sync_requested.send_async(None, connector_id=connector.id)
         )
 
+    # Trigger BrightData sync if this is a BrightData connector (fire-and-forget)
+    if credential_type_enum == CredentialType.BRIGHTDATA:
+        asyncio.create_task(
+            brightdata_connector_sync_requested.send_async(None, connector=connector)
+        )
+
     credential_type = credential.type.value if hasattr(credential.type, 'value') else credential.type
     # New connector has 0 proxies initially (Oxylabs syncer will add them)
     return _connector_to_response(connector, credential.name, credential_type, proxy_count=0)
@@ -200,6 +206,12 @@ async def update_connector(
     if credential and credential.type == CredentialType.OXYLABS:
         asyncio.create_task(
             oxylabs_connector_sync_requested.send_async(None, connector_id=connector.id)
+        )
+
+    # Trigger BrightData sync if this is a BrightData connector (fire-and-forget)
+    if credential and credential.type == CredentialType.BRIGHTDATA:
+        asyncio.create_task(
+            brightdata_connector_sync_requested.send_async(None, connector=connector)
         )
 
     credential_name = credential.name if credential else None

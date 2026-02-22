@@ -20,12 +20,16 @@ from httpx_socks import AsyncProxyTransport  # type: ignore[import-untyped]
 from api.core import utc_now
 from api.core.config import settings
 from api.core.signals import health_check_completed
+from api.models.connector import Connector
 from api.models.proxy import Proxy, ProxyProtocol, ProxyStatus
 
 if TYPE_CHECKING:
     pass
 
 logger = structlog.get_logger()
+
+# Default healthcheck URL
+DEFAULT_HEALTHCHECK_URL = "https://httpbin.org/ip"
 
 
 class ProxyDataProvider(Protocol):
@@ -38,6 +42,10 @@ class ProxyDataProvider(Protocol):
 
     def is_connector_enabled(self, connector_id: str) -> bool:
         """Check if a connector is enabled."""
+        ...
+
+    def get_connector(self, connector_id: str) -> Connector | None:
+        """Get a connector by ID."""
         ...
 
 # Grace period for initializing proxies before marking them unhealthy
@@ -121,9 +129,29 @@ class HealthChecker:
         else:
             raise ValueError(f"Unsupported proxy protocol: {proxy.protocol}")
 
+    def _get_healthcheck_url(self, proxy: Proxy) -> str:
+        """Get the healthcheck URL for a proxy.
+
+        Some connectors can specify a custom healthcheck URL since
+        users may restrict proxies to certain URLs only.
+
+        Args:
+            proxy: The proxy to get the healthcheck URL for.
+
+        Returns:
+            The healthcheck URL to use (default: https://httpbin.org/ip)
+        """
+        connector = self._proxy_data_provider.get_connector(proxy.connector_id)
+        if connector and connector.config:
+            custom_url = connector.config.get("healthcheck_url", DEFAULT_HEALTHCHECK_URL)
+            if custom_url:
+                return custom_url
+        return DEFAULT_HEALTHCHECK_URL
+
     async def _check_proxy(self, proxy: Proxy) -> None:
         """Check health of a single proxy and emit signal with result."""
         start_time = time.monotonic()
+        healthcheck_url = self._get_healthcheck_url(proxy)
 
         try:
             mounts = self._get_proxy_mounts(proxy)
@@ -131,7 +159,7 @@ class HealthChecker:
                 mounts=mounts,
                 timeout=self._timeout,
             ) as client:
-                response = await client.get("https://httpbin.org/ip")
+                response = await client.get(healthcheck_url)
 
                 latency_ms = (time.monotonic() - start_time) * 1000
 

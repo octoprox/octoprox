@@ -22,7 +22,7 @@ from api.core.proxy_server import ProxyServer
 from api.db.migrations import run_migrations
 from api.db.redis import get_redis_client
 from api.db.session import get_async_session_factory
-from api.routes import auth, connectors, credentials, health, metrics, projects, proxies
+from api.routes import auth, brightdata, connectors, credentials, health, metrics, projects, proxies
 
 # Configure logging before getting the logger
 log_level = "DEBUG" if settings.debug else "INFO"
@@ -112,6 +112,7 @@ def create_app() -> FastAPI:
     app.include_router(connectors.options_router, prefix="/api/v1", tags=["Connectors"], dependencies=auth_dependency)
     app.include_router(proxies.router, prefix="/api/v1", tags=["Proxies"], dependencies=auth_dependency)
     app.include_router(metrics.router, prefix="/api/v1", tags=["Metrics"], dependencies=auth_dependency)
+    app.include_router(brightdata.router, prefix="/api/v1", tags=["BrightData"], dependencies=auth_dependency)
 
     # Serve frontend static files in production (when web/dist exists)
     static_dir = Path(__file__).parent.parent / "web" / "dist"

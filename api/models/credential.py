@@ -21,6 +21,7 @@ class CredentialType(str, Enum):
     GCP = "gcp"
     AZURE = "azure"
     OXYLABS = "oxylabs"
+    BRIGHTDATA = "brightdata"
 
 
 class OxylabsProxyType(str, Enum):
@@ -118,9 +119,24 @@ class OxylabsCredentialConfig(BaseModel):
         return self
 
 
+class BrightDataCredentialConfig(BaseModel):
+    """Configuration for BrightData credentials."""
+    token: str
+    customer_id: str
+
+    @model_validator(mode='after')
+    def validate_required_fields(self) -> 'BrightDataCredentialConfig':
+        """Ensure required fields are not empty."""
+        if not self.token or not self.token.strip():
+            raise ValueError('token is required and cannot be empty')
+        if not self.customer_id or not self.customer_id.strip():
+            raise ValueError('customer_id is required and cannot be empty')
+        return self
+
+
 def validate_credential_config(credential_type: CredentialType, config: dict[str, Any]) -> dict[str, Any]:
     """Validate credential config based on type and return validated config."""
-    validated: StaticProxyProviderConfig | AWSCredentialConfig | GCPCredentialConfig | AzureCredentialConfig | OxylabsCredentialConfig
+    validated: StaticProxyProviderConfig | AWSCredentialConfig | GCPCredentialConfig | AzureCredentialConfig | OxylabsCredentialConfig | BrightDataCredentialConfig
     if credential_type == CredentialType.STATIC_PROXY_PROVIDER:
         validated = StaticProxyProviderConfig(**config)
     elif credential_type == CredentialType.AWS:
@@ -131,6 +147,12 @@ def validate_credential_config(credential_type: CredentialType, config: dict[str
         validated = AzureCredentialConfig(**config)
     elif credential_type == CredentialType.OXYLABS:
         validated = OxylabsCredentialConfig(**config)
+    elif credential_type == CredentialType.BRIGHTDATA:
+        # BrightData validation is handled in the route after fetching customer_id from API
+        # Just validate that token is present here
+        if not config.get("token"):
+            raise ValueError("token is required")
+        return config
     else:
         raise ValueError(f"Unknown credential type: {credential_type}")
     return validated.model_dump(exclude_none=True)

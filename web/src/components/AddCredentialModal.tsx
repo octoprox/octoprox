@@ -14,6 +14,7 @@ export const CREDENTIAL_TYPES: { value: CredentialType; label: string }[] = [
   { value: 'gcp', label: 'GCP' },
   { value: 'azure', label: 'Azure' },
   { value: 'oxylabs', label: 'Oxylabs' },
+  { value: 'brightdata', label: 'BrightData' },
 ]
 
 export const OXYLABS_PROXY_TYPES: { value: OxylabsProxyType; label: string }[] = [
@@ -37,6 +38,8 @@ export const getDefaultCredentialConfig = (type: CredentialType): Record<string,
       return { subscription_id: '', tenant_id: '', client_id: '', client_secret: '', key_vault_name: '' }
     case 'oxylabs':
       return { proxy_type: 'residential', username: '', password: '' }
+    case 'brightdata':
+      return { token: '' }
     default:
       return {}
   }
@@ -179,7 +182,7 @@ export default function AddCredentialModal({ isOpen, onClose, onSuccess, fixedTy
     const fields = getDefaultCredentialConfig(formData.type)
     const jsonError = getServiceAccountJsonError()
     return Object.keys(fields).map((key) => {
-      const isSecret = ['password', 'secret_key', 'client_secret', 'service_account_json'].includes(key)
+      const isSecret = ['password', 'secret_key', 'client_secret', 'service_account_json', 'token'].includes(key)
 
       // Special handling for Oxylabs proxy_type field
       if (key === 'proxy_type' && formData.type === 'oxylabs') {
@@ -196,6 +199,11 @@ export default function AddCredentialModal({ isOpen, onClose, onSuccess, fixedTy
             </Select>
           </div>
         )
+      }
+
+      // Skip customer_id for BrightData (auto-populated from API)
+      if (key === 'customer_id' && formData.type === 'brightdata') {
+        return null
       }
 
       return (

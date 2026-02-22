@@ -15,6 +15,7 @@ import structlog
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from api.core.auto_scaler import AutoScaler
+from api.core.brightdata_syncer import BrightDataSyncer
 from api.core.config import Settings
 from api.core.demand_tracker import DemandTracker
 from api.core.health_checker import HealthChecker
@@ -93,6 +94,7 @@ class ProxyManager:
         self._demand_tracker = DemandTracker(redis_client)
         self._auto_scaler = AutoScaler(self)
         self._oxylabs_syncer = OxylabsSyncer(self)
+        self._brightdata_syncer = BrightDataSyncer(self)
         self._running = False
         self._tasks: list[asyncio.Task[None]] = []
 
@@ -124,6 +126,10 @@ class ProxyManager:
 
         # Start Oxylabs syncer
         task = asyncio.create_task(self._oxylabs_syncer.run())
+        self._tasks.append(task)
+
+        # Start BrightData syncer
+        task = asyncio.create_task(self._brightdata_syncer.run())
         self._tasks.append(task)
 
     def _subscribe_to_signals(self) -> None:
@@ -369,18 +375,18 @@ class ProxyManager:
 
     @property
     def credentials(self) -> list[Credential]:
-        """Get all credentials."""
-        return list(self._credentials.values())
+        """Get all credentials, ordered by creation time."""
+        return sorted(self._credentials.values(), key=lambda c: c.created_at)
 
     @property
     def connectors(self) -> list[Connector]:
-        """Get all connectors."""
-        return list(self._connectors.values())
+        """Get all connectors, ordered by creation time."""
+        return sorted(self._connectors.values(), key=lambda c: c.created_at)
 
     @property
     def projects(self) -> list[Project]:
-        """Get all projects."""
-        return list(self._projects.values())
+        """Get all projects, ordered by creation time."""
+        return sorted(self._projects.values(), key=lambda p: p.created_at)
 
     def get_project(self, project_id: str) -> Project | None:
         """Get a project by ID."""
@@ -471,8 +477,9 @@ class ProxyManager:
 
     # Credential methods
     def get_credentials_for_project(self, project_id: str) -> list[Credential]:
-        """Get all credentials for a project."""
-        return [c for c in self._credentials.values() if c.project_id == project_id]
+        """Get all credentials for a project, ordered by creation time."""
+        credentials = [c for c in self._credentials.values() if c.project_id == project_id]
+        return sorted(credentials, key=lambda c: c.created_at)
 
     def get_credential(self, credential_id: str) -> Credential | None:
         """Get a credential by ID."""
@@ -513,13 +520,15 @@ class ProxyManager:
         return True
 
     def get_connectors_for_credential(self, credential_id: str) -> list[Connector]:
-        """Get all connectors using a specific credential."""
-        return [c for c in self._connectors.values() if c.credential_id == credential_id]
+        """Get all connectors using a specific credential, ordered by creation time."""
+        connectors = [c for c in self._connectors.values() if c.credential_id == credential_id]
+        return sorted(connectors, key=lambda c: c.created_at)
 
     # Connector methods
     def get_connectors_for_project(self, project_id: str) -> list[Connector]:
-        """Get all connectors for a project."""
-        return [c for c in self._connectors.values() if c.project_id == project_id]
+        """Get all connectors for a project, ordered by creation time."""
+        connectors = [c for c in self._connectors.values() if c.project_id == project_id]
+        return sorted(connectors, key=lambda c: c.created_at)
 
     def get_connector(self, connector_id: str) -> Connector | None:
         """Get a connector by ID."""

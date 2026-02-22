@@ -198,6 +198,7 @@ export default function ProxyList() {
     {
       accessorKey: 'protocol',
       header: 'Protocol',
+      size: 95,
       cell: ({ getValue }) => (
         <span className="uppercase text-xs font-medium">{getValue<string>()}</span>
       ),
@@ -206,11 +207,14 @@ export default function ProxyList() {
       accessorKey: 'connector_name',
       header: 'Connector',
       enableSorting: false,
-      cell: ({ getValue }) => getValue<string>() || '-',
+      cell: ({ getValue }) => (
+        <span className="truncate block">{getValue<string>() || '-'}</span>
+      ),
     },
     {
       accessorKey: 'status',
       header: 'Status',
+      size: 100,
       cell: ({ row }) => (
         <StatusBadge
           status={row.original.status}
@@ -221,32 +225,36 @@ export default function ProxyList() {
     {
       accessorKey: 'request_count',
       header: 'Reqs',
+      size: 70,
     },
     {
       accessorKey: 'success_rate',
       header: 'Success',
+      size: 90,
       cell: ({ getValue }) => `${getValue<number>().toFixed(1)}%`,
     },
     {
       accessorKey: 'avg_latency_ms',
       header: 'Latency',
+      size: 90,
       cell: ({ getValue }) => `${getValue<number>().toFixed(0)}ms`,
     },
     {
       id: 'traffic',
       header: 'Traffic',
+      size: 90,
       enableSorting: false,
       cell: ({ row }) => (
-        <span className="text-sm whitespace-nowrap">
-          <span className="text-orange-600">↑{formatBytes(row.original.bytes_sent)}</span>
-          {' '}
-          <span className="text-teal-600">↓{formatBytes(row.original.bytes_received)}</span>
-        </span>
+        <div className="text-xs leading-tight whitespace-nowrap">
+          <div className="text-orange-600">↑{formatBytes(row.original.bytes_sent)}</div>
+          <div className="text-teal-600">↓{formatBytes(row.original.bytes_received)}</div>
+        </div>
       ),
     },
     {
       id: 'actions',
       header: '',
+      size: 70,
       enableSorting: false,
       cell: ({ row }) => (
         <div className="flex gap-1">

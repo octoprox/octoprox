@@ -71,15 +71,16 @@ export function DataTable<TData, TValue>({
   const pageCount = table.getPageCount()
 
   return (
-    <div className="space-y-3">
+    <div className="space-y-3 min-w-0">
       <div className="bg-white dark:bg-gray-800 rounded-lg shadow overflow-hidden">
-        <table className="w-full text-sm">
+        <table className="w-full text-sm table-fixed">
           <thead>
             <tr className="bg-gray-50 dark:bg-gray-700 border-b border-gray-200 dark:border-gray-600">
               {table.getHeaderGroups().map((headerGroup) =>
                 headerGroup.headers.map((header) => (
                   <th
                     key={header.id}
+                    style={{ width: header.getSize() !== 150 ? header.getSize() : undefined }}
                     className={`px-3 py-2 text-left text-xs font-semibold text-gray-600 dark:text-gray-300 uppercase tracking-wider ${
                       header.column.getCanSort() ? 'cursor-pointer select-none hover:bg-gray-100 dark:hover:bg-gray-600' : ''
                     }`}
@@ -110,12 +111,12 @@ export function DataTable<TData, TValue>({
               table.getRowModel().rows.map((row) => (
                 <tr
                   key={row.id}
-                  className={`hover:bg-gray-50 dark:hover:bg-gray-700/50 transition-colors ${
+                  className={`h-10 hover:bg-gray-50 dark:hover:bg-gray-700/50 transition-colors ${
                     row.getIsSelected() ? 'bg-blue-50 dark:bg-blue-900/20' : ''
                   }`}
                 >
                   {row.getVisibleCells().map((cell) => (
-                    <td key={cell.id} className="px-3 py-2 text-gray-700 dark:text-gray-300">
+                    <td key={cell.id} className="px-3 h-10 align-middle text-gray-700 dark:text-gray-300">
                       {flexRender(cell.column.columnDef.cell, cell.getContext())}
                     </td>
                   ))}
@@ -216,6 +217,7 @@ export function DataTable<TData, TValue>({
 export function createSelectionColumn<TData>(): ColumnDef<TData, unknown> {
   return {
     id: 'select',
+    size: 40,
     header: ({ table }) => {
       const isAllRowsSelected = table.getIsAllRowsSelected()
       const isAllPageRowsSelected = table.getIsAllPageRowsSelected()
@@ -235,7 +237,7 @@ export function createSelectionColumn<TData>(): ColumnDef<TData, unknown> {
               }
             }}
             onChange={table.getToggleAllPageRowsSelectedHandler()}
-            className="w-4 h-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500 cursor-pointer"
+            className="w-4 h-4 rounded border-gray-300 dark:border-gray-600 dark:bg-gray-700 text-blue-600 focus:ring-blue-500 cursor-pointer"
             aria-label="Select all on page"
           />
           {hasMultiplePages && (
@@ -285,7 +287,7 @@ export function createSelectionColumn<TData>(): ColumnDef<TData, unknown> {
         checked={row.getIsSelected()}
         disabled={!row.getCanSelect()}
         onChange={row.getToggleSelectedHandler()}
-        className="w-4 h-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500 cursor-pointer"
+        className="w-4 h-4 rounded border-gray-300 dark:border-gray-600 dark:bg-gray-700 text-blue-600 focus:ring-blue-500 cursor-pointer"
         aria-label="Select row"
       />
     ),

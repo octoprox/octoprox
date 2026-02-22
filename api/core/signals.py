@@ -147,3 +147,13 @@ proxy_update_requested = signal("proxy-update-requested")
 # Args: connector_id (str)
 oxylabs_connector_sync_requested = signal("oxylabs-connector-sync-requested")
 
+
+# =============================================================================
+# BrightData Syncer Signals
+# =============================================================================
+
+# Emitted when a BrightData connector needs to be synced (after create/update)
+# Sender: API routes
+# Args: connector (Connector)
+brightdata_connector_sync_requested = signal("brightdata-connector-sync-requested")
+

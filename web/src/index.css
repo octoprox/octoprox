@@ -6,3 +6,8 @@ body {
   @apply bg-gray-50 text-gray-900 dark:bg-gray-900 dark:text-gray-100;
 }
 
+/* Dark mode checkbox styling */
+.dark input[type="checkbox"] {
+  color-scheme: dark;
+}
+

@@ -82,6 +82,35 @@ async def create_credential(
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
 
+    # Validate BrightData token if applicable
+    if credential_data.type == CredentialType.BRIGHTDATA:
+        from api.models.credential import BrightDataCredentialConfig
+        from api.routes.brightdata import validate_token
+
+        # Get token from config dict (before full validation)
+        token = credential_data.config.get("token")
+        if not token or not token.strip():
+            raise HTTPException(status_code=400, detail="BrightData token is required")
+
+        # Validate token with API and get customer ID
+        validation = await validate_token(token)
+
+        if not validation.valid:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid BrightData token. Status: {validation.status or 'unknown'}"
+            )
+
+        # Store customer ID in config
+        credential_data.config["customer_id"] = validation.customer_id
+
+        # Now validate the complete config with the model
+        try:
+            validated = BrightDataCredentialConfig(**credential_data.config)
+            credential_data.config = validated.model_dump(exclude_none=True)
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"Invalid BrightData config: {str(e)}") from e
+
     credential = Credential(
         name=credential_data.name,
         type=credential_data.type,
@@ -122,15 +151,48 @@ async def update_credential(
     if credential_data.config is not None:
         # Validate config based on credential type
         credential_type_enum = credential.type if isinstance(credential.type, CredentialType) else CredentialType(credential.type)
-        try:
-            validated_config = validate_credential_config(credential_type_enum, credential_data.config)
-            credential.config = validated_config
-        except ValidationError as e:
-            # Extract just the error messages from Pydantic validation errors
-            messages = [err.get('msg', str(err)) for err in e.errors()]
-            raise HTTPException(status_code=422, detail="; ".join(messages)) from None
-        except ValueError as e:
-            raise HTTPException(status_code=422, detail=str(e)) from None
+
+        # Handle BrightData specially - need to validate token with API if it changed
+        if credential_type_enum == CredentialType.BRIGHTDATA:
+            from api.models.credential import BrightDataCredentialConfig
+            from api.routes.brightdata import validate_token
+
+            new_token = credential_data.config.get("token")
+            old_token = credential.config.get("token") if credential.config else None
+
+            if new_token and new_token != old_token:
+                # Token changed - need to re-validate with API
+                if not new_token.strip():
+                    raise HTTPException(status_code=400, detail="BrightData token is required")
+
+                validation = await validate_token(new_token)
+                if not validation.valid:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Invalid BrightData token. Status: {validation.status or 'unknown'}"
+                    )
+                credential_data.config["customer_id"] = validation.customer_id
+            else:
+                # Token not changed - preserve existing customer_id
+                if credential.config and "customer_id" in credential.config:
+                    credential_data.config["customer_id"] = credential.config["customer_id"]
+
+            # Now validate the complete config
+            try:
+                validated = BrightDataCredentialConfig(**credential_data.config)
+                credential.config = validated.model_dump(exclude_none=True)
+            except Exception as e:
+                raise HTTPException(status_code=400, detail=f"Invalid BrightData config: {str(e)}") from e
+        else:
+            try:
+                validated_config = validate_credential_config(credential_type_enum, credential_data.config)
+                credential.config = validated_config
+            except ValidationError as e:
+                # Extract just the error messages from Pydantic validation errors
+                messages = [err.get('msg', str(err)) for err in e.errors()]
+                raise HTTPException(status_code=422, detail="; ".join(messages)) from None
+            except ValueError as e:
+                raise HTTPException(status_code=422, detail=str(e)) from None
 
     await proxy_manager.update_credential(credential)
     return _credential_to_detail_response(credential)

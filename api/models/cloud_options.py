@@ -502,3 +502,13 @@ OXYLABS_COUNTRIES: list[CountryOption] = [
     CountryOption(code="EG", name="Egypt"),
     CountryOption(code="NG", name="Nigeria"),
 ]
+
+
+# --- BrightData Zone Options ---
+
+class BrightDataZone(BaseModel):
+    """A BrightData zone option with metadata."""
+    name: str
+    type: str  # "res_rotating", "dc_shared", etc.
+    proxy_type: str  # "residential", "datacenter", etc. (mapped)
+    password: str

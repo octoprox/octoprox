@@ -216,7 +216,7 @@ export interface ProxyUploadResponse {
 }
 
 // Credential types
-export type CredentialType = 'static_proxy_provider' | 'aws' | 'gcp' | 'azure' | 'oxylabs'
+export type CredentialType = 'static_proxy_provider' | 'aws' | 'gcp' | 'azure' | 'oxylabs' | 'brightdata'
 
 // Oxylabs proxy types
 export type OxylabsProxyType = 'residential' | 'mobile' | 'isp' | 'dedicated_isp' | 'datacenter' | 'datacenter_dedicated'
@@ -231,6 +231,30 @@ export interface OxylabsConnectorConfig {
   num_proxies: number
   country_code?: string | null
   session_duration_minutes: number
+}
+
+// BrightData proxy types
+export type BrightDataProxyType = 'residential' | 'mobile' | 'isp' | 'datacenter'
+
+export interface BrightDataCredentialConfig {
+  token: string
+  customer_id: string
+}
+
+export interface BrightDataConnectorConfig {
+  zone_name: string
+  zone_password: string
+  proxy_type: BrightDataProxyType
+  num_proxies: number
+  country_code?: string | null
+  healthcheck_url?: string | null  // Custom healthcheck URL (default: https://httpbin.org/ip)
+}
+
+export interface BrightDataZone {
+  name: string
+  type: string
+  proxy_type: BrightDataProxyType
+  password: string
 }
 
 export interface Credential {
@@ -515,6 +539,12 @@ export const deleteProjectConnector = async (projectId: string, connectorId: str
 // Connector options (regions, instance types, etc.)
 export const fetchConnectorOptions = async (): Promise<ConnectorOptions> => {
   const response = await api.get('/connector-options')
+  return response.data
+}
+
+// BrightData API functions
+export const fetchBrightDataZones = async (credentialId: string): Promise<BrightDataZone[]> => {
+  const response = await api.get(`/brightdata/zones/${credentialId}`)
   return response.data
 }
 

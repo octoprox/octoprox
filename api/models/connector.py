@@ -4,6 +4,7 @@
 """Connector model definitions."""
 
 from datetime import datetime
+from enum import Enum
 from typing import Any
 from uuid import uuid4
 
@@ -23,6 +24,7 @@ from api.models.cloud_options import (
     GCP_UBUNTU_IMAGE_X86,
     GCP_ZONES,
     OXYLABS_COUNTRIES,
+    BrightDataZone,
     CountryOption,
     InstanceTypeOption,
     RegionOption,
@@ -187,9 +189,53 @@ class OxylabsConnectorConfig(BaseModel):
         return proxy_type in (OxylabsProxyType.RESIDENTIAL, OxylabsProxyType.MOBILE)
 
 
+class BrightDataProxyType(str, Enum):
+    """Types of BrightData proxies."""
+    RESIDENTIAL = "residential"
+    MOBILE = "mobile"
+    ISP = "isp"
+    DATACENTER = "datacenter"
+
+
+class BrightDataConnectorConfig(BaseModel):
+    """Configuration for BrightData connectors.
+
+    Supports both session-based (residential, mobile) and port-based
+    (isp, datacenter) proxy types. All types support country selection.
+    """
+    zone_name: str  # User-editable
+    zone_password: str  # User-editable, auto-populated from API
+    proxy_type: BrightDataProxyType  # Derived from zone, fixed after creation
+    num_proxies: int = Field(default=1, ge=1, le=1000)
+    country_code: str | None = None  # Optional, all types support it
+    healthcheck_url: str | None = None  # Optional custom healthcheck URL (default: https://httpbin.org/ip)
+
+    @model_validator(mode='after')
+    def validate_fields(self) -> 'BrightDataConnectorConfig':
+        """Validate connector fields."""
+        if not self.zone_name or not self.zone_name.strip():
+            raise ValueError('zone_name is required and cannot be empty')
+        if not self.zone_password or not self.zone_password.strip():
+            raise ValueError('zone_password is required and cannot be empty')
+        # Normalize country code (same as Oxylabs)
+        if self.country_code is not None:
+            if not self.country_code.strip():
+                self.country_code = None
+            else:
+                code = self.country_code.strip().upper()
+                if len(code) != 2 or not code.isalpha():
+                    raise ValueError('country_code must be a 2-letter country code')
+                self.country_code = code
+        return self
+
+    def is_session_based(self) -> bool:
+        """Check if the proxy type uses session-based routing."""
+        return self.proxy_type in (BrightDataProxyType.RESIDENTIAL, BrightDataProxyType.MOBILE)
+
+
 def validate_connector_config(credential_type: CredentialType, config: dict[str, Any]) -> dict[str, Any]:
     """Validate connector config based on credential type and return validated config."""
-    validated: StaticProxyProviderConnectorConfig | AWSConnectorConfig | GCPConnectorConfig | AzureConnectorConfig | OxylabsConnectorConfig
+    validated: StaticProxyProviderConnectorConfig | AWSConnectorConfig | GCPConnectorConfig | AzureConnectorConfig | OxylabsConnectorConfig | BrightDataConnectorConfig
     if credential_type == CredentialType.STATIC_PROXY_PROVIDER:
         validated = StaticProxyProviderConnectorConfig(**config)
     elif credential_type == CredentialType.AWS:
@@ -200,6 +246,8 @@ def validate_connector_config(credential_type: CredentialType, config: dict[str,
         validated = AzureConnectorConfig(**config)
     elif credential_type == CredentialType.OXYLABS:
         validated = OxylabsConnectorConfig(**config)
+    elif credential_type == CredentialType.BRIGHTDATA:
+        validated = BrightDataConnectorConfig(**config)
     else:
         raise ValueError(f"Unknown credential type: {credential_type}")
     return validated.model_dump(exclude_none=True)
@@ -247,6 +295,23 @@ def get_oxylabs_config(
     return None
 
 
+def get_brightdata_config(
+    credential_type: CredentialType, config: dict[str, Any]
+) -> BrightDataConnectorConfig | None:
+    """Get a typed BrightData config model from a raw config dict.
+
+    Args:
+        credential_type: The type of credential.
+        config: The raw configuration dictionary.
+
+    Returns:
+        A BrightDataConnectorConfig if it's a BrightData provider, None otherwise.
+    """
+    if credential_type == CredentialType.BRIGHTDATA:
+        return BrightDataConnectorConfig(**config)
+    return None
+
+
 class Connector(BaseModel):
     """Represents a connector that provides proxies."""
 
@@ -280,6 +345,11 @@ class Connector(BaseModel):
     def oxylabs_config(self) -> OxylabsConnectorConfig | None:
         """Get the Oxylabs config if this is an Oxylabs connector, None otherwise."""
         return get_oxylabs_config(self.credential_type, self.config)
+
+    @property
+    def brightdata_config(self) -> BrightDataConnectorConfig | None:
+        """Get the BrightData config if this is a BrightData connector, None otherwise."""
+        return get_brightdata_config(self.credential_type, self.config)
 
 
 class ConnectorCreate(BaseModel):
@@ -326,7 +396,8 @@ class ConnectorOptionsResponse(BaseModel):
     All options are rich objects with metadata for frontend display:
     - Regions/zones/locations include code and friendly name
     - Instance types include code, vCPUs, memory, architecture, and description
-    - Countries include code and friendly name for Oxylabs geo-targeting
+    - Countries include code and friendly name for Oxylabs/BrightData geo-targeting
+    - BrightData zones include name, type, and password
     """
     aws_regions: list[RegionOption] = Field(default_factory=lambda: AWS_REGIONS)
     aws_instance_types: list[InstanceTypeOption] = Field(default_factory=lambda: AWS_INSTANCE_TYPES)
@@ -335,4 +406,5 @@ class ConnectorOptionsResponse(BaseModel):
     azure_locations: list[RegionOption] = Field(default_factory=lambda: AZURE_LOCATIONS)
     azure_vm_sizes: list[InstanceTypeOption] = Field(default_factory=lambda: AZURE_VM_SIZES)
     oxylabs_countries: list[CountryOption] = Field(default_factory=lambda: OXYLABS_COUNTRIES)
+    brightdata_zones: list[BrightDataZone] = Field(default_factory=list)
 

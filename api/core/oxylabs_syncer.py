@@ -73,6 +73,8 @@ class OxylabsSyncer:
         """
         self._data_provider = data_provider
         self._running = False
+        # Lock per connector to prevent concurrent syncs
+        self._sync_locks: dict[str, asyncio.Lock] = {}
         self._subscribe_to_signals()
 
     def _subscribe_to_signals(self) -> None:
@@ -175,7 +177,7 @@ class OxylabsSyncer:
         if not credential or credential.type != CredentialType.OXYLABS:
             return
 
-        await self.sync_connector(connector, credential)
+        asyncio.create_task(self.sync_connector(connector, credential))
 
     async def _on_proxy_removed(
         self, sender: object, proxy_id: str, connector_id: str
@@ -194,24 +196,28 @@ class OxylabsSyncer:
         if not credential or credential.type != CredentialType.OXYLABS:
             return
 
-        # Get the current proxy count to check if we need to regenerate
-        current_proxies = self._data_provider.get_proxies_for_connector(connector_id)
-        target_count = connector.oxylabs_config.num_proxies if connector.oxylabs_config else 0
+        logger.info("Oxylabs proxy removed, regenerating", proxy_id=proxy_id, connector_id=connector_id)
+        # Sync will add/remove proxies as needed
+        asyncio.create_task(self.sync_connector(connector, credential))
 
-        if len(current_proxies) < target_count:
-            logger.info(
-                "Auto-regenerating Oxylabs proxy",
-                connector_id=connector_id,
-                current_count=len(current_proxies),
-                target_count=target_count,
-            )
-            # Sync will add the missing proxies
-            await self.sync_connector(connector, credential)
+    def _get_sync_lock(self, connector_id: str) -> asyncio.Lock:
+        """Get or create a lock for a connector's sync operations.
+
+        Args:
+            connector_id: The connector ID
+
+        Returns:
+            The lock for this connector
+        """
+        if connector_id not in self._sync_locks:
+            self._sync_locks[connector_id] = asyncio.Lock()
+        return self._sync_locks[connector_id]
 
     async def sync_connector(self, connector: Connector, credential: Credential) -> None:
         """Synchronize proxies for a connector to match its configuration.
 
-        Called when a connector is created or updated.
+        Uses a per-connector lock to prevent concurrent syncs which could cause
+        race conditions (e.g., multiple syncs each adding proxies).
 
         Args:
             connector: The Oxylabs connector to sync
@@ -220,33 +226,36 @@ class OxylabsSyncer:
         if credential.type != CredentialType.OXYLABS:
             return
 
-        provider = OxylabsProvider(connector, credential)
-        existing_proxies = self._data_provider.get_proxies_for_connector(connector.id)
+        lock = self._get_sync_lock(connector.id)
 
-        logger.info(
-            "Syncing Oxylabs connector",
-            connector_id=connector.id,
-            existing_count=len(existing_proxies),
-            target_count=connector.oxylabs_config.num_proxies if connector.oxylabs_config else 0,
-        )
+        async with lock:
+            provider = OxylabsProvider(connector, credential)
+            existing_proxies = self._data_provider.get_proxies_for_connector(connector.id)
 
-        proxies_to_add, proxy_ids_to_remove = await provider.sync_proxies(existing_proxies)
+            logger.info(
+                "Syncing Oxylabs connector",
+                connector_id=connector.id,
+                existing_count=len(existing_proxies),
+                target_count=connector.oxylabs_config.num_proxies if connector.oxylabs_config else 0,
+            )
 
-        # Add new proxies
-        for proxy in proxies_to_add:
-            await proxy_add_requested.send_async(self, proxy=proxy)
-            logger.debug("Added Oxylabs proxy", proxy_id=proxy.id)
+            proxies_to_add, proxy_ids_to_remove = await provider.sync_proxies(existing_proxies)
 
-        # Remove excess proxies
-        for proxy_id in proxy_ids_to_remove:
-            await proxy_remove_requested.send_async(self, proxy_id=proxy_id)
-            logger.debug("Removed Oxylabs proxy", proxy_id=proxy_id)
+            # Add new proxies
+            for proxy in proxies_to_add:
+                await proxy_add_requested.send_async(self, proxy=proxy)
+                logger.debug("Added Oxylabs proxy", proxy_id=proxy.id)
 
-        logger.info(
-            "Oxylabs connector sync complete",
-            connector_id=connector.id,
-            added=len(proxies_to_add),
-            removed=len(proxy_ids_to_remove),
-        )
+            # Remove excess proxies
+            for proxy_id in proxy_ids_to_remove:
+                await proxy_remove_requested.send_async(self, proxy_id=proxy_id)
+                logger.debug("Removed Oxylabs proxy", proxy_id=proxy_id)
+
+            logger.info(
+                "Oxylabs connector sync complete",
+                connector_id=connector.id,
+                added=len(proxies_to_add),
+                removed=len(proxy_ids_to_remove),
+            )
 
 

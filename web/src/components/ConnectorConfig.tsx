@@ -12,11 +12,13 @@ import {
   createProjectConnector,
   updateProjectConnector,
   deleteProjectConnector,
+  fetchBrightDataZones,
   Connector,
   CredentialType,
   ConnectorCreate,
   ConnectorOptions,
   OxylabsProxyType,
+  BrightDataProxyType,
 } from '../api/client'
 import { useProject } from '../contexts/ProjectContext'
 import { useTheme } from '../contexts/ThemeContext'
@@ -33,6 +35,7 @@ import azureLogo from '../assets/logos/azure.svg'
 import azureLogoDark from '../assets/logos/azure_dark.svg'
 import staticProxyLogo from '../assets/logos/static-proxy.svg'
 import oxylabsLogo from '../assets/logos/oxylabs.svg'
+import brightdataLogo from '../assets/logos/brightdata.svg'
 
 interface ConnectorFormData {
   name: string
@@ -47,6 +50,7 @@ const CONNECTOR_TYPES: { type: CredentialType; name: string; description: string
   { type: 'gcp', name: 'Google Cloud Platform', description: 'Compute Engine VMs as proxy servers', logo: gcpLogo, logoDark: gcpLogoDark },
   { type: 'azure', name: 'Microsoft Azure', description: 'Virtual Machines as proxy servers', logo: azureLogo, logoDark: azureLogoDark },
   { type: 'oxylabs', name: 'Oxylabs', description: 'Residential, Mobile, ISP, and Datacenter proxies', logo: oxylabsLogo, logoDark: oxylabsLogo },
+  { type: 'brightdata', name: 'BrightData', description: 'Residential, Mobile, ISP, and Datacenter proxies', logo: brightdataLogo, logoDark: brightdataLogo },
 ]
 
 // Tab type for config sections
@@ -96,7 +100,35 @@ function KeyValueTagsEditor({ value, onChange }: { value: string; onChange: (val
   )
 }
 
+// Helper to get the configured number of proxies from connector config
+const getConfiguredProxies = (connector: Connector): number | null => {
+  const config = connector.config
+  const credType = connector.credential_type
 
+  if (!credType || credType === 'static_proxy_provider') {
+    return null // Static proxy provider has no configured limit
+  }
+
+  if (credType === 'oxylabs' || credType === 'brightdata') {
+    return typeof config.num_proxies === 'number' ? config.num_proxies : null
+  }
+
+  // Cloud connectors (aws, gcp, azure) use max_proxies
+  if (credType === 'aws' || credType === 'gcp' || credType === 'azure') {
+    return typeof config.max_proxies === 'number' ? config.max_proxies : null
+  }
+
+  return null
+}
+
+// Format proxy count display as "X/Y" or just "X" if no configured limit
+const formatProxyCount = (connector: Connector): string => {
+  const configured = getConfiguredProxies(connector)
+  if (configured !== null) {
+    return `${connector.proxy_count}/${configured}`
+  }
+  return `${connector.proxy_count}`
+}
 
 const getDefaultConfig = (type: CredentialType | null, options?: ConnectorOptions): Record<string, string> => {
   switch (type) {
@@ -207,6 +239,13 @@ export default function ConnectorConfig() {
     enabled: !!selectedProjectId && !!formData.credential_id && selectedType === 'oxylabs',
   })
 
+  // Fetch BrightData zones when credential is selected
+  const { data: brightDataZones } = useQuery({
+    queryKey: ['brightdata-zones', formData.credential_id],
+    queryFn: () => fetchBrightDataZones(formData.credential_id),
+    enabled: !!formData.credential_id && selectedType === 'brightdata',
+  })
+
   // Helper to get Oxylabs proxy type from selected credential
   const getOxylabsProxyType = (): OxylabsProxyType | null => {
     if (selectedType !== 'oxylabs' || !selectedCredentialData) return null
@@ -216,6 +255,19 @@ export default function ConnectorConfig() {
   // Check if the Oxylabs proxy type is session-based (residential or mobile)
   const isSessionBasedOxylabs = (): boolean => {
     const proxyType = getOxylabsProxyType()
+    return proxyType === 'residential' || proxyType === 'mobile'
+  }
+
+  // Helper to get BrightData proxy type from selected zone
+  const getBrightDataProxyType = (): BrightDataProxyType | null => {
+    if (selectedType !== 'brightdata' || !formData.config.zone_name || !brightDataZones) return null
+    const zone = brightDataZones.find(z => z.name === formData.config.zone_name)
+    return zone?.proxy_type as BrightDataProxyType || null
+  }
+
+  // Check if the BrightData proxy type is session-based (residential or mobile)
+  const isSessionBasedBrightData = (): boolean => {
+    const proxyType = getBrightDataProxyType()
     return proxyType === 'residential' || proxyType === 'mobile'
   }
 
@@ -474,6 +526,144 @@ export default function ConnectorConfig() {
           {!proxyType && (
             <p className="text-sm text-amber-600 dark:text-amber-400 bg-amber-50 dark:bg-amber-900/20 p-3 rounded-lg">
               Loading credential configuration...
+            </p>
+          )}
+        </div>
+      )
+    }
+
+    // Special handling for BrightData - zone selection and config
+    if (type === 'brightdata') {
+      const proxyType = getBrightDataProxyType()
+      const isSessionBased = isSessionBasedBrightData()
+      const countryOptions: RichSelectOption[] = [
+        { value: '', label: 'All Countries', description: 'No geo-targeting' },
+        ...(optionsData?.oxylabs_countries || []).map((c) => ({
+          value: c.code,
+          label: c.name,
+          description: c.code,
+        })),
+      ]
+
+      const zoneOptions: RichSelectOption[] = (brightDataZones || []).map((zone) => ({
+        value: zone.name,
+        label: zone.name,
+        description: `${zone.proxy_type} (${zone.type})`,
+      }))
+
+      return (
+        <div className="mt-4 space-y-4">
+          <div>
+            <Label className="text-xs text-gray-600 dark:text-gray-400">
+              Zone
+              <span className="text-red-500 ml-1">*</span>
+            </Label>
+            <RichSelect
+              options={zoneOptions}
+              value={config.zone_name || ''}
+              onChange={(val) => {
+                // When zone changes, auto-populate zone_password and proxy_type
+                const zone = brightDataZones?.find(z => z.name === val)
+                if (zone) {
+                  // Update all fields at once to avoid stale state issues
+                  setFormData(prev => ({
+                    ...prev,
+                    config: {
+                      ...prev.config,
+                      zone_name: val,
+                      zone_password: zone.password,
+                      proxy_type: zone.proxy_type,
+                    }
+                  }))
+                }
+              }}
+              placeholder="Select zone"
+            />
+            <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
+              Select a BrightData zone. Proxy type is determined by the zone.
+            </p>
+          </div>
+
+          <div>
+            <Label className="text-xs text-gray-600 dark:text-gray-400">
+              Zone Password
+              <span className="text-red-500 ml-1">*</span>
+            </Label>
+            <Input
+              type="text"
+              value={config.zone_password || ''}
+              onChange={(e) => onChange('zone_password', e.target.value)}
+              className="px-3 py-1.5 text-sm"
+              placeholder="Auto-populated from zone"
+              required
+            />
+            <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
+              Auto-populated when selecting a zone. Can be edited if needed.
+            </p>
+          </div>
+
+          <div>
+            <Label className="text-xs text-gray-600 dark:text-gray-400">
+              Number of Proxies
+              <span className="text-red-500 ml-1">*</span>
+            </Label>
+            <Input
+              type="number"
+              min="1"
+              value={config.num_proxies || '1'}
+              onChange={(e) => onChange('num_proxies', e.target.value)}
+              className="px-3 py-1.5 text-sm"
+              placeholder="1"
+              required
+            />
+          </div>
+
+          <div>
+            <Label className="text-xs text-gray-600 dark:text-gray-400">
+              Country
+            </Label>
+            <RichSelect
+              options={countryOptions}
+              value={config.country_code || ''}
+              onChange={(val) => onChange('country_code', val)}
+              placeholder="Select country (optional)"
+            />
+            <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
+              Leave as "All Countries" for no geo-targeting. Supported by all proxy types.
+            </p>
+          </div>
+
+          <div>
+            <Label className="text-xs text-gray-600 dark:text-gray-400">
+              Healthcheck URL
+            </Label>
+            <Input
+              type="url"
+              value={config.healthcheck_url || ''}
+              onChange={(e) => onChange('healthcheck_url', e.target.value)}
+              className="px-3 py-1.5 text-sm"
+              placeholder="https://httpbin.org/ip (default)"
+            />
+            <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
+              Custom URL for health checks. Use this if your BrightData zone is restricted to certain URLs.
+            </p>
+          </div>
+
+          {proxyType && !isSessionBased && (
+            <p className="text-sm text-gray-500 dark:text-gray-400 bg-gray-50 dark:bg-gray-700 p-3 rounded-lg">
+              Port-based proxy type ({proxyType}). IPs will be discovered and refreshed every 24 hours.
+            </p>
+          )}
+
+          {proxyType && isSessionBased && (
+            <p className="text-sm text-gray-500 dark:text-gray-400 bg-gray-50 dark:bg-gray-700 p-3 rounded-lg">
+              Session-based proxy type ({proxyType}). Global session IDs will be used for routing.
+            </p>
+          )}
+
+          {!config.zone_name && (
+            <p className="text-sm text-amber-600 dark:text-amber-400 bg-amber-50 dark:bg-amber-900/20 p-3 rounded-lg">
+              Please select a zone to continue.
             </p>
           )}
         </div>
@@ -750,7 +940,7 @@ export default function ConnectorConfig() {
                     {connector.credential_name || 'Unknown'}
                     <span className="text-gray-400 dark:text-gray-500 ml-1">({getCredentialTypeLabel(connector.credential_type)})</span>
                   </td>
-                  <td className="px-4 py-2 text-gray-500 dark:text-gray-400">{connector.proxy_count}</td>
+                  <td className="px-4 py-2 text-gray-500 dark:text-gray-400">{formatProxyCount(connector)}</td>
                   <td className="px-4 py-2">
                     <div className="flex items-center gap-2">
                       {connector.last_error && (
