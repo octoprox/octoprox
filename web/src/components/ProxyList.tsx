@@ -4,7 +4,7 @@
 import { useState, useRef, useMemo, useCallback } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { ColumnDef } from '@tanstack/react-table'
-import { Plus, Trash2, Pencil, Upload } from 'lucide-react'
+import { Plus, Trash2, Pencil, Upload, Lock } from 'lucide-react'
 import {
   fetchProjectProxies,
   fetchProjectConnectors,
@@ -189,9 +189,9 @@ export default function ProxyList() {
       id: 'host',
       header: 'Host',
       cell: ({ row }) => (
-        <span className="font-mono text-sm">
+        <span className="font-mono text-sm whitespace-nowrap flex items-center">
+          {row.original.username ? <Lock className="w-3.5 h-3.5 mr-1.5 text-gray-400" /> : <span className="w-3.5 mr-1.5" />}
           {row.original.display_host}:{row.original.port}
-          {row.original.username && <span className="ml-1 text-gray-400" title="Authenticated">🔐</span>}
         </span>
       ),
     },
