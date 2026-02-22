@@ -143,8 +143,8 @@ class HealthChecker:
         """
         connector = self._proxy_data_provider.get_connector(proxy.connector_id)
         if connector and connector.config:
-            custom_url = connector.config.get("healthcheck_url", DEFAULT_HEALTHCHECK_URL)
-            if custom_url:
+            custom_url = connector.config.get("healthcheck_url")
+            if isinstance(custom_url, str) and custom_url:
                 return custom_url
         return DEFAULT_HEALTHCHECK_URL
 
