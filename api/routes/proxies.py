@@ -84,6 +84,7 @@ def _proxy_to_response(
         protocol=proxy.protocol.value if hasattr(proxy.protocol, 'value') else proxy.protocol,
         username=proxy.username,
         password=proxy.password,
+        display_host=proxy.effective_display_host,
         connector_id=proxy.connector_id,
         connector_name=connector_name,
         connector_enabled=connector_enabled,

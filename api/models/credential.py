@@ -20,6 +20,17 @@ class CredentialType(str, Enum):
     AWS = "aws"
     GCP = "gcp"
     AZURE = "azure"
+    OXYLABS = "oxylabs"
+
+
+class OxylabsProxyType(str, Enum):
+    """Types of Oxylabs proxies."""
+    RESIDENTIAL = "residential"
+    MOBILE = "mobile"
+    ISP = "isp"
+    DEDICATED_ISP = "dedicated_isp"
+    DATACENTER = "datacenter"
+    DATACENTER_DEDICATED = "datacenter_dedicated"
 
 
 # --- Typed Config Models for Validation ---
@@ -91,9 +102,25 @@ class AzureCredentialConfig(BaseModel):
         return self
 
 
+class OxylabsCredentialConfig(BaseModel):
+    """Configuration for Oxylabs credentials."""
+    proxy_type: OxylabsProxyType
+    username: str
+    password: str
+
+    @model_validator(mode='after')
+    def validate_required_fields(self) -> 'OxylabsCredentialConfig':
+        """Ensure required fields are not empty."""
+        if not self.username or not self.username.strip():
+            raise ValueError('username is required and cannot be empty')
+        if not self.password or not self.password.strip():
+            raise ValueError('password is required and cannot be empty')
+        return self
+
+
 def validate_credential_config(credential_type: CredentialType, config: dict[str, Any]) -> dict[str, Any]:
     """Validate credential config based on type and return validated config."""
-    validated: StaticProxyProviderConfig | AWSCredentialConfig | GCPCredentialConfig | AzureCredentialConfig
+    validated: StaticProxyProviderConfig | AWSCredentialConfig | GCPCredentialConfig | AzureCredentialConfig | OxylabsCredentialConfig
     if credential_type == CredentialType.STATIC_PROXY_PROVIDER:
         validated = StaticProxyProviderConfig(**config)
     elif credential_type == CredentialType.AWS:
@@ -102,6 +129,8 @@ def validate_credential_config(credential_type: CredentialType, config: dict[str
         validated = GCPCredentialConfig(**config)
     elif credential_type == CredentialType.AZURE:
         validated = AzureCredentialConfig(**config)
+    elif credential_type == CredentialType.OXYLABS:
+        validated = OxylabsCredentialConfig(**config)
     else:
         raise ValueError(f"Unknown credential type: {credential_type}")
     return validated.model_dump(exclude_none=True)

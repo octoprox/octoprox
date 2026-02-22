@@ -55,7 +55,7 @@ class CredentialModel(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now, onupdate=utc_now)
 
     # Foreign key to project
-    project_id: Mapped[str] = mapped_column(String(36), ForeignKey("projects.id"), nullable=False)
+    project_id: Mapped[str] = mapped_column(String(36), ForeignKey("projects.id", ondelete="CASCADE"), nullable=False)
 
     # Relationships
     project: Mapped["ProjectModel"] = relationship("ProjectModel", back_populates="credentials")
@@ -80,7 +80,7 @@ class ConnectorModel(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now, onupdate=utc_now)
 
     # Foreign keys
-    project_id: Mapped[str] = mapped_column(String(36), ForeignKey("projects.id"), nullable=False)
+    project_id: Mapped[str] = mapped_column(String(36), ForeignKey("projects.id", ondelete="CASCADE"), nullable=False)
     credential_id: Mapped[str] = mapped_column(String(36), ForeignKey("credentials.id"), nullable=False)
 
     # Relationships
@@ -100,7 +100,8 @@ class ProxyModel(Base):
     protocol: Mapped[str] = mapped_column(String(20), default=ProxyProtocol.HTTP.value)
     username: Mapped[str | None] = mapped_column(String(255), nullable=True)
     password: Mapped[str | None] = mapped_column(String(255), nullable=True)
-    connector_id: Mapped[str] = mapped_column(String(36), ForeignKey("connectors.id"), nullable=False)
+    display_host: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    connector_id: Mapped[str] = mapped_column(String(36), ForeignKey("connectors.id", ondelete="CASCADE"), nullable=False)
     tags: Mapped[list[str]] = mapped_column(JSON, default=list)
     metadata_: Mapped[dict[str, Any]] = mapped_column("metadata", JSON, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)

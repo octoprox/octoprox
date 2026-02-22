@@ -185,12 +185,12 @@ export default function ProxyList() {
   const columns: ColumnDef<Proxy>[] = useMemo(() => [
     createSelectionColumn<Proxy>(),
     {
-      accessorFn: (row) => `${row.host}:${row.port}`,
+      accessorFn: (row) => `${row.display_host}:${row.port}`,
       id: 'host',
       header: 'Host',
       cell: ({ row }) => (
         <span className="font-mono text-sm">
-          {row.original.host}:{row.original.port}
+          {row.original.display_host}:{row.original.port}
           {row.original.username && <span className="ml-1 text-gray-400" title="Authenticated">🔐</span>}
         </span>
       ),

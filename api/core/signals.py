@@ -132,3 +132,18 @@ connector_remove_requested = signal("connector-remove-requested")
 # Args: connector_id (str), error (str | None), consecutive_errors (int)
 connector_error_updated = signal("connector-error-updated")
 
+
+# =============================================================================
+# Oxylabs Syncer Signals
+# =============================================================================
+
+# Emitted when an Oxylabs proxy's metadata is updated (e.g., IP refresh)
+# Sender: OxylabsSyncer
+# Args: proxy (Proxy)
+proxy_update_requested = signal("proxy-update-requested")
+
+# Emitted when an Oxylabs connector needs to be synced (after create/update)
+# Sender: API routes
+# Args: connector_id (str)
+oxylabs_connector_sync_requested = signal("oxylabs-connector-sync-requested")
+

@@ -3,9 +3,12 @@
 
 """Connector management endpoints."""
 
+import asyncio
+
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, ValidationError
 
+from api.core.signals import oxylabs_connector_sync_requested
 from api.models.connector import (
     Connector,
     ConnectorCreate,
@@ -115,8 +118,16 @@ async def create_connector(
     )
 
     await proxy_manager.add_connector(connector)
+
+    # Trigger Oxylabs sync if this is an Oxylabs connector (fire-and-forget)
+    # Use create_task to avoid blocking the API response during IP discovery
+    if credential_type_enum == CredentialType.OXYLABS:
+        asyncio.create_task(
+            oxylabs_connector_sync_requested.send_async(None, connector_id=connector.id)
+        )
+
     credential_type = credential.type.value if hasattr(credential.type, 'value') else credential.type
-    # New connector has 0 proxies
+    # New connector has 0 proxies initially (Oxylabs syncer will add them)
     return _connector_to_response(connector, credential.name, credential_type, proxy_count=0)
 
 
@@ -183,6 +194,14 @@ async def update_connector(
     await proxy_manager.update_connector(connector)
 
     credential = proxy_manager.get_credential(connector.credential_id)
+
+    # Trigger Oxylabs sync if this is an Oxylabs connector (fire-and-forget)
+    # Use create_task to avoid blocking the API response during IP discovery
+    if credential and credential.type == CredentialType.OXYLABS:
+        asyncio.create_task(
+            oxylabs_connector_sync_requested.send_async(None, connector_id=connector.id)
+        )
+
     credential_name = credential.name if credential else None
     credential_type = credential.type.value if credential and hasattr(credential.type, 'value') else (credential.type if credential else None)
     proxy_count = len(proxy_manager.get_proxies_for_connector(connector.id))

@@ -7,6 +7,7 @@ import { Link2, Trash2, Pencil, X, Plus, ArrowLeft, AlertTriangle } from 'lucide
 import {
   fetchProjectConnectors,
   fetchProjectCredentials,
+  fetchProjectCredential,
   fetchConnectorOptions,
   createProjectConnector,
   updateProjectConnector,
@@ -15,6 +16,7 @@ import {
   CredentialType,
   ConnectorCreate,
   ConnectorOptions,
+  OxylabsProxyType,
 } from '../api/client'
 import { useProject } from '../contexts/ProjectContext'
 import { useTheme } from '../contexts/ThemeContext'
@@ -30,6 +32,7 @@ import gcpLogoDark from '../assets/logos/gcp_dark.svg'
 import azureLogo from '../assets/logos/azure.svg'
 import azureLogoDark from '../assets/logos/azure_dark.svg'
 import staticProxyLogo from '../assets/logos/static-proxy.svg'
+import oxylabsLogo from '../assets/logos/oxylabs.svg'
 
 interface ConnectorFormData {
   name: string
@@ -43,6 +46,7 @@ const CONNECTOR_TYPES: { type: CredentialType; name: string; description: string
   { type: 'aws', name: 'Amazon Web Services', description: 'EC2 instances as proxy servers', logo: awsLogo, logoDark: awsLogoDark },
   { type: 'gcp', name: 'Google Cloud Platform', description: 'Compute Engine VMs as proxy servers', logo: gcpLogo, logoDark: gcpLogoDark },
   { type: 'azure', name: 'Microsoft Azure', description: 'Virtual Machines as proxy servers', logo: azureLogo, logoDark: azureLogoDark },
+  { type: 'oxylabs', name: 'Oxylabs', description: 'Residential, Mobile, ISP, and Datacenter proxies', logo: oxylabsLogo, logoDark: oxylabsLogo },
 ]
 
 // Tab type for config sections
@@ -140,6 +144,12 @@ const getDefaultConfig = (type: CredentialType | null, options?: ConnectorOption
         min_rotation_period_minutes: '60',
         max_rotation_period_minutes: '1440'
       }
+    case 'oxylabs':
+      return {
+        num_proxies: '1',
+        country_code: '',
+        session_duration_minutes: '10'
+      }
     default:
       return {}
   }
@@ -189,6 +199,25 @@ export default function ConnectorConfig() {
     queryKey: ['connector-options'],
     queryFn: fetchConnectorOptions,
   })
+
+  // Fetch selected credential details (for Oxylabs proxy type)
+  const { data: selectedCredentialData } = useQuery({
+    queryKey: ['credential', selectedProjectId, formData.credential_id],
+    queryFn: () => fetchProjectCredential(selectedProjectId!, formData.credential_id),
+    enabled: !!selectedProjectId && !!formData.credential_id && selectedType === 'oxylabs',
+  })
+
+  // Helper to get Oxylabs proxy type from selected credential
+  const getOxylabsProxyType = (): OxylabsProxyType | null => {
+    if (selectedType !== 'oxylabs' || !selectedCredentialData) return null
+    return (selectedCredentialData.config as { proxy_type?: OxylabsProxyType })?.proxy_type || null
+  }
+
+  // Check if the Oxylabs proxy type is session-based (residential or mobile)
+  const isSessionBasedOxylabs = (): boolean => {
+    const proxyType = getOxylabsProxyType()
+    return proxyType === 'residential' || proxyType === 'mobile'
+  }
 
   const createMutation = useMutation({
     mutationFn: (data: ConnectorCreate) => createProjectConnector(selectedProjectId!, data),
@@ -315,7 +344,7 @@ export default function ConnectorConfig() {
   }
 
   const getCredentialTypeLabel = (type: string | null) => {
-    const labels: Record<string, string> = { static_proxy_provider: 'Static Proxy Provider', aws: 'AWS', gcp: 'GCP', azure: 'Azure' }
+    const labels: Record<string, string> = { static_proxy_provider: 'Static Proxy Provider', aws: 'AWS', gcp: 'GCP', azure: 'Azure', oxylabs: 'Oxylabs' }
     return type ? labels[type] || type : 'Unknown'
   }
 
@@ -358,6 +387,7 @@ export default function ConnectorConfig() {
       key_pair_name: 'Key Pair', security_group: 'Security Group', project_id: 'Project ID',
       zone: 'Zone', machine_type: 'Machine Type', network: 'Network', subnetwork: 'Subnetwork',
       ssh_key: 'SSH Key', ssh_public_key: 'SSH Public Key', subscription_id: 'Subscription ID',
+      num_proxies: 'Number of Proxies', country_code: 'Country', session_duration_minutes: 'Session Duration',
       location: 'Location', vm_size: 'VM Size', resource_group: 'Resource Group',
       vnet_name: 'Virtual Network', subnet_name: 'Subnet', min_proxies: 'Min Proxies',
       max_proxies: 'Max Proxies', min_rotation_period_minutes: 'Min Rotation (min)',
@@ -378,6 +408,91 @@ export default function ConnectorConfig() {
 
   const renderConfigFields = (type: CredentialType | null, config: Record<string, string>, onChange: (key: string, value: string) => void) => {
     if (!type || type === 'static_proxy_provider') return null
+
+    // Special handling for Oxylabs - simpler config without tabs
+    if (type === 'oxylabs') {
+      const proxyType = getOxylabsProxyType()
+      const isSessionBased = isSessionBasedOxylabs()
+      const countryOptions: RichSelectOption[] = [
+        { value: '', label: 'All Countries', description: 'No geo-targeting' },
+        ...(optionsData?.oxylabs_countries || []).map((c) => ({
+          value: c.code,
+          label: c.name,
+          description: c.code,
+        })),
+      ]
+
+      return (
+        <div className="mt-4 space-y-4">
+          <div>
+            <Label className="text-xs text-gray-600 dark:text-gray-400">
+              Number of Proxies
+              <span className="text-red-500 ml-1">*</span>
+            </Label>
+            <Input
+              type="number"
+              min="1"
+              value={config.num_proxies || '1'}
+              onChange={(e) => onChange('num_proxies', e.target.value)}
+              className="px-3 py-1.5 text-sm"
+              placeholder="1"
+              required
+            />
+          </div>
+
+          {isSessionBased && (
+            <>
+              <div>
+                <Label className="text-xs text-gray-600 dark:text-gray-400">
+                  Country
+                </Label>
+                <RichSelect
+                  options={countryOptions}
+                  value={config.country_code || ''}
+                  onChange={(val) => onChange('country_code', val)}
+                  placeholder="Select country (optional)"
+                />
+                <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
+                  Leave as "All Countries" for no geo-targeting
+                </p>
+              </div>
+
+              <div>
+                <Label className="text-xs text-gray-600 dark:text-gray-400">
+                  Session Duration (minutes)
+                  <span className="text-red-500 ml-1">*</span>
+                </Label>
+                <Input
+                  type="number"
+                  min="1"
+                  max="30"
+                  value={config.session_duration_minutes || '10'}
+                  onChange={(e) => onChange('session_duration_minutes', e.target.value)}
+                  className="px-3 py-1.5 text-sm"
+                  placeholder="10"
+                  required
+                />
+                <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
+                  Session duration: 1-30 minutes (default: 10)
+                </p>
+              </div>
+            </>
+          )}
+
+          {proxyType && !isSessionBased && (
+            <p className="text-sm text-gray-500 dark:text-gray-400 bg-gray-50 dark:bg-gray-700 p-3 rounded-lg">
+              Port-based proxy type ({proxyType}). IPs will be discovered from Oxylabs ports and refreshed every 24 hours.
+            </p>
+          )}
+
+          {!proxyType && (
+            <p className="text-sm text-amber-600 dark:text-amber-400 bg-amber-50 dark:bg-amber-900/20 p-3 rounded-lg">
+              Loading credential configuration...
+            </p>
+          )}
+        </div>
+      )
+    }
 
     const regionDropdownFields: Record<string, RichSelectOption[]> = {
       region: toRegionOptions(optionsData?.aws_regions),
