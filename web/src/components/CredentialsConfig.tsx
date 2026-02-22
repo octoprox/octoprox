@@ -77,41 +77,51 @@ export default function CredentialsConfig() {
         credential={editingCredential}
       />
 
-      <div className="grid gap-6">
-        {data?.credentials.map((credential) => (
-          <Card key={credential.id} className="p-6">
-            <div className="flex justify-between items-start">
-              <div>
-                <h3 className="text-xl font-semibold">{credential.name}</h3>
-                <p className="text-gray-500 dark:text-gray-400 mt-1">
-                  Type: {CREDENTIAL_TYPES.find(t => t.value === credential.type)?.label || credential.type}
-                </p>
-                <p className="text-gray-400 dark:text-gray-500 text-sm mt-1">
-                  Created: {new Date(credential.created_at).toLocaleDateString()}
-                </p>
-              </div>
-              <div className="flex items-center gap-2">
-                <Button variant="ghost" size="icon" onClick={() => startEditing(credential)} className="text-gray-500 hover:text-blue-600">
-                  <Pencil className="w-5 h-5" />
-                </Button>
-                <Button variant="ghost" size="icon" onClick={() => deleteMutation.mutate(credential.id)} className="text-gray-500 hover:text-red-600">
-                  <Trash2 className="w-5 h-5" />
-                </Button>
-              </div>
-            </div>
-          </Card>
-        ))}
-
-        {data?.credentials.length === 0 && (
-          <Card className="p-8 text-center">
-            <Key className="w-12 h-12 text-gray-400 mx-auto mb-4" />
-            <h3 className="text-lg font-medium">No credentials configured</h3>
-            <p className="text-gray-500 dark:text-gray-400 mt-2">
-              Add credentials to connect to proxy providers or cloud services.
-            </p>
-          </Card>
-        )}
-      </div>
+      {data?.credentials.length === 0 ? (
+        <Card className="p-8 text-center">
+          <Key className="w-12 h-12 text-gray-400 mx-auto mb-4" />
+          <h3 className="text-lg font-medium">No credentials configured</h3>
+          <p className="text-gray-500 dark:text-gray-400 mt-2">
+            Add credentials to connect to proxy providers or cloud services.
+          </p>
+        </Card>
+      ) : (
+        <Card className="overflow-hidden">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="bg-gray-50 dark:bg-gray-700 border-b border-gray-200 dark:border-gray-600">
+                <th className="px-4 py-2 text-left text-xs font-semibold text-gray-600 dark:text-gray-300 uppercase tracking-wider">Name</th>
+                <th className="px-4 py-2 text-left text-xs font-semibold text-gray-600 dark:text-gray-300 uppercase tracking-wider">Type</th>
+                <th className="px-4 py-2 text-left text-xs font-semibold text-gray-600 dark:text-gray-300 uppercase tracking-wider">Created</th>
+                <th className="px-4 py-2 text-right text-xs font-semibold text-gray-600 dark:text-gray-300 uppercase tracking-wider">Actions</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-gray-100 dark:divide-gray-700">
+              {data?.credentials.map((credential) => (
+                <tr key={credential.id} className="hover:bg-gray-50 dark:hover:bg-gray-700/50 transition-colors">
+                  <td className="px-4 py-2 font-medium text-gray-900 dark:text-gray-100">{credential.name}</td>
+                  <td className="px-4 py-2 text-gray-500 dark:text-gray-400">
+                    {CREDENTIAL_TYPES.find(t => t.value === credential.type)?.label || credential.type}
+                  </td>
+                  <td className="px-4 py-2 text-gray-500 dark:text-gray-400">
+                    {new Date(credential.created_at).toLocaleDateString()}
+                  </td>
+                  <td className="px-4 py-2 text-right">
+                    <div className="flex items-center justify-end gap-1">
+                      <Button variant="ghost" size="icon" onClick={() => startEditing(credential)} className="text-gray-500 hover:text-blue-600">
+                        <Pencil className="w-4 h-4" />
+                      </Button>
+                      <Button variant="ghost" size="icon" onClick={() => deleteMutation.mutate(credential.id)} className="text-gray-500 hover:text-red-600">
+                        <Trash2 className="w-4 h-4" />
+                      </Button>
+                    </div>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </Card>
+      )}
     </div>
   )
 }
