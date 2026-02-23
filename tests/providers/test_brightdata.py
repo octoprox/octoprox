@@ -9,7 +9,7 @@ import pytest
 
 from api.models.connector import BrightDataProxyType, Connector
 from api.models.credential import Credential, CredentialType
-from api.models.proxy import ProxyProtocol, ProxyStatus
+from api.models.proxy import ProxyStatus
 from api.providers.brightdata import (
     BRIGHTDATA_HOST,
     BRIGHTDATA_PORT,
@@ -213,7 +213,11 @@ class TestBrightDataProviderInit:
 
 
 class TestBrightDataProviderBuildUsername:
-    """Tests for BrightDataProvider._build_username method."""
+    """Tests for BrightDataProvider._build_username method.
+
+    Note: Usernames now contain {customer_id} placeholder that gets resolved
+    by the proxy manager at request time.
+    """
 
     def test_residential_with_country_and_session(
         self, residential_connector: Connector, residential_credential: Credential
@@ -222,7 +226,8 @@ class TestBrightDataProviderBuildUsername:
         provider = BrightDataProvider(residential_connector, residential_credential)
         username = provider._build_username(session_id="glob_abc123xyz456")
 
-        assert username == "brd-customer-test-customer-zone-test_zone_res-session-glob_abc123xyz456-country-us"
+        # Username contains placeholder that will be resolved by proxy manager
+        assert username == "brd-customer-{customer_id}-zone-test_zone_res-session-glob_abc123xyz456-country-us"
 
     def test_residential_without_country(
         self, residential_credential: Credential
@@ -246,7 +251,8 @@ class TestBrightDataProviderBuildUsername:
         provider = BrightDataProvider(connector, residential_credential)
         username = provider._build_username(session_id="glob_xyz789")
 
-        assert username == "brd-customer-test-customer-zone-res_zone-session-glob_xyz789"
+        # Username contains placeholder that will be resolved by proxy manager
+        assert username == "brd-customer-{customer_id}-zone-res_zone-session-glob_xyz789"
 
     def test_datacenter_with_hashed_ip(
         self, datacenter_connector: Connector, datacenter_credential: Credential
@@ -255,7 +261,8 @@ class TestBrightDataProviderBuildUsername:
         provider = BrightDataProvider(datacenter_connector, datacenter_credential)
         username = provider._build_username(hashed_ip="hashed_ip_123")
 
-        assert username == "brd-customer-test-customer-dc-zone-test_zone_dc-ip-hashed_ip_123"
+        # Username contains placeholder that will be resolved by proxy manager
+        assert username == "brd-customer-{customer_id}-zone-test_zone_dc-ip-hashed_ip_123"
 
     def test_datacenter_with_country_and_hashed_ip(
         self, datacenter_credential: Credential
@@ -279,7 +286,8 @@ class TestBrightDataProviderBuildUsername:
         provider = BrightDataProvider(connector, datacenter_credential)
         username = provider._build_username(hashed_ip="hashed_ip_456")
 
-        assert username == "brd-customer-test-customer-dc-zone-dc_zone-ip-hashed_ip_456-country-gb"
+        # Username contains placeholder that will be resolved by proxy manager
+        assert username == "brd-customer-{customer_id}-zone-dc_zone-ip-hashed_ip_456-country-gb"
 
     def test_isp_without_country(
         self, datacenter_credential: Credential
@@ -302,97 +310,9 @@ class TestBrightDataProviderBuildUsername:
         provider = BrightDataProvider(connector, datacenter_credential)
         username = provider._build_username(hashed_ip="hashed_ip_789")
 
-        assert username == "brd-customer-test-customer-dc-zone-isp_zone-ip-hashed_ip_789"
+        # Username contains placeholder that will be resolved by proxy manager
+        assert username == "brd-customer-{customer_id}-zone-isp_zone-ip-hashed_ip_789"
 
-
-
-class TestBrightDataProviderGetProxies:
-    """Tests for BrightDataProvider.get_proxies method."""
-
-    def test_residential_creates_session_proxies(
-        self, residential_connector: Connector, residential_credential: Credential
-    ) -> None:
-        """Test get_proxies creates session-based proxies for residential."""
-        provider = BrightDataProvider(residential_connector, residential_credential)
-        proxies = provider.get_proxies()
-
-        assert len(proxies) == 3
-        for proxy in proxies:
-            assert proxy.host == BRIGHTDATA_HOST
-            assert proxy.port == BRIGHTDATA_PORT
-            assert proxy.protocol == ProxyProtocol.HTTP
-            assert proxy.status == ProxyStatus.HEALTHY
-            assert "session_id" in proxy.metadata
-            assert proxy.metadata["proxy_type"] == "residential"
-            assert proxy.username.startswith("brd-customer-test-customer-zone-test_zone_res-session-glob_")
-            assert proxy.password == "zone_pass_123"
-
-    def test_mobile_creates_session_proxies(
-        self, residential_credential: Credential
-    ) -> None:
-        """Test get_proxies creates session-based proxies for mobile."""
-        connector = Connector(
-            id="test-connector",
-            name="Test",
-            credential_id="cred",
-            credential_type=CredentialType.BRIGHTDATA,
-            project_id="proj",
-            config={
-                "zone_name": "mobile_zone",
-                "zone_password": "mobile_pass",
-                "proxy_type": BrightDataProxyType.MOBILE.value,
-                "num_proxies": 2,
-            },
-            enabled=True,
-        )
-        provider = BrightDataProvider(connector, residential_credential)
-        proxies = provider.get_proxies()
-
-        assert len(proxies) == 2
-        for proxy in proxies:
-            assert proxy.metadata["proxy_type"] == "mobile"
-            assert "session_id" in proxy.metadata
-
-    def test_datacenter_creates_port_proxies(
-        self, datacenter_connector: Connector, datacenter_credential: Credential
-    ) -> None:
-        """Test get_proxies creates port-based proxies for datacenter."""
-        provider = BrightDataProvider(datacenter_connector, datacenter_credential)
-        proxies = provider.get_proxies()
-
-        assert len(proxies) == 2
-        for proxy in proxies:
-            assert proxy.host == BRIGHTDATA_HOST
-            assert proxy.port == BRIGHTDATA_PORT
-            assert proxy.status == ProxyStatus.INITIALIZING
-            assert proxy.metadata["proxy_type"] == "datacenter"
-            assert "session_id" not in proxy.metadata
-            assert proxy.password == "zone_pass_456"
-
-    def test_isp_creates_port_proxies(
-        self, datacenter_credential: Credential
-    ) -> None:
-        """Test get_proxies creates port-based proxies for ISP."""
-        connector = Connector(
-            id="test-connector",
-            name="Test",
-            credential_id="cred",
-            credential_type=CredentialType.BRIGHTDATA,
-            project_id="proj",
-            config={
-                "zone_name": "isp_zone",
-                "zone_password": "isp_pass",
-                "proxy_type": BrightDataProxyType.ISP.value,
-                "num_proxies": 1,
-            },
-            enabled=True,
-        )
-        provider = BrightDataProvider(connector, datacenter_credential)
-        proxies = provider.get_proxies()
-
-        assert len(proxies) == 1
-        assert proxies[0].metadata["proxy_type"] == "isp"
-        assert proxies[0].status == ProxyStatus.INITIALIZING
 
 
 class TestBrightDataProviderDiscoverIp:
@@ -404,7 +324,7 @@ class TestBrightDataProviderDiscoverIp:
     ) -> None:
         """Test discover_ip returns (None, None) for session-based proxies."""
         provider = BrightDataProvider(residential_connector, residential_credential)
-        proxy = provider.get_proxies()[0]
+        proxy = provider._create_session_proxy(0)
 
         result = await provider.discover_ip(proxy)
         assert result == (None, None)
@@ -419,7 +339,7 @@ class TestBrightDataProviderDiscoverIp:
         expose, so we use the IP from the JSON body for both values.
         """
         provider = BrightDataProvider(datacenter_connector, datacenter_credential)
-        proxy = provider.get_proxies()[0]
+        proxy = provider._create_port_proxy(0)
 
         mock_response = MagicMock()
         mock_response.status_code = 200
@@ -442,7 +362,7 @@ class TestBrightDataProviderDiscoverIp:
     ) -> None:
         """Test discover_ip handles missing IP in JSON response gracefully."""
         provider = BrightDataProvider(datacenter_connector, datacenter_credential)
-        proxy = provider.get_proxies()[0]
+        proxy = provider._create_port_proxy(0)
 
         mock_response = MagicMock()
         mock_response.status_code = 200
@@ -471,7 +391,7 @@ class TestBrightDataProviderSyncProxies:
         provider = BrightDataProvider(residential_connector, residential_credential)
 
         # Start with 1 proxy instead of 3
-        existing_proxies = provider.get_proxies()[:1]
+        existing_proxies = [provider._create_session_proxy(0)]
 
         # Sync should add 2 more proxies
         proxies_to_add, proxy_ids_to_remove = await provider.sync_proxies(existing_proxies)
@@ -490,8 +410,7 @@ class TestBrightDataProviderSyncProxies:
         provider = BrightDataProvider(residential_connector, residential_credential)
 
         # Start with 5 proxies instead of 3
-        existing_proxies = provider.get_proxies()
-        existing_proxies.extend(provider.get_proxies()[:2])
+        existing_proxies = [provider._create_session_proxy(i) for i in range(5)]
 
         # Sync should remove 2 proxies
         proxies_to_add, proxy_ids_to_remove = await provider.sync_proxies(existing_proxies)
@@ -507,7 +426,7 @@ class TestBrightDataProviderSyncProxies:
         provider = BrightDataProvider(residential_connector, residential_credential)
 
         # Start with exactly 3 proxies
-        existing_proxies = provider.get_proxies()
+        existing_proxies = [provider._create_session_proxy(i) for i in range(3)]
 
         # Sync should do nothing
         proxies_to_add, proxy_ids_to_remove = await provider.sync_proxies(existing_proxies)
@@ -556,7 +475,7 @@ class TestBrightDataProviderRefreshIps:
     ) -> None:
         """Test refresh_ips does nothing for session-based proxies."""
         provider = BrightDataProvider(residential_connector, residential_credential)
-        proxies = provider.get_proxies()
+        proxies = [provider._create_session_proxy(i) for i in range(3)]
 
         # Should return empty list (no updates)
         updated = await provider.refresh_ips(proxies)
@@ -568,7 +487,7 @@ class TestBrightDataProviderRefreshIps:
     ) -> None:
         """Test refresh_ips updates IPs for port-based proxies."""
         provider = BrightDataProvider(datacenter_connector, datacenter_credential)
-        proxies = provider.get_proxies()
+        proxies = [provider._create_port_proxy(i) for i in range(2)]
 
         # Set initial IPs
         for proxy in proxies:

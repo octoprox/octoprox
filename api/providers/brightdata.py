@@ -82,12 +82,15 @@ class BrightDataProvider(ProxyProvider):
         return self._proxy_type in SESSION_BASED_TYPES
 
     def _build_username(self, session_id: str | None = None, hashed_ip: str | None = None) -> str:
-        """Build BrightData username.
+        """Build BrightData username with placeholder for customer_id.
 
-        Format: brd-customer-<customer_id>-zone-<zone_name>[-session-<session_id>][-ip-<hashed_ip>][-country-<code>]
+        Uses {customer_id} placeholder that will be resolved at request time
+        by the proxy manager.
+
+        Format: brd-customer-{customer_id}-zone-<zone_name>[-session-<session_id>][-ip-<hashed_ip>][-country-<code>]
         """
         parts = [
-            f"brd-customer-{self._customer_id}",
+            "brd-customer-{customer_id}",
             f"zone-{self._zone_name}",
         ]
 
@@ -102,17 +105,8 @@ class BrightDataProvider(ProxyProvider):
 
         return "-".join(parts)
 
-    def get_proxies(self) -> list[Proxy]:
-        """Create initial proxy list."""
-        if self.is_session_based():
-            # Create session-based proxies with global session IDs
-            return [self._create_session_proxy(i) for i in range(self._config.num_proxies)]
-        else:
-            # Create port-based proxies (will need IP discovery)
-            return [self._create_port_proxy(i) for i in range(self._config.num_proxies)]
-
     def _create_session_proxy(self, index: int) -> Proxy:
-        """Create a session-based proxy with global session ID."""
+        """Create a session-based proxy with global session ID and placeholder credentials."""
         session_id = _generate_session_id()  # glob_<random-12-chars>
         username = self._build_username(session_id=session_id)
 
@@ -121,7 +115,7 @@ class BrightDataProvider(ProxyProvider):
             port=BRIGHTDATA_PORT,
             protocol=ProxyProtocol.HTTP,
             username=username,
-            password=self._zone_password,
+            password="{zone_password}",  # Placeholder resolved at request time
             connector_id=self.connector.id,
             status=ProxyStatus.HEALTHY,
             tags=["brightdata", self._proxy_type.value],
@@ -134,7 +128,7 @@ class BrightDataProvider(ProxyProvider):
         )
 
     def _create_port_proxy(self, index: int) -> Proxy:
-        """Create a port-based proxy (needs IP discovery)."""
+        """Create a port-based proxy with placeholder credentials (needs IP discovery)."""
         username = self._build_username()
 
         return Proxy(
@@ -142,7 +136,7 @@ class BrightDataProvider(ProxyProvider):
             port=BRIGHTDATA_PORT,
             protocol=ProxyProtocol.HTTP,
             username=username,
-            password=self._zone_password,
+            password="{zone_password}",  # Placeholder resolved at request time
             connector_id=self.connector.id,
             status=ProxyStatus.INITIALIZING,
             tags=["brightdata", self._proxy_type.value],
@@ -153,6 +147,18 @@ class BrightDataProvider(ProxyProvider):
                 "index": index,
             },
         )
+
+    def _build_proxy_url_for_discovery(self, proxy: Proxy) -> str:
+        """Build a proxy URL with resolved credentials for IP discovery.
+
+        Since proxy credentials contain placeholders, we need to resolve
+        them with actual credentials for making discovery requests.
+        """
+        # Start with proxy.url and resolve placeholders
+        url = proxy.url
+        url = url.replace("{customer_id}", self._customer_id)
+        url = url.replace("{zone_password}", self._zone_password)
+        return url
 
     async def discover_ip(self, proxy: Proxy) -> tuple[str | None, str | None]:
         """Discover IP for port-based proxy.
@@ -166,7 +172,9 @@ class BrightDataProvider(ProxyProvider):
             return None, None
 
         try:
-            async with httpx.AsyncClient(proxy=proxy.url, timeout=30.0) as client:
+            # Build URL with resolved credentials for discovery
+            proxy_url = self._build_proxy_url_for_discovery(proxy)
+            async with httpx.AsyncClient(proxy=proxy_url, timeout=30.0) as client:
                 response = await client.get(IP_DISCOVERY_URL)
                 if response.status_code == 200:
                     # Get IP from JSON response body

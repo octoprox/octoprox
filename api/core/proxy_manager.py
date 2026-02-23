@@ -485,6 +485,93 @@ class ProxyManager:
         """Get a credential by ID."""
         return self._credentials.get(credential_id)
 
+    def _build_credential_context(self, proxy: Proxy) -> dict[str, str]:
+        """Build a context dictionary for resolving credential placeholders.
+
+        The context contains all values that can be substituted into
+        proxy username/password placeholders. It merges all string values
+        from both the credential config and connector config.
+
+        Args:
+            proxy: The proxy to build context for.
+
+        Returns:
+            Dictionary with all string config values from credential and
+            connector that can be used to resolve placeholders.
+        """
+        context: dict[str, str] = {}
+
+        # Get connector for this proxy
+        connector = self._connectors.get(proxy.connector_id)
+        if not connector:
+            return context
+
+        # Get credential for this connector
+        credential = self._credentials.get(connector.credential_id)
+        if not credential:
+            return context
+
+        # Add all string values from credential config
+        for key, value in credential.config.items():
+            if isinstance(value, str) and value:
+                context[key] = value
+
+        # Add all string values from connector config (may override credential values)
+        if connector.config:
+            for key, value in connector.config.items():
+                if isinstance(value, str) and value:
+                    context[key] = value
+
+        return context
+
+    def resolve_proxy_credentials(self, proxy: Proxy) -> Proxy:
+        """Resolve credential placeholders in proxy username/password.
+
+        Creates a copy of the proxy with placeholders like {username},
+        {password}, {customer_id}, {zone_password} replaced with actual
+        values from the credential/connector chain.
+
+        Args:
+            proxy: The proxy with potential placeholders in credentials.
+
+        Returns:
+            A copy of the proxy with resolved credentials.
+        """
+        # Build context for placeholder resolution
+        context = self._build_credential_context(proxy)
+
+        if not context:
+            # No context available, return proxy as-is
+            return proxy
+
+        # Check if any placeholders need resolution
+        username = proxy.username
+        password = proxy.password
+        needs_resolution = False
+
+        if username and "{" in username:
+            needs_resolution = True
+        if password and "{" in password:
+            needs_resolution = True
+
+        if not needs_resolution:
+            return proxy
+
+        # Create a copy of the proxy with resolved credentials
+        resolved_proxy = proxy.model_copy()
+
+        if username:
+            for key, value in context.items():
+                username = username.replace(f"{{{key}}}", value)
+            resolved_proxy.username = username
+
+        if password:
+            for key, value in context.items():
+                password = password.replace(f"{{{key}}}", value)
+            resolved_proxy.password = password
+
+        return resolved_proxy
+
     async def add_credential(self, credential: Credential) -> None:
         """Add a credential (persists to Postgres)."""
         async with self._session_factory() as session:
@@ -723,10 +810,17 @@ class ProxyManager:
     def select_proxy_for_project(
         self, project_id: str, session_id: str | None = None
     ) -> Proxy | None:
-        """Select a proxy for a specific project using the project's routing strategy."""
+        """Select a proxy for a specific project using the project's routing strategy.
+
+        Returns a proxy with resolved credentials (placeholders replaced with
+        actual values from the credential/connector chain).
+        """
         healthy_proxies = self.get_healthy_proxies_for_project(project_id)
         strategy = self._project_strategies.get(project_id, self._strategy)
-        return strategy.select(healthy_proxies, session_id)
+        proxy = strategy.select(healthy_proxies, session_id)
+        if proxy:
+            return self.resolve_proxy_credentials(proxy)
+        return None
 
     def set_project_strategy(self, project_id: str, strategy_name: str) -> None:
         """Change the routing strategy for a project."""
@@ -803,8 +897,15 @@ class ProxyManager:
         return True
 
     def select_proxy(self, session_id: str | None = None) -> Proxy | None:
-        """Select a proxy using the current routing strategy."""
-        return self._strategy.select(self.healthy_proxies, session_id)
+        """Select a proxy using the current routing strategy.
+
+        Returns a proxy with resolved credentials (placeholders replaced with
+        actual values from the credential/connector chain).
+        """
+        proxy = self._strategy.select(self.healthy_proxies, session_id)
+        if proxy:
+            return self.resolve_proxy_credentials(proxy)
+        return None
 
     def set_strategy(self, strategy_name: str) -> None:
         """Change the routing strategy."""

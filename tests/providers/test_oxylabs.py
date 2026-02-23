@@ -9,7 +9,6 @@ import pytest
 
 from api.models.connector import Connector
 from api.models.credential import Credential, CredentialType, OxylabsProxyType
-from api.models.proxy import ProxyProtocol, ProxyStatus
 from api.providers.oxylabs import (
     OXYLABS_ENDPOINTS,
     PORT_BASED_TYPES,
@@ -160,7 +159,11 @@ class TestOxylabsProviderInit:
 
 
 class TestOxylabsProviderBuildUsername:
-    """Tests for OxylabsProvider._build_username method."""
+    """Tests for OxylabsProvider._build_username method.
+
+    Note: Usernames now contain {username} placeholder that gets resolved
+    by the proxy manager at request time.
+    """
 
     def test_residential_with_country_and_session(
         self, residential_connector: Connector, residential_credential: Credential
@@ -169,7 +172,8 @@ class TestOxylabsProviderBuildUsername:
         provider = OxylabsProvider(residential_connector, residential_credential)
         username = provider._build_username("abc123")
 
-        assert username == "customer-testuser-cc-US-sessid-abc123"
+        # Username contains placeholder that will be resolved by proxy manager
+        assert username == "customer-{username}-cc-US-sessid-abc123"
 
     def test_residential_without_country(
         self, residential_credential: Credential
@@ -187,7 +191,8 @@ class TestOxylabsProviderBuildUsername:
         provider = OxylabsProvider(connector, residential_credential)
         username = provider._build_username("xyz789")
 
-        assert username == "customer-testuser-sessid-xyz789"
+        # Username contains placeholder that will be resolved by proxy manager
+        assert username == "customer-{username}-sessid-xyz789"
 
     def test_datacenter_username(
         self, datacenter_connector: Connector, datacenter_credential: Credential
@@ -196,44 +201,8 @@ class TestOxylabsProviderBuildUsername:
         provider = OxylabsProvider(datacenter_connector, datacenter_credential)
         username = provider._build_username()
 
-        assert username == "user-dcuser"
-
-
-class TestOxylabsProviderGetProxies:
-    """Tests for OxylabsProvider.get_proxies method."""
-
-    def test_residential_creates_session_proxies(
-        self, residential_connector: Connector, residential_credential: Credential
-    ) -> None:
-        """Test get_proxies creates session-based proxies for residential."""
-        provider = OxylabsProvider(residential_connector, residential_credential)
-        proxies = provider.get_proxies()
-
-        assert len(proxies) == 3
-        for proxy in proxies:
-            assert proxy.host == "pr.oxylabs.io"
-            assert proxy.port == 7777
-            assert proxy.protocol == ProxyProtocol.HTTP
-            assert proxy.status == ProxyStatus.HEALTHY
-            assert "session_id" in proxy.metadata
-            assert proxy.metadata["proxy_type"] == "residential"
-            assert proxy.username.startswith("customer-testuser-cc-US-sessid-")
-
-    def test_datacenter_creates_port_proxies(
-        self, datacenter_connector: Connector, datacenter_credential: Credential
-    ) -> None:
-        """Test get_proxies creates port-based proxies for datacenter."""
-        provider = OxylabsProvider(datacenter_connector, datacenter_credential)
-        proxies = provider.get_proxies()
-
-        assert len(proxies) == 2
-        assert proxies[0].host == "dc.oxylabs.io"
-        assert proxies[0].port == 8001
-        assert proxies[1].port == 8002
-        assert proxies[0].status == ProxyStatus.INITIALIZING
-        assert proxies[0].metadata["proxy_type"] == "datacenter"
-        assert proxies[0].metadata["port"] == 8001
-        assert proxies[0].username == "user-dcuser"
+        # Username contains placeholder that will be resolved by proxy manager
+        assert username == "user-{username}"
 
 
 class TestOxylabsProviderDiscoverIp:
@@ -245,7 +214,7 @@ class TestOxylabsProviderDiscoverIp:
     ) -> None:
         """Test discover_ip returns None for session-based proxies."""
         provider = OxylabsProvider(residential_connector, residential_credential)
-        proxy = provider.get_proxies()[0]
+        proxy = provider._create_session_proxy("test_session_123", 0)
 
         result = await provider.discover_ip(proxy)
         assert result is None
@@ -256,7 +225,7 @@ class TestOxylabsProviderDiscoverIp:
     ) -> None:
         """Test discover_ip returns IP for port-based proxies."""
         provider = OxylabsProvider(datacenter_connector, datacenter_credential)
-        proxy = provider.get_proxies()[0]
+        proxy = provider._create_port_proxy(8001, 0)
 
         mock_response = MagicMock()
         mock_response.status_code = 200
@@ -278,7 +247,7 @@ class TestOxylabsProviderDiscoverIp:
     ) -> None:
         """Test discover_ip uses proxy.host for routing (not display_host)."""
         provider = OxylabsProvider(datacenter_connector, datacenter_credential)
-        proxy = provider.get_proxies()[0]
+        proxy = provider._create_port_proxy(8001, 0)
         # Simulate that display_host has been set to discovered IP
         # but host should still be the Oxylabs endpoint
         proxy.display_host = "1.2.3.4"

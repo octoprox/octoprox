@@ -48,6 +48,10 @@ class ProxyDataProvider(Protocol):
         """Get a connector by ID."""
         ...
 
+    def resolve_proxy_credentials(self, proxy: Proxy) -> Proxy:
+        """Resolve credential placeholders in proxy username/password."""
+        ...
+
 # Grace period for initializing proxies before marking them unhealthy
 INITIALIZATION_GRACE_PERIOD = timedelta(minutes=5)
 
@@ -153,8 +157,11 @@ class HealthChecker:
         start_time = time.monotonic()
         healthcheck_url = self._get_healthcheck_url(proxy)
 
+        # Resolve credential placeholders before making the request
+        resolved_proxy = self._proxy_data_provider.resolve_proxy_credentials(proxy)
+
         try:
-            mounts = self._get_proxy_mounts(proxy)
+            mounts = self._get_proxy_mounts(resolved_proxy)
             async with httpx.AsyncClient(
                 mounts=mounts,
                 timeout=self._timeout,
