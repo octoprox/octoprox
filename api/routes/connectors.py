@@ -8,7 +8,7 @@ import asyncio
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, ValidationError
 
-from api.core.signals import brightdata_connector_sync_requested, oxylabs_connector_sync_requested
+from api.core.signals import provider_connector_sync_requested
 from api.models.connector import (
     Connector,
     ConnectorCreate,
@@ -18,6 +18,7 @@ from api.models.connector import (
     validate_connector_config,
 )
 from api.models.credential import CredentialType
+from api.providers.registry import is_syncable_credential_type
 
 router = APIRouter(prefix="/projects/{project_id}/connectors")
 
@@ -119,21 +120,15 @@ async def create_connector(
 
     await proxy_manager.add_connector(connector)
 
-    # Trigger Oxylabs sync if this is an Oxylabs connector (fire-and-forget)
+    # Trigger provider sync if this is a syncable provider connector (fire-and-forget)
     # Use create_task to avoid blocking the API response during IP discovery
-    if credential_type_enum == CredentialType.OXYLABS:
+    if is_syncable_credential_type(credential_type_enum):
         asyncio.create_task(
-            oxylabs_connector_sync_requested.send_async(None, connector_id=connector.id)
-        )
-
-    # Trigger BrightData sync if this is a BrightData connector (fire-and-forget)
-    if credential_type_enum == CredentialType.BRIGHTDATA:
-        asyncio.create_task(
-            brightdata_connector_sync_requested.send_async(None, connector=connector)
+            provider_connector_sync_requested.send_async(None, connector=connector)
         )
 
     credential_type = credential.type.value if hasattr(credential.type, 'value') else credential.type
-    # New connector has 0 proxies initially (Oxylabs syncer will add them)
+    # New connector has 0 proxies initially (provider syncer will add them)
     return _connector_to_response(connector, credential.name, credential_type, proxy_count=0)
 
 
@@ -201,17 +196,11 @@ async def update_connector(
 
     credential = proxy_manager.get_credential(connector.credential_id)
 
-    # Trigger Oxylabs sync if this is an Oxylabs connector (fire-and-forget)
+    # Trigger provider sync if this is a syncable provider connector (fire-and-forget)
     # Use create_task to avoid blocking the API response during IP discovery
-    if credential and credential.type == CredentialType.OXYLABS:
+    if credential and is_syncable_credential_type(credential.type):
         asyncio.create_task(
-            oxylabs_connector_sync_requested.send_async(None, connector_id=connector.id)
-        )
-
-    # Trigger BrightData sync if this is a BrightData connector (fire-and-forget)
-    if credential and credential.type == CredentialType.BRIGHTDATA:
-        asyncio.create_task(
-            brightdata_connector_sync_requested.send_async(None, connector=connector)
+            provider_connector_sync_requested.send_async(None, connector=connector)
         )
 
     credential_name = credential.name if credential else None
