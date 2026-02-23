@@ -15,12 +15,11 @@ import structlog
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from api.core.auto_scaler import AutoScaler
-from api.core.brightdata_syncer import BrightDataSyncer
 from api.core.config import Settings
 from api.core.demand_tracker import DemandTracker
 from api.core.health_checker import HealthChecker
 from api.core.metrics_flusher import MetricsFlusher
-from api.core.oxylabs_syncer import OxylabsSyncer
+from api.core.provider_syncer import ProxyProviderSyncer
 from api.core.signals import (
     connector_error_updated,
     connector_remove_requested,
@@ -93,8 +92,7 @@ class ProxyManager:
         self._metrics_flusher = MetricsFlusher(session_factory, redis_client, settings)
         self._demand_tracker = DemandTracker(redis_client)
         self._auto_scaler = AutoScaler(self)
-        self._oxylabs_syncer = OxylabsSyncer(self)
-        self._brightdata_syncer = BrightDataSyncer(self)
+        self._provider_syncer = ProxyProviderSyncer(self)
         self._running = False
         self._tasks: list[asyncio.Task[None]] = []
 
@@ -124,12 +122,8 @@ class ProxyManager:
         task = asyncio.create_task(self._auto_scaler.run())
         self._tasks.append(task)
 
-        # Start Oxylabs syncer
-        task = asyncio.create_task(self._oxylabs_syncer.run())
-        self._tasks.append(task)
-
-        # Start BrightData syncer
-        task = asyncio.create_task(self._brightdata_syncer.run())
+        # Start provider syncer (handles all proxy provider types)
+        task = asyncio.create_task(self._provider_syncer.run())
         self._tasks.append(task)
 
     def _subscribe_to_signals(self) -> None:
@@ -146,7 +140,7 @@ class ProxyManager:
         connector_remove_requested.connect(self._on_connector_remove_requested)
         connector_error_updated.connect(self._on_connector_error_updated)
 
-        # Oxylabs syncer signals
+        # Provider syncer signals
         proxy_update_requested.connect(self._on_proxy_update_requested)
 
         # Also subscribe DemandTracker to request_completed signal
@@ -236,7 +230,7 @@ class ProxyManager:
         sender: object,
         proxy: Proxy,
     ) -> None:
-        """Handle proxy update request signal from OxylabsSyncer."""
+        """Handle proxy update request signal from ProxyProviderSyncer."""
         await self.update_proxy(proxy)
 
     async def _handle_request_stats(
