@@ -268,31 +268,7 @@ class TestStaticProvider:
 
         assert provider.connector == connector
 
-    def test_get_proxies(self) -> None:
-        """Test StaticProvider gets proxies from config."""
-        from api.providers.static import StaticProvider
 
-        connector = Connector(
-            id="static-connector",
-            name="Static Connector",
-            credential_id="cred",
-            credential_type=CredentialType.STATIC_PROXY_PROVIDER,
-            project_id="proj",
-            config={
-                "proxies": [
-                    {"host": "1.2.3.4", "port": 8080},
-                    {"host": "5.6.7.8", "port": 3128, "protocol": "socks5"},
-                ]
-            },
-        )
-        provider = StaticProvider(connector)
-        proxies = provider.get_proxies()
-
-        assert len(proxies) == 2
-        assert proxies[0].host == "1.2.3.4"
-        assert proxies[0].port == 8080
-        assert proxies[1].host == "5.6.7.8"
-        assert proxies[1].port == 3128
 
 
 class TestAPIProvider:

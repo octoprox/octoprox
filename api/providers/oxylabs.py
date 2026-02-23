@@ -90,17 +90,20 @@ class OxylabsProvider(ProxyProvider):
         return self._proxy_type in SESSION_BASED_TYPES
 
     def _build_username(self, session_id: str | None = None) -> str:
-        """Build the Oxylabs username with optional session and country parameters.
+        """Build the Oxylabs username with placeholders for credential values.
+
+        Uses {username} placeholder that will be resolved at request time
+        by the proxy manager.
 
         For session-based types (residential, mobile):
-            customer-USER-cc-XX-sessid-YYY or customer-USER-sessid-YYY (no country)
+            customer-{username}-cc-XX-sessid-YYY or customer-{username}-sessid-YYY (no country)
 
         For port-based types (isp, dedicated_isp, datacenter, datacenter_dedicated):
-            user-USER
+            user-{username}
         """
         if self.is_session_based():
             prefix = "customer"
-            parts = [f"{prefix}-{self._username}"]
+            parts = [f"{prefix}-{{username}}"]
 
             # Add country code if specified
             if self._config.country_code:
@@ -113,34 +116,10 @@ class OxylabsProvider(ProxyProvider):
             return "-".join(parts)
         else:
             # Port-based types use simple username
-            return f"user-{self._username}"
-
-    def get_proxies(self) -> list[Proxy]:
-        """Get initial proxy list based on configuration.
-
-        For session-based types: Creates proxies with random session IDs
-        For port-based types: Creates proxies for sequential ports (8001, 8002, ...)
-        """
-        proxies: list[Proxy] = []
-        num_proxies = self._config.num_proxies
-
-        if self.is_session_based():
-            # Session-based: generate random session IDs
-            for i in range(num_proxies):
-                session_id = _generate_session_id()
-                proxy = self._create_session_proxy(session_id, i)
-                proxies.append(proxy)
-        else:
-            # Port-based: use sequential ports
-            for i in range(num_proxies):
-                port = self._base_port + i
-                proxy = self._create_port_proxy(port, i)
-                proxies.append(proxy)
-
-        return proxies
+            return "user-{username}"
 
     def _create_session_proxy(self, session_id: str, index: int) -> Proxy:
-        """Create a session-based proxy entry."""
+        """Create a session-based proxy entry with placeholder credentials."""
         username = self._build_username(session_id)
 
         return Proxy(
@@ -149,7 +128,7 @@ class OxylabsProvider(ProxyProvider):
             port=self._base_port,
             protocol=ProxyProtocol.HTTP,
             username=username,
-            password=self._password,
+            password="{password}",  # Placeholder resolved at request time
             connector_id=self.connector.id,
             status=ProxyStatus.HEALTHY,  # Oxylabs proxies are immediately available
             tags=["oxylabs", self._proxy_type.value],
@@ -162,7 +141,7 @@ class OxylabsProvider(ProxyProvider):
         )
 
     def _create_port_proxy(self, port: int, index: int) -> Proxy:
-        """Create a port-based proxy entry.
+        """Create a port-based proxy entry with placeholder credentials.
 
         For port-based proxies:
         - host: The Oxylabs endpoint (used for routing/health checks)
@@ -176,7 +155,7 @@ class OxylabsProvider(ProxyProvider):
             port=port,
             protocol=ProxyProtocol.HTTP,
             username=username,
-            password=self._password,
+            password="{password}",  # Placeholder resolved at request time
             connector_id=self.connector.id,
             status=ProxyStatus.INITIALIZING,  # Will be updated after IP discovery
             tags=["oxylabs", self._proxy_type.value],
@@ -185,6 +164,18 @@ class OxylabsProvider(ProxyProvider):
                 "port": port,
             },
         )
+
+    def _build_proxy_url_for_discovery(self, proxy: Proxy) -> str:
+        """Build a proxy URL with resolved credentials for IP discovery.
+
+        Since proxy credentials contain placeholders, we need to resolve
+        them with actual credentials for making discovery requests.
+        """
+        # Start with proxy.url and resolve placeholders
+        url = proxy.url
+        url = url.replace("{username}", self._username)
+        url = url.replace("{password}", self._password)
+        return url
 
     async def discover_ip(self, proxy: Proxy) -> str | None:
         """Discover the real IP address for a port-based proxy.
@@ -204,8 +195,10 @@ class OxylabsProvider(ProxyProvider):
             return None
 
         try:
+            # Build URL with resolved credentials for discovery
+            proxy_url = self._build_proxy_url_for_discovery(proxy)
             async with httpx.AsyncClient(
-                proxy=proxy.url,
+                proxy=proxy_url,
                 timeout=30.0,
             ) as client:
                 response = await client.get(IP_DISCOVERY_URL)
