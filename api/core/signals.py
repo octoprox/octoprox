@@ -134,26 +134,16 @@ connector_error_updated = signal("connector-error-updated")
 
 
 # =============================================================================
-# Oxylabs Syncer Signals
+# Provider Syncer Signals
 # =============================================================================
 
-# Emitted when an Oxylabs proxy's metadata is updated (e.g., IP refresh)
-# Sender: OxylabsSyncer
+# Emitted when a proxy's metadata is updated (e.g., IP refresh)
+# Sender: ProxyProviderSyncer
 # Args: proxy (Proxy)
 proxy_update_requested = signal("proxy-update-requested")
 
-# Emitted when an Oxylabs connector needs to be synced (after create/update)
-# Sender: API routes
-# Args: connector_id (str)
-oxylabs_connector_sync_requested = signal("oxylabs-connector-sync-requested")
-
-
-# =============================================================================
-# BrightData Syncer Signals
-# =============================================================================
-
-# Emitted when a BrightData connector needs to be synced (after create/update)
+# Emitted when a provider connector needs to be synced (after create/update)
 # Sender: API routes
 # Args: connector (Connector)
-brightdata_connector_sync_requested = signal("brightdata-connector-sync-requested")
+provider_connector_sync_requested = signal("provider-connector-sync-requested")
 
