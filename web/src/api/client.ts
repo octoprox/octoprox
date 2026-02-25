@@ -289,6 +289,11 @@ export interface CredentialUpdate {
 }
 
 // Connector types
+export interface RoutingConfig {
+  domain_whitelist?: string[]
+  domain_blacklist?: string[]
+}
+
 export interface Connector {
   id: string
   name: string
@@ -297,6 +302,7 @@ export interface Connector {
   credential_type: CredentialType | null
   project_id: string
   config: Record<string, unknown>
+  routing_config: RoutingConfig
   enabled: boolean
   proxy_count: number
   // Cloud provider error tracking
@@ -316,6 +322,7 @@ export interface ConnectorCreate {
   name: string
   credential_id: string
   config?: Record<string, unknown>
+  routing_config?: RoutingConfig
   enabled?: boolean
 }
 
@@ -323,6 +330,7 @@ export interface ConnectorUpdate {
   name?: string
   credential_id?: string
   config?: Record<string, unknown>
+  routing_config?: RoutingConfig
   enabled?: boolean
 }
 

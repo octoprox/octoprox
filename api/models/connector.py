@@ -233,6 +233,40 @@ class BrightDataConnectorConfig(BaseModel):
         return self.proxy_type in (BrightDataProxyType.RESIDENTIAL, BrightDataProxyType.MOBILE)
 
 
+class RoutingConfig(BaseModel):
+    """Routing configuration for domain-based filtering.
+
+    Controls which target domains can be routed through a connector's proxies.
+    Whitelist and blacklist are mutually exclusive (at most one can be non-empty).
+
+    Domain matching is hierarchical: entering 'bing.com' matches 'bing.com'
+    and all subdomains (www.bing.com, images.bing.com, etc.).
+    """
+    domain_whitelist: list[str] = Field(default_factory=list)
+    domain_blacklist: list[str] = Field(default_factory=list)
+
+    @model_validator(mode='after')
+    def validate_mutual_exclusivity(self) -> 'RoutingConfig':
+        """Ensure whitelist and blacklist are mutually exclusive."""
+        # Normalize: strip whitespace, lowercase, remove empty strings
+        self.domain_whitelist = [d.strip().lower() for d in self.domain_whitelist if d.strip()]
+        self.domain_blacklist = [d.strip().lower() for d in self.domain_blacklist if d.strip()]
+        if self.domain_whitelist and self.domain_blacklist:
+            raise ValueError('domain_whitelist and domain_blacklist are mutually exclusive; only one can be set')
+        return self
+
+
+def validate_routing_config(config: dict[str, Any]) -> dict[str, Any]:
+    """Validate routing config and return validated dict.
+
+    Excludes empty lists from the output to keep the stored config clean.
+    """
+    validated = RoutingConfig(**config)
+    result = validated.model_dump(exclude_none=True)
+    # Remove empty lists to keep config clean
+    return {k: v for k, v in result.items() if v}
+
+
 def validate_connector_config(credential_type: CredentialType, config: dict[str, Any]) -> dict[str, Any]:
     """Validate connector config based on credential type and return validated config."""
     validated: StaticProxyProviderConnectorConfig | AWSConnectorConfig | GCPConnectorConfig | AzureConnectorConfig | OxylabsConnectorConfig | BrightDataConnectorConfig
@@ -321,6 +355,7 @@ class Connector(BaseModel):
     credential_type: CredentialType
     project_id: str
     config: dict[str, Any] = Field(default_factory=dict)
+    routing_config: dict[str, Any] = Field(default_factory=dict)
     enabled: bool = True
     pending_deletion: bool = False  # Set when connector is marked for async deletion
 
@@ -351,12 +386,20 @@ class Connector(BaseModel):
         """Get the BrightData config if this is a BrightData connector, None otherwise."""
         return get_brightdata_config(self.credential_type, self.config)
 
+    @property
+    def parsed_routing_config(self) -> RoutingConfig:
+        """Get the typed routing config for this connector."""
+        if not self.routing_config:
+            return RoutingConfig()
+        return RoutingConfig(**self.routing_config)
+
 
 class ConnectorCreate(BaseModel):
     """Schema for creating a new connector."""
     name: str
     credential_id: str
     config: dict[str, Any] = Field(default_factory=dict)
+    routing_config: dict[str, Any] = Field(default_factory=dict)
     enabled: bool = True
     # Note: config validation happens in the route after fetching credential type
 
@@ -366,6 +409,7 @@ class ConnectorUpdate(BaseModel):
     name: str | None = None
     credential_id: str | None = None
     config: dict[str, Any] | None = None
+    routing_config: dict[str, Any] | None = None
     enabled: bool | None = None
 
 
@@ -378,6 +422,7 @@ class ConnectorResponse(BaseModel):
     credential_type: str | None = None
     project_id: str
     config: dict[str, Any]
+    routing_config: dict[str, Any] = Field(default_factory=dict)
     enabled: bool
     proxy_count: int
     # Cloud provider error tracking

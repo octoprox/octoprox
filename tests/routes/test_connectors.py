@@ -152,6 +152,188 @@ class TestConnectorEndpoints:
         )
         assert get_response.status_code == 404
 
+    def test_create_connector_with_whitelist(
+        self,
+        authenticated_client: TestClient,
+        created_project: dict[str, Any],
+        created_credential: dict[str, Any],
+        sample_connector_data: dict[str, Any],
+    ) -> None:
+        """Test creating a connector with a domain whitelist."""
+        project_id = created_project["id"]
+        connector_data = sample_connector_data.copy()
+        connector_data["credential_id"] = created_credential["id"]
+        connector_data["routing_config"] = {"domain_whitelist": ["example.com", "test.org"]}
+
+        response = authenticated_client.post(
+            f"/api/v1/projects/{project_id}/connectors",
+            json=connector_data,
+        )
+
+        assert response.status_code == 201
+        data = response.json()
+        assert data["routing_config"] == {"domain_whitelist": ["example.com", "test.org"]}
+
+    def test_create_connector_with_blacklist(
+        self,
+        authenticated_client: TestClient,
+        created_project: dict[str, Any],
+        created_credential: dict[str, Any],
+        sample_connector_data: dict[str, Any],
+    ) -> None:
+        """Test creating a connector with a domain blacklist."""
+        project_id = created_project["id"]
+        connector_data = sample_connector_data.copy()
+        connector_data["credential_id"] = created_credential["id"]
+        connector_data["routing_config"] = {"domain_blacklist": ["blocked.com"]}
+
+        response = authenticated_client.post(
+            f"/api/v1/projects/{project_id}/connectors",
+            json=connector_data,
+        )
+
+        assert response.status_code == 201
+        data = response.json()
+        assert data["routing_config"] == {"domain_blacklist": ["blocked.com"]}
+
+    def test_create_connector_both_lists_rejected(
+        self,
+        authenticated_client: TestClient,
+        created_project: dict[str, Any],
+        created_credential: dict[str, Any],
+        sample_connector_data: dict[str, Any],
+    ) -> None:
+        """Test that creating a connector with both whitelist and blacklist is rejected."""
+        project_id = created_project["id"]
+        connector_data = sample_connector_data.copy()
+        connector_data["credential_id"] = created_credential["id"]
+        connector_data["routing_config"] = {
+            "domain_whitelist": ["a.com"],
+            "domain_blacklist": ["b.com"],
+        }
+
+        response = authenticated_client.post(
+            f"/api/v1/projects/{project_id}/connectors",
+            json=connector_data,
+        )
+
+        assert response.status_code == 422
+
+    def test_create_connector_empty_routing_config(
+        self,
+        authenticated_client: TestClient,
+        created_project: dict[str, Any],
+        created_credential: dict[str, Any],
+        sample_connector_data: dict[str, Any],
+    ) -> None:
+        """Test creating a connector with empty routing config."""
+        project_id = created_project["id"]
+        connector_data = sample_connector_data.copy()
+        connector_data["credential_id"] = created_credential["id"]
+        connector_data["routing_config"] = {}
+
+        response = authenticated_client.post(
+            f"/api/v1/projects/{project_id}/connectors",
+            json=connector_data,
+        )
+
+        assert response.status_code == 201
+        data = response.json()
+        assert data["routing_config"] == {}
+
+    def test_update_connector_routing_config(
+        self,
+        authenticated_client: TestClient,
+        created_project: dict[str, Any],
+        created_connector: dict[str, Any],
+    ) -> None:
+        """Test updating a connector's routing config."""
+        project_id = created_project["id"]
+        connector_id = created_connector["id"]
+
+        response = authenticated_client.patch(
+            f"/api/v1/projects/{project_id}/connectors/{connector_id}",
+            json={"routing_config": {"domain_whitelist": ["updated.com"]}},
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["routing_config"] == {"domain_whitelist": ["updated.com"]}
+
+    def test_update_connector_routing_config_both_lists_rejected(
+        self,
+        authenticated_client: TestClient,
+        created_project: dict[str, Any],
+        created_connector: dict[str, Any],
+    ) -> None:
+        """Test that updating with both whitelist and blacklist is rejected."""
+        project_id = created_project["id"]
+        connector_id = created_connector["id"]
+
+        response = authenticated_client.patch(
+            f"/api/v1/projects/{project_id}/connectors/{connector_id}",
+            json={"routing_config": {
+                "domain_whitelist": ["a.com"],
+                "domain_blacklist": ["b.com"],
+            }},
+        )
+
+        assert response.status_code == 422
+
+    def test_get_connector_includes_routing_config(
+        self,
+        authenticated_client: TestClient,
+        created_project: dict[str, Any],
+        created_credential: dict[str, Any],
+        sample_connector_data: dict[str, Any],
+    ) -> None:
+        """Test that GET connector response includes routing_config."""
+        project_id = created_project["id"]
+        connector_data = sample_connector_data.copy()
+        connector_data["credential_id"] = created_credential["id"]
+        connector_data["routing_config"] = {"domain_blacklist": ["blocked.com"]}
+
+        create_resp = authenticated_client.post(
+            f"/api/v1/projects/{project_id}/connectors",
+            json=connector_data,
+        )
+        assert create_resp.status_code == 201
+        connector_id = create_resp.json()["id"]
+
+        response = authenticated_client.get(
+            f"/api/v1/projects/{project_id}/connectors/{connector_id}"
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["routing_config"] == {"domain_blacklist": ["blocked.com"]}
+
+    def test_list_connectors_includes_routing_config(
+        self,
+        authenticated_client: TestClient,
+        created_project: dict[str, Any],
+        created_credential: dict[str, Any],
+        sample_connector_data: dict[str, Any],
+    ) -> None:
+        """Test that list connectors includes routing_config."""
+        project_id = created_project["id"]
+        connector_data = sample_connector_data.copy()
+        connector_data["credential_id"] = created_credential["id"]
+        connector_data["routing_config"] = {"domain_whitelist": ["example.com"]}
+
+        create_resp = authenticated_client.post(
+            f"/api/v1/projects/{project_id}/connectors",
+            json=connector_data,
+        )
+        assert create_resp.status_code == 201
+
+        response = authenticated_client.get(f"/api/v1/projects/{project_id}/connectors")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["total"] == 1
+        assert data["connectors"][0]["routing_config"] == {"domain_whitelist": ["example.com"]}
+
     def test_get_connector_options(
         self,
         authenticated_client: TestClient,

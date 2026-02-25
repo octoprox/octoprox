@@ -4,6 +4,7 @@
 """Connector management endpoints."""
 
 import asyncio
+from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, ValidationError
@@ -16,6 +17,7 @@ from api.models.connector import (
     ConnectorResponse,
     ConnectorUpdate,
     validate_connector_config,
+    validate_routing_config,
 )
 from api.models.credential import CredentialType
 from api.providers.registry import is_syncable_credential_type
@@ -44,6 +46,7 @@ def _connector_to_response(
         credential_type=credential_type,
         project_id=connector.project_id,
         config=connector.config,
+        routing_config=connector.routing_config,
         enabled=connector.enabled,
         proxy_count=proxy_count,
         last_error=connector.last_error,
@@ -109,12 +112,25 @@ async def create_connector(
     except ValueError as e:
         raise HTTPException(status_code=422, detail=str(e)) from None
 
+    # Validate routing config if provided
+    validated_routing_config: dict[str, Any] = {}
+    if connector_data.routing_config:
+        try:
+            validated_routing_config = validate_routing_config(connector_data.routing_config)
+        except (ValidationError, ValueError) as e:
+            detail = str(e)
+            if hasattr(e, 'errors'):
+                messages = [err.get('msg', str(err)) for err in e.errors()]
+                detail = "; ".join(messages)
+            raise HTTPException(status_code=422, detail=detail) from None
+
     connector = Connector(
         name=connector_data.name,
         credential_id=connector_data.credential_id,
         credential_type=credential_type_enum,
         project_id=project_id,
         config=validated_config,
+        routing_config=validated_routing_config,
         enabled=connector_data.enabled,
     )
 
@@ -189,6 +205,15 @@ async def update_connector(
                 raise HTTPException(status_code=422, detail=str(e)) from None
         else:
             connector.config = connector_data.config
+    if connector_data.routing_config is not None:
+        try:
+            connector.routing_config = validate_routing_config(connector_data.routing_config)
+        except (ValidationError, ValueError) as e:
+            detail = str(e)
+            if hasattr(e, 'errors'):
+                messages = [err.get('msg', str(err)) for err in e.errors()]
+                detail = "; ".join(messages)
+            raise HTTPException(status_code=422, detail=detail) from None
     if connector_data.enabled is not None:
         connector.enabled = connector_data.enabled
 

@@ -213,6 +213,117 @@ class TestConnectorRepository:
         assert result.enabled is False
         assert result.config == {"updated": True}
 
+    async def test_create_connector_with_routing_config(
+        self,
+        connector_repo: ConnectorRepository,
+        credential_repo: CredentialRepository,
+        project_repo: ProjectRepository,
+        db_session: AsyncSession,
+    ) -> None:
+        """Test creating a connector with routing config."""
+        project, credential = await self._create_project_and_credential(
+            project_repo, credential_repo, db_session
+        )
+
+        connector = Connector(
+            name="Routing Connector",
+            credential_id=credential.id,
+            credential_type=CredentialType.STATIC_PROXY_PROVIDER,
+            project_id=project.id,
+            config={},
+            routing_config={"domain_whitelist": ["example.com", "test.org"]},
+        )
+
+        result = await connector_repo.create(connector)
+        await db_session.commit()
+
+        assert result.routing_config == {"domain_whitelist": ["example.com", "test.org"]}
+
+    async def test_get_connector_preserves_routing_config(
+        self,
+        connector_repo: ConnectorRepository,
+        credential_repo: CredentialRepository,
+        project_repo: ProjectRepository,
+        db_session: AsyncSession,
+    ) -> None:
+        """Test that routing config is preserved through create/get cycle."""
+        project, credential = await self._create_project_and_credential(
+            project_repo, credential_repo, db_session
+        )
+
+        connector = Connector(
+            name="Persist Routing",
+            credential_id=credential.id,
+            credential_type=CredentialType.STATIC_PROXY_PROVIDER,
+            project_id=project.id,
+            config={},
+            routing_config={"domain_blacklist": ["blocked.com"]},
+        )
+        await connector_repo.create(connector)
+        await db_session.commit()
+
+        result = await connector_repo.get_by_id(connector.id)
+        assert result is not None
+        assert result.routing_config == {"domain_blacklist": ["blocked.com"]}
+
+    async def test_update_connector_routing_config(
+        self,
+        connector_repo: ConnectorRepository,
+        credential_repo: CredentialRepository,
+        project_repo: ProjectRepository,
+        db_session: AsyncSession,
+    ) -> None:
+        """Test updating a connector's routing config."""
+        project, credential = await self._create_project_and_credential(
+            project_repo, credential_repo, db_session
+        )
+
+        connector = Connector(
+            name="Update Routing",
+            credential_id=credential.id,
+            credential_type=CredentialType.STATIC_PROXY_PROVIDER,
+            project_id=project.id,
+            config={},
+            routing_config={},
+        )
+        await connector_repo.create(connector)
+        await db_session.commit()
+
+        # Update routing config
+        connector.routing_config = {"domain_whitelist": ["new-domain.com"]}
+        await connector_repo.update(connector)
+        await db_session.commit()
+
+        result = await connector_repo.get_by_id(connector.id)
+        assert result is not None
+        assert result.routing_config == {"domain_whitelist": ["new-domain.com"]}
+
+    async def test_connector_empty_routing_config(
+        self,
+        connector_repo: ConnectorRepository,
+        credential_repo: CredentialRepository,
+        project_repo: ProjectRepository,
+        db_session: AsyncSession,
+    ) -> None:
+        """Test that empty routing config defaults to empty dict."""
+        project, credential = await self._create_project_and_credential(
+            project_repo, credential_repo, db_session
+        )
+
+        connector = Connector(
+            name="No Routing",
+            credential_id=credential.id,
+            credential_type=CredentialType.STATIC_PROXY_PROVIDER,
+            project_id=project.id,
+            config={},
+        )
+        await connector_repo.create(connector)
+        await db_session.commit()
+
+        result = await connector_repo.get_by_id(connector.id)
+        assert result is not None
+        assert result.routing_config == {}
+
     async def test_delete_connector(
         self,
         connector_repo: ConnectorRepository,

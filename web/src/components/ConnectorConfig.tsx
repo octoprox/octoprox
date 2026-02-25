@@ -19,23 +19,27 @@ import {
   ConnectorOptions,
   OxylabsProxyType,
   BrightDataProxyType,
+  RoutingConfig,
 } from '../api/client'
 import { useProject } from '../contexts/ProjectContext'
 import { useTheme } from '../contexts/ThemeContext'
 import AddCredentialModal from './AddCredentialModal'
 import { CREDENTIAL_TYPES } from '../utils/credentials'
 import { RichSelect, RichSelectOption } from './RichSelect'
-import { Button, Input, Label, Card, Badge, Alert, ModalFooter } from './ui'
+import { Button, Input, Label, Card, Badge, Alert, ModalFooter, ChipInput } from './ui'
+
+type DomainFilterMode = 'none' | 'whitelist' | 'blacklist'
 
 interface ConnectorFormData {
   name: string
   credential_id: string
   config: Record<string, string>
+  routing_config: RoutingConfig
   enabled: boolean
 }
 
 // Tab type for config sections
-type ConfigTab = 'infrastructure' | 'scaling' | 'advanced'
+type ConfigTab = 'infrastructure' | 'scaling' | 'advanced' | 'routing'
 
 // Component for editing key-value tags (AWS, Azure)
 function KeyValueTagsEditor({ value, onChange }: { value: string; onChange: (value: string) => void }) {
@@ -183,7 +187,7 @@ export default function ConnectorConfig() {
   const [selectedType, setSelectedType] = useState<CredentialType | null>(null)
 
   // Form state
-  const [formData, setFormData] = useState<ConnectorFormData>({ name: '', credential_id: '', config: {}, enabled: true })
+  const [formData, setFormData] = useState<ConnectorFormData>({ name: '', credential_id: '', config: {}, routing_config: {}, enabled: true })
   const [editingConnector, setEditingConnector] = useState<Connector | null>(null)
 
   // Credential creation modal state
@@ -265,14 +269,14 @@ export default function ConnectorConfig() {
   })
 
   const updateMutation = useMutation({
-    mutationFn: ({ id, data }: { id: string; data: { name?: string; credential_id?: string; config?: Record<string, unknown>; enabled?: boolean } }) =>
+    mutationFn: ({ id, data }: { id: string; data: { name?: string; credential_id?: string; config?: Record<string, unknown>; routing_config?: RoutingConfig; enabled?: boolean } }) =>
       updateProjectConnector(selectedProjectId!, id, data),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['connectors', selectedProjectId] })
       setShowWizard(false)
       setWizardStep('select-type')
       setSelectedType(null)
-      setFormData({ name: '', credential_id: '', config: {}, enabled: true })
+      setFormData({ name: '', credential_id: '', config: {}, routing_config: {}, enabled: true })
       setEditingConnector(null)
       setEditError(null)
     },
@@ -294,7 +298,7 @@ export default function ConnectorConfig() {
     setShowWizard(false)
     setWizardStep('select-type')
     setSelectedType(null)
-    setFormData({ name: '', credential_id: '', config: {}, enabled: true })
+    setFormData({ name: '', credential_id: '', config: {}, routing_config: {}, enabled: true })
     setCreateError(null)
     setEditingConnector(null)
     setEditError(null)
@@ -304,6 +308,7 @@ export default function ConnectorConfig() {
   const startEditing = (connector: Connector) => {
     setEditingConnector(connector)
     setSelectedType(connector.credential_type as CredentialType)
+    setActiveConfigTab(connector.credential_type === 'static_proxy_provider' ? 'routing' : 'infrastructure')
     const configForForm: Record<string, string> = {}
     const rawConfig = connector.config || {}
     for (const [key, value] of Object.entries(rawConfig)) {
@@ -317,6 +322,7 @@ export default function ConnectorConfig() {
       name: connector.name,
       credential_id: connector.credential_id,
       config: configForForm,
+      routing_config: connector.routing_config || {},
       enabled: connector.enabled,
     })
     setWizardStep('configure')
@@ -327,6 +333,7 @@ export default function ConnectorConfig() {
   const handleTypeSelect = (type: CredentialType) => {
     setSelectedType(type)
     setFormData({ ...formData, config: getDefaultConfig(type, optionsData) })
+    setActiveConfigTab(type === 'static_proxy_provider' ? 'routing' : 'infrastructure')
     setWizardStep('select-credential')
   }
 
@@ -366,13 +373,14 @@ export default function ConnectorConfig() {
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault()
     const preparedConfig = prepareConfigForSubmit(formData.config)
+    const routingConfig = formData.routing_config
     if (isEditMode) {
       updateMutation.mutate({
         id: editingConnector.id,
-        data: { name: formData.name, enabled: formData.enabled, config: preparedConfig }
+        data: { name: formData.name, enabled: formData.enabled, config: preparedConfig, routing_config: routingConfig }
       })
     } else {
-      createMutation.mutate({ name: formData.name, credential_id: formData.credential_id, config: preparedConfig, enabled: formData.enabled })
+      createMutation.mutate({ name: formData.name, credential_id: formData.credential_id, config: preparedConfig, routing_config: routingConfig, enabled: formData.enabled })
     }
   }
 
@@ -397,6 +405,7 @@ export default function ConnectorConfig() {
       infrastructure: infraFields[type] || [],
       scaling: scalingFields,
       advanced: advancedFields,
+      routing: [],
     }
   }
 
@@ -425,10 +434,143 @@ export default function ConnectorConfig() {
     return opts.map((opt) => ({ value: opt.code, label: opt.name, description: opt.code }))
   }
 
-  const renderConfigFields = (type: CredentialType | null, config: Record<string, string>, onChange: (key: string, value: string) => void) => {
-    if (!type || type === 'static_proxy_provider') return null
+  // Derive routing mode from routing_config
+  const getRoutingMode = (): DomainFilterMode => {
+    const rc = formData.routing_config
+    if ('domain_whitelist' in rc) return 'whitelist'
+    if ('domain_blacklist' in rc) return 'blacklist'
+    return 'none'
+  }
 
-    // Special handling for Oxylabs - simpler config without tabs
+  const getRoutingDomainsArray = (): string[] => {
+    const rc = formData.routing_config
+    if (rc.domain_whitelist && rc.domain_whitelist.length > 0) return rc.domain_whitelist
+    if (rc.domain_blacklist && rc.domain_blacklist.length > 0) return rc.domain_blacklist
+    return []
+  }
+
+  const handleRoutingModeChange = (mode: DomainFilterMode) => {
+    if (mode === 'none') {
+      setFormData({ ...formData, routing_config: {} })
+    } else {
+      // Preserve existing domains when switching between whitelist/blacklist
+      const domains = getRoutingDomainsArray()
+      setFormData({
+        ...formData,
+        routing_config: mode === 'whitelist'
+          ? { domain_whitelist: domains }
+          : { domain_blacklist: domains }
+      })
+    }
+  }
+
+  const setRoutingDomains = (domains: string[]) => {
+    const mode = getRoutingMode()
+    setFormData({
+      ...formData,
+      routing_config: mode === 'whitelist'
+        ? { domain_whitelist: domains }
+        : { domain_blacklist: domains }
+    })
+  }
+
+  const addRoutingDomain = (input: string) => {
+    const newDomains = input.split(/[\n,]+/).map(d => d.trim().toLowerCase()).filter(d => d)
+    if (newDomains.length === 0) return
+    const existing = getRoutingDomainsArray()
+    const unique = newDomains.filter(d => !existing.includes(d))
+    if (unique.length > 0) {
+      setRoutingDomains([...existing, ...unique])
+    }
+  }
+
+  const removeRoutingDomain = (index: number) => {
+    const domains = getRoutingDomainsArray()
+    setRoutingDomains(domains.filter((_, i) => i !== index))
+  }
+
+  const renderRoutingTab = () => (
+    <div className="space-y-4">
+      <div>
+        <Label className="text-xs text-gray-600 dark:text-gray-400">Domain Filter Mode</Label>
+        <div className="flex gap-2 mt-1">
+          {([
+            { value: 'none', label: 'No restriction' },
+            { value: 'whitelist', label: 'Whitelist' },
+            { value: 'blacklist', label: 'Blacklist' },
+          ] as const).map((option) => (
+            <button
+              key={option.value}
+              type="button"
+              onClick={() => handleRoutingModeChange(option.value)}
+              className={`px-3 py-1.5 text-sm rounded-lg border-2 transition-colors ${
+                getRoutingMode() === option.value
+                  ? 'border-blue-500 bg-blue-50 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300'
+                  : 'border-gray-200 dark:border-gray-600 text-gray-600 dark:text-gray-400 hover:border-gray-300 dark:hover:border-gray-500'
+              }`}
+            >
+              {option.label}
+            </button>
+          ))}
+        </div>
+        <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
+          {getRoutingMode() === 'none' && 'All domains can be routed through this connector\'s proxies.'}
+          {getRoutingMode() === 'whitelist' && 'Only the listed domains can be routed through this connector\'s proxies.'}
+          {getRoutingMode() === 'blacklist' && 'All domains except the listed ones can be routed through this connector\'s proxies.'}
+        </p>
+      </div>
+
+      {getRoutingMode() !== 'none' && (
+        <div>
+          <ChipInput
+            label={getRoutingMode() === 'whitelist' ? 'Allowed Domains' : 'Blocked Domains'}
+            values={getRoutingDomainsArray()}
+            onAdd={addRoutingDomain}
+            onRemove={removeRoutingDomain}
+            placeholder="Type a domain and press Enter..."
+          />
+          <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
+            Subdomains are included automatically (e.g., <code className="bg-gray-100 dark:bg-gray-600 px-1 rounded">bing.com</code> also matches <code className="bg-gray-100 dark:bg-gray-600 px-1 rounded">www.bing.com</code>).
+          </p>
+        </div>
+      )}
+    </div>
+  )
+
+  const renderConfigFields = (type: CredentialType | null, config: Record<string, string>, onChange: (key: string, value: string) => void) => {
+    if (!type) return null
+
+    // Static proxy provider - only routing tab
+    if (type === 'static_proxy_provider') {
+      const staticTabs: { id: ConfigTab; label: string }[] = [
+        { id: 'routing', label: 'Routing' },
+      ]
+      return (
+        <div className="mt-4">
+          <div className="flex border-b border-gray-200 dark:border-gray-600 mb-4">
+            {staticTabs.map((tab) => (
+              <button
+                key={tab.id}
+                type="button"
+                onClick={() => setActiveConfigTab(tab.id)}
+                className={`px-4 py-2 text-sm font-medium border-b-2 transition-colors ${
+                  activeConfigTab === tab.id
+                    ? 'border-blue-500 text-blue-600 dark:text-blue-400'
+                    : 'border-transparent text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-300 hover:border-gray-300 dark:hover:border-gray-500'
+                }`}
+              >
+                {tab.label}
+              </button>
+            ))}
+          </div>
+          <div className="min-h-[200px]">
+            {renderRoutingTab()}
+          </div>
+        </div>
+      )
+    }
+
+    // Special handling for Oxylabs - simpler config with tabs
     if (type === 'oxylabs') {
       const proxyType = getOxylabsProxyType()
       const isSessionBased = isSessionBasedOxylabs()
@@ -441,74 +583,105 @@ export default function ConnectorConfig() {
         })),
       ]
 
+      const oxylabsTabs: { id: ConfigTab; label: string }[] = [
+        { id: 'infrastructure', label: 'General' },
+        { id: 'routing', label: 'Routing' },
+      ]
+
       return (
-        <div className="mt-4 space-y-4">
-          <div>
-            <Label className="text-xs text-gray-600 dark:text-gray-400">
-              Number of Proxies
-              <span className="text-red-500 ml-1">*</span>
-            </Label>
-            <Input
-              type="number"
-              min="1"
-              value={config.num_proxies || '1'}
-              onChange={(e) => onChange('num_proxies', e.target.value)}
-              className="px-3 py-1.5 text-sm"
-              placeholder="1"
-              required
-            />
+        <div className="mt-4">
+          {/* Tab Navigation */}
+          <div className="flex border-b border-gray-200 dark:border-gray-600 mb-4">
+            {oxylabsTabs.map((tab) => (
+              <button
+                key={tab.id}
+                type="button"
+                onClick={() => setActiveConfigTab(tab.id)}
+                className={`px-4 py-2 text-sm font-medium border-b-2 transition-colors ${
+                  activeConfigTab === tab.id
+                    ? 'border-blue-500 text-blue-600 dark:text-blue-400'
+                    : 'border-transparent text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-300 hover:border-gray-300 dark:hover:border-gray-500'
+                }`}
+              >
+                {tab.label}
+              </button>
+            ))}
           </div>
 
-          {isSessionBased && (
-            <>
-              <div>
-                <Label className="text-xs text-gray-600 dark:text-gray-400">
-                  Country
-                </Label>
-                <RichSelect
-                  options={countryOptions}
-                  value={config.country_code || ''}
-                  onChange={(val) => onChange('country_code', val)}
-                  placeholder="Select country (optional)"
-                />
-                <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
-                  Leave as "All Countries" for no geo-targeting
-                </p>
+          <div className="min-h-[200px]">
+            {activeConfigTab === 'infrastructure' && (
+              <div className="space-y-4">
+                <div>
+                  <Label className="text-xs text-gray-600 dark:text-gray-400">
+                    Number of Proxies
+                    <span className="text-red-500 ml-1">*</span>
+                  </Label>
+                  <Input
+                    type="number"
+                    min="1"
+                    value={config.num_proxies || '1'}
+                    onChange={(e) => onChange('num_proxies', e.target.value)}
+                    className="px-3 py-1.5 text-sm"
+                    placeholder="1"
+                    required
+                  />
+                </div>
+
+                {isSessionBased && (
+                  <>
+                    <div>
+                      <Label className="text-xs text-gray-600 dark:text-gray-400">
+                        Country
+                      </Label>
+                      <RichSelect
+                        options={countryOptions}
+                        value={config.country_code || ''}
+                        onChange={(val) => onChange('country_code', val)}
+                        placeholder="Select country (optional)"
+                      />
+                      <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
+                        Leave as "All Countries" for no geo-targeting
+                      </p>
+                    </div>
+
+                    <div>
+                      <Label className="text-xs text-gray-600 dark:text-gray-400">
+                        Session Duration (minutes)
+                        <span className="text-red-500 ml-1">*</span>
+                      </Label>
+                      <Input
+                        type="number"
+                        min="1"
+                        max="30"
+                        value={config.session_duration_minutes || '10'}
+                        onChange={(e) => onChange('session_duration_minutes', e.target.value)}
+                        className="px-3 py-1.5 text-sm"
+                        placeholder="10"
+                        required
+                      />
+                      <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
+                        Session duration: 1-30 minutes (default: 10)
+                      </p>
+                    </div>
+                  </>
+                )}
+
+                {proxyType && !isSessionBased && (
+                  <p className="text-sm text-gray-500 dark:text-gray-400 bg-gray-50 dark:bg-gray-700 p-3 rounded-lg">
+                    Port-based proxy type ({proxyType}). IPs will be discovered from Oxylabs ports and refreshed every 24 hours.
+                  </p>
+                )}
+
+                {!proxyType && (
+                  <p className="text-sm text-amber-600 dark:text-amber-400 bg-amber-50 dark:bg-amber-900/20 p-3 rounded-lg">
+                    Loading credential configuration...
+                  </p>
+                )}
               </div>
+            )}
 
-              <div>
-                <Label className="text-xs text-gray-600 dark:text-gray-400">
-                  Session Duration (minutes)
-                  <span className="text-red-500 ml-1">*</span>
-                </Label>
-                <Input
-                  type="number"
-                  min="1"
-                  max="30"
-                  value={config.session_duration_minutes || '10'}
-                  onChange={(e) => onChange('session_duration_minutes', e.target.value)}
-                  className="px-3 py-1.5 text-sm"
-                  placeholder="10"
-                  required
-                />
-                <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
-                  Session duration: 1-30 minutes (default: 10)
-                </p>
-              </div>
-            </>
-          )}
-
-          {proxyType && !isSessionBased && (
-            <p className="text-sm text-gray-500 dark:text-gray-400 bg-gray-50 dark:bg-gray-700 p-3 rounded-lg">
-              Port-based proxy type ({proxyType}). IPs will be discovered from Oxylabs ports and refreshed every 24 hours.
-            </p>
-          )}
-
-          {!proxyType && (
-            <p className="text-sm text-amber-600 dark:text-amber-400 bg-amber-50 dark:bg-amber-900/20 p-3 rounded-lg">
-              Loading credential configuration...
-            </p>
-          )}
+            {activeConfigTab === 'routing' && renderRoutingTab()}
+          </div>
         </div>
       )
     }
@@ -535,6 +708,7 @@ export default function ConnectorConfig() {
       const brightDataTabs: { id: ConfigTab; label: string }[] = [
         { id: 'infrastructure', label: 'General' },
         { id: 'advanced', label: 'Advanced' },
+        { id: 'routing', label: 'Routing' },
       ]
 
       return (
@@ -680,6 +854,8 @@ export default function ConnectorConfig() {
                 </div>
               </>
             )}
+
+            {activeConfigTab === 'routing' && renderRoutingTab()}
           </div>
         </div>
       )
@@ -725,6 +901,7 @@ export default function ConnectorConfig() {
       { id: 'infrastructure', label: 'Infrastructure' },
       { id: 'scaling', label: 'Scaling' },
       { id: 'advanced', label: 'Advanced' },
+      { id: 'routing', label: 'Routing' },
     ]
 
     return (
@@ -749,7 +926,9 @@ export default function ConnectorConfig() {
 
         {/* Tab Content */}
         <div className="min-h-[200px]">
-          {activeConfigTab === 'advanced' ? (
+          {activeConfigTab === 'routing' ? (
+            renderRoutingTab()
+          ) : activeConfigTab === 'advanced' ? (
             <div>
               <Label>Instance Tags</Label>
               <p className="text-xs text-gray-500 dark:text-gray-400 mb-2">Key-value tags applied to instances</p>

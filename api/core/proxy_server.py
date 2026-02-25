@@ -99,7 +99,10 @@ class ProxyServer:
                 self._client_tasks.discard(task)
 
     def _get_upstream_proxy(
-        self, project_id: str | None = None, session_id: str | None = None
+        self,
+        project_id: str | None = None,
+        session_id: str | None = None,
+        target_host: str | None = None,
     ) -> Proxy | None:
         """Select an upstream proxy using the configured strategy.
 
@@ -107,12 +110,16 @@ class ProxyServer:
             project_id: If provided, selects from project-scoped proxies using
                         the project's routing strategy.
             session_id: Session identifier for sticky routing.
+            target_host: If provided, only consider proxies from connectors
+                whose domain routing config allows this host.
 
         Returns:
             Selected proxy or None if no healthy proxies available.
         """
         if project_id:
-            return self._proxy_manager.select_proxy_for_project(project_id, session_id)
+            return self._proxy_manager.select_proxy_for_project(
+                project_id, session_id, target_host
+            )
         return self._proxy_manager.select_proxy(session_id)
 
     def _authenticate_project(self, headers: dict[str, str]) -> Project | None:
@@ -327,22 +334,24 @@ class ProxyServer:
         client_ip: str | None = None,
     ) -> None:
         """Handle HTTPS CONNECT tunneling."""
-        # Select upstream proxy scoped to the authenticated project
-        proxy = self._get_upstream_proxy(project_id=project_id, session_id=client_ip)
-        if not proxy:
-            await self._send_error(client_writer, 503, "No upstream proxy available for project")
-            await request_rejected.send_async(
-                self, project_id=project_id, reason="no_proxy_available"
-            )
-            return
-
-        # Parse target host:port
+        # Parse target host:port before proxy selection (needed for domain filtering)
         if ":" in target:
             target_host, target_port_str = target.rsplit(":", 1)
             target_port = int(target_port_str)
         else:
             target_host = target
             target_port = 443  # Default HTTPS port
+
+        # Select upstream proxy scoped to the authenticated project
+        proxy = self._get_upstream_proxy(
+            project_id=project_id, session_id=client_ip, target_host=target_host
+        )
+        if not proxy:
+            await self._send_error(client_writer, 502, "Bad Gateway", "No upstream proxy available for this domain")
+            await request_rejected.send_async(
+                self, project_id=project_id, reason="no_proxy_available"
+            )
+            return
 
         start_time = time.monotonic()
         success = False
@@ -526,10 +535,15 @@ class ProxyServer:
         client_ip: str | None = None,
     ) -> None:
         """Handle regular HTTP request forwarding."""
+        # Parse target host before proxy selection (needed for domain filtering)
+        parsed_host, _, _ = self._parse_http_url(target)
+
         # Select upstream proxy scoped to the authenticated project
-        proxy = self._get_upstream_proxy(project_id=project_id, session_id=client_ip)
+        proxy = self._get_upstream_proxy(
+            project_id=project_id, session_id=client_ip, target_host=parsed_host
+        )
         if not proxy:
-            await self._send_error(client_writer, 503, "No upstream proxy available for project")
+            await self._send_error(client_writer, 502, "Bad Gateway", "No upstream proxy available for this domain")
             await request_rejected.send_async(
                 self, project_id=project_id, reason="no_proxy_available"
             )

@@ -551,3 +551,228 @@ class TestProxyManager:
         assert await redis_client.get_proxy_metrics(proxy_id) is None
         assert await redis_client.get_project_metrics(project_id) is None
 
+    async def test_domain_whitelist_filters_proxies(self, proxy_manager: ProxyManager) -> None:
+        """Test that domain whitelist filters proxy selection by target host."""
+        project = Project(name="Domain WL", username="domainwl", password="pass")
+        await proxy_manager.add_project(project)
+
+        credential = Credential(
+            name="Domain Cred",
+            type=CredentialType.STATIC_PROXY_PROVIDER,
+            project_id=project.id,
+            config={},
+        )
+        await proxy_manager.add_credential(credential)
+
+        # Connector with whitelist: only example.com
+        connector_wl = Connector(
+            name="Whitelist Conn",
+            credential_id=credential.id,
+            credential_type=CredentialType.STATIC_PROXY_PROVIDER,
+            project_id=project.id,
+            config={},
+            routing_config={"domain_whitelist": ["example.com"]},
+        )
+        await proxy_manager.add_connector(connector_wl)
+
+        proxy = Proxy(
+            host="proxy1.example.com",
+            port=8080,
+            protocol=ProxyProtocol.HTTP,
+            connector_id=connector_wl.id,
+        )
+        proxy.status = ProxyStatus.HEALTHY
+        await proxy_manager.add_proxy(proxy)
+
+        # Should find proxy for whitelisted domain
+        healthy = proxy_manager.get_healthy_proxies_for_project(project.id, target_host="example.com")
+        assert len(healthy) == 1
+
+        # Should find proxy for subdomain of whitelisted domain
+        healthy = proxy_manager.get_healthy_proxies_for_project(project.id, target_host="www.example.com")
+        assert len(healthy) == 1
+
+        # Should NOT find proxy for non-whitelisted domain
+        healthy = proxy_manager.get_healthy_proxies_for_project(project.id, target_host="other.com")
+        assert len(healthy) == 0
+
+    async def test_domain_blacklist_filters_proxies(self, proxy_manager: ProxyManager) -> None:
+        """Test that domain blacklist filters proxy selection by target host."""
+        project = Project(name="Domain BL", username="domainbl", password="pass")
+        await proxy_manager.add_project(project)
+
+        credential = Credential(
+            name="BL Cred",
+            type=CredentialType.STATIC_PROXY_PROVIDER,
+            project_id=project.id,
+            config={},
+        )
+        await proxy_manager.add_credential(credential)
+
+        # Connector with blacklist: block ads.example.com
+        connector_bl = Connector(
+            name="Blacklist Conn",
+            credential_id=credential.id,
+            credential_type=CredentialType.STATIC_PROXY_PROVIDER,
+            project_id=project.id,
+            config={},
+            routing_config={"domain_blacklist": ["ads.example.com"]},
+        )
+        await proxy_manager.add_connector(connector_bl)
+
+        proxy = Proxy(
+            host="proxy2.example.com",
+            port=8080,
+            protocol=ProxyProtocol.HTTP,
+            connector_id=connector_bl.id,
+        )
+        proxy.status = ProxyStatus.HEALTHY
+        await proxy_manager.add_proxy(proxy)
+
+        # Should find proxy for non-blacklisted domain
+        healthy = proxy_manager.get_healthy_proxies_for_project(project.id, target_host="example.com")
+        assert len(healthy) == 1
+
+        # Should NOT find proxy for blacklisted domain
+        healthy = proxy_manager.get_healthy_proxies_for_project(project.id, target_host="ads.example.com")
+        assert len(healthy) == 0
+
+        # Should NOT find proxy for subdomain of blacklisted domain
+        healthy = proxy_manager.get_healthy_proxies_for_project(project.id, target_host="sub.ads.example.com")
+        assert len(healthy) == 0
+
+    async def test_no_routing_config_allows_all(self, proxy_manager: ProxyManager) -> None:
+        """Test that connectors without routing config allow all domains."""
+        project = Project(name="No Routing", username="norouting", password="pass")
+        await proxy_manager.add_project(project)
+
+        credential = Credential(
+            name="No Route Cred",
+            type=CredentialType.STATIC_PROXY_PROVIDER,
+            project_id=project.id,
+            config={},
+        )
+        await proxy_manager.add_credential(credential)
+
+        connector = Connector(
+            name="No Route Conn",
+            credential_id=credential.id,
+            credential_type=CredentialType.STATIC_PROXY_PROVIDER,
+            project_id=project.id,
+            config={},
+            routing_config={},
+        )
+        await proxy_manager.add_connector(connector)
+
+        proxy = Proxy(
+            host="open.example.com",
+            port=8080,
+            protocol=ProxyProtocol.HTTP,
+            connector_id=connector.id,
+        )
+        proxy.status = ProxyStatus.HEALTHY
+        await proxy_manager.add_proxy(proxy)
+
+        # Should allow any domain
+        healthy = proxy_manager.get_healthy_proxies_for_project(project.id, target_host="anything.com")
+        assert len(healthy) == 1
+
+    async def test_mixed_connectors_domain_filtering(self, proxy_manager: ProxyManager) -> None:
+        """Test domain filtering with multiple connectors having different rules."""
+        project = Project(name="Mixed Domain", username="mixeddomain", password="pass")
+        await proxy_manager.add_project(project)
+
+        credential = Credential(
+            name="Mixed Cred",
+            type=CredentialType.STATIC_PROXY_PROVIDER,
+            project_id=project.id,
+            config={},
+        )
+        await proxy_manager.add_credential(credential)
+
+        # Connector 1: whitelist only google.com
+        conn1 = Connector(
+            name="Google Only",
+            credential_id=credential.id,
+            credential_type=CredentialType.STATIC_PROXY_PROVIDER,
+            project_id=project.id,
+            config={},
+            routing_config={"domain_whitelist": ["google.com"]},
+        )
+        await proxy_manager.add_connector(conn1)
+
+        # Connector 2: no restrictions
+        conn2 = Connector(
+            name="Open Conn",
+            credential_id=credential.id,
+            credential_type=CredentialType.STATIC_PROXY_PROVIDER,
+            project_id=project.id,
+            config={},
+            routing_config={},
+        )
+        await proxy_manager.add_connector(conn2)
+
+        proxy1 = Proxy(
+            host="p1.example.com", port=8080, protocol=ProxyProtocol.HTTP,
+            connector_id=conn1.id,
+        )
+        proxy1.status = ProxyStatus.HEALTHY
+        await proxy_manager.add_proxy(proxy1)
+
+        proxy2 = Proxy(
+            host="p2.example.com", port=8080, protocol=ProxyProtocol.HTTP,
+            connector_id=conn2.id,
+        )
+        proxy2.status = ProxyStatus.HEALTHY
+        await proxy_manager.add_proxy(proxy2)
+
+        # google.com: both connectors should match (conn1 whitelist, conn2 open)
+        healthy = proxy_manager.get_healthy_proxies_for_project(project.id, target_host="google.com")
+        assert len(healthy) == 2
+
+        # bing.com: only conn2 should match (conn1 restricts to google.com)
+        healthy = proxy_manager.get_healthy_proxies_for_project(project.id, target_host="bing.com")
+        assert len(healthy) == 1
+        assert healthy[0].connector_id == conn2.id
+
+    async def test_select_proxy_with_target_host(self, proxy_manager: ProxyManager) -> None:
+        """Test that select_proxy_for_project respects domain filtering."""
+        project = Project(name="Select Domain", username="selectdomain", password="pass")
+        await proxy_manager.add_project(project)
+
+        credential = Credential(
+            name="Select Cred",
+            type=CredentialType.STATIC_PROXY_PROVIDER,
+            project_id=project.id,
+            config={},
+        )
+        await proxy_manager.add_credential(credential)
+
+        # Connector with whitelist
+        connector = Connector(
+            name="Select Conn",
+            credential_id=credential.id,
+            credential_type=CredentialType.STATIC_PROXY_PROVIDER,
+            project_id=project.id,
+            config={},
+            routing_config={"domain_whitelist": ["allowed.com"]},
+        )
+        await proxy_manager.add_connector(connector)
+
+        proxy = Proxy(
+            host="select.example.com",
+            port=8080,
+            protocol=ProxyProtocol.HTTP,
+            connector_id=connector.id,
+        )
+        proxy.status = ProxyStatus.HEALTHY
+        await proxy_manager.add_proxy(proxy)
+
+        # Should return proxy for allowed domain
+        result = proxy_manager.select_proxy_for_project(project.id, target_host="allowed.com")
+        assert result is not None
+
+        # Should return None for blocked domain
+        result = proxy_manager.select_proxy_for_project(project.id, target_host="blocked.com")
+        assert result is None
+

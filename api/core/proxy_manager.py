@@ -17,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from api.core.auto_scaler import AutoScaler
 from api.core.config import Settings
 from api.core.demand_tracker import DemandTracker
+from api.core.domain_filter import is_domain_allowed
 from api.core.health_checker import HealthChecker
 from api.core.metrics_flusher import MetricsFlusher
 from api.core.provider_syncer import ProxyProviderSyncer
@@ -776,12 +777,26 @@ class ProxyManager:
         # Non-cloud connector: remove directly
         return await self.remove_connector(connector_id)
 
-    def _get_enabled_connector_ids(self, project_id: str) -> set[str]:
-        """Get IDs of enabled connectors for a project."""
-        return {
-            c.id for c in self._connectors.values()
-            if c.project_id == project_id and c.enabled
-        }
+    def _get_enabled_connector_ids(
+        self, project_id: str, target_host: str | None = None
+    ) -> set[str]:
+        """Get IDs of enabled connectors for a project.
+
+        Args:
+            project_id: The project to get connectors for.
+            target_host: If provided, only return connectors whose domain
+                routing config allows this host.
+        """
+        connector_ids: set[str] = set()
+        for c in self._connectors.values():
+            if c.project_id != project_id or not c.enabled:
+                continue
+            if target_host:
+                routing = c.parsed_routing_config
+                if not is_domain_allowed(target_host, routing):
+                    continue
+            connector_ids.add(c.id)
+        return connector_ids
 
     def get_proxies_for_project(self, project_id: str) -> list[Proxy]:
         """Get all proxies for a project (via enabled connectors only)."""
@@ -793,23 +808,40 @@ class ProxyManager:
         connector_ids = {c.id for c in self._connectors.values() if c.project_id == project_id}
         return [p for p in self._proxies.values() if p.connector_id in connector_ids]
 
-    def get_healthy_proxies_for_project(self, project_id: str) -> list[Proxy]:
-        """Get healthy proxies for a project (from enabled connectors only)."""
-        connector_ids = self._get_enabled_connector_ids(project_id)
+    def get_healthy_proxies_for_project(
+        self, project_id: str, target_host: str | None = None
+    ) -> list[Proxy]:
+        """Get healthy proxies for a project (from enabled connectors only).
+
+        Args:
+            project_id: The project to get proxies for.
+            target_host: If provided, only return proxies from connectors whose
+                domain routing config allows this host.
+        """
+        connector_ids = self._get_enabled_connector_ids(project_id, target_host)
         return [
             p for p in self._proxies.values()
             if p.connector_id in connector_ids and p.status == ProxyStatus.HEALTHY
         ]
 
     def select_proxy_for_project(
-        self, project_id: str, session_id: str | None = None
+        self,
+        project_id: str,
+        session_id: str | None = None,
+        target_host: str | None = None,
     ) -> Proxy | None:
         """Select a proxy for a specific project using the project's routing strategy.
 
         Returns a proxy with resolved credentials (placeholders replaced with
         actual values from the credential/connector chain).
+
+        Args:
+            project_id: The project to select a proxy for.
+            session_id: Session identifier for sticky routing.
+            target_host: If provided, only consider proxies from connectors
+                whose domain routing config allows this host.
         """
-        healthy_proxies = self.get_healthy_proxies_for_project(project_id)
+        healthy_proxies = self.get_healthy_proxies_for_project(project_id, target_host)
         strategy = self._project_strategies.get(project_id, self._strategy)
         proxy = strategy.select(healthy_proxies, session_id)
         if proxy:
