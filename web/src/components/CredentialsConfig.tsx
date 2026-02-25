@@ -12,12 +12,15 @@ import {
   CredentialDetail,
 } from '../api/client'
 import { useProject } from '../contexts/ProjectContext'
-import AddCredentialModal, { CREDENTIAL_TYPES } from './AddCredentialModal'
+import { useTheme } from '../contexts/ThemeContext'
+import AddCredentialModal from './AddCredentialModal'
+import { CREDENTIAL_TYPES } from '../utils/credentials'
 import { Button, Card, Alert } from './ui'
 
 export default function CredentialsConfig() {
   const queryClient = useQueryClient()
   const { selectedProjectId } = useProject()
+  const { theme } = useTheme()
   const [showAddModal, setShowAddModal] = useState(false)
   const [editingCredential, setEditingCredential] = useState<CredentialDetail | null>(null)
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
@@ -90,8 +93,7 @@ export default function CredentialsConfig() {
           <table className="w-full text-sm">
             <thead>
               <tr className="bg-gray-50 dark:bg-gray-700 border-b border-gray-200 dark:border-gray-600">
-                <th className="px-4 py-2 text-left text-xs font-semibold text-gray-600 dark:text-gray-300 uppercase tracking-wider">Name</th>
-                <th className="px-4 py-2 text-left text-xs font-semibold text-gray-600 dark:text-gray-300 uppercase tracking-wider">Type</th>
+                <th className="px-4 py-2 text-left text-xs font-semibold text-gray-600 dark:text-gray-300 uppercase tracking-wider">Credential</th>
                 <th className="px-4 py-2 text-left text-xs font-semibold text-gray-600 dark:text-gray-300 uppercase tracking-wider">Created</th>
                 <th className="px-4 py-2 text-right text-xs font-semibold text-gray-600 dark:text-gray-300 uppercase tracking-wider">Actions</th>
               </tr>
@@ -99,9 +101,12 @@ export default function CredentialsConfig() {
             <tbody className="divide-y divide-gray-100 dark:divide-gray-700">
               {data?.credentials.map((credential) => (
                 <tr key={credential.id} className="hover:bg-gray-50 dark:hover:bg-gray-700/50 transition-colors">
-                  <td className="px-4 py-2 font-medium text-gray-900 dark:text-gray-100">{credential.name}</td>
-                  <td className="px-4 py-2 text-gray-500 dark:text-gray-400">
-                    {CREDENTIAL_TYPES.find(t => t.value === credential.type)?.label || credential.type}
+                  <td className="px-4 py-2">
+                    <div className="flex items-center gap-3">
+                      <img src={(() => { const ct = CREDENTIAL_TYPES.find(ct => ct.value === credential.type); return ct ? (theme === 'dark' ? ct.logoDark : ct.logo) : undefined })()} alt="" className="w-6 h-6 object-contain" />
+                      <span className="font-medium text-gray-900 dark:text-gray-100">{credential.name}</span>
+                      <span className="text-gray-400 dark:text-gray-500">({CREDENTIAL_TYPES.find(t => t.value === credential.type)?.label || credential.type})</span>
+                    </div>
                   </td>
                   <td className="px-4 py-2 text-gray-500 dark:text-gray-400">
                     {new Date(credential.created_at).toLocaleDateString()}

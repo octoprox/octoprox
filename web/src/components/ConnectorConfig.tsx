@@ -23,19 +23,9 @@ import {
 import { useProject } from '../contexts/ProjectContext'
 import { useTheme } from '../contexts/ThemeContext'
 import AddCredentialModal from './AddCredentialModal'
+import { CREDENTIAL_TYPES } from '../utils/credentials'
 import { RichSelect, RichSelectOption } from './RichSelect'
 import { Button, Input, Label, Card, Badge, Alert, ModalFooter } from './ui'
-
-// Import logos
-import awsLogo from '../assets/logos/aws.svg'
-import awsLogoDark from '../assets/logos/aws_dark.svg'
-import gcpLogo from '../assets/logos/gcp.svg'
-import gcpLogoDark from '../assets/logos/gcp_dark.svg'
-import azureLogo from '../assets/logos/azure.svg'
-import azureLogoDark from '../assets/logos/azure_dark.svg'
-import staticProxyLogo from '../assets/logos/static-proxy.svg'
-import oxylabsLogo from '../assets/logos/oxylabs.svg'
-import brightdataLogo from '../assets/logos/brightdata.svg'
 
 interface ConnectorFormData {
   name: string
@@ -43,15 +33,6 @@ interface ConnectorFormData {
   config: Record<string, string>
   enabled: boolean
 }
-
-const CONNECTOR_TYPES: { type: CredentialType; name: string; description: string; logo: string; logoDark: string }[] = [
-  { type: 'static_proxy_provider', name: 'Static Proxy Provider', description: 'Manually managed proxy servers', logo: staticProxyLogo, logoDark: staticProxyLogo },
-  { type: 'aws', name: 'Amazon Web Services', description: 'EC2 instances as proxy servers', logo: awsLogo, logoDark: awsLogoDark },
-  { type: 'gcp', name: 'Google Cloud Platform', description: 'Compute Engine VMs as proxy servers', logo: gcpLogo, logoDark: gcpLogoDark },
-  { type: 'azure', name: 'Microsoft Azure', description: 'Virtual Machines as proxy servers', logo: azureLogo, logoDark: azureLogoDark },
-  { type: 'oxylabs', name: 'Oxylabs', description: 'Residential, Mobile, ISP, and Datacenter proxies', logo: oxylabsLogo, logoDark: oxylabsLogo },
-  { type: 'brightdata', name: 'BrightData', description: 'Residential, Mobile, ISP, and Datacenter proxies', logo: brightdataLogo, logoDark: brightdataLogo },
-]
 
 // Tab type for config sections
 type ConfigTab = 'infrastructure' | 'scaling' | 'advanced'
@@ -194,7 +175,7 @@ export default function ConnectorConfig() {
   const { selectedProjectId } = useProject()
   const { theme } = useTheme()
 
-  const getlogo = (ct: typeof CONNECTOR_TYPES[number]) => theme === 'dark' ? ct.logoDark : ct.logo
+  const getlogo = (ct: typeof CREDENTIAL_TYPES[number]) => theme === 'dark' ? ct.logoDark : ct.logo
 
   // Wizard state
   const [showWizard, setShowWizard] = useState(false)
@@ -396,8 +377,8 @@ export default function ConnectorConfig() {
   }
 
   const getCredentialTypeLabel = (type: string | null) => {
-    const labels: Record<string, string> = { static_proxy_provider: 'Static Proxy Provider', aws: 'AWS', gcp: 'GCP', azure: 'Azure', oxylabs: 'Oxylabs' }
-    return type ? labels[type] || type : 'Unknown'
+    if (!type) return 'Unknown'
+    return CREDENTIAL_TYPES.find(ct => ct.value === type)?.label || type
   }
 
   const getCredentialsForType = () => {
@@ -829,8 +810,8 @@ export default function ConnectorConfig() {
               {/* Step 1: Select Type */}
               {wizardStep === 'select-type' && (
                 <div className="grid grid-cols-2 gap-4">
-                  {CONNECTOR_TYPES.map((ct) => (
-                    <button key={ct.type} onClick={() => handleTypeSelect(ct.type)} className="flex items-center gap-4 p-6 border-2 border-gray-200 dark:border-gray-600 rounded-xl hover:border-blue-500 hover:bg-blue-50 dark:hover:bg-blue-900/30 transition-all text-left">
+                  {CREDENTIAL_TYPES.map((ct) => (
+                    <button key={ct.value} onClick={() => handleTypeSelect(ct.value)} className="flex items-center gap-4 p-6 border-2 border-gray-200 dark:border-gray-600 rounded-xl hover:border-blue-500 hover:bg-blue-50 dark:hover:bg-blue-900/30 transition-all text-left">
                       <img src={getlogo(ct)} alt={ct.name} className="w-16 h-16 object-contain" />
                       <div>
                         <h3 className="text-lg font-semibold">{ct.name}</h3>
@@ -932,7 +913,7 @@ export default function ConnectorConfig() {
                 <tr key={connector.id} className="hover:bg-gray-50 dark:hover:bg-gray-700/50 transition-colors">
                   <td className="px-4 py-2">
                     <div className="flex items-center gap-3">
-                      <img src={(() => { const ct = CONNECTOR_TYPES.find(ct => ct.type === connector.credential_type); return ct ? getlogo(ct) : undefined })()} alt="" className="w-6 h-6 object-contain" />
+                      <img src={(() => { const ct = CREDENTIAL_TYPES.find(ct => ct.value === connector.credential_type); return ct ? getlogo(ct) : undefined })()} alt="" className="w-6 h-6 object-contain" />
                       <span className="font-medium text-gray-900 dark:text-gray-100">{connector.name}</span>
                     </div>
                   </td>

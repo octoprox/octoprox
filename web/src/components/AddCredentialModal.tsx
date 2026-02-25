@@ -7,15 +7,7 @@ import { X, Eye, EyeOff } from 'lucide-react'
 import { createProjectCredential, updateProjectCredential, CredentialType, CredentialCreate, Credential, CredentialDetail, OxylabsProxyType } from '../api/client'
 import { useProject } from '../contexts/ProjectContext'
 import { Button, Input, Select, Textarea, Label, Alert, ModalFooter } from './ui'
-
-export const CREDENTIAL_TYPES: { value: CredentialType; label: string }[] = [
-  { value: 'static_proxy_provider', label: 'Static Proxy Provider' },
-  { value: 'aws', label: 'AWS' },
-  { value: 'gcp', label: 'GCP' },
-  { value: 'azure', label: 'Azure' },
-  { value: 'oxylabs', label: 'Oxylabs' },
-  { value: 'brightdata', label: 'BrightData' },
-]
+import { CREDENTIAL_TYPES } from '../utils/credentials'
 
 export const OXYLABS_PROXY_TYPES: { value: OxylabsProxyType; label: string }[] = [
   { value: 'residential', label: 'Residential' },
