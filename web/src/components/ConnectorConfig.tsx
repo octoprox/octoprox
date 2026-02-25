@@ -532,121 +532,155 @@ export default function ConnectorConfig() {
         description: `${zone.proxy_type} (${zone.type})`,
       }))
 
+      const brightDataTabs: { id: ConfigTab; label: string }[] = [
+        { id: 'infrastructure', label: 'General' },
+        { id: 'advanced', label: 'Advanced' },
+      ]
+
       return (
-        <div className="mt-4 space-y-4">
-          <div>
-            <Label className="text-xs text-gray-600 dark:text-gray-400">
-              Zone
-              <span className="text-red-500 ml-1">*</span>
-            </Label>
-            <RichSelect
-              options={zoneOptions}
-              value={config.zone_name || ''}
-              onChange={(val) => {
-                // When zone changes, auto-populate zone_password and proxy_type
-                const zone = brightDataZones?.find(z => z.name === val)
-                if (zone) {
-                  // Update all fields at once to avoid stale state issues
-                  setFormData(prev => ({
-                    ...prev,
-                    config: {
-                      ...prev.config,
-                      zone_name: val,
-                      zone_password: zone.password,
-                      proxy_type: zone.proxy_type,
-                    }
-                  }))
-                }
-              }}
-              placeholder="Select zone"
-            />
-            <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
-              Select a BrightData zone. Proxy type is determined by the zone.
-            </p>
+        <div className="mt-4">
+          {/* Tab Navigation */}
+          <div className="flex border-b border-gray-200 dark:border-gray-600 mb-4">
+            {brightDataTabs.map((tab) => (
+              <button
+                key={tab.id}
+                type="button"
+                onClick={() => setActiveConfigTab(tab.id)}
+                className={`px-4 py-2 text-sm font-medium border-b-2 transition-colors ${
+                  activeConfigTab === tab.id
+                    ? 'border-blue-500 text-blue-600 dark:text-blue-400'
+                    : 'border-transparent text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-300 hover:border-gray-300 dark:hover:border-gray-500'
+                }`}
+              >
+                {tab.label}
+              </button>
+            ))}
           </div>
 
-          <div>
-            <Label className="text-xs text-gray-600 dark:text-gray-400">
-              Zone Password
-              <span className="text-red-500 ml-1">*</span>
-            </Label>
-            <Input
-              type="text"
-              value={config.zone_password || ''}
-              onChange={(e) => onChange('zone_password', e.target.value)}
-              className="px-3 py-1.5 text-sm"
-              placeholder="Auto-populated from zone"
-              required
-            />
-            <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
-              Auto-populated when selecting a zone. Can be edited if needed.
-            </p>
+          {/* Tab Content */}
+          <div className="space-y-4 min-h-[300px]">
+            {activeConfigTab === 'infrastructure' && (
+              <>
+                <div>
+                  <Label className="text-xs text-gray-600 dark:text-gray-400">
+                    Zone
+                    <span className="text-red-500 ml-1">*</span>
+                  </Label>
+                  <RichSelect
+                    options={zoneOptions}
+                    value={config.zone_name || ''}
+                    onChange={(val) => {
+                      // When zone changes, auto-populate zone_password and proxy_type
+                      const zone = brightDataZones?.find(z => z.name === val)
+                      if (zone) {
+                        // Update all fields at once to avoid stale state issues
+                        setFormData(prev => ({
+                          ...prev,
+                          config: {
+                            ...prev.config,
+                            zone_name: val,
+                            zone_password: zone.password,
+                            proxy_type: zone.proxy_type,
+                          }
+                        }))
+                      }
+                    }}
+                    placeholder="Select zone"
+                  />
+                  <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
+                    Select a BrightData zone. Proxy type is determined by the zone.
+                  </p>
+                </div>
+
+                <div>
+                  <Label className="text-xs text-gray-600 dark:text-gray-400">
+                    Zone Password
+                    <span className="text-red-500 ml-1">*</span>
+                  </Label>
+                  <Input
+                    type="text"
+                    value={config.zone_password || ''}
+                    onChange={(e) => onChange('zone_password', e.target.value)}
+                    className="px-3 py-1.5 text-sm"
+                    placeholder="Auto-populated from zone"
+                    required
+                  />
+                  <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
+                    Auto-populated when selecting a zone. Can be edited if needed.
+                  </p>
+                </div>
+
+                <div>
+                  <Label className="text-xs text-gray-600 dark:text-gray-400">
+                    Number of Proxies
+                    <span className="text-red-500 ml-1">*</span>
+                  </Label>
+                  <Input
+                    type="number"
+                    min="1"
+                    value={config.num_proxies || '1'}
+                    onChange={(e) => onChange('num_proxies', e.target.value)}
+                    className="px-3 py-1.5 text-sm"
+                    placeholder="1"
+                    required
+                  />
+                </div>
+
+                {proxyType && !isSessionBased && (
+                  <p className="text-sm text-gray-500 dark:text-gray-400 bg-gray-50 dark:bg-gray-700 p-3 rounded-lg">
+                    Port-based proxy type ({proxyType}). IPs will be discovered and refreshed every 24 hours.
+                  </p>
+                )}
+
+                {proxyType && isSessionBased && (
+                  <p className="text-sm text-gray-500 dark:text-gray-400 bg-gray-50 dark:bg-gray-700 p-3 rounded-lg">
+                    Session-based proxy type ({proxyType}). Global session IDs will be used for routing.
+                  </p>
+                )}
+
+                {!config.zone_name && (
+                  <p className="text-sm text-amber-600 dark:text-amber-400 bg-amber-50 dark:bg-amber-900/20 p-3 rounded-lg">
+                    Please select a zone to continue.
+                  </p>
+                )}
+              </>
+            )}
+
+            {activeConfigTab === 'advanced' && (
+              <>
+                <div>
+                  <Label className="text-xs text-gray-600 dark:text-gray-400">
+                    Country
+                  </Label>
+                  <RichSelect
+                    options={countryOptions}
+                    value={config.country_code || ''}
+                    onChange={(val) => onChange('country_code', val)}
+                    placeholder="Select country (optional)"
+                  />
+                  <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
+                    Leave as "All Countries" for no geo-targeting. Supported by all proxy types.
+                  </p>
+                </div>
+
+                <div>
+                  <Label className="text-xs text-gray-600 dark:text-gray-400">
+                    Healthcheck URL
+                  </Label>
+                  <Input
+                    type="url"
+                    value={config.healthcheck_url || ''}
+                    onChange={(e) => onChange('healthcheck_url', e.target.value)}
+                    className="px-3 py-1.5 text-sm"
+                    placeholder="https://httpbin.org/ip (default)"
+                  />
+                  <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
+                    Custom URL for health checks. Use this if your BrightData zone is restricted to certain URLs.
+                  </p>
+                </div>
+              </>
+            )}
           </div>
-
-          <div>
-            <Label className="text-xs text-gray-600 dark:text-gray-400">
-              Number of Proxies
-              <span className="text-red-500 ml-1">*</span>
-            </Label>
-            <Input
-              type="number"
-              min="1"
-              value={config.num_proxies || '1'}
-              onChange={(e) => onChange('num_proxies', e.target.value)}
-              className="px-3 py-1.5 text-sm"
-              placeholder="1"
-              required
-            />
-          </div>
-
-          <div>
-            <Label className="text-xs text-gray-600 dark:text-gray-400">
-              Country
-            </Label>
-            <RichSelect
-              options={countryOptions}
-              value={config.country_code || ''}
-              onChange={(val) => onChange('country_code', val)}
-              placeholder="Select country (optional)"
-            />
-            <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
-              Leave as "All Countries" for no geo-targeting. Supported by all proxy types.
-            </p>
-          </div>
-
-          <div>
-            <Label className="text-xs text-gray-600 dark:text-gray-400">
-              Healthcheck URL
-            </Label>
-            <Input
-              type="url"
-              value={config.healthcheck_url || ''}
-              onChange={(e) => onChange('healthcheck_url', e.target.value)}
-              className="px-3 py-1.5 text-sm"
-              placeholder="https://httpbin.org/ip (default)"
-            />
-            <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
-              Custom URL for health checks. Use this if your BrightData zone is restricted to certain URLs.
-            </p>
-          </div>
-
-          {proxyType && !isSessionBased && (
-            <p className="text-sm text-gray-500 dark:text-gray-400 bg-gray-50 dark:bg-gray-700 p-3 rounded-lg">
-              Port-based proxy type ({proxyType}). IPs will be discovered and refreshed every 24 hours.
-            </p>
-          )}
-
-          {proxyType && isSessionBased && (
-            <p className="text-sm text-gray-500 dark:text-gray-400 bg-gray-50 dark:bg-gray-700 p-3 rounded-lg">
-              Session-based proxy type ({proxyType}). Global session IDs will be used for routing.
-            </p>
-          )}
-
-          {!config.zone_name && (
-            <p className="text-sm text-amber-600 dark:text-amber-400 bg-amber-50 dark:bg-amber-900/20 p-3 rounded-lg">
-              Please select a zone to continue.
-            </p>
-          )}
         </div>
       )
     }
