@@ -106,6 +106,17 @@ Octoprox supports multiple routing strategies for distributing requests across p
 | `sticky` | Routes requests from the same client to the same proxy |
 | `health_based` | Prioritizes proxies with better health scores and lower latency |
 
+## Domain Filtering
+
+Connectors support optional domain-based filtering to control which target domains their proxies serve. This is configured per-connector via the `routing_config` field.
+
+- **Whitelist mode** — Only requests for the listed domains are routed through the connector.
+- **Blacklist mode** — All requests *except* those for the listed domains are routed through the connector.
+
+Domain matching is hierarchical: `bing.com` matches `bing.com` and all subdomains (`www.bing.com`, `images.bing.com`, etc.).
+
+Connectors with no domain filtering rules (the default) allow all domains. See the [API Reference]({{ site.baseurl }}/api#domain-filtering-routing_config) for configuration details.
+
 ## Database Configuration
 
 Octoprox uses PostgreSQL for persistent storage:

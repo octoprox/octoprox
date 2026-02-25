@@ -183,7 +183,48 @@ Content-Type: application/json
     "security_group": "sg-0123456789abcdef0",
     "min_proxies": 1,
     "max_proxies": 10
+  },
+  "routing_config": {
+    "domain_whitelist": ["example.com", "api.example.com"]
   }
+}
+```
+
+#### Domain Filtering (routing_config)
+
+Connectors support optional domain-based filtering to control which target domains their proxies serve. The `routing_config` field accepts:
+
+- **`domain_whitelist`** — Only route requests for these domains through this connector's proxies.
+- **`domain_blacklist`** — Route all requests *except* these domains through this connector's proxies.
+
+Whitelist and blacklist are mutually exclusive — you can set one or the other, but not both.
+
+Domain matching is hierarchical: entering `bing.com` matches `bing.com` and all subdomains (`www.bing.com`, `images.bing.com`, etc.).
+
+**Examples:**
+
+Whitelist — only allow specific domains:
+```json
+{
+  "routing_config": {
+    "domain_whitelist": ["example.com", "api.example.com"]
+  }
+}
+```
+
+Blacklist — block specific domains:
+```json
+{
+  "routing_config": {
+    "domain_blacklist": ["blocked.com", "ads.tracker.net"]
+  }
+}
+```
+
+No restrictions (default):
+```json
+{
+  "routing_config": {}
 }
 ```
 
@@ -205,6 +246,14 @@ GET /api/v1/projects/{project_id}/connectors/{connector_id}
 
 ```bash
 PATCH /api/v1/projects/{project_id}/connectors/{connector_id}
+Content-Type: application/json
+
+{
+  "name": "Updated Name",
+  "routing_config": {
+    "domain_whitelist": ["new-domain.com"]
+  }
+}
 ```
 
 ### Delete Connector
