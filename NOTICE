@@ -23,21 +23,41 @@ Backend (Python):
 - FastAPI (MIT License) - https://github.com/tiangolo/fastapi
 - Uvicorn (BSD License) - https://github.com/encode/uvicorn
 - Pydantic (MIT License) - https://github.com/pydantic/pydantic
+- Pydantic Settings (MIT License) - https://github.com/pydantic/pydantic-settings
 - httpx (BSD License) - https://github.com/encode/httpx
+- httpx-socks (Apache 2.0 License) - https://github.com/romis2012/httpx-socks
+- python-socks (Apache 2.0 License) - https://github.com/romis2012/python-socks
+- aiohttp (Apache 2.0 License) - https://github.com/aio-libs/aiohttp
 - SQLAlchemy (MIT License) - https://github.com/sqlalchemy/sqlalchemy
+- asyncpg (Apache 2.0 License) - https://github.com/MagicStack/asyncpg
+- Alembic (MIT License) - https://github.com/sqlalchemy/alembic
+- psycopg2-binary (LGPL License) - https://github.com/psycopg/psycopg2
 - Redis-py (MIT License) - https://github.com/redis/redis-py
+- PyYAML (MIT License) - https://github.com/yaml/pyyaml
+- structlog (Apache 2.0 / MIT License) - https://github.com/hynek/structlog
+- prometheus-client (Apache 2.0 License) - https://github.com/prometheus/client_python
+- python-multipart (MIT License) - https://github.com/Kludex/python-multipart
+- python-jose (MIT License) - https://github.com/mpdavis/python-jose
+- blinker (MIT License) - https://github.com/pallets-eco/blinker
 - boto3 (Apache 2.0 License) - https://github.com/boto/boto3
 - google-cloud-compute (Apache 2.0 License) - https://github.com/googleapis/google-cloud-python
 - azure-mgmt-compute (MIT License) - https://github.com/Azure/azure-sdk-for-python
+- azure-mgmt-network (MIT License) - https://github.com/Azure/azure-sdk-for-python
+- azure-identity (MIT License) - https://github.com/Azure/azure-sdk-for-python
 
 Frontend (TypeScript/JavaScript):
 - React (MIT License) - https://github.com/facebook/react
+- React DOM (MIT License) - https://github.com/facebook/react
+- React Router (MIT License) - https://github.com/remix-run/react-router
 - Vite (MIT License) - https://github.com/vitejs/vite
 - TailwindCSS (MIT License) - https://github.com/tailwindlabs/tailwindcss
 - TanStack Query (MIT License) - https://github.com/TanStack/query
 - TanStack Table (MIT License) - https://github.com/TanStack/table
+- Axios (MIT License) - https://github.com/axios/axios
 - Recharts (MIT License) - https://github.com/recharts/recharts
 - Lucide React (ISC License) - https://github.com/lucide-icons/lucide
+- clsx (MIT License) - https://github.com/lukeed/clsx
+- tailwind-merge (MIT License) - https://github.com/dcastil/tailwind-merge
 
 For the full list of dependencies and their licenses, see:
 - pyproject.toml (Python dependencies)
