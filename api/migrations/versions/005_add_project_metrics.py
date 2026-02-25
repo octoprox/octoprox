@@ -1,4 +1,4 @@
-# Copyright 2025 Octoprox Authors
+# Copyright 2026 Octoprox Authors
 # SPDX-License-Identifier: Apache-2.0
 
 """Add project_metrics table for aggregate project-level metrics.

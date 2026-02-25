@@ -1,4 +1,4 @@
-# Copyright 2025 Octoprox Authors
+# Copyright 2026 Octoprox Authors
 # SPDX-License-Identifier: Apache-2.0
 
 """BrightData proxy provider for residential, mobile, ISP, and datacenter proxies."""

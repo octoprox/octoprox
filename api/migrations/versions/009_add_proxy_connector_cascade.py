@@ -1,4 +1,4 @@
-# Copyright 2025 Octoprox Authors
+# Copyright 2026 Octoprox Authors
 # SPDX-License-Identifier: Apache-2.0
 
 """Add ON DELETE CASCADE to proxies.connector_id foreign key.
