@@ -46,6 +46,7 @@ export function DataTable<TData, TValue>({
     onRowSelectionChange: setRowSelection,
     enableRowSelection,
     getRowId,
+    autoResetPageIndex: false,
     state: {
       sorting,
       rowSelection,
@@ -57,6 +58,16 @@ export function DataTable<TData, TValue>({
     },
   })
 
+  // Handle edge case: if current page becomes invalid after data changes,
+  // navigate to the last available page
+  const pageCount = table.getPageCount()
+  const currentPageIndex = table.getState().pagination.pageIndex
+  useEffect(() => {
+    if (pageCount > 0 && currentPageIndex >= pageCount) {
+      table.setPageIndex(pageCount - 1)
+    }
+  }, [pageCount, currentPageIndex, table])
+
   // Notify parent of selection changes
   useEffect(() => {
     if (onSelectionChange) {
@@ -65,10 +76,8 @@ export function DataTable<TData, TValue>({
     }
   }, [rowSelection, onSelectionChange, table])
 
-  const pageIndex = table.getState().pagination.pageIndex
   const pageSize = table.getState().pagination.pageSize
   const totalRows = table.getFilteredRowModel().rows.length
-  const pageCount = table.getPageCount()
 
   return (
     <div className="space-y-3 min-w-0">
@@ -138,7 +147,7 @@ export function DataTable<TData, TValue>({
         <div className="flex items-center justify-between text-sm">
           <div className="flex items-center gap-4 text-gray-600 dark:text-gray-400">
             <span>
-              Showing {pageIndex * pageSize + 1}-{Math.min((pageIndex + 1) * pageSize, totalRows)} of {totalRows}
+              Showing {currentPageIndex * pageSize + 1}-{Math.min((currentPageIndex + 1) * pageSize, totalRows)} of {totalRows}
             </span>
             <div className="flex items-center gap-2">
               <label htmlFor="pageSize" className="text-gray-500 dark:text-gray-400">Rows:</label>
@@ -162,7 +171,7 @@ export function DataTable<TData, TValue>({
                 type="number"
                 min={1}
                 max={pageCount}
-                value={pageIndex + 1}
+                value={currentPageIndex + 1}
                 onChange={(e) => {
                   const page = e.target.value ? Number(e.target.value) - 1 : 0
                   table.setPageIndex(Math.max(0, Math.min(page, pageCount - 1)))
