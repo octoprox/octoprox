@@ -255,6 +255,8 @@ export interface BrightDataZone {
   type: string
   proxy_type: BrightDataProxyType
   password: string
+  country_counts: Record<string, number> | null
+  total_ips: number | null
 }
 
 export interface Credential {

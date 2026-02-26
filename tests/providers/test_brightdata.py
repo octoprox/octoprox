@@ -435,18 +435,16 @@ class TestBrightDataProviderSyncProxies:
         assert len(proxy_ids_to_remove) == 0
 
     @pytest.mark.asyncio
-    async def test_sync_port_based_discovers_ips(
+    async def test_sync_port_based_uses_route_ips_api(
         self, datacenter_connector: Connector, datacenter_credential: Credential
     ) -> None:
-        """Test sync_proxies discovers unique IPs for new port-based proxies."""
+        """Test sync_proxies uses route_ips API to assign IPs for port-based proxies."""
         provider = BrightDataProvider(datacenter_connector, datacenter_credential)
 
-        # Start with 0 proxies
         existing_proxies: list = []
 
-        # Mock discover_ip to return unique IPs
-        with patch.object(provider, "discover_ip", new_callable=AsyncMock) as mock_discover:
-            mock_discover.side_effect = [("1.2.3.4", "1.2.3.4"), ("5.6.7.8", "5.6.7.8")]
+        with patch.object(provider, "_fetch_route_ips", new_callable=AsyncMock) as mock_fetch:
+            mock_fetch.return_value = [("1.2.3.4", "us"), ("5.6.7.8", "de")]
 
             proxies_to_add, proxy_ids_to_remove = await provider.sync_proxies(existing_proxies)
 
@@ -454,8 +452,107 @@ class TestBrightDataProviderSyncProxies:
             assert len(proxy_ids_to_remove) == 0
             assert proxies_to_add[0].display_host == "1.2.3.4"
             assert proxies_to_add[0].metadata["hashed_ip"] == "1.2.3.4"
+            assert proxies_to_add[0].metadata["country"] == "us"
+            assert proxies_to_add[0].status == ProxyStatus.HEALTHY
             assert proxies_to_add[1].display_host == "5.6.7.8"
             assert proxies_to_add[1].metadata["hashed_ip"] == "5.6.7.8"
+            assert proxies_to_add[1].metadata["country"] == "de"
+            mock_fetch.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_sync_port_based_api_passes_country_to_api(
+        self, datacenter_credential: Credential
+    ) -> None:
+        """Test sync_proxies passes country_code to _fetch_route_ips for server-side filtering."""
+        connector = Connector(
+            id="test-connector",
+            name="Test",
+            credential_id="cred",
+            credential_type=CredentialType.BRIGHTDATA,
+            project_id="proj",
+            config={
+                "zone_name": "dc_zone",
+                "zone_password": "pass",
+                "proxy_type": BrightDataProxyType.DATACENTER.value,
+                "num_proxies": 2,
+                "country_code": "US",
+            },
+            enabled=True,
+        )
+        provider = BrightDataProvider(connector, datacenter_credential)
+
+        with patch.object(provider, "_fetch_route_ips", new_callable=AsyncMock) as mock_fetch:
+            # Simulate API returning only US IPs (server-side filtered)
+            mock_fetch.return_value = [
+                ("1.2.3.4", "us"),
+                ("9.10.11.12", "us"),
+            ]
+
+            proxies_to_add, _ = await provider.sync_proxies([])
+
+            # Verify country was passed to _fetch_route_ips
+            mock_fetch.assert_called_once_with(country="US")
+            assert len(proxies_to_add) == 2
+            assert proxies_to_add[0].display_host == "1.2.3.4"
+            assert proxies_to_add[1].display_host == "9.10.11.12"
+
+    @pytest.mark.asyncio
+    async def test_sync_port_based_api_deduplicates_existing(
+        self, datacenter_connector: Connector, datacenter_credential: Credential
+    ) -> None:
+        """Test sync_proxies excludes IPs already assigned to existing proxies."""
+        provider = BrightDataProvider(datacenter_connector, datacenter_credential)
+
+        existing = provider._create_port_proxy(0)
+        existing.metadata["discovered_ip"] = "1.2.3.4"
+
+        datacenter_connector.config["num_proxies"] = 2
+
+        with patch.object(provider, "_fetch_route_ips", new_callable=AsyncMock) as mock_fetch:
+            mock_fetch.return_value = [("1.2.3.4", "us"), ("5.6.7.8", "de")]
+
+            proxies_to_add, _ = await provider.sync_proxies([existing])
+
+            assert len(proxies_to_add) == 1
+            assert proxies_to_add[0].display_host == "5.6.7.8"
+
+    @pytest.mark.asyncio
+    async def test_sync_port_based_api_not_enough_ips(
+        self, datacenter_connector: Connector, datacenter_credential: Credential
+    ) -> None:
+        """Test sync_proxies assigns as many IPs as available when not enough."""
+        provider = BrightDataProvider(datacenter_connector, datacenter_credential)
+
+        with patch.object(provider, "_fetch_route_ips", new_callable=AsyncMock) as mock_fetch:
+            mock_fetch.return_value = [("1.2.3.4", "us")]  # Only 1 IP, need 2
+
+            proxies_to_add, _ = await provider.sync_proxies([])
+
+            assert len(proxies_to_add) == 1
+            assert proxies_to_add[0].display_host == "1.2.3.4"
+
+    @pytest.mark.asyncio
+    async def test_sync_port_based_falls_back_to_discovery(
+        self, datacenter_connector: Connector, datacenter_credential: Credential
+    ) -> None:
+        """Test sync_proxies falls back to discover_ip when route_ips API fails."""
+        provider = BrightDataProvider(datacenter_connector, datacenter_credential)
+
+        existing_proxies: list = []
+
+        with patch.object(provider, "_fetch_route_ips", new_callable=AsyncMock) as mock_fetch, \
+             patch.object(provider, "discover_ip", new_callable=AsyncMock) as mock_discover:
+            mock_fetch.return_value = []  # API failed
+            mock_discover.side_effect = [("1.2.3.4", "1.2.3.4"), ("5.6.7.8", "5.6.7.8")]
+
+            proxies_to_add, proxy_ids_to_remove = await provider.sync_proxies(existing_proxies)
+
+            assert len(proxies_to_add) == 2
+            assert len(proxy_ids_to_remove) == 0
+            assert proxies_to_add[0].display_host == "1.2.3.4"
+            assert proxies_to_add[1].display_host == "5.6.7.8"
+            mock_fetch.assert_called_once()
+            assert mock_discover.call_count == 2
 
 
 class TestBrightDataProviderRefreshIps:
@@ -475,20 +572,68 @@ class TestBrightDataProviderRefreshIps:
         assert len(to_remove) == 0
 
     @pytest.mark.asyncio
-    async def test_refresh_port_based_updates_ips(
+    async def test_refresh_port_based_retains_valid_ips(
         self, datacenter_connector: Connector, datacenter_credential: Credential
     ) -> None:
-        """Test refresh_ips updates IPs for port-based proxies."""
+        """Test refresh_ips retains proxies whose IPs are still in the route_ips pool."""
         provider = BrightDataProvider(datacenter_connector, datacenter_credential)
         proxies = [provider._create_port_proxy(i) for i in range(2)]
 
-        # Set initial IPs
+        proxies[0].metadata["discovered_ip"] = "1.2.3.4"
+        proxies[0].metadata["hashed_ip"] = "1.2.3.4"
+        proxies[1].metadata["discovered_ip"] = "5.6.7.8"
+        proxies[1].metadata["hashed_ip"] = "5.6.7.8"
+
+        with patch.object(provider, "_fetch_route_ips", new_callable=AsyncMock) as mock_fetch:
+            mock_fetch.return_value = [("1.2.3.4", "us"), ("5.6.7.8", "de"), ("9.10.11.12", "gb")]
+
+            updated, to_remove = await provider.refresh_ips(proxies)
+
+            assert len(updated) == 2
+            assert len(to_remove) == 0
+            assert updated[0].metadata.get("country") == "us"
+            assert updated[1].metadata.get("country") == "de"
+
+    @pytest.mark.asyncio
+    async def test_refresh_port_based_removes_stale_ips(
+        self, datacenter_connector: Connector, datacenter_credential: Credential
+    ) -> None:
+        """Test refresh_ips removes proxies whose IPs are no longer in the pool."""
+        provider = BrightDataProvider(datacenter_connector, datacenter_credential)
+        proxies = [provider._create_port_proxy(i) for i in range(2)]
+
+        proxies[0].metadata["discovered_ip"] = "1.2.3.4"
+        proxies[0].metadata["hashed_ip"] = "1.2.3.4"
+        proxies[1].metadata["discovered_ip"] = "5.6.7.8"
+        proxies[1].metadata["hashed_ip"] = "5.6.7.8"
+
+        with patch.object(provider, "_fetch_route_ips", new_callable=AsyncMock) as mock_fetch:
+            # Only 1.2.3.4 is still in the pool, 5.6.7.8 is gone
+            mock_fetch.return_value = [("1.2.3.4", "us"), ("9.10.11.12", "gb")]
+
+            updated, to_remove = await provider.refresh_ips(proxies)
+
+            assert len(updated) == 1
+            assert updated[0].metadata["discovered_ip"] == "1.2.3.4"
+            assert len(to_remove) == 1
+            assert to_remove[0] == proxies[1].id
+
+    @pytest.mark.asyncio
+    async def test_refresh_port_based_falls_back_to_discovery(
+        self, datacenter_connector: Connector, datacenter_credential: Credential
+    ) -> None:
+        """Test refresh_ips falls back to per-proxy discovery when API fails."""
+        provider = BrightDataProvider(datacenter_connector, datacenter_credential)
+        proxies = [provider._create_port_proxy(i) for i in range(2)]
+
         for proxy in proxies:
             proxy.display_host = "old.ip.address"
+            proxy.metadata["discovered_ip"] = "old.ip.address"
             proxy.metadata["hashed_ip"] = "old.ip.address"
 
-        # Mock discover_ip to return unique IPs
-        with patch.object(provider, "discover_ip", new_callable=AsyncMock) as mock_discover:
+        with patch.object(provider, "_fetch_route_ips", new_callable=AsyncMock) as mock_fetch, \
+             patch.object(provider, "discover_ip", new_callable=AsyncMock) as mock_discover:
+            mock_fetch.return_value = []  # API failed
             mock_discover.side_effect = [("5.6.7.8", "5.6.7.8"), ("9.10.11.12", "9.10.11.12")]
 
             updated, to_remove = await provider.refresh_ips(proxies)
@@ -499,8 +644,8 @@ class TestBrightDataProviderRefreshIps:
             assert updated[0].metadata["hashed_ip"] == "5.6.7.8"
             assert "5.6.7.8" in updated[0].username
             assert updated[1].display_host == "9.10.11.12"
-            assert updated[1].metadata["hashed_ip"] == "9.10.11.12"
-            assert "9.10.11.12" in updated[1].username
+            mock_fetch.assert_called_once()
+            assert mock_discover.call_count == 2
 
 
 class TestBrightDataConstants:
@@ -525,16 +670,18 @@ class TestBrightDataConstants:
 
 
 class TestBrightDataSyncDeduplicate:
-    """Tests for duplicate IP detection in sync_proxies."""
+    """Tests for duplicate IP detection in sync_proxies fallback (per-proxy discovery)."""
 
     @pytest.mark.asyncio
     async def test_sync_port_based_retries_on_duplicate_ip(
         self, datacenter_connector: Connector, datacenter_credential: Credential
     ) -> None:
-        """Test that sync retries when a duplicate IP is discovered."""
+        """Test that sync retries when a duplicate IP is discovered (fallback path)."""
         provider = BrightDataProvider(datacenter_connector, datacenter_credential)
 
-        with patch.object(provider, "discover_ip", new_callable=AsyncMock) as mock_discover:
+        with patch.object(provider, "_fetch_route_ips", new_callable=AsyncMock) as mock_fetch, \
+             patch.object(provider, "discover_ip", new_callable=AsyncMock) as mock_discover:
+            mock_fetch.return_value = []  # Force fallback
             # Slot 0: unique IP, Slot 1: dupe then unique on retry
             mock_discover.side_effect = [
                 ("1.2.3.4", "1.2.3.4"),  # slot 0 - unique
@@ -553,10 +700,12 @@ class TestBrightDataSyncDeduplicate:
     async def test_sync_port_based_gives_up_after_max_retries(
         self, datacenter_connector: Connector, datacenter_credential: Credential
     ) -> None:
-        """Test that sync gives up on a slot after max retries."""
+        """Test that sync gives up on a slot after max retries (fallback path)."""
         provider = BrightDataProvider(datacenter_connector, datacenter_credential)
 
-        with patch.object(provider, "discover_ip", new_callable=AsyncMock) as mock_discover:
+        with patch.object(provider, "_fetch_route_ips", new_callable=AsyncMock) as mock_fetch, \
+             patch.object(provider, "discover_ip", new_callable=AsyncMock) as mock_discover:
+            mock_fetch.return_value = []  # Force fallback
             # Slot 0: unique, Slot 1: 3 dupes (all retries exhausted)
             mock_discover.side_effect = [
                 ("1.2.3.4", "1.2.3.4"),  # slot 0 - unique
@@ -575,7 +724,7 @@ class TestBrightDataSyncDeduplicate:
     async def test_sync_port_based_stops_after_consecutive_failed_slots(
         self, datacenter_credential: Credential
     ) -> None:
-        """Test that sync stops after 3 consecutive failed slots."""
+        """Test that sync stops after 3 consecutive failed slots (fallback path)."""
         connector = Connector(
             id="test-connector",
             name="Test",
@@ -592,7 +741,9 @@ class TestBrightDataSyncDeduplicate:
         )
         provider = BrightDataProvider(connector, datacenter_credential)
 
-        with patch.object(provider, "discover_ip", new_callable=AsyncMock) as mock_discover:
+        with patch.object(provider, "_fetch_route_ips", new_callable=AsyncMock) as mock_fetch, \
+             patch.object(provider, "discover_ip", new_callable=AsyncMock) as mock_discover:
+            mock_fetch.return_value = []  # Force fallback
             # Slot 0: unique, Slots 1-3: all return dupes (3 retries each)
             mock_discover.side_effect = [
                 ("1.2.3.4", "1.2.3.4"),  # slot 0 - unique
@@ -611,7 +762,7 @@ class TestBrightDataSyncDeduplicate:
     async def test_sync_port_based_skips_ip_already_in_existing(
         self, datacenter_connector: Connector, datacenter_credential: Credential
     ) -> None:
-        """Test that IPs already in existing proxies trigger retries."""
+        """Test that IPs already in existing proxies trigger retries (fallback path)."""
         provider = BrightDataProvider(datacenter_connector, datacenter_credential)
 
         # Create an existing proxy with a known IP
@@ -621,7 +772,9 @@ class TestBrightDataSyncDeduplicate:
         # Configure for 2 proxies, 1 existing
         datacenter_connector.config["num_proxies"] = 2
 
-        with patch.object(provider, "discover_ip", new_callable=AsyncMock) as mock_discover:
+        with patch.object(provider, "_fetch_route_ips", new_callable=AsyncMock) as mock_fetch, \
+             patch.object(provider, "discover_ip", new_callable=AsyncMock) as mock_discover:
+            mock_fetch.return_value = []  # Force fallback
             # Slot 1: first attempt returns existing IP, second returns unique
             mock_discover.side_effect = [
                 ("1.2.3.4", "1.2.3.4"),  # dupe of existing
@@ -645,12 +798,40 @@ class TestBrightDataRefreshDeduplicate:
         provider = BrightDataProvider(datacenter_connector, datacenter_credential)
 
         proxies = [provider._create_port_proxy(i) for i in range(2)]
+        # Both proxies have the same IP (duplicate)
+        for p in proxies:
+            p.metadata["discovered_ip"] = "1.2.3.4"
+            p.metadata["hashed_ip"] = "1.2.3.4"
+            p.status = ProxyStatus.HEALTHY
+
+        with patch.object(provider, "_fetch_route_ips", new_callable=AsyncMock) as mock_fetch:
+            mock_fetch.return_value = [("1.2.3.4", "us"), ("5.6.7.8", "de")]
+
+            updated, to_remove = await provider.refresh_ips(proxies)
+
+            # First proxy is retained
+            assert len(updated) == 1
+            assert updated[0].metadata["discovered_ip"] == "1.2.3.4"
+            # Second proxy (duplicate) is removed
+            assert len(to_remove) == 1
+            assert to_remove[0] == proxies[1].id
+
+    @pytest.mark.asyncio
+    async def test_refresh_fallback_removes_duplicate_ip_proxy(
+        self, datacenter_connector: Connector, datacenter_credential: Credential
+    ) -> None:
+        """Test duplicate detection works in fallback per-proxy discovery path."""
+        provider = BrightDataProvider(datacenter_connector, datacenter_credential)
+
+        proxies = [provider._create_port_proxy(i) for i in range(2)]
         for p in proxies:
             p.metadata["discovered_ip"] = "old.ip"
             p.metadata["hashed_ip"] = "old.ip"
             p.status = ProxyStatus.HEALTHY
 
-        with patch.object(provider, "discover_ip", new_callable=AsyncMock) as mock_discover:
+        with patch.object(provider, "_fetch_route_ips", new_callable=AsyncMock) as mock_fetch, \
+             patch.object(provider, "discover_ip", new_callable=AsyncMock) as mock_discover:
+            mock_fetch.return_value = []  # Force fallback
             # Both proxies refresh to the same IP
             mock_discover.return_value = ("1.2.3.4", "1.2.3.4")
 
@@ -662,4 +843,75 @@ class TestBrightDataRefreshDeduplicate:
             # Second proxy is returned for removal
             assert len(to_remove) == 1
             assert to_remove[0] == proxies[1].id
+
+
+class TestBrightDataFetchRouteIps:
+    """Tests for BrightDataProvider._fetch_route_ips method."""
+
+    @pytest.mark.asyncio
+    async def test_fetch_route_ips_success(
+        self, datacenter_connector: Connector, datacenter_credential: Credential
+    ) -> None:
+        """Test _fetch_route_ips returns IP/country tuples on success."""
+        provider = BrightDataProvider(datacenter_connector, datacenter_credential)
+
+        with patch("api.providers.brightdata.brightdata_api.fetch_route_ips", new_callable=AsyncMock) as mock_api:
+            mock_api.return_value = [
+                {"ip": "1.2.3.4", "country": "us"},
+                {"ip": "5.6.7.8", "country": "de"},
+            ]
+
+            result = await provider._fetch_route_ips()
+
+            assert result == [("1.2.3.4", "us"), ("5.6.7.8", "de")]
+            mock_api.assert_called_once_with("test-token-456", "test_zone_dc", country=None)
+
+    @pytest.mark.asyncio
+    async def test_fetch_route_ips_with_country(
+        self, datacenter_connector: Connector, datacenter_credential: Credential
+    ) -> None:
+        """Test _fetch_route_ips passes country param to API."""
+        provider = BrightDataProvider(datacenter_connector, datacenter_credential)
+
+        with patch("api.providers.brightdata.brightdata_api.fetch_route_ips", new_callable=AsyncMock) as mock_api:
+            mock_api.return_value = [{"ip": "1.2.3.4", "country": "us"}]
+
+            result = await provider._fetch_route_ips(country="US")
+
+            assert result == [("1.2.3.4", "us")]
+            mock_api.assert_called_once_with("test-token-456", "test_zone_dc", country="US")
+
+    @pytest.mark.asyncio
+    async def test_fetch_route_ips_empty_response(
+        self, datacenter_connector: Connector, datacenter_credential: Credential
+    ) -> None:
+        """Test _fetch_route_ips returns empty list on empty response."""
+        provider = BrightDataProvider(datacenter_connector, datacenter_credential)
+
+        with patch("api.providers.brightdata.brightdata_api.fetch_route_ips", new_callable=AsyncMock) as mock_api:
+            mock_api.return_value = []
+
+            result = await provider._fetch_route_ips()
+
+            assert result == []
+
+    @pytest.mark.asyncio
+    async def test_fetch_route_ips_skips_entries_without_ip(
+        self, datacenter_connector: Connector, datacenter_credential: Credential
+    ) -> None:
+        """Test _fetch_route_ips skips entries missing the 'ip' field."""
+        provider = BrightDataProvider(datacenter_connector, datacenter_credential)
+
+        with patch("api.providers.brightdata.brightdata_api.fetch_route_ips", new_callable=AsyncMock) as mock_api:
+            mock_api.return_value = [
+                {"ip": "1.2.3.4", "country": "us"},
+                {"country": "de"},  # Missing ip field
+                {"ip": "5.6.7.8"},  # Missing country field (should default to "")
+            ]
+
+            result = await provider._fetch_route_ips()
+
+            assert len(result) == 2
+            assert result[0] == ("1.2.3.4", "us")
+            assert result[1] == ("5.6.7.8", "")
 

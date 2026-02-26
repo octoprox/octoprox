@@ -85,7 +85,7 @@ async def create_credential(
     # Validate BrightData token if applicable
     if credential_data.type == CredentialType.BRIGHTDATA:
         from api.models.credential import BrightDataCredentialConfig
-        from api.routes.brightdata import validate_token
+        from api.services.brightdata_api import validate_token
 
         # Get token from config dict (before full validation)
         token = credential_data.config.get("token")
@@ -155,7 +155,7 @@ async def update_credential(
         # Handle BrightData specially - need to validate token with API if it changed
         if credential_type_enum == CredentialType.BRIGHTDATA:
             from api.models.credential import BrightDataCredentialConfig
-            from api.routes.brightdata import validate_token
+            from api.services.brightdata_api import validate_token
 
             new_token = credential_data.config.get("token")
             old_token = credential.config.get("token") if credential.config else None

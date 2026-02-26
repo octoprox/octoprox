@@ -512,3 +512,6 @@ class BrightDataZone(BaseModel):
     type: str  # "res_rotating", "dc_shared", etc.
     proxy_type: str  # "residential", "datacenter", etc. (mapped)
     password: str
+    # IP info for ISP/DC zones (populated via route_ips API)
+    country_counts: dict[str, int] | None = None  # e.g. {"us": 5, "de": 3}
+    total_ips: int | None = None

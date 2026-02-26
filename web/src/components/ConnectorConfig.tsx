@@ -690,19 +690,40 @@ export default function ConnectorConfig() {
     if (type === 'brightdata') {
       const proxyType = getBrightDataProxyType()
       const isSessionBased = isSessionBasedBrightData()
-      const countryOptions: RichSelectOption[] = [
-        { value: '', label: 'All Countries', description: 'No geo-targeting' },
-        ...(optionsData?.oxylabs_countries || []).map((c) => ({
-          value: c.code,
-          label: c.name,
-          description: c.code,
-        })),
-      ]
+      const selectedZone = brightDataZones?.find(z => z.name === config.zone_name)
+      const selectedZoneIsPortBased = selectedZone && !isSessionBased
+
+      const countryOptions: RichSelectOption[] = (() => {
+        if (selectedZoneIsPortBased && selectedZone?.country_counts) {
+          // Use actual countries from route_ips API for ISP/DC zones
+          return [
+            { value: '', label: 'All Countries', description: `${selectedZone.total_ips ?? 0} IPs total` },
+            ...Object.entries(selectedZone.country_counts)
+              .sort(([, a], [, b]) => b - a)
+              .map(([cc, count]) => ({
+                value: cc.toUpperCase(),
+                label: cc.toUpperCase(),
+                description: `${count} IPs`,
+              })),
+          ]
+        }
+        // Fallback for session-based or zones without IP data
+        return [
+          { value: '', label: 'All Countries', description: 'No geo-targeting' },
+          ...(optionsData?.oxylabs_countries || []).map((c) => ({
+            value: c.code,
+            label: c.name,
+            description: c.code,
+          })),
+        ]
+      })()
 
       const zoneOptions: RichSelectOption[] = (brightDataZones || []).map((zone) => ({
         value: zone.name,
         label: zone.name,
-        description: `${zone.proxy_type} (${zone.type})`,
+        description: zone.total_ips != null
+          ? `${zone.proxy_type} (${zone.type}) — ${zone.total_ips} IPs`
+          : `${zone.proxy_type} (${zone.type})`,
       }))
 
       const brightDataTabs: { id: ConfigTab; label: string }[] = [
@@ -732,77 +753,137 @@ export default function ConnectorConfig() {
           </div>
 
           {/* Tab Content */}
-          <div className="space-y-4 min-h-[300px]">
+          <div className="min-h-[250px]">
             {activeConfigTab === 'infrastructure' && (
-              <>
-                <div>
-                  <Label className="text-xs text-gray-600 dark:text-gray-400">
-                    Zone
-                    <span className="text-red-500 ml-1">*</span>
-                  </Label>
-                  <RichSelect
-                    options={zoneOptions}
-                    value={config.zone_name || ''}
-                    onChange={(val) => {
-                      // When zone changes, auto-populate zone_password and proxy_type
-                      const zone = brightDataZones?.find(z => z.name === val)
-                      if (zone) {
-                        // Update all fields at once to avoid stale state issues
-                        setFormData(prev => ({
-                          ...prev,
-                          config: {
-                            ...prev.config,
-                            zone_name: val,
-                            zone_password: zone.password,
-                            proxy_type: zone.proxy_type,
+              <div className="space-y-3">
+                <div className="grid grid-cols-2 gap-x-4 gap-y-3">
+                  <div>
+                    <Label className="text-xs text-gray-600 dark:text-gray-400">
+                      Zone
+                      <span className="text-red-500 ml-1">*</span>
+                    </Label>
+                    <RichSelect
+                      options={zoneOptions}
+                      value={config.zone_name || ''}
+                      onChange={(val) => {
+                        const zone = brightDataZones?.find(z => z.name === val)
+                        if (zone) {
+                          setFormData(prev => ({
+                            ...prev,
+                            config: {
+                              ...prev.config,
+                              zone_name: val,
+                              zone_password: zone.password,
+                              proxy_type: zone.proxy_type,
+                            }
+                          }))
+                        }
+                      }}
+                      placeholder="Select zone"
+                    />
+                    <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
+                      Proxy type is determined by the zone.
+                    </p>
+                  </div>
+
+                  <div>
+                    <Label className="text-xs text-gray-600 dark:text-gray-400">
+                      Zone Password
+                      <span className="text-red-500 ml-1">*</span>
+                    </Label>
+                    <Input
+                      type="text"
+                      value={config.zone_password || ''}
+                      onChange={(e) => onChange('zone_password', e.target.value)}
+                      className="px-3 py-1.5 text-sm"
+                      placeholder="Auto-populated from zone"
+                      required
+                    />
+                    <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
+                      Auto-populated when selecting a zone.
+                    </p>
+                  </div>
+
+                  <div>
+                    <Label className="text-xs text-gray-600 dark:text-gray-400">
+                      Number of Proxies
+                      <span className="text-red-500 ml-1">*</span>
+                    </Label>
+                    {(() => {
+                      const cc = config.country_code?.toLowerCase()
+                      const maxIps = selectedZoneIsPortBased && selectedZone?.total_ips != null
+                        ? (cc && selectedZone.country_counts?.[cc]
+                            ? selectedZone.country_counts[cc]
+                            : selectedZone.total_ips)
+                        : undefined
+                      return (
+                        <>
+                          <Input
+                            type="number"
+                            min="1"
+                            max={maxIps}
+                            value={config.num_proxies || '1'}
+                            onChange={(e) => onChange('num_proxies', e.target.value)}
+                            className="px-3 py-1.5 text-sm"
+                            placeholder="1"
+                            required
+                          />
+                          {maxIps != null && (
+                            <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
+                              Max {maxIps}{cc ? ` in ${cc.toUpperCase()}` : ''}
+                            </p>
+                          )}
+                        </>
+                      )
+                    })()}
+                  </div>
+
+                  <div>
+                    <Label className="text-xs text-gray-600 dark:text-gray-400">
+                      Country
+                    </Label>
+                    <RichSelect
+                      options={countryOptions}
+                      value={config.country_code || ''}
+                      onChange={(val) => {
+                        onChange('country_code', val)
+                        if (selectedZoneIsPortBased && selectedZone?.total_ips != null) {
+                          const newMax = val && selectedZone.country_counts?.[val.toLowerCase()]
+                            ? selectedZone.country_counts[val.toLowerCase()]
+                            : selectedZone.total_ips
+                          const currentNum = parseInt(config.num_proxies || '1', 10)
+                          if (currentNum > newMax) {
+                            onChange('num_proxies', String(newMax))
                           }
-                        }))
-                      }
-                    }}
-                    placeholder="Select zone"
-                  />
-                  <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
-                    Select a BrightData zone. Proxy type is determined by the zone.
-                  </p>
+                        }
+                      }}
+                      placeholder="Select country (optional)"
+                    />
+                    <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
+                      Optional geo-targeting. All proxy types.
+                    </p>
+                  </div>
                 </div>
 
-                <div>
-                  <Label className="text-xs text-gray-600 dark:text-gray-400">
-                    Zone Password
-                    <span className="text-red-500 ml-1">*</span>
-                  </Label>
-                  <Input
-                    type="text"
-                    value={config.zone_password || ''}
-                    onChange={(e) => onChange('zone_password', e.target.value)}
-                    className="px-3 py-1.5 text-sm"
-                    placeholder="Auto-populated from zone"
-                    required
-                  />
-                  <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
-                    Auto-populated when selecting a zone. Can be edited if needed.
-                  </p>
-                </div>
+                {selectedZoneIsPortBased && selectedZone?.total_ips != null && (
+                  <div className="text-sm bg-blue-50 dark:bg-blue-900/20 p-3 rounded-lg">
+                    <p className="font-medium text-blue-700 dark:text-blue-300">
+                      {selectedZone.total_ips} IPs available in this zone
+                    </p>
+                    {selectedZone.country_counts && Object.keys(selectedZone.country_counts).length > 0 && (
+                      <p className="text-blue-600 dark:text-blue-400 mt-1">
+                        {Object.entries(selectedZone.country_counts)
+                          .sort(([, a], [, b]) => b - a)
+                          .map(([cc, count]) => `${cc.toUpperCase()} (${count})`)
+                          .join(', ')}
+                      </p>
+                    )}
+                  </div>
+                )}
 
-                <div>
-                  <Label className="text-xs text-gray-600 dark:text-gray-400">
-                    Number of Proxies
-                    <span className="text-red-500 ml-1">*</span>
-                  </Label>
-                  <Input
-                    type="number"
-                    min="1"
-                    value={config.num_proxies || '1'}
-                    onChange={(e) => onChange('num_proxies', e.target.value)}
-                    className="px-3 py-1.5 text-sm"
-                    placeholder="1"
-                    required
-                  />
-                </div>
-
-                {proxyType && !isSessionBased && (
+                {proxyType && !isSessionBased && !selectedZoneIsPortBased && (
                   <p className="text-sm text-gray-500 dark:text-gray-400 bg-gray-50 dark:bg-gray-700 p-3 rounded-lg">
-                    Port-based proxy type ({proxyType}). IPs will be discovered and refreshed every 24 hours.
+                    Port-based proxy type ({proxyType}). IPs are assigned from your zone's IP pool and refreshed every 24 hours.
                   </p>
                 )}
 
@@ -817,26 +898,11 @@ export default function ConnectorConfig() {
                     Please select a zone to continue.
                   </p>
                 )}
-              </>
+              </div>
             )}
 
             {activeConfigTab === 'advanced' && (
               <>
-                <div>
-                  <Label className="text-xs text-gray-600 dark:text-gray-400">
-                    Country
-                  </Label>
-                  <RichSelect
-                    options={countryOptions}
-                    value={config.country_code || ''}
-                    onChange={(val) => onChange('country_code', val)}
-                    placeholder="Select country (optional)"
-                  />
-                  <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
-                    Leave as "All Countries" for no geo-targeting. Supported by all proxy types.
-                  </p>
-                </div>
-
                 <div>
                   <Label className="text-xs text-gray-600 dark:text-gray-400">
                     Healthcheck URL
