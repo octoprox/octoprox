@@ -221,26 +221,63 @@ class BrightDataProvider(ProxyProvider):
         proxy_ids_to_remove: list[str] = []
 
         if current_count < num_proxies:
+            # Collect existing discovered IPs for dedup
+            existing_ips = {
+                p.metadata.get("discovered_ip")
+                for p in existing_proxies
+                if p.metadata.get("discovered_ip")
+            }
+            consecutive_failed_slots = 0
+            max_retries_per_slot = 3
+            max_consecutive_failed_slots = 3
+
             # Add new proxies
             for i in range(current_count, num_proxies):
                 if self.is_session_based():
                     proxy = self._create_session_proxy(i)
                     proxies_to_add.append(proxy)
                 else:
-                    # Port-based: create and discover IP
+                    # Port-based: create and discover IP, retry on duplicate
                     proxy = self._create_port_proxy(i)
-                    display_ip, hashed_ip = await self.discover_ip(proxy)
-                    if display_ip and hashed_ip:
-                        proxy.display_host = display_ip
-                        proxy.metadata["discovered_ip"] = display_ip
-                        proxy.metadata["hashed_ip"] = hashed_ip
-                        # Update username with hashed IP
-                        proxy.username = self._build_username(hashed_ip=hashed_ip)
-                        proxy.status = ProxyStatus.HEALTHY
-                        proxies_to_add.append(proxy)
+                    added = False
+
+                    for attempt in range(max_retries_per_slot):
+                        display_ip, hashed_ip = await self.discover_ip(proxy)
+                        if display_ip and hashed_ip:
+                            if display_ip not in existing_ips:
+                                existing_ips.add(display_ip)
+                                proxy.display_host = display_ip
+                                proxy.metadata["discovered_ip"] = display_ip
+                                proxy.metadata["hashed_ip"] = hashed_ip
+                                proxy.username = self._build_username(hashed_ip=hashed_ip)
+                                proxy.status = ProxyStatus.HEALTHY
+                                proxies_to_add.append(proxy)
+                                added = True
+                                break
+                            logger.warning(
+                                "Duplicate IP discovered, retrying",
+                                connector_id=self.connector.id,
+                                index=i,
+                                ip=display_ip,
+                                attempt=attempt + 1,
+                            )
+                        else:
+                            logger.warning(
+                                "Failed to discover IP for new proxy",
+                                index=i,
+                            )
+                            break  # Discovery failed entirely, stop retrying
+
+                    if added:
+                        consecutive_failed_slots = 0
                     else:
-                        logger.warning("Failed to discover IP for new proxy", index=i)
-                        break  # Stop on first failure
+                        consecutive_failed_slots += 1
+                        if consecutive_failed_slots >= max_consecutive_failed_slots:
+                            logger.warning(
+                                "Too many consecutive failed slots, stopping discovery",
+                                connector_id=self.connector.id,
+                            )
+                            break
 
         elif current_count > num_proxies:
             # Remove excess proxies
@@ -249,15 +286,34 @@ class BrightDataProvider(ProxyProvider):
 
         return proxies_to_add, proxy_ids_to_remove
 
-    async def refresh_ips(self, proxies: list[Proxy]) -> list[Proxy]:
-        """Refresh IPs for port-based proxies (called by syncer every 24h)."""
+    async def refresh_ips(
+        self, proxies: list[Proxy]
+    ) -> tuple[list[Proxy], list[str]]:
+        """Refresh IPs for port-based proxies (called by syncer every 24h).
+
+        Returns:
+            Tuple of (updated_proxies, duplicate_proxy_ids_to_remove)
+        """
         if self.is_session_based():
-            return []
+            return [], []
 
         updated_proxies: list[Proxy] = []
+        proxy_ids_to_remove: list[str] = []
+        seen_ips: set[str] = set()
+
         for proxy in proxies:
             display_ip, hashed_ip = await self.discover_ip(proxy)
             if display_ip and hashed_ip:
+                if display_ip in seen_ips:
+                    logger.warning(
+                        "Duplicate IP on refresh, removing proxy",
+                        proxy_id=proxy.id,
+                        ip=display_ip,
+                    )
+                    proxy_ids_to_remove.append(proxy.id)
+                    continue
+
+                seen_ips.add(display_ip)
                 old_ip = proxy.metadata.get("discovered_ip")
                 old_hashed = proxy.metadata.get("hashed_ip")
 
@@ -276,5 +332,5 @@ class BrightDataProvider(ProxyProvider):
 
                 updated_proxies.append(proxy)
 
-        return updated_proxies
+        return updated_proxies, proxy_ids_to_remove
 

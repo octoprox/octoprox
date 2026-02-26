@@ -275,6 +275,14 @@ class OxylabsProvider(ProxyProvider):
                 if proxy.port not in target_ports:
                     proxy_ids_to_remove.append(proxy.id)
 
+            # Collect existing discovered IPs for dedup
+            existing_ips = {
+                p.metadata.get("discovered_ip")
+                for p in existing_proxies
+                if p.metadata.get("discovered_ip")
+            }
+            consecutive_duplicates = 0
+
             # Add new proxies for missing ports, stop on first failure
             for port in ports_to_add:
                 index = port - self._base_port
@@ -283,6 +291,25 @@ class OxylabsProvider(ProxyProvider):
                 # Try to discover IP
                 ip = await self.discover_ip(proxy)
                 if ip:
+                    if ip in existing_ips:
+                        consecutive_duplicates += 1
+                        logger.warning(
+                            "Duplicate IP discovered, skipping port",
+                            connector_id=self.connector.id,
+                            port=port,
+                            ip=ip,
+                        )
+                        if consecutive_duplicates >= 3:
+                            logger.warning(
+                                "Too many consecutive duplicate IPs, stopping discovery",
+                                connector_id=self.connector.id,
+                            )
+                            break
+                        continue
+
+                    consecutive_duplicates = 0
+                    existing_ips.add(ip)
+
                     # Store discovered IP in display_host for UI display
                     # host remains the Oxylabs endpoint for routing
                     proxy.display_host = ip
@@ -300,7 +327,9 @@ class OxylabsProvider(ProxyProvider):
 
         return proxies_to_add, proxy_ids_to_remove
 
-    async def refresh_ips(self, proxies: list[Proxy]) -> list[Proxy]:
+    async def refresh_ips(
+        self, proxies: list[Proxy]
+    ) -> tuple[list[Proxy], list[str]]:
         """Refresh discovered IPs for port-based proxies.
 
         Called periodically (e.g., every 24h) to update IP metadata.
@@ -310,15 +339,28 @@ class OxylabsProvider(ProxyProvider):
             proxies: List of proxies to refresh
 
         Returns:
-            List of proxies with updated IP metadata
+            Tuple of (updated_proxies, duplicate_proxy_ids_to_remove)
         """
         if self.is_session_based():
-            return proxies
+            return proxies, []
 
         updated_proxies: list[Proxy] = []
+        proxy_ids_to_remove: list[str] = []
+        seen_ips: set[str] = set()
+
         for proxy in proxies:
             ip = await self.discover_ip(proxy)
             if ip:
+                if ip in seen_ips:
+                    logger.warning(
+                        "Duplicate IP on refresh, removing proxy",
+                        proxy_id=proxy.id,
+                        ip=ip,
+                    )
+                    proxy_ids_to_remove.append(proxy.id)
+                    continue
+
+                seen_ips.add(ip)
                 old_ip = proxy.metadata.get("discovered_ip")
                 if ip != old_ip:
                     logger.info(
@@ -333,4 +375,4 @@ class OxylabsProvider(ProxyProvider):
                 proxy.metadata["discovered_ip"] = ip
             updated_proxies.append(proxy)
 
-        return updated_proxies
+        return updated_proxies, proxy_ids_to_remove

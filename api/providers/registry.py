@@ -39,11 +39,13 @@ class SyncableProvider(Protocol):
         """
         ...
 
-    async def refresh_ips(self, proxies: list[Proxy]) -> list[Proxy]:
+    async def refresh_ips(
+        self, proxies: list[Proxy]
+    ) -> tuple[list[Proxy], list[str]]:
         """Refresh IPs for port-based proxies.
 
         Returns:
-            List of proxies with updated IP metadata
+            Tuple of (updated_proxies, duplicate_proxy_ids_to_remove)
         """
         ...
 

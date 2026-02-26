@@ -156,11 +156,15 @@ class ProxyProviderSyncer:
         )
 
         # Refresh IPs
-        updated_proxies = await provider.refresh_ips(proxies)
+        updated_proxies, proxy_ids_to_remove = await provider.refresh_ips(proxies)
 
         # Emit update signals for changed proxies
         for proxy in updated_proxies:
             await proxy_update_requested.send_async(self, proxy=proxy)
+
+        # Remove proxies with duplicate IPs (sync will backfill via _on_proxy_removed)
+        for proxy_id in proxy_ids_to_remove:
+            await proxy_remove_requested.send_async(self, proxy_id=proxy_id)
 
     async def _on_connector_sync_requested(
         self, sender: Any, connector: Connector

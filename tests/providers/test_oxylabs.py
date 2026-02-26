@@ -9,6 +9,7 @@ import pytest
 
 from api.models.connector import Connector
 from api.models.credential import Credential, CredentialType, OxylabsProxyType
+from api.models.proxy import ProxyStatus
 from api.providers.oxylabs import (
     OXYLABS_ENDPOINTS,
     PORT_BASED_TYPES,
@@ -297,3 +298,126 @@ class TestOxylabsEndpoints:
         for proxy_type in PORT_BASED_TYPES:
             _, port = OXYLABS_ENDPOINTS[proxy_type]
             assert port == 8001
+
+
+class TestOxylabsSyncDeduplicate:
+    """Tests for duplicate IP detection in sync_proxies."""
+
+    @pytest.mark.asyncio
+    async def test_sync_port_based_skips_duplicate_ips(
+        self, datacenter_connector: Connector, datacenter_credential: Credential
+    ) -> None:
+        """Test that duplicate IPs are skipped during sync."""
+        provider = OxylabsProvider(datacenter_connector, datacenter_credential)
+
+        # Mock discover_ip to return the same IP for both ports
+        with patch.object(provider, "discover_ip", new_callable=AsyncMock) as mock_discover:
+            mock_discover.return_value = "1.2.3.4"
+
+            proxies_to_add, _ = await provider.sync_proxies([])
+
+            # Only 1 proxy should be added despite 2 requested (num_proxies=2)
+            assert len(proxies_to_add) == 1
+            assert proxies_to_add[0].metadata["discovered_ip"] == "1.2.3.4"
+
+    @pytest.mark.asyncio
+    async def test_sync_port_based_adds_unique_ips(
+        self, datacenter_connector: Connector, datacenter_credential: Credential
+    ) -> None:
+        """Test that unique IPs are all added during sync."""
+        provider = OxylabsProvider(datacenter_connector, datacenter_credential)
+
+        with patch.object(provider, "discover_ip", new_callable=AsyncMock) as mock_discover:
+            mock_discover.side_effect = ["1.2.3.4", "5.6.7.8"]
+
+            proxies_to_add, _ = await provider.sync_proxies([])
+
+            assert len(proxies_to_add) == 2
+            assert proxies_to_add[0].metadata["discovered_ip"] == "1.2.3.4"
+            assert proxies_to_add[1].metadata["discovered_ip"] == "5.6.7.8"
+
+    @pytest.mark.asyncio
+    async def test_sync_port_based_stops_after_consecutive_duplicates(
+        self, datacenter_credential: Credential
+    ) -> None:
+        """Test that sync stops after 3 consecutive duplicate IPs."""
+        connector = Connector(
+            id="test-connector",
+            name="Test",
+            credential_id="cred",
+            credential_type=CredentialType.OXYLABS,
+            project_id="proj",
+            config={"num_proxies": 5},
+            enabled=True,
+        )
+        provider = OxylabsProvider(connector, datacenter_credential)
+
+        with patch.object(provider, "discover_ip", new_callable=AsyncMock) as mock_discover:
+            # First port gets unique IP, then 3 consecutive duplicates
+            mock_discover.side_effect = ["1.2.3.4", "1.2.3.4", "1.2.3.4", "1.2.3.4"]
+
+            proxies_to_add, _ = await provider.sync_proxies([])
+
+            # Only 1 unique proxy added, then 3 consecutive dupes triggers stop
+            assert len(proxies_to_add) == 1
+            # Should have stopped after 3 consecutive duplicates (tried 4 ports total)
+            assert mock_discover.call_count == 4
+
+    @pytest.mark.asyncio
+    async def test_sync_port_based_skips_ip_already_in_existing(
+        self, datacenter_credential: Credential
+    ) -> None:
+        """Test that IPs already in existing proxies are skipped."""
+        connector = Connector(
+            id="test-connector",
+            name="Test",
+            credential_id="cred",
+            credential_type=CredentialType.OXYLABS,
+            project_id="proj",
+            config={"num_proxies": 3},
+            enabled=True,
+        )
+        provider = OxylabsProvider(connector, datacenter_credential)
+
+        # Create an existing proxy with a known IP
+        existing = provider._create_port_proxy(8001, 0)
+        existing.metadata["discovered_ip"] = "1.2.3.4"
+
+        with patch.object(provider, "discover_ip", new_callable=AsyncMock) as mock_discover:
+            # Port 8002 returns same IP as existing, port 8003 returns new IP
+            mock_discover.side_effect = ["1.2.3.4", "5.6.7.8"]
+
+            proxies_to_add, _ = await provider.sync_proxies([existing])
+
+            # Only the unique IP should be added
+            assert len(proxies_to_add) == 1
+            assert proxies_to_add[0].metadata["discovered_ip"] == "5.6.7.8"
+
+
+class TestOxylabsRefreshDeduplicate:
+    """Tests for duplicate IP detection in refresh_ips."""
+
+    @pytest.mark.asyncio
+    async def test_refresh_removes_duplicate_ip_proxy(
+        self, datacenter_connector: Connector, datacenter_credential: Credential
+    ) -> None:
+        """Test that proxies with duplicate IPs on refresh are returned for removal."""
+        provider = OxylabsProvider(datacenter_connector, datacenter_credential)
+
+        proxies = [provider._create_port_proxy(8001, 0), provider._create_port_proxy(8002, 1)]
+        for p in proxies:
+            p.metadata["discovered_ip"] = "old.ip"
+            p.status = ProxyStatus.HEALTHY
+
+        with patch.object(provider, "discover_ip", new_callable=AsyncMock) as mock_discover:
+            # Both proxies refresh to the same IP
+            mock_discover.return_value = "1.2.3.4"
+
+            updated, to_remove = await provider.refresh_ips(proxies)
+
+            # First proxy gets updated normally
+            assert len(updated) == 1
+            assert updated[0].display_host == "1.2.3.4"
+            # Second proxy is returned for removal
+            assert len(to_remove) == 1
+            assert to_remove[0] == proxies[1].id
