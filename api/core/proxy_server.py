@@ -25,7 +25,7 @@ from python_socks.async_.asyncio import Proxy as SocksProxy
 
 from api.core.config import settings
 from api.core.signals import request_completed, request_rejected
-from api.models.project import Project
+from api.core.username_params import AuthResult, parse_proxy_username
 from api.models.proxy import Proxy, ProxyProtocol
 
 if TYPE_CHECKING:
@@ -122,17 +122,19 @@ class ProxyServer:
             )
         return self._proxy_manager.select_proxy(session_id)
 
-    def _authenticate_project(self, headers: dict[str, str]) -> Project | None:
+    def _authenticate_project(self, headers: dict[str, str]) -> AuthResult | None:
         """Authenticate a client request using Proxy-Authorization header.
 
         Expects HTTP Basic Auth in the Proxy-Authorization header with
-        project username and password.
+        project username and password. The username may contain a session ID
+        suffix in the format: <username>-sessid-<session_id>
 
         Args:
             headers: Request headers (lowercase keys)
 
         Returns:
-            Authenticated Project or None if authentication fails.
+            AuthResult with authenticated Project and optional sessid,
+            or None if authentication fails.
         """
         auth_header = headers.get("proxy-authorization", "")
         if not auth_header:
@@ -151,10 +153,13 @@ class ProxyServer:
         except (ValueError, UnicodeDecodeError):
             return None
 
-        # Look up project by username
-        project = self._proxy_manager.get_project_by_username(username)
+        # Parse session parameters from username
+        real_username, sessid = parse_proxy_username(username)
+
+        # Look up project by the real username (without session suffix)
+        project = self._proxy_manager.get_project_by_username(real_username)
         if not project:
-            logger.debug("Project not found for username", username=username)
+            logger.debug("Project not found for username", username=real_username)
             return None
 
         # Verify password (plain text comparison as per requirements)
@@ -162,7 +167,7 @@ class ProxyServer:
             logger.debug("Invalid password for project", project_id=project.id)
             return None
 
-        return project
+        return AuthResult(project=project, sessid=sessid)
 
     async def _connect_via_proxy(
         self,
@@ -242,9 +247,9 @@ class ProxyServer:
             headers = await self._read_headers(client_reader)
 
             # Authenticate project using Proxy-Authorization header
-            project = self._authenticate_project(headers)
-            logger.debug("Authenticated project", headers=headers, project=project)
-            if not project:
+            auth_result = self._authenticate_project(headers)
+            logger.debug("Authenticated project", headers=headers, auth_result=auth_result)
+            if not auth_result:
                 await self._send_error(
                     client_writer,
                     407,
@@ -253,21 +258,25 @@ class ProxyServer:
                 )
                 return
 
+            project = auth_result.project
+            sessid = auth_result.sessid
             project_id = project.id
             logger.debug(
                 "Authenticated project",
                 project_id=project_id,
                 project_name=project.name,
                 client_addr=client_addr,
+                sessid=sessid,
             )
 
             if method.upper() == "CONNECT":
                 await self._handle_connect(
-                    client_reader, client_writer, target, headers, project_id, client_ip
+                    client_reader, client_writer, target, headers, project_id, client_ip, sessid
                 )
             else:
                 await self._handle_http(
-                    client_reader, client_writer, method, target, version, headers, project_id, client_ip
+                    client_reader, client_writer, method, target, version, headers, project_id,
+                    client_ip, sessid
                 )
 
         except asyncio.CancelledError:
@@ -332,6 +341,7 @@ class ProxyServer:
         headers: dict[str, str],
         project_id: str,
         client_ip: str | None = None,
+        sessid: str | None = None,
     ) -> None:
         """Handle HTTPS CONNECT tunneling."""
         # Parse target host:port before proxy selection (needed for domain filtering)
@@ -342,9 +352,12 @@ class ProxyServer:
             target_host = target
             target_port = 443  # Default HTTPS port
 
+        # Use explicit session ID from username if provided, otherwise fall back to client IP
+        session_id = sessid if sessid is not None else client_ip
+
         # Select upstream proxy scoped to the authenticated project
         proxy = self._get_upstream_proxy(
-            project_id=project_id, session_id=client_ip, target_host=target_host
+            project_id=project_id, session_id=session_id, target_host=target_host
         )
         if not proxy:
             await self._send_error(client_writer, 502, "Bad Gateway", "No upstream proxy available for this domain")
@@ -533,14 +546,18 @@ class ProxyServer:
         headers: dict[str, str],
         project_id: str,
         client_ip: str | None = None,
+        sessid: str | None = None,
     ) -> None:
         """Handle regular HTTP request forwarding."""
         # Parse target host before proxy selection (needed for domain filtering)
         parsed_host, _, _ = self._parse_http_url(target)
 
+        # Use explicit session ID from username if provided, otherwise fall back to client IP
+        session_id = sessid if sessid is not None else client_ip
+
         # Select upstream proxy scoped to the authenticated project
         proxy = self._get_upstream_proxy(
-            project_id=project_id, session_id=client_ip, target_host=parsed_host
+            project_id=project_id, session_id=session_id, target_host=parsed_host
         )
         if not proxy:
             await self._send_error(client_writer, 502, "Bad Gateway", "No upstream proxy available for this domain")

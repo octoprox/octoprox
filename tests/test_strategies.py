@@ -159,6 +159,64 @@ class TestStickySessionStrategy:
         second_result = strategy.select(sample_proxies, session_id=session_id)
         assert second_result.id == first_result.id  # Consistent hashing
 
+    def test_sessid_produces_consistent_selection(self, sample_proxies: list[Proxy]):
+        """Test that a session ID (as extracted from username) produces consistent results."""
+        strategy = StickySessionStrategy()
+        sessid = "abc123"
+
+        first_result = strategy.select(sample_proxies, session_id=sessid)
+        assert first_result is not None
+
+        for _ in range(5):
+            result = strategy.select(sample_proxies, session_id=sessid)
+            assert result.id == first_result.id
+
+    def test_different_sessids_can_map_to_different_proxies(self, sample_proxies: list[Proxy]):
+        """Test that different session IDs can map to different proxies."""
+        strategy = StickySessionStrategy()
+
+        results = {}
+        for i in range(20):
+            sessid = f"session-{i}"
+            result = strategy.select(sample_proxies, session_id=sessid)
+            results[sessid] = result.id
+
+        # With 20 different session IDs and 3 proxies, we should see more than 1 proxy used
+        unique_proxies = set(results.values())
+        assert len(unique_proxies) > 1
+
+    def test_cached_proxy_survives_list_reorder(self, sample_proxies: list[Proxy]):
+        """Test that a cached session binding is stable even if the proxy list order changes."""
+        strategy = StickySessionStrategy()
+        sessid = "stable-session"
+
+        first_result = strategy.select(sample_proxies, session_id=sessid)
+
+        # Reverse the proxy list order
+        reordered = list(reversed(sample_proxies))
+        result = strategy.select(reordered, session_id=sessid)
+        assert result.id == first_result.id
+
+    def test_removed_proxy_triggers_reassignment(self):
+        """Test that removing the bound proxy causes reassignment to another proxy."""
+        strategy = StickySessionStrategy()
+        proxies = [
+            Proxy(id="proxy-a", host="a.example.com", port=8080, connector_id="conn-1"),
+            Proxy(id="proxy-b", host="b.example.com", port=8080, connector_id="conn-1"),
+        ]
+        sessid = "sticky-session"
+
+        first_result = strategy.select(proxies, session_id=sessid)
+
+        # Remove the selected proxy from the list (simulating it becoming unhealthy)
+        remaining = [p for p in proxies if p.id != first_result.id]
+        result = strategy.select(remaining, session_id=sessid)
+
+        # Should get the other proxy
+        assert result is not None
+        assert result.id != first_result.id
+        assert result.id in [p.id for p in remaining]
+
 
 class TestHealthBasedStrategy:
     """Tests for HealthBasedStrategy."""
