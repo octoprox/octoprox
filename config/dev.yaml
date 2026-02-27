@@ -25,6 +25,7 @@ database:
 proxy:
   # Default routing strategy: round_robin, least_used, random, sticky, health_based
   default_strategy: round_robin
+  ip_refresh_interval: 3600
   
   # Health check settings
   health_check:

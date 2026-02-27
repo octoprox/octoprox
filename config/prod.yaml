@@ -29,6 +29,7 @@ database:
 
 proxy:
   default_strategy: health_based
+  ip_refresh_interval: 3600
 
   health_check:
     enabled: true

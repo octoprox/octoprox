@@ -49,6 +49,8 @@ def _load_yaml_config(config_path: Path) -> dict[str, Any]:
         if "connection" in proxy_cfg:
             flat_config["connection_timeout"] = proxy_cfg["connection"].get("timeout_seconds")
             flat_config["max_retries"] = proxy_cfg["connection"].get("max_retries")
+        if "ip_refresh_interval" in proxy_cfg:
+            flat_config["ip_refresh_interval"] = proxy_cfg["ip_refresh_interval"]
 
     # Remove None values
     return {k: v for k, v in flat_config.items() if v is not None}
@@ -157,6 +159,7 @@ class Settings(BaseSettings):
     health_check_timeout: int = Field(default=30)
     connection_timeout: int = Field(default=30)
     max_retries: int = Field(default=3)
+    ip_refresh_interval: int = Field(default=3600, description="IP refresh interval in seconds for port-based proxies")
 
     # Authentication settings
     auth_enabled: bool = Field(default=False, description="Enable authentication")

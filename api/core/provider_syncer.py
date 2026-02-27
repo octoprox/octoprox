@@ -4,7 +4,7 @@
 """Generic proxy provider syncer for periodic IP refresh and proxy management.
 
 This module provides background synchronization for all registered proxy providers:
-- Periodic IP refresh for port-based proxies (every 24 hours)
+- Periodic IP refresh for port-based proxies (configurable interval, default 1 hour)
 - Auto-regeneration of deleted proxies
 - Sync proxies when connector config changes
 
@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 
 import structlog
 
+from api.core.config import settings
 from api.core.signals import (
     provider_connector_sync_requested,
     proxy_add_requested,
@@ -37,9 +38,6 @@ if TYPE_CHECKING:
     pass
 
 logger = structlog.get_logger()
-
-# How often to refresh IPs for port-based proxies (24 hours in seconds)
-IP_REFRESH_INTERVAL_SECONDS = 24 * 60 * 60
 
 
 class ProviderDataSource(Protocol):
@@ -63,7 +61,7 @@ class ProxyProviderSyncer:
     """Manages periodic synchronization of proxy provider proxies.
 
     Responsibilities:
-    - Refresh discovered IPs for port-based proxies every 24 hours
+    - Refresh discovered IPs for port-based proxies at a configurable interval
     - Sync proxy counts when connector config changes
     - Auto-regenerate deleted proxies
 
@@ -90,19 +88,19 @@ class ProxyProviderSyncer:
 
     async def run(self) -> None:
         """Run the provider syncer loop."""
-        logger.info("Starting provider syncer", interval_hours=IP_REFRESH_INTERVAL_SECONDS // 3600)
+        logger.info("Starting provider syncer", interval_hours=settings.ip_refresh_interval // 3600)
         self._running = True
 
         while self._running:
             try:
                 await self._refresh_all_provider_proxies()
-                await asyncio.sleep(IP_REFRESH_INTERVAL_SECONDS)
+                await asyncio.sleep(settings.ip_refresh_interval)
             except asyncio.CancelledError:
                 logger.info("Provider syncer stopped")
                 break
             except Exception as e:
                 logger.error("Provider syncer error", error=str(e))
-                await asyncio.sleep(IP_REFRESH_INTERVAL_SECONDS)
+                await asyncio.sleep(settings.ip_refresh_interval)
 
     def stop(self) -> None:
         """Signal the syncer to stop."""
