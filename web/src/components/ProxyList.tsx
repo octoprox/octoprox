@@ -188,6 +188,7 @@ export default function ProxyList() {
       accessorFn: (row) => `${row.display_host}:${row.port}`,
       id: 'host',
       header: 'Host',
+      meta: { filterVariant: 'text' as const },
       cell: ({ row }) => (
         <span className="font-mono text-sm whitespace-nowrap flex items-center">
           {row.original.username ? <Lock className="w-3.5 h-3.5 mr-1.5 text-gray-400" /> : <span className="w-3.5 mr-1.5" />}
@@ -199,6 +200,7 @@ export default function ProxyList() {
       accessorKey: 'protocol',
       header: 'Protocol',
       size: 95,
+      meta: { filterVariant: 'select' as const },
       cell: ({ getValue }) => (
         <span className="uppercase text-xs font-medium">{getValue<string>()}</span>
       ),
@@ -207,6 +209,7 @@ export default function ProxyList() {
       accessorKey: 'connector_name',
       header: 'Connector',
       enableSorting: false,
+      meta: { filterVariant: 'select' as const },
       cell: ({ getValue }) => (
         <span className="truncate block">{getValue<string>() || '-'}</span>
       ),
@@ -215,6 +218,7 @@ export default function ProxyList() {
       accessorKey: 'status',
       header: 'Status',
       size: 100,
+      meta: { filterVariant: 'select' as const },
       cell: ({ row }) => (
         <StatusBadge
           status={row.original.status}
@@ -497,6 +501,7 @@ export default function ProxyList() {
         defaultPageSize={10}
         emptyMessage="No proxies configured."
         enableRowSelection
+        enableColumnFilters
         onSelectionChange={handleSelectionChange}
         getRowId={(row) => row.id}
       />

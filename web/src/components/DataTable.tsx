@@ -1,18 +1,41 @@
 // Copyright 2026 Octoprox Authors
 // SPDX-License-Identifier: Apache-2.0
 
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useMemo } from 'react'
 import {
   ColumnDef,
+  ColumnFiltersState,
+  Column,
   SortingState,
   RowSelectionState,
+  FilterFn,
   flexRender,
   getCoreRowModel,
+  getFilteredRowModel,
+  getFacetedUniqueValues,
   getSortedRowModel,
   getPaginationRowModel,
   useReactTable,
 } from '@tanstack/react-table'
-import { ChevronUp, ChevronDown, ChevronsUpDown, ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight } from 'lucide-react'
+import { ChevronUp, ChevronDown, ChevronsUpDown, ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight, X } from 'lucide-react'
+
+declare module '@tanstack/react-table' {
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  interface ColumnMeta<TData extends unknown, TValue> {
+    filterVariant?: 'text' | 'select' | 'range'
+  }
+  interface FilterFns {
+    range: FilterFn<unknown>
+  }
+}
+
+const rangeFilterFn: FilterFn<unknown> = (row, columnId, filterValue: [number | '', number | '']) => {
+  const value = row.getValue<number>(columnId)
+  const [min, max] = filterValue
+  if (min !== '' && value < min) return false
+  if (max !== '' && value > max) return false
+  return true
+}
 
 interface DataTableProps<TData, TValue> {
   columns: ColumnDef<TData, TValue>[]
@@ -20,6 +43,7 @@ interface DataTableProps<TData, TValue> {
   defaultPageSize?: number
   emptyMessage?: string
   enableRowSelection?: boolean
+  enableColumnFilters?: boolean
   onSelectionChange?: (selectedRows: TData[]) => void
   getRowId?: (row: TData) => string
 }
@@ -30,26 +54,33 @@ export function DataTable<TData, TValue>({
   defaultPageSize = 20,
   emptyMessage = 'No data available.',
   enableRowSelection = false,
+  enableColumnFilters = false,
   onSelectionChange,
   getRowId,
 }: DataTableProps<TData, TValue>) {
   const [sorting, setSorting] = useState<SortingState>([])
   const [rowSelection, setRowSelection] = useState<RowSelectionState>({})
+  const [columnFilters, setColumnFilters] = useState<ColumnFiltersState>([])
 
   const table = useReactTable({
     data,
     columns,
+    filterFns: { range: rangeFilterFn },
     getCoreRowModel: getCoreRowModel(),
+    getFilteredRowModel: getFilteredRowModel(),
+    getFacetedUniqueValues: getFacetedUniqueValues(),
     getSortedRowModel: getSortedRowModel(),
     getPaginationRowModel: getPaginationRowModel(),
     onSortingChange: setSorting,
     onRowSelectionChange: setRowSelection,
+    onColumnFiltersChange: setColumnFilters,
     enableRowSelection,
     getRowId,
     autoResetPageIndex: false,
     state: {
       sorting,
       rowSelection,
+      columnFilters,
     },
     initialState: {
       pagination: {
@@ -114,6 +145,17 @@ export function DataTable<TData, TValue>({
                 ))
               )}
             </tr>
+            {enableColumnFilters && (
+              <tr className="bg-gray-50/50 dark:bg-gray-700/50 border-b border-gray-200 dark:border-gray-600">
+                {table.getHeaderGroups().map((headerGroup) =>
+                  headerGroup.headers.map((header) => (
+                    <th key={header.id} className="px-2 py-1.5">
+                      <ColumnFilter column={header.column} />
+                    </th>
+                  ))
+                )}
+              </tr>
+            )}
           </thead>
           <tbody className="divide-y divide-gray-100 dark:divide-gray-700">
             {table.getRowModel().rows.length > 0 ? (
@@ -148,7 +190,19 @@ export function DataTable<TData, TValue>({
           <div className="flex items-center gap-4 text-gray-600 dark:text-gray-400">
             <span>
               Showing {currentPageIndex * pageSize + 1}-{Math.min((currentPageIndex + 1) * pageSize, totalRows)} of {totalRows}
+              {enableColumnFilters && columnFilters.length > 0 && (
+                <span className="text-gray-400 dark:text-gray-500"> (filtered)</span>
+              )}
             </span>
+            {enableColumnFilters && columnFilters.length > 0 && (
+              <button
+                onClick={() => setColumnFilters([])}
+                className="flex items-center gap-1 text-xs text-blue-600 dark:text-blue-400 hover:text-blue-800 dark:hover:text-blue-300"
+              >
+                <X className="w-3 h-3" />
+                Clear filters
+              </button>
+            )}
             <div className="flex items-center gap-2">
               <label htmlFor="pageSize" className="text-gray-500 dark:text-gray-400">Rows:</label>
               <select
@@ -219,6 +273,68 @@ export function DataTable<TData, TValue>({
         </div>
       )}
     </div>
+  )
+}
+
+const filterInputClasses =
+  'w-full px-1.5 py-1 text-xs border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 focus:outline-none focus:ring-1 focus:ring-blue-500 placeholder-gray-400 dark:placeholder-gray-500'
+
+function ColumnFilter<TData>({ column }: { column: Column<TData, unknown> }) {
+  const filterVariant = column.columnDef.meta?.filterVariant
+  if (!filterVariant) return null
+
+  if (filterVariant === 'range') {
+    const filterValue = (column.getFilterValue() as [number | '', number | '']) ?? ['', '']
+    return (
+      <div className="flex gap-1">
+        <input
+          type="number"
+          value={filterValue[0]}
+          onChange={(e) => column.setFilterValue([e.target.value === '' ? '' : Number(e.target.value), filterValue[1]])}
+          placeholder="Min"
+          className={filterInputClasses}
+        />
+        <input
+          type="number"
+          value={filterValue[1]}
+          onChange={(e) => column.setFilterValue([filterValue[0], e.target.value === '' ? '' : Number(e.target.value)])}
+          placeholder="Max"
+          className={filterInputClasses}
+        />
+      </div>
+    )
+  }
+
+  if (filterVariant === 'select') {
+    const sortedUniqueValues = useMemo(
+      () => Array.from(column.getFacetedUniqueValues().keys()).sort(),
+      [column.getFacetedUniqueValues()],
+    )
+    return (
+      <select
+        value={(column.getFilterValue() as string) ?? ''}
+        onChange={(e) => column.setFilterValue(e.target.value || undefined)}
+        className={filterInputClasses}
+      >
+        <option value="">All</option>
+        {sortedUniqueValues.map((value) => (
+          <option key={String(value)} value={String(value)}>
+            {String(value)}
+          </option>
+        ))}
+      </select>
+    )
+  }
+
+  // text filter
+  return (
+    <input
+      type="text"
+      value={(column.getFilterValue() as string) ?? ''}
+      onChange={(e) => column.setFilterValue(e.target.value || undefined)}
+      placeholder="Filter..."
+      className={filterInputClasses}
+    />
   )
 }
 
