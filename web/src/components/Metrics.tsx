@@ -152,67 +152,70 @@ export default function Metrics() {
         />
       </div>
 
-      {/* Requests Over Time */}
-      <Card className="p-6 mb-8">
-        <h2 className="text-xl font-semibold mb-4">Requests Over Time</h2>
-        {chartData.length === 0 ? (
-          <p className="text-gray-400 text-center py-12">No data for this time range</p>
-        ) : (
-          <ResponsiveContainer width="100%" height={300}>
-            <AreaChart data={chartData}>
-              <CartesianGrid strokeDasharray="3 3" stroke={gridColor} />
-              <XAxis
-                dataKey="time"
-                type="number"
-                scale="time"
-                domain={['dataMin', 'dataMax']}
-                tickFormatter={(v: number) => formatTickByRange(v, range)}
-                tick={{ fontSize: 12, fill: tickColor }}
-              />
-              <YAxis allowDecimals={false} tick={{ fill: tickColor }} />
-              <Tooltip
-                labelFormatter={(v: number) => new Date(v).toLocaleString()}
-                contentStyle={theme === 'dark' ? { backgroundColor: '#1f2937', border: '1px solid #374151', color: '#f3f4f6' } : undefined}
-              />
-              <Legend />
-              <Area connectNulls={false} type="monotone" dataKey="request_count" name="Requests" stroke="#6366f1" fill="#6366f1" fillOpacity={0.1} />
-              <Area connectNulls={false} type="monotone" dataKey="success_count" name="Successes" stroke="#22c55e" fill="#22c55e" fillOpacity={0.1} />
-              <Area connectNulls={false} type="monotone" dataKey="failure_count" name="Failures" stroke="#ef4444" fill="#ef4444" fillOpacity={0.1} />
-            </AreaChart>
-          </ResponsiveContainer>
-        )}
-      </Card>
+      {/* Charts grid */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        {/* Requests Over Time */}
+        <Card className="p-6 min-w-0">
+          <h2 className="text-xl font-semibold mb-4">Requests Over Time</h2>
+          {chartData.length === 0 ? (
+            <p className="text-gray-400 text-center py-12">No data for this time range</p>
+          ) : (
+            <ResponsiveContainer width="100%" height={300}>
+              <AreaChart data={chartData}>
+                <CartesianGrid strokeDasharray="3 3" stroke={gridColor} />
+                <XAxis
+                  dataKey="time"
+                  type="number"
+                  scale="time"
+                  domain={['dataMin', 'dataMax']}
+                  tickFormatter={(v: number) => formatTickByRange(v, range)}
+                  tick={{ fontSize: 12, fill: tickColor }}
+                />
+                <YAxis allowDecimals={false} tick={{ fill: tickColor }} />
+                <Tooltip
+                  labelFormatter={(v: number) => new Date(v).toLocaleString()}
+                  contentStyle={theme === 'dark' ? { backgroundColor: '#1f2937', border: '1px solid #374151', color: '#f3f4f6' } : undefined}
+                />
+                <Legend />
+                <Area connectNulls={false} type="monotone" dataKey="request_count" name="Requests" stroke="#6366f1" fill="#6366f1" fillOpacity={0.1} />
+                <Area connectNulls={false} type="monotone" dataKey="success_count" name="Successes" stroke="#22c55e" fill="#22c55e" fillOpacity={0.1} />
+                <Area connectNulls={false} type="monotone" dataKey="failure_count" name="Failures" stroke="#ef4444" fill="#ef4444" fillOpacity={0.1} />
+              </AreaChart>
+            </ResponsiveContainer>
+          )}
+        </Card>
 
-      {/* Bytes Over Time */}
-      <Card className="p-6">
-        <h2 className="text-xl font-semibold mb-4">Bytes Over Time</h2>
-        {chartData.length === 0 ? (
-          <p className="text-gray-400 text-center py-12">No data for this time range</p>
-        ) : (
-          <ResponsiveContainer width="100%" height={300}>
-            <AreaChart data={chartData}>
-              <CartesianGrid strokeDasharray="3 3" stroke={gridColor} />
-              <XAxis
-                dataKey="time"
-                type="number"
-                scale="time"
-                domain={['dataMin', 'dataMax']}
-                tickFormatter={(v: number) => formatTickByRange(v, range)}
-                tick={{ fontSize: 12, fill: tickColor }}
-              />
-              <YAxis tickFormatter={(v: number) => formatBytes(v)} tick={{ fill: tickColor }} />
-              <Tooltip
-                labelFormatter={(v: number) => new Date(v).toLocaleString()}
-                formatter={(value: number) => formatBytes(value)}
-                contentStyle={theme === 'dark' ? { backgroundColor: '#1f2937', border: '1px solid #374151', color: '#f3f4f6' } : undefined}
-              />
-              <Legend />
-              <Area connectNulls={false} type="monotone" dataKey="bytes_sent" name="Bytes Sent" stroke="#f97316" fill="#f97316" fillOpacity={0.1} />
-              <Area connectNulls={false} type="monotone" dataKey="bytes_received" name="Bytes Received" stroke="#14b8a6" fill="#14b8a6" fillOpacity={0.1} />
-            </AreaChart>
-          </ResponsiveContainer>
-        )}
-      </Card>
+        {/* Bytes Over Time */}
+        <Card className="p-6 min-w-0">
+          <h2 className="text-xl font-semibold mb-4">Bytes Over Time</h2>
+          {chartData.length === 0 ? (
+            <p className="text-gray-400 text-center py-12">No data for this time range</p>
+          ) : (
+            <ResponsiveContainer width="100%" height={300}>
+              <AreaChart data={chartData}>
+                <CartesianGrid strokeDasharray="3 3" stroke={gridColor} />
+                <XAxis
+                  dataKey="time"
+                  type="number"
+                  scale="time"
+                  domain={['dataMin', 'dataMax']}
+                  tickFormatter={(v: number) => formatTickByRange(v, range)}
+                  tick={{ fontSize: 12, fill: tickColor }}
+                />
+                <YAxis tickFormatter={(v: number) => formatBytes(v)} tick={{ fill: tickColor }} />
+                <Tooltip
+                  labelFormatter={(v: number) => new Date(v).toLocaleString()}
+                  formatter={(value: number) => formatBytes(value)}
+                  contentStyle={theme === 'dark' ? { backgroundColor: '#1f2937', border: '1px solid #374151', color: '#f3f4f6' } : undefined}
+                />
+                <Legend />
+                <Area connectNulls={false} type="monotone" dataKey="bytes_sent" name="Bytes Sent" stroke="#f97316" fill="#f97316" fillOpacity={0.1} />
+                <Area connectNulls={false} type="monotone" dataKey="bytes_received" name="Bytes Received" stroke="#14b8a6" fill="#14b8a6" fillOpacity={0.1} />
+              </AreaChart>
+            </ResponsiveContainer>
+          )}
+        </Card>
+      </div>
     </div>
   )
 }
