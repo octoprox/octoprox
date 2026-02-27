@@ -42,7 +42,10 @@ async def fetch_zones(token: str) -> list[BrightDataZone]:
         proxy_type = None
 
         # Map zone type to proxy type (only supported types)
-        if zone_type.startswith("res"):
+        # res_static zones have static IPs like ISP, so map them to ISP
+        if zone_type == "res_static":
+            proxy_type = BrightDataProxyType.ISP.value
+        elif zone_type.startswith("res"):
             proxy_type = BrightDataProxyType.RESIDENTIAL.value
         elif zone_type.startswith("mobile"):
             proxy_type = BrightDataProxyType.MOBILE.value
