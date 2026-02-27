@@ -3,8 +3,6 @@ server:
   host: "0.0.0.0"
   api_port: 8000
   proxy_port: 8080
-  debug: true
-  reload: true
 
 logging:
   level: DEBUG

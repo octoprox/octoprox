@@ -89,7 +89,6 @@ class Settings(BaseSettings):
     host: str = Field(default="0.0.0.0")
     api_port: int = Field(default=8000)
     proxy_port: int = Field(default=8080)
-    debug: bool = Field(default=False)
 
     # Environment
     env: str = Field(default="development")
@@ -148,7 +147,15 @@ class Settings(BaseSettings):
     metrics_flush_interval: int = Field(default=60)
 
     # Logging
-    log_level: str = Field(default="INFO")
+    log_level: str = Field(
+        default="INFO",
+        description="Logging level (DEBUG, INFO, WARNING, ERROR, CRITICAL)"
+    )
+
+    @property
+    def debug(self) -> bool:
+        """Debug mode is enabled when log level is DEBUG."""
+        return self.log_level.upper() == "DEBUG"
 
     # CORS
     cors_origins: list[str] = Field(default=["http://localhost:3000", "http://localhost:5173"])

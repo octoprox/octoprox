@@ -25,8 +25,7 @@ from api.db.session import get_async_session_factory
 from api.routes import auth, brightdata, connectors, credentials, health, metrics, projects, proxies
 
 # Configure logging before getting the logger
-log_level = "DEBUG" if settings.debug else "INFO"
-setup_logging(log_level)
+setup_logging(settings.log_level)
 logger = structlog.get_logger()
 
 
@@ -145,7 +144,7 @@ def run() -> None:
         host=settings.host,
         port=settings.api_port,
         reload=settings.debug,
-        log_level=log_level.lower(),
+        log_level=settings.log_level.lower(),
         log_config=None,
     )
 
