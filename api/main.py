@@ -17,8 +17,10 @@ from fastapi.staticfiles import StaticFiles
 from api.core.auth import require_auth
 from api.core.config import settings
 from api.core.logging import setup_logging
+from api.core.mitm import MitmHandler
 from api.core.proxy_manager import ProxyManager
 from api.core.proxy_server import ProxyServer
+from api.core.tls_cert_manager import TLSCertManager
 from api.db.migrations import run_migrations
 from api.db.redis import get_redis_client
 from api.db.session import get_async_session_factory
@@ -64,8 +66,16 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # Start background tasks (loads from DB, hydrates from Redis)
     await proxy_manager.start()
 
+    # Initialize TLS MITM certificate manager
+    cert_manager = TLSCertManager(
+        ca_cert_path=Path(settings.tls_mitm_ca_cert_path),
+        ca_key_path=Path(settings.tls_mitm_ca_key_path),
+    )
+    cert_manager.initialize()
+    mitm_handler = MitmHandler(cert_manager)
+
     # Start the HTTP proxy server
-    proxy_server = ProxyServer(proxy_manager)
+    proxy_server = ProxyServer(proxy_manager, mitm_handler=mitm_handler)
     await proxy_server.start()
     app.state.proxy_server = proxy_server
 

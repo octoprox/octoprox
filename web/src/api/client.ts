@@ -113,6 +113,9 @@ export interface Project {
   health_check_timeout: number
   connection_timeout: number
   max_retries: number
+  tls_mitm_mode: string
+  tls_mitm_engine: string | null
+  tls_mitm_browser: string | null
   created_at: string
   updated_at: string
 }
@@ -139,6 +142,9 @@ export interface ProjectCreate {
   health_check_timeout?: number
   connection_timeout?: number
   max_retries?: number
+  tls_mitm_mode?: string
+  tls_mitm_engine?: string | null
+  tls_mitm_browser?: string | null
 }
 
 export interface ProjectUpdate {
@@ -151,6 +157,9 @@ export interface ProjectUpdate {
   health_check_timeout?: number
   connection_timeout?: number
   max_retries?: number
+  tls_mitm_mode?: string
+  tls_mitm_engine?: string | null
+  tls_mitm_browser?: string | null
 }
 
 export interface Proxy {

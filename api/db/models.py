@@ -33,6 +33,9 @@ class ProjectModel(Base):
     health_check_timeout: Mapped[int] = mapped_column(Integer, default=30)
     connection_timeout: Mapped[int] = mapped_column(Integer, default=30)
     max_retries: Mapped[int] = mapped_column(Integer, default=3)
+    tls_mitm_mode: Mapped[str] = mapped_column(String(20), default="off")
+    tls_mitm_engine: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    tls_mitm_browser: Mapped[str | None] = mapped_column(String(20), nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now, onupdate=utc_now)

@@ -21,6 +21,7 @@ services:
       - OCTOPROX_LOG_LEVEL=INFO
     volumes:
       - ./config:/app/config:ro
+      - ca_data:/app/data/ca
     depends_on:
       redis:
         condition: service_healthy
@@ -67,3 +68,4 @@ services:
 volumes:
   postgres_data:
   redis_data:
+  ca_data:

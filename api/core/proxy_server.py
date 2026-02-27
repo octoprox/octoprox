@@ -26,9 +26,11 @@ from python_socks.async_.asyncio import Proxy as SocksProxy
 from api.core.config import settings
 from api.core.signals import request_completed, request_rejected
 from api.core.username_params import AuthResult, parse_proxy_username
+from api.models.project import MitmMode, Project
 from api.models.proxy import Proxy, ProxyProtocol
 
 if TYPE_CHECKING:
+    from api.core.mitm import MitmHandler
     from api.core.proxy_manager import ProxyManager
 
 logger = structlog.get_logger()
@@ -40,8 +42,13 @@ BUFFER_SIZE = 65536
 class ProxyServer:
     """HTTP Proxy Server that forwards requests through managed upstream proxies."""
 
-    def __init__(self, proxy_manager: "ProxyManager") -> None:
+    def __init__(
+        self,
+        proxy_manager: "ProxyManager",
+        mitm_handler: "MitmHandler | None" = None,
+    ) -> None:
         self._proxy_manager = proxy_manager
+        self._mitm_handler = mitm_handler
         self._server: asyncio.Server | None = None
         self._host = settings.host
         self._port = settings.proxy_port
@@ -271,7 +278,7 @@ class ProxyServer:
 
             if method.upper() == "CONNECT":
                 await self._handle_connect(
-                    client_reader, client_writer, target, headers, project_id, client_ip, sessid
+                    client_reader, client_writer, target, headers, project, client_ip, sessid
                 )
             else:
                 await self._handle_http(
@@ -339,7 +346,7 @@ class ProxyServer:
         client_writer: asyncio.StreamWriter,
         target: str,
         headers: dict[str, str],
-        project_id: str,
+        project: Project,
         client_ip: str | None = None,
         sessid: str | None = None,
     ) -> None:
@@ -357,12 +364,12 @@ class ProxyServer:
 
         # Select upstream proxy scoped to the authenticated project
         proxy = self._get_upstream_proxy(
-            project_id=project_id, session_id=session_id, target_host=target_host
+            project_id=project.id, session_id=session_id, target_host=target_host
         )
         if not proxy:
             await self._send_error(client_writer, 502, "Bad Gateway", "No upstream proxy available for this domain")
             await request_rejected.send_async(
-                self, project_id=project_id, reason="no_proxy_available"
+                self, project_id=project.id, reason="no_proxy_available"
             )
             return
 
@@ -374,6 +381,12 @@ class ProxyServer:
         bytes_received = 0
         upstream_writer: asyncio.StreamWriter | None = None
 
+        # Check if MITM is enabled for this project
+        use_mitm = (
+            project.tls_mitm_mode != MitmMode.OFF
+            and self._mitm_handler is not None
+        )
+
         try:
             # Connect through upstream proxy (handles all protocols)
             upstream_reader, upstream_writer = await self._connect_via_proxy(
@@ -383,19 +396,27 @@ class ProxyServer:
             # Measure latency up to connection establishment (before tunneling)
             latency_ms = (time.monotonic() - start_time) * 1000
 
-            # Send 200 to client
+            # Tell client the tunnel is established
             client_writer.write(b"HTTP/1.1 200 Connection Established\r\n\r\n")
             await client_writer.drain()
-
             success = True
 
-            # Start bidirectional tunnel (not included in latency measurement)
-            bytes_sent, bytes_received = await self._tunnel(
-                client_reader,
-                client_writer,
-                upstream_reader,
-                upstream_writer,
-            )
+            if use_mitm:
+                # MITM handler takes ownership of upstream connection
+                bytes_sent, bytes_received = await self._mitm_handler.handle(  # type: ignore[union-attr]
+                    client_reader, client_writer, target_host, target_port,
+                    proxy, project,
+                    upstream_reader=upstream_reader,
+                    upstream_writer=upstream_writer,
+                )
+                upstream_writer = None  # MitmHandler/relay owns it now
+            else:
+                bytes_sent, bytes_received = await self._tunnel(
+                    client_reader,
+                    client_writer,
+                    upstream_reader,
+                    upstream_writer,
+                )
 
         except TimeoutError:
             latency_ms = (time.monotonic() - start_time) * 1000
@@ -431,7 +452,7 @@ class ProxyServer:
                 await request_completed.send_async(
                     self,
                     proxy_id=proxy.id,
-                    project_id=project_id,
+                    project_id=project.id,
                     success=success,
                     latency_ms=latency_ms,
                     bytes_sent=bytes_sent,

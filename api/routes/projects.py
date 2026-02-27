@@ -3,9 +3,13 @@
 
 """Project management endpoints."""
 
+from pathlib import Path
+
 from fastapi import APIRouter, HTTPException, Request
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
+from api.core.config import settings
 from api.models.project import (
     Project,
     ProjectCreate,
@@ -47,6 +51,9 @@ def _project_to_response(
         health_check_timeout=project.health_check_timeout,
         connection_timeout=project.connection_timeout,
         max_retries=project.max_retries,
+        tls_mitm_mode=project.tls_mitm_mode,
+        tls_mitm_engine=project.tls_mitm_engine,
+        tls_mitm_browser=project.tls_mitm_browser,
         created_at=project.created_at,
         updated_at=project.updated_at,
         credential_count=credential_count,
@@ -71,11 +78,28 @@ def _project_to_summary(
         username=project.username,
         password=project.password,
         routing_strategy=project.routing_strategy,
+        tls_mitm_mode=project.tls_mitm_mode,
+        tls_mitm_engine=project.tls_mitm_engine,
+        tls_mitm_browser=project.tls_mitm_browser,
         credential_count=credential_count,
         connector_count=connector_count,
         proxy_count=proxy_count,
         healthy_proxy_count=healthy_proxy_count,
         created_at=project.created_at,
+    )
+
+
+@router.get("/ca-certificate")
+async def download_ca_certificate() -> FileResponse:
+    """Download the MITM CA certificate for client trust store installation."""
+    ca_cert_path = Path(settings.tls_mitm_ca_cert_path)
+    if not ca_cert_path.exists():
+        raise HTTPException(status_code=404, detail="CA certificate not found")
+
+    return FileResponse(
+        path=ca_cert_path,
+        media_type="application/x-pem-file",
+        filename="octoprox-ca.crt",
     )
 
 
@@ -128,6 +152,9 @@ async def create_project(request: Request, project_data: ProjectCreate) -> Proje
         health_check_timeout=project_data.health_check_timeout,
         connection_timeout=project_data.connection_timeout,
         max_retries=project_data.max_retries,
+        tls_mitm_mode=project_data.tls_mitm_mode,
+        tls_mitm_engine=project_data.tls_mitm_engine,
+        tls_mitm_browser=project_data.tls_mitm_browser,
     )
 
     await proxy_manager.add_project(project)
@@ -196,6 +223,12 @@ async def update_project(
         project.connection_timeout = project_data.connection_timeout
     if project_data.max_retries is not None:
         project.max_retries = project_data.max_retries
+    if project_data.tls_mitm_mode is not None:
+        project.tls_mitm_mode = project_data.tls_mitm_mode
+    if project_data.tls_mitm_engine is not None:
+        project.tls_mitm_engine = project_data.tls_mitm_engine
+    if project_data.tls_mitm_browser is not None:
+        project.tls_mitm_browser = project_data.tls_mitm_browser
 
     await proxy_manager.update_project(project)
 

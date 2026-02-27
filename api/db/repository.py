@@ -20,7 +20,7 @@ from api.db.models import (
 )
 from api.models.connector import Connector
 from api.models.credential import Credential, CredentialType
-from api.models.project import Project
+from api.models.project import MitmBrowser, MitmEngine, MitmMode, Project
 from api.models.proxy import Proxy, ProxyProtocol
 
 
@@ -65,6 +65,9 @@ class ProjectRepository:
             health_check_timeout=project.health_check_timeout,
             connection_timeout=project.connection_timeout,
             max_retries=project.max_retries,
+            tls_mitm_mode=project.tls_mitm_mode,
+            tls_mitm_engine=project.tls_mitm_engine,
+            tls_mitm_browser=project.tls_mitm_browser,
             created_at=project.created_at,
             updated_at=project.updated_at,
         )
@@ -88,6 +91,9 @@ class ProjectRepository:
             model.health_check_timeout = project.health_check_timeout
             model.connection_timeout = project.connection_timeout
             model.max_retries = project.max_retries
+            model.tls_mitm_mode = project.tls_mitm_mode
+            model.tls_mitm_engine = project.tls_mitm_engine
+            model.tls_mitm_browser = project.tls_mitm_browser
             model.updated_at = utc_now()
             await self._session.flush()
         return project
@@ -128,6 +134,9 @@ class ProjectRepository:
             health_check_timeout=model.health_check_timeout,
             connection_timeout=model.connection_timeout,
             max_retries=model.max_retries,
+            tls_mitm_mode=MitmMode(model.tls_mitm_mode),
+            tls_mitm_engine=MitmEngine(model.tls_mitm_engine) if model.tls_mitm_engine else None,
+            tls_mitm_browser=MitmBrowser(model.tls_mitm_browser) if model.tls_mitm_browser else None,
             created_at=model.created_at,
             updated_at=model.updated_at,
         )
