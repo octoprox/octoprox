@@ -52,6 +52,13 @@ def _load_yaml_config(config_path: Path) -> dict[str, Any]:
         if "ip_refresh_interval" in proxy_cfg:
             flat_config["ip_refresh_interval"] = proxy_cfg["ip_refresh_interval"]
 
+    if "tls_mitm" in config_data:
+        mitm_cfg = config_data["tls_mitm"]
+        if "ca_cert_path" in mitm_cfg:
+            flat_config["tls_mitm_ca_cert_path"] = mitm_cfg["ca_cert_path"]
+        if "ca_key_path" in mitm_cfg:
+            flat_config["tls_mitm_ca_key_path"] = mitm_cfg["ca_key_path"]
+
     # Remove None values
     return {k: v for k, v in flat_config.items() if v is not None}
 
@@ -167,6 +174,16 @@ class Settings(BaseSettings):
     connection_timeout: int = Field(default=30)
     max_retries: int = Field(default=3)
     ip_refresh_interval: int = Field(default=3600, description="IP refresh interval in seconds for port-based proxies")
+
+    # TLS MITM settings
+    tls_mitm_ca_cert_path: str = Field(
+        default="data/ca/octoprox-ca.crt",
+        description="Path to the MITM CA certificate file (auto-generated if missing)",
+    )
+    tls_mitm_ca_key_path: str = Field(
+        default="data/ca/octoprox-ca.key",
+        description="Path to the MITM CA private key file (auto-generated if missing)",
+    )
 
     # Authentication settings
     auth_enabled: bool = Field(default=False, description="Enable authentication")

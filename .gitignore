@@ -208,5 +208,16 @@ marimo/_static/
 marimo/_lsp/
 __marimo__/
 
+# Runtime data (database, CA certificates, etc.)
+data/
+
+# TLS MITM CA certificates (auto-generated, contain private keys)
+*.crt
+*.key
+*.pem
+
 # macos
 .DS_Store
+
+# claude
+.claude/

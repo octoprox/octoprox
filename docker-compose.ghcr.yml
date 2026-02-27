@@ -20,6 +20,8 @@ services:
       - OCTOPROX_DB_PASSWORD=octoprox
       - OCTOPROX_DB_NAME=octoprox
       - OCTOPROX_LOG_LEVEL=INFO
+    volumes:
+      - ca_data:/app/data/ca
     depends_on:
       redis:
         condition: service_healthy
@@ -66,4 +68,5 @@ services:
 volumes:
   postgres_data:
   redis_data:
+  ca_data:
 

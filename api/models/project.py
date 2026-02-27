@@ -4,11 +4,37 @@
 """Project model definitions for multi-tenancy."""
 
 from datetime import datetime
+from enum import Enum
 from uuid import uuid4
 
 from pydantic import BaseModel, Field
 
 from api.core import utc_now
+
+
+class MitmMode(str, Enum):
+    """TLS MITM interception modes."""
+
+    OFF = "off"
+    PLAIN = "plain"
+    MATCH_UA = "match_ua"
+    OVERRIDE_UA = "override_ua"
+
+
+class MitmEngine(str, Enum):
+    """TLS engines for browser fingerprint impersonation."""
+
+    CURL_CFFI = "curl_cffi"
+    RNET = "rnet"
+
+
+class MitmBrowser(str, Enum):
+    """Browser profiles for TLS fingerprint impersonation."""
+
+    CHROME = "chrome"
+    FIREFOX = "firefox"
+    SAFARI = "safari"
+    EDGE = "edge"
 
 
 class Project(BaseModel):
@@ -28,6 +54,11 @@ class Project(BaseModel):
     health_check_timeout: int = 30  # seconds
     connection_timeout: int = 30  # seconds
     max_retries: int = 3
+
+    # TLS MITM interception
+    tls_mitm_mode: MitmMode = MitmMode.OFF
+    tls_mitm_engine: MitmEngine | None = None
+    tls_mitm_browser: MitmBrowser | None = None
 
     # Aggregate statistics (persists across proxy rotation)
     request_count: int = 0
@@ -53,6 +84,9 @@ class ProjectCreate(BaseModel):
     health_check_timeout: int = 30
     connection_timeout: int = 30
     max_retries: int = 3
+    tls_mitm_mode: MitmMode = MitmMode.OFF
+    tls_mitm_engine: MitmEngine | None = None
+    tls_mitm_browser: MitmBrowser | None = None
 
 
 class ProjectUpdate(BaseModel):
@@ -66,6 +100,9 @@ class ProjectUpdate(BaseModel):
     health_check_timeout: int | None = None
     connection_timeout: int | None = None
     max_retries: int | None = None
+    tls_mitm_mode: MitmMode | None = None
+    tls_mitm_engine: MitmEngine | None = None
+    tls_mitm_browser: MitmBrowser | None = None
 
 
 class ProjectResponse(BaseModel):
@@ -80,6 +117,9 @@ class ProjectResponse(BaseModel):
     health_check_timeout: int
     connection_timeout: int
     max_retries: int
+    tls_mitm_mode: MitmMode
+    tls_mitm_engine: MitmEngine | None
+    tls_mitm_browser: MitmBrowser | None
     created_at: datetime
     updated_at: datetime
     # Aggregated stats (populated by API)
@@ -97,6 +137,9 @@ class ProjectSummary(BaseModel):
     username: str
     password: str
     routing_strategy: str
+    tls_mitm_mode: MitmMode = MitmMode.OFF
+    tls_mitm_engine: MitmEngine | None = None
+    tls_mitm_browser: MitmBrowser | None = None
     credential_count: int = 0
     connector_count: int = 0
     proxy_count: int = 0

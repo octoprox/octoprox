@@ -32,6 +32,9 @@ dependencies = [
     "azure-mgmt-network==30.1.0",
     "azure-identity==1.25.2",
     "blinker==1.9.0",
+    "cryptography==46.0.5",
+    "curl_cffi==0.14.0",
+    "rnet==2.4.2",
 ]
 
 [project.optional-dependencies]

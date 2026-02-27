@@ -145,6 +145,59 @@ class TestProjectEndpoints:
 
         assert response.status_code == 404
 
+    def test_create_project_with_mitm_mode(
+        self,
+        authenticated_client: TestClient,
+        sample_project_data: dict[str, Any],
+    ) -> None:
+        """Test creating a project with MITM mode fields."""
+        project_data = sample_project_data.copy()
+        project_data["tls_mitm_mode"] = "match_ua"
+        project_data["tls_mitm_engine"] = "curl_cffi"
+
+        response = authenticated_client.post("/api/v1/projects", json=project_data)
+
+        assert response.status_code == 201
+        data = response.json()
+        assert data["tls_mitm_mode"] == "match_ua"
+        assert data["tls_mitm_engine"] == "curl_cffi"
+        assert data["tls_mitm_browser"] is None
+
+    def test_create_project_default_mitm_mode(
+        self,
+        authenticated_client: TestClient,
+        sample_project_data: dict[str, Any],
+    ) -> None:
+        """Test that project defaults to MITM off."""
+        response = authenticated_client.post("/api/v1/projects", json=sample_project_data)
+
+        assert response.status_code == 201
+        data = response.json()
+        assert data["tls_mitm_mode"] == "off"
+        assert data["tls_mitm_engine"] is None
+        assert data["tls_mitm_browser"] is None
+
+    def test_update_project_mitm_mode(
+        self,
+        authenticated_client: TestClient,
+        created_project: dict[str, Any],
+    ) -> None:
+        """Test updating MITM mode from off to override_ua."""
+        project_id = created_project["id"]
+        update_data = {
+            "tls_mitm_mode": "override_ua",
+            "tls_mitm_engine": "rnet",
+            "tls_mitm_browser": "firefox",
+        }
+
+        response = authenticated_client.patch(f"/api/v1/projects/{project_id}", json=update_data)
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["tls_mitm_mode"] == "override_ua"
+        assert data["tls_mitm_engine"] == "rnet"
+        assert data["tls_mitm_browser"] == "firefox"
+
     def test_list_projects_with_data(
         self,
         authenticated_client: TestClient,
