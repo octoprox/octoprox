@@ -35,17 +35,17 @@ class TestDetectBrowser:
         ua = "Mozilla/5.0 Chrome/131.0 Edg/131.0"
         assert detect_browser(ua) == MitmBrowser.EDGE
 
-    def test_empty_string_returns_default(self) -> None:
-        """Empty string should return the default browser."""
-        assert detect_browser("") == MitmBrowser.CHROME
+    def test_empty_string_returns_none(self) -> None:
+        """Empty string should return None (no match)."""
+        assert detect_browser("") is None
 
-    def test_unknown_user_agent_returns_default(self) -> None:
-        """Unknown UA should return the default browser."""
-        assert detect_browser("MyCustomBot/1.0") == MitmBrowser.CHROME
+    def test_unknown_user_agent_returns_none(self) -> None:
+        """Unknown UA should return None (no match)."""
+        assert detect_browser("MyCustomBot/1.0") is None
 
-    def test_none_like_empty_returns_default(self) -> None:
-        """Empty-ish UA should return default."""
-        assert detect_browser("   ") == MitmBrowser.CHROME
+    def test_whitespace_only_returns_none(self) -> None:
+        """Whitespace-only UA should return None."""
+        assert detect_browser("   ") is None
 
     def test_chrome_without_safari(self) -> None:
         """Chrome UA without Safari suffix still detected as chrome."""

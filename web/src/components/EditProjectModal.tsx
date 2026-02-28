@@ -3,7 +3,7 @@
 
 import { useState } from 'react'
 import { Eye, EyeOff, Info, AlertTriangle, Shield } from 'lucide-react'
-import { ProjectUpdate, ProjectSummary } from '../api/client'
+import { ProjectUpdate, ProjectSummary, downloadCaCertificate } from '../api/client'
 import { RichSelect, RichSelectOption } from './RichSelect'
 import { Button, Input, Select, Textarea, Label, Modal, ModalHeader, ModalFooter, Alert } from './ui'
 
@@ -198,6 +198,7 @@ export default function EditProjectModal({
                     <option value="firefox">Firefox (alternative fingerprint)</option>
                     <option value="safari">Safari (macOS/iOS fingerprint)</option>
                     <option value="edge">Edge (Chromium-based, Windows-like)</option>
+                    <option value="random">Random (rotate browser per request)</option>
                   </Select>
                 </div>
               )}
@@ -211,13 +212,13 @@ export default function EditProjectModal({
               {showCaWarning && (
                 <p className="text-xs text-amber-600 dark:text-amber-400">
                   Clients must install the proxy CA certificate.{' '}
-                  <a
-                    href="/api/v1/projects/ca-certificate"
-                    download="octoprox-ca.crt"
+                  <button
+                    type="button"
+                    onClick={() => downloadCaCertificate()}
                     className="underline hover:no-underline font-medium"
                   >
                     Download CA Certificate
-                  </a>
+                  </button>
                 </p>
               )}
             </div>

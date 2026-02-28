@@ -8,60 +8,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from api.core.mitm.handler import MitmHandler, _read_chunked_body
+from api.core.mitm.handler import MitmHandler
 from api.models.project import MitmEngine, MitmMode
-
-
-class TestReadChunkedBody:
-    """Tests for the chunked body reader."""
-
-    async def test_simple_chunked_body(self) -> None:
-        """Read a simple chunked body with one chunk."""
-        data = b"5\r\nhello\r\n0\r\n\r\n"
-        reader = asyncio.StreamReader()
-        reader.feed_data(data)
-        reader.feed_eof()
-
-        result = await _read_chunked_body(reader)
-        assert result == b"hello"
-
-    async def test_multiple_chunks(self) -> None:
-        """Read a body with multiple chunks."""
-        data = b"5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n"
-        reader = asyncio.StreamReader()
-        reader.feed_data(data)
-        reader.feed_eof()
-
-        result = await _read_chunked_body(reader)
-        assert result == b"hello world"
-
-    async def test_empty_chunked_body(self) -> None:
-        """Read an empty chunked body (just terminator)."""
-        data = b"0\r\n\r\n"
-        reader = asyncio.StreamReader()
-        reader.feed_data(data)
-        reader.feed_eof()
-
-        result = await _read_chunked_body(reader)
-        assert result == b""
-
-    async def test_chunk_with_extension(self) -> None:
-        """Read a chunk with extension (ignored)."""
-        data = b"5;ext=val\r\nhello\r\n0\r\n\r\n"
-        reader = asyncio.StreamReader()
-        reader.feed_data(data)
-        reader.feed_eof()
-
-        result = await _read_chunked_body(reader)
-        assert result == b"hello"
-
-    async def test_eof_mid_chunk(self) -> None:
-        """Gracefully handle EOF in the middle of reading."""
-        reader = asyncio.StreamReader()
-        reader.feed_eof()
-
-        result = await _read_chunked_body(reader)
-        assert result == b""
 
 
 class TestMitmHandler:
@@ -145,7 +93,9 @@ class TestMitmHandler:
         call_args = mock_relay.send_request.call_args
         assert call_args[0][0] == "GET"
         assert call_args[0][1] == "https://example.com/path"
-        assert "Host" in call_args[0][2]
+        # host is kept (relays handle stripping if needed); user-agent passes through
+        assert "host" in call_args[0][2]
+        assert "user-agent" in call_args[0][2]
         mock_relay.close.assert_called_once()
 
         # Verify response was written
@@ -187,4 +137,4 @@ class TestMitmHandler:
 
         # Check that 502 was written
         written_data = b"".join(call.args[0] for call in writer.write.call_args_list)
-        assert b"502 Bad Gateway" in written_data
+        assert b"HTTP/1.1 502" in written_data

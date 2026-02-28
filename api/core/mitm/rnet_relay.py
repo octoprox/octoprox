@@ -11,18 +11,18 @@ with genuine JA3/JA4 fingerprints.
 import structlog
 from rnet import Client, Impersonate, Method
 
-from api.core.mitm.base import MitmRelay
-from api.core.mitm.browser_detect import DEFAULT_BROWSER, detect_browser
+from api.core.mitm.base import ImpersonationRelay
+from api.core.mitm.browser_detect import DEFAULT_BROWSER
 from api.models.project import MitmBrowser, MitmMode
 
 logger = structlog.get_logger()
 
 # Map browser names to rnet Impersonate enum values
 _IMPERSONATE_MAP: dict[MitmBrowser, Impersonate] = {
-    MitmBrowser.CHROME: Impersonate.Chrome136,
-    MitmBrowser.FIREFOX: Impersonate.Firefox133,
+    MitmBrowser.CHROME: Impersonate.Chrome137,
+    MitmBrowser.FIREFOX: Impersonate.Firefox139,
     MitmBrowser.SAFARI: Impersonate.Safari18,
-    MitmBrowser.EDGE: Impersonate.Edge131,
+    MitmBrowser.EDGE: Impersonate.Edge134,
 }
 
 # Map HTTP method strings to rnet Method enum
@@ -38,19 +38,11 @@ _METHOD_MAP: dict[str, Method] = {
 }
 
 
-class RnetRelay(MitmRelay):
-    """Relay requests via rnet with browser impersonation.
-
-    In 'match_ua' mode: detects browser from the client's User-Agent header
-    and selects a matching impersonation profile.
-
-    In 'override_ua' mode: uses the configured browser profile and removes
-    the client's User-Agent so the engine sets its own consistent one.
-    """
+class RnetRelay(ImpersonationRelay):
+    """Relay requests via rnet with browser impersonation."""
 
     def __init__(self, mode: MitmMode, browser: MitmBrowser | None = None) -> None:
-        self._mode = mode
-        self._configured_browser = browser or DEFAULT_BROWSER
+        super().__init__(mode, browser)
         self._client: Client | None = None
         self._current_impersonate: MitmBrowser | None = None
 
@@ -72,20 +64,7 @@ class RnetRelay(MitmRelay):
         proxy_url: str,
     ) -> tuple[int, str, dict[str, str], bytes]:
         """Send request via rnet with browser impersonation."""
-        forward_headers = dict(headers)
-
-        if self._mode == MitmMode.OVERRIDE_UA:
-            # Remove User-Agent so engine sets its own consistent one
-            forward_headers = {
-                k: v for k, v in forward_headers.items()
-                if k.lower() != "user-agent"
-            }
-            browser = self._configured_browser
-        else:
-            # match_ua: detect browser from client's User-Agent
-            user_agent = headers.get("User-Agent", headers.get("user-agent", ""))
-            browser = detect_browser(user_agent)
-
+        forward_headers, browser = self._prepare_headers(headers)
         client = self._get_or_create_client(browser)
 
         rnet_method = _METHOD_MAP.get(method.upper(), Method.GET)

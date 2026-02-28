@@ -184,8 +184,9 @@ When using Browser Override mode, you choose which browser to impersonate:
 | **Firefox** | Alternative fingerprint for diversity. |
 | **Safari** | macOS/iOS fingerprint. |
 | **Edge** | Chromium-based, Windows-like fingerprint. |
+| **Random** | Randomly selects a different browser profile for each request. Useful for fingerprint diversity across a large volume of requests. |
 
-In Browser Match mode, the browser profile is automatically detected from the client's User-Agent header.
+In Browser Match mode, the browser profile is automatically detected from the client's User-Agent header. If the User-Agent doesn't match any known browser, the engine defaults to Chrome and replaces the unrecognized User-Agent with Chrome's default.
 
 ### How It Works
 
