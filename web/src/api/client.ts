@@ -419,6 +419,16 @@ export const setStrategy = async (strategy: string) => {
   return response.data
 }
 
+export const downloadCaCertificate = async (): Promise<void> => {
+  const response = await api.get('/projects/ca-certificate', { responseType: 'blob' })
+  const url = URL.createObjectURL(response.data as Blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = 'octoprox-ca.crt'
+  a.click()
+  URL.revokeObjectURL(url)
+}
+
 // Project API functions
 export const fetchProjects = async (): Promise<ProjectListResponse> => {
   const response = await api.get('/projects')

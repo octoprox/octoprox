@@ -35,6 +35,7 @@ class MitmBrowser(str, Enum):
     FIREFOX = "firefox"
     SAFARI = "safari"
     EDGE = "edge"
+    RANDOM = "random"
 
 
 class Project(BaseModel):

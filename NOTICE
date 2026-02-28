@@ -38,6 +38,10 @@ Backend (Python):
 - prometheus-client (Apache 2.0 License) - https://github.com/prometheus/client_python
 - python-multipart (MIT License) - https://github.com/Kludex/python-multipart
 - python-jose (MIT License) - https://github.com/mpdavis/python-jose
+- cryptography (Apache 2.0 / BSD License) - https://github.com/pyca/cryptography
+- curl_cffi (MIT License) - https://github.com/lexiforest/curl_cffi
+- rnet (Apache 2.0 License) - https://github.com/0x676e67/rnet
+- h11 (MIT License) - https://github.com/python-hyper/h11
 - blinker (MIT License) - https://github.com/pallets-eco/blinker
 - boto3 (Apache 2.0 License) - https://github.com/boto/boto3
 - google-cloud-compute (Apache 2.0 License) - https://github.com/googleapis/google-cloud-python

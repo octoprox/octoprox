@@ -9,17 +9,17 @@ from api.models.project import MitmBrowser
 DEFAULT_BROWSER = MitmBrowser.CHROME
 
 
-def detect_browser(user_agent: str) -> MitmBrowser:
+def detect_browser(user_agent: str) -> MitmBrowser | None:
     """Detect browser family from User-Agent string.
 
     Returns a MitmBrowser enum value that can be used to select a matching
-    TLS fingerprint impersonation profile, ensuring the TLS fingerprint
-    and User-Agent header are consistent.
+    TLS fingerprint impersonation profile, or None if the UA doesn't match
+    any known browser pattern.
 
     Detection order matters: Edge UA contains "Chrome", Chrome UA contains "Safari".
     """
-    if not user_agent:
-        return DEFAULT_BROWSER
+    if not user_agent or not user_agent.strip():
+        return None
 
     if "Edg/" in user_agent:
         return MitmBrowser.EDGE
@@ -30,4 +30,4 @@ def detect_browser(user_agent: str) -> MitmBrowser:
     if "Safari/" in user_agent:
         return MitmBrowser.SAFARI
 
-    return DEFAULT_BROWSER
+    return None

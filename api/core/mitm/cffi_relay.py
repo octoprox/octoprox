@@ -13,30 +13,21 @@ from typing import Any
 import structlog
 from curl_cffi.requests import AsyncSession
 
-from api.core.mitm.base import MitmRelay
-from api.core.mitm.browser_detect import DEFAULT_BROWSER, detect_browser
+from api.core.mitm.base import ImpersonationRelay
 from api.models.project import MitmBrowser, MitmMode
 
 logger = structlog.get_logger()
 
 
-class CffiRelay(MitmRelay):
-    """Relay requests via curl_cffi with browser impersonation.
-
-    In 'match_ua' mode: detects browser from the client's User-Agent header
-    and selects a matching impersonation profile.
-
-    In 'override_ua' mode: uses the configured browser profile and removes
-    the client's User-Agent so the engine sets its own consistent one.
-    """
+class CffiRelay(ImpersonationRelay):
+    """Relay requests via curl_cffi with browser impersonation."""
 
     def __init__(self, mode: MitmMode, browser: MitmBrowser | None = None) -> None:
-        self._mode = mode
-        self._configured_browser = browser or DEFAULT_BROWSER
+        super().__init__(mode, browser)
         self._session: AsyncSession[Any] | None = None
-        self._current_impersonate: str | None = None
+        self._current_impersonate: MitmBrowser | None = None
 
-    def _get_or_create_session(self, browser: str) -> AsyncSession[Any]:
+    def _get_or_create_session(self, browser: MitmBrowser) -> AsyncSession[Any]:
         """Get existing session or create a new one if browser changed."""
         if self._session is None or browser != self._current_impersonate:
             if self._session is not None:
@@ -55,20 +46,7 @@ class CffiRelay(MitmRelay):
         proxy_url: str,
     ) -> tuple[int, str, dict[str, str], bytes]:
         """Send request via curl_cffi with browser impersonation."""
-        forward_headers = dict(headers)
-
-        if self._mode == MitmMode.OVERRIDE_UA:
-            # Remove User-Agent so engine sets its own consistent one
-            forward_headers = {
-                k: v for k, v in forward_headers.items()
-                if k.lower() != "user-agent"
-            }
-            browser = self._configured_browser
-        else:
-            # match_ua: detect browser from client's User-Agent
-            user_agent = headers.get("User-Agent", headers.get("user-agent", ""))
-            browser = detect_browser(user_agent)
-
+        forward_headers, browser = self._prepare_headers(headers)
         session = self._get_or_create_session(browser)
 
         response = await session.request(

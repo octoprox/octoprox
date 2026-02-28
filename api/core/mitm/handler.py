@@ -6,11 +6,16 @@
 Intercepts HTTPS traffic by terminating TLS on the client side,
 reading plaintext HTTP requests, logging headers, and relaying
 requests upstream via a pluggable relay strategy.
+
+Uses h11 as a sans-I/O HTTP/1.1 state machine to handle protocol
+parsing and serialization, replacing manual request/response parsing.
 """
 
 import asyncio
+import contextlib
 from typing import TYPE_CHECKING
 
+import h11
 import structlog
 
 from api.core.tls_cert_manager import TLSCertManager
@@ -21,6 +26,9 @@ if TYPE_CHECKING:
     from api.models.proxy import Proxy
 
 logger = structlog.get_logger()
+
+# Read buffer size for client-facing connection
+_READ_SIZE = 65536
 
 
 class MitmHandler:
@@ -47,8 +55,8 @@ class MitmHandler:
     ) -> tuple[int, int]:
         """Run MITM interception on the client connection.
 
-        Upgrades the client connection to TLS, then enters a request loop
-        that reads HTTP/1.1 requests, logs headers, and relays them via
+        Upgrades the client connection to TLS, then uses h11 to parse
+        HTTP/1.1 requests and serialize responses, relaying them via
         the appropriate strategy based on project settings.
 
         Returns:
@@ -85,7 +93,6 @@ class MitmHandler:
         else:
             base_url = f"https://{target_host}:{target_port}"
 
-        # Determine proxy URL
         proxy_url = proxy.url
 
         # Create relay strategy based on project settings
@@ -96,147 +103,78 @@ class MitmHandler:
             target_host=target_host,
         )
 
+        conn = h11.Connection(our_role=h11.SERVER)
+
         try:
-            # Request loop (handles HTTP keep-alive)
             while True:
-                # Read request line
-                try:
-                    request_line_raw = await client_reader.readline()
-                except (ConnectionResetError, BrokenPipeError, OSError):
-                    break
-                if not request_line_raw:
-                    break
+                # Read a complete request using h11 (Request + optional Data + EndOfMessage)
+                request_event, body, read_bytes = await _read_request(conn, client_reader)
+                bytes_sent += read_bytes
 
-                request_line = request_line_raw.decode("utf-8", errors="replace").strip()
-                if not request_line:
+                if request_event is None:
                     break
 
-                bytes_sent += len(request_line_raw)
+                # Extract request details from h11 event
+                method = request_event.method.decode("ascii")
+                path = request_event.target.decode("ascii")
+                headers: dict[str, str] = {
+                    name.decode("latin-1"): value.decode("latin-1")
+                    for name, value in request_event.headers
+                }
 
-                # Parse request line
-                parts = request_line.split()
-                if len(parts) < 3:
-                    break
-                method, path, _version = parts[0], parts[1], parts[2]
-
-                # Read headers until blank line
-                headers: dict[str, str] = {}
-                content_length = 0
-                is_chunked = False
-
-                while True:
-                    try:
-                        line_raw = await client_reader.readline()
-                    except (ConnectionResetError, BrokenPipeError, OSError):
-                        return bytes_sent, bytes_received
-                    if not line_raw:
-                        return bytes_sent, bytes_received
-
-                    bytes_sent += len(line_raw)
-                    line = line_raw.decode("utf-8", errors="replace").strip()
-
-                    if not line:
-                        break  # End of headers
-
-                    if ":" in line:
-                        key, value = line.split(":", 1)
-                        header_name = key.strip()
-                        header_value = value.strip()
-                        headers[header_name] = header_value
-
-                        lower_name = header_name.lower()
-                        if lower_name == "content-length":
-                            content_length = int(header_value)
-                        elif lower_name == "transfer-encoding" and "chunked" in header_value.lower():
-                            is_chunked = True
-
-                # Log the intercepted request
                 logger.debug(
                     "MITM intercepted request",
                     target_host=target_host,
-                    request_line=request_line,
+                    method=method,
+                    path=path,
                     headers=headers,
                     mode=project.tls_mitm_mode,
                 )
 
-                # Read request body if present
-                body: bytes | None = None
-                if is_chunked:
-                    body = await _read_chunked_body(client_reader)
-                    bytes_sent += len(body) if body else 0
-                elif content_length > 0:
-                    try:
-                        body = await client_reader.readexactly(content_length)
-                        bytes_sent += len(body)
-                    except asyncio.IncompleteReadError:
-                        break
-
-                # Build full URL
                 url = f"{base_url}{path}"
 
                 # Remove hop-by-hop headers that shouldn't be forwarded
                 forward_headers = {
                     k: v for k, v in headers.items()
-                    if k.lower() not in ("connection", "proxy-connection", "keep-alive",
-                                         "transfer-encoding")
+                    if k.lower() not in (
+                        "connection", "proxy-connection", "keep-alive",
+                        "transfer-encoding",
+                    )
                 }
 
                 # Relay request via the chosen strategy
                 try:
-                    status_code, reason, response_headers, response_body = (
-                        await relay.send_request(
-                            method, url, forward_headers, body, proxy_url,
-                        )
+                    status_code, _reason, response_headers, response_body = (
+                        await relay.send_request(method, url, forward_headers, body, proxy_url)
                     )
                 except Exception as e:
                     logger.debug("MITM upstream request failed", url=url, error=str(e))
-                    # Send 502 to client
-                    error_response = (
-                        b"HTTP/1.1 502 Bad Gateway\r\n"
-                        b"Content-Length: 0\r\n"
-                        b"Connection: close\r\n\r\n"
-                    )
-                    try:
-                        client_writer.write(error_response)
+                    written = _send_via_h11(conn, client_writer, 502, {}, b"")
+                    with contextlib.suppress(ConnectionResetError, BrokenPipeError, OSError):
                         await client_writer.drain()
-                        bytes_received += len(error_response)
-                    except (ConnectionResetError, BrokenPipeError, OSError):
-                        pass
+                    bytes_received += written
                     break
 
-                # Write response back to client
+                # Filter response headers: drop transfer-encoding/content-length
+                # (h11 manages content-length automatically)
+                filtered: dict[str, str] = {
+                    k: v for k, v in response_headers.items()
+                    if k.lower() not in ("transfer-encoding", "content-length")
+                }
+
                 try:
-                    # Status line
-                    status_line = f"HTTP/1.1 {status_code} {reason}\r\n"
-                    status_bytes = status_line.encode()
-                    client_writer.write(status_bytes)
-                    bytes_received += len(status_bytes)
-
-                    # Response headers (skip transfer-encoding, we use content-length)
-                    for name, value in response_headers.items():
-                        if name.lower() in ("transfer-encoding", "content-length"):
-                            continue
-                        header_line = f"{name}: {value}\r\n".encode()
-                        client_writer.write(header_line)
-                        bytes_received += len(header_line)
-
-                    # Set Content-Length
-                    cl_header = f"Content-Length: {len(response_body)}\r\n".encode()
-                    client_writer.write(cl_header)
-                    bytes_received += len(cl_header)
-
-                    # End of headers
-                    client_writer.write(b"\r\n")
-                    bytes_received += 2
-
-                    # Response body
-                    if response_body:
-                        client_writer.write(response_body)
-                        bytes_received += len(response_body)
-
+                    written = _send_via_h11(
+                        conn, client_writer, status_code, filtered, response_body,
+                    )
                     await client_writer.drain()
-
+                    bytes_received += written
                 except (ConnectionResetError, BrokenPipeError, OSError):
+                    break
+
+                # Prepare for next request (keep-alive)
+                try:
+                    conn.start_next_cycle()
+                except h11.LocalProtocolError:
                     break
 
         except (ConnectionResetError, BrokenPipeError, OSError):
@@ -247,38 +185,68 @@ class MitmHandler:
         return bytes_sent, bytes_received
 
 
-async def _read_chunked_body(reader: asyncio.StreamReader) -> bytes:
-    """Read a chunked transfer-encoded body from the stream."""
-    body = bytearray()
+async def _read_request(
+    conn: h11.Connection,
+    reader: asyncio.StreamReader,
+) -> tuple[h11.Request | None, bytes | None, int]:
+    """Read a full HTTP/1.1 request via h11.
+
+    Returns (request_event, body_bytes, bytes_read_from_socket).
+    Returns (None, None, bytes_read) if the connection is closed or an
+    unrecoverable event is encountered.
+    """
+    request_event: h11.Request | None = None
+    body_parts: list[bytes] = []
+    total_read = 0
+
     while True:
-        try:
-            size_line = await reader.readline()
-        except (ConnectionResetError, BrokenPipeError, OSError):
-            break
-        if not size_line:
-            break
+        event = conn.next_event()
 
-        size_str = size_line.decode("utf-8", errors="replace").strip()
-        if not size_str:
-            break
+        if event is h11.NEED_DATA:
+            try:
+                data = await reader.read(_READ_SIZE)
+            except (ConnectionResetError, BrokenPipeError, OSError):
+                return None, None, total_read
+            if not data:
+                return None, None, total_read
+            total_read += len(data)
+            conn.receive_data(data)
+            continue
 
-        try:
-            chunk_size = int(size_str.split(";")[0], 16)
-        except ValueError:
-            break
+        if isinstance(event, h11.Request):
+            request_event = event
+            continue
 
-        if chunk_size == 0:
-            # Read trailing CRLF after the last chunk
-            await reader.readline()
-            break
+        if isinstance(event, h11.Data):
+            body_parts.append(bytes(event.data))
+            continue
 
-        try:
-            chunk_data = await reader.readexactly(chunk_size)
-        except asyncio.IncompleteReadError:
-            break
-        body.extend(chunk_data)
+        if isinstance(event, h11.EndOfMessage):
+            body = b"".join(body_parts) if body_parts else None
+            return request_event, body, total_read
 
-        # Read CRLF after chunk data
-        await reader.readline()
+        # ConnectionClosed, PAUSED, or other sentinel — stop
+        return None, None, total_read
 
-    return bytes(body)
+
+def _send_via_h11(
+    conn: h11.Connection,
+    writer: asyncio.StreamWriter,
+    status_code: int,
+    headers: dict[str, str],
+    body: bytes,
+) -> int:
+    """Serialize and write a full HTTP/1.1 response via h11.
+
+    Returns the number of bytes written.
+    """
+    h11_headers: list[tuple[str, str]] = list(headers.items())
+    h11_headers.append(("content-length", str(len(body))))
+
+    out = conn.send(h11.Response(status_code=status_code, headers=h11_headers)) or b""
+    if body:
+        out += conn.send(h11.Data(data=body)) or b""
+    out += conn.send(h11.EndOfMessage()) or b""
+
+    writer.write(out)
+    return len(out)
