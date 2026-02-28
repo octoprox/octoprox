@@ -8,10 +8,10 @@ import { Plus, Server, Activity, Trash2, FolderOpen, Settings, Moon, Sun } from 
 import { fetchProjects, createProject, deleteProject, updateProject, ProjectCreate, ProjectUpdate, ProjectSummary } from '../api/client'
 import { useProject } from '../contexts/ProjectContext'
 import { useTheme } from '../contexts/ThemeContext'
-import EditProjectModal from './EditProjectModal'
+import ProjectModal from './ProjectModal'
 import octoproxLogo from '../assets/logos/octoprox_horizontal.svg'
 import octoproxLogoDark from '../assets/logos/octoprox_horizontal_dark.svg'
-import { Button, Input, Select, Textarea, Label, Modal, ModalHeader, ModalFooter, Card, Alert } from './ui'
+import { Button, Input, Modal, ModalFooter, Card } from './ui'
 
 export default function ProjectSelection() {
   const navigate = useNavigate()
@@ -137,16 +137,16 @@ export default function ProjectSelection() {
       </div>
 
       {showCreateModal && (
-        <CreateProjectModal
+        <ProjectModal
           onClose={() => setShowCreateModal(false)}
-          onCreate={handleCreateProject}
+          onSave={(data) => handleCreateProject(data as ProjectCreate)}
           isLoading={createMutation.isPending}
           error={createMutation.error?.message}
         />
       )}
 
       {showEditModal && (
-        <EditProjectModal
+        <ProjectModal
           project={showEditModal}
           onClose={() => setShowEditModal(null)}
           onSave={(data) => updateMutation.mutate({ id: showEditModal.id, data })}
@@ -232,103 +232,6 @@ function ProjectCard({
         Open Project
       </Button>
     </Card>
-  )
-}
-
-function CreateProjectModal({
-  onClose,
-  onCreate,
-  isLoading,
-  error,
-}: {
-  onClose: () => void
-  onCreate: (data: ProjectCreate) => void
-  isLoading: boolean
-  error?: string
-}) {
-  const [formData, setFormData] = useState<ProjectCreate>({
-    name: '',
-    description: '',
-    username: '',
-    password: '',
-    routing_strategy: 'round_robin',
-  })
-
-  const handleSubmit = (e: React.FormEvent) => {
-    e.preventDefault()
-    onCreate(formData)
-  }
-
-  return (
-    <Modal onClose={onClose} className="p-6">
-      <ModalHeader title="Create New Project" onClose={onClose} />
-      <form onSubmit={handleSubmit}>
-        <div className="space-y-4">
-          <div>
-            <Label>Name</Label>
-            <Input
-              type="text"
-              required
-              value={formData.name}
-              onChange={(e) => setFormData({ ...formData, name: e.target.value })}
-              placeholder="My Project"
-            />
-          </div>
-          <div>
-            <Label>Description</Label>
-            <Textarea
-              value={formData.description}
-              onChange={(e) => setFormData({ ...formData, description: e.target.value })}
-              rows={2}
-              placeholder="Optional description"
-            />
-          </div>
-          <div>
-            <Label>Proxy Username</Label>
-            <Input
-              type="text"
-              required
-              value={formData.username}
-              onChange={(e) => setFormData({ ...formData, username: e.target.value })}
-              placeholder="proxy_user"
-            />
-            <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">Used for proxy authentication</p>
-          </div>
-          <div>
-            <Label>Proxy Password</Label>
-            <Input
-              type="password"
-              required
-              value={formData.password}
-              onChange={(e) => setFormData({ ...formData, password: e.target.value })}
-              placeholder="••••••••"
-            />
-          </div>
-          <div>
-            <Label>Routing Strategy</Label>
-            <Select
-              value={formData.routing_strategy}
-              onChange={(e) => setFormData({ ...formData, routing_strategy: e.target.value })}
-            >
-              <option value="round_robin">Round Robin</option>
-              <option value="least_used">Least Used</option>
-              <option value="random">Random</option>
-              <option value="sticky">Sticky</option>
-              <option value="health_based">Health Based</option>
-            </Select>
-          </div>
-        </div>
-        {error && <Alert className="mt-4">{error}</Alert>}
-        <ModalFooter>
-          <Button type="button" variant="ghost" onClick={onClose}>
-            Cancel
-          </Button>
-          <Button type="submit" disabled={isLoading}>
-            {isLoading ? 'Creating...' : 'Create Project'}
-          </Button>
-        </ModalFooter>
-      </form>
-    </Modal>
   )
 }
 

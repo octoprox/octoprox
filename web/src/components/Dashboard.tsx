@@ -6,7 +6,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { Activity, Server, CheckCircle, XCircle, Settings, ArrowUpCircle, ArrowDownCircle, TrendingUp, Loader, Power } from 'lucide-react'
 import { fetchProjectMetrics, fetchProjectScalingMetrics, updateProject, ProjectUpdate, ScalingMetrics } from '../api/client'
 import { useProject } from '../contexts/ProjectContext'
-import EditProjectModal from './EditProjectModal'
+import ProjectModal from './ProjectModal'
 import { formatBytes } from '../utils/format'
 import { Card, Badge, Button } from './ui'
 
@@ -190,7 +190,7 @@ export default function Dashboard() {
 
       {/* Edit Project Modal */}
       {showEditModal && selectedProject && (
-        <EditProjectModal
+        <ProjectModal
           project={selectedProject}
           onClose={() => setShowEditModal(false)}
           onSave={(data) => updateMutation.mutate(data)}
