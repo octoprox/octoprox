@@ -13,6 +13,8 @@ parsing and serialization, replacing manual request/response parsing.
 
 import asyncio
 import contextlib
+import json
+import time
 from typing import TYPE_CHECKING
 
 import h11
@@ -22,6 +24,7 @@ from api.core.tls_cert_manager import TLSCertManager
 
 if TYPE_CHECKING:
     from api.core.mitm.base import MitmRelay
+    from api.db.redis import RedisClient
     from api.models.project import Project
     from api.models.proxy import Proxy
 
@@ -39,8 +42,68 @@ class MitmHandler:
     via a pluggable relay strategy (plain, curl_cffi, or rnet).
     """
 
-    def __init__(self, cert_manager: TLSCertManager) -> None:
+    def __init__(
+        self,
+        cert_manager: TLSCertManager,
+        redis_client: "RedisClient | None" = None,
+    ) -> None:
         self._cert_manager = cert_manager
+        self._redis_client = redis_client
+
+    def _record_request(
+        self,
+        *,
+        project: "Project",
+        method: str,
+        url: str,
+        request_headers: dict[str, str],
+        upstream_headers: dict[str, str],
+        request_body_size: int,
+        status_code: int,
+        response_headers: dict[str, str],
+        response_body_size: int,
+        target_host: str,
+        proxy_url: str,
+        latency_ms: float,
+    ) -> None:
+        """Fire-and-forget: schedule MITM request recording as a background task."""
+        if self._redis_client is None:
+            return
+
+        from api.core import utc_now
+
+        req_ct = request_headers.get("content-type", request_headers.get("Content-Type", ""))
+        resp_ct = response_headers.get("content-type", response_headers.get("Content-Type", ""))
+
+        fields = {
+            "timestamp": utc_now().isoformat(),
+            "method": method,
+            "url": url,
+            "request_headers": json.dumps(request_headers),
+            "upstream_headers": json.dumps(upstream_headers),
+            "request_body_size": str(request_body_size),
+            "request_content_type": req_ct,
+            "status_code": str(status_code),
+            "response_headers": json.dumps(response_headers),
+            "response_body_size": str(response_body_size),
+            "response_content_type": resp_ct,
+            "target_host": target_host,
+            "proxy_url": proxy_url,
+            "mitm_mode": project.tls_mitm_mode.value
+            if hasattr(project.tls_mitm_mode, "value")
+            else str(project.tls_mitm_mode),
+            "mitm_engine": project.tls_mitm_engine.value
+            if project.tls_mitm_engine and hasattr(project.tls_mitm_engine, "value")
+            else str(project.tls_mitm_engine or ""),
+            "mitm_browser": project.tls_mitm_browser.value
+            if project.tls_mitm_browser and hasattr(project.tls_mitm_browser, "value")
+            else str(project.tls_mitm_browser or ""),
+            "latency_ms": str(round(latency_ms, 2)),
+        }
+
+        coro = self._redis_client.record_mitm_request(project.id, fields)
+        task = asyncio.create_task(coro)
+        task.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
 
     async def handle(
         self,
@@ -135,18 +198,26 @@ class MitmHandler:
 
                 # Remove hop-by-hop headers that shouldn't be forwarded
                 forward_headers = {
-                    k: v for k, v in headers.items()
-                    if k.lower() not in (
-                        "connection", "proxy-connection", "keep-alive",
+                    k: v
+                    for k, v in headers.items()
+                    if k.lower()
+                    not in (
+                        "connection",
+                        "proxy-connection",
+                        "keep-alive",
                         "transfer-encoding",
                     )
                 }
 
                 # Relay request via the chosen strategy
+                req_start = time.monotonic()
                 try:
-                    status_code, _reason, response_headers, response_body = (
-                        await relay.send_request(method, url, forward_headers, body, proxy_url)
-                    )
+                    (
+                        status_code,
+                        _reason,
+                        response_headers,
+                        response_body,
+                    ) = await relay.send_request(method, url, forward_headers, body, proxy_url)
                 except Exception as e:
                     logger.debug("MITM upstream request failed", url=url, error=str(e))
                     written = _send_via_h11(conn, client_writer, 502, {}, b"")
@@ -158,18 +229,40 @@ class MitmHandler:
                 # Filter response headers: drop transfer-encoding/content-length
                 # (h11 manages content-length automatically)
                 filtered: dict[str, str] = {
-                    k: v for k, v in response_headers.items()
+                    k: v
+                    for k, v in response_headers.items()
                     if k.lower() not in ("transfer-encoding", "content-length")
                 }
 
+                req_latency_ms = (time.monotonic() - req_start) * 1000
+
                 try:
                     written = _send_via_h11(
-                        conn, client_writer, status_code, filtered, response_body,
+                        conn,
+                        client_writer,
+                        status_code,
+                        filtered,
+                        response_body,
                     )
                     await client_writer.drain()
                     bytes_received += written
                 except (ConnectionResetError, BrokenPipeError, OSError):
                     break
+
+                self._record_request(
+                    project=project,
+                    method=method,
+                    url=url,
+                    request_headers=headers,
+                    upstream_headers=relay.last_upstream_headers,
+                    request_body_size=len(body) if body else 0,
+                    status_code=status_code,
+                    response_headers=response_headers,
+                    response_body_size=len(response_body),
+                    target_host=target_host,
+                    proxy_url=proxy_url,
+                    latency_ms=req_latency_ms,
+                )
 
                 # Prepare for next request (keep-alive)
                 try:

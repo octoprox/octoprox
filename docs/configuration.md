@@ -197,6 +197,14 @@ TLS interception inherently creates two separate TLS sessions:
 
 This means the upstream TLS fingerprint (JA3/JA4) is always determined by the relay engine, never by your client. Your client's original fingerprint is not and cannot be passed through.
 
+### Protocol Support
+
+When MITM is **disabled**, Octoprox creates a raw TCP tunnel (`CONNECT`) and is completely protocol-agnostic — HTTP/2, HTTP/3 (QUIC), WebSocket, and any other protocol work transparently.
+
+When MITM is **enabled**, the proxy terminates TLS and parses traffic itself. The current implementation uses [h11](https://h11.readthedocs.io/) on the client-facing side, which limits interception to **HTTP/1.1** only. On the relay side, the impersonation engines (`curl_cffi`, `rnet`) negotiate HTTP/2 with the target server automatically.
+
+WebSocket and HTTP/2 client-side support are planned for a future release.
+
 ### CA Certificate
 
 When any MITM mode is enabled, clients must trust the Octoprox CA certificate. Without it, clients will see TLS verification errors.

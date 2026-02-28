@@ -24,7 +24,17 @@ from api.core.tls_cert_manager import TLSCertManager
 from api.db.migrations import run_migrations
 from api.db.redis import get_redis_client
 from api.db.session import get_async_session_factory
-from api.routes import auth, brightdata, connectors, credentials, health, metrics, projects, proxies
+from api.routes import (
+    auth,
+    brightdata,
+    connectors,
+    credentials,
+    health,
+    metrics,
+    mitm,
+    projects,
+    proxies,
+)
 
 # Configure logging before getting the logger
 setup_logging(settings.log_level)
@@ -72,7 +82,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         ca_key_path=Path(settings.tls_mitm_ca_key_path),
     )
     cert_manager.initialize()
-    mitm_handler = MitmHandler(cert_manager)
+    mitm_handler = MitmHandler(cert_manager, redis_client=redis_client)
 
     # Start the HTTP proxy server
     proxy_server = ProxyServer(proxy_manager, mitm_handler=mitm_handler)
@@ -115,13 +125,31 @@ def create_app() -> FastAPI:
 
     # All API routes under /api/v1
     app.include_router(auth.router, prefix="/api/v1", tags=["Auth"])
-    app.include_router(projects.router, prefix="/api/v1", tags=["Projects"], dependencies=auth_dependency)
-    app.include_router(credentials.router, prefix="/api/v1", tags=["Credentials"], dependencies=auth_dependency)
-    app.include_router(connectors.router, prefix="/api/v1", tags=["Connectors"], dependencies=auth_dependency)
-    app.include_router(connectors.options_router, prefix="/api/v1", tags=["Connectors"], dependencies=auth_dependency)
-    app.include_router(proxies.router, prefix="/api/v1", tags=["Proxies"], dependencies=auth_dependency)
-    app.include_router(metrics.router, prefix="/api/v1", tags=["Metrics"], dependencies=auth_dependency)
-    app.include_router(brightdata.router, prefix="/api/v1", tags=["BrightData"], dependencies=auth_dependency)
+    app.include_router(
+        projects.router, prefix="/api/v1", tags=["Projects"], dependencies=auth_dependency
+    )
+    app.include_router(
+        credentials.router, prefix="/api/v1", tags=["Credentials"], dependencies=auth_dependency
+    )
+    app.include_router(
+        connectors.router, prefix="/api/v1", tags=["Connectors"], dependencies=auth_dependency
+    )
+    app.include_router(
+        connectors.options_router,
+        prefix="/api/v1",
+        tags=["Connectors"],
+        dependencies=auth_dependency,
+    )
+    app.include_router(
+        proxies.router, prefix="/api/v1", tags=["Proxies"], dependencies=auth_dependency
+    )
+    app.include_router(
+        metrics.router, prefix="/api/v1", tags=["Metrics"], dependencies=auth_dependency
+    )
+    app.include_router(
+        brightdata.router, prefix="/api/v1", tags=["BrightData"], dependencies=auth_dependency
+    )
+    app.include_router(mitm.router, prefix="/api/v1", tags=["MITM"], dependencies=auth_dependency)
 
     # Serve frontend static files in production (when web/dist exists)
     static_dir = Path(__file__).parent.parent / "web" / "dist"
@@ -161,4 +189,3 @@ def run() -> None:
 
 if __name__ == "__main__":
     run()
-

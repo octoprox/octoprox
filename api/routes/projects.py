@@ -11,6 +11,7 @@ from pydantic import BaseModel
 
 from api.core.config import settings
 from api.models.project import (
+    MitmMode,
     Project,
     ProjectCreate,
     ProjectResponse,
@@ -229,6 +230,29 @@ async def update_project(
         project.tls_mitm_engine = project_data.tls_mitm_engine
     if project_data.tls_mitm_browser is not None:
         project.tls_mitm_browser = project_data.tls_mitm_browser
+
+    # Clear fields that don't apply to the current MITM mode and validate
+    if project.tls_mitm_mode in (MitmMode.OFF, MitmMode.PLAIN):
+        project.tls_mitm_engine = None
+        project.tls_mitm_browser = None
+    elif project.tls_mitm_mode == MitmMode.MATCH_UA:
+        if project.tls_mitm_engine is None:
+            raise HTTPException(
+                status_code=400,
+                detail="tls_mitm_engine is required when tls_mitm_mode is 'match_ua'",
+            )
+        project.tls_mitm_browser = None
+    elif project.tls_mitm_mode == MitmMode.OVERRIDE_UA:
+        if project.tls_mitm_engine is None:
+            raise HTTPException(
+                status_code=400,
+                detail="tls_mitm_engine is required when tls_mitm_mode is 'override_ua'",
+            )
+        if project.tls_mitm_browser is None:
+            raise HTTPException(
+                status_code=400,
+                detail="tls_mitm_browser is required when tls_mitm_mode is 'override_ua'",
+            )
 
     await proxy_manager.update_project(project)
 

@@ -3,7 +3,7 @@
 
 import { useState, useEffect } from 'react'
 import { BrowserRouter, Routes, Route, Link, Navigate, useParams, useNavigate } from 'react-router-dom'
-import { Server, BarChart3, LineChart, LogOut, FolderOpen, ChevronDown, ChevronLeft, Key, Link2, Moon, Sun } from 'lucide-react'
+import { Server, BarChart3, LineChart, LogOut, FolderOpen, ChevronDown, ChevronLeft, Key, Link2, Moon, Sun, Search } from 'lucide-react'
 import Dashboard from './components/Dashboard'
 import octoproxLogo from './assets/logos/octoprox_horizontal.svg'
 import octoproxLogoDark from './assets/logos/octoprox_horizontal_dark.svg'
@@ -12,6 +12,7 @@ import octoproxLogoOnlyDark from './assets/logos/octoprox_logo_only_dark.svg'
 import ProxyList from './components/ProxyList'
 import CredentialsConfig from './components/CredentialsConfig'
 import ConnectorConfig from './components/ConnectorConfig'
+import MitmInspector from './components/MitmInspector'
 import Metrics from './components/Metrics'
 import Login from './components/Login'
 import ProjectSelection from './components/ProjectSelection'
@@ -205,6 +206,7 @@ function ProjectLayout({
           <NavLink to={`/projects/${projectId}/proxies`} icon={<Server />} label="Proxies" collapsed={sidebarCollapsed} />
           <NavLink to={`/projects/${projectId}/credentials`} icon={<Key />} label="Credentials" collapsed={sidebarCollapsed} />
           <NavLink to={`/projects/${projectId}/connectors`} icon={<Link2 />} label="Connectors" collapsed={sidebarCollapsed} />
+          <NavLink to={`/projects/${projectId}/mitm-inspector`} icon={<Search />} label="MITM Inspector" collapsed={sidebarCollapsed} />
         </nav>
 
         {/* Bottom section: theme toggle + user info */}
@@ -269,6 +271,7 @@ function ProjectLayout({
           <Route path="proxies" element={<ProxyList />} />
           <Route path="credentials" element={<CredentialsConfig />} />
           <Route path="connectors" element={<ConnectorConfig />} />
+          <Route path="mitm-inspector" element={<MitmInspector />} />
           <Route path="*" element={<Navigate to="dashboard" replace />} />
         </Routes>
       </main>

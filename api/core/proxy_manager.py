@@ -445,6 +445,7 @@ class ProxyManager:
             await self._redis_client.delete_proxy_status(proxy_id)
             await self._redis_client.reset_proxy_metrics(proxy_id)
         await self._redis_client.reset_project_metrics(project_id)
+        await self._redis_client.clear_mitm_requests(project_id)
 
         # Remove from cache
         del self._projects[project_id]

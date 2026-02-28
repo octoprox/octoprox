@@ -78,9 +78,19 @@ class RnetRelay(ImpersonationRelay):
 
         # rnet response.status is already int
         response_body = await response.bytes()
-        # rnet HeaderMapItemsIter stubs don't match Iterator protocol
-        header_items: list[tuple[str, str]] = list(response.headers.items())  # type: ignore[arg-type]
-        response_headers: dict[str, str] = dict(header_items)
+        # rnet headers may contain bytes keys/values — decode to str.
+        # Drop content-encoding — rnet auto-decompresses the body,
+        # so forwarding the header would cause browsers to double-decompress.
+        raw_items: list[tuple[object, object]] = (
+            list(response.headers.items()) if response.headers else []  # type: ignore[arg-type]
+        )
+        response_headers: dict[str, str] = {
+            (k.decode("latin-1") if isinstance(k, bytes) else str(k)):
+            (v.decode("latin-1") if isinstance(v, bytes) else str(v))
+            for k, v in raw_items
+            if (k.decode("latin-1") if isinstance(k, bytes) else str(k)).lower()
+            != "content-encoding"
+        }
 
         return response.status, "OK", response_headers, response_body
 

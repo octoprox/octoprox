@@ -59,7 +59,12 @@ class CffiRelay(ImpersonationRelay):
             timeout=30,
         )
 
-        response_headers = dict(response.headers)
+        # Drop content-encoding — curl_cffi auto-decompresses the body,
+        # so forwarding the header would cause browsers to double-decompress.
+        response_headers = {
+            k: v for k, v in response.headers.items()
+            if k.lower() != "content-encoding"
+        }
         return (
             response.status_code,
             response.reason or "OK",
