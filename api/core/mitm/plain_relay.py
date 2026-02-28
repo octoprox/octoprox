@@ -79,15 +79,16 @@ class PlainRelay(MitmRelay):
             path = f"{path}?{parsed.query}"
 
         # Build raw HTTP/1.1 request
+        upstream_headers = dict(headers)
+        if not any(k.lower() == "host" for k in upstream_headers):
+            upstream_headers["Host"] = self._target_host
+        self.last_upstream_headers = upstream_headers
+
         request_line = f"{method} {path} HTTP/1.1\r\n"
         self._upstream_writer.write(request_line.encode())
 
-        for name, value in headers.items():
+        for name, value in upstream_headers.items():
             self._upstream_writer.write(f"{name}: {value}\r\n".encode())
-
-        # Ensure Host header is present
-        if not any(k.lower() == "host" for k in headers):
-            self._upstream_writer.write(f"Host: {self._target_host}\r\n".encode())
 
         # Content-Length for body
         if body:

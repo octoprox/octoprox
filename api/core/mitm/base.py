@@ -26,6 +26,9 @@ class MitmRelay(ABC):
     The relay determines the TLS fingerprint the target server sees.
     """
 
+    #: Headers actually sent upstream (set by each relay in send_request).
+    last_upstream_headers: dict[str, str] = {}
+
     @abstractmethod
     async def send_request(
         self,
@@ -106,4 +109,5 @@ class ImpersonationRelay(MitmRelay):
                     if k.lower() != "user-agent"
                 }
 
+        self.last_upstream_headers = forward_headers
         return forward_headers, browser

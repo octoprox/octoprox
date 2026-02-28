@@ -577,5 +577,47 @@ export const fetchBrightDataZones = async (credentialId: string): Promise<Bright
   return response.data
 }
 
+// MITM Inspector types
+export interface MitmRequestRecord {
+  id: string
+  timestamp: string
+  method: string
+  url: string
+  request_headers: Record<string, string>
+  upstream_headers: Record<string, string>
+  request_body_size: number
+  request_content_type: string
+  status_code: number
+  response_headers: Record<string, string>
+  response_body_size: number
+  response_content_type: string
+  target_host: string
+  proxy_url: string
+  mitm_mode: string
+  mitm_engine: string
+  mitm_browser: string
+  latency_ms: number
+}
+
+export interface MitmRequestsResponse {
+  records: MitmRequestRecord[]
+  next_cursor: string | null
+}
+
+export const fetchMitmRequests = async (
+  projectId: string,
+  count: number = 50,
+  cursor?: string | null,
+): Promise<MitmRequestsResponse> => {
+  const params: Record<string, string | number> = { count }
+  if (cursor) params.cursor = cursor
+  const response = await api.get(`/projects/${projectId}/mitm/requests`, { params })
+  return response.data
+}
+
+export const clearMitmRequests = async (projectId: string): Promise<void> => {
+  await api.delete(`/projects/${projectId}/mitm/requests`)
+}
+
 export default api
 

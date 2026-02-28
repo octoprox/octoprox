@@ -1,0 +1,111 @@
+# Copyright 2026 Octoprox Authors
+# SPDX-License-Identifier: Apache-2.0
+
+"""MITM traffic inspection endpoints."""
+
+import json
+
+from fastapi import APIRouter, HTTPException, Query, Request
+from pydantic import BaseModel
+
+router = APIRouter(prefix="/projects/{project_id}/mitm")
+
+
+class MitmRequestRecord(BaseModel):
+    """A single MITM-intercepted request record."""
+
+    id: str
+    timestamp: str
+    method: str
+    url: str
+    request_headers: dict[str, str]
+    upstream_headers: dict[str, str]
+    request_body_size: int
+    request_content_type: str
+    status_code: int
+    response_headers: dict[str, str]
+    response_body_size: int
+    response_content_type: str
+    target_host: str
+    proxy_url: str
+    mitm_mode: str
+    mitm_engine: str
+    mitm_browser: str
+    latency_ms: float
+
+
+class MitmRequestsResponse(BaseModel):
+    """Paginated list of MITM request records."""
+
+    records: list[MitmRequestRecord]
+    next_cursor: str | None = None
+
+
+@router.get("/requests", response_model=MitmRequestsResponse)
+async def list_mitm_requests(
+    request: Request,
+    project_id: str,
+    count: int = Query(50, ge=1, le=200),
+    cursor: str | None = Query(None, description="Stream entry ID for cursor pagination"),
+) -> MitmRequestsResponse:
+    """List recent MITM-intercepted requests for a project (newest first)."""
+    proxy_manager = request.app.state.proxy_manager
+    project = proxy_manager.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    redis_client = request.app.state.redis_client
+
+    # Fetch count+1 to determine if there's a next page
+    raw_records = await redis_client.get_mitm_requests(
+        project_id,
+        count=count + 1,
+        before_id=cursor,
+    )
+
+    has_more = len(raw_records) > count
+    records_to_return = raw_records[:count]
+
+    records = [
+        MitmRequestRecord(
+            id=raw["id"],
+            timestamp=raw["timestamp"],
+            method=raw["method"],
+            url=raw["url"],
+            request_headers=json.loads(raw["request_headers"]),
+            upstream_headers=json.loads(raw.get("upstream_headers", "{}")),
+            request_body_size=int(raw["request_body_size"]),
+            request_content_type=raw.get("request_content_type", ""),
+            status_code=int(raw["status_code"]),
+            response_headers=json.loads(raw["response_headers"]),
+            response_body_size=int(raw["response_body_size"]),
+            response_content_type=raw.get("response_content_type", ""),
+            target_host=raw["target_host"],
+            proxy_url=raw["proxy_url"],
+            mitm_mode=raw.get("mitm_mode", ""),
+            mitm_engine=raw.get("mitm_engine", ""),
+            mitm_browser=raw.get("mitm_browser", ""),
+            latency_ms=float(raw["latency_ms"]),
+        )
+        for raw in records_to_return
+    ]
+
+    next_cursor = records_to_return[-1]["id"] if has_more and records_to_return else None
+
+    return MitmRequestsResponse(records=records, next_cursor=next_cursor)
+
+
+@router.delete("/requests")
+async def clear_mitm_requests(
+    request: Request,
+    project_id: str,
+) -> dict[str, str]:
+    """Clear all MITM request records for a project."""
+    proxy_manager = request.app.state.proxy_manager
+    project = proxy_manager.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    redis_client = request.app.state.redis_client
+    await redis_client.clear_mitm_requests(project_id)
+    return {"status": "ok"}

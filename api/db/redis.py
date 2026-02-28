@@ -19,6 +19,7 @@ PROXY_STATUS_KEY = "proxy:status:{proxy_id}"
 PROXY_METRICS_KEY = "proxy:metrics:{proxy_id}"
 PROJECT_METRICS_KEY = "project:metrics:{project_id}"
 SESSION_KEY = "session:{session_id}"
+MITM_REQUESTS_KEY = "mitm:requests:{project_id}"
 
 
 class RedisClient:
@@ -243,6 +244,62 @@ class RedisClient:
     async def delete_session(self, session_id: str) -> None:
         """Delete a session."""
         key = SESSION_KEY.format(session_id=session_id)
+        await self.client.delete(key)
+
+    # MITM request recording operations
+    async def record_mitm_request(
+        self,
+        project_id: str,
+        fields: dict[str, str],
+    ) -> None:
+        """Append a MITM request record to the project's capped stream.
+
+        Uses XADD with approximate MAXLEN to keep the last ~1000 entries.
+        """
+        key = MITM_REQUESTS_KEY.format(project_id=project_id)
+        await self.client.xadd(key, fields, maxlen=1000, approximate=True)  # type: ignore[arg-type]
+
+    async def get_mitm_requests(
+        self,
+        project_id: str,
+        count: int = 50,
+        before_id: str | None = None,
+    ) -> list[dict[str, str]]:
+        """Read MITM request records from the project's stream (newest first).
+
+        Args:
+            project_id: Project ID.
+            count: Max number of records to return.
+            before_id: If set, return records older than this stream entry ID
+                (cursor-based pagination).
+
+        Returns:
+            List of dicts with stream entry ``id`` plus all field/value pairs.
+        """
+        key = MITM_REQUESTS_KEY.format(project_id=project_id)
+
+        if before_id:
+            # Make the bound exclusive by decrementing the sequence number
+            parts = before_id.split("-")
+            ts_part, seq_part = parts[0], int(parts[1])
+            if seq_part > 0:
+                end = f"{ts_part}-{seq_part - 1}"
+            else:
+                end = f"{int(ts_part) - 1}-18446744073709551615"
+        else:
+            end = "+"
+
+        raw: list[tuple[str, dict[str, str]]] = await self.client.xrevrange(
+            key,
+            max=end,
+            min="-",
+            count=count,
+        )
+        return [{"id": entry_id, **fields} for entry_id, fields in raw]
+
+    async def clear_mitm_requests(self, project_id: str) -> None:
+        """Delete all MITM request records for a project."""
+        key = MITM_REQUESTS_KEY.format(project_id=project_id)
         await self.client.delete(key)
 
 

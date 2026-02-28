@@ -1,16 +1,18 @@
 // Copyright 2026 Octoprox Authors
 // SPDX-License-Identifier: Apache-2.0
 
-import { useState, useEffect, useMemo } from 'react'
+import { Fragment, useState, useEffect, useMemo } from 'react'
 import {
   ColumnDef,
   ColumnFiltersState,
   Column,
+  ExpandedState,
   SortingState,
   RowSelectionState,
   FilterFn,
   flexRender,
   getCoreRowModel,
+  getExpandedRowModel,
   getFilteredRowModel,
   getFacetedUniqueValues,
   getSortedRowModel,
@@ -46,6 +48,7 @@ interface DataTableProps<TData, TValue> {
   enableColumnFilters?: boolean
   onSelectionChange?: (selectedRows: TData[]) => void
   getRowId?: (row: TData) => string
+  renderExpandedRow?: (row: TData) => React.ReactNode
 }
 
 export function DataTable<TData, TValue>({
@@ -57,16 +60,20 @@ export function DataTable<TData, TValue>({
   enableColumnFilters = false,
   onSelectionChange,
   getRowId,
+  renderExpandedRow,
 }: DataTableProps<TData, TValue>) {
   const [sorting, setSorting] = useState<SortingState>([])
   const [rowSelection, setRowSelection] = useState<RowSelectionState>({})
   const [columnFilters, setColumnFilters] = useState<ColumnFiltersState>([])
+  const [expanded, setExpanded] = useState<ExpandedState>({})
 
   const table = useReactTable({
     data,
     columns,
     filterFns: { range: rangeFilterFn },
     getCoreRowModel: getCoreRowModel(),
+    getExpandedRowModel: renderExpandedRow ? getExpandedRowModel() : undefined,
+    getRowCanExpand: renderExpandedRow ? () => true : undefined,
     getFilteredRowModel: getFilteredRowModel(),
     getFacetedUniqueValues: getFacetedUniqueValues(),
     getSortedRowModel: getSortedRowModel(),
@@ -74,6 +81,7 @@ export function DataTable<TData, TValue>({
     onSortingChange: setSorting,
     onRowSelectionChange: setRowSelection,
     onColumnFiltersChange: setColumnFilters,
+    onExpandedChange: setExpanded,
     enableRowSelection,
     getRowId,
     autoResetPageIndex: false,
@@ -81,6 +89,7 @@ export function DataTable<TData, TValue>({
       sorting,
       rowSelection,
       columnFilters,
+      expanded,
     },
     initialState: {
       pagination: {
@@ -160,18 +169,26 @@ export function DataTable<TData, TValue>({
           <tbody className="divide-y divide-gray-100 dark:divide-gray-700">
             {table.getRowModel().rows.length > 0 ? (
               table.getRowModel().rows.map((row) => (
-                <tr
-                  key={row.id}
-                  className={`h-10 hover:bg-gray-50 dark:hover:bg-gray-700/50 transition-colors ${
-                    row.getIsSelected() ? 'bg-blue-50 dark:bg-blue-900/20' : ''
-                  }`}
-                >
-                  {row.getVisibleCells().map((cell) => (
-                    <td key={cell.id} className="px-3 h-10 align-middle text-gray-700 dark:text-gray-300">
-                      {flexRender(cell.column.columnDef.cell, cell.getContext())}
-                    </td>
-                  ))}
-                </tr>
+                <Fragment key={row.id}>
+                  <tr
+                    className={`h-10 hover:bg-gray-50 dark:hover:bg-gray-700/50 transition-colors ${
+                      row.getIsSelected() ? 'bg-blue-50 dark:bg-blue-900/20' : ''
+                    }`}
+                  >
+                    {row.getVisibleCells().map((cell) => (
+                      <td key={cell.id} className="px-3 h-10 align-middle text-gray-700 dark:text-gray-300">
+                        {flexRender(cell.column.columnDef.cell, cell.getContext())}
+                      </td>
+                    ))}
+                  </tr>
+                  {renderExpandedRow && row.getIsExpanded() && (
+                    <tr>
+                      <td colSpan={row.getVisibleCells().length}>
+                        {renderExpandedRow(row.original)}
+                      </td>
+                    </tr>
+                  )}
+                </Fragment>
               ))
             ) : (
               <tr>

@@ -7,7 +7,7 @@ from datetime import datetime
 from enum import Enum
 from uuid import uuid4
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from api.core import utc_now
 
@@ -88,6 +88,27 @@ class ProjectCreate(BaseModel):
     tls_mitm_mode: MitmMode = MitmMode.OFF
     tls_mitm_engine: MitmEngine | None = None
     tls_mitm_browser: MitmBrowser | None = None
+
+    @model_validator(mode="after")
+    def validate_mitm_fields(self) -> "ProjectCreate":
+        """Validate and clean MITM fields based on mode."""
+        mode = self.tls_mitm_mode
+        if mode in (MitmMode.OFF, MitmMode.PLAIN):
+            self.tls_mitm_engine = None
+            self.tls_mitm_browser = None
+        elif mode == MitmMode.MATCH_UA:
+            if self.tls_mitm_engine is None:
+                msg = "tls_mitm_engine is required when tls_mitm_mode is 'match_ua'"
+                raise ValueError(msg)
+            self.tls_mitm_browser = None
+        elif mode == MitmMode.OVERRIDE_UA:
+            if self.tls_mitm_engine is None:
+                msg = "tls_mitm_engine is required when tls_mitm_mode is 'override_ua'"
+                raise ValueError(msg)
+            if self.tls_mitm_browser is None:
+                msg = "tls_mitm_browser is required when tls_mitm_mode is 'override_ua'"
+                raise ValueError(msg)
+        return self
 
 
 class ProjectUpdate(BaseModel):
