@@ -28,8 +28,10 @@ COPY config/ ./config/
 # Copy built frontend
 COPY --from=frontend-builder /app/web/dist ./web/dist
 
-# Create non-root user
-RUN useradd -m -u 1000 octoprox && chown -R octoprox:octoprox /app
+# Create non-root user and data directories
+RUN useradd -m -u 1000 octoprox \
+    && mkdir -p /app/data/ca \
+    && chown -R octoprox:octoprox /app
 USER octoprox
 
 # Expose ports
