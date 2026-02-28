@@ -57,10 +57,10 @@ class TestMitmHandlerRecording:
         mock_relay.send_request.return_value = (
             200,
             "OK",
-            {"content-type": "text/html"},
+            [("content-type", "text/html")],
             b"<html>ok</html>",
         )
-        mock_relay.last_upstream_headers = {"User-Agent": "TestBot/1.0"}
+        mock_relay.last_upstream_headers = [("User-Agent", "TestBot/1.0")]
         mock_relay.close = AsyncMock()
 
         with (
@@ -85,7 +85,7 @@ class TestMitmHandlerRecording:
         assert fields["response_body_size"] == str(len(b"<html>ok</html>"))
         assert "timestamp" in fields
         assert float(fields["latency_ms"]) >= 0
-        assert '"User-Agent"' in fields["upstream_headers"]
+        assert "User-Agent" in fields["upstream_headers"]
 
     async def test_record_request_not_called_without_redis(self) -> None:
         """Verify recording is skipped when no redis_client is provided."""
@@ -113,7 +113,7 @@ class TestMitmHandlerRecording:
         project = self._make_project()
 
         mock_relay = AsyncMock()
-        mock_relay.send_request.return_value = (200, "OK", {}, b"ok")
+        mock_relay.send_request.return_value = (200, "OK", [], b"ok")
         mock_relay.close = AsyncMock()
 
         with (
@@ -197,8 +197,8 @@ class TestMitmHandlerRecording:
         project = self._make_project()
 
         mock_relay = AsyncMock()
-        mock_relay.send_request.return_value = (200, "OK", {}, b"ok")
-        mock_relay.last_upstream_headers = {}
+        mock_relay.send_request.return_value = (200, "OK", [], b"ok")
+        mock_relay.last_upstream_headers = []
         mock_relay.close = AsyncMock()
 
         with (

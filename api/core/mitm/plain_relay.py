@@ -62,10 +62,10 @@ class PlainRelay(MitmRelay):
         self,
         method: str,
         url: str,
-        headers: dict[str, str],
+        headers: list[tuple[str, str]],
         body: bytes | None,
         proxy_url: str,
-    ) -> tuple[int, str, dict[str, str], bytes]:
+    ) -> tuple[int, str, list[tuple[str, str]], bytes]:
         """Send request over the raw TLS connection and read the response."""
         await self._ensure_tls()
 
@@ -79,15 +79,15 @@ class PlainRelay(MitmRelay):
             path = f"{path}?{parsed.query}"
 
         # Build raw HTTP/1.1 request
-        upstream_headers = dict(headers)
-        if not any(k.lower() == "host" for k in upstream_headers):
-            upstream_headers["Host"] = self._target_host
+        upstream_headers = list(headers)
+        if not any(k.lower() == "host" for k, _v in upstream_headers):
+            upstream_headers.append(("Host", self._target_host))
         self.last_upstream_headers = upstream_headers
 
         request_line = f"{method} {path} HTTP/1.1\r\n"
         self._upstream_writer.write(request_line.encode())
 
-        for name, value in upstream_headers.items():
+        for name, value in upstream_headers:
             self._upstream_writer.write(f"{name}: {value}\r\n".encode())
 
         # Content-Length for body
@@ -104,18 +104,18 @@ class PlainRelay(MitmRelay):
         # Read response status line
         status_line_raw = await self._upstream_reader.readline()
         if not status_line_raw:
-            return 502, "Bad Gateway", {}, b""
+            return 502, "Bad Gateway", [], b""
 
         status_line = status_line_raw.decode("utf-8", errors="replace").strip()
         parts = status_line.split(" ", 2)
         if len(parts) < 2:
-            return 502, "Bad Gateway", {}, b""
+            return 502, "Bad Gateway", [], b""
 
         status_code = int(parts[1])
         reason = parts[2] if len(parts) > 2 else "OK"
 
-        # Read response headers
-        response_headers: dict[str, str] = {}
+        # Read response headers — list of tuples to preserve duplicates
+        response_headers: list[tuple[str, str]] = []
         content_length = 0
         is_chunked = False
 
@@ -130,7 +130,7 @@ class PlainRelay(MitmRelay):
                 key, value = line.split(":", 1)
                 header_name = key.strip()
                 header_value = value.strip()
-                response_headers[header_name] = header_value
+                response_headers.append((header_name, header_value))
                 lower_name = header_name.lower()
                 if lower_name == "content-length":
                     content_length = int(header_value)

@@ -33,6 +33,14 @@ logger = structlog.get_logger()
 # Read buffer size for client-facing connection
 _READ_SIZE = 65536
 
+# Hop-by-hop headers that must not be forwarded through a proxy
+_HOP_BY_HOP = frozenset((
+    "connection",
+    "proxy-connection",
+    "keep-alive",
+    "transfer-encoding",
+))
+
 
 class MitmHandler:
     """Handles MITM interception for a single CONNECT tunnel.
@@ -56,11 +64,11 @@ class MitmHandler:
         project: "Project",
         method: str,
         url: str,
-        request_headers: dict[str, str],
-        upstream_headers: dict[str, str],
+        request_headers: list[tuple[str, str]],
+        upstream_headers: list[tuple[str, str]],
         request_body_size: int,
         status_code: int,
-        response_headers: dict[str, str],
+        response_headers: list[tuple[str, str]],
         response_body_size: int,
         target_host: str,
         proxy_url: str,
@@ -72,8 +80,12 @@ class MitmHandler:
 
         from api.core import utc_now
 
-        req_ct = request_headers.get("content-type", request_headers.get("Content-Type", ""))
-        resp_ct = response_headers.get("content-type", response_headers.get("Content-Type", ""))
+        req_ct = next(
+            (v for k, v in request_headers if k.lower() == "content-type"), ""
+        )
+        resp_ct = next(
+            (v for k, v in response_headers if k.lower() == "content-type"), ""
+        )
 
         fields = {
             "timestamp": utc_now().isoformat(),
@@ -180,10 +192,10 @@ class MitmHandler:
                 # Extract request details from h11 event
                 method = request_event.method.decode("ascii")
                 path = request_event.target.decode("ascii")
-                headers: dict[str, str] = {
-                    name.decode("latin-1"): value.decode("latin-1")
+                headers: list[tuple[str, str]] = [
+                    (name.decode("latin-1"), value.decode("latin-1"))
                     for name, value in request_event.headers
-                }
+                ]
 
                 logger.debug(
                     "MITM intercepted request",
@@ -197,17 +209,11 @@ class MitmHandler:
                 url = f"{base_url}{path}"
 
                 # Remove hop-by-hop headers that shouldn't be forwarded
-                forward_headers = {
-                    k: v
-                    for k, v in headers.items()
-                    if k.lower()
-                    not in (
-                        "connection",
-                        "proxy-connection",
-                        "keep-alive",
-                        "transfer-encoding",
-                    )
-                }
+                forward_headers = [
+                    (k, v)
+                    for k, v in headers
+                    if k.lower() not in _HOP_BY_HOP
+                ]
 
                 # Relay request via the chosen strategy
                 req_start = time.monotonic()
@@ -220,7 +226,7 @@ class MitmHandler:
                     ) = await relay.send_request(method, url, forward_headers, body, proxy_url)
                 except Exception as e:
                     logger.debug("MITM upstream request failed", url=url, error=str(e))
-                    written = _send_via_h11(conn, client_writer, 502, {}, b"")
+                    written = _send_via_h11(conn, client_writer, 502, [], b"")
                     with contextlib.suppress(ConnectionResetError, BrokenPipeError, OSError):
                         await client_writer.drain()
                     bytes_received += written
@@ -228,11 +234,11 @@ class MitmHandler:
 
                 # Filter response headers: drop transfer-encoding/content-length
                 # (h11 manages content-length automatically)
-                filtered: dict[str, str] = {
-                    k: v
-                    for k, v in response_headers.items()
+                filtered: list[tuple[str, str]] = [
+                    (k, v)
+                    for k, v in response_headers
                     if k.lower() not in ("transfer-encoding", "content-length")
-                }
+                ]
 
                 req_latency_ms = (time.monotonic() - req_start) * 1000
 
@@ -326,14 +332,14 @@ def _send_via_h11(
     conn: h11.Connection,
     writer: asyncio.StreamWriter,
     status_code: int,
-    headers: dict[str, str],
+    headers: list[tuple[str, str]],
     body: bytes,
 ) -> int:
     """Serialize and write a full HTTP/1.1 response via h11.
 
     Returns the number of bytes written.
     """
-    h11_headers: list[tuple[str, str]] = list(headers.items())
+    h11_headers: list[tuple[str, str]] = list(headers)
     h11_headers.append(("content-length", str(len(body))))
 
     out = conn.send(h11.Response(status_code=status_code, headers=h11_headers)) or b""

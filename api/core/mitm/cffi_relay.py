@@ -41,10 +41,10 @@ class CffiRelay(ImpersonationRelay):
         self,
         method: str,
         url: str,
-        headers: dict[str, str],
+        headers: list[tuple[str, str]],
         body: bytes | None,
         proxy_url: str,
-    ) -> tuple[int, str, dict[str, str], bytes]:
+    ) -> tuple[int, str, list[tuple[str, str]], bytes]:
         """Send request via curl_cffi with browser impersonation."""
         forward_headers, browser = self._prepare_headers(headers)
         session = self._get_or_create_session(browser)
@@ -61,10 +61,11 @@ class CffiRelay(ImpersonationRelay):
 
         # Drop content-encoding — curl_cffi auto-decompresses the body,
         # so forwarding the header would cause browsers to double-decompress.
-        response_headers = {
-            k: v for k, v in response.headers.items()
+        # Use multi_items() to preserve duplicate headers (e.g. Set-Cookie).
+        response_headers = [
+            (k, v) for k, v in response.headers.multi_items()
             if k.lower() != "content-encoding"
-        }
+        ]
         return (
             response.status_code,
             response.reason or "OK",

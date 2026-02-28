@@ -18,12 +18,12 @@ class MitmRequestRecord(BaseModel):
     timestamp: str
     method: str
     url: str
-    request_headers: dict[str, str]
-    upstream_headers: dict[str, str]
+    request_headers: list[list[str]]
+    upstream_headers: list[list[str]]
     request_body_size: int
     request_content_type: str
     status_code: int
-    response_headers: dict[str, str]
+    response_headers: list[list[str]]
     response_body_size: int
     response_content_type: str
     target_host: str
@@ -73,7 +73,7 @@ async def list_mitm_requests(
             method=raw["method"],
             url=raw["url"],
             request_headers=json.loads(raw["request_headers"]),
-            upstream_headers=json.loads(raw.get("upstream_headers", "{}")),
+            upstream_headers=json.loads(raw.get("upstream_headers", "[]")),
             request_body_size=int(raw["request_body_size"]),
             request_content_type=raw.get("request_content_type", ""),
             status_code=int(raw["status_code"]),

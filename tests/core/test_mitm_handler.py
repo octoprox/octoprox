@@ -75,7 +75,7 @@ class TestMitmHandler:
         project.tls_mitm_browser = None
 
         mock_relay = AsyncMock()
-        mock_relay.send_request.return_value = (200, "OK", {"Content-Type": "text/plain"}, b"response body")
+        mock_relay.send_request.return_value = (200, "OK", [("Content-Type", "text/plain")], b"response body")
         mock_relay.close = AsyncMock()
 
         with (
@@ -93,9 +93,10 @@ class TestMitmHandler:
         call_args = mock_relay.send_request.call_args
         assert call_args[0][0] == "GET"
         assert call_args[0][1] == "https://example.com/path"
-        # host is kept (relays handle stripping if needed); user-agent passes through
-        assert "host" in call_args[0][2]
-        assert "user-agent" in call_args[0][2]
+        # headers is a list of tuples; host and user-agent should be present
+        header_keys = [k.lower() for k, _v in call_args[0][2]]
+        assert "host" in header_keys
+        assert "user-agent" in header_keys
         mock_relay.close.assert_called_once()
 
         # Verify response was written

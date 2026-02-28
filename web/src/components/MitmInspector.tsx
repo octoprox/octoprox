@@ -37,17 +37,16 @@ function MethodBadge({ method }: { method: string }) {
   return <Badge color={colorMap[method] || 'gray'}>{method}</Badge>
 }
 
-function HeadersTable({ headers }: { headers: Record<string, string> }) {
-  const entries = Object.entries(headers)
-  if (entries.length === 0) {
+function HeadersTable({ headers }: { headers: [string, string][] }) {
+  if (headers.length === 0) {
     return <span className="text-xs text-gray-400 italic">No headers</span>
   }
   return (
     <div className="bg-white dark:bg-gray-800 rounded border border-gray-200 dark:border-gray-700 overflow-auto h-48">
       <table className="w-full text-xs font-mono">
         <tbody>
-          {entries.map(([key, value]) => (
-            <tr key={key} className="border-b border-gray-100 dark:border-gray-700 last:border-0">
+          {headers.map(([key, value], i) => (
+            <tr key={`${key}-${i}`} className="border-b border-gray-100 dark:border-gray-700 last:border-0">
               <td className="px-2 py-1 font-semibold text-gray-600 dark:text-gray-400 whitespace-nowrap align-top">{key}</td>
               <td className="px-2 py-1 text-gray-800 dark:text-gray-200 break-all">{value}</td>
             </tr>
@@ -154,6 +153,7 @@ export default function MitmInspector() {
       accessorKey: 'status_code',
       header: 'Status',
       size: 80,
+      filterFn: 'equalsString',
       meta: { filterVariant: 'select' as const },
       cell: ({ getValue }) => <StatusCodeBadge code={getValue<number>()} />,
     },

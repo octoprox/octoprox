@@ -59,17 +59,19 @@ class RnetRelay(ImpersonationRelay):
         self,
         method: str,
         url: str,
-        headers: dict[str, str],
+        headers: list[tuple[str, str]],
         body: bytes | None,
         proxy_url: str,
-    ) -> tuple[int, str, dict[str, str], bytes]:
+    ) -> tuple[int, str, list[tuple[str, str]], bytes]:
         """Send request via rnet with browser impersonation."""
         forward_headers, browser = self._prepare_headers(headers)
         client = self._get_or_create_client(browser)
 
         rnet_method = _METHOD_MAP.get(method.upper(), Method.GET)
+        # rnet only accepts Dict[str, str] | HeaderMap for headers
+        headers_dict = dict(forward_headers)
         kwargs: dict[str, object] = {
-            "headers": forward_headers,
+            "headers": headers_dict,
             "proxy": proxy_url,
         }
         if body is not None:
@@ -78,19 +80,22 @@ class RnetRelay(ImpersonationRelay):
 
         # rnet response.status is already int
         response_body = await response.bytes()
-        # rnet headers may contain bytes keys/values — decode to str.
+        # rnet HeaderMap.items() preserves duplicate headers (it's a multi-map).
+        # Decode bytes keys/values to str.
         # Drop content-encoding — rnet auto-decompresses the body,
         # so forwarding the header would cause browsers to double-decompress.
         raw_items: list[tuple[object, object]] = (
             list(response.headers.items()) if response.headers else []  # type: ignore[arg-type]
         )
-        response_headers: dict[str, str] = {
-            (k.decode("latin-1") if isinstance(k, bytes) else str(k)):
-            (v.decode("latin-1") if isinstance(v, bytes) else str(v))
+        response_headers: list[tuple[str, str]] = [
+            (
+                k.decode("latin-1") if isinstance(k, bytes) else str(k),
+                v.decode("latin-1") if isinstance(v, bytes) else str(v),
+            )
             for k, v in raw_items
             if (k.decode("latin-1") if isinstance(k, bytes) else str(k)).lower()
             != "content-encoding"
-        }
+        ]
 
         return response.status, "OK", response_headers, response_body
 

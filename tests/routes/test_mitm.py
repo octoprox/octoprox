@@ -17,11 +17,11 @@ def _make_fields(i: int = 0, **overrides: str) -> dict[str, str]:
         "timestamp": f"2026-01-15T10:00:{i:02d}",
         "method": "GET",
         "url": f"https://example.com/path/{i}",
-        "request_headers": json.dumps({"host": "example.com"}),
+        "request_headers": json.dumps([["host", "example.com"]]),
         "request_body_size": "0",
         "request_content_type": "",
         "status_code": "200",
-        "response_headers": json.dumps({"content-type": "text/html"}),
+        "response_headers": json.dumps([["content-type", "text/html"]]),
         "response_body_size": "1024",
         "response_content_type": "text/html",
         "target_host": "example.com",
@@ -82,8 +82,8 @@ class TestMitmEndpoints:
         assert data["records"][2]["url"] == "https://example.com/path/0"
         # Verify field types are correct
         record = data["records"][0]
-        assert isinstance(record["request_headers"], dict)
-        assert isinstance(record["response_headers"], dict)
+        assert isinstance(record["request_headers"], list)
+        assert isinstance(record["response_headers"], list)
         assert isinstance(record["status_code"], int)
         assert isinstance(record["request_body_size"], int)
         assert isinstance(record["latency_ms"], float)

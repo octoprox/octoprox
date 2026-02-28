@@ -583,12 +583,12 @@ export interface MitmRequestRecord {
   timestamp: string
   method: string
   url: string
-  request_headers: Record<string, string>
-  upstream_headers: Record<string, string>
+  request_headers: [string, string][]
+  upstream_headers: [string, string][]
   request_body_size: number
   request_content_type: string
   status_code: number
-  response_headers: Record<string, string>
+  response_headers: [string, string][]
   response_body_size: number
   response_content_type: string
   target_host: string
