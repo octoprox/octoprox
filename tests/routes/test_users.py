@@ -396,3 +396,238 @@ class TestUserAccessControl:
         """Test that unauthenticated users cannot list users."""
         response = async_client.get("/api/v1/users")
         assert response.status_code == 401
+
+    def test_editor_cannot_invite_user(self, editor_client: TestClient) -> None:
+        """Test that editors cannot invite users."""
+        response = editor_client.post(
+            "/api/v1/users/invite",
+            json={
+                "username": "noaccess",
+                "email": "no@example.com",
+                "role": "viewer",
+            },
+        )
+        assert response.status_code == 403
+
+
+class TestUserInviteFlow:
+    """Tests for the invite link user creation flow."""
+
+    def test_invite_user(self, authenticated_client: TestClient) -> None:
+        """Test creating a user via invite link."""
+        response = authenticated_client.post(
+            "/api/v1/users/invite",
+            json={
+                "username": "invitee",
+                "email": "invitee@example.com",
+                "role": "editor",
+            },
+        )
+        assert response.status_code == 201
+        data = response.json()
+        assert data["user"]["username"] == "invitee"
+        assert data["user"]["email"] == "invitee@example.com"
+        assert data["user"]["role"] == "editor"
+        assert data["user"]["has_password"] is False
+        assert "invite_url" in data
+        assert "/set-password/" in data["invite_url"]
+
+    def test_invite_user_has_password_false_in_list(self, authenticated_client: TestClient) -> None:
+        """Test that invited users show has_password=False in list."""
+        authenticated_client.post(
+            "/api/v1/users/invite",
+            json={"username": "invitelist", "role": "viewer"},
+        )
+        response = authenticated_client.get("/api/v1/users")
+        users = response.json()["users"]
+        invited = [u for u in users if u["username"] == "invitelist"]
+        assert len(invited) == 1
+        assert invited[0]["has_password"] is False
+
+    def test_invite_user_duplicate_username(self, authenticated_client: TestClient) -> None:
+        """Test that inviting a user with a duplicate username fails."""
+        authenticated_client.post(
+            "/api/v1/users/invite",
+            json={"username": "dupinvite", "role": "viewer"},
+        )
+        response = authenticated_client.post(
+            "/api/v1/users/invite",
+            json={"username": "dupinvite", "role": "viewer"},
+        )
+        assert response.status_code == 400
+        assert "already exists" in response.json()["detail"]
+
+    def test_invite_user_duplicate_email(self, authenticated_client: TestClient) -> None:
+        """Test that inviting a user with a duplicate email fails."""
+        authenticated_client.post(
+            "/api/v1/users/invite",
+            json={"username": "invitemail1", "email": "shared-invite@example.com", "role": "viewer"},
+        )
+        response = authenticated_client.post(
+            "/api/v1/users/invite",
+            json={"username": "invitemail2", "email": "shared-invite@example.com", "role": "viewer"},
+        )
+        assert response.status_code == 400
+        assert "already exists" in response.json()["detail"]
+
+    def test_set_password_with_invite_token(self, authenticated_client: TestClient) -> None:
+        """Test setting password via invite token returns a JWT."""
+        invite_resp = authenticated_client.post(
+            "/api/v1/users/invite",
+            json={"username": "setpwuser", "email": "setpw@example.com", "role": "viewer"},
+        )
+        invite_url = invite_resp.json()["invite_url"]
+        token = invite_url.split("/set-password/")[1]
+
+        # Set password (endpoint is public, works with any client)
+        response = authenticated_client.post(
+            "/api/v1/auth/set-password",
+            json={"token": token, "password": "mypassword123"},
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert "access_token" in data
+        assert data["token_type"] == "bearer"
+
+    def test_set_password_user_has_password_after(self, authenticated_client: TestClient) -> None:
+        """Test that after setting password, has_password becomes True."""
+        invite_resp = authenticated_client.post(
+            "/api/v1/users/invite",
+            json={"username": "pwcheck", "role": "viewer"},
+        )
+        invite_url = invite_resp.json()["invite_url"]
+        user_id = invite_resp.json()["user"]["id"]
+        token = invite_url.split("/set-password/")[1]
+
+        authenticated_client.post(
+            "/api/v1/auth/set-password",
+            json={"token": token, "password": "mypassword123"},
+        )
+
+        user_resp = authenticated_client.get(f"/api/v1/users/{user_id}")
+        assert user_resp.json()["has_password"] is True
+
+    def test_set_password_invalid_token(self, authenticated_client: TestClient) -> None:
+        """Test that an invalid invite token returns 404."""
+        response = authenticated_client.post(
+            "/api/v1/auth/set-password",
+            json={"token": "nonexistent-token", "password": "pass123"},
+        )
+        assert response.status_code == 404
+
+    def test_set_password_token_consumed(self, authenticated_client: TestClient) -> None:
+        """Test that an invite token can only be used once."""
+        invite_resp = authenticated_client.post(
+            "/api/v1/users/invite",
+            json={"username": "onceonly", "role": "viewer"},
+        )
+        token = invite_resp.json()["invite_url"].split("/set-password/")[1]
+
+        # First use
+        resp1 = authenticated_client.post(
+            "/api/v1/auth/set-password",
+            json={"token": token, "password": "pass123"},
+        )
+        assert resp1.status_code == 200
+
+        # Second use — token is consumed
+        resp2 = authenticated_client.post(
+            "/api/v1/auth/set-password",
+            json={"token": token, "password": "pass456"},
+        )
+        assert resp2.status_code == 404
+
+    def test_login_blocked_without_password(self, authenticated_client: TestClient) -> None:
+        """Test that users without a password cannot login."""
+        authenticated_client.post(
+            "/api/v1/users/invite",
+            json={"username": "nologin", "role": "viewer"},
+        )
+        response = authenticated_client.post(
+            "/api/v1/auth/login",
+            json={"username": "nologin", "password": "anything"},
+        )
+        assert response.status_code == 401
+
+    def test_login_works_after_set_password(self, authenticated_client: TestClient) -> None:
+        """Test that invited user can login after setting password."""
+        invite_resp = authenticated_client.post(
+            "/api/v1/users/invite",
+            json={"username": "loginafter", "role": "viewer"},
+        )
+        token = invite_resp.json()["invite_url"].split("/set-password/")[1]
+
+        authenticated_client.post(
+            "/api/v1/auth/set-password",
+            json={"token": token, "password": "mypass123"},
+        )
+
+        login_resp = authenticated_client.post(
+            "/api/v1/auth/login",
+            json={"username": "loginafter", "password": "mypass123"},
+        )
+        assert login_resp.status_code == 200
+        assert "access_token" in login_resp.json()
+
+    def test_reinvite_user(self, authenticated_client: TestClient) -> None:
+        """Test regenerating an invite link for a pending user."""
+        invite_resp = authenticated_client.post(
+            "/api/v1/users/invite",
+            json={"username": "reinvitee", "role": "viewer"},
+        )
+        user_id = invite_resp.json()["user"]["id"]
+        old_token = invite_resp.json()["invite_url"].split("/set-password/")[1]
+
+        # Reinvite
+        reinvite_resp = authenticated_client.post(f"/api/v1/users/{user_id}/reinvite")
+        assert reinvite_resp.status_code == 200
+        new_url = reinvite_resp.json()["invite_url"]
+        new_token = new_url.split("/set-password/")[1]
+        assert new_token != old_token
+
+        # Old token should no longer work
+        old_resp = authenticated_client.post(
+            "/api/v1/auth/set-password",
+            json={"token": old_token, "password": "pass123"},
+        )
+        assert old_resp.status_code == 404
+
+        # New token should work
+        new_resp = authenticated_client.post(
+            "/api/v1/auth/set-password",
+            json={"token": new_token, "password": "pass123"},
+        )
+        assert new_resp.status_code == 200
+
+    def test_reinvite_user_already_has_password(
+        self, authenticated_client: TestClient
+    ) -> None:
+        """Test that reinviting a user who already has a password fails."""
+        create_resp = authenticated_client.post(
+            "/api/v1/users",
+            json={
+                "username": "haspass",
+                "password": "pass123",
+                "role": "viewer",
+            },
+        )
+        user_id = create_resp.json()["id"]
+
+        response = authenticated_client.post(f"/api/v1/users/{user_id}/reinvite")
+        assert response.status_code == 400
+        assert "already has a password" in response.json()["detail"]
+
+    def test_create_with_password_has_password_true(
+        self, authenticated_client: TestClient
+    ) -> None:
+        """Test that users created with password have has_password=True."""
+        response = authenticated_client.post(
+            "/api/v1/users",
+            json={
+                "username": "withpass",
+                "password": "pass123",
+                "role": "viewer",
+            },
+        )
+        assert response.status_code == 201
+        assert response.json()["has_password"] is True

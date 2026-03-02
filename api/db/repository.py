@@ -737,6 +737,14 @@ class UserRepository:
         model = result.scalar_one_or_none()
         return self._to_domain(model) if model else None
 
+    async def get_by_invite_token(self, token: str) -> User | None:
+        """Get user by invite token."""
+        result = await self._session.execute(
+            select(UserModel).where(UserModel.invite_token == token)
+        )
+        model = result.scalar_one_or_none()
+        return self._to_domain(model) if model else None
+
     async def count(self) -> int:
         """Count total users."""
         result = await self._session.execute(select(func.count(UserModel.id)))
@@ -751,6 +759,8 @@ class UserRepository:
             password_hash=user.password_hash,
             role=user.role.value if isinstance(user.role, UserRole) else user.role,
             is_active=user.is_active,
+            invite_token=user.invite_token,
+            invite_token_expires_at=user.invite_token_expires_at,
             created_at=user.created_at,
             updated_at=user.updated_at,
         )
@@ -770,6 +780,8 @@ class UserRepository:
             model.password_hash = user.password_hash
             model.role = user.role.value if isinstance(user.role, UserRole) else user.role
             model.is_active = user.is_active
+            model.invite_token = user.invite_token
+            model.invite_token_expires_at = user.invite_token_expires_at
             model.updated_at = utc_now()
             await self._session.flush()
         return user
@@ -790,6 +802,8 @@ class UserRepository:
             password_hash=model.password_hash,
             role=UserRole(model.role),
             is_active=model.is_active,
+            invite_token=model.invite_token,
+            invite_token_expires_at=model.invite_token_expires_at,
             created_at=model.created_at,
             updated_at=model.updated_at,
         )

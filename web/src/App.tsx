@@ -4,6 +4,7 @@
 import { useState, useEffect, useMemo } from 'react'
 import { BrowserRouter, Routes, Route, Link, Navigate, useParams, useNavigate } from 'react-router-dom'
 import { Server, BarChart3, LineChart, LogOut, FolderOpen, ChevronDown, ChevronLeft, Key, Link2, Moon, Sun, Search, Users, User } from 'lucide-react'
+import SetPassword from './components/SetPassword'
 import Dashboard from './components/Dashboard'
 import octoproxLogo from './assets/logos/octoprox_horizontal.svg'
 import octoproxLogoDark from './assets/logos/octoprox_horizontal_dark.svg'
@@ -24,21 +25,37 @@ import { useTheme } from './contexts/ThemeContext'
 import { checkAuthStatus, login, logout, AuthStatus } from './api/client'
 
 function App() {
+  return (
+    <BrowserRouter>
+      <Routes>
+        {/* Unauthenticated route — accessible without login */}
+        <Route path="/set-password/:token" element={<SetPassword />} />
+        {/* All other routes require authentication */}
+        <Route path="/*" element={<AuthenticatedApp />} />
+      </Routes>
+    </BrowserRouter>
+  )
+}
+
+function AuthenticatedApp() {
   const [authStatus, setAuthStatus] = useState<AuthStatus | null>(null)
   const [isLoading, setIsLoading] = useState(true)
   const [loginError, setLoginError] = useState<string | null>(null)
 
+  const refreshAuth = async () => {
+    try {
+      const status = await checkAuthStatus()
+      setAuthStatus(status)
+    } catch {
+      setAuthStatus({ authenticated: false, username: null, role: null, user_id: null })
+    }
+  }
+
   // Check auth status on mount
   useEffect(() => {
     const checkAuth = async () => {
-      try {
-        const status = await checkAuthStatus()
-        setAuthStatus(status)
-      } catch {
-        setAuthStatus({ authenticated: false, username: null, role: null, user_id: null })
-      } finally {
-        setIsLoading(false)
-      }
+      await refreshAuth()
+      setIsLoading(false)
     }
     checkAuth()
 
@@ -46,8 +63,15 @@ function App() {
     const handleLogout = () => {
       setAuthStatus((prev) => prev ? { ...prev, authenticated: false, username: null, role: null, user_id: null } : null)
     }
+    // Listen for login events (e.g. after invite password set)
+    const handleLogin = () => { refreshAuth() }
+
     window.addEventListener('auth:logout', handleLogout)
-    return () => window.removeEventListener('auth:logout', handleLogout)
+    window.addEventListener('auth:login', handleLogin)
+    return () => {
+      window.removeEventListener('auth:logout', handleLogout)
+      window.removeEventListener('auth:login', handleLogin)
+    }
   }, [])
 
   const handleLogin = async (username: string, password: string) => {
@@ -90,26 +114,24 @@ function App() {
   return (
     <AuthProvider value={authContextValue}>
       <ProjectProvider>
-        <BrowserRouter>
-          <Routes>
-            {/* Project selection page */}
-            <Route path="/" element={<ProjectSelection />} />
+        <Routes>
+          {/* Project selection page */}
+          <Route path="/" element={<ProjectSelection />} />
 
-            {/* Users management (top-level, admin only) */}
-            <Route path="/users" element={<UsersPage />} />
+          {/* Users management (top-level, admin only) */}
+          <Route path="/users" element={<UsersPage />} />
 
-            {/* Project-scoped routes */}
-            <Route
-              path="/projects/:projectId/*"
-              element={
-                <ProjectLayout
-                  authStatus={authStatus}
-                  onLogout={handleLogout}
-                />
-              }
-            />
-          </Routes>
-        </BrowserRouter>
+          {/* Project-scoped routes */}
+          <Route
+            path="/projects/:projectId/*"
+            element={
+              <ProjectLayout
+                authStatus={authStatus}
+                onLogout={handleLogout}
+              />
+            }
+          />
+        </Routes>
       </ProjectProvider>
     </AuthProvider>
   )

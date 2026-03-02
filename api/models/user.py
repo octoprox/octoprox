@@ -27,9 +27,11 @@ class User(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid4()))
     username: str
     email: str = ""
-    password_hash: str
+    password_hash: str | None = None
     role: UserRole = UserRole.VIEWER
     is_active: bool = True
+    invite_token: str | None = None
+    invite_token_expires_at: datetime | None = None
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
 
@@ -91,6 +93,26 @@ class UserSelfUpdate(BaseModel):
         return _validate_email(v)
 
 
+class UserInviteCreate(BaseModel):
+    """Schema for creating a user via invite link (no password)."""
+
+    username: str
+    email: str = ""
+    role: UserRole = UserRole.VIEWER
+
+    @field_validator("email")
+    @classmethod
+    def check_email(cls, v: str) -> str:
+        return _validate_email(v)
+
+
+class SetPasswordRequest(BaseModel):
+    """Schema for setting password via invite token."""
+
+    token: str
+    password: str
+
+
 class UserResponse(BaseModel):
     """Schema for user API responses (never exposes password_hash)."""
 
@@ -99,5 +121,13 @@ class UserResponse(BaseModel):
     email: str
     role: UserRole
     is_active: bool
+    has_password: bool
     created_at: datetime
     updated_at: datetime
+
+
+class InviteResponse(BaseModel):
+    """Response for invite user endpoint."""
+
+    user: UserResponse
+    invite_url: str

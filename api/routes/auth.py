@@ -12,10 +12,12 @@ from jose import JWTError, jwt  # type: ignore[import-untyped]
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from api.core import utc_now
 from api.core.config import settings
-from api.core.password import verify_password
+from api.core.password import hash_password, verify_password
 from api.db.repository import UserRepository
 from api.db.session import get_db
+from api.models.user import SetPasswordRequest
 
 logger = structlog.get_logger()
 
@@ -75,7 +77,7 @@ async def login(login_req: LoginRequest, session: DbDep) -> LoginResponse:
     repo = UserRepository(session)
     user = await repo.get_by_username(login_req.username)
 
-    if not user or not verify_password(login_req.password, user.password_hash):
+    if not user or not user.password_hash or not verify_password(login_req.password, user.password_hash):
         logger.warning("Failed login attempt", username=login_req.username)
         raise HTTPException(
             status_code=401,
@@ -123,3 +125,41 @@ async def auth_status(request: Request) -> AuthStatus:
             )
 
     return AuthStatus(authenticated=False)
+
+
+@router.post("/set-password", response_model=LoginResponse)
+async def set_password(data: SetPasswordRequest, session: DbDep) -> LoginResponse:
+    """Set password using an invite token (unauthenticated)."""
+    repo = UserRepository(session)
+    user = await repo.get_by_invite_token(data.token)
+
+    if not user:
+        raise HTTPException(status_code=404, detail="Invalid invite token")
+
+    if user.invite_token_expires_at and user.invite_token_expires_at < utc_now():
+        raise HTTPException(status_code=400, detail="Invite token has expired")
+
+    if not user.is_active:
+        raise HTTPException(status_code=400, detail="Account is disabled")
+
+    user.password_hash = hash_password(data.password)
+    user.invite_token = None
+    user.invite_token_expires_at = None
+    await repo.update(user)
+
+    token = create_jwt(
+        payload={
+            "sub": user.username,
+            "user_id": user.id,
+            "role": user.role.value,
+        },
+        secret=settings.jwt_secret,
+        expiry_hours=settings.jwt_expiry_hours,
+    )
+
+    logger.info("User set password via invite", username=user.username)
+
+    return LoginResponse(
+        access_token=token,
+        expires_in=settings.jwt_expiry_hours * 3600,
+    )
