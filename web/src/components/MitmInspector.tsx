@@ -9,7 +9,6 @@ import {
   fetchMitmRequests,
   clearMitmRequests,
   MitmRequestRecord,
-  TlsClientHello,
 } from '../api/client'
 import { useProject } from '../contexts/ProjectContext'
 import { DataTable } from './DataTable'
