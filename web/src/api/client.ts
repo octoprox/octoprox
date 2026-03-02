@@ -629,6 +629,7 @@ export interface UserAccount {
   email: string
   role: UserRole
   is_active: boolean
+  has_password: boolean
   created_at: string
   updated_at: string
 }
@@ -643,6 +644,17 @@ export interface UserCreate {
   email?: string
   password: string
   role: UserRole
+}
+
+export interface UserInviteCreate {
+  username: string
+  email?: string
+  role: UserRole
+}
+
+export interface InviteResponse {
+  user: UserAccount
+  invite_url: string
 }
 
 export interface UserUpdate {
@@ -670,6 +682,16 @@ export const createUser = async (data: UserCreate): Promise<UserAccount> => {
   return response.data
 }
 
+export const inviteUser = async (data: UserInviteCreate): Promise<InviteResponse> => {
+  const response = await api.post('/users/invite', data)
+  return response.data
+}
+
+export const reinviteUser = async (userId: string): Promise<InviteResponse> => {
+  const response = await api.post(`/users/${userId}/reinvite`)
+  return response.data
+}
+
 export const updateUser = async (id: string, data: UserUpdate): Promise<UserAccount> => {
   const response = await api.patch(`/users/${id}`, data)
   return response.data
@@ -687,6 +709,13 @@ export const fetchCurrentUser = async (): Promise<UserAccount> => {
 export const updateSelf = async (data: UserSelfUpdate): Promise<UserAccount> => {
   const response = await api.patch('/users/me', data)
   return response.data
+}
+
+export const setPasswordWithToken = async (token: string, password: string): Promise<LoginResponse> => {
+  const response = await api.post('/auth/set-password', { token, password })
+  const data = response.data as LoginResponse
+  auth.setToken(data.access_token)
+  return data
 }
 
 export default api

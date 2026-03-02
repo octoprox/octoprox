@@ -193,6 +193,7 @@ class Settings(BaseSettings):
         description="Secret key for JWT token signing"
     )
     jwt_expiry_hours: int = Field(default=24, description="JWT token expiry in hours")
+    invite_token_expiry_hours: int = Field(default=168, description="Invite token expiry in hours (default 7 days)")
 
     model_config = {
         "env_prefix": "OCTOPROX_",
