@@ -9,6 +9,7 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
+from api.core.auth import RequireEditorDep
 from api.core.config import settings
 from api.models.project import (
     MitmMode,
@@ -131,7 +132,9 @@ async def list_projects(request: Request) -> ProjectListResponse:
 
 
 @router.post("", response_model=ProjectResponse, status_code=201)
-async def create_project(request: Request, project_data: ProjectCreate) -> ProjectResponse:
+async def create_project(
+    request: Request, project_data: ProjectCreate, _guard: RequireEditorDep
+) -> ProjectResponse:
     """Create a new project."""
     proxy_manager = request.app.state.proxy_manager
 
@@ -187,7 +190,7 @@ async def get_project(request: Request, project_id: str) -> ProjectResponse:
 
 @router.patch("/{project_id}", response_model=ProjectResponse)
 async def update_project(
-    request: Request, project_id: str, project_data: ProjectUpdate
+    request: Request, project_id: str, project_data: ProjectUpdate, _guard: RequireEditorDep
 ) -> ProjectResponse:
     """Update a project."""
     proxy_manager = request.app.state.proxy_manager
@@ -272,7 +275,7 @@ async def update_project(
 
 @router.delete("/{project_id}", status_code=204)
 async def delete_project(
-    request: Request, project_id: str, body: DeleteConfirmation
+    request: Request, project_id: str, body: DeleteConfirmation, _guard: RequireEditorDep
 ) -> None:
     """Delete a project.
 

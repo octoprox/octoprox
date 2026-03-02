@@ -13,7 +13,7 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 
-from api.core.config import Settings, settings
+from api.core.config import settings
 
 
 def get_async_engine(
@@ -67,11 +67,8 @@ def get_async_session_factory(
     )
 
 
-async def get_db(settings: Settings = settings) -> AsyncGenerator[AsyncSession, None]:
+async def get_db() -> AsyncGenerator[AsyncSession, None]:
     """Get database session for dependency injection.
-
-    Args:
-        settings: Application settings (injected).
 
     Yields:
         Database session with automatic commit/rollback.

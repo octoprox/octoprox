@@ -71,10 +71,13 @@ api.interceptors.response.use(
 )
 
 // Auth API types
+export type UserRole = 'admin' | 'editor' | 'viewer'
+
 export interface AuthStatus {
-  enabled: boolean
   authenticated: boolean
   username: string | null
+  role: UserRole | null
+  user_id: string | null
 }
 
 export interface LoginResponse {
@@ -617,6 +620,73 @@ export const fetchMitmRequests = async (
 
 export const clearMitmRequests = async (projectId: string): Promise<void> => {
   await api.delete(`/projects/${projectId}/mitm/requests`)
+}
+
+// User types
+export interface UserAccount {
+  id: string
+  username: string
+  email: string
+  role: UserRole
+  is_active: boolean
+  created_at: string
+  updated_at: string
+}
+
+export interface UserListResponse {
+  total: number
+  users: UserAccount[]
+}
+
+export interface UserCreate {
+  username: string
+  email?: string
+  password: string
+  role: UserRole
+}
+
+export interface UserUpdate {
+  username?: string
+  email?: string
+  password?: string
+  role?: UserRole
+  is_active?: boolean
+}
+
+export interface UserSelfUpdate {
+  email?: string
+  password?: string
+  current_password?: string
+}
+
+// User API functions
+export const fetchUsers = async (): Promise<UserListResponse> => {
+  const response = await api.get('/users')
+  return response.data
+}
+
+export const createUser = async (data: UserCreate): Promise<UserAccount> => {
+  const response = await api.post('/users', data)
+  return response.data
+}
+
+export const updateUser = async (id: string, data: UserUpdate): Promise<UserAccount> => {
+  const response = await api.patch(`/users/${id}`, data)
+  return response.data
+}
+
+export const deleteUser = async (id: string): Promise<void> => {
+  await api.delete(`/users/${id}`)
+}
+
+export const fetchCurrentUser = async (): Promise<UserAccount> => {
+  const response = await api.get('/users/me')
+  return response.data
+}
+
+export const updateSelf = async (data: UserSelfUpdate): Promise<UserAccount> => {
+  const response = await api.patch('/users/me', data)
+  return response.data
 }
 
 export default api

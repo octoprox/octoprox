@@ -13,6 +13,7 @@ import {
 } from '../api/client'
 import { useProject } from '../contexts/ProjectContext'
 import { useTheme } from '../contexts/ThemeContext'
+import { useAuth } from '../contexts/AuthContext'
 import AddCredentialModal from './AddCredentialModal'
 import { CREDENTIAL_TYPES } from '../utils/credentials'
 import { Button, Card, Alert } from './ui'
@@ -21,6 +22,7 @@ export default function CredentialsConfig() {
   const queryClient = useQueryClient()
   const { selectedProjectId } = useProject()
   const { theme } = useTheme()
+  const { canMutate } = useAuth()
   const [showAddModal, setShowAddModal] = useState(false)
   const [editingCredential, setEditingCredential] = useState<CredentialDetail | null>(null)
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
@@ -54,10 +56,12 @@ export default function CredentialsConfig() {
     <div>
       <div className="flex justify-between items-center mb-8">
         <h1 className="text-3xl font-bold">Credentials</h1>
-        <Button onClick={() => setShowAddModal(true)}>
-          <Key className="w-5 h-5" />
-          Add Credential
-        </Button>
+        {canMutate && (
+          <Button onClick={() => setShowAddModal(true)}>
+            <Key className="w-5 h-5" />
+            Add Credential
+          </Button>
+        )}
       </div>
 
       {errorMessage && (
@@ -95,7 +99,7 @@ export default function CredentialsConfig() {
               <tr className="bg-gray-50 dark:bg-gray-700 border-b border-gray-200 dark:border-gray-600">
                 <th className="px-4 py-2 text-left text-xs font-semibold text-gray-600 dark:text-gray-300 uppercase tracking-wider">Credential</th>
                 <th className="px-4 py-2 text-left text-xs font-semibold text-gray-600 dark:text-gray-300 uppercase tracking-wider">Created</th>
-                <th className="px-4 py-2 text-right text-xs font-semibold text-gray-600 dark:text-gray-300 uppercase tracking-wider">Actions</th>
+                {canMutate && <th className="px-4 py-2 text-right text-xs font-semibold text-gray-600 dark:text-gray-300 uppercase tracking-wider">Actions</th>}
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-100 dark:divide-gray-700">
@@ -111,16 +115,18 @@ export default function CredentialsConfig() {
                   <td className="px-4 py-2 text-gray-500 dark:text-gray-400">
                     {new Date(credential.created_at).toLocaleDateString()}
                   </td>
-                  <td className="px-4 py-2 text-right">
-                    <div className="flex items-center justify-end gap-1">
-                      <Button variant="ghost" size="icon" onClick={() => startEditing(credential)} className="text-gray-500 hover:text-blue-600">
-                        <Pencil className="w-4 h-4" />
-                      </Button>
-                      <Button variant="ghost" size="icon" onClick={() => deleteMutation.mutate(credential.id)} className="text-gray-500 hover:text-red-600">
-                        <Trash2 className="w-4 h-4" />
-                      </Button>
-                    </div>
-                  </td>
+                  {canMutate && (
+                    <td className="px-4 py-2 text-right">
+                      <div className="flex items-center justify-end gap-1">
+                        <Button variant="ghost" size="icon" onClick={() => startEditing(credential)} className="text-gray-500 hover:text-blue-600">
+                          <Pencil className="w-4 h-4" />
+                        </Button>
+                        <Button variant="ghost" size="icon" onClick={() => deleteMutation.mutate(credential.id)} className="text-gray-500 hover:text-red-600">
+                          <Trash2 className="w-4 h-4" />
+                        </Button>
+                      </div>
+                    </td>
+                  )}
                 </tr>
               ))}
             </tbody>

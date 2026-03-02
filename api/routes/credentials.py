@@ -6,6 +6,7 @@
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, ValidationError
 
+from api.core.auth import RequireEditorDep
 from api.models.credential import (
     Credential,
     CredentialCreate,
@@ -74,6 +75,7 @@ async def create_credential(
     request: Request,
     credential_data: CredentialCreate,
     project_id: str,
+    _guard: RequireEditorDep,
 ) -> CredentialDetailResponse:
     """Create a new credential."""
     proxy_manager = request.app.state.proxy_manager
@@ -136,7 +138,7 @@ async def get_credential(request: Request, credential_id: str) -> CredentialDeta
 
 @router.patch("/{credential_id}", response_model=CredentialDetailResponse)
 async def update_credential(
-    request: Request, credential_id: str, credential_data: CredentialUpdate
+    request: Request, credential_id: str, credential_data: CredentialUpdate, _guard: RequireEditorDep
 ) -> CredentialDetailResponse:
     """Update a credential."""
     proxy_manager = request.app.state.proxy_manager
@@ -199,7 +201,7 @@ async def update_credential(
 
 
 @router.delete("/{credential_id}", status_code=204)
-async def delete_credential(request: Request, credential_id: str) -> None:
+async def delete_credential(request: Request, credential_id: str, _guard: RequireEditorDep) -> None:
     """Delete a credential."""
     proxy_manager = request.app.state.proxy_manager
 

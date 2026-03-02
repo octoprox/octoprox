@@ -4,14 +4,18 @@
 """Authentication routes for Octoprox."""
 
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Annotated, Any
 
 import structlog
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from jose import JWTError, jwt  # type: ignore[import-untyped]
 from pydantic import BaseModel
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.core.config import settings
+from api.core.password import verify_password
+from api.db.repository import UserRepository
+from api.db.session import get_db
 
 logger = structlog.get_logger()
 
@@ -22,12 +26,14 @@ ALGORITHM = "HS256"
 
 class LoginRequest(BaseModel):
     """Login request payload."""
+
     username: str
     password: str
 
 
 class LoginResponse(BaseModel):
     """Login response with JWT token."""
+
     access_token: str
     token_type: str = "bearer"
     expires_in: int
@@ -35,22 +41,15 @@ class LoginResponse(BaseModel):
 
 class AuthStatus(BaseModel):
     """Authentication status response."""
-    enabled: bool
+
     authenticated: bool = False
     username: str | None = None
+    role: str | None = None
+    user_id: str | None = None
 
 
 def create_jwt(payload: dict[str, Any], secret: str, expiry_hours: int) -> str:
-    """Create a JWT token using python-jose.
-
-    Args:
-        payload: The token payload data
-        secret: Secret key for signing
-        expiry_hours: Token expiry in hours
-
-    Returns:
-        JWT token string
-    """
+    """Create a JWT token."""
     to_encode = payload.copy()
     expire = datetime.now(UTC) + timedelta(hours=expiry_hours)
     to_encode.update({"exp": expire})
@@ -59,15 +58,7 @@ def create_jwt(payload: dict[str, Any], secret: str, expiry_hours: int) -> str:
 
 
 def verify_jwt(token: str, secret: str) -> dict[str, Any] | None:
-    """Verify a JWT token and return the payload.
-
-    Args:
-        token: JWT token string
-        secret: Secret key for verification
-
-    Returns:
-        Token payload if valid, None otherwise
-    """
+    """Verify a JWT token and return the payload."""
     try:
         payload: dict[str, Any] = jwt.decode(token, secret, algorithms=[ALGORITHM])
         return payload
@@ -75,32 +66,40 @@ def verify_jwt(token: str, secret: str) -> dict[str, Any] | None:
         return None
 
 
-@router.post("/login", response_model=LoginResponse)
-async def login(login_req: LoginRequest) -> LoginResponse:
-    """Authenticate user and return JWT token."""
-    if not settings.auth_enabled:
-        raise HTTPException(
-            status_code=400,
-            detail="Authentication is not enabled"
-        )
+DbDep = Annotated[AsyncSession, Depends(get_db)]
 
-    # Validate credentials
-    if (login_req.username != settings.auth_username or
-        login_req.password != settings.auth_password):
+
+@router.post("/login", response_model=LoginResponse)
+async def login(login_req: LoginRequest, session: DbDep) -> LoginResponse:
+    """Authenticate user against database and return JWT token."""
+    repo = UserRepository(session)
+    user = await repo.get_by_username(login_req.username)
+
+    if not user or not verify_password(login_req.password, user.password_hash):
         logger.warning("Failed login attempt", username=login_req.username)
         raise HTTPException(
             status_code=401,
-            detail="Invalid username or password"
+            detail="Invalid username or password",
         )
 
-    # Create JWT token
+    if not user.is_active:
+        logger.warning("Inactive user login attempt", username=login_req.username)
+        raise HTTPException(
+            status_code=401,
+            detail="Account is disabled",
+        )
+
     token = create_jwt(
-        payload={"sub": login_req.username},
+        payload={
+            "sub": user.username,
+            "user_id": user.id,
+            "role": user.role.value,
+        },
         secret=settings.jwt_secret,
         expiry_hours=settings.jwt_expiry_hours,
     )
 
-    logger.info("User logged in", username=login_req.username)
+    logger.info("User logged in", username=user.username, role=user.role.value)
 
     return LoginResponse(
         access_token=token,
@@ -111,20 +110,16 @@ async def login(login_req: LoginRequest) -> LoginResponse:
 @router.get("/status", response_model=AuthStatus)
 async def auth_status(request: Request) -> AuthStatus:
     """Get current authentication status."""
-    if not settings.auth_enabled:
-        return AuthStatus(enabled=False)
-
-    # Check for token in Authorization header
     auth_header = request.headers.get("Authorization", "")
     if auth_header.startswith("Bearer "):
         token = auth_header[7:]
         payload = verify_jwt(token, settings.jwt_secret)
         if payload:
             return AuthStatus(
-                enabled=True,
                 authenticated=True,
                 username=payload.get("sub"),
+                role=payload.get("role"),
+                user_id=payload.get("user_id"),
             )
 
-    return AuthStatus(enabled=True, authenticated=False)
-
+    return AuthStatus(authenticated=False)

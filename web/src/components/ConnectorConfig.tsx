@@ -23,6 +23,7 @@ import {
 } from '../api/client'
 import { useProject } from '../contexts/ProjectContext'
 import { useTheme } from '../contexts/ThemeContext'
+import { useAuth } from '../contexts/AuthContext'
 import AddCredentialModal from './AddCredentialModal'
 import { CREDENTIAL_TYPES } from '../utils/credentials'
 import { RichSelect, RichSelectOption } from './RichSelect'
@@ -178,6 +179,7 @@ export default function ConnectorConfig() {
   const queryClient = useQueryClient()
   const { selectedProjectId } = useProject()
   const { theme } = useTheme()
+  const { canMutate } = useAuth()
 
   const getlogo = (ct: typeof CREDENTIAL_TYPES[number]) => theme === 'dark' ? ct.logoDark : ct.logo
 
@@ -1056,9 +1058,11 @@ export default function ConnectorConfig() {
     <div>
       <div className="flex justify-between items-center mb-8">
         <h1 className="text-3xl font-bold">Connectors</h1>
-        <Button onClick={() => setShowWizard(true)}>
-          <Link2 className="w-5 h-5" /> Add Connector
-        </Button>
+        {canMutate && (
+          <Button onClick={() => setShowWizard(true)}>
+            <Link2 className="w-5 h-5" /> Add Connector
+          </Button>
+        )}
       </div>
 
       {/* Wizard Modal - custom layout for multi-step wizard */}
@@ -1184,7 +1188,7 @@ export default function ConnectorConfig() {
                 <th className="px-4 py-2 text-left text-xs font-semibold text-gray-600 dark:text-gray-300 uppercase tracking-wider">Credential</th>
                 <th className="px-4 py-2 text-left text-xs font-semibold text-gray-600 dark:text-gray-300 uppercase tracking-wider">Proxies</th>
                 <th className="px-4 py-2 text-left text-xs font-semibold text-gray-600 dark:text-gray-300 uppercase tracking-wider">Status</th>
-                <th className="px-4 py-2 text-right text-xs font-semibold text-gray-600 dark:text-gray-300 uppercase tracking-wider">Actions</th>
+                {canMutate && <th className="px-4 py-2 text-right text-xs font-semibold text-gray-600 dark:text-gray-300 uppercase tracking-wider">Actions</th>}
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-100 dark:divide-gray-700">
@@ -1214,16 +1218,18 @@ export default function ConnectorConfig() {
                       </Badge>
                     </div>
                   </td>
-                  <td className="px-4 py-2 text-right">
-                    <div className="flex items-center justify-end gap-1">
-                      <Button variant="ghost" size="icon" onClick={() => startEditing(connector)} className="text-gray-500 hover:text-blue-600">
-                        <Pencil className="w-4 h-4" />
-                      </Button>
-                      <Button variant="ghost" size="icon" onClick={() => deleteMutation.mutate(connector.id)} className="text-gray-500 hover:text-red-600">
-                        <Trash2 className="w-4 h-4" />
-                      </Button>
-                    </div>
-                  </td>
+                  {canMutate && (
+                    <td className="px-4 py-2 text-right">
+                      <div className="flex items-center justify-end gap-1">
+                        <Button variant="ghost" size="icon" onClick={() => startEditing(connector)} className="text-gray-500 hover:text-blue-600">
+                          <Pencil className="w-4 h-4" />
+                        </Button>
+                        <Button variant="ghost" size="icon" onClick={() => deleteMutation.mutate(connector.id)} className="text-gray-500 hover:text-red-600">
+                          <Trash2 className="w-4 h-4" />
+                        </Button>
+                      </div>
+                    </td>
+                  )}
                 </tr>
               ))}
             </tbody>

@@ -3,6 +3,7 @@
 
 """Tests for project endpoints."""
 
+import uuid
 from typing import Any
 
 from starlette.testclient import TestClient
@@ -204,8 +205,6 @@ class TestProjectEndpoints:
         sample_project_data: dict[str, Any],
     ) -> None:
         """Test listing projects when some exist."""
-        import uuid
-
         # Get initial count (includes default project from migrations)
         initial_response = authenticated_client.get("/api/v1/projects")
         initial_count = initial_response.json()["total"]
@@ -225,4 +224,55 @@ class TestProjectEndpoints:
         # Should have 3 more projects than initial count
         assert data["total"] == initial_count + 3
         assert len(data["projects"]) == initial_count + 3
+
+
+class TestProjectRoleAccess:
+    """Tests for role-based access control on project endpoints."""
+
+    def test_viewer_can_list_projects(self, viewer_client: TestClient) -> None:
+        """Test that viewers can list projects."""
+        response = viewer_client.get("/api/v1/projects")
+        assert response.status_code == 200
+
+    def test_viewer_cannot_create_project(self, viewer_client: TestClient) -> None:
+        """Test that viewers cannot create projects."""
+        response = viewer_client.post(
+            "/api/v1/projects",
+            json={
+                "name": "Viewer Project",
+                "username": "viewerproject",
+                "password": "pass123",
+            },
+        )
+        assert response.status_code == 403
+
+    def test_viewer_cannot_update_project(self, viewer_client: TestClient) -> None:
+        """Test that viewers cannot update projects."""
+        response = viewer_client.patch(
+            "/api/v1/projects/some-project-id",
+            json={"name": "Updated"},
+        )
+        assert response.status_code == 403
+
+    def test_viewer_cannot_delete_project(self, viewer_client: TestClient) -> None:
+        """Test that viewers cannot delete projects."""
+        response = viewer_client.request(
+            "DELETE",
+            "/api/v1/projects/some-project-id",
+            json={"confirmation": "permanently delete"},
+        )
+        assert response.status_code == 403
+
+    def test_editor_can_create_project(self, editor_client: TestClient) -> None:
+        """Test that editors can create projects."""
+        unique_id = uuid.uuid4().hex[:8]
+        response = editor_client.post(
+            "/api/v1/projects",
+            json={
+                "name": f"Editor Project {unique_id}",
+                "username": f"editorproject_{unique_id}",
+                "password": "pass123",
+            },
+        )
+        assert response.status_code == 201
 

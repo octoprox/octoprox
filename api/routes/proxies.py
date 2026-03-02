@@ -9,6 +9,7 @@ from typing import Annotated, Any
 from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
 from pydantic import BaseModel
 
+from api.core.auth import RequireEditorDep
 from api.models.credential import CredentialType
 from api.models.proxy import Proxy, ProxyCreate, ProxyProtocol, ProxyResponse, ProxyUpdate
 
@@ -131,7 +132,9 @@ async def list_proxies(request: Request, project_id: str) -> ProxyListResponse:
 
 
 @router.post("", response_model=ProxyResponse, status_code=201)
-async def create_proxy(request: Request, proxy_data: ProxyCreate, project_id: str) -> ProxyResponse:
+async def create_proxy(
+    request: Request, proxy_data: ProxyCreate, project_id: str, _guard: RequireEditorDep
+) -> ProxyResponse:
     """Add a new proxy to the pool. Only allowed for STATIC_PROXY_PROVIDER connectors."""
     proxy_manager = request.app.state.proxy_manager
 
@@ -186,6 +189,7 @@ async def upload_proxies(
     project_id: str,
     file: Annotated[UploadFile, File(...)],
     connector_id: Annotated[str, Form(...)],
+    _guard: RequireEditorDep,
 ) -> ProxyUploadResponse:
     """
     Upload proxies from a CSV file.
@@ -302,7 +306,7 @@ async def get_proxy(request: Request, proxy_id: str) -> ProxyResponse:
 
 @router.patch("/{proxy_id}", response_model=ProxyResponse)
 async def update_proxy(
-    request: Request, proxy_id: str, proxy_data: ProxyUpdate
+    request: Request, proxy_id: str, proxy_data: ProxyUpdate, _guard: RequireEditorDep
 ) -> ProxyResponse:
     """Update a proxy."""
     proxy_manager = request.app.state.proxy_manager
@@ -337,7 +341,7 @@ async def update_proxy(
 
 
 @router.delete("/{proxy_id}", status_code=204)
-async def delete_proxy(request: Request, proxy_id: str) -> None:
+async def delete_proxy(request: Request, proxy_id: str, _guard: RequireEditorDep) -> None:
     """Remove a proxy from the pool.
 
     If the proxy belongs to a cloud provider connector (AWS, GCP, Azure),
@@ -353,7 +357,9 @@ async def delete_proxy(request: Request, proxy_id: str) -> None:
 
 
 @router.post("/strategy")
-async def set_strategy(request: Request, strategy_req: StrategyRequest) -> dict[str, str]:
+async def set_strategy(
+    request: Request, strategy_req: StrategyRequest, _guard: RequireEditorDep
+) -> dict[str, str]:
     """Change the routing strategy."""
     proxy_manager = request.app.state.proxy_manager
 

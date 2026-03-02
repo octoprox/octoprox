@@ -294,22 +294,25 @@ Configuration is loaded from YAML files in the `config/` directory based on the 
 | `OCTOPROX_ENV` | Environment (development/production) | development |
 | `OCTOPROX_REDIS_URL` | Redis connection URL | redis://localhost:6379/0 |
 | `OCTOPROX_LOG_LEVEL` | Logging level | INFO |
-| `OCTOPROX_AUTH_ENABLED` | Enable authentication for the web UI and API | false |
-| `OCTOPROX_AUTH_USERNAME` | Login username (required if auth enabled) | admin |
-| `OCTOPROX_AUTH_PASSWORD` | Login password (required if auth enabled) | (empty) |
+| `OCTOPROX_AUTH_USERNAME` | Initial admin username (used to seed admin on first startup) | admin |
+| `OCTOPROX_AUTH_PASSWORD` | Initial admin password (required) | (empty) |
 | `OCTOPROX_JWT_SECRET` | Secret key for JWT token signing | change-me-in-production |
 | `OCTOPROX_JWT_EXPIRY_HOURS` | JWT token expiry in hours | 24 |
 
 ### Authentication
 
-Octoprox supports optional authentication to protect the web UI and API endpoints. When enabled, users must log in with a username and password to access the dashboard and API.
+Octoprox requires authentication for all web UI and API access. Users must log in with a username and password. On first startup, an admin user is automatically created from `OCTOPROX_AUTH_USERNAME` and `OCTOPROX_AUTH_PASSWORD`.
 
-#### Enabling Authentication
+There are three roles:
+- **Admin** — Full access including user management
+- **Editor** — Can manage projects, proxies, credentials, and connectors (no user management)
+- **Viewer** — Read-only access to all data
 
-Set the following environment variables to enable authentication:
+#### Configuration
+
+Set the following environment variables:
 
 ```bash
-export OCTOPROX_AUTH_ENABLED=true
 export OCTOPROX_AUTH_USERNAME=admin
 export OCTOPROX_AUTH_PASSWORD=your-secure-password
 export OCTOPROX_JWT_SECRET=your-random-secret-key
@@ -318,7 +321,6 @@ export OCTOPROX_JWT_SECRET=your-random-secret-key
 Or create a `.env` file in the project root:
 
 ```env
-OCTOPROX_AUTH_ENABLED=true
 OCTOPROX_AUTH_USERNAME=admin
 OCTOPROX_AUTH_PASSWORD=your-secure-password
 OCTOPROX_JWT_SECRET=your-random-secret-key
@@ -330,7 +332,7 @@ OCTOPROX_JWT_SECRET=your-random-secret-key
 - **Never commit credentials** to version control. Use environment variables or `.env` files (which should be gitignored).
 - The `/api/v1/auth/login` and `/api/v1/auth/status` endpoints are always public.
 - The `/health` endpoint is always public for load balancer health checks.
-- All other API endpoints require authentication when `OCTOPROX_AUTH_ENABLED=true`.
+- All other API endpoints require authentication.
 
 ### Example Configuration
 

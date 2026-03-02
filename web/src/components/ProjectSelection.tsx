@@ -4,10 +4,11 @@
 import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { Plus, Server, Activity, Trash2, FolderOpen, Settings, Moon, Sun } from 'lucide-react'
+import { Plus, Server, Activity, Trash2, FolderOpen, Settings, Moon, Sun, Users } from 'lucide-react'
 import { fetchProjects, createProject, deleteProject, updateProject, ProjectCreate, ProjectUpdate, ProjectSummary } from '../api/client'
 import { useProject } from '../contexts/ProjectContext'
 import { useTheme } from '../contexts/ThemeContext'
+import { useAuth } from '../contexts/AuthContext'
 import ProjectModal from './ProjectModal'
 import octoproxLogo from '../assets/logos/octoprox_horizontal.svg'
 import octoproxLogoDark from '../assets/logos/octoprox_horizontal_dark.svg'
@@ -18,6 +19,7 @@ export default function ProjectSelection() {
   const queryClient = useQueryClient()
   const { setSelectedProjectId } = useProject()
   const { theme, toggleTheme } = useTheme()
+  const { isAdmin, canMutate } = useAuth()
   const [showCreateModal, setShowCreateModal] = useState(false)
   const [showEditModal, setShowEditModal] = useState<ProjectSummary | null>(null)
   const [showDeleteModal, setShowDeleteModal] = useState<ProjectSummary | null>(null)
@@ -102,15 +104,23 @@ export default function ProjectSelection() {
             >
               {theme === 'dark' ? <Sun className="w-5 h-5" /> : <Moon className="w-5 h-5" />}
             </button>
-            <Button
-              onClick={() => {
-                createMutation.reset()
-                setShowCreateModal(true)
-              }}
-            >
-              <Plus className="w-5 h-5" />
-              New Project
-            </Button>
+            {isAdmin && (
+              <Button variant="secondary" onClick={() => navigate('/users')}>
+                <Users className="w-5 h-5" />
+                Manage Users
+              </Button>
+            )}
+            {canMutate && (
+              <Button
+                onClick={() => {
+                  createMutation.reset()
+                  setShowCreateModal(true)
+                }}
+              >
+                <Plus className="w-5 h-5" />
+                New Project
+              </Button>
+            )}
           </div>
         </div>
 
@@ -119,6 +129,7 @@ export default function ProjectSelection() {
             <ProjectCard
               key={project.id}
               project={project}
+              canMutate={canMutate}
               onSelect={() => handleSelectProject(project)}
               onEdit={() => {
                 updateMutation.reset()
@@ -174,11 +185,13 @@ export default function ProjectSelection() {
 
 function ProjectCard({
   project,
+  canMutate,
   onSelect,
   onEdit,
   onDelete,
 }: {
   project: ProjectSummary
+  canMutate: boolean
   onSelect: () => void
   onEdit: () => void
   onDelete: () => void
@@ -187,28 +200,30 @@ function ProjectCard({
     <Card className="shadow-md p-6 hover:shadow-lg transition-shadow flex flex-col h-full">
       <div className="flex items-start justify-between mb-4">
         <h3 className="text-xl font-semibold text-gray-900 dark:text-gray-100">{project.name}</h3>
-        <div className="flex items-center gap-2">
-          <button
-            onClick={(e) => {
-              e.stopPropagation()
-              onEdit()
-            }}
-            className="text-gray-400 hover:text-blue-500 transition-colors"
-            title="Edit project"
-          >
-            <Settings className="w-5 h-5" />
-          </button>
-          <button
-            onClick={(e) => {
-              e.stopPropagation()
-              onDelete()
-            }}
-            className="text-gray-400 hover:text-red-500 transition-colors"
-            title="Delete project"
-          >
-            <Trash2 className="w-5 h-5" />
-          </button>
-        </div>
+        {canMutate && (
+          <div className="flex items-center gap-2">
+            <button
+              onClick={(e) => {
+                e.stopPropagation()
+                onEdit()
+              }}
+              className="text-gray-400 hover:text-blue-500 transition-colors"
+              title="Edit project"
+            >
+              <Settings className="w-5 h-5" />
+            </button>
+            <button
+              onClick={(e) => {
+                e.stopPropagation()
+                onDelete()
+              }}
+              className="text-gray-400 hover:text-red-500 transition-colors"
+              title="Delete project"
+            >
+              <Trash2 className="w-5 h-5" />
+            </button>
+          </div>
+        )}
       </div>
       <div className="flex-grow">
         <p className="text-gray-600 dark:text-gray-400 text-sm mb-4 line-clamp-2 min-h-[2.5rem]">
