@@ -20,7 +20,7 @@ from typing import TYPE_CHECKING
 import h11
 import structlog
 
-from api.core.tls_cert_manager import TLSCertManager
+from api.core.tls_cert_manager import TLSCertManager, pop_client_hello
 
 if TYPE_CHECKING:
     from api.core.mitm.base import MitmRelay
@@ -164,7 +164,8 @@ class MitmHandler:
             return bytes_sent, bytes_received
 
         # Extract client-side TLS handshake info (per-connection)
-        ssl_object = new_transport.get_extra_info("ssl_object")
+        tls_info: dict[str, str] = {}
+        ssl_object = new_transport.get_extra_info("ssl_object") if new_transport else None
         if ssl_object is not None:
             _cipher_info = ssl_object.cipher()  # (name, protocol, key_bits)
             tls_info = {
@@ -175,8 +176,28 @@ class MitmHandler:
                     name for name, _proto, _bits in (ssl_object.shared_ciphers() or [])
                 ),
             }
-        else:
-            tls_info: dict[str, str] = {}
+
+            # Parse raw ClientHello captured during the handshake
+            raw_hello = pop_client_hello(ssl_object)
+            if raw_hello is not None:
+                try:
+                    from api.core.mitm.client_hello import (
+                        client_hello_to_dict,
+                        compute_ja3,
+                        compute_ja4,
+                        compute_ja4_r,
+                        parse_client_hello,
+                    )
+
+                    ch_info = parse_client_hello(raw_hello)
+                    ja3_hash, ja3_full = compute_ja3(ch_info)
+                    ja4 = compute_ja4(ch_info)
+                    ja4_r = compute_ja4_r(ch_info)
+                    tls_info["tls_client_hello"] = json.dumps(
+                        client_hello_to_dict(ch_info, ja3_hash, ja3_full, ja4, ja4_r)
+                    )
+                except Exception:
+                    logger.debug("Failed to parse ClientHello", exc_info=True)
 
         # Update the writer's transport to the TLS-wrapped one
         client_writer._transport = new_transport  # type: ignore[attr-defined]

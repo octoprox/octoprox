@@ -581,6 +581,22 @@ export const fetchBrightDataZones = async (credentialId: string): Promise<Bright
 }
 
 // MITM Inspector types
+export interface TlsClientHello {
+  version: string
+  supported_versions: string[]
+  cipher_suites: { id: string; name: string }[]
+  extensions: { id: number; name: string }[]
+  sni: string
+  alpn: string[]
+  supported_groups: { id: number; name: string }[]
+  signature_algorithms: { id: string; name: string }[]
+  ec_point_formats: number[]
+  ja3: string
+  ja3_full: string
+  ja4: string
+  ja4_r: string
+}
+
 export interface MitmRequestRecord {
   id: string
   timestamp: string
@@ -604,6 +620,7 @@ export interface MitmRequestRecord {
   tls_cipher: string
   tls_key_bits: number
   tls_shared_ciphers: string[]
+  tls_client_hello: TlsClientHello | null
 }
 
 export interface MitmRequestsResponse {

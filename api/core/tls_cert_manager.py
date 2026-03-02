@@ -35,6 +35,41 @@ _RSA_KEY_SIZE = 2048
 # Maximum number of cached domain SSL contexts
 _MAX_CACHE_SIZE = 1000
 
+# ---------------------------------------------------------------------------
+# ClientHello capture via _msg_callback
+# ---------------------------------------------------------------------------
+
+# Stores raw ClientHello bytes per TLS connection, keyed by id(SSLObject).
+# Populated by _tls_msg_callback during start_tls() and consumed by
+# pop_client_hello() in the MITM handler immediately after.
+_pending_client_hellos: dict[int, bytes] = {}
+_hello_lock = threading.Lock()
+
+
+def _tls_msg_callback(
+    conn: object,
+    direction: str,
+    version: object,
+    content_type: int,
+    msg_type: int,
+    data: bytes,
+) -> None:
+    """OpenSSL message callback that captures ClientHello during TLS handshake."""
+    # content_type 22 = Handshake, msg_type 1 = ClientHello
+    if direction == "read" and content_type == 22 and msg_type == 1:
+        with _hello_lock:
+            _pending_client_hellos[id(conn)] = bytes(data)
+
+
+def pop_client_hello(ssl_object: object) -> bytes | None:
+    """Retrieve and remove captured ClientHello bytes for an SSL connection.
+
+    Must be called after ``start_tls()`` completes, passing the ``ssl_object``
+    obtained from ``transport.get_extra_info("ssl_object")``.
+    """
+    with _hello_lock:
+        return _pending_client_hellos.pop(id(ssl_object), None)
+
 
 class TLSCertManager:
     """Manages CA and per-domain certificates for TLS MITM interception."""
@@ -120,6 +155,11 @@ class TLSCertManager:
 
         # Force HTTP/1.1 — we parse requests as HTTP/1.1 on the client-facing side
         ctx.set_alpn_protocols(["http/1.1"])
+
+        # Capture raw ClientHello bytes during the TLS handshake.
+        # _msg_callback is an internal CPython API (stable since 3.8) that hooks
+        # into OpenSSL's SSL_CTX_set_msg_callback.
+        ctx._msg_callback = _tls_msg_callback  # type: ignore[attr-defined]
 
         return ctx
 

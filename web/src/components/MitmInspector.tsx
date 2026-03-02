@@ -4,11 +4,12 @@
 import { useMemo, useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { ColumnDef, Row } from '@tanstack/react-table'
-import { ChevronDown, ChevronRight, Info, Trash2, Search } from 'lucide-react'
+import { ChevronDown, ChevronRight, Info, Trash2, Search, Copy, Check } from 'lucide-react'
 import {
   fetchMitmRequests,
   clearMitmRequests,
   MitmRequestRecord,
+  TlsClientHello,
 } from '../api/client'
 import { useProject } from '../contexts/ProjectContext'
 import { DataTable } from './DataTable'
@@ -57,28 +58,129 @@ function HeadersTable({ headers }: { headers: [string, string][] }) {
   )
 }
 
-function TlsInfoTable({ record }: { record: MitmRequestRecord }) {
+function CopyButton({ text }: { text: string }) {
+  const [copied, setCopied] = useState(false)
   return (
-    <div className="bg-white dark:bg-gray-800 rounded border border-gray-200 dark:border-gray-700 overflow-auto h-48">
+    <button
+      onClick={() => {
+        navigator.clipboard.writeText(text)
+        setCopied(true)
+        setTimeout(() => setCopied(false), 1500)
+      }}
+      className="ml-1.5 p-0.5 text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 inline-flex"
+      title="Copy to clipboard"
+    >
+      {copied ? <Check className="w-3 h-3 text-green-500" /> : <Copy className="w-3 h-3" />}
+    </button>
+  )
+}
+
+function TlsRow({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <tr className="border-b border-gray-100 dark:border-gray-700 last:border-0">
+      <td className="px-2 py-1 font-semibold text-gray-600 dark:text-gray-400 whitespace-nowrap align-top w-40">{label}</td>
+      <td className="px-2 py-1 text-gray-800 dark:text-gray-200">{children}</td>
+    </tr>
+  )
+}
+
+function TlsSectionHeader({ title }: { title: string }) {
+  return (
+    <tr className="border-b border-gray-200 dark:border-gray-600">
+      <td colSpan={2} className="px-2 py-1.5 text-[10px] font-bold uppercase tracking-wider text-gray-500 dark:text-gray-400 bg-gray-50 dark:bg-gray-800/50">{title}</td>
+    </tr>
+  )
+}
+
+function IdNameList({ items, maxH = 'max-h-40' }: { items: { id: string | number; name: string }[]; maxH?: string }) {
+  if (items.length === 0) return <span className="text-gray-400 italic">None</span>
+  return (
+    <div className={`overflow-auto ${maxH}`}>
+      {items.map((item, i) => (
+        <div key={i} className="flex gap-2 leading-relaxed">
+          <span className="text-gray-400 shrink-0">{typeof item.id === 'number' ? `0x${item.id.toString(16).padStart(4, '0').toUpperCase()}` : item.id}</span>
+          <span className="break-all">{item.name}</span>
+        </div>
+      ))}
+    </div>
+  )
+}
+
+function TlsInfoTable({ record }: { record: MitmRequestRecord }) {
+  const [ja3Expanded, setJa3Expanded] = useState(false)
+  const ch = record.tls_client_hello
+
+  return (
+    <div className="bg-white dark:bg-gray-800 rounded border border-gray-200 dark:border-gray-700 overflow-auto">
       <table className="w-full text-xs font-mono">
         <tbody>
-          <tr className="border-b border-gray-100 dark:border-gray-700">
-            <td className="px-2 py-1 font-semibold text-gray-600 dark:text-gray-400 whitespace-nowrap align-top">Version</td>
-            <td className="px-2 py-1 text-gray-800 dark:text-gray-200">{record.tls_version}</td>
-          </tr>
-          <tr className="border-b border-gray-100 dark:border-gray-700">
-            <td className="px-2 py-1 font-semibold text-gray-600 dark:text-gray-400 whitespace-nowrap align-top">Cipher</td>
-            <td className="px-2 py-1 text-gray-800 dark:text-gray-200">{record.tls_cipher}</td>
-          </tr>
-          <tr className="border-b border-gray-100 dark:border-gray-700">
-            <td className="px-2 py-1 font-semibold text-gray-600 dark:text-gray-400 whitespace-nowrap align-top">Key Bits</td>
-            <td className="px-2 py-1 text-gray-800 dark:text-gray-200">{record.tls_key_bits}</td>
-          </tr>
-          {record.tls_shared_ciphers.length > 0 && (
-            <tr>
-              <td className="px-2 py-1 font-semibold text-gray-600 dark:text-gray-400 whitespace-nowrap align-top">Shared Ciphers</td>
-              <td className="px-2 py-1 text-gray-800 dark:text-gray-200 break-all">{record.tls_shared_ciphers.join(', ')}</td>
-            </tr>
+          <TlsSectionHeader title="Negotiated" />
+          <TlsRow label="Version">{record.tls_version}</TlsRow>
+          <TlsRow label="Cipher">{record.tls_cipher}</TlsRow>
+          <TlsRow label="Key Bits">{record.tls_key_bits}</TlsRow>
+
+          {ch && (
+            <>
+              <TlsSectionHeader title="Fingerprints" />
+              <TlsRow label="JA3">
+                <span className="break-all">{ch.ja3}</span>
+                <CopyButton text={ch.ja3} />
+              </TlsRow>
+              <TlsRow label="JA4">
+                <span className="break-all">{ch.ja4}</span>
+                <CopyButton text={ch.ja4} />
+              </TlsRow>
+              <TlsRow label="JA4_r">
+                <span className="break-all">{ch.ja4_r}</span>
+                <CopyButton text={ch.ja4_r} />
+              </TlsRow>
+              <TlsRow label="JA3 Full">
+                {ja3Expanded ? (
+                  <div>
+                    <span className="break-all">{ch.ja3_full}</span>
+                    <CopyButton text={ch.ja3_full} />
+                    <button onClick={() => setJa3Expanded(false)} className="ml-2 text-blue-500 hover:text-blue-600 text-[10px]">collapse</button>
+                  </div>
+                ) : (
+                  <div>
+                    <span className="text-gray-400 truncate max-w-xs inline-block align-bottom">{ch.ja3_full.slice(0, 60)}...</span>
+                    <button onClick={() => setJa3Expanded(true)} className="ml-1 text-blue-500 hover:text-blue-600 text-[10px]">expand</button>
+                  </div>
+                )}
+              </TlsRow>
+
+              <TlsSectionHeader title="Client Hello" />
+              {ch.sni && <TlsRow label="SNI">{ch.sni}</TlsRow>}
+              {ch.alpn.length > 0 && <TlsRow label="ALPN">{ch.alpn.join(', ')}</TlsRow>}
+              {ch.supported_versions.length > 0 && <TlsRow label="Supported Versions">{ch.supported_versions.join(', ')}</TlsRow>}
+              <TlsRow label={`Cipher Suites (${ch.cipher_suites.length})`}>
+                <IdNameList items={ch.cipher_suites} maxH="max-h-48" />
+              </TlsRow>
+              <TlsRow label={`Extensions (${ch.extensions.length})`}>
+                <IdNameList items={ch.extensions} />
+              </TlsRow>
+              {ch.supported_groups.length > 0 && (
+                <TlsRow label={`Elliptic Curves (${ch.supported_groups.length})`}>
+                  <IdNameList items={ch.supported_groups} />
+                </TlsRow>
+              )}
+              {ch.signature_algorithms.length > 0 && (
+                <TlsRow label={`Signature Algs (${ch.signature_algorithms.length})`}>
+                  <IdNameList items={ch.signature_algorithms} />
+                </TlsRow>
+              )}
+              {ch.ec_point_formats.length > 0 && (
+                <TlsRow label="EC Point Formats">
+                  {ch.ec_point_formats.map(f => f === 0 ? 'uncompressed' : `${f}`).join(', ')}
+                </TlsRow>
+              )}
+            </>
+          )}
+
+          {!ch && record.tls_shared_ciphers.length > 0 && (
+            <TlsRow label="Shared Ciphers">
+              <span className="break-all">{record.tls_shared_ciphers.join(', ')}</span>
+            </TlsRow>
           )}
         </tbody>
       </table>

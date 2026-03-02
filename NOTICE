@@ -48,6 +48,7 @@ Backend (Python):
 - azure-mgmt-compute (MIT License) - https://github.com/Azure/azure-sdk-for-python
 - azure-mgmt-network (MIT License) - https://github.com/Azure/azure-sdk-for-python
 - azure-identity (MIT License) - https://github.com/Azure/azure-sdk-for-python
+- dpkt (BSD License) - https://github.com/kbandla/dpkt
 
 Frontend (TypeScript/JavaScript):
 - React (MIT License) - https://github.com/facebook/react

@@ -4,11 +4,30 @@
 """MITM traffic inspection endpoints."""
 
 import json
+from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel
 
 router = APIRouter(prefix="/projects/{project_id}/mitm")
+
+
+class TlsClientHello(BaseModel):
+    """Parsed TLS ClientHello handshake details."""
+
+    version: str
+    supported_versions: list[str]
+    cipher_suites: list[dict[str, str]]
+    extensions: list[dict[str, Any]]
+    sni: str
+    alpn: list[str]
+    supported_groups: list[dict[str, Any]]
+    signature_algorithms: list[dict[str, str]]
+    ec_point_formats: list[int]
+    ja3: str
+    ja3_full: str
+    ja4: str
+    ja4_r: str
 
 
 class MitmRequestRecord(BaseModel):
@@ -36,6 +55,7 @@ class MitmRequestRecord(BaseModel):
     tls_cipher: str
     tls_key_bits: int
     tls_shared_ciphers: list[str]
+    tls_client_hello: TlsClientHello | None = None
 
 
 class MitmRequestsResponse(BaseModel):
@@ -94,6 +114,7 @@ async def list_mitm_requests(
             tls_cipher=raw.get("tls_cipher", ""),
             tls_key_bits=int(raw["tls_key_bits"]) if raw.get("tls_key_bits") else 0,
             tls_shared_ciphers=raw["tls_shared_ciphers"].split(",") if raw.get("tls_shared_ciphers") else [],
+            tls_client_hello=json.loads(raw["tls_client_hello"]) if raw.get("tls_client_hello") else None,
         )
         for raw in records_to_return
     ]

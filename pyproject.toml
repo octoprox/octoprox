@@ -37,6 +37,7 @@ dependencies = [
     "rnet==2.4.2",
     "h11==0.16.0",
     "bcrypt==5.0.0",
+    "dpkt==1.9.8",
 ]
 
 [project.optional-dependencies]
