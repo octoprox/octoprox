@@ -73,6 +73,7 @@ class MitmHandler:
         target_host: str,
         proxy_url: str,
         latency_ms: float,
+        tls_info: dict[str, str] | None = None,
     ) -> None:
         """Fire-and-forget: schedule MITM request recording as a background task."""
         if self._redis_client is None:
@@ -112,6 +113,9 @@ class MitmHandler:
             else str(project.tls_mitm_browser or ""),
             "latency_ms": str(round(latency_ms, 2)),
         }
+
+        if tls_info:
+            fields.update(tls_info)
 
         coro = self._redis_client.record_mitm_request(project.id, fields)
         task = asyncio.create_task(coro)
@@ -158,6 +162,21 @@ class MitmHandler:
         except Exception as e:
             logger.debug("MITM TLS handshake failed", target_host=target_host, error=str(e))
             return bytes_sent, bytes_received
+
+        # Extract client-side TLS handshake info (per-connection)
+        ssl_object = new_transport.get_extra_info("ssl_object")
+        if ssl_object is not None:
+            _cipher_info = ssl_object.cipher()  # (name, protocol, key_bits)
+            tls_info = {
+                "tls_version": ssl_object.version() or "",
+                "tls_cipher": _cipher_info[0] if _cipher_info else "",
+                "tls_key_bits": str(_cipher_info[2]) if _cipher_info else "",
+                "tls_shared_ciphers": ",".join(
+                    name for name, _proto, _bits in (ssl_object.shared_ciphers() or [])
+                ),
+            }
+        else:
+            tls_info: dict[str, str] = {}
 
         # Update the writer's transport to the TLS-wrapped one
         client_writer._transport = new_transport  # type: ignore[attr-defined]
@@ -268,6 +287,7 @@ class MitmHandler:
                     target_host=target_host,
                     proxy_url=proxy_url,
                     latency_ms=req_latency_ms,
+                    tls_info=tls_info,
                 )
 
                 # Prepare for next request (keep-alive)

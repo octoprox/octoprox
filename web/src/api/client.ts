@@ -600,6 +600,10 @@ export interface MitmRequestRecord {
   mitm_engine: string
   mitm_browser: string
   latency_ms: number
+  tls_version: string
+  tls_cipher: string
+  tls_key_bits: number
+  tls_shared_ciphers: string[]
 }
 
 export interface MitmRequestsResponse {

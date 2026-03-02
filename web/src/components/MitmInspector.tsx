@@ -81,6 +81,35 @@ function ExpandedDetail({ record }: { record: MitmRequestRecord }) {
           <h4 className="text-xs font-semibold uppercase text-gray-500 dark:text-gray-400 mb-2">Response Headers</h4>
           <HeadersTable headers={record.response_headers} />
         </div>
+        {record.tls_version && (
+          <div>
+            <h4 className="text-xs font-semibold uppercase text-gray-500 dark:text-gray-400 mb-2">Client TLS Handshake</h4>
+            <div className="bg-white dark:bg-gray-800 rounded border border-gray-200 dark:border-gray-700 overflow-auto">
+              <table className="w-full text-xs font-mono">
+                <tbody>
+                  <tr className="border-b border-gray-100 dark:border-gray-700">
+                    <td className="px-2 py-1 font-semibold text-gray-600 dark:text-gray-400 whitespace-nowrap align-top">Version</td>
+                    <td className="px-2 py-1 text-gray-800 dark:text-gray-200">{record.tls_version}</td>
+                  </tr>
+                  <tr className="border-b border-gray-100 dark:border-gray-700">
+                    <td className="px-2 py-1 font-semibold text-gray-600 dark:text-gray-400 whitespace-nowrap align-top">Cipher</td>
+                    <td className="px-2 py-1 text-gray-800 dark:text-gray-200">{record.tls_cipher}</td>
+                  </tr>
+                  <tr className="border-b border-gray-100 dark:border-gray-700">
+                    <td className="px-2 py-1 font-semibold text-gray-600 dark:text-gray-400 whitespace-nowrap align-top">Key Bits</td>
+                    <td className="px-2 py-1 text-gray-800 dark:text-gray-200">{record.tls_key_bits}</td>
+                  </tr>
+                  {record.tls_shared_ciphers.length > 0 && (
+                    <tr>
+                      <td className="px-2 py-1 font-semibold text-gray-600 dark:text-gray-400 whitespace-nowrap align-top">Shared Ciphers</td>
+                      <td className="px-2 py-1 text-gray-800 dark:text-gray-200 break-all">{record.tls_shared_ciphers.join(', ')}</td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
       </div>
       <div className="flex flex-wrap gap-x-6 gap-y-1 text-xs text-gray-500 dark:text-gray-400">
         <span>Full URL: <span className="font-mono text-gray-700 dark:text-gray-300">{record.url}</span></span>

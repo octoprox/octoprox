@@ -32,6 +32,10 @@ class MitmRequestRecord(BaseModel):
     mitm_engine: str
     mitm_browser: str
     latency_ms: float
+    tls_version: str
+    tls_cipher: str
+    tls_key_bits: int
+    tls_shared_ciphers: list[str]
 
 
 class MitmRequestsResponse(BaseModel):
@@ -86,6 +90,10 @@ async def list_mitm_requests(
             mitm_engine=raw.get("mitm_engine", ""),
             mitm_browser=raw.get("mitm_browser", ""),
             latency_ms=float(raw["latency_ms"]),
+            tls_version=raw.get("tls_version", ""),
+            tls_cipher=raw.get("tls_cipher", ""),
+            tls_key_bits=int(raw["tls_key_bits"]) if raw.get("tls_key_bits") else 0,
+            tls_shared_ciphers=raw["tls_shared_ciphers"].split(",") if raw.get("tls_shared_ciphers") else [],
         )
         for raw in records_to_return
     ]
