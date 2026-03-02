@@ -248,6 +248,109 @@ class TestUserEmailUniqueness:
         assert response.json()["email"] == ""
 
 
+class TestUserEmailValidation:
+    """Tests for email format validation."""
+
+    def test_create_user_invalid_email_no_domain(self, authenticated_client: TestClient) -> None:
+        """Test that creating a user with an invalid email (no domain) fails."""
+        response = authenticated_client.post(
+            "/api/v1/users",
+            json={
+                "username": "bademail1",
+                "email": "notanemail",
+                "password": "pass123",
+                "role": "viewer",
+            },
+        )
+        assert response.status_code == 422
+
+    def test_create_user_invalid_email_no_tld(self, authenticated_client: TestClient) -> None:
+        """Test that creating a user with an email missing TLD fails."""
+        response = authenticated_client.post(
+            "/api/v1/users",
+            json={
+                "username": "bademail2",
+                "email": "user@domain",
+                "password": "pass123",
+                "role": "viewer",
+            },
+        )
+        assert response.status_code == 422
+
+    def test_create_user_invalid_email_spaces(self, authenticated_client: TestClient) -> None:
+        """Test that creating a user with spaces in email fails."""
+        response = authenticated_client.post(
+            "/api/v1/users",
+            json={
+                "username": "bademail3",
+                "email": "user @example.com",
+                "password": "pass123",
+                "role": "viewer",
+            },
+        )
+        assert response.status_code == 422
+
+    def test_create_user_valid_email(self, authenticated_client: TestClient) -> None:
+        """Test that valid emails are accepted."""
+        response = authenticated_client.post(
+            "/api/v1/users",
+            json={
+                "username": "goodemail",
+                "email": "valid.user+tag@sub.example.com",
+                "password": "pass123",
+                "role": "viewer",
+            },
+        )
+        assert response.status_code == 201
+        assert response.json()["email"] == "valid.user+tag@sub.example.com"
+
+    def test_create_user_empty_email_still_allowed(self, authenticated_client: TestClient) -> None:
+        """Test that empty email (opting out) is still allowed."""
+        response = authenticated_client.post(
+            "/api/v1/users",
+            json={
+                "username": "noemailval",
+                "email": "",
+                "password": "pass123",
+                "role": "viewer",
+            },
+        )
+        assert response.status_code == 201
+
+    def test_create_user_email_whitespace_trimmed(self, authenticated_client: TestClient) -> None:
+        """Test that whitespace around email is trimmed."""
+        response = authenticated_client.post(
+            "/api/v1/users",
+            json={
+                "username": "trimmed",
+                "email": "  trimmed@example.com  ",
+                "password": "pass123",
+                "role": "viewer",
+            },
+        )
+        assert response.status_code == 201
+        assert response.json()["email"] == "trimmed@example.com"
+
+    def test_update_user_invalid_email(self, authenticated_client: TestClient) -> None:
+        """Test that updating to an invalid email fails."""
+        create_resp = authenticated_client.post(
+            "/api/v1/users",
+            json={
+                "username": "updatebademail",
+                "email": "good@example.com",
+                "password": "pass123",
+                "role": "viewer",
+            },
+        )
+        user_id = create_resp.json()["id"]
+
+        response = authenticated_client.patch(
+            f"/api/v1/users/{user_id}",
+            json={"email": "not-valid"},
+        )
+        assert response.status_code == 422
+
+
 class TestUserSelfEndpoints:
     """Tests for user self-service endpoints."""
 

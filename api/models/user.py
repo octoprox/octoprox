@@ -3,11 +3,12 @@
 
 """User model definitions for authentication and authorization."""
 
+import re
 from datetime import datetime
 from enum import Enum
 from uuid import uuid4
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from api.core import utc_now
 
@@ -33,6 +34,17 @@ class User(BaseModel):
     updated_at: datetime = Field(default_factory=utc_now)
 
 
+_EMAIL_RE = re.compile(r"^[a-zA-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-zA-Z0-9-]+(?:\.[a-zA-Z0-9-]+)*\.[a-zA-Z]{2,}$")
+
+
+def _validate_email(v: str) -> str:
+    """Validate email format. Empty string is allowed (email is optional)."""
+    v = v.strip()
+    if v and not _EMAIL_RE.fullmatch(v):
+        raise ValueError("Invalid email address")
+    return v
+
+
 class UserCreate(BaseModel):
     """Schema for creating a new user (admin action)."""
 
@@ -40,6 +52,11 @@ class UserCreate(BaseModel):
     email: str = ""
     password: str
     role: UserRole = UserRole.VIEWER
+
+    @field_validator("email")
+    @classmethod
+    def check_email(cls, v: str) -> str:
+        return _validate_email(v)
 
 
 class UserUpdate(BaseModel):
@@ -51,6 +68,13 @@ class UserUpdate(BaseModel):
     role: UserRole | None = None
     is_active: bool | None = None
 
+    @field_validator("email")
+    @classmethod
+    def check_email(cls, v: str | None) -> str | None:
+        if v is None:
+            return v
+        return _validate_email(v)
+
 
 class UserSelfUpdate(BaseModel):
     """Schema for a user updating their own profile."""
@@ -58,6 +82,13 @@ class UserSelfUpdate(BaseModel):
     email: str | None = None
     password: str | None = None
     current_password: str | None = None
+
+    @field_validator("email")
+    @classmethod
+    def check_email(cls, v: str | None) -> str | None:
+        if v is None:
+            return v
+        return _validate_email(v)
 
 
 class UserResponse(BaseModel):
