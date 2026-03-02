@@ -261,3 +261,34 @@ class TestCredentialEndpoints:
         data = update_response.json()
         assert data["config"]["access_key"] == "AKIANEWKEY12345678"
 
+
+class TestCredentialRoleAccess:
+    """Tests for role-based access control on credential endpoints."""
+
+    def test_viewer_cannot_create_credential(self, viewer_client: TestClient) -> None:
+        """Test that viewers cannot create credentials."""
+        response = viewer_client.post(
+            "/api/v1/projects/some-project-id/credentials",
+            json={
+                "name": "Viewer Credential",
+                "type": "static_proxy_provider",
+                "config": {},
+            },
+        )
+        assert response.status_code == 403
+
+    def test_viewer_cannot_update_credential(self, viewer_client: TestClient) -> None:
+        """Test that viewers cannot update credentials."""
+        response = viewer_client.patch(
+            "/api/v1/projects/some-project-id/credentials/some-credential-id",
+            json={"name": "Updated"},
+        )
+        assert response.status_code == 403
+
+    def test_viewer_cannot_delete_credential(self, viewer_client: TestClient) -> None:
+        """Test that viewers cannot delete credentials."""
+        response = viewer_client.delete(
+            "/api/v1/projects/some-project-id/credentials/some-credential-id"
+        )
+        assert response.status_code == 403
+

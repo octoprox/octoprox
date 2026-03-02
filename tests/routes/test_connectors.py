@@ -346,3 +346,35 @@ class TestConnectorEndpoints:
         data = response.json()
         assert isinstance(data, dict)
 
+
+class TestConnectorRoleAccess:
+    """Tests for role-based access control on connector endpoints."""
+
+    def test_viewer_cannot_create_connector(self, viewer_client: TestClient) -> None:
+        """Test that viewers cannot create connectors."""
+        response = viewer_client.post(
+            "/api/v1/projects/some-project-id/connectors",
+            json={
+                "name": "Viewer Connector",
+                "credential_id": "some-credential-id",
+                "config": {},
+                "enabled": True,
+            },
+        )
+        assert response.status_code == 403
+
+    def test_viewer_cannot_update_connector(self, viewer_client: TestClient) -> None:
+        """Test that viewers cannot update connectors."""
+        response = viewer_client.patch(
+            "/api/v1/projects/some-project-id/connectors/some-connector-id",
+            json={"name": "Updated"},
+        )
+        assert response.status_code == 403
+
+    def test_viewer_cannot_delete_connector(self, viewer_client: TestClient) -> None:
+        """Test that viewers cannot delete connectors."""
+        response = viewer_client.delete(
+            "/api/v1/projects/some-project-id/connectors/some-connector-id"
+        )
+        assert response.status_code == 403
+

@@ -20,6 +20,7 @@ from api.core.logging import setup_logging
 from api.core.mitm import MitmHandler
 from api.core.proxy_manager import ProxyManager
 from api.core.proxy_server import ProxyServer
+from api.core.seed import seed_admin_user
 from api.core.tls_cert_manager import TLSCertManager
 from api.db.migrations import run_migrations
 from api.db.redis import get_redis_client
@@ -34,6 +35,7 @@ from api.routes import (
     mitm,
     projects,
     proxies,
+    users,
 )
 
 # Configure logging before getting the logger
@@ -56,6 +58,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         settings.db_application_name,
         settings.debug,
     )
+
+    # Seed initial admin user if no users exist
+    await seed_admin_user(session_factory, settings)
 
     # Create and connect Redis client
     logger.info("Connecting to Redis")
@@ -150,6 +155,9 @@ def create_app() -> FastAPI:
         brightdata.router, prefix="/api/v1", tags=["BrightData"], dependencies=auth_dependency
     )
     app.include_router(mitm.router, prefix="/api/v1", tags=["MITM"], dependencies=auth_dependency)
+    app.include_router(
+        users.router, prefix="/api/v1", tags=["Users"], dependencies=auth_dependency
+    )
 
     # Serve frontend static files in production (when web/dist exists)
     static_dir = Path(__file__).parent.parent / "web" / "dist"

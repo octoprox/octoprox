@@ -1,9 +1,9 @@
 // Copyright 2026 Octoprox Authors
 // SPDX-License-Identifier: Apache-2.0
 
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useMemo } from 'react'
 import { BrowserRouter, Routes, Route, Link, Navigate, useParams, useNavigate } from 'react-router-dom'
-import { Server, BarChart3, LineChart, LogOut, FolderOpen, ChevronDown, ChevronLeft, Key, Link2, Moon, Sun, Search } from 'lucide-react'
+import { Server, BarChart3, LineChart, LogOut, FolderOpen, ChevronDown, ChevronLeft, Key, Link2, Moon, Sun, Search, Users, User } from 'lucide-react'
 import Dashboard from './components/Dashboard'
 import octoproxLogo from './assets/logos/octoprox_horizontal.svg'
 import octoproxLogoDark from './assets/logos/octoprox_horizontal_dark.svg'
@@ -16,7 +16,10 @@ import MitmInspector from './components/MitmInspector'
 import Metrics from './components/Metrics'
 import Login from './components/Login'
 import ProjectSelection from './components/ProjectSelection'
+import UsersPage from './components/UsersPage'
+import ProfileModal from './components/ProfileModal'
 import { ProjectProvider, useProject } from './contexts/ProjectContext'
+import { AuthProvider, AuthContextValue } from './contexts/AuthContext'
 import { useTheme } from './contexts/ThemeContext'
 import { checkAuthStatus, login, logout, AuthStatus } from './api/client'
 
@@ -31,9 +34,8 @@ function App() {
       try {
         const status = await checkAuthStatus()
         setAuthStatus(status)
-      } catch (error) {
-        // If we can't reach the server, assume auth is disabled
-        setAuthStatus({ enabled: false, authenticated: false, username: null })
+      } catch {
+        setAuthStatus({ authenticated: false, username: null, role: null, user_id: null })
       } finally {
         setIsLoading(false)
       }
@@ -42,7 +44,7 @@ function App() {
 
     // Listen for logout events
     const handleLogout = () => {
-      setAuthStatus((prev) => prev ? { ...prev, authenticated: false, username: null } : null)
+      setAuthStatus((prev) => prev ? { ...prev, authenticated: false, username: null, role: null, user_id: null } : null)
     }
     window.addEventListener('auth:logout', handleLogout)
     return () => window.removeEventListener('auth:logout', handleLogout)
@@ -61,8 +63,15 @@ function App() {
 
   const handleLogout = () => {
     logout()
-    setAuthStatus((prev) => prev ? { ...prev, authenticated: false, username: null } : null)
+    setAuthStatus((prev) => prev ? { ...prev, authenticated: false, username: null, role: null, user_id: null } : null)
   }
+
+  const authContextValue = useMemo<AuthContextValue>(() => ({
+    authStatus,
+    isAdmin: authStatus?.role === 'admin',
+    canMutate: authStatus?.role === 'admin' || authStatus?.role === 'editor',
+    isViewer: authStatus?.role === 'viewer',
+  }), [authStatus])
 
   // Show loading state
   if (isLoading) {
@@ -73,31 +82,36 @@ function App() {
     )
   }
 
-  // Show login if auth is enabled and not authenticated
-  if (authStatus?.enabled && !authStatus.authenticated) {
+  // Show login if not authenticated
+  if (!authStatus?.authenticated) {
     return <Login onLogin={handleLogin} error={loginError} />
   }
 
   return (
-    <ProjectProvider>
-      <BrowserRouter>
-        <Routes>
-          {/* Project selection page */}
-          <Route path="/" element={<ProjectSelection />} />
+    <AuthProvider value={authContextValue}>
+      <ProjectProvider>
+        <BrowserRouter>
+          <Routes>
+            {/* Project selection page */}
+            <Route path="/" element={<ProjectSelection />} />
 
-          {/* Project-scoped routes */}
-          <Route
-            path="/projects/:projectId/*"
-            element={
-              <ProjectLayout
-                authStatus={authStatus}
-                onLogout={handleLogout}
-              />
-            }
-          />
-        </Routes>
-      </BrowserRouter>
-    </ProjectProvider>
+            {/* Users management (top-level, admin only) */}
+            <Route path="/users" element={<UsersPage />} />
+
+            {/* Project-scoped routes */}
+            <Route
+              path="/projects/:projectId/*"
+              element={
+                <ProjectLayout
+                  authStatus={authStatus}
+                  onLogout={handleLogout}
+                />
+              }
+            />
+          </Routes>
+        </BrowserRouter>
+      </ProjectProvider>
+    </AuthProvider>
   )
 }
 
@@ -114,6 +128,9 @@ function ProjectLayout({
   const { theme, toggleTheme } = useTheme()
   const [showProjectDropdown, setShowProjectDropdown] = useState(false)
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
+  const [showProfileModal, setShowProfileModal] = useState(false)
+
+  const isAdmin = authStatus?.role === 'admin'
 
   // Sync project ID from URL to context
   useEffect(() => {
@@ -207,6 +224,9 @@ function ProjectLayout({
           <NavLink to={`/projects/${projectId}/credentials`} icon={<Key />} label="Credentials" collapsed={sidebarCollapsed} />
           <NavLink to={`/projects/${projectId}/connectors`} icon={<Link2 />} label="Connectors" collapsed={sidebarCollapsed} />
           <NavLink to={`/projects/${projectId}/mitm-inspector`} icon={<Search />} label="MITM Inspector" collapsed={sidebarCollapsed} />
+          {isAdmin && (
+            <NavLink to={`/projects/${projectId}/users`} icon={<Users />} label="Users" collapsed={sidebarCollapsed} />
+          )}
         </nav>
 
         {/* Bottom section: theme toggle + user info */}
@@ -233,9 +253,16 @@ function ProjectLayout({
           </div>
 
           {/* User info and logout */}
-          {authStatus?.enabled && authStatus.authenticated && (
-            <div className={`p-4 border-t border-gray-200 dark:border-gray-700 ${sidebarCollapsed ? 'flex justify-center' : ''}`}>
-              {sidebarCollapsed ? (
+          <div className={`p-4 border-t border-gray-200 dark:border-gray-700 ${sidebarCollapsed ? 'flex flex-col items-center gap-2' : ''}`}>
+            {sidebarCollapsed ? (
+              <>
+                <button
+                  onClick={() => setShowProfileModal(true)}
+                  className="p-2 text-gray-500 dark:text-gray-400 hover:text-gray-900 dark:hover:text-gray-100 hover:bg-gray-100 dark:hover:bg-gray-700 rounded-lg transition-colors"
+                  title="Profile"
+                >
+                  <User className="w-5 h-5" />
+                </button>
                 <button
                   onClick={onLogout}
                   className="p-2 text-gray-500 dark:text-gray-400 hover:text-gray-900 dark:hover:text-gray-100 hover:bg-gray-100 dark:hover:bg-gray-700 rounded-lg transition-colors"
@@ -243,22 +270,27 @@ function ProjectLayout({
                 >
                   <LogOut className="w-5 h-5" />
                 </button>
-              ) : (
-                <>
-                  <div className="text-sm text-gray-500 dark:text-gray-400 mb-2">
-                    Signed in as <span className="text-gray-900 dark:text-gray-100">{authStatus.username}</span>
-                  </div>
-                  <button
-                    onClick={onLogout}
-                    className="flex items-center gap-2 text-gray-500 dark:text-gray-400 hover:text-gray-900 dark:hover:text-gray-100 transition-colors text-sm"
-                  >
-                    <LogOut className="w-4 h-4" />
-                    Sign out
-                  </button>
-                </>
-              )}
-            </div>
-          )}
+              </>
+            ) : (
+              <>
+                <button
+                  onClick={() => setShowProfileModal(true)}
+                  className="flex items-center gap-2 text-sm text-gray-500 dark:text-gray-400 hover:text-gray-900 dark:hover:text-gray-100 transition-colors mb-2 w-full"
+                >
+                  <User className="w-4 h-4" />
+                  <span className="text-gray-900 dark:text-gray-100">{authStatus?.username}</span>
+                  <span className="text-xs text-gray-400 dark:text-gray-500">({authStatus?.role})</span>
+                </button>
+                <button
+                  onClick={onLogout}
+                  className="flex items-center gap-2 text-gray-500 dark:text-gray-400 hover:text-gray-900 dark:hover:text-gray-100 transition-colors text-sm"
+                >
+                  <LogOut className="w-4 h-4" />
+                  Sign out
+                </button>
+              </>
+            )}
+          </div>
         </div>
 
       </aside>
@@ -272,9 +304,20 @@ function ProjectLayout({
           <Route path="credentials" element={<CredentialsConfig />} />
           <Route path="connectors" element={<ConnectorConfig />} />
           <Route path="mitm-inspector" element={<MitmInspector />} />
+          <Route path="users" element={<UsersPage />} />
           <Route path="*" element={<Navigate to="dashboard" replace />} />
         </Routes>
       </main>
+
+      {/* Profile Modal */}
+      {showProfileModal && authStatus && (
+        <ProfileModal
+          username={authStatus.username || ''}
+          email=""
+          onClose={() => setShowProfileModal(false)}
+          onSuccess={() => setShowProfileModal(false)}
+        />
+      )}
     </div>
   )
 }

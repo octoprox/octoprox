@@ -17,6 +17,7 @@ import {
   ProxyUploadResponse,
 } from '../api/client'
 import { useProject } from '../contexts/ProjectContext'
+import { useAuth } from '../contexts/AuthContext'
 import { DataTable, createSelectionColumn } from './DataTable'
 import { formatBytes } from '../utils/format'
 import { Button, Input, Select, Label, Modal, ModalHeader, Badge, Alert } from './ui'
@@ -24,6 +25,7 @@ import { Button, Input, Select, Label, Modal, ModalHeader, Badge, Alert } from '
 export default function ProxyList() {
   const queryClient = useQueryClient()
   const { selectedProjectId } = useProject()
+  const { canMutate } = useAuth()
   const [showForm, setShowForm] = useState(false)
   const [formData, setFormData] = useState({ host: '', port: '', protocol: 'http', connector_id: '', username: '', password: '' })
   const [editingProxy, setEditingProxy] = useState<Proxy | null>(null)
@@ -185,7 +187,7 @@ export default function ProxyList() {
   const columns: ColumnDef<Proxy>[] = useMemo(() => [
     createSelectionColumn<Proxy>(),
     {
-      accessorFn: (row) => `${row.display_host}:${row.port}`,
+      accessorFn: (row: Proxy) => `${row.display_host}:${row.port}`,
       id: 'host',
       header: 'Host',
       meta: { filterVariant: 'text' as const },
@@ -255,12 +257,12 @@ export default function ProxyList() {
         </div>
       ),
     },
-    {
+    ...(canMutate ? [{
       id: 'actions',
       header: '',
       size: 70,
       enableSorting: false,
-      cell: ({ row }) => (
+      cell: ({ row }: { row: { original: Proxy } }) => (
         <div className="flex gap-1">
           <button
             onClick={() => startEditing(row.original)}
@@ -278,8 +280,8 @@ export default function ProxyList() {
           </button>
         </div>
       ),
-    },
-  ], [deleteMutation])
+    }] as ColumnDef<Proxy>[] : []),
+  ], [deleteMutation, canMutate])
 
   if (isLoading) return <div>Loading...</div>
 
@@ -287,31 +289,33 @@ export default function ProxyList() {
     <div>
       <div className="flex justify-between items-center mb-8">
         <h1 className="text-3xl font-bold">Proxies</h1>
-        <div className="flex gap-2">
-          {selectedProxies.length > 0 && (
+        {canMutate && (
+          <div className="flex gap-2">
+            {selectedProxies.length > 0 && (
+              <Button
+                variant="danger"
+                onClick={handleBulkDelete}
+                disabled={isBulkDeleting}
+              >
+                <Trash2 className="w-5 h-5" />
+                {isBulkDeleting ? 'Deleting...' : `Delete ${selectedProxies.length} selected`}
+              </Button>
+            )}
             <Button
-              variant="danger"
-              onClick={handleBulkDelete}
-              disabled={isBulkDeleting}
+              variant="success"
+              onClick={() => setShowUploadModal(true)}
+              disabled={staticConnectors.length === 0}
+              title={staticConnectors.length === 0 ? 'Create a Static Proxy Provider connector first' : 'Upload proxies from CSV'}
             >
-              <Trash2 className="w-5 h-5" />
-              {isBulkDeleting ? 'Deleting...' : `Delete ${selectedProxies.length} selected`}
+              <Upload className="w-5 h-5" />
+              Upload CSV
             </Button>
-          )}
-          <Button
-            variant="success"
-            onClick={() => setShowUploadModal(true)}
-            disabled={staticConnectors.length === 0}
-            title={staticConnectors.length === 0 ? 'Create a Static Proxy Provider connector first' : 'Upload proxies from CSV'}
-          >
-            <Upload className="w-5 h-5" />
-            Upload CSV
-          </Button>
-          <Button onClick={() => setShowForm(true)}>
-            <Plus className="w-5 h-5" />
-            Add Proxy
-          </Button>
-        </div>
+            <Button onClick={() => setShowForm(true)}>
+              <Plus className="w-5 h-5" />
+              Add Proxy
+            </Button>
+          </div>
+        )}
       </div>
 
       {/* Add Proxy Modal */}

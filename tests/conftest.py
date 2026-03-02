@@ -64,32 +64,13 @@ def test_settings(
         db_password=postgres_container.password,
         db_name=postgres_container.dbname,
         redis_url=test_redis_url,
-        auth_enabled=False,
-        log_level="DEBUG",
-        health_check_interval=3600,  # Disable health checks in tests
-        metrics_flush_interval=3600,  # Disable metrics flushing in tests
-        proxy_port=0,  # Use port 0 to let OS assign a free port
-    )
-
-
-@pytest.fixture
-def test_settings_auth_enabled(test_settings: Settings) -> Settings:
-    """Create test settings with authentication enabled."""
-    return Settings(
-        db_host=test_settings.db_host,
-        db_port=test_settings.db_port,
-        db_user=test_settings.db_user,
-        db_password=test_settings.db_password,
-        db_name=test_settings.db_name,
-        redis_url=test_settings.redis_url,
-        auth_enabled=True,
         auth_username="testadmin",
         auth_password="testpassword123",
         jwt_secret="test-jwt-secret-key",
         jwt_expiry_hours=1,
         log_level="DEBUG",
-        health_check_interval=3600,
-        metrics_flush_interval=3600,
+        health_check_interval=3600,  # Disable health checks in tests
+        metrics_flush_interval=3600,  # Disable metrics flushing in tests
         proxy_port=0,  # Use port 0 to let OS assign a free port
     )
 
@@ -149,6 +130,7 @@ async def db_session(
         await conn.execute(text("TRUNCATE TABLE connectors CASCADE"))
         await conn.execute(text("TRUNCATE TABLE credentials CASCADE"))
         await conn.execute(text("TRUNCATE TABLE projects CASCADE"))
+        await conn.execute(text("TRUNCATE TABLE users CASCADE"))
         await conn.commit()
 
 
@@ -204,8 +186,10 @@ def mock_proxy_manager() -> MagicMock:
 @pytest.fixture
 def app_with_lifespan(test_settings: Settings) -> Any:
     """Create a FastAPI app with full lifespan."""
+    import api.core.auth
     import api.core.config
     import api.core.proxy_server
+    import api.db.session
     import api.main
     import api.routes.auth
     from api.db.session import get_async_session_factory
@@ -219,6 +203,8 @@ def app_with_lifespan(test_settings: Settings) -> Any:
     api.main.settings = test_settings
     api.core.proxy_server.settings = test_settings
     api.routes.auth.settings = test_settings
+    api.core.auth.settings = test_settings
+    api.db.session.settings = test_settings
 
     app = create_app()
 
@@ -230,67 +216,89 @@ def app_with_lifespan(test_settings: Settings) -> Any:
 
 @pytest.fixture
 def async_client(app_with_lifespan: Any) -> Generator[TestClient, None, None]:
-    """Create a test client for testing endpoints."""
+    """Create a test client (unauthenticated) for testing endpoints."""
     with TestClient(app_with_lifespan) as client:
         yield client
 
 
 @pytest.fixture
-def auth_headers(test_settings_auth_enabled: Settings) -> dict[str, str]:
-    """Create authentication headers with a valid JWT token."""
+def auth_headers(test_settings: Settings) -> dict[str, str]:
+    """Create admin authentication headers with a valid JWT token."""
     from api.routes.auth import create_jwt
 
     token = create_jwt(
-        payload={"sub": test_settings_auth_enabled.auth_username},
-        secret=test_settings_auth_enabled.jwt_secret,
-        expiry_hours=test_settings_auth_enabled.jwt_expiry_hours,
+        payload={
+            "sub": test_settings.auth_username,
+            "user_id": "test-admin-id",
+            "role": "admin",
+        },
+        secret=test_settings.jwt_secret,
+        expiry_hours=test_settings.jwt_expiry_hours,
     )
     return {"Authorization": f"Bearer {token}"}
 
 
 @pytest.fixture
-def app_with_auth(test_settings_auth_enabled: Settings) -> Any:
-    """Create a FastAPI app with authentication enabled."""
-    import api.core.auth
-    import api.core.config
-    import api.core.proxy_server
-    import api.main
-    import api.routes.auth
-    from api.db.session import get_async_session_factory
-    from api.main import create_app
+def editor_auth_headers(test_settings: Settings) -> dict[str, str]:
+    """Create editor authentication headers with a valid JWT token."""
+    from api.routes.auth import create_jwt
 
-    # Clear the session factory cache to avoid event loop issues between tests
-    get_async_session_factory.cache_clear()
-
-    # Patch settings in all modules that import it at module load time
-    api.core.config.settings = test_settings_auth_enabled
-    api.main.settings = test_settings_auth_enabled
-    api.routes.auth.settings = test_settings_auth_enabled
-    api.core.auth.settings = test_settings_auth_enabled
-    api.core.proxy_server.settings = test_settings_auth_enabled
-
-    app = create_app()
-
-    yield app
-
-    # Cleanup
-    get_async_session_factory.cache_clear()
+    token = create_jwt(
+        payload={
+            "sub": "testeditor",
+            "user_id": "test-editor-id",
+            "role": "editor",
+        },
+        secret=test_settings.jwt_secret,
+        expiry_hours=test_settings.jwt_expiry_hours,
+    )
+    return {"Authorization": f"Bearer {token}"}
 
 
 @pytest.fixture
-def auth_client(app_with_auth: Any) -> Generator[TestClient, None, None]:
-    """Create a test client for auth-enabled app (unauthenticated)."""
-    with TestClient(app_with_auth) as client:
-        yield client
+def viewer_auth_headers(test_settings: Settings) -> dict[str, str]:
+    """Create viewer authentication headers with a valid JWT token."""
+    from api.routes.auth import create_jwt
+
+    token = create_jwt(
+        payload={
+            "sub": "testviewer",
+            "user_id": "test-viewer-id",
+            "role": "viewer",
+        },
+        secret=test_settings.jwt_secret,
+        expiry_hours=test_settings.jwt_expiry_hours,
+    )
+    return {"Authorization": f"Bearer {token}"}
 
 
 @pytest.fixture
 def authenticated_client(
-    app_with_auth: Any,
+    app_with_lifespan: Any,
     auth_headers: dict[str, str],
 ) -> Generator[TestClient, None, None]:
-    """Create an authenticated test client."""
-    with TestClient(app_with_auth, headers=auth_headers) as client:
+    """Create an authenticated test client (admin role)."""
+    with TestClient(app_with_lifespan, headers=auth_headers) as client:
+        yield client
+
+
+@pytest.fixture
+def editor_client(
+    app_with_lifespan: Any,
+    editor_auth_headers: dict[str, str],
+) -> Generator[TestClient, None, None]:
+    """Create an authenticated test client with editor role."""
+    with TestClient(app_with_lifespan, headers=editor_auth_headers) as client:
+        yield client
+
+
+@pytest.fixture
+def viewer_client(
+    app_with_lifespan: Any,
+    viewer_auth_headers: dict[str, str],
+) -> Generator[TestClient, None, None]:
+    """Create an authenticated test client with viewer role."""
+    with TestClient(app_with_lifespan, headers=viewer_auth_headers) as client:
         yield client
 
 
@@ -413,4 +421,3 @@ def sample_connector_data() -> dict[str, Any]:
         "config": {},
         "enabled": True,
     }
-

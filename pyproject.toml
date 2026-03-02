@@ -36,6 +36,7 @@ dependencies = [
     "curl_cffi==0.14.0",
     "rnet==2.4.2",
     "h11==0.16.0",
+    "bcrypt==5.0.0",
 ]
 
 [project.optional-dependencies]

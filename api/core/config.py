@@ -186,9 +186,8 @@ class Settings(BaseSettings):
     )
 
     # Authentication settings
-    auth_enabled: bool = Field(default=False, description="Enable authentication")
-    auth_username: str = Field(default="admin", description="Login username")
-    auth_password: str = Field(default="", description="Login password (required if auth enabled)")
+    auth_username: str = Field(default="admin", description="Admin username for initial seed")
+    auth_password: str = Field(default="", description="Admin password for initial seed")
     jwt_secret: str = Field(
         default="change-me-in-production",
         description="Secret key for JWT token signing"

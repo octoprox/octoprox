@@ -180,3 +180,35 @@ class TestProxyEndpoints:
         assert data["total"] == 3
         assert len(data["proxies"]) == 3
 
+
+class TestProxyRoleAccess:
+    """Tests for role-based access control on proxy endpoints."""
+
+    def test_viewer_cannot_create_proxy(self, viewer_client: TestClient) -> None:
+        """Test that viewers cannot create proxies."""
+        response = viewer_client.post(
+            "/api/v1/projects/some-project-id/proxies",
+            json={
+                "host": "proxy.example.com",
+                "port": 8080,
+                "protocol": "http",
+                "connector_id": "some-connector-id",
+            },
+        )
+        assert response.status_code == 403
+
+    def test_viewer_cannot_update_proxy(self, viewer_client: TestClient) -> None:
+        """Test that viewers cannot update proxies."""
+        response = viewer_client.patch(
+            "/api/v1/projects/some-project-id/proxies/some-proxy-id",
+            json={"host": "updated.example.com"},
+        )
+        assert response.status_code == 403
+
+    def test_viewer_cannot_delete_proxy(self, viewer_client: TestClient) -> None:
+        """Test that viewers cannot delete proxies."""
+        response = viewer_client.delete(
+            "/api/v1/projects/some-project-id/proxies/some-proxy-id"
+        )
+        assert response.status_code == 403
+

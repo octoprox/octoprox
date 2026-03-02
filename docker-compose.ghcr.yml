@@ -8,7 +8,6 @@ services:
       - "8000:8000"  # API and Web UI
       - "8080:8080"  # Proxy server
     environment:
-      - OCTOPROX_AUTH_ENABLED=true
       - OCTOPROX_AUTH_USERNAME=admin
       - OCTOPROX_AUTH_PASSWORD=admin
       - OCTOPROX_JWT_SECRET=change-me-in-production

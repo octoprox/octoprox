@@ -18,7 +18,7 @@ http://localhost:8000/api/v1/projects
 
 ## Authentication
 
-When authentication is enabled (`OCTOPROX_AUTH_ENABLED=true`), all API endpoints except `/api/v1/auth/*` and `/health` require a valid JWT token.
+All API endpoints except `/api/v1/auth/*` and `/health` require a valid JWT token. Mutation endpoints require at least Editor role; user management requires Admin role.
 
 ### Login
 

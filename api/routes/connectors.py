@@ -9,6 +9,7 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, ValidationError
 
+from api.core.auth import RequireEditorDep
 from api.core.signals import provider_connector_sync_requested
 from api.models.connector import (
     Connector,
@@ -86,6 +87,7 @@ async def create_connector(
     request: Request,
     connector_data: ConnectorCreate,
     project_id: str,
+    _guard: RequireEditorDep,
 ) -> ConnectorResponse:
     """Create a new connector."""
     proxy_manager = request.app.state.proxy_manager
@@ -166,7 +168,7 @@ async def get_connector(request: Request, connector_id: str) -> ConnectorRespons
 
 @router.patch("/{connector_id}", response_model=ConnectorResponse)
 async def update_connector(
-    request: Request, connector_id: str, connector_data: ConnectorUpdate
+    request: Request, connector_id: str, connector_data: ConnectorUpdate, _guard: RequireEditorDep
 ) -> ConnectorResponse:
     """Update a connector."""
     proxy_manager = request.app.state.proxy_manager
@@ -235,7 +237,7 @@ async def update_connector(
 
 
 @router.delete("/{connector_id}", status_code=204)
-async def delete_connector(request: Request, connector_id: str) -> None:
+async def delete_connector(request: Request, connector_id: str, _guard: RequireEditorDep) -> None:
     """Delete a connector and all its proxies.
 
     For cloud connectors (AWS, GCP, Azure), all proxies will be marked as

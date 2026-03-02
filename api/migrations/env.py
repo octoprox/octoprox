@@ -13,6 +13,7 @@ from api.db.models import (  # noqa: F401
     ProjectModel,
     ProxyMetricsModel,
     ProxyModel,
+    UserModel,
 )
 
 # this is the Alembic Config object, which provides

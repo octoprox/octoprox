@@ -17,11 +17,13 @@ from api.db.models import (
     ProjectModel,
     ProxyMetricsModel,
     ProxyModel,
+    UserModel,
 )
 from api.models.connector import Connector
 from api.models.credential import Credential, CredentialType
 from api.models.project import MitmBrowser, MitmEngine, MitmMode, Project
 from api.models.proxy import Proxy, ProxyProtocol
+from api.models.user import User, UserRole
 
 
 class ProjectRepository:
@@ -693,3 +695,101 @@ class MetricsRepository:
             }
 
         return metrics
+
+
+class UserRepository:
+    """Repository for user database operations."""
+
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+
+    async def get_all(self) -> list[User]:
+        """Get all users, ordered by creation time."""
+        result = await self._session.execute(
+            select(UserModel).order_by(UserModel.created_at)
+        )
+        models = result.scalars().all()
+        return [self._to_domain(m) for m in models]
+
+    async def get_by_id(self, user_id: str) -> User | None:
+        """Get user by ID."""
+        result = await self._session.execute(
+            select(UserModel).where(UserModel.id == user_id)
+        )
+        model = result.scalar_one_or_none()
+        return self._to_domain(model) if model else None
+
+    async def get_by_username(self, username: str) -> User | None:
+        """Get user by username."""
+        result = await self._session.execute(
+            select(UserModel).where(UserModel.username == username)
+        )
+        model = result.scalar_one_or_none()
+        return self._to_domain(model) if model else None
+
+    async def get_by_email(self, email: str) -> User | None:
+        """Get user by email (only matches non-empty emails)."""
+        if not email:
+            return None
+        result = await self._session.execute(
+            select(UserModel).where(UserModel.email == email)
+        )
+        model = result.scalar_one_or_none()
+        return self._to_domain(model) if model else None
+
+    async def count(self) -> int:
+        """Count total users."""
+        result = await self._session.execute(select(func.count(UserModel.id)))
+        return result.scalar() or 0
+
+    async def create(self, user: User) -> User:
+        """Create a new user."""
+        model = UserModel(
+            id=user.id,
+            username=user.username,
+            email=user.email,
+            password_hash=user.password_hash,
+            role=user.role.value if isinstance(user.role, UserRole) else user.role,
+            is_active=user.is_active,
+            created_at=user.created_at,
+            updated_at=user.updated_at,
+        )
+        self._session.add(model)
+        await self._session.flush()
+        return user
+
+    async def update(self, user: User) -> User:
+        """Update an existing user."""
+        result = await self._session.execute(
+            select(UserModel).where(UserModel.id == user.id)
+        )
+        model = result.scalar_one_or_none()
+        if model:
+            model.username = user.username
+            model.email = user.email
+            model.password_hash = user.password_hash
+            model.role = user.role.value if isinstance(user.role, UserRole) else user.role
+            model.is_active = user.is_active
+            model.updated_at = utc_now()
+            await self._session.flush()
+        return user
+
+    async def delete(self, user_id: str) -> bool:
+        """Delete a user."""
+        result = await self._session.execute(
+            delete(UserModel).where(UserModel.id == user_id)
+        )
+        return bool(result.rowcount and result.rowcount > 0)  # type: ignore[attr-defined]
+
+    def _to_domain(self, model: UserModel) -> User:
+        """Convert database model to domain model."""
+        return User(
+            id=model.id,
+            username=model.username,
+            email=model.email,
+            password_hash=model.password_hash,
+            role=UserRole(model.role),
+            is_active=model.is_active,
+            created_at=model.created_at,
+            updated_at=model.updated_at,
+        )
