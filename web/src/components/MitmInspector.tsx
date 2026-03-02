@@ -1,7 +1,7 @@
 // Copyright 2026 Octoprox Authors
 // SPDX-License-Identifier: Apache-2.0
 
-import { useMemo } from 'react'
+import { useMemo, useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { ColumnDef, Row } from '@tanstack/react-table'
 import { ChevronDown, ChevronRight, Info, Trash2, Search } from 'lucide-react'
@@ -57,59 +57,77 @@ function HeadersTable({ headers }: { headers: [string, string][] }) {
   )
 }
 
+function TlsInfoTable({ record }: { record: MitmRequestRecord }) {
+  return (
+    <div className="bg-white dark:bg-gray-800 rounded border border-gray-200 dark:border-gray-700 overflow-auto h-48">
+      <table className="w-full text-xs font-mono">
+        <tbody>
+          <tr className="border-b border-gray-100 dark:border-gray-700">
+            <td className="px-2 py-1 font-semibold text-gray-600 dark:text-gray-400 whitespace-nowrap align-top">Version</td>
+            <td className="px-2 py-1 text-gray-800 dark:text-gray-200">{record.tls_version}</td>
+          </tr>
+          <tr className="border-b border-gray-100 dark:border-gray-700">
+            <td className="px-2 py-1 font-semibold text-gray-600 dark:text-gray-400 whitespace-nowrap align-top">Cipher</td>
+            <td className="px-2 py-1 text-gray-800 dark:text-gray-200">{record.tls_cipher}</td>
+          </tr>
+          <tr className="border-b border-gray-100 dark:border-gray-700">
+            <td className="px-2 py-1 font-semibold text-gray-600 dark:text-gray-400 whitespace-nowrap align-top">Key Bits</td>
+            <td className="px-2 py-1 text-gray-800 dark:text-gray-200">{record.tls_key_bits}</td>
+          </tr>
+          {record.tls_shared_ciphers.length > 0 && (
+            <tr>
+              <td className="px-2 py-1 font-semibold text-gray-600 dark:text-gray-400 whitespace-nowrap align-top">Shared Ciphers</td>
+              <td className="px-2 py-1 text-gray-800 dark:text-gray-200 break-all">{record.tls_shared_ciphers.join(', ')}</td>
+            </tr>
+          )}
+        </tbody>
+      </table>
+    </div>
+  )
+}
+
+type DetailTab = 'request' | 'forwarded' | 'response' | 'tls'
+
 function ExpandedDetail({ record }: { record: MitmRequestRecord }) {
+  const hasTls = !!record.tls_version
+  const tabs: { key: DetailTab; label: string; tooltip?: string }[] = [
+    { key: 'request', label: 'Request Headers' },
+    { key: 'forwarded', label: 'Forwarded to Relay', tooltip: `Headers passed to the ${record.mitm_engine || 'relay'} engine. Impersonation engines add browser headers (UA, Accept-Encoding, Sec-Fetch-*, etc.) automatically.` },
+    { key: 'response', label: 'Response Headers' },
+    ...(hasTls ? [{ key: 'tls' as DetailTab, label: 'Client TLS' }] : []),
+  ]
+  const [activeTab, setActiveTab] = useState<DetailTab>('request')
+
   return (
     <div className="p-4 bg-gray-50 dark:bg-gray-900 space-y-4">
-      <div className="space-y-3">
-        <div>
-          <h4 className="text-xs font-semibold uppercase text-gray-500 dark:text-gray-400 mb-2">Client Request Headers</h4>
-          <HeadersTable headers={record.request_headers} />
+      <div>
+        <div className="flex gap-0 border-b border-gray-200 dark:border-gray-700 mb-3">
+          {tabs.map(({ key, label, tooltip }) => (
+            <button
+              key={key}
+              onClick={() => setActiveTab(key)}
+              className={`px-3 py-1.5 text-xs font-medium border-b-2 -mb-px transition-colors flex items-center gap-1.5 ${
+                activeTab === key
+                  ? 'border-blue-500 text-blue-600 dark:text-blue-400'
+                  : 'border-transparent text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-300'
+              }`}
+            >
+              {label}
+              {tooltip && (
+                <span className="relative group">
+                  <Info className="w-3.5 h-3.5 text-gray-400 dark:text-gray-500 cursor-help" />
+                  <span className="absolute left-1/2 -translate-x-1/2 bottom-full mb-1.5 w-56 px-2.5 py-1.5 rounded bg-gray-900 dark:bg-gray-100 text-[10px] leading-tight text-gray-100 dark:text-gray-900 opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all z-50 pointer-events-none">
+                    {tooltip}
+                  </span>
+                </span>
+              )}
+            </button>
+          ))}
         </div>
-        <div>
-          <h4 className="text-xs font-semibold uppercase text-gray-500 dark:text-gray-400 mb-2 flex items-center gap-1.5">
-            Forwarded to Relay
-            <span className="relative group">
-              <Info className="w-3.5 h-3.5 text-gray-400 dark:text-gray-500 cursor-help" />
-              <span className="absolute left-1/2 -translate-x-1/2 bottom-full mb-1.5 w-56 px-2.5 py-1.5 rounded bg-gray-900 dark:bg-gray-100 text-[10px] leading-tight text-gray-100 dark:text-gray-900 opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all z-50 pointer-events-none">
-                Headers passed to the {record.mitm_engine || 'relay'} engine. Impersonation engines add browser headers (UA, Accept-Encoding, Sec-Fetch-*, etc.) automatically.
-              </span>
-            </span>
-          </h4>
-          <HeadersTable headers={record.upstream_headers} />
-        </div>
-        <div>
-          <h4 className="text-xs font-semibold uppercase text-gray-500 dark:text-gray-400 mb-2">Response Headers</h4>
-          <HeadersTable headers={record.response_headers} />
-        </div>
-        {record.tls_version && (
-          <div>
-            <h4 className="text-xs font-semibold uppercase text-gray-500 dark:text-gray-400 mb-2">Client TLS Handshake</h4>
-            <div className="bg-white dark:bg-gray-800 rounded border border-gray-200 dark:border-gray-700 overflow-auto">
-              <table className="w-full text-xs font-mono">
-                <tbody>
-                  <tr className="border-b border-gray-100 dark:border-gray-700">
-                    <td className="px-2 py-1 font-semibold text-gray-600 dark:text-gray-400 whitespace-nowrap align-top">Version</td>
-                    <td className="px-2 py-1 text-gray-800 dark:text-gray-200">{record.tls_version}</td>
-                  </tr>
-                  <tr className="border-b border-gray-100 dark:border-gray-700">
-                    <td className="px-2 py-1 font-semibold text-gray-600 dark:text-gray-400 whitespace-nowrap align-top">Cipher</td>
-                    <td className="px-2 py-1 text-gray-800 dark:text-gray-200">{record.tls_cipher}</td>
-                  </tr>
-                  <tr className="border-b border-gray-100 dark:border-gray-700">
-                    <td className="px-2 py-1 font-semibold text-gray-600 dark:text-gray-400 whitespace-nowrap align-top">Key Bits</td>
-                    <td className="px-2 py-1 text-gray-800 dark:text-gray-200">{record.tls_key_bits}</td>
-                  </tr>
-                  {record.tls_shared_ciphers.length > 0 && (
-                    <tr>
-                      <td className="px-2 py-1 font-semibold text-gray-600 dark:text-gray-400 whitespace-nowrap align-top">Shared Ciphers</td>
-                      <td className="px-2 py-1 text-gray-800 dark:text-gray-200 break-all">{record.tls_shared_ciphers.join(', ')}</td>
-                    </tr>
-                  )}
-                </tbody>
-              </table>
-            </div>
-          </div>
-        )}
+        {activeTab === 'request' && <HeadersTable headers={record.request_headers} />}
+        {activeTab === 'forwarded' && <HeadersTable headers={record.upstream_headers} />}
+        {activeTab === 'response' && <HeadersTable headers={record.response_headers} />}
+        {activeTab === 'tls' && hasTls && <TlsInfoTable record={record} />}
       </div>
       <div className="flex flex-wrap gap-x-6 gap-y-1 text-xs text-gray-500 dark:text-gray-400">
         <span>Full URL: <span className="font-mono text-gray-700 dark:text-gray-300">{record.url}</span></span>
