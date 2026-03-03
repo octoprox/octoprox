@@ -298,10 +298,11 @@ function ProjectLayout({
                 <button
                   onClick={() => setShowProfileModal(true)}
                   className="flex items-center gap-2 text-sm text-gray-500 dark:text-gray-400 hover:text-gray-900 dark:hover:text-gray-100 transition-colors mb-2 w-full"
+                  style={{ maxWidth: '100%' }}
                 >
-                  <User className="w-4 h-4" />
-                  <span className="text-gray-900 dark:text-gray-100">{authStatus?.username}</span>
-                  <span className="text-xs text-gray-400 dark:text-gray-500">({authStatus?.role})</span>
+                  <User className="w-4 h-4 shrink-0" />
+                  <span className="text-gray-900 dark:text-gray-100 truncate w-0 flex-1">{authStatus?.username}</span>
+                  <span className="text-xs text-gray-400 dark:text-gray-500 shrink-0">({authStatus?.role})</span>
                 </button>
                 <button
                   onClick={onLogout}
