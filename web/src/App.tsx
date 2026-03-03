@@ -301,7 +301,7 @@ function ProjectLayout({
                   style={{ maxWidth: '100%' }}
                 >
                   <User className="w-4 h-4 shrink-0" />
-                  <span className="text-gray-900 dark:text-gray-100 truncate w-0 flex-1">{authStatus?.username}</span>
+                  <span className="text-gray-900 dark:text-gray-100 truncate min-w-0">{authStatus?.username}</span>
                   <span className="text-xs text-gray-400 dark:text-gray-500 shrink-0">({authStatus?.role})</span>
                 </button>
                 <button
