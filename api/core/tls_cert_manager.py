@@ -39,10 +39,10 @@ _MAX_CACHE_SIZE = 1000
 # ClientHello capture via _msg_callback
 # ---------------------------------------------------------------------------
 
-# Stores raw ClientHello bytes per TLS connection, keyed by id(SSLObject).
-# Populated by _tls_msg_callback during start_tls() and consumed by
-# pop_client_hello() in the MITM handler immediately after.
-_pending_client_hellos: dict[int, bytes] = {}
+# Stores raw ClientHello bytes + record-layer version per TLS connection,
+# keyed by id(SSLObject).  Populated by _tls_msg_callback during start_tls()
+# and consumed by pop_client_hello() in the MITM handler immediately after.
+_pending_client_hellos: dict[int, tuple[bytes, int]] = {}
 _hello_lock = threading.Lock()
 
 
@@ -58,11 +58,13 @@ def _tls_msg_callback(
     # content_type 22 = Handshake, msg_type 1 = ClientHello
     if direction == "read" and content_type == 22 and msg_type == 1:
         with _hello_lock:
-            _pending_client_hellos[id(conn)] = bytes(data)
+            _pending_client_hellos[id(conn)] = (bytes(data), int(version))  # type: ignore[call-overload]
 
 
-def pop_client_hello(ssl_object: object) -> bytes | None:
+def pop_client_hello(ssl_object: object) -> tuple[bytes, int] | None:
     """Retrieve and remove captured ClientHello bytes for an SSL connection.
+
+    Returns ``(handshake_bytes, record_layer_version)`` or ``None``.
 
     Must be called after ``start_tls()`` completes, passing the ``ssl_object``
     obtained from ``transport.get_extra_info("ssl_object")``.

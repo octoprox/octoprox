@@ -11,6 +11,10 @@ import pytest
 from api.core.mitm.client_hello import (
     GREASE_VALUES,
     ClientHelloInfo,
+    _parse_alps,
+    _parse_compress_certificate,
+    _parse_key_share,
+    _parse_psk_key_exchange_modes,
     client_hello_to_dict,
     compute_ja3,
     compute_ja4,
@@ -47,6 +51,30 @@ _GREASE_HANDSHAKE = bytes.fromhex(
 _MINIMAL_HANDSHAKE = bytes.fromhex(
     "01000029030100000000000000000000000000000000000000000000000000000000000000000000"
     "02002f0100"
+)
+
+# Extended ClientHello: same as basic but with session_id (32 bytes), compression=[null, DEFLATE],
+# and additional extensions: compress_certificate=[brotli, zstd], psk_key_exchange_modes=[psk_dhe_ke, psk_ke],
+# key_share=[x25519 with 32-byte key], ALPS=["h2"]
+_EXTENDED_HANDSHAKE = bytes.fromhex(
+    "010000dd0303"
+    "0000000000000000000000000000000000000000000000000000000000000000"  # random
+    "20"  # session_id_length = 32
+    "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"  # session_id
+    "000613011302c02f"  # cipher_suites
+    "020001"  # compression_methods: [null, DEFLATE]
+    "008d"  # extensions_length = 141
+    "00000010000e00000b6578616d706c652e636f6d"  # SNI=example.com
+    "000a00060004001d0017"  # supported_groups=[x25519, secp256r1]
+    "000b00020100"  # ec_point_formats=[0]
+    "000d0006000404030804"  # sig_algs=[0x0403, 0x0804]
+    "0010000e000c02683208687474702f312e31"  # ALPN=[h2, http/1.1]
+    "001b00050400020003"  # compress_certificate=[brotli(2), zstd(3)]
+    "002b00050403040303"  # supported_versions=[TLS 1.3, TLS 1.2]
+    "002d0003020100"  # psk_key_exchange_modes=[psk_dhe_ke(1), psk_ke(0)]
+    "003300260024001d0020"  # key_share: x25519 with 32-byte key
+    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"  # key data
+    "44690006000400026832"  # ALPS=["h2"]
 )
 
 
@@ -138,9 +166,131 @@ class TestParseClientHello:
         assert info.supported_groups == []
         assert info.supported_versions == []
 
+    def test_basic_compression_methods(self) -> None:
+        info = parse_client_hello(_BASIC_HANDSHAKE)
+        assert info.compression_methods == [0]  # null only
+
+    def test_basic_session_id_length(self) -> None:
+        info = parse_client_hello(_BASIC_HANDSHAKE)
+        assert info.session_id_length == 0
+
+    def test_basic_record_layer_version(self) -> None:
+        info = parse_client_hello(_BASIC_HANDSHAKE, record_layer_version=0x0301)
+        assert info.record_layer_version == 0x0301
+
+    def test_basic_no_new_extensions(self) -> None:
+        """Basic handshake has none of the newly-parsed extensions."""
+        info = parse_client_hello(_BASIC_HANDSHAKE)
+        assert info.key_share_groups == []
+        assert info.compress_certificate == []
+        assert info.alps_protocols == []
+        assert info.psk_key_exchange_modes == []
+
+    def test_extended_session_id_length(self) -> None:
+        info = parse_client_hello(_EXTENDED_HANDSHAKE)
+        assert info.session_id_length == 32
+
+    def test_extended_compression_methods(self) -> None:
+        info = parse_client_hello(_EXTENDED_HANDSHAKE)
+        assert info.compression_methods == [0, 1]  # null + DEFLATE
+
+    def test_extended_key_share_groups(self) -> None:
+        info = parse_client_hello(_EXTENDED_HANDSHAKE)
+        assert info.key_share_groups == [{"group": 0x001D, "key_length": 32}]
+
+    def test_extended_compress_certificate(self) -> None:
+        info = parse_client_hello(_EXTENDED_HANDSHAKE)
+        assert info.compress_certificate == [2, 3]  # brotli, zstd
+
+    def test_extended_alps_protocols(self) -> None:
+        info = parse_client_hello(_EXTENDED_HANDSHAKE)
+        assert info.alps_protocols == ["h2"]
+
+    def test_extended_psk_key_exchange_modes(self) -> None:
+        info = parse_client_hello(_EXTENDED_HANDSHAKE)
+        assert info.psk_key_exchange_modes == [1, 0]  # psk_dhe_ke, psk_ke
+
+    def test_extended_extensions_list(self) -> None:
+        info = parse_client_hello(_EXTENDED_HANDSHAKE)
+        assert info.extensions == [
+            0x0000, 0x000A, 0x000B, 0x000D, 0x0010,
+            0x001B, 0x002B, 0x002D, 0x0033, 0x4469,
+        ]
+
+    def test_minimal_compression_methods(self) -> None:
+        info = parse_client_hello(_MINIMAL_HANDSHAKE)
+        assert info.compression_methods == [0]
+
     def test_invalid_data_raises(self) -> None:
         with pytest.raises(dpkt.dpkt.NeedData):
             parse_client_hello(b"\x00\x00\x00")
+
+
+# ---------------------------------------------------------------------------
+# New extension parser unit tests
+# ---------------------------------------------------------------------------
+
+
+class TestNewExtensionParsers:
+    """Tests for the new extension payload parsers."""
+
+    def test_parse_key_share_single_entry(self) -> None:
+        # x25519 (0x001D) with 32-byte key
+        data = bytes.fromhex("0024001d0020") + b"\xaa" * 32
+        result = _parse_key_share(data)
+        assert result == [{"group": 0x001D, "key_length": 32}]
+
+    def test_parse_key_share_multiple_entries(self) -> None:
+        # x25519 (32 bytes) + secp256r1 (65 bytes)
+        x25519_entry = bytes.fromhex("001d0020") + b"\xaa" * 32
+        secp256r1_entry = bytes.fromhex("00170041") + b"\xbb" * 65
+        total_len = len(x25519_entry) + len(secp256r1_entry)
+        data = total_len.to_bytes(2, "big") + x25519_entry + secp256r1_entry
+        result = _parse_key_share(data)
+        assert len(result) == 2
+        assert result[0] == {"group": 0x001D, "key_length": 32}
+        assert result[1] == {"group": 0x0017, "key_length": 65}
+
+    def test_parse_key_share_empty(self) -> None:
+        assert _parse_key_share(b"") == []
+        assert _parse_key_share(b"\x00") == []
+
+    def test_parse_compress_certificate_brotli_zstd(self) -> None:
+        data = bytes.fromhex("0400020003")  # length=4, brotli(2), zstd(3)
+        assert _parse_compress_certificate(data) == [2, 3]
+
+    def test_parse_compress_certificate_single(self) -> None:
+        data = bytes.fromhex("020002")  # length=2, brotli(2)
+        assert _parse_compress_certificate(data) == [2]
+
+    def test_parse_compress_certificate_empty(self) -> None:
+        assert _parse_compress_certificate(b"") == []
+
+    def test_parse_alps_h2(self) -> None:
+        data = bytes.fromhex("000400026832")  # total_len=4, proto_len=2, "h2"
+        assert _parse_alps(data) == ["h2"]
+
+    def test_parse_alps_multiple(self) -> None:
+        # "h2" + "h3"
+        data = bytes.fromhex("0008000268320002683300")[:10]  # total_len=8
+        # Let me build properly: total_len=8, h2(len=2, "h2"), h3(len=2, "h3")
+        data = bytes.fromhex("00080002683200026833")
+        assert _parse_alps(data) == ["h2", "h3"]
+
+    def test_parse_alps_empty(self) -> None:
+        assert _parse_alps(b"") == []
+        assert _parse_alps(b"\x00") == []
+
+    def test_parse_psk_key_exchange_modes_both(self) -> None:
+        data = bytes.fromhex("020100")  # length=2, psk_dhe_ke(1), psk_ke(0)
+        assert _parse_psk_key_exchange_modes(data) == [1, 0]
+
+    def test_parse_psk_key_exchange_modes_single(self) -> None:
+        data = bytes.fromhex("0101")  # length=1, psk_dhe_ke(1)
+        assert _parse_psk_key_exchange_modes(data) == [1]
+
+    def test_parse_psk_key_exchange_modes_empty(self) -> None:
+        assert _parse_psk_key_exchange_modes(b"") == []
 
 
 # ---------------------------------------------------------------------------
@@ -480,6 +630,86 @@ class TestClientHelloToDict:
         info = parse_client_hello(_BASIC_HANDSHAKE)
         d = client_hello_to_dict(info, "", "", "", "")
         assert d["ec_point_formats"] == [0]
+
+    def test_basic_compression_methods_in_dict(self) -> None:
+        info = parse_client_hello(_BASIC_HANDSHAKE)
+        d = client_hello_to_dict(info, "", "", "", "")
+        assert d["compression_methods"] == [{"id": 0, "name": "null"}]
+
+    def test_basic_session_id_length_in_dict(self) -> None:
+        info = parse_client_hello(_BASIC_HANDSHAKE)
+        d = client_hello_to_dict(info, "", "", "", "")
+        assert d["session_id_length"] == 0
+
+    def test_basic_record_layer_version_empty(self) -> None:
+        info = parse_client_hello(_BASIC_HANDSHAKE)
+        d = client_hello_to_dict(info, "", "", "", "")
+        assert d["record_layer_version"] == ""
+
+    def test_record_layer_version_human_readable(self) -> None:
+        info = parse_client_hello(_BASIC_HANDSHAKE, record_layer_version=0x0301)
+        d = client_hello_to_dict(info, "", "", "", "")
+        assert d["record_layer_version"] == "TLS 1.0"
+
+    def test_basic_new_fields_empty(self) -> None:
+        info = parse_client_hello(_BASIC_HANDSHAKE)
+        d = client_hello_to_dict(info, "", "", "", "")
+        assert d["key_share_groups"] == []
+        assert d["compress_certificate"] == []
+        assert d["alps_protocols"] == []
+        assert d["psk_key_exchange_modes"] == []
+
+    def test_extended_key_share_in_dict(self) -> None:
+        info = parse_client_hello(_EXTENDED_HANDSHAKE)
+        d = client_hello_to_dict(info, "", "", "", "")
+        assert d["key_share_groups"] == [{"group": "x25519", "key_length": 32}]
+
+    def test_extended_compress_certificate_in_dict(self) -> None:
+        info = parse_client_hello(_EXTENDED_HANDSHAKE)
+        d = client_hello_to_dict(info, "", "", "", "")
+        assert d["compress_certificate"] == [
+            {"id": 2, "name": "brotli"},
+            {"id": 3, "name": "zstd"},
+        ]
+
+    def test_extended_alps_in_dict(self) -> None:
+        info = parse_client_hello(_EXTENDED_HANDSHAKE)
+        d = client_hello_to_dict(info, "", "", "", "")
+        assert d["alps_protocols"] == ["h2"]
+
+    def test_extended_psk_ke_modes_in_dict(self) -> None:
+        info = parse_client_hello(_EXTENDED_HANDSHAKE)
+        d = client_hello_to_dict(info, "", "", "", "")
+        assert d["psk_key_exchange_modes"] == [
+            {"id": 1, "name": "psk_dhe_ke"},
+            {"id": 0, "name": "psk_ke"},
+        ]
+
+    def test_extended_compression_methods_in_dict(self) -> None:
+        info = parse_client_hello(_EXTENDED_HANDSHAKE)
+        d = client_hello_to_dict(info, "", "", "", "")
+        assert d["compression_methods"] == [
+            {"id": 0, "name": "null"},
+            {"id": 1, "name": "DEFLATE"},
+        ]
+
+    def test_extended_session_id_length_in_dict(self) -> None:
+        info = parse_client_hello(_EXTENDED_HANDSHAKE)
+        d = client_hello_to_dict(info, "", "", "", "")
+        assert d["session_id_length"] == 32
+
+    def test_grease_filtered_from_key_share(self) -> None:
+        """GREASE key_share entries should be filtered in serialization."""
+        info = ClientHelloInfo(
+            version=0x0303,
+            key_share_groups=[
+                {"group": 0x4A4A, "key_length": 1},  # GREASE
+                {"group": 0x001D, "key_length": 32},  # x25519
+            ],
+        )
+        d = client_hello_to_dict(info, "", "", "", "")
+        assert len(d["key_share_groups"]) == 1
+        assert d["key_share_groups"][0]["group"] == "x25519"
 
 
 # ---------------------------------------------------------------------------

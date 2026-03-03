@@ -24,6 +24,13 @@ class TlsClientHello(BaseModel):
     supported_groups: list[dict[str, Any]]
     signature_algorithms: list[dict[str, str]]
     ec_point_formats: list[int]
+    compression_methods: list[dict[str, Any]] = []
+    session_id_length: int = 0
+    record_layer_version: str = ""
+    key_share_groups: list[dict[str, Any]] = []
+    compress_certificate: list[dict[str, Any]] = []
+    alps_protocols: list[str] = []
+    psk_key_exchange_modes: list[dict[str, Any]] = []
     ja3: str
     ja3_full: str
     ja4: str

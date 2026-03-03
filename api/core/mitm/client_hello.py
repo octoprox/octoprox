@@ -39,7 +39,11 @@ _EXT_SUPPORTED_GROUPS = 0x000A
 _EXT_EC_POINT_FORMATS = 0x000B
 _EXT_SIGNATURE_ALGORITHMS = 0x000D
 _EXT_ALPN = 0x0010
+_EXT_COMPRESS_CERTIFICATE = 0x001B
 _EXT_SUPPORTED_VERSIONS = 0x002B
+_EXT_PSK_KEY_EXCHANGE_MODES = 0x002D
+_EXT_KEY_SHARE = 0x0033
+_EXT_APPLICATION_SETTINGS = 0x4469
 
 # ---------------------------------------------------------------------------
 # Human-readable name lookup tables
@@ -61,6 +65,7 @@ EXTENSION_NAMES: dict[int, str] = {
     0x0012: "signed_certificate_timestamp",
     0x0015: "padding",
     0x0016: "encrypt_then_mac",
+    0x001B: "compress_certificate",
     0x0017: "extended_master_secret",
     0x001C: "record_size_limit",
     0x0023: "session_ticket",
@@ -72,7 +77,7 @@ EXTENSION_NAMES: dict[int, str] = {
     0x0031: "certificate_authorities",
     0x0032: "oid_filters",
     0x0033: "key_share",
-    0x0039: "compress_certificate",
+    0x0039: "quic_transport_parameters",
     0x4469: "application_settings",
     0xFE0D: "encrypted_client_hello",
     0xFF01: "renegotiation_info",
@@ -121,6 +126,22 @@ TLS_VERSION_NAMES: dict[int, str] = {
     0x0304: "TLS 1.3",
 }
 
+COMPRESS_CERTIFICATE_NAMES: dict[int, str] = {
+    1: "zlib",
+    2: "brotli",
+    3: "zstd",
+}
+
+PSK_KE_MODE_NAMES: dict[int, str] = {
+    0: "psk_ke",
+    1: "psk_dhe_ke",
+}
+
+COMPRESSION_METHOD_NAMES: dict[int, str] = {
+    0: "null",
+    1: "DEFLATE",
+}
+
 
 # ---------------------------------------------------------------------------
 # ClientHelloInfo dataclass
@@ -141,6 +162,13 @@ class ClientHelloInfo:
     supported_versions: list[int] = field(default_factory=list)
     sni: str = ""
     alpn: list[str] = field(default_factory=list)
+    compression_methods: list[int] = field(default_factory=list)
+    session_id_length: int = 0
+    record_layer_version: int = 0
+    key_share_groups: list[dict[str, int]] = field(default_factory=list)
+    compress_certificate: list[int] = field(default_factory=list)
+    alps_protocols: list[str] = field(default_factory=list)
+    psk_key_exchange_modes: list[int] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -233,17 +261,75 @@ def _parse_supported_versions(data: bytes) -> list[int]:
     return versions
 
 
+def _parse_key_share(data: bytes) -> list[dict[str, int]]:
+    """Parse key_share extension (ClientHello) → list of {group, key_length}."""
+    if len(data) < 2:
+        return []
+    total_len = struct.unpack("!H", data[:2])[0]
+    entries: list[dict[str, int]] = []
+    offset = 2
+    while offset + 4 <= min(2 + total_len, len(data)):
+        group = struct.unpack("!H", data[offset : offset + 2])[0]
+        key_len = struct.unpack("!H", data[offset + 2 : offset + 4])[0]
+        entries.append({"group": group, "key_length": key_len})
+        offset += 4 + key_len
+    return entries
+
+
+def _parse_compress_certificate(data: bytes) -> list[int]:
+    """Parse compress_certificate extension → list of algorithm IDs."""
+    if len(data) < 1:
+        return []
+    list_len = data[0]
+    algs: list[int] = []
+    offset = 1
+    while offset + 2 <= min(1 + list_len, len(data)):
+        algs.append(struct.unpack("!H", data[offset : offset + 2])[0])
+        offset += 2
+    return algs
+
+
+def _parse_alps(data: bytes) -> list[str]:
+    """Parse application_settings (ALPS) extension → list of protocol names."""
+    if len(data) < 2:
+        return []
+    total_len = struct.unpack("!H", data[:2])[0]
+    protocols: list[str] = []
+    offset = 2
+    while offset < min(2 + total_len, len(data)):
+        if offset + 2 > len(data):
+            break
+        proto_len = struct.unpack("!H", data[offset : offset + 2])[0]
+        offset += 2
+        if offset + proto_len > len(data):
+            break
+        protocols.append(data[offset : offset + proto_len].decode("ascii", errors="replace"))
+        offset += proto_len
+    return protocols
+
+
+def _parse_psk_key_exchange_modes(data: bytes) -> list[int]:
+    """Parse psk_key_exchange_modes extension → list of mode values."""
+    if len(data) < 1:
+        return []
+    list_len = data[0]
+    return list(data[1 : 1 + list_len])
+
+
 # ---------------------------------------------------------------------------
 # Main parser
 # ---------------------------------------------------------------------------
 
 
-def parse_client_hello(data: bytes) -> ClientHelloInfo:
+def parse_client_hello(data: bytes, *, record_layer_version: int = 0) -> ClientHelloInfo:
     """Parse raw ClientHello handshake message bytes into structured info.
 
     ``data`` should be the bytes received from ``ssl.SSLContext._msg_callback``
     for a ClientHello message (content_type=22, msg_type=1).  This typically
     includes the 4-byte handshake header (type + 3-byte length).
+
+    ``record_layer_version`` is the TLS record layer protocol version from
+    the outer TLS record that carried this handshake message.
     """
     # dpkt.ssl.TLSHandshake expects the full handshake message (type + length + body).
     # The _msg_callback passes the full record body which starts with the handshake
@@ -252,6 +338,11 @@ def parse_client_hello(data: bytes) -> ClientHelloInfo:
     ch = handshake.data  # dpkt.ssl.TLSClientHello
 
     info = ClientHelloInfo(version=ch.version)
+    info.record_layer_version = record_layer_version
+
+    # --- Fields parsed by dpkt ---
+    info.compression_methods = list(getattr(ch, "compression_methods", ()))
+    info.session_id_length = len(getattr(ch, "session_id", b""))
 
     # --- Cipher suites ---
     # dpkt parses cipher suites into CipherSuite objects with .code (int) and .name (str).
@@ -275,8 +366,16 @@ def parse_client_hello(data: bytes) -> ClientHelloInfo:
                 info.signature_algorithms = _parse_signature_algorithms(ext_data)
             elif ext_type == _EXT_ALPN:
                 info.alpn = _parse_alpn(ext_data)
+            elif ext_type == _EXT_COMPRESS_CERTIFICATE:
+                info.compress_certificate = _parse_compress_certificate(ext_data)
             elif ext_type == _EXT_SUPPORTED_VERSIONS:
                 info.supported_versions = _parse_supported_versions(ext_data)
+            elif ext_type == _EXT_PSK_KEY_EXCHANGE_MODES:
+                info.psk_key_exchange_modes = _parse_psk_key_exchange_modes(ext_data)
+            elif ext_type == _EXT_KEY_SHARE:
+                info.key_share_groups = _parse_key_share(ext_data)
+            elif ext_type == _EXT_APPLICATION_SETTINGS:
+                info.alps_protocols = _parse_alps(ext_data)
 
     return info
 
@@ -480,6 +579,33 @@ def client_hello_to_dict(
             if not _is_grease(a)
         ],
         "ec_point_formats": info.ec_point_formats,
+        "compression_methods": [
+            {"id": m, "name": COMPRESSION_METHOD_NAMES.get(m, f"Unknown ({m})")}
+            for m in info.compression_methods
+        ],
+        "session_id_length": info.session_id_length,
+        "record_layer_version": (
+            TLS_VERSION_NAMES.get(info.record_layer_version, f"0x{info.record_layer_version:04X}")
+            if info.record_layer_version
+            else ""
+        ),
+        "key_share_groups": [
+            {
+                "group": SUPPORTED_GROUP_NAMES.get(ks["group"], f"Unknown (0x{ks['group']:04X})"),
+                "key_length": ks["key_length"],
+            }
+            for ks in info.key_share_groups
+            if not _is_grease(ks["group"])
+        ],
+        "compress_certificate": [
+            {"id": a, "name": COMPRESS_CERTIFICATE_NAMES.get(a, f"Unknown ({a})")}
+            for a in info.compress_certificate
+        ],
+        "alps_protocols": info.alps_protocols,
+        "psk_key_exchange_modes": [
+            {"id": m, "name": PSK_KE_MODE_NAMES.get(m, f"Unknown ({m})")}
+            for m in info.psk_key_exchange_modes
+        ],
         "ja3": ja3_hash,
         "ja3_full": ja3_full,
         "ja4": ja4,

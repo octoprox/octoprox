@@ -178,8 +178,9 @@ class MitmHandler:
             }
 
             # Parse raw ClientHello captured during the handshake
-            raw_hello = pop_client_hello(ssl_object)
-            if raw_hello is not None:
+            hello_result = pop_client_hello(ssl_object)
+            if hello_result is not None:
+                raw_hello, record_layer_version = hello_result
                 try:
                     from api.core.mitm.client_hello import (
                         client_hello_to_dict,
@@ -189,7 +190,7 @@ class MitmHandler:
                         parse_client_hello,
                     )
 
-                    ch_info = parse_client_hello(raw_hello)
+                    ch_info = parse_client_hello(raw_hello, record_layer_version=record_layer_version)
                     ja3_hash, ja3_full = compute_ja3(ch_info)
                     ja4 = compute_ja4(ch_info)
                     ja4_r = compute_ja4_r(ch_info)

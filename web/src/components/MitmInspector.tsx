@@ -173,6 +173,41 @@ function TlsInfoTable({ record }: { record: MitmRequestRecord }) {
                   {ch.ec_point_formats.map(f => f === 0 ? 'uncompressed' : `${f}`).join(', ')}
                 </TlsRow>
               )}
+              {ch.record_layer_version && (
+                <TlsRow label="Record Layer Version">{ch.record_layer_version}</TlsRow>
+              )}
+              {ch.session_id_length > 0 && (
+                <TlsRow label="Session ID Length">{ch.session_id_length} bytes</TlsRow>
+              )}
+              {ch.compression_methods?.length > 0 && (
+                <TlsRow label="Compression Methods">
+                  <IdNameList items={ch.compression_methods} />
+                </TlsRow>
+              )}
+              {ch.key_share_groups?.length > 0 && (
+                <TlsRow label={`Key Share (${ch.key_share_groups.length})`}>
+                  <div className="overflow-auto max-h-40">
+                    {ch.key_share_groups.map((ks, i) => (
+                      <div key={i} className="leading-relaxed">
+                        {ks.group} <span className="text-gray-400">({ks.key_length} bytes)</span>
+                      </div>
+                    ))}
+                  </div>
+                </TlsRow>
+              )}
+              {ch.compress_certificate?.length > 0 && (
+                <TlsRow label="Compress Certificate">
+                  <IdNameList items={ch.compress_certificate} />
+                </TlsRow>
+              )}
+              {ch.alps_protocols?.length > 0 && (
+                <TlsRow label="ALPS">{ch.alps_protocols.join(', ')}</TlsRow>
+              )}
+              {ch.psk_key_exchange_modes?.length > 0 && (
+                <TlsRow label="PSK KE Modes">
+                  <IdNameList items={ch.psk_key_exchange_modes} />
+                </TlsRow>
+              )}
             </>
           )}
 

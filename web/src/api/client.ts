@@ -591,6 +591,13 @@ export interface TlsClientHello {
   supported_groups: { id: number; name: string }[]
   signature_algorithms: { id: string; name: string }[]
   ec_point_formats: number[]
+  compression_methods: { id: number; name: string }[]
+  session_id_length: number
+  record_layer_version: string
+  key_share_groups: { group: string; key_length: number }[]
+  compress_certificate: { id: number; name: string }[]
+  alps_protocols: string[]
+  psk_key_exchange_modes: { id: number; name: string }[]
   ja3: string
   ja3_full: string
   ja4: string
