@@ -27,6 +27,14 @@ const GAP_THRESHOLD_MS: Record<TimeRange, number> = {
   '30d': 2 * 6 * 3600_000,
 }
 
+const RANGE_DURATION_MS: Record<TimeRange, number> = {
+  '1h':  3_600_000,
+  '6h':  6 * 3_600_000,
+  '24h': 24 * 3_600_000,
+  '7d':  7 * 24 * 3_600_000,
+  '30d': 30 * 24 * 3_600_000,
+}
+
 type ChartPoint = {
   time: number
   request_count: number | null
@@ -110,6 +118,10 @@ export default function Metrics() {
   const totals = useMemo(() => computeTotals(snapshots), [snapshots])
 
   const chartData = useMemo(() => buildChartData(snapshots, range), [snapshots, range])
+  const timeDomain = useMemo(() => {
+    const now = Date.now()
+    return [now - RANGE_DURATION_MS[range], now]
+  }, [range])
 
   const gridColor = theme === 'dark' ? '#374151' : '#e5e7eb'
   const tickColor = theme === 'dark' ? '#9ca3af' : undefined
@@ -167,9 +179,10 @@ export default function Metrics() {
                   dataKey="time"
                   type="number"
                   scale="time"
-                  domain={['dataMin', 'dataMax']}
+                  domain={timeDomain}
                   tickFormatter={(v: number) => formatTickByRange(v, range)}
                   tick={{ fontSize: 12, fill: tickColor }}
+                  minTickGap={40}
                 />
                 <YAxis allowDecimals={false} tick={{ fill: tickColor }} />
                 <Tooltip
@@ -198,9 +211,10 @@ export default function Metrics() {
                   dataKey="time"
                   type="number"
                   scale="time"
-                  domain={['dataMin', 'dataMax']}
+                  domain={timeDomain}
                   tickFormatter={(v: number) => formatTickByRange(v, range)}
                   tick={{ fontSize: 12, fill: tickColor }}
+                  minTickGap={40}
                 />
                 <YAxis tickFormatter={(v: number) => formatBytes(v)} tick={{ fill: tickColor }} />
                 <Tooltip
