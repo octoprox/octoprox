@@ -1,6 +1,6 @@
 title: Octoprox
 description: A dynamic and flexible proxy manager that acts as an intelligent proxy aggregator
-baseurl: "/octoprox"
+baseurl: ""
 
 defaults:
   - scope:
