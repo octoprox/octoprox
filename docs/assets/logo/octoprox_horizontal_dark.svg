@@ -6,43 +6,24 @@
    id="svg1"
    viewBox="0 0 680 139.32367"
    preserveAspectRatio="xMinYMid meet"
-   sodipodi:docname="octoprox_horizontal_dark.svg"
-   inkscape:version="1.4.3 (0d15f75, 2025-12-25)"
-   xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape"
-   xmlns:sodipodi="http://sodipodi.sourceforge.net/DTD/sodipodi-0.dtd"
    xmlns:xlink="http://www.w3.org/1999/xlink"
    xmlns="http://www.w3.org/2000/svg"
    xmlns:svg="http://www.w3.org/2000/svg">
-  <sodipodi:namedview
-     id="namedview1"
-     pagecolor="#ffffff"
-     bordercolor="#000000"
-     borderopacity="0.25"
-     inkscape:showpageshadow="2"
-     inkscape:pageopacity="0.0"
-     inkscape:pagecheckerboard="0"
-     inkscape:deskcolor="#d1d1d1"
-     inkscape:zoom="0.74"
-     inkscape:cx="310.81081"
-     inkscape:cy="70.27027"
-     inkscape:window-width="2560"
-     inkscape:window-height="1387"
-     inkscape:window-x="0"
-     inkscape:window-y="25"
-     inkscape:window-maximized="1"
-     inkscape:current-layer="svg1" />
   <defs
      id="defs1">
     <linearGradient
        id="linearGradient31">
-      <stop
-         style="stop-color:#0000ff;stop-opacity:1"
-         offset="0"
-         id="stop31" />
-      <stop
-         style="stop-color:#d42aff;stop-opacity:1"
-         offset="1"
-         id="stop32" />
+      <stop style="stop-color:#dadaff" offset="0" />
+      <stop style="stop-color:#e0cfff" offset="0.1" />
+      <stop style="stop-color:#e7c5ff" offset="0.2" />
+      <stop style="stop-color:#edbaff" offset="0.3" />
+      <stop style="stop-color:#f3afff" offset="0.4" />
+      <stop style="stop-color:#f9a4ff" offset="0.5" />
+      <stop style="stop-color:#ff99ff" offset="0.6" />
+      <stop style="stop-color:#ff8eff" offset="0.7" />
+      <stop style="stop-color:#ff84ff" offset="0.8" />
+      <stop style="stop-color:#ff79ff" offset="0.9" />
+      <stop style="stop-color:#ff6eff" offset="1" />
     </linearGradient>
     <linearGradient
        xlink:href="#linearGradient31"
@@ -53,29 +34,10 @@
        y2="662.92212"
        gradientUnits="userSpaceOnUse"
        gradientTransform="matrix(0.2843775,0,0,0.2843775,376.42438,128.78713)" />
-    <filter
-       style="color-interpolation-filters:sRGB;"
-       inkscape:label="Invert"
-       id="filter7"
-       x="0"
-       y="0"
-       width="1"
-       height="1">
-      <feColorMatrix
-         type="hueRotate"
-         values="180"
-         result="color1"
-         id="feColorMatrix6" />
-      <feColorMatrix
-         values="-1 0 0 0 1 0 -1 0 0 1 0 0 -1 0 1 -0.21 -0.72 -0.07 2 0 "
-         result="color2"
-         id="feColorMatrix7" />
-    </filter>
   </defs>
   <g
      id="g1"
-     transform="translate(-527.12872,-179.96164)"
-     style="filter:url(#filter7)">
+     transform="translate(-527.12872,-179.96164)">
     <path
        id="path14"
        style="fill:url(#linearGradient32);stroke-width:0.284384"
@@ -85,7 +47,7 @@
        transform="translate(0,-4.0536122)">
       <text
          xml:space="preserve"
-         style="font-style:normal;font-variant:normal;font-weight:bold;font-stretch:normal;font-size:96px;line-height:0;font-family:Menlo;-inkscape-font-specification:'Menlo Bold';writing-mode:lr-tb;direction:ltr;fill:#000000;fill-opacity:1"
+         style="font-style:normal;font-variant:normal;font-weight:bold;font-stretch:normal;font-size:96px;line-height:0;font-family:Menlo;-inkscape-font-specification:'Menlo Bold';writing-mode:lr-tb;direction:ltr;fill:#ffffff;fill-opacity:1"
          x="687.21918"
          y="262"
          id="text33"><tspan
@@ -94,7 +56,7 @@
            y="262">OCTOPROX</tspan></text>
       <text
          xml:space="preserve"
-         style="font-style:normal;font-variant:normal;font-weight:bold;font-stretch:normal;font-size:42.6667px;line-height:0;font-family:Menlo;-inkscape-font-specification:'Menlo Bold';writing-mode:lr-tb;direction:ltr;fill:#000000;fill-opacity:1"
+         style="font-style:normal;font-variant:normal;font-weight:bold;font-stretch:normal;font-size:42.6667px;line-height:0;font-family:Menlo;-inkscape-font-specification:'Menlo Bold';writing-mode:lr-tb;direction:ltr;fill:#ffffff;fill-opacity:1"
          x="687.39868"
          y="316"
          id="text34"><tspan
