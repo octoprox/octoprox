@@ -12,7 +12,7 @@ import structlog
 from api.models.connector import BrightDataConnectorConfig, BrightDataProxyType, Connector
 from api.models.credential import Credential
 from api.models.proxy import Proxy, ProxyProtocol, ProxyStatus
-from api.providers.base import ProxyProvider
+from api.providers.base import ProxyProvider, _sort_proxies_healthy_first
 from api.services import brightdata_api
 
 logger = structlog.get_logger()
@@ -363,8 +363,9 @@ class BrightDataProvider(ProxyProvider):
                     )
 
         elif current_count > num_proxies:
-            # Remove excess proxies
-            proxies_to_remove = existing_proxies[num_proxies:]
+            # Remove excess proxies, prioritising unhealthy ones first
+            sorted_proxies = _sort_proxies_healthy_first(existing_proxies)
+            proxies_to_remove = sorted_proxies[num_proxies:]
             proxy_ids_to_remove = [p.id for p in proxies_to_remove]
 
         return proxies_to_add, proxy_ids_to_remove

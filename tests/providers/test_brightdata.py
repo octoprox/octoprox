@@ -419,6 +419,30 @@ class TestBrightDataProviderSyncProxies:
         assert len(proxy_ids_to_remove) == 2  # 2 proxies should be removed
 
     @pytest.mark.asyncio
+    async def test_sync_removes_unhealthy_proxies_first(
+        self, residential_connector: Connector, residential_credential: Credential
+    ) -> None:
+        """Test sync_proxies prioritises removing unhealthy proxies over healthy ones."""
+        provider = BrightDataProvider(residential_connector, residential_credential)
+
+        # Start with 5 proxies instead of 3 (target)
+        existing_proxies = [provider._create_session_proxy(i) for i in range(5)]
+
+        # Mark first two as healthy, next two as unhealthy, last one as degraded
+        existing_proxies[0].status = ProxyStatus.HEALTHY
+        existing_proxies[1].status = ProxyStatus.HEALTHY
+        existing_proxies[2].status = ProxyStatus.UNHEALTHY
+        existing_proxies[3].status = ProxyStatus.UNHEALTHY
+        existing_proxies[4].status = ProxyStatus.DEGRADED
+
+        proxies_to_add, proxy_ids_to_remove = await provider.sync_proxies(existing_proxies)
+
+        assert len(proxy_ids_to_remove) == 2
+        # Both unhealthy proxies should be removed, not the healthy or degraded ones
+        assert existing_proxies[2].id in proxy_ids_to_remove
+        assert existing_proxies[3].id in proxy_ids_to_remove
+
+    @pytest.mark.asyncio
     async def test_sync_does_nothing_when_at_target(
         self, residential_connector: Connector, residential_credential: Credential
     ) -> None:

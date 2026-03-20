@@ -12,7 +12,7 @@ import structlog
 from api.models.connector import Connector, OxylabsConnectorConfig
 from api.models.credential import Credential, OxylabsProxyType
 from api.models.proxy import Proxy, ProxyProtocol, ProxyStatus
-from api.providers.base import ProxyProvider
+from api.providers.base import ProxyProvider, _sort_proxies_healthy_first
 
 logger = structlog.get_logger()
 
@@ -259,8 +259,9 @@ class OxylabsProvider(ProxyProvider):
                     proxy = self._create_session_proxy(session_id, i)
                     proxies_to_add.append(proxy)
             elif current_count > num_proxies:
-                # Remove excess proxies (from the end)
-                for proxy in existing_proxies[num_proxies:]:
+                # Remove excess proxies, prioritising unhealthy ones first
+                sorted_proxies = _sort_proxies_healthy_first(existing_proxies)
+                for proxy in sorted_proxies[num_proxies:]:
                     proxy_ids_to_remove.append(proxy.id)
         else:
             # Port-based: ensure we have proxies for ports 8001 to 8001+num_proxies-1
