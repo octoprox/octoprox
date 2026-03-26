@@ -131,6 +131,8 @@ class ProxyResponse(BaseModel):
     avg_latency_ms: float
     bytes_sent: int = 0
     bytes_received: int = 0
+    quarantined: bool = False
+    quarantine_remaining_seconds: float = 0.0
     tags: list[str]
     created_at: datetime
 

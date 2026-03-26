@@ -111,6 +111,7 @@ class ConnectorModel(Base):
     last_error_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     consecutive_errors: Mapped[int] = mapped_column(Integer, default=0)
     routing_config: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    rate_limit_config: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now, onupdate=utc_now)
 

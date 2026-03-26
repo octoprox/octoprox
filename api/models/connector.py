@@ -256,6 +256,33 @@ class RoutingConfig(BaseModel):
         return self
 
 
+class RateLimitConfig(BaseModel):
+    """Rate limiting configuration for per-proxy request throttling.
+
+    When enabled, tracks the number of requests each proxy handles within
+    a sliding time window. If a proxy exceeds max_requests within
+    window_seconds, it is quarantined for a random duration between
+    quarantine_seconds_min and quarantine_seconds_max.
+
+    When sticky_quarantine is True and the project uses sticky session routing,
+    a quarantined proxy will NOT be replaced by another proxy for the same
+    session. Instead the request is rejected (429), forcing the client to
+    start a new session if it wants a different IP.
+    """
+    max_requests: int = Field(ge=1)
+    window_seconds: int = Field(ge=1, le=86400)
+    quarantine_seconds_min: int = Field(ge=1, le=86400)
+    quarantine_seconds_max: int = Field(ge=1, le=86400)
+    sticky_quarantine: bool = False
+
+    @model_validator(mode='after')
+    def validate_quarantine_range(self) -> 'RateLimitConfig':
+        """Ensure quarantine min <= max."""
+        if self.quarantine_seconds_min > self.quarantine_seconds_max:
+            raise ValueError('quarantine_seconds_min must be <= quarantine_seconds_max')
+        return self
+
+
 def validate_routing_config(config: dict[str, Any]) -> dict[str, Any]:
     """Validate routing config and return validated dict.
 
@@ -265,6 +292,17 @@ def validate_routing_config(config: dict[str, Any]) -> dict[str, Any]:
     result = validated.model_dump(exclude_none=True)
     # Remove empty lists to keep config clean
     return {k: v for k, v in result.items() if v}
+
+
+def validate_rate_limit_config(config: dict[str, Any]) -> dict[str, Any]:
+    """Validate rate limit config and return validated dict.
+
+    Returns an empty dict if the input is empty (rate limiting disabled).
+    """
+    if not config:
+        return {}
+    validated = RateLimitConfig(**config)
+    return validated.model_dump()
 
 
 def validate_connector_config(credential_type: CredentialType, config: dict[str, Any]) -> dict[str, Any]:
@@ -356,6 +394,7 @@ class Connector(BaseModel):
     project_id: str
     config: dict[str, Any] = Field(default_factory=dict)
     routing_config: dict[str, Any] = Field(default_factory=dict)
+    rate_limit_config: dict[str, Any] = Field(default_factory=dict)
     enabled: bool = True
     pending_deletion: bool = False  # Set when connector is marked for async deletion
 
@@ -393,6 +432,13 @@ class Connector(BaseModel):
             return RoutingConfig()
         return RoutingConfig(**self.routing_config)
 
+    @property
+    def parsed_rate_limit_config(self) -> RateLimitConfig | None:
+        """Get the typed rate limit config, or None if not configured."""
+        if not self.rate_limit_config:
+            return None
+        return RateLimitConfig(**self.rate_limit_config)
+
 
 class ConnectorCreate(BaseModel):
     """Schema for creating a new connector."""
@@ -400,6 +446,7 @@ class ConnectorCreate(BaseModel):
     credential_id: str
     config: dict[str, Any] = Field(default_factory=dict)
     routing_config: dict[str, Any] = Field(default_factory=dict)
+    rate_limit_config: dict[str, Any] = Field(default_factory=dict)
     enabled: bool = True
     # Note: config validation happens in the route after fetching credential type
 
@@ -410,6 +457,7 @@ class ConnectorUpdate(BaseModel):
     credential_id: str | None = None
     config: dict[str, Any] | None = None
     routing_config: dict[str, Any] | None = None
+    rate_limit_config: dict[str, Any] | None = None
     enabled: bool | None = None
 
 
@@ -423,6 +471,7 @@ class ConnectorResponse(BaseModel):
     project_id: str
     config: dict[str, Any]
     routing_config: dict[str, Any] = Field(default_factory=dict)
+    rate_limit_config: dict[str, Any] = Field(default_factory=dict)
     enabled: bool
     proxy_count: int
     # Cloud provider error tracking

@@ -4,13 +4,14 @@
 import { useState, useRef, useMemo, useCallback } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { ColumnDef } from '@tanstack/react-table'
-import { Plus, Trash2, Pencil, Upload, Lock } from 'lucide-react'
+import { Plus, Trash2, Pencil, Upload, Lock, ShieldOff } from 'lucide-react'
 import {
   fetchProjectProxies,
   fetchProjectConnectors,
   createProjectProxy,
   updateProjectProxy,
   deleteProjectProxy,
+  unquarantineProjectProxy,
   uploadProjectProxies,
   Proxy,
   ProxyCreate,
@@ -81,6 +82,13 @@ export default function ProxyList() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['proxies', selectedProjectId] })
       queryClient.invalidateQueries({ queryKey: ['connectors', selectedProjectId] })
+    },
+  })
+  const unquarantineMutation = useMutation({
+    mutationFn: (id: string) => unquarantineProjectProxy(selectedProjectId!, id),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['proxies', selectedProjectId] })
+      queryClient.invalidateQueries({ queryKey: ['metrics', selectedProjectId] })
     },
   })
 
@@ -219,12 +227,14 @@ export default function ProxyList() {
     {
       accessorKey: 'status',
       header: 'Status',
-      size: 100,
+      size: 160,
       meta: { filterVariant: 'select' as const },
       cell: ({ row }) => (
         <StatusBadge
           status={row.original.status}
           connectorEnabled={row.original.connector_enabled}
+          quarantined={row.original.quarantined}
+          quarantineRemainingSeconds={row.original.quarantine_remaining_seconds}
         />
       ),
     },
@@ -260,10 +270,19 @@ export default function ProxyList() {
     ...(canMutate ? [{
       id: 'actions',
       header: '',
-      size: 70,
+      size: 100,
       enableSorting: false,
       cell: ({ row }: { row: { original: Proxy } }) => (
-        <div className="flex gap-1">
+        <div className="flex gap-1 justify-end">
+          {row.original.quarantined && (
+            <button
+              onClick={() => unquarantineMutation.mutate(row.original.id)}
+              className="p-1 text-orange-600 hover:text-orange-800 hover:bg-orange-50 dark:hover:bg-orange-900/30 rounded"
+              title="Remove from quarantine"
+            >
+              <ShieldOff className="w-4 h-4" />
+            </button>
+          )}
           <button
             onClick={() => startEditing(row.original)}
             className="p-1 text-blue-600 hover:text-blue-800 hover:bg-blue-50 dark:hover:bg-blue-900/30 rounded"
@@ -281,7 +300,7 @@ export default function ProxyList() {
         </div>
       ),
     }] as ColumnDef<Proxy>[] : []),
-  ], [deleteMutation, canMutate])
+  ], [deleteMutation, unquarantineMutation, canMutate])
 
   if (isLoading) return <div>Loading...</div>
 
@@ -521,10 +540,28 @@ const STATUS_COLORS: Record<string, 'green' | 'blue' | 'yellow' | 'red' | 'gray'
   unknown: 'gray',
   draining: 'orange',
   terminating: 'purple',
+  quarantined: 'orange',
   disabled: 'slate',
 }
 
-function StatusBadge({ status, connectorEnabled = true }: { status: string; connectorEnabled?: boolean }) {
+function formatQuarantineRemaining(seconds: number): string {
+  const m = Math.floor(seconds / 60)
+  const s = Math.floor(seconds % 60)
+  if (m > 0) return `${m}m ${s}s`
+  return `${s}s`
+}
+
+function StatusBadge({ status, connectorEnabled = true, quarantined = false, quarantineRemainingSeconds = 0 }: { status: string; connectorEnabled?: boolean; quarantined?: boolean; quarantineRemainingSeconds?: number }) {
+  if (quarantined) {
+    return (
+      <div className="flex items-center gap-1.5">
+        <Badge color="orange">quarantined</Badge>
+        <span className="text-xs text-gray-500 dark:text-gray-400 whitespace-nowrap">
+          {formatQuarantineRemaining(quarantineRemainingSeconds)}
+        </span>
+      </div>
+    )
+  }
   const displayStatus = connectorEnabled ? status : 'disabled'
   return (
     <Badge color={STATUS_COLORS[displayStatus] ?? 'gray'}>

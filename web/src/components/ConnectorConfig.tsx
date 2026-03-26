@@ -20,6 +20,7 @@ import {
   OxylabsProxyType,
   BrightDataProxyType,
   RoutingConfig,
+  RateLimitConfig,
 } from '../api/client'
 import { useProject } from '../contexts/ProjectContext'
 import { useTheme } from '../contexts/ThemeContext'
@@ -36,11 +37,12 @@ interface ConnectorFormData {
   credential_id: string
   config: Record<string, string>
   routing_config: RoutingConfig
+  rate_limit_config: RateLimitConfig
   enabled: boolean
 }
 
 // Tab type for config sections
-type ConfigTab = 'infrastructure' | 'scaling' | 'advanced' | 'routing'
+type ConfigTab = 'infrastructure' | 'scaling' | 'advanced' | 'routing' | 'rate_limiting'
 
 // Component for editing key-value tags (AWS, Azure)
 function KeyValueTagsEditor({ value, onChange }: { value: string; onChange: (value: string) => void }) {
@@ -189,7 +191,7 @@ export default function ConnectorConfig() {
   const [selectedType, setSelectedType] = useState<CredentialType | null>(null)
 
   // Form state
-  const [formData, setFormData] = useState<ConnectorFormData>({ name: '', credential_id: '', config: {}, routing_config: {}, enabled: true })
+  const [formData, setFormData] = useState<ConnectorFormData>({ name: '', credential_id: '', config: {}, routing_config: {}, rate_limit_config: {}, enabled: true })
   const [editingConnector, setEditingConnector] = useState<Connector | null>(null)
 
   // Credential creation modal state
@@ -271,14 +273,14 @@ export default function ConnectorConfig() {
   })
 
   const updateMutation = useMutation({
-    mutationFn: ({ id, data }: { id: string; data: { name?: string; credential_id?: string; config?: Record<string, unknown>; routing_config?: RoutingConfig; enabled?: boolean } }) =>
+    mutationFn: ({ id, data }: { id: string; data: { name?: string; credential_id?: string; config?: Record<string, unknown>; routing_config?: RoutingConfig; rate_limit_config?: RateLimitConfig; enabled?: boolean } }) =>
       updateProjectConnector(selectedProjectId!, id, data),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['connectors', selectedProjectId] })
       setShowWizard(false)
       setWizardStep('select-type')
       setSelectedType(null)
-      setFormData({ name: '', credential_id: '', config: {}, routing_config: {}, enabled: true })
+      setFormData({ name: '', credential_id: '', config: {}, routing_config: {}, rate_limit_config: {}, enabled: true })
       setEditingConnector(null)
       setEditError(null)
     },
@@ -300,7 +302,7 @@ export default function ConnectorConfig() {
     setShowWizard(false)
     setWizardStep('select-type')
     setSelectedType(null)
-    setFormData({ name: '', credential_id: '', config: {}, routing_config: {}, enabled: true })
+    setFormData({ name: '', credential_id: '', config: {}, routing_config: {}, rate_limit_config: {}, enabled: true })
     setCreateError(null)
     setEditingConnector(null)
     setEditError(null)
@@ -325,6 +327,7 @@ export default function ConnectorConfig() {
       credential_id: connector.credential_id,
       config: configForForm,
       routing_config: connector.routing_config || {},
+      rate_limit_config: connector.rate_limit_config || {},
       enabled: connector.enabled,
     })
     setWizardStep('configure')
@@ -376,13 +379,14 @@ export default function ConnectorConfig() {
     e.preventDefault()
     const preparedConfig = prepareConfigForSubmit(formData.config)
     const routingConfig = formData.routing_config
+    const rateLimitConfig = formData.rate_limit_config
     if (isEditMode) {
       updateMutation.mutate({
         id: editingConnector.id,
-        data: { name: formData.name, enabled: formData.enabled, config: preparedConfig, routing_config: routingConfig }
+        data: { name: formData.name, enabled: formData.enabled, config: preparedConfig, routing_config: routingConfig, rate_limit_config: rateLimitConfig }
       })
     } else {
-      createMutation.mutate({ name: formData.name, credential_id: formData.credential_id, config: preparedConfig, routing_config: routingConfig, enabled: formData.enabled })
+      createMutation.mutate({ name: formData.name, credential_id: formData.credential_id, config: preparedConfig, routing_config: routingConfig, rate_limit_config: rateLimitConfig, enabled: formData.enabled })
     }
   }
 
@@ -408,6 +412,7 @@ export default function ConnectorConfig() {
       scaling: scalingFields,
       advanced: advancedFields,
       routing: [],
+      rate_limiting: [],
     }
   }
 
@@ -536,6 +541,94 @@ export default function ConnectorConfig() {
           </p>
         </div>
       )}
+
+    </div>
+  )
+
+  const renderRateLimitingTab = () => (
+    <div className="space-y-3">
+      <div className="flex items-center justify-between">
+        <Label className="text-xs text-gray-600 dark:text-gray-400">Enable Rate Limiting</Label>
+        <label className="relative inline-flex items-center cursor-pointer">
+          <input
+            type="checkbox"
+            checked={!!formData.rate_limit_config.max_requests}
+            onChange={(e) => {
+              if (e.target.checked) {
+                setFormData({ ...formData, rate_limit_config: { max_requests: 100, window_seconds: 60, quarantine_seconds_min: 60, quarantine_seconds_max: 300 } })
+              } else {
+                setFormData({ ...formData, rate_limit_config: {} })
+              }
+            }}
+            className="sr-only peer"
+          />
+          <div className="w-9 h-5 bg-gray-200 peer-focus:outline-none peer-focus:ring-2 peer-focus:ring-blue-300 dark:peer-focus:ring-blue-800 rounded-full peer dark:bg-gray-600 peer-checked:after:translate-x-full rtl:peer-checked:after:-translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:start-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all dark:after:border-gray-500 peer-checked:bg-blue-500" />
+        </label>
+      </div>
+
+      {formData.rate_limit_config.max_requests ? (
+        <>
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <Label className="text-xs">Max Requests</Label>
+              <Input
+                type="number"
+                min={1}
+                className="px-3 py-1.5 text-sm"
+                value={formData.rate_limit_config.max_requests || ''}
+                onChange={(e) => setFormData({ ...formData, rate_limit_config: { ...formData.rate_limit_config, max_requests: parseInt(e.target.value) || 1 } })}
+              />
+            </div>
+            <div>
+              <Label className="text-xs">Window (seconds)</Label>
+              <Input
+                type="number"
+                min={1}
+                className="px-3 py-1.5 text-sm"
+                value={formData.rate_limit_config.window_seconds || ''}
+                onChange={(e) => setFormData({ ...formData, rate_limit_config: { ...formData.rate_limit_config, window_seconds: parseInt(e.target.value) || 1 } })}
+              />
+            </div>
+            <div>
+              <Label className="text-xs">Min Quarantine (seconds)</Label>
+              <Input
+                type="number"
+                min={1}
+                className="px-3 py-1.5 text-sm"
+                value={formData.rate_limit_config.quarantine_seconds_min || ''}
+                onChange={(e) => setFormData({ ...formData, rate_limit_config: { ...formData.rate_limit_config, quarantine_seconds_min: parseInt(e.target.value) || 1 } })}
+              />
+            </div>
+            <div>
+              <Label className="text-xs">Max Quarantine (seconds)</Label>
+              <Input
+                type="number"
+                min={1}
+                className="px-3 py-1.5 text-sm"
+                value={formData.rate_limit_config.quarantine_seconds_max || ''}
+                onChange={(e) => setFormData({ ...formData, rate_limit_config: { ...formData.rate_limit_config, quarantine_seconds_max: parseInt(e.target.value) || 1 } })}
+              />
+            </div>
+          </div>
+
+          <div className="flex items-center justify-between border-t border-gray-200 dark:border-gray-700 pt-2">
+            <Label className="text-xs text-gray-600 dark:text-gray-400">Sticky session quarantine &mdash; <span className="font-normal text-gray-500 dark:text-gray-400">block fallback to other proxies for sticky sessions</span></Label>
+            <label className="relative inline-flex items-center cursor-pointer shrink-0 ml-4">
+              <input
+                type="checkbox"
+                checked={!!formData.rate_limit_config.sticky_quarantine}
+                onChange={(e) => setFormData({ ...formData, rate_limit_config: { ...formData.rate_limit_config, sticky_quarantine: e.target.checked } })}
+                className="sr-only peer"
+              />
+              <div className="w-9 h-5 bg-gray-200 peer-focus:outline-none peer-focus:ring-2 peer-focus:ring-blue-300 dark:peer-focus:ring-blue-800 rounded-full peer dark:bg-gray-600 peer-checked:after:translate-x-full rtl:peer-checked:after:-translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:start-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all dark:after:border-gray-500 peer-checked:bg-blue-500" />
+            </label>
+          </div>
+        </>
+      ) : (
+        <p className="text-xs text-gray-500 dark:text-gray-400">
+          No rate limiting applied. Proxies handle requests without throttling.
+        </p>
+      )}
     </div>
   )
 
@@ -546,6 +639,7 @@ export default function ConnectorConfig() {
     if (type === 'static_proxy_provider') {
       const staticTabs: { id: ConfigTab; label: string }[] = [
         { id: 'routing', label: 'Routing' },
+        { id: 'rate_limiting', label: 'Rate Limiting' },
       ]
       return (
         <div className="mt-4">
@@ -566,7 +660,7 @@ export default function ConnectorConfig() {
             ))}
           </div>
           <div className="min-h-[200px]">
-            {renderRoutingTab()}
+            {activeConfigTab === 'rate_limiting' ? renderRateLimitingTab() : renderRoutingTab()}
           </div>
         </div>
       )
@@ -588,6 +682,7 @@ export default function ConnectorConfig() {
       const oxylabsTabs: { id: ConfigTab; label: string }[] = [
         { id: 'infrastructure', label: 'General' },
         { id: 'routing', label: 'Routing' },
+        { id: 'rate_limiting', label: 'Rate Limiting' },
       ]
 
       return (
@@ -683,6 +778,7 @@ export default function ConnectorConfig() {
             )}
 
             {activeConfigTab === 'routing' && renderRoutingTab()}
+            {activeConfigTab === 'rate_limiting' && renderRateLimitingTab()}
           </div>
         </div>
       )
@@ -732,6 +828,7 @@ export default function ConnectorConfig() {
         { id: 'infrastructure', label: 'General' },
         { id: 'advanced', label: 'Advanced' },
         { id: 'routing', label: 'Routing' },
+        { id: 'rate_limiting', label: 'Rate Limiting' },
       ]
 
       return (
@@ -924,6 +1021,7 @@ export default function ConnectorConfig() {
             )}
 
             {activeConfigTab === 'routing' && renderRoutingTab()}
+            {activeConfigTab === 'rate_limiting' && renderRateLimitingTab()}
           </div>
         </div>
       )
@@ -970,6 +1068,7 @@ export default function ConnectorConfig() {
       { id: 'scaling', label: 'Scaling' },
       { id: 'advanced', label: 'Advanced' },
       { id: 'routing', label: 'Routing' },
+      { id: 'rate_limiting', label: 'Rate Limiting' },
     ]
 
     return (
@@ -996,6 +1095,8 @@ export default function ConnectorConfig() {
         <div className="min-h-[200px]">
           {activeConfigTab === 'routing' ? (
             renderRoutingTab()
+          ) : activeConfigTab === 'rate_limiting' ? (
+            renderRateLimitingTab()
           ) : activeConfigTab === 'advanced' ? (
             <div>
               <Label>Instance Tags</Label>

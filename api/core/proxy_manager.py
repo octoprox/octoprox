@@ -21,6 +21,7 @@ from api.core.domain_filter import is_domain_allowed
 from api.core.health_checker import HealthChecker
 from api.core.metrics_flusher import MetricsFlusher
 from api.core.provider_syncer import ProxyProviderSyncer
+from api.core.rate_limiter import RateLimiter
 from api.core.signals import (
     connector_error_updated,
     connector_remove_requested,
@@ -94,6 +95,7 @@ class ProxyManager:
         self._demand_tracker = DemandTracker(redis_client)
         self._auto_scaler = AutoScaler(self)
         self._provider_syncer = ProxyProviderSyncer(self)
+        self._rate_limiter = RateLimiter(redis_client)
         self._running = False
         self._tasks: list[asyncio.Task[None]] = []
 
@@ -254,6 +256,20 @@ class ProxyManager:
                 proxy_id, success, latency_ms, bytes_sent, bytes_received
             )
 
+            # Rate limit tracking
+            connector = self._connectors.get(proxy.connector_id)
+            if connector:
+                rl_config = connector.parsed_rate_limit_config
+                if rl_config:
+                    await self._rate_limiter.record_request(
+                        proxy_id=proxy_id,
+                        connector_id=proxy.connector_id,
+                        max_requests=rl_config.max_requests,
+                        window_seconds=rl_config.window_seconds,
+                        quarantine_seconds_min=rl_config.quarantine_seconds_min,
+                        quarantine_seconds_max=rl_config.quarantine_seconds_max,
+                    )
+
         # Update project-level metrics
         project = self._projects.get(project_id)
         if project:
@@ -350,6 +366,9 @@ class ProxyManager:
             rd = redis_project_metrics.get(project_id, {})
             apply_metrics(project, combine_metrics(pg, rd))
 
+        # Restore quarantine state from Redis
+        await self._rate_limiter.hydrate_from_redis(list(self._proxies.keys()))
+
         logger.info(
             "Hydrated operational data",
             proxy_count=len(self._proxies),
@@ -357,6 +376,11 @@ class ProxyManager:
             from_redis=len(redis_proxy_metrics),
             from_postgres=len(postgres_proxy_metrics),
         )
+
+    @property
+    def rate_limiter(self) -> RateLimiter:
+        """Get the rate limiter instance."""
+        return self._rate_limiter
 
     @property
     def proxies(self) -> list[Proxy]:
@@ -446,6 +470,9 @@ class ProxyManager:
             await self._redis_client.reset_proxy_metrics(proxy_id)
         await self._redis_client.reset_project_metrics(project_id)
         await self._redis_client.clear_mitm_requests(project_id)
+
+        # Clean up rate limiter state (in-memory + Redis quarantine keys)
+        await self._rate_limiter.remove_proxies(proxy_ids_to_remove)
 
         # Remove from cache
         del self._projects[project_id]
@@ -634,10 +661,22 @@ class ProxyManager:
 
     async def update_connector(self, connector: Connector) -> None:
         """Update a connector (persists to Postgres)."""
+        # Check if rate limit config changed before persisting
+        old_connector = self._connectors.get(connector.id)
+        rate_limit_changed = (
+            old_connector is not None
+            and old_connector.rate_limit_config != connector.rate_limit_config
+        )
+
         async with self._session_factory() as session:
             repo = ConnectorRepository(session)
             await repo.update(connector)
             await session.commit()
+
+        # Only clear rate limiter state if the rate limit config actually changed
+        if rate_limit_changed:
+            proxy_ids = [p.id for p in self._proxies.values() if p.connector_id == connector.id]
+            self._rate_limiter.clear_connector_proxies(proxy_ids)
 
         self._connectors[connector.id] = connector
         logger.info("Updated connector", connector_id=connector.id, name=connector.name)
@@ -718,6 +757,9 @@ class ProxyManager:
         for proxy_id in proxy_ids_to_remove:
             await self._redis_client.delete_proxy_status(proxy_id)
             await self._redis_client.reset_proxy_metrics(proxy_id)
+
+        # Clean up rate limiter state (in-memory + Redis quarantine keys)
+        await self._rate_limiter.remove_proxies(proxy_ids_to_remove)
 
         # Remove from cache
         del self._connectors[connector_id]
@@ -814,6 +856,8 @@ class ProxyManager:
     ) -> list[Proxy]:
         """Get healthy proxies for a project (from enabled connectors only).
 
+        Excludes quarantined proxies (rate-limited).
+
         Args:
             project_id: The project to get proxies for.
             target_host: If provided, only return proxies from connectors whose
@@ -822,8 +866,68 @@ class ProxyManager:
         connector_ids = self._get_enabled_connector_ids(project_id, target_host)
         return [
             p for p in self._proxies.values()
+            if p.connector_id in connector_ids
+            and p.status == ProxyStatus.HEALTHY
+            and not self._rate_limiter.is_quarantined(p.id)
+        ]
+
+    def _is_sticky_quarantine_blocked(
+        self, project_id: str, session_id: str | None
+    ) -> bool:
+        """Check if a sticky session's cached proxy is quarantined and sticky_quarantine is on.
+
+        Returns True when the session should be blocked (429) rather than
+        falling back to another proxy.
+        """
+        if session_id is None:
+            return False
+        strategy = self._project_strategies.get(project_id, self._strategy)
+        if strategy.name != "sticky":
+            return False
+        session_map: dict[str, str] = getattr(strategy, "_session_map", {})
+        cached_proxy_id = session_map.get(session_id)
+        if not cached_proxy_id or not self._rate_limiter.is_quarantined(cached_proxy_id):
+            return False
+        cached_proxy = self._proxies.get(cached_proxy_id)
+        if not cached_proxy or cached_proxy.status != ProxyStatus.HEALTHY:
+            return False
+        connector = self._connectors.get(cached_proxy.connector_id)
+        if not connector:
+            return False
+        rl_config = connector.parsed_rate_limit_config
+        return rl_config is not None and rl_config.sticky_quarantine
+
+    def are_all_proxies_quarantined(
+        self,
+        project_id: str,
+        target_host: str | None = None,
+        session_id: str | None = None,
+    ) -> bool:
+        """Check if proxy selection failed due to quarantine.
+
+        Returns True when either all healthy proxies are quarantined, or
+        when sticky_quarantine blocked a specific session's quarantined proxy.
+        Used to distinguish 'no proxies exist' (502) from quarantine (429).
+        """
+        if self._is_sticky_quarantine_blocked(project_id, session_id):
+            return True
+
+        connector_ids = self._get_enabled_connector_ids(project_id, target_host)
+        healthy = [
+            p for p in self._proxies.values()
             if p.connector_id in connector_ids and p.status == ProxyStatus.HEALTHY
         ]
+        if not healthy:
+            return False
+        return all(self._rate_limiter.is_quarantined(p.id) for p in healthy)
+
+    def get_quarantined_count_for_project(self, project_id: str) -> int:
+        """Get the number of quarantined proxies for a project."""
+        connector_ids = {c.id for c in self._connectors.values() if c.project_id == project_id and c.enabled}
+        return sum(
+            1 for p in self._proxies.values()
+            if p.connector_id in connector_ids and self._rate_limiter.is_quarantined(p.id)
+        )
 
     def select_proxy_for_project(
         self,
@@ -836,12 +940,20 @@ class ProxyManager:
         Returns a proxy with resolved credentials (placeholders replaced with
         actual values from the credential/connector chain).
 
+        When sticky_quarantine is enabled on a connector's rate limit config
+        and the project uses sticky routing, a session whose assigned proxy is
+        quarantined will get None (triggering 429) instead of falling back to
+        a different proxy.
+
         Args:
             project_id: The project to select a proxy for.
             session_id: Session identifier for sticky routing.
             target_host: If provided, only consider proxies from connectors
                 whose domain routing config allows this host.
         """
+        if self._is_sticky_quarantine_blocked(project_id, session_id):
+            return None
+
         healthy_proxies = self.get_healthy_proxies_for_project(project_id, target_host)
         strategy = self._project_strategies.get(project_id, self._strategy)
         proxy = strategy.select(healthy_proxies, session_id)
@@ -910,6 +1022,9 @@ class ProxyManager:
         # metrics for a deleted proxy (which would cause foreign key violations)
         await self._redis_client.delete_proxy_status(proxy_id)
         await self._redis_client.reset_proxy_metrics(proxy_id)
+
+        # Clean up rate limiter state (in-memory + Redis quarantine key)
+        await self._rate_limiter.remove_proxy(proxy_id)
 
         del self._proxies[proxy_id]
         logger.info("Removed proxy", proxy_id=proxy_id)

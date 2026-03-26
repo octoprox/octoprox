@@ -76,6 +76,8 @@ def _proxy_to_response(
     proxy: Proxy,
     connector_name: str | None = None,
     connector_enabled: bool = True,
+    quarantined: bool = False,
+    quarantine_remaining_seconds: float = 0.0,
 ) -> ProxyResponse:
     """Convert a Proxy to ProxyResponse."""
     return ProxyResponse(
@@ -97,6 +99,8 @@ def _proxy_to_response(
         avg_latency_ms=proxy.avg_latency_ms,
         bytes_sent=proxy.bytes_sent,
         bytes_received=proxy.bytes_received,
+        quarantined=quarantined,
+        quarantine_remaining_seconds=round(quarantine_remaining_seconds, 1),
         tags=proxy.tags,
         created_at=proxy.created_at,
     )
@@ -116,13 +120,18 @@ async def list_proxies(request: Request, project_id: str) -> ProxyListResponse:
     # Get healthy proxies (only from enabled connectors) for the count
     healthy_proxies = proxy_manager.get_healthy_proxies_for_project(project_id)
 
-    # Build responses with connector names and enabled status
+    # Build responses with connector names, enabled status, and quarantine info
+    rate_limiter = proxy_manager.rate_limiter
     responses = []
     for p in all_proxies:
         connector = proxy_manager.get_connector(p.connector_id)
         connector_name = connector.name if connector else None
         connector_enabled = connector.enabled if connector else True
-        responses.append(_proxy_to_response(p, connector_name, connector_enabled))
+        responses.append(_proxy_to_response(
+            p, connector_name, connector_enabled,
+            quarantined=rate_limiter.is_quarantined(p.id),
+            quarantine_remaining_seconds=rate_limiter.get_quarantine_remaining(p.id),
+        ))
 
     return ProxyListResponse(
         total=len(all_proxies),
@@ -301,7 +310,12 @@ async def get_proxy(request: Request, proxy_id: str) -> ProxyResponse:
     connector = proxy_manager.get_connector(proxy.connector_id)
     connector_name = connector.name if connector else None
     connector_enabled = connector.enabled if connector else True
-    return _proxy_to_response(proxy, connector_name, connector_enabled)
+    rate_limiter = proxy_manager.rate_limiter
+    return _proxy_to_response(
+        proxy, connector_name, connector_enabled,
+        quarantined=rate_limiter.is_quarantined(proxy.id),
+        quarantine_remaining_seconds=rate_limiter.get_quarantine_remaining(proxy.id),
+    )
 
 
 @router.patch("/{proxy_id}", response_model=ProxyResponse)
@@ -337,7 +351,12 @@ async def update_proxy(
     connector = proxy_manager.get_connector(proxy.connector_id)
     connector_name = connector.name if connector else None
     connector_enabled = connector.enabled if connector else True
-    return _proxy_to_response(proxy, connector_name, connector_enabled)
+    rate_limiter = proxy_manager.rate_limiter
+    return _proxy_to_response(
+        proxy, connector_name, connector_enabled,
+        quarantined=rate_limiter.is_quarantined(proxy.id),
+        quarantine_remaining_seconds=rate_limiter.get_quarantine_remaining(proxy.id),
+    )
 
 
 @router.delete("/{proxy_id}", status_code=204)
@@ -354,6 +373,24 @@ async def delete_proxy(request: Request, proxy_id: str, _guard: RequireEditorDep
 
     if not await proxy_manager.delete_proxy_async(proxy_id):
         raise HTTPException(status_code=404, detail="Proxy not found")
+
+
+@router.post("/{proxy_id}/unquarantine", status_code=200)
+async def unquarantine_proxy(
+    request: Request, proxy_id: str, _guard: RequireEditorDep
+) -> dict[str, str]:
+    """Forcefully remove a proxy from quarantine."""
+    proxy_manager = request.app.state.proxy_manager
+
+    proxy = proxy_manager.get_proxy(proxy_id)
+    if proxy is None:
+        raise HTTPException(status_code=404, detail="Proxy not found")
+
+    removed = await proxy_manager.rate_limiter.unquarantine(proxy_id)
+    if not removed:
+        raise HTTPException(status_code=400, detail="Proxy is not quarantined")
+
+    return {"status": "ok", "proxy_id": proxy_id}
 
 
 @router.post("/strategy")

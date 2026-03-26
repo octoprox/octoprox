@@ -367,10 +367,19 @@ class ProxyServer:
             project_id=project.id, session_id=session_id, target_host=target_host
         )
         if not proxy:
-            await self._send_error(client_writer, 502, "Bad Gateway", "No upstream proxy available for this domain")
-            await request_rejected.send_async(
-                self, project_id=project.id, reason="no_proxy_available"
-            )
+            if self._proxy_manager.are_all_proxies_quarantined(project.id, target_host, session_id):
+                await self._send_error(
+                    client_writer, 429, "Too Many Requests",
+                    "All proxies are temporarily rate-limited. Retry later.",
+                )
+                await request_rejected.send_async(
+                    self, project_id=project.id, reason="all_proxies_quarantined"
+                )
+            else:
+                await self._send_error(client_writer, 502, "Bad Gateway", "No upstream proxy available for this domain")
+                await request_rejected.send_async(
+                    self, project_id=project.id, reason="no_proxy_available"
+                )
             return
 
         start_time = time.monotonic()
@@ -581,10 +590,19 @@ class ProxyServer:
             project_id=project_id, session_id=session_id, target_host=parsed_host
         )
         if not proxy:
-            await self._send_error(client_writer, 502, "Bad Gateway", "No upstream proxy available for this domain")
-            await request_rejected.send_async(
-                self, project_id=project_id, reason="no_proxy_available"
-            )
+            if self._proxy_manager.are_all_proxies_quarantined(project_id, parsed_host, session_id):
+                await self._send_error(
+                    client_writer, 429, "Too Many Requests",
+                    "All proxies are temporarily rate-limited. Retry later.",
+                )
+                await request_rejected.send_async(
+                    self, project_id=project_id, reason="all_proxies_quarantined"
+                )
+            else:
+                await self._send_error(client_writer, 502, "Bad Gateway", "No upstream proxy available for this domain")
+                await request_rejected.send_async(
+                    self, project_id=project_id, reason="no_proxy_available"
+                )
             return
 
         start_time = time.monotonic()

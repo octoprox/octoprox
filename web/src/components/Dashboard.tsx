@@ -3,7 +3,7 @@
 
 import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { Activity, Server, CheckCircle, XCircle, Settings, ArrowUpCircle, ArrowDownCircle, TrendingUp, Loader, Power } from 'lucide-react'
+import { Activity, Server, CheckCircle, XCircle, Timer, Settings, ArrowUpCircle, ArrowDownCircle, TrendingUp, Loader, Power } from 'lucide-react'
 import { fetchProjectMetrics, fetchProjectScalingMetrics, updateProject, ProjectUpdate, ScalingMetrics } from '../api/client'
 import { useProject } from '../contexts/ProjectContext'
 import ProjectModal from './ProjectModal'
@@ -71,7 +71,7 @@ export default function Dashboard() {
       </div>
 
       {/* Pool Metrics */}
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-8">
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-6 mb-8">
         <StatCard
           title="Total Proxies"
           value={pool?.total_proxies ?? 0}
@@ -81,6 +81,11 @@ export default function Dashboard() {
           title="Healthy"
           value={pool?.healthy_proxies ?? 0}
           icon={<CheckCircle className="w-8 h-8 text-green-500" />}
+        />
+        <StatCard
+          title="Quarantined"
+          value={pool?.quarantined_proxies ?? 0}
+          icon={<Timer className="w-8 h-8 text-orange-500" />}
         />
         <StatCard
           title="Unhealthy"

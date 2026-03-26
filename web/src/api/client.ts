@@ -184,6 +184,8 @@ export interface Proxy {
   avg_latency_ms: number
   bytes_sent: number
   bytes_received: number
+  quarantined: boolean
+  quarantine_remaining_seconds: number
   tags: string[]
   created_at: string
 }
@@ -308,6 +310,14 @@ export interface RoutingConfig {
   domain_blacklist?: string[]
 }
 
+export interface RateLimitConfig {
+  max_requests?: number
+  window_seconds?: number
+  quarantine_seconds_min?: number
+  quarantine_seconds_max?: number
+  sticky_quarantine?: boolean
+}
+
 export interface Connector {
   id: string
   name: string
@@ -317,6 +327,7 @@ export interface Connector {
   project_id: string
   config: Record<string, unknown>
   routing_config: RoutingConfig
+  rate_limit_config: RateLimitConfig
   enabled: boolean
   proxy_count: number
   // Cloud provider error tracking
@@ -337,6 +348,7 @@ export interface ConnectorCreate {
   credential_id: string
   config?: Record<string, unknown>
   routing_config?: RoutingConfig
+  rate_limit_config?: RateLimitConfig
   enabled?: boolean
 }
 
@@ -345,6 +357,7 @@ export interface ConnectorUpdate {
   credential_id?: string
   config?: Record<string, unknown>
   routing_config?: RoutingConfig
+  rate_limit_config?: RateLimitConfig
   enabled?: boolean
 }
 
@@ -381,6 +394,7 @@ export interface PoolMetrics {
   total_proxies: number
   healthy_proxies: number
   unhealthy_proxies: number
+  quarantined_proxies: number
   draining_proxies: number
   terminating_proxies: number
   total_requests: number
@@ -475,6 +489,10 @@ export const updateProjectProxy = async (projectId: string, proxyId: string, dat
 
 export const deleteProjectProxy = async (projectId: string, proxyId: string): Promise<void> => {
   await api.delete(`/projects/${projectId}/proxies/${proxyId}`)
+}
+
+export const unquarantineProjectProxy = async (projectId: string, proxyId: string): Promise<void> => {
+  await api.post(`/projects/${projectId}/proxies/${proxyId}/unquarantine`)
 }
 
 export const uploadProjectProxies = async (projectId: string, file: File, connectorId: string): Promise<ProxyUploadResponse> => {
