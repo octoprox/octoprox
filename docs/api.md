@@ -186,6 +186,12 @@ Content-Type: application/json
   },
   "routing_config": {
     "domain_whitelist": ["example.com", "api.example.com"]
+  },
+  "rate_limit_config": {
+    "max_requests": 100,
+    "window_seconds": 60,
+    "quarantine_seconds_min": 120,
+    "quarantine_seconds_max": 300
   }
 }
 ```
@@ -227,6 +233,48 @@ No restrictions (default):
   "routing_config": {}
 }
 ```
+
+#### Rate Limiting (rate_limit_config)
+
+Connectors support optional per-proxy rate limiting. When a proxy exceeds `max_requests` within `window_seconds`, it is quarantined (excluded from selection) for a random duration between `quarantine_seconds_min` and `quarantine_seconds_max`. See the [Rate Limiting]({{ site.baseurl }}/rate-limiting) guide for details.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `max_requests` | integer | Max requests per proxy in the window |
+| `window_seconds` | integer | Sliding window duration (1–86400) |
+| `quarantine_seconds_min` | integer | Min quarantine duration (1–86400) |
+| `quarantine_seconds_max` | integer | Max quarantine duration (1–86400) |
+| `sticky_quarantine` | boolean | Block sticky session fallback (default: `false`) |
+
+**Example:**
+```json
+{
+  "rate_limit_config": {
+    "max_requests": 100,
+    "window_seconds": 60,
+    "quarantine_seconds_min": 120,
+    "quarantine_seconds_max": 300,
+    "sticky_quarantine": false
+  }
+}
+```
+
+Disabled (default):
+```json
+{
+  "rate_limit_config": {}
+}
+```
+
+#### Unquarantine Proxy
+
+Forcefully remove a proxy from quarantine:
+
+```bash
+POST /api/v1/projects/{project_id}/proxies/{proxy_id}/unquarantine
+```
+
+Returns `200` with `{"status": "ok", "proxy_id": "..."}` on success, `400` if the proxy is not quarantined.
 
 ### Get Connector Options
 
