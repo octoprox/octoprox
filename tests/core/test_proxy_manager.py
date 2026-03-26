@@ -776,3 +776,109 @@ class TestProxyManager:
         result = proxy_manager.select_proxy_for_project(project.id, target_host="blocked.com")
         assert result is None
 
+    async def test_sticky_quarantine_blocks_fallback(self, proxy_manager: ProxyManager) -> None:
+        """When sticky_quarantine is enabled, a quarantined proxy should not be replaced for the same session."""
+        project = Project(name="Sticky Q Project", username="stickyquser", password="pass")
+        await proxy_manager.add_project(project)
+        proxy_manager.set_project_strategy(project.id, "sticky")
+
+        credential = Credential(
+            name="Sticky Q Cred",
+            type=CredentialType.STATIC_PROXY_PROVIDER,
+            project_id=project.id,
+            config={},
+        )
+        await proxy_manager.add_credential(credential)
+
+        connector = Connector(
+            name="Sticky Q Conn",
+            credential_id=credential.id,
+            credential_type=CredentialType.STATIC_PROXY_PROVIDER,
+            project_id=project.id,
+            config={},
+            rate_limit_config={
+                "max_requests": 5,
+                "window_seconds": 60,
+                "quarantine_seconds_min": 300,
+                "quarantine_seconds_max": 300,
+                "sticky_quarantine": True,
+            },
+        )
+        await proxy_manager.add_connector(connector)
+
+        proxy1 = Proxy(host="proxy1.example.com", port=8080, protocol=ProxyProtocol.HTTP, connector_id=connector.id)
+        proxy2 = Proxy(host="proxy2.example.com", port=8080, protocol=ProxyProtocol.HTTP, connector_id=connector.id)
+        await proxy_manager.add_proxy(proxy1)
+        await proxy_manager.add_proxy(proxy2)
+        await proxy_manager.update_proxy_status(proxy1.id, ProxyStatus.HEALTHY)
+        await proxy_manager.update_proxy_status(proxy2.id, ProxyStatus.HEALTHY)
+
+        # First request with session assigns a proxy
+        result = proxy_manager.select_proxy_for_project(project.id, session_id="session-1")
+        assert result is not None
+        assigned_id = result.id
+
+        # Quarantine the assigned proxy
+        proxy_manager._rate_limiter._quarantine_expiry[assigned_id] = __import__("time").monotonic() + 300
+
+        # With sticky_quarantine=True, same session should get None (429)
+        result = proxy_manager.select_proxy_for_project(project.id, session_id="session-1")
+        assert result is None
+
+        # are_all_proxies_quarantined should also detect this
+        assert proxy_manager.are_all_proxies_quarantined(project.id, session_id="session-1") is True
+
+        # A different session should still get a proxy (the non-quarantined one)
+        result = proxy_manager.select_proxy_for_project(project.id, session_id="session-2")
+        assert result is not None
+
+    async def test_sticky_quarantine_disabled_allows_fallback(self, proxy_manager: ProxyManager) -> None:
+        """When sticky_quarantine is False (default), a quarantined proxy should be replaced."""
+        project = Project(name="Sticky NQ Project", username="stickynquser", password="pass")
+        await proxy_manager.add_project(project)
+        proxy_manager.set_project_strategy(project.id, "sticky")
+
+        credential = Credential(
+            name="Sticky NQ Cred",
+            type=CredentialType.STATIC_PROXY_PROVIDER,
+            project_id=project.id,
+            config={},
+        )
+        await proxy_manager.add_credential(credential)
+
+        connector = Connector(
+            name="Sticky NQ Conn",
+            credential_id=credential.id,
+            credential_type=CredentialType.STATIC_PROXY_PROVIDER,
+            project_id=project.id,
+            config={},
+            rate_limit_config={
+                "max_requests": 5,
+                "window_seconds": 60,
+                "quarantine_seconds_min": 300,
+                "quarantine_seconds_max": 300,
+                "sticky_quarantine": False,
+            },
+        )
+        await proxy_manager.add_connector(connector)
+
+        proxy1 = Proxy(host="p1.example.com", port=8080, protocol=ProxyProtocol.HTTP, connector_id=connector.id)
+        proxy2 = Proxy(host="p2.example.com", port=8080, protocol=ProxyProtocol.HTTP, connector_id=connector.id)
+        await proxy_manager.add_proxy(proxy1)
+        await proxy_manager.add_proxy(proxy2)
+        await proxy_manager.update_proxy_status(proxy1.id, ProxyStatus.HEALTHY)
+        await proxy_manager.update_proxy_status(proxy2.id, ProxyStatus.HEALTHY)
+
+        # First request with session assigns a proxy
+        result = proxy_manager.select_proxy_for_project(project.id, session_id="sess-1")
+        assert result is not None
+        assigned_id = result.id
+
+        # Quarantine the assigned proxy
+        proxy_manager._rate_limiter._quarantine_expiry[assigned_id] = __import__("time").monotonic() + 300
+
+        # With sticky_quarantine=False, same session should fall back to another proxy
+        result = proxy_manager.select_proxy_for_project(project.id, session_id="sess-1")
+        assert result is not None
+        assert result.id != assigned_id
+

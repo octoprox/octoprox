@@ -21,6 +21,7 @@ class PoolMetrics(BaseModel):
     total_proxies: int
     healthy_proxies: int
     unhealthy_proxies: int
+    quarantined_proxies: int
     draining_proxies: int
     terminating_proxies: int
     total_requests: int
@@ -82,6 +83,7 @@ async def get_metrics(request: Request, project_id: str) -> MetricsResponse:
     # Count draining and terminating proxies
     draining_count = sum(1 for p in proxies if p.status == ProxyStatus.DRAINING)
     terminating_count = sum(1 for p in proxies if p.status == ProxyStatus.TERMINATING)
+    quarantined_count = proxy_manager.get_quarantined_count_for_project(project_id)
 
     # Get project-level metrics directly from the Project model
     overall_success_rate = 0.0
@@ -93,6 +95,7 @@ async def get_metrics(request: Request, project_id: str) -> MetricsResponse:
             total_proxies=len(proxies),
             healthy_proxies=len(healthy),
             unhealthy_proxies=len(proxies) - len(healthy) - draining_count - terminating_count,
+            quarantined_proxies=quarantined_count,
             draining_proxies=draining_count,
             terminating_proxies=terminating_count,
             total_requests=project.request_count,
@@ -258,6 +261,7 @@ async def prometheus_metrics(request: Request, project_id: str) -> str:
 
     proxies = proxy_manager.get_proxies_for_project(project_id)
     healthy = proxy_manager.get_healthy_proxies_for_project(project_id)
+    quarantined = proxy_manager.get_quarantined_count_for_project(project_id)
 
     label_str = f'{{project="{project_id}"}}'
 
@@ -269,6 +273,10 @@ async def prometheus_metrics(request: Request, project_id: str) -> str:
         "# HELP octoprox_proxies_healthy Number of healthy proxies",
         "# TYPE octoprox_proxies_healthy gauge",
         f"octoprox_proxies_healthy{label_str} {len(healthy)}",
+        "",
+        "# HELP octoprox_proxies_quarantined Number of quarantined (rate-limited) proxies",
+        "# TYPE octoprox_proxies_quarantined gauge",
+        f"octoprox_proxies_quarantined{label_str} {quarantined}",
         "",
         "# HELP octoprox_requests_total Total number of requests processed",
         "# TYPE octoprox_requests_total counter",

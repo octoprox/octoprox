@@ -18,6 +18,7 @@ from api.models.connector import (
     ConnectorResponse,
     ConnectorUpdate,
     validate_connector_config,
+    validate_rate_limit_config,
     validate_routing_config,
 )
 from api.models.credential import CredentialType
@@ -48,6 +49,7 @@ def _connector_to_response(
         project_id=connector.project_id,
         config=connector.config,
         routing_config=connector.routing_config,
+        rate_limit_config=connector.rate_limit_config,
         enabled=connector.enabled,
         proxy_count=proxy_count,
         last_error=connector.last_error,
@@ -126,6 +128,18 @@ async def create_connector(
                 detail = "; ".join(messages)
             raise HTTPException(status_code=422, detail=detail) from None
 
+    # Validate rate limit config if provided
+    validated_rate_limit_config: dict[str, Any] = {}
+    if connector_data.rate_limit_config:
+        try:
+            validated_rate_limit_config = validate_rate_limit_config(connector_data.rate_limit_config)
+        except (ValidationError, ValueError) as e:
+            detail = str(e)
+            if hasattr(e, 'errors'):
+                messages = [err.get('msg', str(err)) for err in e.errors()]
+                detail = "; ".join(messages)
+            raise HTTPException(status_code=422, detail=detail) from None
+
     connector = Connector(
         name=connector_data.name,
         credential_id=connector_data.credential_id,
@@ -133,6 +147,7 @@ async def create_connector(
         project_id=project_id,
         config=validated_config,
         routing_config=validated_routing_config,
+        rate_limit_config=validated_rate_limit_config,
         enabled=connector_data.enabled,
     )
 
@@ -210,6 +225,15 @@ async def update_connector(
     if connector_data.routing_config is not None:
         try:
             connector.routing_config = validate_routing_config(connector_data.routing_config)
+        except (ValidationError, ValueError) as e:
+            detail = str(e)
+            if hasattr(e, 'errors'):
+                messages = [err.get('msg', str(err)) for err in e.errors()]
+                detail = "; ".join(messages)
+            raise HTTPException(status_code=422, detail=detail) from None
+    if connector_data.rate_limit_config is not None:
+        try:
+            connector.rate_limit_config = validate_rate_limit_config(connector_data.rate_limit_config)
         except (ValidationError, ValueError) as e:
             detail = str(e)
             if hasattr(e, 'errors'):

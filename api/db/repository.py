@@ -273,6 +273,7 @@ class ConnectorRepository:
             project_id=connector.project_id,
             config=connector.config,
             routing_config=connector.routing_config,
+            rate_limit_config=connector.rate_limit_config,
             enabled=connector.enabled,
             pending_deletion=connector.pending_deletion,
             last_error=connector.last_error,
@@ -296,6 +297,7 @@ class ConnectorRepository:
             model.credential_id = connector.credential_id
             model.config = connector.config
             model.routing_config = connector.routing_config
+            model.rate_limit_config = connector.rate_limit_config
             model.enabled = connector.enabled
             model.pending_deletion = connector.pending_deletion
             model.last_error = connector.last_error
@@ -329,6 +331,7 @@ class ConnectorRepository:
             project_id=model.project_id,
             config=model.config,
             routing_config=model.routing_config or {},
+            rate_limit_config=model.rate_limit_config or {},
             enabled=model.enabled,
             pending_deletion=model.pending_deletion,
             last_error=model.last_error,
