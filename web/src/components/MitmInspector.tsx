@@ -222,15 +222,80 @@ function TlsInfoTable({ record }: { record: MitmRequestRecord }) {
   )
 }
 
-type DetailTab = 'request' | 'forwarded' | 'response' | 'tls'
+function H2FingerprintTable({ record }: { record: MitmRequestRecord }) {
+  if (!record.h2_fingerprint) return null
+
+  const frames = record.h2_frames || []
+
+  return (
+    <div className="bg-white dark:bg-gray-800 rounded border border-gray-200 dark:border-gray-700 overflow-auto">
+      <table className="w-full text-xs font-mono">
+        <tbody>
+          <TlsSectionHeader title="HTTP/2 Fingerprint" />
+          <TlsRow label="Akamai Hash">
+            <span className="break-all">{record.h2_fingerprint_hash}</span>
+            <CopyButton text={record.h2_fingerprint_hash!} />
+          </TlsRow>
+          <TlsRow label="Akamai Full">
+            <span className="break-all">{record.h2_fingerprint}</span>
+            <CopyButton text={record.h2_fingerprint!} />
+          </TlsRow>
+
+          <TlsSectionHeader title="HTTP/2 Frames" />
+          {frames.map((frame, i) => {
+            if (frame.type === 'SETTINGS' && frame.settings) {
+              return (
+                <TlsRow key={i} label="SETTINGS">
+                  <div>
+                    {Object.entries(frame.settings).map(([name, value]) => (
+                      <div key={name} className="leading-relaxed">
+                        <span className="text-gray-400">{name}</span> = {value}
+                      </div>
+                    ))}
+                  </div>
+                </TlsRow>
+              )
+            }
+            if (frame.type === 'WINDOW_UPDATE') {
+              return (
+                <TlsRow key={i} label="WINDOW_UPDATE">
+                  increment = {frame.delta}
+                </TlsRow>
+              )
+            }
+            if (frame.type === 'PRIORITY') {
+              return (
+                <TlsRow key={i} label="PRIORITY">
+                  weight={frame.weight}, depends_on={frame.depends_on}, exclusive={frame.exclusive ? 'yes' : 'no'}
+                </TlsRow>
+              )
+            }
+            if (frame.type === 'HEADERS' && frame.pseudo_header_order) {
+              return (
+                <TlsRow key={i} label="Pseudo-Header Order">
+                  {frame.pseudo_header_order.join(', ')}
+                </TlsRow>
+              )
+            }
+            return null
+          })}
+        </tbody>
+      </table>
+    </div>
+  )
+}
+
+type DetailTab = 'request' | 'forwarded' | 'response' | 'tls' | 'h2'
 
 function ExpandedDetail({ record }: { record: MitmRequestRecord }) {
   const hasTls = !!record.tls_version
+  const hasH2 = !!record.h2_fingerprint
   const tabs: { key: DetailTab; label: string; tooltip?: string }[] = [
     { key: 'request', label: 'Request Headers' },
     { key: 'forwarded', label: 'Forwarded to Relay', tooltip: `Headers passed to the ${record.mitm_engine || 'relay'} engine. Impersonation engines add browser headers (UA, Accept-Encoding, Sec-Fetch-*, etc.) automatically.` },
     { key: 'response', label: 'Response Headers' },
     ...(hasTls ? [{ key: 'tls' as DetailTab, label: 'Client TLS' }] : []),
+    ...(hasH2 ? [{ key: 'h2' as DetailTab, label: 'HTTP/2' }] : []),
   ]
   const [activeTab, setActiveTab] = useState<DetailTab>('request')
 
@@ -264,6 +329,7 @@ function ExpandedDetail({ record }: { record: MitmRequestRecord }) {
         {activeTab === 'forwarded' && <HeadersTable headers={record.upstream_headers} />}
         {activeTab === 'response' && <HeadersTable headers={record.response_headers} />}
         {activeTab === 'tls' && hasTls && <TlsInfoTable record={record} />}
+        {activeTab === 'h2' && hasH2 && <H2FingerprintTable record={record} />}
       </div>
       <div className="flex flex-wrap gap-x-6 gap-y-1 text-xs text-gray-500 dark:text-gray-400">
         <span>Full URL: <span className="font-mono text-gray-700 dark:text-gray-300">{record.url}</span></span>

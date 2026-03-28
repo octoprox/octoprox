@@ -63,6 +63,9 @@ class MitmRequestRecord(BaseModel):
     tls_key_bits: int
     tls_shared_ciphers: list[str]
     tls_client_hello: TlsClientHello | None = None
+    h2_fingerprint: str | None = None
+    h2_fingerprint_hash: str | None = None
+    h2_frames: list[dict[str, Any]] | None = None
 
 
 class MitmRequestsResponse(BaseModel):
@@ -122,6 +125,9 @@ async def list_mitm_requests(
             tls_key_bits=int(raw["tls_key_bits"]) if raw.get("tls_key_bits") else 0,
             tls_shared_ciphers=raw["tls_shared_ciphers"].split(",") if raw.get("tls_shared_ciphers") else [],
             tls_client_hello=json.loads(raw["tls_client_hello"]) if raw.get("tls_client_hello") else None,
+            h2_fingerprint=raw.get('h2_fingerprint'),
+            h2_fingerprint_hash=raw.get('h2_fingerprint_hash'),
+            h2_frames=json.loads(raw['h2_frames']) if raw.get('h2_frames') else None
         )
         for raw in records_to_return
     ]

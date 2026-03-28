@@ -155,8 +155,8 @@ class TLSCertManager:
                 os.unlink(cert_f.name)
                 os.unlink(key_f.name)
 
-        # Force HTTP/1.1 — we parse requests as HTTP/1.1 on the client-facing side
-        ctx.set_alpn_protocols(["http/1.1"])
+        # advertise HTTP/2 and HTTP/1.1 -- handler picks code path based on negotiated protocol
+        ctx.set_alpn_protocols(["h2", "http/1.1"])
 
         # Capture raw ClientHello bytes during the TLS handshake.
         # _msg_callback is an internal CPython API (stable since 3.8) that hooks

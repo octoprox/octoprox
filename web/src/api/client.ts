@@ -622,6 +622,17 @@ export interface TlsClientHello {
   ja4_r: string
 }
 
+export interface H2Frame {
+  type: string
+  stream_id: number
+  settings?: Record<string, number>
+  delta?: number
+  weight?: number
+  depends_on?: number
+  exclusive?: boolean
+  pseudo_header_order?: string[]
+}
+
 export interface MitmRequestRecord {
   id: string
   timestamp: string
@@ -646,6 +657,9 @@ export interface MitmRequestRecord {
   tls_key_bits: number
   tls_shared_ciphers: string[]
   tls_client_hello: TlsClientHello | null
+  h2_fingerprint: string | null
+  h2_fingerprint_hash: string | null
+  h2_frames: H2Frame[] | null
 }
 
 export interface MitmRequestsResponse {

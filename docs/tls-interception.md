@@ -55,9 +55,20 @@ This means the upstream TLS fingerprint (JA3/JA4) is always determined by the re
 
 When MITM is **disabled**, Octoprox creates a raw TCP tunnel (`CONNECT`) and is completely protocol-agnostic — HTTP/2, HTTP/3 (QUIC), WebSocket, and any other protocol work transparently.
 
-When MITM is **enabled**, the proxy terminates TLS and parses traffic itself. The current implementation uses [h11](https://h11.readthedocs.io/) on the client-facing side, which limits interception to **HTTP/1.1** only. On the relay side, the impersonation engines (`curl_cffi`, `rnet`) negotiate HTTP/2 with the target server automatically.
+When MITM is **enabled**, the proxy terminates TLS and parses traffic itself. Both HTTP/1.1 and HTTP/2 are supported on the client-facing side. HTTP/1.1 is parsed via [h11](https://h11.readthedocs.io/) and HTTP/2 is parsed via [h2](https://python-hyper.org/projects/hyper-h2/). The protocol is negotiated via ALPN during the TLS handshake — clients that support HTTP/2 will use it automatically. On the relay side, the impersonation engines (`curl_cffi`, `rnet`) negotiate HTTP/2 with the target server automatically.
 
-WebSocket and HTTP/2 client-side support are planned for a future release.
+WebSocket client-side support is planned for a future release.
+
+### HTTP/2 Fingerprint
+
+When a client connects over HTTP/2, the proxy captures the Akamai-style HTTP/2 fingerprint from the connection's initial frames:
+
+- **SETTINGS** frame parameters (e.g., INITIAL_WINDOW_SIZE, MAX_CONCURRENT_STREAMS)
+- **WINDOW_UPDATE** connection-level increment
+- **PRIORITY** information (whether PRIORITY frames are sent)
+- **Pseudo-header order** from the first HEADERS frame (`:method`, `:path`, `:authority`, `:scheme`)
+
+These are combined into the Akamai fingerprint format (`SETTINGS|WINDOW_UPDATE|PRIORITY|ORDER`) with an MD5 hash, visible in the MITM Inspector's HTTP/2 tab alongside the TLS fingerprint data (JA3/JA4).
 
 ## CA Certificate
 
