@@ -119,6 +119,7 @@ export interface Project {
   tls_mitm_mode: string
   tls_mitm_engine: string | null
   tls_mitm_browser: string | null
+  metrics_retention_days: number
   created_at: string
   updated_at: string
 }
@@ -148,6 +149,7 @@ export interface ProjectCreate {
   tls_mitm_mode?: string
   tls_mitm_engine?: string | null
   tls_mitm_browser?: string | null
+  metrics_retention_days?: number
 }
 
 export interface ProjectUpdate {
@@ -163,6 +165,7 @@ export interface ProjectUpdate {
   tls_mitm_mode?: string
   tls_mitm_engine?: string | null
   tls_mitm_browser?: string | null
+  metrics_retention_days?: number
 }
 
 export interface Proxy {

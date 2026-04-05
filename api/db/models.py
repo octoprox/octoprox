@@ -68,6 +68,9 @@ class ProjectModel(Base):
     tls_mitm_engine: Mapped[str | None] = mapped_column(String(20), nullable=True)
     tls_mitm_browser: Mapped[str | None] = mapped_column(String(20), nullable=True)
 
+    # Metrics settings
+    metrics_retention_days: Mapped[int] = mapped_column(Integer, default=90)
+
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now, onupdate=utc_now)
 
@@ -164,6 +167,7 @@ class ProxyMetricsModel(Base):
     bytes_sent: Mapped[int] = mapped_column(Integer, default=0)
     bytes_received: Mapped[int] = mapped_column(Integer, default=0)
     status: Mapped[str] = mapped_column(String(20), default="unknown")
+    granularity: Mapped[int] = mapped_column(Integer, default=60, nullable=False)
 
 
 class ProjectMetricsModel(Base):
@@ -188,4 +192,4 @@ class ProjectMetricsModel(Base):
     avg_latency_ms: Mapped[float] = mapped_column(Float, default=0.0)
     bytes_sent: Mapped[int] = mapped_column(Integer, default=0)
     bytes_received: Mapped[int] = mapped_column(Integer, default=0)
-
+    granularity: Mapped[int] = mapped_column(Integer, default=60, nullable=False)

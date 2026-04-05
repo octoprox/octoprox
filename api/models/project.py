@@ -61,6 +61,9 @@ class Project(BaseModel):
     tls_mitm_engine: MitmEngine | None = None
     tls_mitm_browser: MitmBrowser | None = None
 
+    # Metrics settings
+    metrics_retention_days: int = 90  # 0 = keep forever
+
     # Aggregate statistics (persists across proxy rotation)
     request_count: int = 0
     success_count: int = 0
@@ -88,6 +91,7 @@ class ProjectCreate(BaseModel):
     tls_mitm_mode: MitmMode = MitmMode.OFF
     tls_mitm_engine: MitmEngine | None = None
     tls_mitm_browser: MitmBrowser | None = None
+    metrics_retention_days: int = 90
 
     @model_validator(mode="after")
     def validate_mitm_fields(self) -> "ProjectCreate":
@@ -125,6 +129,7 @@ class ProjectUpdate(BaseModel):
     tls_mitm_mode: MitmMode | None = None
     tls_mitm_engine: MitmEngine | None = None
     tls_mitm_browser: MitmBrowser | None = None
+    metrics_retention_days: int | None = None
 
 
 class ProjectResponse(BaseModel):
@@ -142,6 +147,7 @@ class ProjectResponse(BaseModel):
     tls_mitm_mode: MitmMode
     tls_mitm_engine: MitmEngine | None
     tls_mitm_browser: MitmBrowser | None
+    metrics_retention_days: int
     created_at: datetime
     updated_at: datetime
     # Aggregated stats (populated by API)

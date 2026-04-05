@@ -19,6 +19,7 @@ from api.core.config import Settings
 from api.core.demand_tracker import DemandTracker
 from api.core.domain_filter import is_domain_allowed
 from api.core.health_checker import HealthChecker
+from api.core.metrics_compactor import MetricsCompactor
 from api.core.metrics_flusher import MetricsFlusher
 from api.core.provider_syncer import ProxyProviderSyncer
 from api.core.rate_limiter import RateLimiter
@@ -92,6 +93,7 @@ class ProxyManager:
         self._strategy: RoutingStrategy = get_strategy(settings.default_strategy)
         self._health_checker = HealthChecker(self)
         self._metrics_flusher = MetricsFlusher(session_factory, redis_client, settings)
+        self._metrics_compactor = MetricsCompactor(session_factory)
         self._demand_tracker = DemandTracker(redis_client)
         self._auto_scaler = AutoScaler(self)
         self._provider_syncer = ProxyProviderSyncer(self)
@@ -119,6 +121,10 @@ class ProxyManager:
 
         # Start metrics flusher
         task = asyncio.create_task(self._metrics_flusher.run())
+        self._tasks.append(task)
+
+        # Start metrics compactor (compaction + retention)
+        task = asyncio.create_task(self._metrics_compactor.run())
         self._tasks.append(task)
 
         # Start auto-scaler

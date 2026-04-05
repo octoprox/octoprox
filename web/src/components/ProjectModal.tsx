@@ -78,6 +78,7 @@ export default function ProjectModal({
     tls_mitm_mode: project?.tls_mitm_mode ?? 'off',
     tls_mitm_engine: project?.tls_mitm_engine ?? null,
     tls_mitm_browser: project?.tls_mitm_browser ?? null,
+    metrics_retention_days: project?.metrics_retention_days ?? 90,
   })
   const [showPassword, setShowPassword] = useState(false)
   const [activeTab, setActiveTab] = useState<SettingsTab>('general')
@@ -174,6 +175,16 @@ export default function ProjectModal({
                     <option value="sticky">Sticky</option>
                     <option value="health_based">Health Based</option>
                   </Select>
+                </div>
+                <div>
+                  <Label>Metrics Retention (days)</Label>
+                  <Input
+                    type="number"
+                    min={0}
+                    value={formData.metrics_retention_days ?? 90}
+                    onChange={(e) => setFormData({ ...formData, metrics_retention_days: parseInt(e.target.value) || 0 })}
+                  />
+                  <p className="text-xs text-gray-400 dark:text-gray-500 mt-1">0 = keep forever</p>
                 </div>
               </div>
 
