@@ -70,6 +70,7 @@ class ProjectRepository:
             tls_mitm_mode=project.tls_mitm_mode,
             tls_mitm_engine=project.tls_mitm_engine,
             tls_mitm_browser=project.tls_mitm_browser,
+            metrics_retention_days=project.metrics_retention_days,
             created_at=project.created_at,
             updated_at=project.updated_at,
         )
@@ -96,6 +97,7 @@ class ProjectRepository:
             model.tls_mitm_mode = project.tls_mitm_mode
             model.tls_mitm_engine = project.tls_mitm_engine
             model.tls_mitm_browser = project.tls_mitm_browser
+            model.metrics_retention_days = project.metrics_retention_days
             model.updated_at = utc_now()
             await self._session.flush()
         return project
@@ -139,6 +141,7 @@ class ProjectRepository:
             tls_mitm_mode=MitmMode(model.tls_mitm_mode),
             tls_mitm_engine=MitmEngine(model.tls_mitm_engine) if model.tls_mitm_engine else None,
             tls_mitm_browser=MitmBrowser(model.tls_mitm_browser) if model.tls_mitm_browser else None,
+            metrics_retention_days=model.metrics_retention_days,
             created_at=model.created_at,
             updated_at=model.updated_at,
         )
@@ -440,6 +443,54 @@ class ProxyRepository:
         )
 
 
+def _strip_tz(dt: datetime) -> datetime:
+    """Strip timezone info from a datetime for naive-datetime DB columns.
+
+    PostgreSQL's ``to_timestamp()`` returns ``TIMESTAMP WITH TIME ZONE``,
+    but our columns use ``TIMESTAMP WITHOUT TIME ZONE``.
+    """
+    return dt.replace(tzinfo=None) if dt.tzinfo else dt
+
+
+def _bucket_expressions(
+    model: type[ProjectMetricsModel] | type[ProxyMetricsModel],
+    bucket_seconds: int,
+) -> tuple[Any, Any]:
+    """Build bucket-epoch and bucket-timestamp expressions for time bucketing.
+
+    Returns (bucket_epoch, bucket_ts) where bucket_epoch is a numeric
+    expression suitable for GROUP BY and bucket_ts is a timestamp label.
+    """
+    bucket = text(str(bucket_seconds))
+    ts_col = func.extract("epoch", model.timestamp)
+    bucket_epoch = func.floor(ts_col / bucket) * bucket
+    bucket_ts = func.to_timestamp(bucket_epoch).label("bucket_ts")
+    return bucket_epoch, bucket_ts
+
+
+def _metrics_aggregate_columns(
+    model: type[ProjectMetricsModel] | type[ProxyMetricsModel],
+) -> list[Any]:
+    """Return the standard aggregate SELECT columns for a metrics model.
+
+    Columns: request_count, success_count, failure_count, avg_latency_ms
+    (weighted), bytes_sent, bytes_received.
+    """
+    weighted_latency = (
+        func.sum(model.avg_latency_ms * model.request_count)
+        / func.nullif(func.sum(model.request_count), 0)
+    ).label("avg_latency_ms")
+
+    return [
+        func.sum(model.request_count).label("request_count"),
+        func.sum(model.success_count).label("success_count"),
+        func.sum(model.failure_count).label("failure_count"),
+        weighted_latency,
+        func.sum(model.bytes_sent).label("bytes_sent"),
+        func.sum(model.bytes_received).label("bytes_received"),
+    ]
+
+
 class MetricsRepository:
     """Repository for metrics database operations."""
 
@@ -509,8 +560,6 @@ class MetricsRepository:
         Used to restore metrics on startup - these totals should be combined with
         the current Redis window.
         """
-        from sqlalchemy import func
-
         # Sum counts and compute weighted average for latency
         # weighted_avg = sum(avg_latency * request_count) / sum(request_count)
         query = (
@@ -582,10 +631,12 @@ class MetricsRepository:
         project_id: str,
         since: datetime | None = None,
         limit: int = 100,
+        granularity: int = 60,
     ) -> list[dict[str, Any]]:
-        """Get historical metrics for a project."""
+        """Get historical metrics for a project at a specific granularity."""
         query = select(ProjectMetricsModel).where(
-            ProjectMetricsModel.project_id == project_id
+            ProjectMetricsModel.project_id == project_id,
+            ProjectMetricsModel.granularity == granularity,
         )
         if since:
             query = query.where(ProjectMetricsModel.timestamp >= since)
@@ -615,26 +666,18 @@ class MetricsRepository:
         """Get historical metrics aggregated into fixed-size time buckets.
 
         Uses floor division on the epoch to group rows into buckets of
-        ``bucket_seconds`` width, then SUMs counters and AVGs latency.
+        ``bucket_seconds`` width, then SUMs counters and computes weighted
+        average latency.  Rows with granularity <= bucket_seconds are included,
+        so pre-compacted rows coexist with recent raw rows.
         """
-        bucket = text(str(bucket_seconds))
-        # Bucket expression: floor(epoch / bucket_seconds) * bucket_seconds
-        ts_col = func.extract("epoch", ProjectMetricsModel.timestamp)
-        bucket_epoch = (func.floor(ts_col / bucket) * bucket)
-        bucket_ts = func.to_timestamp(bucket_epoch).label("bucket_ts")
+        bucket_epoch, bucket_ts = _bucket_expressions(ProjectMetricsModel, bucket_seconds)
+        agg_cols = _metrics_aggregate_columns(ProjectMetricsModel)
 
         query = (
-            select(
-                bucket_ts,
-                func.sum(ProjectMetricsModel.request_count).label("request_count"),
-                func.sum(ProjectMetricsModel.success_count).label("success_count"),
-                func.sum(ProjectMetricsModel.failure_count).label("failure_count"),
-                func.avg(ProjectMetricsModel.avg_latency_ms).label("avg_latency_ms"),
-                func.sum(ProjectMetricsModel.bytes_sent).label("bytes_sent"),
-                func.sum(ProjectMetricsModel.bytes_received).label("bytes_received"),
-            )
+            select(bucket_ts, *agg_cols)
             .where(ProjectMetricsModel.project_id == project_id)
             .where(ProjectMetricsModel.timestamp >= since)
+            .where(ProjectMetricsModel.granularity <= bucket_seconds)
             .group_by(bucket_epoch)
             .order_by(bucket_epoch.desc())
         )
@@ -698,6 +741,185 @@ class MetricsRepository:
             }
 
         return metrics
+
+    # Compaction and retention methods
+
+    async def compact_project_metrics(
+        self,
+        project_id: str,
+        older_than: datetime,
+        source_granularity: int,
+        target_granularity: int,
+    ) -> int:
+        """Compact project metrics from source to target granularity.
+
+        Aggregates source-granularity rows older than ``older_than`` into
+        target-granularity buckets, inserts the compacted rows, and deletes
+        the originals — all within the current transaction.
+
+        Returns the number of source rows deleted.
+        """
+        bucket_epoch, bucket_ts = _bucket_expressions(ProjectMetricsModel, target_granularity)
+        agg_cols = _metrics_aggregate_columns(ProjectMetricsModel)
+
+        query = (
+            select(bucket_ts, *agg_cols)
+            .where(ProjectMetricsModel.project_id == project_id)
+            .where(ProjectMetricsModel.granularity == source_granularity)
+            .where(ProjectMetricsModel.timestamp < older_than)
+            .group_by(bucket_epoch)
+        )
+
+        result = await self._session.execute(query)
+        buckets = result.all()
+        if not buckets:
+            return 0
+
+        # Insert compacted rows
+        for row in buckets:
+            model = ProjectMetricsModel(
+                project_id=project_id,
+                timestamp=_strip_tz(row.bucket_ts),
+                request_count=row.request_count,
+                success_count=row.success_count,
+                failure_count=row.failure_count,
+                avg_latency_ms=float(row.avg_latency_ms or 0),
+                bytes_sent=row.bytes_sent,
+                bytes_received=row.bytes_received,
+                granularity=target_granularity,
+            )
+            self._session.add(model)
+
+        # Delete source rows
+        del_stmt = (
+            delete(ProjectMetricsModel)
+            .where(ProjectMetricsModel.project_id == project_id)
+            .where(ProjectMetricsModel.granularity == source_granularity)
+            .where(ProjectMetricsModel.timestamp < older_than)
+        )
+        del_result = await self._session.execute(del_stmt)
+        await self._session.flush()
+        return int(del_result.rowcount or 0)  # type: ignore[attr-defined]
+
+    async def compact_proxy_metrics(
+        self,
+        proxy_id: str,
+        older_than: datetime,
+        source_granularity: int,
+        target_granularity: int,
+    ) -> int:
+        """Compact proxy metrics from source to target granularity.
+
+        Same as compact_project_metrics but for the proxy_metrics table.
+        Returns the number of source rows deleted.
+        """
+        bucket_epoch, bucket_ts = _bucket_expressions(ProxyMetricsModel, target_granularity)
+        agg_cols = _metrics_aggregate_columns(ProxyMetricsModel)
+
+        base_filter = [
+            ProxyMetricsModel.proxy_id == proxy_id,
+            ProxyMetricsModel.granularity == source_granularity,
+            ProxyMetricsModel.timestamp < older_than,
+        ]
+
+        agg_query = (
+            select(
+                bucket_ts,
+                *agg_cols,
+                func.max(ProxyMetricsModel.timestamp).label("max_ts"),
+            )
+            .where(*base_filter)
+            .group_by(bucket_epoch)
+        )
+
+        result = await self._session.execute(agg_query)
+        buckets = result.all()
+        if not buckets:
+            return 0
+
+        # Get the latest status for each bucket (status from the row with max timestamp)
+        max_ts_set = {row.max_ts for row in buckets}
+        status_query = (
+            select(
+                ProxyMetricsModel.timestamp,
+                ProxyMetricsModel.status,
+            )
+            .where(ProxyMetricsModel.proxy_id == proxy_id)
+            .where(ProxyMetricsModel.timestamp.in_(max_ts_set))
+        )
+        status_result = await self._session.execute(status_query)
+        status_by_ts = {row.timestamp: row.status for row in status_result.all()}
+
+        for row in buckets:
+            status = status_by_ts.get(row.max_ts, "unknown")
+            model = ProxyMetricsModel(
+                proxy_id=proxy_id,
+                timestamp=_strip_tz(row.bucket_ts),
+                request_count=row.request_count,
+                success_count=row.success_count,
+                failure_count=row.failure_count,
+                avg_latency_ms=float(row.avg_latency_ms or 0),
+                bytes_sent=row.bytes_sent,
+                bytes_received=row.bytes_received,
+                status=status,
+                granularity=target_granularity,
+            )
+            self._session.add(model)
+
+        del_stmt = (
+            delete(ProxyMetricsModel)
+            .where(*base_filter)
+        )
+        del_result = await self._session.execute(del_stmt)
+        await self._session.flush()
+        return int(del_result.rowcount or 0)  # type: ignore[attr-defined]
+
+    async def delete_project_metrics_older_than(
+        self,
+        project_id: str,
+        older_than: datetime,
+    ) -> int:
+        """Delete all project metrics rows older than the given timestamp."""
+        stmt = (
+            delete(ProjectMetricsModel)
+            .where(ProjectMetricsModel.project_id == project_id)
+            .where(ProjectMetricsModel.timestamp < older_than)
+        )
+        result = await self._session.execute(stmt)
+        return int(result.rowcount or 0)  # type: ignore[attr-defined]
+
+    async def delete_proxy_metrics_for_project_older_than(
+        self,
+        project_id: str,
+        older_than: datetime,
+    ) -> int:
+        """Delete proxy metrics for all proxies belonging to a project.
+
+        Uses a subquery to resolve proxy IDs via connectors in a single DELETE.
+        """
+        proxy_ids_subquery = (
+            select(ProxyModel.id)
+            .join(ConnectorModel, ProxyModel.connector_id == ConnectorModel.id)
+            .where(ConnectorModel.project_id == project_id)
+            .scalar_subquery()
+        )
+        stmt = (
+            delete(ProxyMetricsModel)
+            .where(ProxyMetricsModel.proxy_id.in_(proxy_ids_subquery))
+            .where(ProxyMetricsModel.timestamp < older_than)
+        )
+        result = await self._session.execute(stmt)
+        return int(result.rowcount or 0)  # type: ignore[attr-defined]
+
+    async def get_proxy_ids_for_project(self, project_id: str) -> list[str]:
+        """Get all proxy IDs belonging to a project (via connectors)."""
+        query = (
+            select(ProxyModel.id)
+            .join(ConnectorModel, ProxyModel.connector_id == ConnectorModel.id)
+            .where(ConnectorModel.project_id == project_id)
+        )
+        result = await self._session.execute(query)
+        return [row[0] for row in result.all()]
 
 
 class UserRepository:

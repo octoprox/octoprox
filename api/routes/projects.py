@@ -56,6 +56,7 @@ def _project_to_response(
         tls_mitm_mode=project.tls_mitm_mode,
         tls_mitm_engine=project.tls_mitm_engine,
         tls_mitm_browser=project.tls_mitm_browser,
+        metrics_retention_days=project.metrics_retention_days,
         created_at=project.created_at,
         updated_at=project.updated_at,
         credential_count=credential_count,
@@ -159,6 +160,7 @@ async def create_project(
         tls_mitm_mode=project_data.tls_mitm_mode,
         tls_mitm_engine=project_data.tls_mitm_engine,
         tls_mitm_browser=project_data.tls_mitm_browser,
+        metrics_retention_days=project_data.metrics_retention_days,
     )
 
     await proxy_manager.add_project(project)
@@ -233,6 +235,8 @@ async def update_project(
         project.tls_mitm_engine = project_data.tls_mitm_engine
     if project_data.tls_mitm_browser is not None:
         project.tls_mitm_browser = project_data.tls_mitm_browser
+    if project_data.metrics_retention_days is not None:
+        project.metrics_retention_days = project_data.metrics_retention_days
 
     # Clear fields that don't apply to the current MITM mode and validate
     if project.tls_mitm_mode in (MitmMode.OFF, MitmMode.PLAIN):

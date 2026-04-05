@@ -240,6 +240,7 @@ async def get_metrics_history(
                 project_id=project_id,
                 since=since,
                 limit=limit,
+                granularity=60,
             )
 
     # Rows come back in descending order; reverse to chronological
