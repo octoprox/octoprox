@@ -321,15 +321,17 @@ class TestCompactProxyMetrics:
             project_repo, credential_repo, connector_repo, proxy_repo, db_session
         )
 
-        base_time = utc_now() - timedelta(days=2)
+        # Anchor to a round hour so both rows land in the same 1-hour bucket
+        now = utc_now()
+        base_time = now.replace(minute=0, second=0, microsecond=0) - timedelta(days=2)
         # First row: healthy, second: unhealthy (later = latest)
         await _insert_proxy_metrics(
-            db_session, proxy.id, base_time,
+            db_session, proxy.id, base_time + timedelta(minutes=5),
             request_count=10, success_count=8, failure_count=2,
             status="healthy",
         )
         await _insert_proxy_metrics(
-            db_session, proxy.id, base_time + timedelta(minutes=30),
+            db_session, proxy.id, base_time + timedelta(minutes=35),
             request_count=20, success_count=15, failure_count=5,
             status="unhealthy",
         )
@@ -339,7 +341,7 @@ class TestCompactProxyMetrics:
         before = await metrics_repo.get_cumulative_metrics_for_all_proxies()
         before_proxy = before[proxy.id]
 
-        cutoff = utc_now() - timedelta(hours=24)
+        cutoff = now - timedelta(hours=24)
         deleted = await metrics_repo.compact_proxy_metrics(
             proxy_id=proxy.id,
             older_than=cutoff,
