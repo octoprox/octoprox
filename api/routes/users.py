@@ -50,6 +50,7 @@ def _to_response(user: User) -> UserResponse:
         role=user.role,
         is_active=user.is_active,
         has_password=user.password_hash is not None,
+        theme_preference=user.theme_preference,
         created_at=user.created_at,
         updated_at=user.updated_at,
     )
@@ -102,6 +103,9 @@ async def update_self(
                     status_code=400, detail=f"Email '{data.email}' already exists"
                 )
         db_user.email = data.email
+
+    if data.theme_preference is not None:
+        db_user.theme_preference = data.theme_preference
 
     await repo.update(db_user)
 
@@ -266,6 +270,8 @@ async def update_user(
         user.role = data.role
     if data.is_active is not None:
         user.is_active = data.is_active
+    if data.theme_preference is not None:
+        user.theme_preference = data.theme_preference
 
     await repo.update(user)
 

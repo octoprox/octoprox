@@ -104,7 +104,7 @@ function computeTotals(snapshots: MetricsSnapshot[]) {
 
 export default function Metrics() {
   const { selectedProjectId } = useProject()
-  const { theme } = useTheme()
+  const { isDark } = useTheme()
   const [range, setRange] = useState<TimeRange>('24h')
 
   const { data } = useQuery({
@@ -123,8 +123,8 @@ export default function Metrics() {
     return [now - RANGE_DURATION_MS[range], now]
   }, [range])
 
-  const gridColor = theme === 'dark' ? '#374151' : '#e5e7eb'
-  const tickColor = theme === 'dark' ? '#9ca3af' : undefined
+  const gridColor = isDark ? '#374151' : '#e5e7eb'
+  const tickColor = isDark ? '#9ca3af' : undefined
 
   return (
     <div>
@@ -187,7 +187,7 @@ export default function Metrics() {
                 <YAxis allowDecimals={false} tick={{ fill: tickColor }} />
                 <Tooltip
                   labelFormatter={(v: number) => new Date(v).toLocaleString()}
-                  contentStyle={theme === 'dark' ? { backgroundColor: '#1f2937', border: '1px solid #374151', color: '#f3f4f6' } : undefined}
+                  contentStyle={isDark ? { backgroundColor: '#1f2937', border: '1px solid #374151', color: '#f3f4f6' } : undefined}
                 />
                 <Legend />
                 <Area connectNulls={false} type="monotone" dataKey="request_count" name="Requests" stroke="#6366f1" fill="#6366f1" fillOpacity={0.1} />
@@ -220,7 +220,7 @@ export default function Metrics() {
                 <Tooltip
                   labelFormatter={(v: number) => new Date(v).toLocaleString()}
                   formatter={(value: number) => formatBytes(value)}
-                  contentStyle={theme === 'dark' ? { backgroundColor: '#1f2937', border: '1px solid #374151', color: '#f3f4f6' } : undefined}
+                  contentStyle={isDark ? { backgroundColor: '#1f2937', border: '1px solid #374151', color: '#f3f4f6' } : undefined}
                 />
                 <Legend />
                 <Area connectNulls={false} type="monotone" dataKey="bytes_sent" name="Bytes Sent" stroke="#f97316" fill="#f97316" fillOpacity={0.1} />
@@ -237,7 +237,7 @@ export default function Metrics() {
 function StatCard({
   title,
   value,
-  color = 'text-gray-900 dark:text-gray-100',
+  color = 'text-fg',
   icon,
 }: {
   title: string
@@ -249,7 +249,7 @@ function StatCard({
     <Card className="p-4">
       <div className="flex items-center gap-1 mb-1">
         {icon}
-        <p className="text-gray-500 dark:text-gray-400 text-sm">{title}</p>
+        <p className="text-fg-muted text-sm">{title}</p>
       </div>
       <p className={`text-2xl font-bold ${color}`}>{value}</p>
     </Card>

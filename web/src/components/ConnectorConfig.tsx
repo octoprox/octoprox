@@ -81,7 +81,7 @@ function KeyValueTagsEditor({ value, onChange }: { value: string; onChange: (val
           <button type="button" onClick={() => removeTag(index)} className="p-1.5 text-gray-400 hover:text-red-500"><Trash2 className="w-4 h-4" /></button>
         </div>
       ))}
-      <button type="button" onClick={addTag} className="flex items-center gap-1 text-sm text-blue-600 hover:text-blue-700 dark:text-blue-400 dark:hover:text-blue-300">
+      <button type="button" onClick={addTag} className="flex items-center gap-1 text-sm text-primary hover:brightness-110">
         <Plus className="w-4 h-4" /> Add Tag
       </button>
     </div>
@@ -180,10 +180,10 @@ type WizardStep = 'select-type' | 'select-credential' | 'configure'
 export default function ConnectorConfig() {
   const queryClient = useQueryClient()
   const { selectedProjectId } = useProject()
-  const { theme } = useTheme()
+  const { isDark } = useTheme()
   const { canMutate } = useAuth()
 
-  const getlogo = (ct: typeof CREDENTIAL_TYPES[number]) => theme === 'dark' ? ct.logoDark : ct.logo
+  const getlogo = (ct: typeof CREDENTIAL_TYPES[number]) => isDark ? ct.logoDark : ct.logo
 
   // Wizard state
   const [showWizard, setShowWizard] = useState(false)
@@ -499,7 +499,7 @@ export default function ConnectorConfig() {
   const renderRoutingTab = () => (
     <div className="space-y-4">
       <div>
-        <Label className="text-xs text-gray-600 dark:text-gray-400">Domain Filter Mode</Label>
+        <Label className="text-xs text-fg-muted">Domain Filter Mode</Label>
         <div className="flex gap-2 mt-1">
           {([
             { value: 'none', label: 'No restriction' },
@@ -512,15 +512,15 @@ export default function ConnectorConfig() {
               onClick={() => handleRoutingModeChange(option.value)}
               className={`px-3 py-1.5 text-sm rounded-lg border-2 transition-colors ${
                 getRoutingMode() === option.value
-                  ? 'border-blue-500 bg-blue-50 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300'
-                  : 'border-gray-200 dark:border-gray-600 text-gray-600 dark:text-gray-400 hover:border-gray-300 dark:hover:border-gray-500'
+                  ? 'border-blue-500 bg-primary-soft/30 text-primary-soft-fg'
+                  : 'border-line text-fg-muted hover:border-line-strong'
               }`}
             >
               {option.label}
             </button>
           ))}
         </div>
-        <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
+        <p className="text-xs text-fg-muted mt-1">
           {getRoutingMode() === 'none' && 'All domains can be routed through this connector\'s proxies.'}
           {getRoutingMode() === 'whitelist' && 'Only the listed domains can be routed through this connector\'s proxies.'}
           {getRoutingMode() === 'blacklist' && 'All domains except the listed ones can be routed through this connector\'s proxies.'}
@@ -536,8 +536,8 @@ export default function ConnectorConfig() {
             onRemove={removeRoutingDomain}
             placeholder="Type a domain and press Enter..."
           />
-          <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
-            Subdomains are included automatically (e.g., <code className="bg-gray-100 dark:bg-gray-600 px-1 rounded">bing.com</code> also matches <code className="bg-gray-100 dark:bg-gray-600 px-1 rounded">www.bing.com</code>).
+          <p className="text-xs text-fg-muted mt-1">
+            Subdomains are included automatically (e.g., <code className="bg-surface-raised px-1 rounded">bing.com</code> also matches <code className="bg-surface-raised px-1 rounded">www.bing.com</code>).
           </p>
         </div>
       )}
@@ -548,7 +548,7 @@ export default function ConnectorConfig() {
   const renderRateLimitingTab = () => (
     <div className="space-y-3">
       <div className="flex items-center justify-between">
-        <Label className="text-xs text-gray-600 dark:text-gray-400">Enable Rate Limiting</Label>
+        <Label className="text-xs text-fg-muted">Enable Rate Limiting</Label>
         <label className="relative inline-flex items-center cursor-pointer">
           <input
             type="checkbox"
@@ -562,7 +562,7 @@ export default function ConnectorConfig() {
             }}
             className="sr-only peer"
           />
-          <div className="w-9 h-5 bg-gray-200 peer-focus:outline-none peer-focus:ring-2 peer-focus:ring-blue-300 dark:peer-focus:ring-blue-800 rounded-full peer dark:bg-gray-600 peer-checked:after:translate-x-full rtl:peer-checked:after:-translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:start-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all dark:after:border-gray-500 peer-checked:bg-blue-500" />
+          <div className="w-9 h-5 bg-surface-raised peer-focus:outline-none peer-focus:ring-2 peer-focus:ring-ring rounded-full peer peer-checked:after:translate-x-full rtl:peer-checked:after:-translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:start-[2px] after:bg-white after:border-line-strong after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-primary" />
         </label>
       </div>
 
@@ -611,8 +611,8 @@ export default function ConnectorConfig() {
             </div>
           </div>
 
-          <div className="flex items-center justify-between border-t border-gray-200 dark:border-gray-700 pt-2">
-            <Label className="text-xs text-gray-600 dark:text-gray-400">Sticky session quarantine &mdash; <span className="font-normal text-gray-500 dark:text-gray-400">block fallback to other proxies for sticky sessions</span></Label>
+          <div className="flex items-center justify-between border-t border-line pt-2">
+            <Label className="text-xs text-fg-muted">Sticky session quarantine &mdash; <span className="font-normal text-fg-muted">block fallback to other proxies for sticky sessions</span></Label>
             <label className="relative inline-flex items-center cursor-pointer shrink-0 ml-4">
               <input
                 type="checkbox"
@@ -620,12 +620,12 @@ export default function ConnectorConfig() {
                 onChange={(e) => setFormData({ ...formData, rate_limit_config: { ...formData.rate_limit_config, sticky_quarantine: e.target.checked } })}
                 className="sr-only peer"
               />
-              <div className="w-9 h-5 bg-gray-200 peer-focus:outline-none peer-focus:ring-2 peer-focus:ring-blue-300 dark:peer-focus:ring-blue-800 rounded-full peer dark:bg-gray-600 peer-checked:after:translate-x-full rtl:peer-checked:after:-translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:start-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all dark:after:border-gray-500 peer-checked:bg-blue-500" />
+              <div className="w-9 h-5 bg-surface-raised peer-focus:outline-none peer-focus:ring-2 peer-focus:ring-ring rounded-full peer peer-checked:after:translate-x-full rtl:peer-checked:after:-translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:start-[2px] after:bg-white after:border-line-strong after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-primary" />
             </label>
           </div>
         </>
       ) : (
-        <p className="text-xs text-gray-500 dark:text-gray-400">
+        <p className="text-xs text-fg-muted">
           No rate limiting applied. Proxies handle requests without throttling.
         </p>
       )}
@@ -643,7 +643,7 @@ export default function ConnectorConfig() {
       ]
       return (
         <div className="mt-4">
-          <div className="flex border-b border-gray-200 dark:border-gray-600 mb-4">
+          <div className="flex border-b border-line mb-4">
             {staticTabs.map((tab) => (
               <button
                 key={tab.id}
@@ -651,8 +651,8 @@ export default function ConnectorConfig() {
                 onClick={() => setActiveConfigTab(tab.id)}
                 className={`px-4 py-2 text-sm font-medium border-b-2 transition-colors ${
                   activeConfigTab === tab.id
-                    ? 'border-blue-500 text-blue-600 dark:text-blue-400'
-                    : 'border-transparent text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-300 hover:border-gray-300 dark:hover:border-gray-500'
+                    ? 'border-blue-500 text-primary'
+                    : 'border-transparent text-fg-muted hover:text-fg hover:border-line-strong'
                 }`}
               >
                 {tab.label}
@@ -688,7 +688,7 @@ export default function ConnectorConfig() {
       return (
         <div className="mt-4">
           {/* Tab Navigation */}
-          <div className="flex border-b border-gray-200 dark:border-gray-600 mb-4">
+          <div className="flex border-b border-line mb-4">
             {oxylabsTabs.map((tab) => (
               <button
                 key={tab.id}
@@ -696,8 +696,8 @@ export default function ConnectorConfig() {
                 onClick={() => setActiveConfigTab(tab.id)}
                 className={`px-4 py-2 text-sm font-medium border-b-2 transition-colors ${
                   activeConfigTab === tab.id
-                    ? 'border-blue-500 text-blue-600 dark:text-blue-400'
-                    : 'border-transparent text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-300 hover:border-gray-300 dark:hover:border-gray-500'
+                    ? 'border-blue-500 text-primary'
+                    : 'border-transparent text-fg-muted hover:text-fg hover:border-line-strong'
                 }`}
               >
                 {tab.label}
@@ -709,7 +709,7 @@ export default function ConnectorConfig() {
             {activeConfigTab === 'infrastructure' && (
               <div className="space-y-4">
                 <div>
-                  <Label className="text-xs text-gray-600 dark:text-gray-400">
+                  <Label className="text-xs text-fg-muted">
                     Number of Proxies
                     <span className="text-red-500 ml-1">*</span>
                   </Label>
@@ -727,7 +727,7 @@ export default function ConnectorConfig() {
                 {isSessionBased && (
                   <>
                     <div>
-                      <Label className="text-xs text-gray-600 dark:text-gray-400">
+                      <Label className="text-xs text-fg-muted">
                         Country
                       </Label>
                       <RichSelect
@@ -736,13 +736,13 @@ export default function ConnectorConfig() {
                         onChange={(val) => onChange('country_code', val)}
                         placeholder="Select country (optional)"
                       />
-                      <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
+                      <p className="text-xs text-fg-muted mt-1">
                         Leave as "All Countries" for no geo-targeting
                       </p>
                     </div>
 
                     <div>
-                      <Label className="text-xs text-gray-600 dark:text-gray-400">
+                      <Label className="text-xs text-fg-muted">
                         Session Duration (minutes)
                         <span className="text-red-500 ml-1">*</span>
                       </Label>
@@ -756,7 +756,7 @@ export default function ConnectorConfig() {
                         placeholder="10"
                         required
                       />
-                      <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
+                      <p className="text-xs text-fg-muted mt-1">
                         Session duration: 1-30 minutes (default: 10)
                       </p>
                     </div>
@@ -764,13 +764,13 @@ export default function ConnectorConfig() {
                 )}
 
                 {proxyType && !isSessionBased && (
-                  <p className="text-sm text-gray-500 dark:text-gray-400 bg-gray-50 dark:bg-gray-700 p-3 rounded-lg">
+                  <p className="text-sm text-fg-muted bg-surface-raised p-3 rounded-lg">
                     Port-based proxy type ({proxyType}). IPs will be discovered from Oxylabs ports and refreshed every 24 hours.
                   </p>
                 )}
 
                 {!proxyType && (
-                  <p className="text-sm text-amber-600 dark:text-amber-400 bg-amber-50 dark:bg-amber-900/20 p-3 rounded-lg">
+                  <p className="text-sm text-warning bg-warning-soft p-3 rounded-lg">
                     Loading credential configuration...
                   </p>
                 )}
@@ -834,7 +834,7 @@ export default function ConnectorConfig() {
       return (
         <div className="mt-4">
           {/* Tab Navigation */}
-          <div className="flex border-b border-gray-200 dark:border-gray-600 mb-4">
+          <div className="flex border-b border-line mb-4">
             {brightDataTabs.map((tab) => (
               <button
                 key={tab.id}
@@ -842,8 +842,8 @@ export default function ConnectorConfig() {
                 onClick={() => setActiveConfigTab(tab.id)}
                 className={`px-4 py-2 text-sm font-medium border-b-2 transition-colors ${
                   activeConfigTab === tab.id
-                    ? 'border-blue-500 text-blue-600 dark:text-blue-400'
-                    : 'border-transparent text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-300 hover:border-gray-300 dark:hover:border-gray-500'
+                    ? 'border-blue-500 text-primary'
+                    : 'border-transparent text-fg-muted hover:text-fg hover:border-line-strong'
                 }`}
               >
                 {tab.label}
@@ -857,7 +857,7 @@ export default function ConnectorConfig() {
               <div className="space-y-3">
                 <div className="grid grid-cols-2 gap-x-4 gap-y-3">
                   <div>
-                    <Label className="text-xs text-gray-600 dark:text-gray-400">
+                    <Label className="text-xs text-fg-muted">
                       Zone
                       <span className="text-red-500 ml-1">*</span>
                     </Label>
@@ -880,13 +880,13 @@ export default function ConnectorConfig() {
                       }}
                       placeholder="Select zone"
                     />
-                    <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
+                    <p className="text-xs text-fg-muted mt-1">
                       Proxy type is determined by the zone.
                     </p>
                   </div>
 
                   <div>
-                    <Label className="text-xs text-gray-600 dark:text-gray-400">
+                    <Label className="text-xs text-fg-muted">
                       Zone Password
                       <span className="text-red-500 ml-1">*</span>
                     </Label>
@@ -898,13 +898,13 @@ export default function ConnectorConfig() {
                       placeholder="Auto-populated from zone"
                       required
                     />
-                    <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
+                    <p className="text-xs text-fg-muted mt-1">
                       Auto-populated when selecting a zone.
                     </p>
                   </div>
 
                   <div>
-                    <Label className="text-xs text-gray-600 dark:text-gray-400">
+                    <Label className="text-xs text-fg-muted">
                       Number of Proxies
                       <span className="text-red-500 ml-1">*</span>
                     </Label>
@@ -928,7 +928,7 @@ export default function ConnectorConfig() {
                             required
                           />
                           {maxIps != null && (
-                            <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
+                            <p className="text-xs text-fg-muted mt-1">
                               Max {maxIps}{cc ? ` in ${cc.toUpperCase()}` : ''}
                             </p>
                           )}
@@ -938,7 +938,7 @@ export default function ConnectorConfig() {
                   </div>
 
                   <div>
-                    <Label className="text-xs text-gray-600 dark:text-gray-400">
+                    <Label className="text-xs text-fg-muted">
                       Country
                     </Label>
                     <RichSelect
@@ -958,19 +958,19 @@ export default function ConnectorConfig() {
                       }}
                       placeholder="Select country (optional)"
                     />
-                    <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
+                    <p className="text-xs text-fg-muted mt-1">
                       Optional geo-targeting. All proxy types.
                     </p>
                   </div>
                 </div>
 
                 {selectedZoneIsPortBased && selectedZone?.total_ips != null && (
-                  <div className="text-sm bg-blue-50 dark:bg-blue-900/20 p-3 rounded-lg">
-                    <p className="font-medium text-blue-700 dark:text-blue-300">
+                  <div className="text-sm bg-primary-soft/20 p-3 rounded-lg">
+                    <p className="font-medium text-primary-soft-fg">
                       {selectedZone.total_ips} IPs available in this zone
                     </p>
                     {selectedZone.country_counts && Object.keys(selectedZone.country_counts).length > 0 && (
-                      <p className="text-blue-600 dark:text-blue-400 mt-1">
+                      <p className="text-primary mt-1">
                         {Object.entries(selectedZone.country_counts)
                           .sort(([, a], [, b]) => b - a)
                           .map(([cc, count]) => `${cc.toUpperCase()} (${count})`)
@@ -981,19 +981,19 @@ export default function ConnectorConfig() {
                 )}
 
                 {proxyType && !isSessionBased && !selectedZoneIsPortBased && (
-                  <p className="text-sm text-gray-500 dark:text-gray-400 bg-gray-50 dark:bg-gray-700 p-3 rounded-lg">
+                  <p className="text-sm text-fg-muted bg-surface-raised p-3 rounded-lg">
                     Port-based proxy type ({proxyType}). IPs are assigned from your zone's IP pool and refreshed every 24 hours.
                   </p>
                 )}
 
                 {proxyType && isSessionBased && (
-                  <p className="text-sm text-gray-500 dark:text-gray-400 bg-gray-50 dark:bg-gray-700 p-3 rounded-lg">
+                  <p className="text-sm text-fg-muted bg-surface-raised p-3 rounded-lg">
                     Session-based proxy type ({proxyType}). Global session IDs will be used for routing.
                   </p>
                 )}
 
                 {!config.zone_name && (
-                  <p className="text-sm text-amber-600 dark:text-amber-400 bg-amber-50 dark:bg-amber-900/20 p-3 rounded-lg">
+                  <p className="text-sm text-warning bg-warning-soft p-3 rounded-lg">
                     Please select a zone to continue.
                   </p>
                 )}
@@ -1003,7 +1003,7 @@ export default function ConnectorConfig() {
             {activeConfigTab === 'advanced' && (
               <>
                 <div>
-                  <Label className="text-xs text-gray-600 dark:text-gray-400">
+                  <Label className="text-xs text-fg-muted">
                     Healthcheck URL
                   </Label>
                   <Input
@@ -1013,7 +1013,7 @@ export default function ConnectorConfig() {
                     className="px-3 py-1.5 text-sm"
                     placeholder="https://httpbin.org/ip (default)"
                   />
-                  <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
+                  <p className="text-xs text-fg-muted mt-1">
                     Custom URL for health checks. Use this if your BrightData zone is restricted to certain URLs.
                   </p>
                 </div>
@@ -1074,7 +1074,7 @@ export default function ConnectorConfig() {
     return (
       <div className="mt-4">
         {/* Tab Navigation */}
-        <div className="flex border-b border-gray-200 dark:border-gray-600 mb-4">
+        <div className="flex border-b border-line mb-4">
           {tabs.map((tab) => (
             <button
               key={tab.id}
@@ -1082,8 +1082,8 @@ export default function ConnectorConfig() {
               onClick={() => setActiveConfigTab(tab.id)}
               className={`px-4 py-2 text-sm font-medium border-b-2 transition-colors ${
                 activeConfigTab === tab.id
-                  ? 'border-blue-500 text-blue-600 dark:text-blue-400'
-                  : 'border-transparent text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-300 hover:border-gray-300 dark:hover:border-gray-500'
+                  ? 'border-blue-500 text-primary'
+                  : 'border-transparent text-fg-muted hover:text-fg hover:border-line-strong'
               }`}
             >
               {tab.label}
@@ -1100,7 +1100,7 @@ export default function ConnectorConfig() {
           ) : activeConfigTab === 'advanced' ? (
             <div>
               <Label>Instance Tags</Label>
-              <p className="text-xs text-gray-500 dark:text-gray-400 mb-2">Key-value tags applied to instances</p>
+              <p className="text-xs text-fg-muted mb-2">Key-value tags applied to instances</p>
               <KeyValueTagsEditor value={config.tags || '{}'} onChange={(val) => onChange('tags', val)} />
             </div>
           ) : (
@@ -1112,7 +1112,7 @@ export default function ConnectorConfig() {
                 const required = isRequired(key)
                 return (
                   <div key={key}>
-                    <Label className="text-xs text-gray-600 dark:text-gray-400">
+                    <Label className="text-xs text-fg-muted">
                       {getFieldLabel(key)}
                       {required && <span className="text-red-500 ml-1">*</span>}
                     </Label>
@@ -1142,7 +1142,7 @@ export default function ConnectorConfig() {
                         required={required}
                       />
                     )}
-                    {helperText && <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">{helperText}</p>}
+                    {helperText && <p className="text-xs text-fg-muted mt-1">{helperText}</p>}
                   </div>
                 )
               })}
@@ -1169,8 +1169,8 @@ export default function ConnectorConfig() {
       {/* Wizard Modal - custom layout for multi-step wizard */}
       {showWizard && (
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-          <div className="bg-white dark:bg-gray-800 rounded-lg shadow-xl max-w-4xl w-full mx-4 max-h-[90vh] overflow-y-auto">
-            <div className="p-6 border-b border-gray-200 dark:border-gray-700 flex justify-between items-center">
+          <div className="bg-surface rounded-lg shadow-xl max-w-4xl w-full mx-4 max-h-[90vh] overflow-y-auto">
+            <div className="p-6 border-b border-line flex justify-between items-center">
               <div className="flex items-center gap-4">
                 {wizardStep !== 'select-type' && !isEditMode && (
                   <Button variant="ghost" size="icon" onClick={() => setWizardStep(wizardStep === 'configure' ? 'select-credential' : 'select-type')}>
@@ -1195,11 +1195,11 @@ export default function ConnectorConfig() {
               {wizardStep === 'select-type' && (
                 <div className="grid grid-cols-2 gap-4">
                   {CREDENTIAL_TYPES.map((ct) => (
-                    <button key={ct.value} onClick={() => handleTypeSelect(ct.value)} className="flex items-center gap-4 p-6 border-2 border-gray-200 dark:border-gray-600 rounded-xl hover:border-blue-500 hover:bg-blue-50 dark:hover:bg-blue-900/30 transition-all text-left">
+                    <button key={ct.value} onClick={() => handleTypeSelect(ct.value)} className="flex items-center gap-4 p-6 border-2 border-line rounded-xl hover:border-blue-500 hover:bg-primary-soft transition-all text-left">
                       <img src={getlogo(ct)} alt={ct.name} className="w-16 h-16 object-contain" />
                       <div>
                         <h3 className="text-lg font-semibold">{ct.name}</h3>
-                        <p className="text-gray-500 dark:text-gray-400 text-sm">{ct.description}</p>
+                        <p className="text-fg-muted text-sm">{ct.description}</p>
                       </div>
                     </button>
                   ))}
@@ -1211,7 +1211,7 @@ export default function ConnectorConfig() {
                 <div className="space-y-4">
                   {getCredentialsForType().length === 0 ? (
                     <div className="text-center py-8">
-                      <p className="text-gray-500 dark:text-gray-400 mb-4">No {getCredentialTypeLabel(selectedType)} credentials found.</p>
+                      <p className="text-fg-muted mb-4">No {getCredentialTypeLabel(selectedType)} credentials found.</p>
                       <Button onClick={() => handleCredentialSelect('create-new')} className="mx-auto">
                         <Plus className="w-5 h-5" /> Create New Credential
                       </Button>
@@ -1219,12 +1219,12 @@ export default function ConnectorConfig() {
                   ) : (
                     <>
                       {getCredentialsForType().map((cred) => (
-                        <button key={cred.id} onClick={() => handleCredentialSelect(cred.id)} className={`w-full flex items-center justify-between p-4 border-2 rounded-lg hover:border-blue-500 transition-all ${formData.credential_id === cred.id ? 'border-blue-500 bg-blue-50 dark:bg-blue-900/30' : 'border-gray-200 dark:border-gray-600'}`}>
+                        <button key={cred.id} onClick={() => handleCredentialSelect(cred.id)} className={`w-full flex items-center justify-between p-4 border-2 rounded-lg hover:border-blue-500 transition-all ${formData.credential_id === cred.id ? 'border-blue-500 bg-primary-soft/30' : 'border-line'}`}>
                           <span className="font-medium">{cred.name}</span>
-                          <span className="text-gray-500 dark:text-gray-400 text-sm">Created {new Date(cred.created_at).toLocaleDateString()}</span>
+                          <span className="text-fg-muted text-sm">Created {new Date(cred.created_at).toLocaleDateString()}</span>
                         </button>
                       ))}
-                      <button onClick={() => handleCredentialSelect('create-new')} className="w-full flex items-center justify-center gap-2 p-4 border-2 border-dashed border-gray-300 dark:border-gray-600 rounded-lg hover:border-blue-500 hover:bg-blue-50 dark:hover:bg-blue-900/30 transition-all text-gray-600 dark:text-gray-400">
+                      <button onClick={() => handleCredentialSelect('create-new')} className="w-full flex items-center justify-center gap-2 p-4 border-2 border-dashed border-line-strong rounded-lg hover:border-blue-500 hover:bg-primary-soft transition-all text-fg-muted">
                         <Plus className="w-5 h-5" /> Create New Credential
                       </button>
                     </>
@@ -1277,35 +1277,35 @@ export default function ConnectorConfig() {
       {connectorsData?.connectors.length === 0 ? (
         <Card className="p-8 text-center">
           <Link2 className="w-12 h-12 text-gray-400 mx-auto mb-4" />
-          <h3 className="text-lg font-medium text-gray-900 dark:text-gray-100">No connectors configured</h3>
-          <p className="text-gray-500 dark:text-gray-400 mt-2">Add a connector to start managing proxies from your credentials.</p>
+          <h3 className="text-lg font-medium text-fg">No connectors configured</h3>
+          <p className="text-fg-muted mt-2">Add a connector to start managing proxies from your credentials.</p>
         </Card>
       ) : (
         <Card className="overflow-hidden">
           <table className="w-full text-sm">
             <thead>
-              <tr className="bg-gray-50 dark:bg-gray-700 border-b border-gray-200 dark:border-gray-600">
-                <th className="px-4 py-2 text-left text-xs font-semibold text-gray-600 dark:text-gray-300 uppercase tracking-wider">Connector</th>
-                <th className="px-4 py-2 text-left text-xs font-semibold text-gray-600 dark:text-gray-300 uppercase tracking-wider">Credential</th>
-                <th className="px-4 py-2 text-left text-xs font-semibold text-gray-600 dark:text-gray-300 uppercase tracking-wider">Proxies</th>
-                <th className="px-4 py-2 text-left text-xs font-semibold text-gray-600 dark:text-gray-300 uppercase tracking-wider">Status</th>
-                {canMutate && <th className="px-4 py-2 text-right text-xs font-semibold text-gray-600 dark:text-gray-300 uppercase tracking-wider">Actions</th>}
+              <tr className="bg-surface-raised border-b border-line">
+                <th className="px-4 py-2 text-left text-xs font-semibold text-fg-muted uppercase tracking-wider">Connector</th>
+                <th className="px-4 py-2 text-left text-xs font-semibold text-fg-muted uppercase tracking-wider">Credential</th>
+                <th className="px-4 py-2 text-left text-xs font-semibold text-fg-muted uppercase tracking-wider">Proxies</th>
+                <th className="px-4 py-2 text-left text-xs font-semibold text-fg-muted uppercase tracking-wider">Status</th>
+                {canMutate && <th className="px-4 py-2 text-right text-xs font-semibold text-fg-muted uppercase tracking-wider">Actions</th>}
               </tr>
             </thead>
-            <tbody className="divide-y divide-gray-100 dark:divide-gray-700">
+            <tbody className="divide-y divide-line">
               {connectorsData?.connectors.map((connector) => (
-                <tr key={connector.id} className="hover:bg-gray-50 dark:hover:bg-gray-700/50 transition-colors">
+                <tr key={connector.id} className="hover:bg-surface-raised/60 transition-colors">
                   <td className="px-4 py-2">
                     <div className="flex items-center gap-3">
                       <img src={(() => { const ct = CREDENTIAL_TYPES.find(ct => ct.value === connector.credential_type); return ct ? getlogo(ct) : undefined })()} alt="" className="w-6 h-6 object-contain" />
-                      <span className="font-medium text-gray-900 dark:text-gray-100">{connector.name}</span>
+                      <span className="font-medium text-fg">{connector.name}</span>
                     </div>
                   </td>
-                  <td className="px-4 py-2 text-gray-500 dark:text-gray-400">
+                  <td className="px-4 py-2 text-fg-muted">
                     {connector.credential_name || 'Unknown'}
-                    <span className="text-gray-400 dark:text-gray-500 ml-1">({getCredentialTypeLabel(connector.credential_type)})</span>
+                    <span className="text-fg-subtle ml-1">({getCredentialTypeLabel(connector.credential_type)})</span>
                   </td>
-                  <td className="px-4 py-2 text-gray-500 dark:text-gray-400">{formatProxyCount(connector)}</td>
+                  <td className="px-4 py-2 text-fg-muted">{formatProxyCount(connector)}</td>
                   <td className="px-4 py-2">
                     <div className="flex items-center gap-2">
                       {connector.last_error && (

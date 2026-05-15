@@ -21,7 +21,7 @@ import { Button, Card, Alert } from './ui'
 export default function CredentialsConfig() {
   const queryClient = useQueryClient()
   const { selectedProjectId } = useProject()
-  const { theme } = useTheme()
+  const { isDark } = useTheme()
   const { canMutate } = useAuth()
   const [showAddModal, setShowAddModal] = useState(false)
   const [editingCredential, setEditingCredential] = useState<CredentialDetail | null>(null)
@@ -88,7 +88,7 @@ export default function CredentialsConfig() {
         <Card className="p-8 text-center">
           <Key className="w-12 h-12 text-gray-400 mx-auto mb-4" />
           <h3 className="text-lg font-medium">No credentials configured</h3>
-          <p className="text-gray-500 dark:text-gray-400 mt-2">
+          <p className="text-fg-muted mt-2">
             Add credentials to connect to proxy providers or cloud services.
           </p>
         </Card>
@@ -96,23 +96,23 @@ export default function CredentialsConfig() {
         <Card className="overflow-hidden">
           <table className="w-full text-sm">
             <thead>
-              <tr className="bg-gray-50 dark:bg-gray-700 border-b border-gray-200 dark:border-gray-600">
-                <th className="px-4 py-2 text-left text-xs font-semibold text-gray-600 dark:text-gray-300 uppercase tracking-wider">Credential</th>
-                <th className="px-4 py-2 text-left text-xs font-semibold text-gray-600 dark:text-gray-300 uppercase tracking-wider">Created</th>
-                {canMutate && <th className="px-4 py-2 text-right text-xs font-semibold text-gray-600 dark:text-gray-300 uppercase tracking-wider">Actions</th>}
+              <tr className="bg-surface-raised border-b border-line">
+                <th className="px-4 py-2 text-left text-xs font-semibold text-fg-muted uppercase tracking-wider">Credential</th>
+                <th className="px-4 py-2 text-left text-xs font-semibold text-fg-muted uppercase tracking-wider">Created</th>
+                {canMutate && <th className="px-4 py-2 text-right text-xs font-semibold text-fg-muted uppercase tracking-wider">Actions</th>}
               </tr>
             </thead>
-            <tbody className="divide-y divide-gray-100 dark:divide-gray-700">
+            <tbody className="divide-y divide-line">
               {data?.credentials.map((credential) => (
-                <tr key={credential.id} className="hover:bg-gray-50 dark:hover:bg-gray-700/50 transition-colors">
+                <tr key={credential.id} className="hover:bg-surface-raised/60 transition-colors">
                   <td className="px-4 py-2">
                     <div className="flex items-center gap-3">
-                      <img src={(() => { const ct = CREDENTIAL_TYPES.find(ct => ct.value === credential.type); return ct ? (theme === 'dark' ? ct.logoDark : ct.logo) : undefined })()} alt="" className="w-6 h-6 object-contain" />
-                      <span className="font-medium text-gray-900 dark:text-gray-100">{credential.name}</span>
-                      <span className="text-gray-400 dark:text-gray-500">({CREDENTIAL_TYPES.find(t => t.value === credential.type)?.label || credential.type})</span>
+                      <img src={(() => { const ct = CREDENTIAL_TYPES.find(ct => ct.value === credential.type); return ct ? (isDark ? ct.logoDark : ct.logo) : undefined })()} alt="" className="w-6 h-6 object-contain" />
+                      <span className="font-medium text-fg">{credential.name}</span>
+                      <span className="text-fg-subtle">({CREDENTIAL_TYPES.find(t => t.value === credential.type)?.label || credential.type})</span>
                     </div>
                   </td>
-                  <td className="px-4 py-2 text-gray-500 dark:text-gray-400">
+                  <td className="px-4 py-2 text-fg-muted">
                     {new Date(credential.created_at).toLocaleDateString()}
                   </td>
                   {canMutate && (

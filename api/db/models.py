@@ -41,6 +41,9 @@ class UserModel(Base):
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     invite_token: Mapped[str | None] = mapped_column(String(64), nullable=True)
     invite_token_expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    theme_preference: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="light", server_default="light"
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now, onupdate=utc_now)
 

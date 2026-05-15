@@ -37,22 +37,22 @@ const mitmModeOptions: RichSelectOption[] = [
 
 const mitmModeInfo: Record<string, { color: string; icon: typeof Info; text: string }> = {
   off: {
-    color: 'bg-gray-50 dark:bg-gray-700/30 border-gray-200 dark:border-gray-600 text-gray-600 dark:text-gray-400',
+    color: 'bg-surface-raised/60 border-line text-fg-muted',
     icon: Info,
     text: 'Traffic is forwarded through an encrypted tunnel as-is. The proxy cannot inspect HTTP headers or content. Your client\'s TLS fingerprint, User-Agent, and all headers reach the target server unchanged. You are responsible for configuring anti-detection measures in your client.',
   },
   plain: {
-    color: 'bg-amber-50 dark:bg-amber-900/20 border-amber-200 dark:border-amber-700 text-amber-700 dark:text-amber-300',
+    color: 'bg-warning-soft border-warning/30 text-warning',
     icon: AlertTriangle,
     text: 'Debug mode. Decrypts HTTPS traffic to inspect HTTP headers, then re-encrypts using Python\'s standard TLS library. The target server sees a Python/OpenSSL TLS fingerprint, which is easily detectable by anti-bot systems. Best for development and debugging — not suitable for production scraping against protected targets.',
   },
   match_ua: {
-    color: 'bg-blue-50 dark:bg-blue-900/20 border-blue-200 dark:border-blue-700 text-blue-700 dark:text-blue-300',
+    color: 'bg-primary-soft border-primary/30 text-primary-soft-fg',
     icon: Shield,
     text: 'Browser-grade TLS fingerprint matching your client\'s User-Agent. If your client sends a Chrome User-Agent, the target sees a Chrome TLS fingerprint (JA3/JA4). Note: this replaces your client\'s original TLS fingerprint with the engine\'s impersonation — the target sees the engine\'s fingerprint, not your client\'s.',
   },
   override_ua: {
-    color: 'bg-blue-50 dark:bg-blue-900/20 border-blue-200 dark:border-blue-700 text-blue-700 dark:text-blue-300',
+    color: 'bg-primary-soft border-primary/30 text-primary-soft-fg',
     icon: Shield,
     text: 'Full fingerprint control. The TLS fingerprint and User-Agent are guaranteed consistent — both match the selected browser profile. Your client\'s original User-Agent is overridden. Best for maximum anti-detection when you don\'t need to control the User-Agent yourself.',
   },
@@ -120,7 +120,7 @@ export default function ProjectModal({
       <ModalHeader title={isEdit ? 'Edit Project' : 'Create Project'} onClose={onClose} />
 
       {/* Tab Navigation */}
-      <div className="flex border-b border-gray-200 dark:border-gray-600 mb-4">
+      <div className="flex border-b border-line-strong mb-4">
         {tabs.map((tab) => (
           <button
             key={tab.id}
@@ -128,8 +128,8 @@ export default function ProjectModal({
             onClick={() => setActiveTab(tab.id)}
             className={`px-4 py-2 text-sm font-medium border-b-2 transition-colors ${
               activeTab === tab.id
-                ? 'border-blue-500 text-blue-600 dark:text-blue-400'
-                : 'border-transparent text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-300 hover:border-gray-300 dark:hover:border-gray-500'
+                ? 'border-primary text-primary'
+                : 'border-transparent text-fg-muted hover:text-fg hover:border-line-strong'
             }`}
           >
             {tab.label}
@@ -184,16 +184,16 @@ export default function ProjectModal({
                     value={formData.metrics_retention_days ?? 90}
                     onChange={(e) => setFormData({ ...formData, metrics_retention_days: parseInt(e.target.value) || 0 })}
                   />
-                  <p className="text-xs text-gray-400 dark:text-gray-500 mt-1">0 = keep forever</p>
+                  <p className="text-xs text-fg-subtle mt-1">0 = keep forever</p>
                 </div>
               </div>
 
               {/* Right column: Proxy Credentials */}
-              <div className="border border-gray-200 dark:border-gray-600 rounded-lg p-4 bg-gray-50 dark:bg-gray-700/50">
-                <h3 className="text-sm font-medium text-gray-700 dark:text-gray-300 mb-3">Proxy Credentials</h3>
+              <div className="border border-line-strong rounded-lg p-4 bg-surface-raised/60">
+                <h3 className="text-sm font-medium text-fg mb-3">Proxy Credentials</h3>
                 <div className="space-y-3">
                   <div>
-                    <Label className="text-xs text-gray-500 dark:text-gray-400">Username</Label>
+                    <Label className="text-xs text-fg-muted">Username</Label>
                     <Input
                       type="text"
                       required
@@ -204,7 +204,7 @@ export default function ProjectModal({
                     />
                   </div>
                   <div>
-                    <Label className="text-xs text-gray-500 dark:text-gray-400">Password</Label>
+                    <Label className="text-xs text-fg-muted">Password</Label>
                     <div className="relative">
                       <Input
                         type={showPassword ? 'text' : 'password'}
@@ -217,7 +217,7 @@ export default function ProjectModal({
                       <button
                         type="button"
                         onClick={() => setShowPassword(!showPassword)}
-                        className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600 dark:hover:text-gray-300"
+                        className="absolute right-2 top-1/2 -translate-y-1/2 text-fg-subtle hover:text-fg-muted"
                       >
                         {showPassword ? <EyeOff className="w-5 h-5" /> : <Eye className="w-5 h-5" />}
                       </button>
@@ -232,7 +232,7 @@ export default function ProjectModal({
           {activeTab === 'tls' && (
             <div className="space-y-3">
               <div>
-                <Label className="text-xs text-gray-500 dark:text-gray-400">Mode</Label>
+                <Label className="text-xs text-fg-muted">Mode</Label>
                 <RichSelect
                   options={mitmModeOptions}
                   value={currentMode}
@@ -242,7 +242,7 @@ export default function ProjectModal({
 
               {showEngine && (
                 <div>
-                  <Label className="text-xs text-gray-500 dark:text-gray-400">TLS Engine</Label>
+                  <Label className="text-xs text-fg-muted">TLS Engine</Label>
                   <RichSelect
                     options={engineOptions}
                     value={formData.tls_mitm_engine || 'curl_cffi'}
@@ -253,7 +253,7 @@ export default function ProjectModal({
 
               {showBrowser && (
                 <div>
-                  <Label className="text-xs text-gray-500 dark:text-gray-400">Browser Profile</Label>
+                  <Label className="text-xs text-fg-muted">Browser Profile</Label>
                   <RichSelect
                     options={browserOptions}
                     value={formData.tls_mitm_browser || 'chrome'}
@@ -269,7 +269,7 @@ export default function ProjectModal({
               </div>
 
               {showCaWarning && (
-                <p className="text-xs text-amber-600 dark:text-amber-400">
+                <p className="text-xs text-warning">
                   Clients must install the proxy CA certificate.{' '}
                   <button
                     type="button"

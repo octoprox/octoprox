@@ -3,7 +3,7 @@
 
 import { useState } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
-import { Lock, AlertCircle, CheckCircle, Moon, Sun } from 'lucide-react'
+import { Lock, AlertCircle, CheckCircle } from 'lucide-react'
 import octoproxLogo from '../assets/logos/octoprox_horizontal.svg'
 import octoproxLogoDark from '../assets/logos/octoprox_horizontal_dark.svg'
 import { useTheme } from '../contexts/ThemeContext'
@@ -13,7 +13,7 @@ import { setPasswordWithToken } from '../api/client'
 export default function SetPassword() {
   const { token } = useParams<{ token: string }>()
   const navigate = useNavigate()
-  const { theme, toggleTheme } = useTheme()
+  const { isDark } = useTheme()
   const [password, setPassword] = useState('')
   const [confirmPassword, setConfirmPassword] = useState('')
   const [isLoading, setIsLoading] = useState(false)
@@ -56,23 +56,15 @@ export default function SetPassword() {
   }
 
   return (
-    <div className="min-h-screen flex items-center justify-center bg-gray-100 dark:bg-gray-900 relative">
-      {/* Theme toggle */}
-      <button
-        onClick={toggleTheme}
-        className="absolute top-4 right-4 p-2 text-gray-500 dark:text-gray-400 hover:text-gray-900 dark:hover:text-gray-100 hover:bg-white/60 dark:hover:bg-gray-800/60 rounded-lg transition-colors"
-        title={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
-      >
-        {theme === 'dark' ? <Sun className="w-5 h-5" /> : <Moon className="w-5 h-5" />}
-      </button>
+    <div className="min-h-screen flex items-center justify-center bg-bg relative">
       <div className="max-w-md w-full">
-        <div className="bg-white dark:bg-gray-800 rounded-lg shadow-lg p-8">
+        <div className="bg-surface rounded-lg shadow-lg p-8">
           {/* Logo */}
           <div className="text-center mb-8">
             <div className="flex items-center justify-center mb-2">
-              <img src={theme === 'dark' ? octoproxLogoDark : octoproxLogo} alt="Octoprox" className="h-12" />
+              <img src={isDark ? octoproxLogoDark : octoproxLogo} alt="Octoprox" className="h-12" />
             </div>
-            <p className="text-gray-500 dark:text-gray-400">Set your password to get started</p>
+            <p className="text-fg-muted">Set your password to get started</p>
           </div>
 
           {/* Success message */}
@@ -135,7 +127,7 @@ export default function SetPassword() {
               <Button
                 type="submit"
                 disabled={isLoading}
-                className="w-full shadow-sm focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 dark:focus:ring-violet-500"
+                className="w-full shadow-sm focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-ring"
               >
                 {isLoading ? 'Setting password...' : 'Set Password'}
               </Button>

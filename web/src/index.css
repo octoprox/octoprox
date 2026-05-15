@@ -2,12 +2,216 @@
 @tailwind components;
 @tailwind utilities;
 
-body {
-  @apply bg-gray-50 text-gray-900 dark:bg-gray-900 dark:text-gray-100;
+/*
+ * Theme tokens — semantic CSS variables, R G B triplets so Tailwind alpha
+ * modifiers work (e.g. bg-primary/10). Each .theme-* class redefines them.
+ * Light/Dark values mirror the previous Tailwind gray-based palette so the
+ * default look is unchanged.
+ */
+
+:root,
+.theme-light {
+  --color-bg: 249 250 251;
+  --color-surface: 255 255 255;
+  --color-surface-raised: 243 244 246;
+  --color-surface-sunken: 243 244 246;
+  --color-overlay: 0 0 0;
+  --color-fg: 17 24 39;
+  --color-fg-muted: 107 114 128;
+  --color-fg-subtle: 156 163 175;
+  --color-fg-on-primary: 255 255 255;
+  --color-line: 229 231 235;
+  --color-line-strong: 209 213 219;
+  --color-primary: 37 99 235;
+  --color-primary-hover: 29 78 216;
+  --color-primary-soft: 239 246 255;
+  --color-primary-soft-fg: 29 78 216;
+  --color-success: 22 163 74;
+  --color-success-soft: 240 253 244;
+  --color-warning: 217 119 6;
+  --color-warning-soft: 255 251 235;
+  --color-danger: 220 38 38;
+  --color-danger-soft: 254 242 242;
+  --color-ring: 59 130 246;
 }
 
-/* Dark mode checkbox styling */
-.dark input[type="checkbox"] {
+.dark,
+.theme-dark {
+  --color-bg: 17 24 39;
+  --color-surface: 31 41 55;
+  --color-surface-raised: 55 65 81;
+  --color-surface-sunken: 3 7 18;
+  --color-overlay: 0 0 0;
+  --color-fg: 243 244 246;
+  --color-fg-muted: 156 163 175;
+  --color-fg-subtle: 107 114 128;
+  --color-fg-on-primary: 255 255 255;
+  --color-line: 55 65 81;
+  --color-line-strong: 75 85 99;
+  --color-primary: 124 58 237;
+  --color-primary-hover: 109 40 217;
+  --color-primary-soft: 30 58 138;
+  --color-primary-soft-fg: 147 197 253;
+  --color-success: 16 185 129;
+  --color-success-soft: 20 83 45;
+  --color-warning: 251 191 36;
+  --color-warning-soft: 120 53 15;
+  --color-danger: 248 113 113;
+  --color-danger-soft: 127 29 29;
+  --color-ring: 59 130 246;
+}
+
+.theme-solarized-light {
+  --color-bg: 253 246 227;
+  --color-surface: 255 252 240;
+  --color-surface-raised: 238 232 213;
+  --color-surface-sunken: 238 232 213;
+  --color-overlay: 0 43 54;
+  --color-fg: 88 110 117;
+  --color-fg-muted: 101 123 131;
+  --color-fg-subtle: 147 161 161;
+  --color-fg-on-primary: 253 246 227;
+  --color-line: 238 232 213;
+  --color-line-strong: 147 161 161;
+  --color-primary: 38 139 210;
+  --color-primary-hover: 30 110 170;
+  --color-primary-soft: 230 240 250;
+  --color-primary-soft-fg: 38 139 210;
+  --color-success: 133 153 0;
+  --color-success-soft: 240 245 215;
+  --color-warning: 181 137 0;
+  --color-warning-soft: 250 240 200;
+  --color-danger: 220 50 47;
+  --color-danger-soft: 250 225 220;
+  --color-ring: 38 139 210;
+}
+
+.theme-solarized-dark {
+  --color-bg: 0 43 54;
+  --color-surface: 7 54 66;
+  --color-surface-raised: 20 70 80;
+  --color-surface-sunken: 0 30 38;
+  --color-overlay: 0 0 0;
+  --color-fg: 147 161 161;
+  --color-fg-muted: 131 148 150;
+  --color-fg-subtle: 88 110 117;
+  --color-fg-on-primary: 253 246 227;
+  --color-line: 20 70 80;
+  --color-line-strong: 88 110 117;
+  --color-primary: 38 139 210;
+  --color-primary-hover: 60 160 230;
+  --color-primary-soft: 20 60 90;
+  --color-primary-soft-fg: 100 180 230;
+  --color-success: 133 153 0;
+  --color-success-soft: 30 60 20;
+  --color-warning: 181 137 0;
+  --color-warning-soft: 60 50 15;
+  --color-danger: 220 50 47;
+  --color-danger-soft: 70 25 25;
+  --color-ring: 38 139 210;
+}
+
+.theme-dracula {
+  --color-bg: 40 42 54;
+  --color-surface: 68 71 90;
+  --color-surface-raised: 80 84 105;
+  --color-surface-sunken: 30 32 42;
+  --color-overlay: 0 0 0;
+  --color-fg: 248 248 242;
+  --color-fg-muted: 189 195 209;
+  --color-fg-subtle: 98 114 164;
+  --color-fg-on-primary: 40 42 54;
+  --color-line: 68 71 90;
+  --color-line-strong: 98 114 164;
+  --color-primary: 189 147 249;
+  --color-primary-hover: 169 127 229;
+  --color-primary-soft: 60 50 100;
+  --color-primary-soft-fg: 220 195 255;
+  --color-success: 80 250 123;
+  --color-success-soft: 30 70 40;
+  --color-warning: 255 184 108;
+  --color-warning-soft: 80 50 30;
+  --color-danger: 255 85 85;
+  --color-danger-soft: 80 30 30;
+  --color-ring: 189 147 249;
+}
+
+.theme-nord {
+  --color-bg: 46 52 64;
+  --color-surface: 59 66 82;
+  --color-surface-raised: 67 76 94;
+  --color-surface-sunken: 35 40 50;
+  --color-overlay: 0 0 0;
+  --color-fg: 236 239 244;
+  --color-fg-muted: 216 222 233;
+  --color-fg-subtle: 129 161 193;
+  --color-fg-on-primary: 46 52 64;
+  --color-line: 67 76 94;
+  --color-line-strong: 76 86 106;
+  --color-primary: 136 192 208;
+  --color-primary-hover: 143 188 187;
+  --color-primary-soft: 50 70 90;
+  --color-primary-soft-fg: 180 220 230;
+  --color-success: 163 190 140;
+  --color-success-soft: 50 70 50;
+  --color-warning: 235 203 139;
+  --color-warning-soft: 80 70 40;
+  --color-danger: 191 97 106;
+  --color-danger-soft: 80 40 45;
+  --color-ring: 136 192 208;
+}
+
+.theme-high-contrast {
+  --color-bg: 0 0 0;
+  --color-surface: 20 20 20;
+  --color-surface-raised: 40 40 40;
+  --color-surface-sunken: 0 0 0;
+  --color-overlay: 0 0 0;
+  --color-fg: 255 255 255;
+  --color-fg-muted: 220 220 220;
+  --color-fg-subtle: 180 180 180;
+  --color-fg-on-primary: 0 0 0;
+  --color-line: 200 200 200;
+  --color-line-strong: 255 255 255;
+  --color-primary: 255 212 0;
+  --color-primary-hover: 255 230 80;
+  --color-primary-soft: 80 65 0;
+  --color-primary-soft-fg: 255 230 80;
+  --color-success: 100 255 100;
+  --color-success-soft: 0 80 0;
+  --color-warning: 255 200 0;
+  --color-warning-soft: 80 60 0;
+  --color-danger: 255 82 82;
+  --color-danger-soft: 80 0 0;
+  --color-ring: 255 212 0;
+}
+
+body {
+  @apply bg-bg text-fg;
+}
+
+/* Dark-mode checkbox styling — keyed off data-theme-mode so it applies
+   under every dark-mode theme, not just .theme-dark. */
+[data-theme-mode="dark"] input[type="checkbox"] {
   color-scheme: dark;
 }
 
+/* Override Chrome/Safari/Edge autofill styling (yellow background, forced
+   text colour). The browser ignores plain `background-color`, so we paint
+   over it with a 1000px inset box-shadow in the surface colour, and use
+   -webkit-text-fill-color to force the foreground colour. */
+input:-webkit-autofill,
+input:-webkit-autofill:hover,
+input:-webkit-autofill:focus,
+input:-webkit-autofill:active,
+textarea:-webkit-autofill,
+textarea:-webkit-autofill:hover,
+textarea:-webkit-autofill:focus,
+select:-webkit-autofill,
+select:-webkit-autofill:hover,
+select:-webkit-autofill:focus {
+  -webkit-box-shadow: 0 0 0 1000px rgb(var(--color-surface)) inset !important;
+  -webkit-text-fill-color: rgb(var(--color-fg)) !important;
+  caret-color: rgb(var(--color-fg));
+  transition: background-color 5000s ease-in-out 0s;
+}

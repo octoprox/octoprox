@@ -986,6 +986,7 @@ class UserRepository:
             is_active=user.is_active,
             invite_token=user.invite_token,
             invite_token_expires_at=user.invite_token_expires_at,
+            theme_preference=user.theme_preference,
             created_at=user.created_at,
             updated_at=user.updated_at,
         )
@@ -1007,6 +1008,7 @@ class UserRepository:
             model.is_active = user.is_active
             model.invite_token = user.invite_token
             model.invite_token_expires_at = user.invite_token_expires_at
+            model.theme_preference = user.theme_preference
             model.updated_at = utc_now()
             await self._session.flush()
         return user
@@ -1029,6 +1031,7 @@ class UserRepository:
             is_active=model.is_active,
             invite_token=model.invite_token,
             invite_token_expires_at=model.invite_token_expires_at,
+            theme_preference=model.theme_preference,
             created_at=model.created_at,
             updated_at=model.updated_at,
         )

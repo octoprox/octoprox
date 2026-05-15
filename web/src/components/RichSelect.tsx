@@ -69,22 +69,22 @@ export function RichSelect({
         onClick={() => !disabled && setIsOpen(!isOpen)}
         className={cn(
           'w-full flex items-center justify-between px-3 py-1.5 text-sm border rounded-lg transition-colors text-left',
-          'focus:outline-none focus:ring-1 focus:ring-blue-500 focus:border-blue-500',
+          'focus:outline-none focus:ring-1 focus:ring-ring focus:border-ring',
           disabled
-            ? 'bg-gray-100 dark:bg-gray-700 cursor-not-allowed text-gray-500'
-            : 'bg-white dark:bg-gray-700 border-gray-300 dark:border-gray-600 hover:border-gray-400 dark:hover:border-gray-500 text-gray-900 dark:text-gray-100',
-          isOpen && 'ring-1 ring-blue-500 border-blue-500'
+            ? 'bg-surface-raised cursor-not-allowed text-fg-muted'
+            : 'bg-surface border-line-strong hover:border-fg-subtle text-fg',
+          isOpen && 'ring-1 ring-ring border-ring'
         )}
         disabled={disabled}
         aria-required={required}
         aria-expanded={isOpen}
       >
-        <span className={cn('truncate', !selectedOption && 'text-gray-400')}>
+        <span className={cn('truncate', !selectedOption && 'text-fg-subtle')}>
           {selectedOption ? selectedOption.label : placeholder}
         </span>
         <ChevronDown
           className={cn(
-            'w-4 h-4 text-gray-400 transition-transform flex-shrink-0 ml-2',
+            'w-4 h-4 text-fg-subtle transition-transform flex-shrink-0 ml-2',
             isOpen && 'rotate-180'
           )}
         />
@@ -92,34 +92,34 @@ export function RichSelect({
 
       {/* Dropdown menu */}
       {isOpen && (
-        <div className="absolute z-50 w-full mt-1 bg-white dark:bg-gray-700 border border-gray-200 dark:border-gray-600 rounded-lg shadow-lg max-h-60 overflow-auto">
+        <div className="absolute z-50 w-full mt-1 bg-surface border border-line-strong rounded-lg shadow-lg max-h-60 overflow-auto">
           {options.map((option) => (
             <button
               key={option.value}
               type="button"
               onClick={() => handleSelect(option.value)}
               className={cn(
-                'w-full flex items-start gap-2 px-3 py-2 text-left hover:bg-blue-50 dark:hover:bg-blue-900/30 transition-colors',
-                option.value === value && 'bg-blue-50 dark:bg-blue-900/30'
+                'w-full flex items-start gap-2 px-3 py-2 text-left hover:bg-primary-soft/60 transition-colors',
+                option.value === value && 'bg-primary-soft/60'
               )}
             >
               <div className="flex-1 min-w-0">
                 <div className="flex items-center gap-2">
-                  <span className="text-sm font-medium text-gray-900 dark:text-gray-100 truncate">
+                  <span className="text-sm font-medium text-fg truncate">
                     {option.label}
                   </span>
                   {option.badge && (
-                    <span className="inline-flex items-center px-1.5 py-0.5 text-xs font-medium rounded bg-gray-100 dark:bg-gray-600 text-gray-600 dark:text-gray-300">
+                    <span className="inline-flex items-center px-1.5 py-0.5 text-xs font-medium rounded bg-surface-raised text-fg-muted">
                       {option.badge}
                     </span>
                   )}
                 </div>
                 {option.description && (
-                  <p className="text-xs text-gray-500 dark:text-gray-400 truncate mt-0.5">{option.description}</p>
+                  <p className="text-xs text-fg-muted truncate mt-0.5">{option.description}</p>
                 )}
               </div>
               {option.value === value && (
-                <Check className="w-4 h-4 text-blue-600 flex-shrink-0 mt-0.5" />
+                <Check className="w-4 h-4 text-primary flex-shrink-0 mt-0.5" />
               )}
             </button>
           ))}
