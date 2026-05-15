@@ -1,28 +1,31 @@
 // Copyright 2026 Octoprox Authors
 // SPDX-License-Identifier: Apache-2.0
 
-import { useState } from 'react'
-import { useMutation } from '@tanstack/react-query'
-import { updateSelf, UserSelfUpdate } from '../api/client'
-import { Button, Input, Label, Alert, Modal, ModalHeader, ModalFooter } from './ui'
+import { useEffect, useState } from 'react'
+import { useMutation, useQuery } from '@tanstack/react-query'
+import { fetchCurrentUser, updateSelf, UserSelfUpdate } from '../../api/client'
+import { Alert, Button, Card, Input, Label } from '../../components/ui'
 
-export default function ProfileModal({
-  username,
-  email,
-  onClose,
-  onSuccess,
-}: {
-  username: string
-  email: string
-  onClose: () => void
-  onSuccess: () => void
-}) {
-  const [newEmail, setNewEmail] = useState(email)
+export default function AccountSection() {
+  const { data: currentUser, isLoading, refetch } = useQuery({
+    queryKey: ['currentUser'],
+    queryFn: fetchCurrentUser,
+    refetchInterval: false,
+    staleTime: Infinity,
+  })
+
+  const [email, setEmail] = useState('')
   const [currentPassword, setCurrentPassword] = useState('')
   const [newPassword, setNewPassword] = useState('')
   const [confirmPassword, setConfirmPassword] = useState('')
   const [error, setError] = useState<string | null>(null)
   const [success, setSuccess] = useState(false)
+
+  useEffect(() => {
+    if (currentUser) {
+      setEmail(currentUser.email || '')
+    }
+  }, [currentUser])
 
   const mutation = useMutation({
     mutationFn: (data: UserSelfUpdate) => updateSelf(data),
@@ -32,10 +35,10 @@ export default function ProfileModal({
       setCurrentPassword('')
       setNewPassword('')
       setConfirmPassword('')
-      onSuccess()
+      refetch()
     },
     onError: (err: any) => {
-      setError(err.message || 'Failed to update profile')
+      setError(err.message || 'Failed to update account')
       setSuccess(false)
     },
   })
@@ -56,44 +59,51 @@ export default function ProfileModal({
     }
 
     const data: UserSelfUpdate = {}
-    if (newEmail !== email) data.email = newEmail
+    if (currentUser && email !== currentUser.email) data.email = email
     if (newPassword) {
       data.password = newPassword
       data.current_password = currentPassword
     }
 
     if (Object.keys(data).length === 0) {
-      onClose()
       return
     }
 
     mutation.mutate(data)
   }
 
+  if (isLoading || !currentUser) {
+    return <div className="text-fg-muted">Loading…</div>
+  }
+
   return (
-    <Modal onClose={onClose}>
-      <form onSubmit={handleSubmit} className="p-6">
-        <ModalHeader title="Profile" onClose={onClose} />
+    <div className="space-y-6">
+      <header>
+        <h2 className="text-xl font-semibold text-fg">Account</h2>
+        <p className="text-sm text-fg-muted mt-1">Manage your email and password.</p>
+      </header>
 
-        {error && <Alert variant="error" className="mb-4">{error}</Alert>}
-        {success && <Alert variant="success" className="mb-4">Profile updated successfully</Alert>}
+      <Card className="p-6">
+        <form onSubmit={handleSubmit} className="space-y-4">
+          {error && <Alert variant="error">{error}</Alert>}
+          {success && <Alert variant="success">Account updated successfully</Alert>}
 
-        <div className="space-y-4">
           <div>
             <Label htmlFor="profile-username">Username</Label>
-            <Input id="profile-username" value={username} disabled />
+            <Input id="profile-username" value={currentUser.username} disabled />
           </div>
           <div>
             <Label htmlFor="profile-email">Email</Label>
             <Input
               id="profile-email"
               type="email"
-              value={newEmail}
-              onChange={(e) => setNewEmail(e.target.value)}
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              autoComplete="email"
             />
           </div>
 
-          <hr className="border-gray-200 dark:border-gray-700" />
+          <hr className="border-line" />
 
           <div>
             <Label htmlFor="current-password">Current Password</Label>
@@ -103,6 +113,7 @@ export default function ProfileModal({
               value={currentPassword}
               onChange={(e) => setCurrentPassword(e.target.value)}
               placeholder="Required to change password"
+              autoComplete="current-password"
             />
           </div>
           <div>
@@ -113,6 +124,7 @@ export default function ProfileModal({
               value={newPassword}
               onChange={(e) => setNewPassword(e.target.value)}
               placeholder="Leave blank to keep current"
+              autoComplete="new-password"
             />
           </div>
           <div>
@@ -123,17 +135,17 @@ export default function ProfileModal({
               value={confirmPassword}
               onChange={(e) => setConfirmPassword(e.target.value)}
               placeholder="Repeat new password"
+              autoComplete="new-password"
             />
           </div>
-        </div>
 
-        <ModalFooter>
-          <Button type="button" variant="secondary" onClick={onClose}>Cancel</Button>
-          <Button type="submit" disabled={mutation.isPending}>
-            {mutation.isPending ? 'Saving...' : 'Save'}
-          </Button>
-        </ModalFooter>
-      </form>
-    </Modal>
+          <div className="flex justify-end">
+            <Button type="submit" disabled={mutation.isPending}>
+              {mutation.isPending ? 'Saving…' : 'Save'}
+            </Button>
+          </div>
+        </form>
+      </Card>
+    </div>
   )
 }

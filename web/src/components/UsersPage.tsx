@@ -3,7 +3,7 @@
 
 import { useState, useMemo } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { useNavigate, useParams } from 'react-router-dom'
+import { useLocation, useNavigate, useParams } from 'react-router-dom'
 import { ColumnDef } from '@tanstack/react-table'
 import { Plus, Trash2, Edit, ArrowLeft, Send, Copy, Check } from 'lucide-react'
 import { Button, Input, Label, Badge, Alert, Modal, ModalHeader, ModalFooter } from './ui'
@@ -43,15 +43,16 @@ export default function UsersPage() {
   const navigate = useNavigate()
   const { projectId } = useParams()
   const queryClient = useQueryClient()
-  const { theme } = useTheme()
+  const { isDark } = useTheme()
   const [showCreateModal, setShowCreateModal] = useState(false)
   const [editingUser, setEditingUser] = useState<UserAccount | null>(null)
   const [deletingUser, setDeletingUser] = useState<UserAccount | null>(null)
   const [inviteUrl, setInviteUrl] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
 
-  // When inside a project layout, we're embedded (sidebar provides navigation)
-  const isEmbedded = !!projectId
+  const location = useLocation()
+  // Embedded when the parent layout already provides chrome (project sidebar or settings page).
+  const isEmbedded = !!projectId || location.pathname.startsWith('/settings')
 
   const { data, isLoading } = useQuery({
     queryKey: ['users'],
@@ -112,17 +113,19 @@ export default function UsersPage() {
       accessorKey: 'username',
       header: 'Username',
       meta: { filterVariant: 'text' as const },
-      cell: ({ getValue }) => (
-        <span className="font-medium">{getValue<string>()}</span>
-      ),
+      cell: ({ getValue }) => {
+        const v = getValue<string>()
+        return <div className="font-medium truncate" title={v}>{v}</div>
+      },
     },
     {
       accessorKey: 'email',
       header: 'Email',
       meta: { filterVariant: 'text' as const },
-      cell: ({ getValue }) => (
-        <span className="text-gray-500 dark:text-gray-400">{getValue<string>() || '-'}</span>
-      ),
+      cell: ({ getValue }) => {
+        const v = getValue<string>() || ''
+        return <div className="text-fg-muted truncate" title={v}>{v || '-'}</div>
+      },
     },
     {
       accessorKey: 'role',
@@ -159,7 +162,7 @@ export default function UsersPage() {
       header: 'Created',
       size: 120,
       cell: ({ getValue }) => (
-        <span className="text-gray-500 dark:text-gray-400 text-sm">
+        <span className="text-fg-muted text-sm">
           {new Date(getValue<string>()).toLocaleDateString()}
         </span>
       ),
@@ -174,7 +177,7 @@ export default function UsersPage() {
           {!row.original.has_password && (
             <button
               onClick={() => reinviteMutation.mutate(row.original.id)}
-              className="p-1.5 text-gray-400 hover:text-amber-600 dark:hover:text-amber-400 hover:bg-amber-50 dark:hover:bg-amber-900/20 rounded transition-colors"
+              className="p-1.5 text-fg-subtle hover:text-warning hover:bg-warning-soft rounded transition-colors"
               title="Resend invite"
             >
               <Send className="w-4 h-4" />
@@ -182,14 +185,14 @@ export default function UsersPage() {
           )}
           <button
             onClick={() => { setError(null); setEditingUser(row.original) }}
-            className="p-1.5 text-gray-400 hover:text-blue-600 dark:hover:text-blue-400 hover:bg-blue-50 dark:hover:bg-blue-900/20 rounded transition-colors"
+            className="p-1.5 text-fg-subtle hover:text-primary hover:bg-primary-soft rounded transition-colors"
             title="Edit user"
           >
             <Edit className="w-4 h-4" />
           </button>
           <button
             onClick={() => setDeletingUser(row.original)}
-            className="p-1.5 text-gray-400 hover:text-red-600 dark:hover:text-red-400 hover:bg-red-50 dark:hover:bg-red-900/20 rounded transition-colors"
+            className="p-1.5 text-fg-subtle hover:text-danger hover:bg-danger-soft rounded transition-colors"
             title="Delete user"
           >
             <Trash2 className="w-4 h-4" />
@@ -216,7 +219,7 @@ export default function UsersPage() {
       )}
 
       {isLoading ? (
-        <div className="text-center text-gray-500 dark:text-gray-400 py-12">Loading users...</div>
+        <div className="text-center text-fg-muted py-12">Loading users...</div>
       ) : (
         <DataTable
           columns={columns}
@@ -265,7 +268,7 @@ export default function UsersPage() {
         <Modal onClose={() => setDeletingUser(null)}>
           <div className="p-6">
             <ModalHeader title="Delete User" onClose={() => setDeletingUser(null)} />
-            <p className="text-gray-600 dark:text-gray-400">
+            <p className="text-fg-muted">
               Are you sure you want to delete user <strong>{deletingUser.username}</strong>? This action cannot be undone.
             </p>
             <ModalFooter>
@@ -291,17 +294,17 @@ export default function UsersPage() {
 
   // Standalone page: wrap with its own header/chrome
   return (
-    <div className="min-h-screen bg-gray-50 dark:bg-gray-900 text-gray-900 dark:text-gray-100">
-      <div className="bg-white dark:bg-gray-800 border-b border-gray-200 dark:border-gray-700">
+    <div className="min-h-screen bg-bg text-fg">
+      <div className="bg-surface border-b border-line">
         <div className="max-w-6xl mx-auto px-6 py-4 flex items-center gap-4">
           <button
             onClick={() => navigate('/')}
-            className="p-2 text-gray-500 hover:text-gray-900 dark:hover:text-gray-100 hover:bg-gray-100 dark:hover:bg-gray-700 rounded-lg transition-colors"
+            className="p-2 text-fg-muted hover:text-fg hover:bg-surface-raised rounded-lg transition-colors"
             title="Back to projects"
           >
             <ArrowLeft className="w-5 h-5" />
           </button>
-          <img src={theme === 'dark' ? octoproxLogoDark : octoproxLogo} alt="Octoprox" className="h-8" />
+          <img src={isDark ? octoproxLogoDark : octoproxLogo} alt="Octoprox" className="h-8" />
         </div>
       </div>
       <div className="max-w-6xl mx-auto px-6 py-8">
@@ -390,7 +393,7 @@ function UserFormModal({
                 type="checkbox"
                 checked={useInvite}
                 onChange={(e) => setUseInvite(e.target.checked)}
-                className="rounded border-gray-300 dark:border-gray-600"
+                className="rounded border-line-strong"
               />
               <Label htmlFor="use_invite" className="mb-0">Send invite link instead of setting password</Label>
             </div>
@@ -426,7 +429,7 @@ function UserFormModal({
                 type="checkbox"
                 checked={isActive}
                 onChange={(e) => setIsActive(e.target.checked)}
-                className="rounded border-gray-300 dark:border-gray-600"
+                className="rounded border-line-strong"
               />
               <Label htmlFor="is_active" className="mb-0">Active</Label>
             </div>
@@ -469,7 +472,7 @@ function InviteUrlModal({ url, onClose }: { url: string; onClose: () => void }) 
     <Modal onClose={onClose}>
       <div className="p-6">
         <ModalHeader title="Invite Link Created" onClose={onClose} />
-        <p className="text-gray-600 dark:text-gray-400 mb-4">
+        <p className="text-fg-muted mb-4">
           Share this link with the user. They will use it to set their password and log in. The link expires in 7 days.
         </p>
         <div className="flex items-center gap-2">

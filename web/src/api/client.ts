@@ -78,6 +78,7 @@ export interface AuthStatus {
   username: string | null
   role: UserRole | null
   user_id: string | null
+  theme_preference: string | null
 }
 
 export interface LoginResponse {
@@ -679,6 +680,7 @@ export interface UserAccount {
   role: UserRole
   is_active: boolean
   has_password: boolean
+  theme_preference: string
   created_at: string
   updated_at: string
 }
@@ -712,12 +714,14 @@ export interface UserUpdate {
   password?: string
   role?: UserRole
   is_active?: boolean
+  theme_preference?: string
 }
 
 export interface UserSelfUpdate {
   email?: string
   password?: string
   current_password?: string
+  theme_preference?: string
 }
 
 // User API functions

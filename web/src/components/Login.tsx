@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { useState } from 'react'
-import { Lock, User, AlertCircle, Moon, Sun } from 'lucide-react'
+import { Lock, User, AlertCircle } from 'lucide-react'
 import octoproxLogo from '../assets/logos/octoprox_horizontal.svg'
 import octoproxLogoDark from '../assets/logos/octoprox_horizontal_dark.svg'
 import { useTheme } from '../contexts/ThemeContext'
@@ -17,7 +17,7 @@ export default function Login({ onLogin, error }: LoginProps) {
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
   const [isLoading, setIsLoading] = useState(false)
-  const { theme, toggleTheme } = useTheme()
+  const { isDark } = useTheme()
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -30,23 +30,15 @@ export default function Login({ onLogin, error }: LoginProps) {
   }
 
   return (
-    <div className="min-h-screen flex items-center justify-center bg-gray-100 dark:bg-gray-900 relative">
-      {/* Theme toggle */}
-      <button
-        onClick={toggleTheme}
-        className="absolute top-4 right-4 p-2 text-gray-500 dark:text-gray-400 hover:text-gray-900 dark:hover:text-gray-100 hover:bg-white/60 dark:hover:bg-gray-800/60 rounded-lg transition-colors"
-        title={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
-      >
-        {theme === 'dark' ? <Sun className="w-5 h-5" /> : <Moon className="w-5 h-5" />}
-      </button>
+    <div className="min-h-screen flex items-center justify-center bg-bg relative">
       <div className="max-w-md w-full">
-        <div className="bg-white dark:bg-gray-800 rounded-lg shadow-lg p-8">
+        <div className="bg-surface rounded-lg shadow-lg p-8">
           {/* Logo */}
           <div className="text-center mb-8">
             <div className="flex items-center justify-center mb-2">
-              <img src={theme === 'dark' ? octoproxLogoDark : octoproxLogo} alt="Octoprox" className="h-12" />
+              <img src={isDark ? octoproxLogoDark : octoproxLogo} alt="Octoprox" className="h-12" />
             </div>
-            <p className="text-gray-500 dark:text-gray-400">Sign in to your account</p>
+            <p className="text-fg-muted">Sign in to your account</p>
           </div>
 
           {/* Error message */}
@@ -100,7 +92,7 @@ export default function Login({ onLogin, error }: LoginProps) {
             <Button
               type="submit"
               disabled={isLoading}
-              className="w-full shadow-sm focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 dark:focus:ring-violet-500"
+              className="w-full shadow-sm focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-ring"
             >
               {isLoading ? 'Signing in...' : 'Sign in'}
             </Button>

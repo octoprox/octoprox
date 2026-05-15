@@ -16,7 +16,7 @@ export function Modal({ children, onClose, className, overlayClassName }: ModalP
   return (
     <div
       className={cn(
-        'fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4',
+        'fixed inset-0 bg-overlay/50 flex items-center justify-center z-50 p-4',
         overlayClassName
       )}
       onClick={(e) => {
@@ -25,7 +25,7 @@ export function Modal({ children, onClose, className, overlayClassName }: ModalP
     >
       <div
         className={cn(
-          'bg-white dark:bg-gray-800 rounded-lg shadow-xl w-full max-w-md',
+          'bg-surface rounded-lg shadow-xl w-full max-w-md',
           className
         )}
       >
@@ -51,7 +51,7 @@ export function ModalHeader({ title, onClose, children }: ModalHeaderProps) {
       <button
         type="button"
         onClick={onClose}
-        className="p-2 hover:bg-gray-100 dark:hover:bg-gray-700 rounded-lg text-gray-500 hover:text-gray-700 dark:hover:text-gray-300"
+        className="p-2 hover:bg-surface-raised rounded-lg text-fg-muted hover:text-fg"
       >
         <X className="w-5 h-5" />
       </button>

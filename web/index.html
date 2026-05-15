@@ -10,6 +10,24 @@
     <link rel="shortcut icon" href="/favicon.ico" />
     <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png" />
     <link rel="manifest" href="/site.webmanifest" />
+    <script>
+      // Apply theme before React mounts to avoid FOUC.
+      // Keep ids in sync with web/src/themes/index.ts.
+      (function () {
+        var ids = ['light','dark','solarized-light','solarized-dark','dracula','nord','high-contrast'];
+        var darkIds = {'dark':1,'solarized-dark':1,'dracula':1,'nord':1,'high-contrast':1};
+        var stored = null;
+        try { stored = localStorage.getItem('octoprox_theme'); } catch (e) {}
+        var id = (stored && ids.indexOf(stored) !== -1) ? stored : null;
+        if (!id) {
+          id = (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) ? 'dark' : 'light';
+        }
+        var isDark = !!darkIds[id];
+        var root = document.documentElement;
+        root.className = 'theme-' + id + (isDark ? ' dark' : '');
+        root.setAttribute('data-theme-mode', isDark ? 'dark' : 'light');
+      })();
+    </script>
   </head>
   <body>
     <div id="root"></div>

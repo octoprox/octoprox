@@ -208,25 +208,30 @@ export default function AddCredentialModal({ isOpen, onClose, onSuccess, fixedTy
               <Textarea
                 value={formData.config[key] || ''}
                 onChange={(e) => handleConfigChange(key, e.target.value)}
-                className={`font-mono text-sm ${jsonError ? 'border-red-300 dark:border-red-600 bg-red-50 dark:bg-red-900/20' : ''}`}
+                className={`font-mono text-sm ${jsonError ? 'border-danger/50 bg-danger-soft' : ''}`}
                 rows={4}
                 placeholder="Paste service account JSON here"
+                autoComplete="off"
               />
               {jsonError && (
-                <p className="mt-1 text-xs text-red-600 dark:text-red-400">{jsonError}</p>
+                <p className="mt-1 text-xs text-danger">{jsonError}</p>
               )}
             </div>
           ) : (
             <div className="relative">
               <Input
                 type={isSecret && !showSecrets[key] ? 'password' : 'text'}
+                name={`octoprox-cred-${key}`}
                 value={formData.config[key] || ''}
                 onChange={(e) => handleConfigChange(key, e.target.value)}
                 className="pr-10"
                 placeholder={key.replace(/_/g, ' ')}
+                autoComplete={isSecret ? 'new-password' : 'off'}
+                data-1p-ignore
+                data-lpignore="true"
               />
               {isSecret && (
-                <button type="button" onClick={() => toggleSecret(key)} className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-500 hover:text-gray-700 dark:hover:text-gray-300">
+                <button type="button" onClick={() => toggleSecret(key)} className="absolute right-2 top-1/2 -translate-y-1/2 text-fg-muted hover:text-fg">
                   {showSecrets[key] ? <EyeOff className="w-5 h-5" /> : <Eye className="w-5 h-5" />}
                 </button>
               )}
@@ -242,13 +247,13 @@ export default function AddCredentialModal({ isOpen, onClose, onSuccess, fixedTy
   const typeLabel = CREDENTIAL_TYPES.find((t) => t.value === formData.type)?.label || formData.type
 
   return (
-    <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-[60]">
-      <div className="bg-white dark:bg-gray-800 rounded-lg shadow-xl max-w-lg w-full mx-4 max-h-[90vh] overflow-y-auto">
-        <div className="p-6 border-b border-gray-200 dark:border-gray-700 flex justify-between items-center">
+    <div className="fixed inset-0 bg-overlay/50 flex items-center justify-center z-[60]">
+      <div className="bg-surface rounded-lg shadow-xl max-w-lg w-full mx-4 max-h-[90vh] overflow-y-auto">
+        <div className="p-6 border-b border-line flex justify-between items-center">
           <h2 className="text-xl font-semibold">
             {isEditMode ? `Edit ${typeLabel} Credential` : (fixedType ? `Create ${typeLabel} Credential` : 'Create Credential')}
           </h2>
-          <button onClick={handleClose} className="p-2 hover:bg-gray-100 dark:hover:bg-gray-700 rounded-lg">
+          <button onClick={handleClose} className="p-2 hover:bg-surface-raised rounded-lg">
             <X className="w-5 h-5" />
           </button>
         </div>

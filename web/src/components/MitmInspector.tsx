@@ -42,13 +42,13 @@ function HeadersTable({ headers }: { headers: [string, string][] }) {
     return <span className="text-xs text-gray-400 italic">No headers</span>
   }
   return (
-    <div className="bg-white dark:bg-gray-800 rounded border border-gray-200 dark:border-gray-700 overflow-auto h-48">
+    <div className="bg-surface rounded border border-line overflow-auto h-48">
       <table className="w-full text-xs font-mono">
         <tbody>
           {headers.map(([key, value], i) => (
-            <tr key={`${key}-${i}`} className="border-b border-gray-100 dark:border-gray-700 last:border-0">
-              <td className="px-2 py-1 font-semibold text-gray-600 dark:text-gray-400 whitespace-nowrap align-top">{key}</td>
-              <td className="px-2 py-1 text-gray-800 dark:text-gray-200 break-all">{value}</td>
+            <tr key={`${key}-${i}`} className="border-b border-line last:border-0">
+              <td className="px-2 py-1 font-semibold text-fg-muted whitespace-nowrap align-top">{key}</td>
+              <td className="px-2 py-1 text-fg break-all">{value}</td>
             </tr>
           ))}
         </tbody>
@@ -66,7 +66,7 @@ function CopyButton({ text }: { text: string }) {
         setCopied(true)
         setTimeout(() => setCopied(false), 1500)
       }}
-      className="ml-1.5 p-0.5 text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 inline-flex"
+      className="ml-1.5 p-0.5 text-gray-400 hover:text-fg-muted inline-flex"
       title="Copy to clipboard"
     >
       {copied ? <Check className="w-3 h-3 text-green-500" /> : <Copy className="w-3 h-3" />}
@@ -76,17 +76,17 @@ function CopyButton({ text }: { text: string }) {
 
 function TlsRow({ label, children }: { label: string; children: React.ReactNode }) {
   return (
-    <tr className="border-b border-gray-100 dark:border-gray-700 last:border-0">
-      <td className="px-2 py-1 font-semibold text-gray-600 dark:text-gray-400 whitespace-nowrap align-top w-40">{label}</td>
-      <td className="px-2 py-1 text-gray-800 dark:text-gray-200">{children}</td>
+    <tr className="border-b border-line last:border-0">
+      <td className="px-2 py-1 font-semibold text-fg-muted whitespace-nowrap align-top w-40">{label}</td>
+      <td className="px-2 py-1 text-fg">{children}</td>
     </tr>
   )
 }
 
 function TlsSectionHeader({ title }: { title: string }) {
   return (
-    <tr className="border-b border-gray-200 dark:border-gray-600">
-      <td colSpan={2} className="px-2 py-1.5 text-[10px] font-bold uppercase tracking-wider text-gray-500 dark:text-gray-400 bg-gray-50 dark:bg-gray-800/50">{title}</td>
+    <tr className="border-b border-line">
+      <td colSpan={2} className="px-2 py-1.5 text-[10px] font-bold uppercase tracking-wider text-fg-muted bg-surface-raised/60">{title}</td>
     </tr>
   )
 }
@@ -110,7 +110,7 @@ function TlsInfoTable({ record }: { record: MitmRequestRecord }) {
   const ch = record.tls_client_hello
 
   return (
-    <div className="bg-white dark:bg-gray-800 rounded border border-gray-200 dark:border-gray-700 overflow-auto">
+    <div className="bg-surface rounded border border-line overflow-auto">
       <table className="w-full text-xs font-mono">
         <tbody>
           <TlsSectionHeader title="Negotiated" />
@@ -235,24 +235,24 @@ function ExpandedDetail({ record }: { record: MitmRequestRecord }) {
   const [activeTab, setActiveTab] = useState<DetailTab>('request')
 
   return (
-    <div className="p-4 bg-gray-50 dark:bg-gray-900 space-y-4">
+    <div className="p-4 bg-bg space-y-4">
       <div>
-        <div className="flex gap-0 border-b border-gray-200 dark:border-gray-700 mb-3">
+        <div className="flex gap-0 border-b border-line mb-3">
           {tabs.map(({ key, label, tooltip }) => (
             <button
               key={key}
               onClick={() => setActiveTab(key)}
               className={`px-3 py-1.5 text-xs font-medium border-b-2 -mb-px transition-colors flex items-center gap-1.5 ${
                 activeTab === key
-                  ? 'border-blue-500 text-blue-600 dark:text-blue-400'
-                  : 'border-transparent text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-300'
+                  ? 'border-blue-500 text-primary'
+                  : 'border-transparent text-fg-muted hover:text-fg'
               }`}
             >
               {label}
               {tooltip && (
                 <span className="relative group">
-                  <Info className="w-3.5 h-3.5 text-gray-400 dark:text-gray-500 cursor-help" />
-                  <span className="absolute left-1/2 -translate-x-1/2 bottom-full mb-1.5 w-56 px-2.5 py-1.5 rounded bg-gray-900 dark:bg-gray-100 text-[10px] leading-tight text-gray-100 dark:text-gray-900 opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all z-50 pointer-events-none">
+                  <Info className="w-3.5 h-3.5 text-fg-subtle cursor-help" />
+                  <span className="absolute left-1/2 -translate-x-1/2 bottom-full mb-1.5 w-56 px-2.5 py-1.5 rounded bg-fg text-[10px] leading-tight text-bg opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all z-50 pointer-events-none">
                     {tooltip}
                   </span>
                 </span>
@@ -265,14 +265,14 @@ function ExpandedDetail({ record }: { record: MitmRequestRecord }) {
         {activeTab === 'response' && <HeadersTable headers={record.response_headers} />}
         {activeTab === 'tls' && hasTls && <TlsInfoTable record={record} />}
       </div>
-      <div className="flex flex-wrap gap-x-6 gap-y-1 text-xs text-gray-500 dark:text-gray-400">
-        <span>Full URL: <span className="font-mono text-gray-700 dark:text-gray-300">{record.url}</span></span>
+      <div className="flex flex-wrap gap-x-6 gap-y-1 text-xs text-fg-muted">
+        <span>Full URL: <span className="font-mono text-fg">{record.url}</span></span>
       </div>
-      <div className="flex flex-wrap gap-x-6 gap-y-1 text-xs text-gray-500 dark:text-gray-400">
-        <span>Mode: <span className="text-gray-700 dark:text-gray-300">{record.mitm_mode}</span></span>
-        <span>Engine: <span className="text-gray-700 dark:text-gray-300">{record.mitm_engine || 'n/a'}</span></span>
-        <span>Browser: <span className="text-gray-700 dark:text-gray-300">{record.mitm_browser || 'n/a'}</span></span>
-        <span>Proxy: <span className="font-mono text-gray-700 dark:text-gray-300">{record.proxy_url}</span></span>
+      <div className="flex flex-wrap gap-x-6 gap-y-1 text-xs text-fg-muted">
+        <span>Mode: <span className="text-fg">{record.mitm_mode}</span></span>
+        <span>Engine: <span className="text-fg">{record.mitm_engine || 'n/a'}</span></span>
+        <span>Browser: <span className="text-fg">{record.mitm_browser || 'n/a'}</span></span>
+        <span>Proxy: <span className="font-mono text-fg">{record.proxy_url}</span></span>
       </div>
     </div>
   )
@@ -304,7 +304,7 @@ export default function MitmInspector() {
       cell: ({ row }: { row: Row<MitmRequestRecord> }) => (
         <button
           onClick={row.getToggleExpandedHandler()}
-          className="p-0.5 text-gray-400 hover:text-gray-600 dark:hover:text-gray-300"
+          className="p-0.5 text-gray-400 hover:text-fg-muted"
         >
           {row.getIsExpanded()
             ? <ChevronDown className="w-4 h-4" />
@@ -319,7 +319,7 @@ export default function MitmInspector() {
       cell: ({ getValue }) => {
         const ts = getValue<string>()
         return (
-          <span className="font-mono text-xs text-gray-500 dark:text-gray-400">
+          <span className="font-mono text-xs text-fg-muted">
             {new Date(ts + 'Z').toLocaleTimeString()}
           </span>
         )
@@ -385,11 +385,11 @@ export default function MitmInspector() {
         <div className="text-xs leading-tight whitespace-nowrap">
           <div>
             <span className="text-gray-400">Req </span>
-            <span className="text-orange-600 dark:text-orange-400">{formatBytes(row.original.request_body_size)}</span>
+            <span className="text-warning">{formatBytes(row.original.request_body_size)}</span>
           </div>
           <div>
             <span className="text-gray-400">Res </span>
-            <span className="text-teal-600 dark:text-teal-400">{formatBytes(row.original.response_body_size)}</span>
+            <span className="text-success">{formatBytes(row.original.response_body_size)}</span>
           </div>
         </div>
       ),
@@ -417,8 +417,8 @@ export default function MitmInspector() {
     <div>
       <div className="flex items-center justify-between mb-6">
         <div>
-          <h1 className="text-2xl font-bold text-gray-900 dark:text-gray-100">MITM Inspector</h1>
-          <p className="text-sm text-gray-500 dark:text-gray-400 mt-1">
+          <h1 className="text-2xl font-bold text-fg">MITM Inspector</h1>
+          <p className="text-sm text-fg-muted mt-1">
             Inspect intercepted HTTPS requests and responses in real time
           </p>
         </div>
@@ -427,7 +427,7 @@ export default function MitmInspector() {
             variant="ghost"
             onClick={() => clearMutation.mutate()}
             disabled={clearMutation.isPending}
-            className="text-red-600 hover:text-red-700 hover:bg-red-50 dark:text-red-400 dark:hover:text-red-300 dark:hover:bg-red-900/20"
+            className="text-danger hover:brightness-110 hover:bg-danger-soft"
           >
             <Trash2 className="w-4 h-4 mr-1.5" />
             Clear
@@ -436,12 +436,12 @@ export default function MitmInspector() {
       </div>
 
       {isLoading ? (
-        <div className="text-center py-12 text-gray-500 dark:text-gray-400">Loading...</div>
+        <div className="text-center py-12 text-fg-muted">Loading...</div>
       ) : records.length === 0 ? (
         <div className="text-center py-16">
-          <Search className="w-12 h-12 text-gray-300 dark:text-gray-600 mx-auto mb-4" />
-          <h3 className="text-lg font-medium text-gray-900 dark:text-gray-100 mb-1">No intercepted requests</h3>
-          <p className="text-sm text-gray-500 dark:text-gray-400">
+          <Search className="w-12 h-12 text-fg-subtle mx-auto mb-4" />
+          <h3 className="text-lg font-medium text-fg mb-1">No intercepted requests</h3>
+          <p className="text-sm text-fg-muted">
             Requests will appear here when MITM interception is enabled and traffic flows through the proxy.
           </p>
         </div>

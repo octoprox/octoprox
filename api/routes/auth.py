@@ -48,6 +48,7 @@ class AuthStatus(BaseModel):
     username: str | None = None
     role: str | None = None
     user_id: str | None = None
+    theme_preference: str | None = None
 
 
 def create_jwt(payload: dict[str, Any], secret: str, expiry_hours: int) -> str:
@@ -110,18 +111,25 @@ async def login(login_req: LoginRequest, session: DbDep) -> LoginResponse:
 
 
 @router.get("/status", response_model=AuthStatus)
-async def auth_status(request: Request) -> AuthStatus:
+async def auth_status(request: Request, session: DbDep) -> AuthStatus:
     """Get current authentication status."""
     auth_header = request.headers.get("Authorization", "")
     if auth_header.startswith("Bearer "):
         token = auth_header[7:]
         payload = verify_jwt(token, settings.jwt_secret)
         if payload:
+            user_id = payload.get("user_id")
+            theme_preference: str | None = None
+            if user_id:
+                user = await UserRepository(session).get_by_id(user_id)
+                if user:
+                    theme_preference = user.theme_preference
             return AuthStatus(
                 authenticated=True,
                 username=payload.get("sub"),
                 role=payload.get("role"),
-                user_id=payload.get("user_id"),
+                user_id=user_id,
+                theme_preference=theme_preference,
             )
 
     return AuthStatus(authenticated=False)

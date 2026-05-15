@@ -32,6 +32,7 @@ class User(BaseModel):
     is_active: bool = True
     invite_token: str | None = None
     invite_token_expires_at: datetime | None = None
+    theme_preference: str = "light"
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
 
@@ -44,6 +45,28 @@ def _validate_email(v: str) -> str:
     v = v.strip()
     if v and not _EMAIL_RE.fullmatch(v):
         raise ValueError("Invalid email address")
+    return v
+
+
+# Keep in sync with THEMES in web/src/themes/index.ts
+ALLOWED_THEMES = frozenset(
+    {
+        "light",
+        "dark",
+        "solarized-light",
+        "solarized-dark",
+        "dracula",
+        "nord",
+        "high-contrast",
+    }
+)
+
+
+def _validate_theme(v: str | None) -> str | None:
+    if v is None:
+        return v
+    if v not in ALLOWED_THEMES:
+        raise ValueError(f"Invalid theme: {v}")
     return v
 
 
@@ -69,6 +92,7 @@ class UserUpdate(BaseModel):
     password: str | None = None
     role: UserRole | None = None
     is_active: bool | None = None
+    theme_preference: str | None = None
 
     @field_validator("email")
     @classmethod
@@ -76,6 +100,11 @@ class UserUpdate(BaseModel):
         if v is None:
             return v
         return _validate_email(v)
+
+    @field_validator("theme_preference")
+    @classmethod
+    def check_theme(cls, v: str | None) -> str | None:
+        return _validate_theme(v)
 
 
 class UserSelfUpdate(BaseModel):
@@ -84,6 +113,7 @@ class UserSelfUpdate(BaseModel):
     email: str | None = None
     password: str | None = None
     current_password: str | None = None
+    theme_preference: str | None = None
 
     @field_validator("email")
     @classmethod
@@ -91,6 +121,11 @@ class UserSelfUpdate(BaseModel):
         if v is None:
             return v
         return _validate_email(v)
+
+    @field_validator("theme_preference")
+    @classmethod
+    def check_theme(cls, v: str | None) -> str | None:
+        return _validate_theme(v)
 
 
 class UserInviteCreate(BaseModel):
@@ -122,6 +157,7 @@ class UserResponse(BaseModel):
     role: UserRole
     is_active: bool
     has_password: bool
+    theme_preference: str
     created_at: datetime
     updated_at: datetime
 

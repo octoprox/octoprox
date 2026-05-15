@@ -8,17 +8,12 @@ const baseClasses =
   'inline-flex items-center justify-center gap-2 rounded-lg font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed'
 
 const variants = {
-  primary:
-    'bg-blue-600 text-white hover:bg-blue-700 dark:bg-violet-600 dark:hover:bg-violet-700',
-  success:
-    'bg-green-600 text-white hover:bg-green-700 dark:bg-emerald-700 dark:hover:bg-emerald-800',
-  danger: 'bg-red-600 text-white hover:bg-red-700',
-  secondary:
-    'bg-gray-200 dark:bg-gray-600 text-gray-700 dark:text-gray-300 hover:bg-gray-300 dark:hover:bg-gray-500',
-  ghost:
-    'text-gray-600 dark:text-gray-400 hover:text-gray-800 dark:hover:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700',
-  outline:
-    'border border-gray-300 dark:border-gray-600 hover:bg-gray-50 dark:hover:bg-gray-700 text-gray-700 dark:text-gray-300',
+  primary: 'bg-primary text-fg-on-primary hover:bg-primary-hover',
+  success: 'bg-success text-fg-on-primary hover:brightness-110',
+  danger: 'bg-danger text-fg-on-primary hover:brightness-110',
+  secondary: 'bg-surface-raised text-fg hover:bg-line',
+  ghost: 'text-fg-muted hover:text-fg hover:bg-surface-raised',
+  outline: 'border border-line-strong text-fg hover:bg-surface-raised',
 } as const
 
 const sizes = {

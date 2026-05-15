@@ -277,7 +277,7 @@ export default function ProxyList() {
           {row.original.quarantined && (
             <button
               onClick={() => unquarantineMutation.mutate(row.original.id)}
-              className="p-1 text-orange-600 hover:text-orange-800 hover:bg-orange-50 dark:hover:bg-orange-900/30 rounded"
+              className="p-1 text-warning hover:brightness-110 hover:bg-warning-soft rounded"
               title="Remove from quarantine"
             >
               <ShieldOff className="w-4 h-4" />
@@ -285,14 +285,14 @@ export default function ProxyList() {
           )}
           <button
             onClick={() => startEditing(row.original)}
-            className="p-1 text-blue-600 hover:text-blue-800 hover:bg-blue-50 dark:hover:bg-blue-900/30 rounded"
+            className="p-1 text-primary hover:brightness-110 hover:bg-primary-soft rounded"
             title="Edit"
           >
             <Pencil className="w-4 h-4" />
           </button>
           <button
             onClick={() => deleteMutation.mutate(row.original.id)}
-            className="p-1 text-red-600 hover:text-red-800 hover:bg-red-50 dark:hover:bg-red-900/30 rounded"
+            className="p-1 text-danger hover:brightness-110 hover:bg-danger-soft rounded"
             title="Delete"
           >
             <Trash2 className="w-4 h-4" />
@@ -453,8 +453,8 @@ export default function ProxyList() {
                   accept=".csv,.txt"
                   required
                 />
-                <p className="text-sm text-gray-500 dark:text-gray-400 mt-2">
-                  One proxy per line: <code className="bg-gray-100 dark:bg-gray-700 px-1 rounded">protocol://[user:pass@]host:port</code>
+                <p className="text-sm text-fg-muted mt-2">
+                  One proxy per line: <code className="bg-surface-raised px-1 rounded">protocol://[user:pass@]host:port</code>
                 </p>
               </div>
 
@@ -478,32 +478,32 @@ export default function ProxyList() {
             </form>
           ) : (
             <div>
-              <div className="mb-4 p-4 bg-gray-50 dark:bg-gray-700 rounded-lg">
+              <div className="mb-4 p-4 bg-surface-raised rounded-lg">
                 <div className="grid grid-cols-3 gap-4 text-center">
                   <div>
-                    <p className="text-2xl font-bold text-gray-800 dark:text-gray-200">{uploadResult.total_lines}</p>
-                    <p className="text-sm text-gray-500 dark:text-gray-400">Total Lines</p>
+                    <p className="text-2xl font-bold text-fg">{uploadResult.total_lines}</p>
+                    <p className="text-sm text-fg-muted">Total Lines</p>
                   </div>
                   <div>
                     <p className="text-2xl font-bold text-green-600">{uploadResult.successful}</p>
-                    <p className="text-sm text-gray-500 dark:text-gray-400">Successful</p>
+                    <p className="text-sm text-fg-muted">Successful</p>
                   </div>
                   <div>
                     <p className="text-2xl font-bold text-red-600">{uploadResult.failed}</p>
-                    <p className="text-sm text-gray-500 dark:text-gray-400">Failed</p>
+                    <p className="text-sm text-fg-muted">Failed</p>
                   </div>
                 </div>
               </div>
 
               {uploadResult.errors.length > 0 && (
                 <div className="mb-4">
-                  <h3 className="text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">Errors:</h3>
-                  <div className="max-h-40 overflow-y-auto bg-red-50 dark:bg-red-900/20 rounded-lg p-3">
+                  <h3 className="text-sm font-medium text-fg mb-2">Errors:</h3>
+                  <div className="max-h-40 overflow-y-auto bg-danger-soft rounded-lg p-3">
                     {uploadResult.errors.map((err, idx) => (
-                      <div key={idx} className="text-sm text-red-700 dark:text-red-400 mb-1">
+                      <div key={idx} className="text-sm text-danger mb-1">
                         <span className="font-medium">Line {err.line_number}:</span> {err.error}
                         <br />
-                        <code className="text-xs bg-red-100 dark:bg-red-900/40 px-1 rounded">{err.line}</code>
+                        <code className="text-xs bg-danger/20 px-1 rounded">{err.line}</code>
                       </div>
                     ))}
                   </div>
@@ -556,7 +556,7 @@ function StatusBadge({ status, connectorEnabled = true, quarantined = false, qua
     return (
       <div className="flex items-center gap-1.5">
         <Badge color="orange">quarantined</Badge>
-        <span className="text-xs text-gray-500 dark:text-gray-400 whitespace-nowrap">
+        <span className="text-xs text-fg-muted whitespace-nowrap">
           {formatQuarantineRemaining(quarantineRemainingSeconds)}
         </span>
       </div>

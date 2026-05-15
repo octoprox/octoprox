@@ -132,7 +132,7 @@ export default function Dashboard() {
           <h2 className="text-xl font-semibold mb-4">Auto-Scaling Status</h2>
           <div className="grid grid-cols-2 md:grid-cols-4 gap-6">
             <div>
-              <p className="text-gray-500 dark:text-gray-400 text-sm mb-1">Demand Level</p>
+              <p className="text-fg-muted text-sm mb-1">Demand Level</p>
               <DemandBadge level={scalingMetrics.demand_level} />
             </div>
             <MetricItem
@@ -151,7 +151,7 @@ export default function Dashboard() {
             />
           </div>
           {(scalingMetrics.draining_instances > 0 || scalingMetrics.terminating_instances > 0) && (
-            <div className="mt-4 pt-4 border-t border-gray-100 dark:border-gray-700 flex gap-6">
+            <div className="mt-4 pt-4 border-t border-line flex gap-6">
               {scalingMetrics.draining_instances > 0 && (
                 <div className="flex items-center gap-2">
                   <Loader className="w-4 h-4 text-orange-500 animate-spin" />
@@ -188,7 +188,7 @@ export default function Dashboard() {
             </Button>
           ))}
         </div>
-        <p className="mt-4 text-gray-500 dark:text-gray-400 text-sm">
+        <p className="mt-4 text-fg-muted text-sm">
           Current strategy: <strong>{formatStrategy(strategy?.current_strategy ?? '')}</strong>
         </p>
       </Card>
@@ -212,7 +212,7 @@ function StatCard({ title, value, icon }: { title: string; value: string | numbe
     <Card className="p-6">
       <div className="flex items-center justify-between">
         <div>
-          <p className="text-gray-500 dark:text-gray-400 text-sm">{title}</p>
+          <p className="text-fg-muted text-sm">{title}</p>
           <p className="text-3xl font-bold mt-1">{value}</p>
         </div>
         {icon}
@@ -224,7 +224,7 @@ function StatCard({ title, value, icon }: { title: string; value: string | numbe
 function MetricItem({
   label,
   value,
-  color = 'text-gray-900 dark:text-gray-100',
+  color = 'text-fg',
   icon,
 }: {
   label: string
@@ -236,7 +236,7 @@ function MetricItem({
     <div>
       <div className="flex items-center gap-1">
         {icon}
-        <p className="text-gray-500 dark:text-gray-400 text-sm">{label}</p>
+        <p className="text-fg-muted text-sm">{label}</p>
       </div>
       <p className={`text-2xl font-bold ${color}`}>{value}</p>
     </div>
