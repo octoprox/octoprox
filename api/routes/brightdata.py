@@ -17,7 +17,7 @@ from api.services.brightdata_api import (
 
 logger = structlog.get_logger()
 
-router = APIRouter(prefix="/brightdata", tags=["brightdata"])
+router = APIRouter(prefix="/brightdata")
 
 
 async def fetch_zones(token: str) -> list[BrightDataZone]:
