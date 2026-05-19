@@ -4,9 +4,10 @@
 """Configuration management for Octoprox."""
 
 import os
+import uuid
 from functools import lru_cache
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import yaml  # type: ignore[import-untyped]
 from pydantic import Field
@@ -99,6 +100,24 @@ class Settings(BaseSettings):
 
     # Environment
     env: str = Field(default="development")
+
+    # Instance identity for multi-instance deployments. Used by the event bus
+    # to drop self-echoes, by Redis heartbeats to advertise membership, and by
+    # leadership leases to identify the holder.
+    instance_id: str = Field(
+        default_factory=lambda: str(uuid.uuid4()),
+        description="Unique identifier for this process. Auto-generated per boot if unset.",
+    )
+
+    # Process role. Today only `all` (monolith) is wired; the flag exists so
+    # Option B can split into control/data/worker without re-introducing it.
+    role: Literal["all", "control", "data", "worker"] = Field(
+        default="all",
+        description=(
+            "Process role: 'all' runs everything in one process (default), "
+            "'control' / 'data' / 'worker' reserved for the future tier split."
+        ),
+    )
 
     # Redis
     redis_url: str = Field(default="redis://localhost:6379/0")

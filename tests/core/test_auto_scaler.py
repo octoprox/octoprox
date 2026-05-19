@@ -11,6 +11,7 @@ import pytest
 from api.core import signals, utc_now
 from api.core.auto_scaler import SCALING_COOLDOWN_SECONDS, AutoScaler
 from api.core.demand_tracker import DemandLevel
+from api.db.redis import RedisClient
 from api.models.connector import CloudConnectorConfig, Connector
 from api.models.credential import Credential, CredentialType
 from api.models.proxy import Proxy, ProxyProtocol, ProxyStatus
@@ -31,9 +32,11 @@ def mock_data_provider() -> MagicMock:
 
 
 @pytest.fixture
-def auto_scaler(mock_data_provider: MagicMock) -> AutoScaler:
+def auto_scaler(
+    mock_data_provider: MagicMock, redis_client: RedisClient
+) -> AutoScaler:
     """Create an AutoScaler instance for testing."""
-    return AutoScaler(mock_data_provider)
+    return AutoScaler(mock_data_provider, redis_client, "test-instance")
 
 
 @pytest.fixture
@@ -90,13 +93,12 @@ def sample_proxy() -> Proxy:
 class TestAutoScalerInit:
     """Tests for AutoScaler initialization."""
 
-    def test_init(self, mock_data_provider: MagicMock) -> None:
+    def test_init(self, mock_data_provider: MagicMock, redis_client: RedisClient) -> None:
         """Test AutoScaler initialization."""
-        scaler = AutoScaler(mock_data_provider)
+        scaler = AutoScaler(mock_data_provider, redis_client, "test-instance")
         assert scaler._data_provider == mock_data_provider
         assert scaler._running is False
         assert scaler._rotation_schedule == {}
-        assert scaler._last_scale_action_at == {}
         assert scaler._last_demand_level == {}
 
 
@@ -344,8 +346,12 @@ class TestScalingCooldown:
         sample_credential: Credential,
     ) -> None:
         """Test that scaling is skipped when in cooldown period."""
-        # Set a recent scale action
-        auto_scaler._last_scale_action_at[sample_connector.id] = utc_now() - timedelta(seconds=60)
+        # Set a recent scale action (Redis-backed)
+        await auto_scaler._redis_client.client.hset(
+            "autoscaler:last_action",
+            sample_connector.id,
+            (utc_now() - timedelta(seconds=60)).isoformat(),
+        )
 
         mock_data_provider.get_active_proxies_for_connector.return_value = []
         mock_data_provider.demand_tracker.get_demand_level = AsyncMock(
@@ -366,8 +372,10 @@ class TestScalingCooldown:
     ) -> None:
         """Test that scaling proceeds after cooldown period expires."""
         # Set a scale action that happened more than SCALING_COOLDOWN_SECONDS ago
-        auto_scaler._last_scale_action_at[sample_connector.id] = (
-            utc_now() - timedelta(seconds=SCALING_COOLDOWN_SECONDS + 10)
+        await auto_scaler._redis_client.client.hset(
+            "autoscaler:last_action",
+            sample_connector.id,
+            (utc_now() - timedelta(seconds=SCALING_COOLDOWN_SECONDS + 10)).isoformat(),
         )
 
         mock_data_provider.get_active_proxies_for_connector.return_value = []
@@ -380,27 +388,36 @@ class TestScalingCooldown:
             # Should scale up to min (1) since current is 0
             mock_scale_up.assert_called_once()
 
-    def test_is_in_scaling_cooldown_no_history(
+    @pytest.mark.asyncio
+    async def test_is_in_scaling_cooldown_no_history(
         self, auto_scaler: AutoScaler
     ) -> None:
         """Test cooldown returns False when no previous action."""
-        assert auto_scaler._is_in_scaling_cooldown("unknown-connector") is False
+        assert await auto_scaler._is_in_scaling_cooldown("unknown-connector") is False
 
-    def test_is_in_scaling_cooldown_recent_action(
+    @pytest.mark.asyncio
+    async def test_is_in_scaling_cooldown_recent_action(
         self, auto_scaler: AutoScaler
     ) -> None:
         """Test cooldown returns True for recent action."""
-        auto_scaler._last_scale_action_at["conn-1"] = utc_now() - timedelta(seconds=30)
-        assert auto_scaler._is_in_scaling_cooldown("conn-1") is True
+        await auto_scaler._redis_client.client.hset(
+            "autoscaler:last_action",
+            "conn-1",
+            (utc_now() - timedelta(seconds=30)).isoformat(),
+        )
+        assert await auto_scaler._is_in_scaling_cooldown("conn-1") is True
 
-    def test_is_in_scaling_cooldown_expired(
+    @pytest.mark.asyncio
+    async def test_is_in_scaling_cooldown_expired(
         self, auto_scaler: AutoScaler
     ) -> None:
         """Test cooldown returns False when expired."""
-        auto_scaler._last_scale_action_at["conn-1"] = (
-            utc_now() - timedelta(seconds=SCALING_COOLDOWN_SECONDS + 1)
+        await auto_scaler._redis_client.client.hset(
+            "autoscaler:last_action",
+            "conn-1",
+            (utc_now() - timedelta(seconds=SCALING_COOLDOWN_SECONDS + 1)).isoformat(),
         )
-        assert auto_scaler._is_in_scaling_cooldown("conn-1") is False
+        assert await auto_scaler._is_in_scaling_cooldown("conn-1") is False
 
 
 class TestRotationAwareness:
@@ -666,7 +683,11 @@ class TestScaleDown:
         with patch.object(signals.proxy_draining_requested, "send_async", new_callable=AsyncMock):
             await auto_scaler._scale_down(sample_connector, 1)
 
-        assert sample_connector.id in auto_scaler._last_scale_action_at
+        # Cooldown is now recorded in Redis, not in process memory.
+        recorded = await auto_scaler._redis_client.client.hget(
+            "autoscaler:last_action", sample_connector.id
+        )
+        assert recorded is not None
 
 
 class TestStopMethod:

@@ -9,6 +9,7 @@ Emits proxy lifecycle signals (proxy_added, proxy_removed, proxy_status_changed)
 
 import asyncio
 import contextlib
+import json
 from typing import TYPE_CHECKING, Any
 
 import structlog
@@ -18,17 +19,22 @@ from api.core.auto_scaler import AutoScaler
 from api.core.config import Settings
 from api.core.demand_tracker import DemandTracker
 from api.core.domain_filter import is_domain_allowed
+from api.core.event_bus import EVENT_CHANNEL, RedisPubSubTransport, event_bus
 from api.core.health_checker import HealthChecker
 from api.core.metrics_compactor import MetricsCompactor
 from api.core.metrics_flusher import MetricsFlusher
 from api.core.provider_syncer import ProxyProviderSyncer
 from api.core.rate_limiter import RateLimiter
 from api.core.signals import (
+    connector_changed,
     connector_error_updated,
     connector_remove_requested,
+    credential_changed,
     health_check_completed,
+    project_changed,
     proxy_add_requested,
     proxy_added,
+    proxy_changed,
     proxy_draining_requested,
     proxy_draining_started,
     proxy_marked_terminating,
@@ -39,8 +45,8 @@ from api.core.signals import (
     proxy_update_requested,
     request_completed,
 )
-from api.core.stats import apply_metrics, combine_metrics, increment_stats
-from api.db.redis import RedisClient
+from api.core.stats import apply_metrics, combine_metrics
+from api.db.redis import INSTANCE_REGISTRY_KEY, RedisClient
 from api.db.repository import (
     ConnectorRepository,
     CredentialRepository,
@@ -91,12 +97,16 @@ class ProxyManager:
         self._project_strategies: dict[str, RoutingStrategy] = {}
         # Default strategy for backward compatibility
         self._strategy: RoutingStrategy = get_strategy(settings.default_strategy)
-        self._health_checker = HealthChecker(self)
+        self._health_checker = HealthChecker(self, redis_client, settings.instance_id)
         self._metrics_flusher = MetricsFlusher(session_factory, redis_client, settings)
-        self._metrics_compactor = MetricsCompactor(session_factory)
+        self._metrics_compactor = MetricsCompactor(
+            session_factory, redis_client, settings.instance_id
+        )
         self._demand_tracker = DemandTracker(redis_client)
-        self._auto_scaler = AutoScaler(self)
-        self._provider_syncer = ProxyProviderSyncer(self)
+        self._auto_scaler = AutoScaler(self, redis_client, settings.instance_id)
+        self._provider_syncer = ProxyProviderSyncer(
+            self, redis_client, settings.instance_id
+        )
         self._rate_limiter = RateLimiter(redis_client)
         self._running = False
         self._tasks: list[asyncio.Task[None]] = []
@@ -108,6 +118,26 @@ class ProxyManager:
 
         # Subscribe to signals
         self._subscribe_to_signals()
+
+        # Wire the cross-instance transport for the event bus. Imports kept
+        # local so signals.py is not pulled in for tests that don't need it.
+        from api.core.signals import (
+            connector_changed,
+            credential_changed,
+            project_changed,
+            proxy_changed,
+            proxy_quarantine_changed,
+        )
+        event_bus.configure_distributed(
+            RedisPubSubTransport(self._redis_client, self._settings.instance_id),
+            [
+                project_changed,
+                credential_changed,
+                connector_changed,
+                proxy_changed,
+                proxy_quarantine_changed,
+            ],
+        )
 
         # Load data from Postgres into memory cache
         await self._load_from_database()
@@ -134,6 +164,178 @@ class ProxyManager:
         # Start provider syncer (handles all proxy provider types)
         task = asyncio.create_task(self._provider_syncer.run())
         self._tasks.append(task)
+
+        # Advertise this instance's presence so future phases can discover
+        # peers (cross-instance event fanout, sharded health checks, leases).
+        task = asyncio.create_task(self._heartbeat_loop())
+        self._tasks.append(task)
+
+        # Safety-net reload from Postgres in case cross-instance invalidation
+        # events get dropped (Redis Pub/Sub is best-effort).
+        task = asyncio.create_task(self._periodic_full_reload_loop())
+        self._tasks.append(task)
+
+        # Fast metric refresh: pulls Redis-backed counters into in-memory
+        # so per-instance views converge with the cluster total every few
+        # seconds (otherwise the UI flaps as polls round-robin across
+        # instances that each handled only part of the traffic).
+        task = asyncio.create_task(self._periodic_metric_refresh_loop())
+        self._tasks.append(task)
+
+        # Subscribe to cross-instance cache-invalidation events.
+        task = asyncio.create_task(self._cross_instance_subscriber_loop())
+        self._tasks.append(task)
+
+    async def _cross_instance_subscriber_loop(self) -> None:
+        """Listen on the EventBus distributed channel and reload entities.
+
+        Drops self-echoes by ``instance_id``, then dispatches by the
+        signal's own name (no string duplication — the signal objects are
+        the source of truth). The handler receives ``(entity_id, op)`` so
+        it can short-circuit on "removed" without a wasted DB read.
+        Reconnects on failure so a brief Redis hiccup does not silently
+        mute cross-instance updates.
+        """
+        from api.core.signals import (
+            connector_changed,
+            credential_changed,
+            project_changed,
+            proxy_changed,
+            proxy_quarantine_changed,
+        )
+
+        dispatch: dict[str, Any] = {
+            project_changed.name: self._apply_project_change,
+            credential_changed.name: self._apply_credential_change,
+            connector_changed.name: self._apply_connector_change,
+            proxy_changed.name: self._apply_proxy_change,
+            proxy_quarantine_changed.name: self._apply_proxy_quarantine_change,
+        }
+        my_id = self._settings.instance_id
+        while self._running:
+            try:
+                pubsub = self._redis_client.client.pubsub()
+                await pubsub.subscribe(EVENT_CHANNEL)
+                try:
+                    async for message in pubsub.listen():
+                        if not self._running:
+                            break
+                        if message.get("type") != "message":
+                            continue
+                        try:
+                            data = message.get("data")
+                            if isinstance(data, bytes):
+                                data = data.decode("utf-8")
+                            payload = json.loads(data)
+                        except (TypeError, ValueError, json.JSONDecodeError):
+                            logger.debug("Skipping malformed cross-instance message")
+                            continue
+                        if payload.get("instance_id") == my_id:
+                            continue
+                        handler = dispatch.get(payload.get("signal"))
+                        entity_id = payload.get("entity_id")
+                        if handler is None or not entity_id:
+                            continue
+                        op = payload.get("op")
+                        try:
+                            await handler(entity_id, op)
+                        except Exception:
+                            logger.warning(
+                                "Cross-instance reload handler failed",
+                                signal=payload.get("signal"),
+                                entity_id=entity_id,
+                                op=op,
+                                exc_info=True,
+                            )
+                finally:
+                    with contextlib.suppress(Exception):
+                        await pubsub.unsubscribe(EVENT_CHANNEL)
+                        await pubsub.aclose()  # type: ignore[no-untyped-call]
+            except asyncio.CancelledError:
+                break
+            except Exception:
+                logger.warning("Cross-instance subscriber failed, reconnecting", exc_info=True)
+                await asyncio.sleep(1.0)
+
+    # Op-aware dispatchers for the cross-instance subscriber. Each routes
+    # "removed" to a synchronous cache eviction (no DB read needed), and
+    # any other op (typically "added" / "updated") to a DB-reload path.
+    async def _apply_project_change(self, project_id: str, op: str | None) -> None:
+        if op == "removed":
+            self._evict_project_from_cache(project_id)
+            return
+        await self.reload_project(project_id)
+
+    async def _apply_credential_change(self, credential_id: str, op: str | None) -> None:
+        if op == "removed":
+            self._credentials.pop(credential_id, None)
+            return
+        await self.reload_credential(credential_id)
+
+    async def _apply_connector_change(self, connector_id: str, op: str | None) -> None:
+        if op == "removed":
+            self._connectors.pop(connector_id, None)
+            return
+        await self.reload_connector(connector_id)
+
+    async def _apply_proxy_change(self, proxy_id: str, op: str | None) -> None:
+        if op == "removed":
+            await self._evict_proxy_from_cache(proxy_id)
+            return
+        await self.reload_proxy(proxy_id)
+
+    async def _apply_proxy_quarantine_change(
+        self, proxy_id: str, op: str | None
+    ) -> None:
+        # Re-hydrate this proxy's quarantine TTL from Redis. The Redis key
+        # set/cleared by the peer is authoritative; we just refresh our
+        # local cache so selection sees the change immediately.
+        await self._rate_limiter.refresh_quarantine_for(proxy_id)
+
+    def _evict_project_from_cache(self, project_id: str) -> None:
+        self._projects.pop(project_id, None)
+        self._project_strategies.pop(project_id, None)
+
+    async def _evict_proxy_from_cache(self, proxy_id: str) -> None:
+        if proxy_id in self._proxies:
+            await self._redis_client.delete_proxy_status(proxy_id)
+            await self._redis_client.reset_proxy_metrics(proxy_id)
+            await self._rate_limiter.remove_proxy(proxy_id)
+            del self._proxies[proxy_id]
+
+    async def _heartbeat_loop(self) -> None:
+        """Write a TTL'd Redis key advertising this instance.
+
+        Used as the live-membership source for:
+
+        * The cross-instance subscriber to drop self-echoes by ``instance_id``.
+        * The HealthChecker's HRW shard ownership.
+        * Lease holder identification (the lease value is the instance_id).
+
+        Cleanup is double-belt:
+
+        * Redis TTL (10s) expires the key automatically if the process
+          dies hard (SIGKILL, OOM, network partition).
+        * The ``finally`` block deletes the key on graceful shutdown so
+          peers see the departure immediately rather than waiting 10s.
+
+        Refresh interval (5s) is deliberately half the TTL so a single
+        missed write does not declare us dead.
+        """
+        key = INSTANCE_REGISTRY_KEY.format(instance_id=self._settings.instance_id)
+        payload = self._settings.role
+        ttl_seconds = 10
+        interval_seconds = 5
+        try:
+            while self._running:
+                try:
+                    await self._redis_client.client.set(key, payload, ex=ttl_seconds)
+                except Exception:
+                    logger.warning("Instance heartbeat write failed", exc_info=True)
+                await asyncio.sleep(interval_seconds)
+        finally:
+            with contextlib.suppress(Exception):
+                await self._redis_client.client.delete(key)
 
     def _subscribe_to_signals(self) -> None:
         """Subscribe to signals from other components."""
@@ -251,13 +453,19 @@ class ProxyManager:
         bytes_sent: int,
         bytes_received: int,
     ) -> None:
-        """Handle request statistics update (internal implementation)."""
+        """Handle request statistics update (internal implementation).
+
+        Only writes to Redis. The in-memory counters on this instance's
+        cached ``Proxy`` / ``Project`` are intentionally NOT incremented
+        here — that would produce per-instance counter divergence (A
+        handled 2, B handled 1, C handled 0), which the UI sees as
+        flapping when it round-robins polls across instances. Instead,
+        the periodic metric-refresh loop pulls the Redis-backed total
+        back into in-memory at a fast cadence, so all instances see the
+        same cluster-wide view.
+        """
         proxy = self._proxies.get(proxy_id)
         if proxy:
-            # Update in-memory cache
-            increment_stats(proxy, success, latency_ms, bytes_sent, bytes_received)
-
-            # Persist to Redis (proxy-level)
             await self._redis_client.update_proxy_metrics(
                 proxy_id, success, latency_ms, bytes_sent, bytes_received
             )
@@ -276,15 +484,13 @@ class ProxyManager:
                         quarantine_seconds_max=rl_config.quarantine_seconds_max,
                     )
 
-        # Update project-level metrics
+        # Project-level: same — Redis is authoritative; refresh loop
+        # propagates back into in-memory.
         project = self._projects.get(project_id)
         if project:
-            # Update Redis (current window)
             await self._redis_client.update_project_metrics(
                 project_id, success, latency_ms, bytes_sent, bytes_received
             )
-            # Update in-memory Project object
-            increment_stats(project, success, latency_ms, bytes_sent, bytes_received)
 
     async def stop(self) -> None:
         """Stop the proxy manager and cleanup."""
@@ -299,6 +505,10 @@ class ProxyManager:
             with contextlib.suppress(asyncio.CancelledError):
                 await task
         self._tasks.clear()
+
+        # Release the EventBus distributed transport — it holds a reference
+        # to the redis client, which the lifespan is about to close.
+        event_bus.reset_distributed()
 
     async def _load_from_database(self) -> None:
         """Load projects, credentials, connectors and proxies from Postgres."""
@@ -383,6 +593,241 @@ class ProxyManager:
             from_postgres=len(postgres_proxy_metrics),
         )
 
+    async def full_reload(self) -> None:
+        """Re-read all definitions from Postgres, merging into the cache.
+
+        Entries no longer present in Postgres are removed (with Redis +
+        rate-limiter cleanup for proxies); new entries are added; existing
+        entries have their *definition* fields patched in place so runtime
+        state (live status, per-request counters) is preserved. After the
+        merge, runtime fields are re-hydrated from Redis as a safety net so
+        the cache converges with the cross-instance source of truth.
+        """
+        async with self._session_factory() as session:
+            project_repo = ProjectRepository(session)
+            credential_repo = CredentialRepository(session)
+            connector_repo = ConnectorRepository(session)
+            proxy_repo = ProxyRepository(session)
+            projects = {p.id: p for p in await project_repo.get_all()}
+            credentials = {c.id: c for c in await credential_repo.get_all()}
+            connectors = {c.id: c for c in await connector_repo.get_all()}
+            proxies = {p.id: p for p in await proxy_repo.get_all()}
+
+        # Projects — merge in place, preserving aggregate counters.
+        for pid in list(self._projects.keys()):
+            if pid not in projects:
+                self._projects.pop(pid, None)
+                self._project_strategies.pop(pid, None)
+        for pid, fresh in projects.items():
+            existing = self._projects.get(pid)
+            if existing is None:
+                self._projects[pid] = fresh
+                self._project_strategies[pid] = get_strategy(fresh.routing_strategy)
+            else:
+                old_strategy = existing.routing_strategy
+                existing.merge_definition_from(fresh)
+                if old_strategy != fresh.routing_strategy:
+                    self._project_strategies[pid] = get_strategy(fresh.routing_strategy)
+
+        # Credentials and connectors have no in-memory runtime state of
+        # their own — every field is DB-backed — so an outright replace
+        # is fine, but only for entries that actually changed.
+        for cid in list(self._credentials.keys()):
+            if cid not in credentials:
+                self._credentials.pop(cid, None)
+        self._credentials.update(credentials)
+
+        for cid in list(self._connectors.keys()):
+            if cid not in connectors:
+                self._connectors.pop(cid, None)
+        self._connectors.update(connectors)
+
+        # Proxies — patch in place to keep request counters, status, and
+        # last_check_latency_ms from being clobbered by Pydantic defaults.
+        removed_proxy_ids = [pid for pid in self._proxies if pid not in proxies]
+        for pid in removed_proxy_ids:
+            await self._redis_client.delete_proxy_status(pid)
+            await self._redis_client.reset_proxy_metrics(pid)
+            self._proxies.pop(pid, None)
+        if removed_proxy_ids:
+            await self._rate_limiter.remove_proxies(removed_proxy_ids)
+        for pid, fresh_proxy in proxies.items():
+            existing_proxy = self._proxies.get(pid)
+            if existing_proxy is None:
+                self._proxies[pid] = fresh_proxy
+            else:
+                existing_proxy.merge_definition_from(fresh_proxy)
+
+        # Re-hydrate runtime state (status, metrics) from Redis so this
+        # instance's view converges with the cross-instance source of truth.
+        await self._hydrate_from_redis()
+
+        logger.debug(
+            "Full reload complete",
+            projects=len(self._projects),
+            credentials=len(self._credentials),
+            connectors=len(self._connectors),
+            proxies=len(self._proxies),
+        )
+
+    async def _periodic_full_reload_loop(self, interval_seconds: int = 60) -> None:
+        """Background safety-net: periodically re-sync the cache from Postgres."""
+        while self._running:
+            try:
+                await asyncio.sleep(interval_seconds)
+                if not self._running:
+                    break
+                await self.full_reload()
+            except asyncio.CancelledError:
+                break
+            except Exception:
+                logger.warning("Periodic full reload failed", exc_info=True)
+
+    async def _refresh_metrics_from_redis(self) -> None:
+        """Refresh in-memory counters from the cluster-wide source of truth.
+
+        Per-request handling on each instance no longer increments the
+        local counter — Redis HINCRBY does, and this loop folds the
+        Redis current-window + Postgres historical cumulative back into
+        every instance's in-memory ``Proxy`` / ``Project``. Without this
+        every instance would only ever see counters reflecting requests
+        it personally handled, and the UI would flap as it round-robins
+        polls across instances.
+
+        Status and quarantine state are deliberately NOT touched here —
+        they have their own cross-instance propagation via Pub/Sub
+        (``proxy_changed`` / ``proxy_quarantine_changed``), and a
+        ``KEYS instance_registry:*``-style refresh would re-do per-proxy
+        Redis TTL lookups that aren't needed at this cadence.
+        """
+        redis_proxy_metrics = await self._redis_client.get_all_proxy_metrics()
+        redis_project_metrics = await self._redis_client.get_all_project_metrics()
+        async with self._session_factory() as session:
+            repo = MetricsRepository(session)
+            postgres_proxy_metrics = await repo.get_cumulative_metrics_for_all_proxies()
+            postgres_project_metrics = await repo.get_cumulative_project_metrics()
+
+        for proxy_id, proxy in self._proxies.items():
+            pg = postgres_proxy_metrics.get(proxy_id, {})
+            rd = redis_proxy_metrics.get(proxy_id, {})
+            apply_metrics(proxy, combine_metrics(pg, rd))
+
+        for project_id, project in self._projects.items():
+            pg = postgres_project_metrics.get(project_id, {})
+            rd = redis_project_metrics.get(project_id, {})
+            apply_metrics(project, combine_metrics(pg, rd))
+
+    async def _periodic_metric_refresh_loop(self, interval_seconds: float = 5.0) -> None:
+        """Background loop: fold Redis-backed metric totals into in-memory.
+
+        Runs at a faster cadence than ``full_reload`` because per-request
+        increments now live exclusively in Redis. 5s is a good default —
+        fast enough that the UI feels live, slow enough that the
+        Postgres ``get_cumulative_metrics_for_all_proxies`` query stays
+        cheap even with thousands of proxies.
+        """
+        while self._running:
+            try:
+                await asyncio.sleep(interval_seconds)
+                if not self._running:
+                    break
+                await self._refresh_metrics_from_redis()
+            except asyncio.CancelledError:
+                break
+            except Exception:
+                logger.warning("Periodic metric refresh failed", exc_info=True)
+
+    async def reload_project(self, project_id: str) -> None:
+        """Re-read a project from Postgres into the cache.
+
+        If the project no longer exists, it is removed. Otherwise its
+        definition fields are patched in place onto the existing cached
+        ``Project`` so accumulated per-request counters survive the reload.
+        """
+        async with self._session_factory() as session:
+            fresh = await ProjectRepository(session).get_by_id(project_id)
+        if fresh is None:
+            self._projects.pop(project_id, None)
+            self._project_strategies.pop(project_id, None)
+            logger.info("Reload removed project from cache", project_id=project_id)
+            return
+        existing = self._projects.get(project_id)
+        if existing is None:
+            self._projects[project_id] = fresh
+            self._project_strategies[project_id] = get_strategy(fresh.routing_strategy)
+        else:
+            old_strategy = existing.routing_strategy
+            existing.merge_definition_from(fresh)
+            if old_strategy != fresh.routing_strategy:
+                self._project_strategies[project_id] = get_strategy(fresh.routing_strategy)
+        logger.debug("Reloaded project", project_id=project_id)
+
+    async def reload_credential(self, credential_id: str) -> None:
+        """Re-read a credential from Postgres into the cache."""
+        async with self._session_factory() as session:
+            credential = await CredentialRepository(session).get_by_id(credential_id)
+        if credential is None:
+            self._credentials.pop(credential_id, None)
+            logger.info("Reload removed credential from cache", credential_id=credential_id)
+            return
+        self._credentials[credential_id] = credential
+        logger.debug("Reloaded credential", credential_id=credential_id)
+
+    async def reload_connector(self, connector_id: str) -> None:
+        """Re-read a connector from Postgres into the cache."""
+        async with self._session_factory() as session:
+            connector = await ConnectorRepository(session).get_by_id(connector_id)
+        if connector is None:
+            self._connectors.pop(connector_id, None)
+            logger.info("Reload removed connector from cache", connector_id=connector_id)
+            return
+        self._connectors[connector_id] = connector
+        logger.debug("Reloaded connector", connector_id=connector_id)
+
+    async def reload_proxy(self, proxy_id: str) -> None:
+        """Re-read a proxy from Postgres + Redis status into the cache.
+
+        If the proxy no longer exists in Postgres, removes it and cleans
+        up the matching Redis + rate-limiter state. Otherwise the proxy's
+        *definition* fields are patched in place onto the existing cached
+        ``Proxy`` and ``status`` / ``last_check_latency_ms`` /
+        ``consecutive_failures`` are refreshed from Redis. Per-request
+        counters (``request_count`` and friends) are deliberately left
+        untouched: they are updated by ``_handle_request_stats`` per
+        request, and replacing them here would zero them out every time a
+        peer publishes ``proxy_changed`` — causing UI stats to flap.
+        """
+        async with self._session_factory() as session:
+            fresh = await ProxyRepository(session).get_by_id(proxy_id)
+        if fresh is None:
+            if proxy_id in self._proxies:
+                await self._redis_client.delete_proxy_status(proxy_id)
+                await self._redis_client.reset_proxy_metrics(proxy_id)
+                await self._rate_limiter.remove_proxy(proxy_id)
+                del self._proxies[proxy_id]
+                logger.info("Reload removed proxy from cache", proxy_id=proxy_id)
+            return
+
+        status_data = await self._redis_client.get_proxy_status(proxy_id)
+        existing = self._proxies.get(proxy_id)
+        if existing is None:
+            # First time we see this proxy — take the fresh entity and
+            # apply Redis status. Counters start at zero (the model
+            # default), and converge upward via ``_hydrate_from_redis``
+            # on the next periodic full reload.
+            if status_data:
+                fresh.status = status_data["status"]
+                fresh.last_check_latency_ms = status_data["latency_ms"]
+                fresh.consecutive_failures = status_data["consecutive_failures"]
+            self._proxies[proxy_id] = fresh
+        else:
+            existing.merge_definition_from(fresh)
+            if status_data:
+                existing.status = status_data["status"]
+                existing.last_check_latency_ms = status_data["latency_ms"]
+                existing.consecutive_failures = status_data["consecutive_failures"]
+        logger.debug("Reloaded proxy", proxy_id=proxy_id)
+
     @property
     def rate_limiter(self) -> RateLimiter:
         """Get the rate limiter instance."""
@@ -434,6 +879,7 @@ class ProxyManager:
         self._projects[project.id] = project
         self._project_strategies[project.id] = get_strategy(project.routing_strategy)
         logger.info("Added project", project_id=project.id, name=project.name)
+        await event_bus.publish(project_changed, self, entity_id=project.id, op="added")
 
     async def update_project(self, project: Project) -> None:
         """Update a project (persists to Postgres)."""
@@ -445,6 +891,7 @@ class ProxyManager:
         self._projects[project.id] = project
         self._project_strategies[project.id] = get_strategy(project.routing_strategy)
         logger.info("Updated project", project_id=project.id, name=project.name)
+        await event_bus.publish(project_changed, self, entity_id=project.id, op="updated")
 
     async def remove_project(self, project_id: str) -> bool:
         """Remove a project (deletes from Postgres, cascades to credentials, connectors and proxies).
@@ -502,6 +949,7 @@ class ProxyManager:
         }
 
         logger.info("Removed project", project_id=project_id)
+        await event_bus.publish(project_changed, self, entity_id=project_id, op="removed")
         return True
 
     # Credential methods
@@ -610,6 +1058,7 @@ class ProxyManager:
 
         self._credentials[credential.id] = credential
         logger.info("Added credential", credential_id=credential.id, name=credential.name)
+        await event_bus.publish(credential_changed, self, entity_id=credential.id, op="added")
 
     async def update_credential(self, credential: Credential) -> None:
         """Update a credential (persists to Postgres)."""
@@ -620,6 +1069,7 @@ class ProxyManager:
 
         self._credentials[credential.id] = credential
         logger.info("Updated credential", credential_id=credential.id, name=credential.name)
+        await event_bus.publish(credential_changed, self, entity_id=credential.id, op="updated")
 
     async def remove_credential(self, credential_id: str) -> bool:
         """Remove a credential (deletes from Postgres)."""
@@ -633,6 +1083,7 @@ class ProxyManager:
 
         del self._credentials[credential_id]
         logger.info("Removed credential", credential_id=credential_id)
+        await event_bus.publish(credential_changed, self, entity_id=credential_id, op="removed")
         return True
 
     def get_connectors_for_credential(self, credential_id: str) -> list[Connector]:
@@ -664,6 +1115,7 @@ class ProxyManager:
 
         self._connectors[connector.id] = connector
         logger.info("Added connector", connector_id=connector.id, name=connector.name)
+        await event_bus.publish(connector_changed, self, entity_id=connector.id, op="added")
 
     async def update_connector(self, connector: Connector) -> None:
         """Update a connector (persists to Postgres)."""
@@ -686,6 +1138,7 @@ class ProxyManager:
 
         self._connectors[connector.id] = connector
         logger.info("Updated connector", connector_id=connector.id, name=connector.name)
+        await event_bus.publish(connector_changed, self, entity_id=connector.id, op="updated")
 
     async def update_connector_error(
         self,
@@ -735,6 +1188,7 @@ class ProxyManager:
                 "Connector error cleared",
                 connector_id=connector_id,
             )
+        await event_bus.publish(connector_changed, self, entity_id=connector_id, op="updated")
 
     async def remove_connector(self, connector_id: str) -> bool:
         """Remove a connector (deletes from Postgres, cascades to proxies).
@@ -775,6 +1229,7 @@ class ProxyManager:
             if p.connector_id != connector_id
         }
         logger.info("Removed connector", connector_id=connector_id)
+        await event_bus.publish(connector_changed, self, entity_id=connector_id, op="removed")
         return True
 
     async def delete_connector_async(self, connector_id: str) -> bool:
@@ -935,7 +1390,7 @@ class ProxyManager:
             if p.connector_id in connector_ids and self._rate_limiter.is_quarantined(p.id)
         )
 
-    def select_proxy_for_project(
+    async def select_proxy_for_project(
         self,
         project_id: str,
         session_id: str | None = None,
@@ -951,6 +1406,12 @@ class ProxyManager:
         quarantined will get None (triggering 429) instead of falling back to
         a different proxy.
 
+        For sticky-strategy projects with a session_id, looks up the
+        session→proxy binding in Redis (cross-instance) before falling back
+        to the strategy's local selection. New bindings are persisted to
+        Redis with a short TTL so other instances see them on the next
+        request.
+
         Args:
             project_id: The project to select a proxy for.
             session_id: Session identifier for sticky routing.
@@ -962,10 +1423,19 @@ class ProxyManager:
 
         healthy_proxies = self.get_healthy_proxies_for_project(project_id, target_host)
         strategy = self._project_strategies.get(project_id, self._strategy)
-        proxy = strategy.select(healthy_proxies, session_id)
-        if proxy:
-            return self.resolve_proxy_credentials(proxy)
-        return None
+
+        # The strategy handles whatever cross-instance state it needs
+        # (sticky reads/writes its Redis binding inside select; others
+        # ignore the redis_client/project_id kwargs).
+        selected = await strategy.select(
+            healthy_proxies,
+            session_id,
+            redis_client=self._redis_client,
+            project_id=project_id,
+        )
+        if selected is None:
+            return None
+        return self.resolve_proxy_credentials(selected)
 
     def set_project_strategy(self, project_id: str, strategy_name: str) -> None:
         """Change the routing strategy for a project."""
@@ -989,12 +1459,15 @@ class ProxyManager:
         self._proxies[proxy.id] = proxy
         logger.info("Added proxy", proxy_id=proxy.id, host=proxy.host)
 
-        # Emit signal for subscribers
-        await proxy_added.send_async(
+        # Local-only: in-process subscribers (e.g., ProviderSyncer for
+        # re-creation logic) attach to proxy_added. Cross-instance receivers
+        # use proxy_changed.
+        await event_bus.publish(proxy_added,
             self,
             proxy_id=proxy.id,
             connector_id=proxy.connector_id,
         )
+        await event_bus.publish(proxy_changed, self, entity_id=proxy.id, op="added")
 
     async def update_proxy(self, proxy: Proxy) -> None:
         """Update a proxy in the pool (persists to Postgres)."""
@@ -1005,6 +1478,7 @@ class ProxyManager:
 
         self._proxies[proxy.id] = proxy
         logger.info("Updated proxy", proxy_id=proxy.id, host=proxy.host)
+        await event_bus.publish(proxy_changed, self, entity_id=proxy.id, op="updated")
 
     async def remove_proxy(self, proxy_id: str) -> bool:
         """Remove a proxy from the pool (deletes from Postgres).
@@ -1035,22 +1509,27 @@ class ProxyManager:
         del self._proxies[proxy_id]
         logger.info("Removed proxy", proxy_id=proxy_id)
 
-        # Emit signal for subscribers
-        await proxy_removed.send_async(
+        await event_bus.publish(proxy_removed,
             self,
             proxy_id=proxy_id,
             connector_id=connector_id,
         )
+        await event_bus.publish(proxy_changed, self, entity_id=proxy_id, op="removed")
 
         return True
 
-    def select_proxy(self, session_id: str | None = None) -> Proxy | None:
-        """Select a proxy using the current routing strategy.
+    async def select_proxy(self, session_id: str | None = None) -> Proxy | None:
+        """Select a proxy using the current (global) routing strategy.
 
-        Returns a proxy with resolved credentials (placeholders replaced with
-        actual values from the credential/connector chain).
+        Project-scoped traffic uses select_proxy_for_project instead; this is
+        the unscoped fallback. Kept async for API consistency with the
+        project-scoped variant.
         """
-        proxy = self._strategy.select(self.healthy_proxies, session_id)
+        proxy = await self._strategy.select(
+            self.healthy_proxies,
+            session_id,
+            redis_client=self._redis_client,
+        )
         if proxy:
             return self.resolve_proxy_credentials(proxy)
         return None
@@ -1084,11 +1563,15 @@ class ProxyManager:
 
             # Emit signal if status actually changed
             if old_status != status:
-                await proxy_status_changed.send_async(
+                await event_bus.publish(proxy_status_changed,
                     self,
                     proxy_id=proxy_id,
                     old_status=old_status,
                     new_status=status,
+                )
+                # Cross-instance: tell peers to re-hydrate this proxy.
+                await event_bus.publish(
+                    proxy_changed, self, entity_id=proxy_id, op="updated"
                 )
 
     # Demand tracking and scaling methods
@@ -1176,7 +1659,7 @@ class ProxyManager:
         logger.info("Started draining proxy", proxy_id=proxy_id)
 
         # Emit signal for subscribers
-        await proxy_draining_started.send_async(
+        await event_bus.publish(proxy_draining_started,
             self,
             proxy_id=proxy_id,
             connector_id=proxy.connector_id,
@@ -1212,7 +1695,7 @@ class ProxyManager:
         logger.info("Marked proxy as terminating", proxy_id=proxy_id)
 
         # Emit signal for subscribers
-        await proxy_marked_terminating.send_async(
+        await event_bus.publish(proxy_marked_terminating,
             self,
             proxy_id=proxy_id,
             connector_id=proxy.connector_id,

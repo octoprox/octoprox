@@ -1,0 +1,128 @@
+# Production-ready multi-instance Octoprox cluster using the
+# pre-built image from GitHub Container Registry.
+#
+# Layout is identical to docker-compose.cluster.yml — three Octoprox
+# replicas fronted by HAProxy, sharing a single Postgres and Redis —
+# but pulls ghcr.io/octoprox/octoprox:latest instead of building from
+# the local source tree. Use this as the starting point for a real
+# deployment.
+#
+# Start:   docker compose -f docker-compose.cluster.ghcr.yml up -d
+# Stop:    docker compose -f docker-compose.cluster.ghcr.yml down
+# Stats:   http://localhost:8404/
+#
+# Before running this in production:
+#   - Change OCTOPROX_AUTH_PASSWORD to something strong.
+#   - Set OCTOPROX_JWT_SECRET to a long random string.
+#   - Change OCTOPROX_DB_PASSWORD and the matching POSTGRES_PASSWORD.
+#   - Consider locking down the Postgres/Redis ports (the local-build
+#     variant exposes 5433/6379 for convenience; remove or restrict
+#     those rules if running on a public-facing host).
+
+# Shared base for all three octoprox replicas. Each replica overrides
+# OCTOPROX_INSTANCE_ID so logs are unambiguous.
+x-octoprox-base: &octoprox-base
+  image: ghcr.io/octoprox/octoprox:latest
+  environment: &octoprox-env
+    OCTOPROX_AUTH_USERNAME: admin
+    OCTOPROX_AUTH_PASSWORD: admin
+    OCTOPROX_JWT_SECRET: change-me-in-production
+    OCTOPROX_ENV: production
+    OCTOPROX_REDIS_URL: redis://redis:6379/0
+    OCTOPROX_DB_HOST: postgres
+    OCTOPROX_DB_PORT: "5432"
+    OCTOPROX_DB_USER: octoprox
+    OCTOPROX_DB_PASSWORD: octoprox
+    OCTOPROX_DB_NAME: octoprox
+    OCTOPROX_LOG_LEVEL: INFO
+  volumes:
+    - ca_data:/app/data/ca
+  depends_on:
+    redis:
+      condition: service_healthy
+    postgres:
+      condition: service_healthy
+  healthcheck:
+    test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+    interval: 30s
+    timeout: 10s
+    retries: 3
+    start_period: 10s
+  restart: unless-stopped
+
+services:
+  octoprox-1:
+    <<: *octoprox-base
+    container_name: octoprox-1
+    hostname: octoprox-1
+    environment:
+      <<: *octoprox-env
+      OCTOPROX_INSTANCE_ID: octoprox-1
+
+  octoprox-2:
+    <<: *octoprox-base
+    container_name: octoprox-2
+    hostname: octoprox-2
+    environment:
+      <<: *octoprox-env
+      OCTOPROX_INSTANCE_ID: octoprox-2
+
+  octoprox-3:
+    <<: *octoprox-base
+    container_name: octoprox-3
+    hostname: octoprox-3
+    environment:
+      <<: *octoprox-env
+      OCTOPROX_INSTANCE_ID: octoprox-3
+
+  haproxy:
+    image: haproxy:2.9-alpine
+    container_name: octoprox-haproxy
+    ports:
+      - "8000:8000"   # API + Web UI
+      - "8080:8080"   # Proxy traffic
+      - "8404:8404"   # HAProxy stats UI
+    volumes:
+      - ./haproxy/haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+    depends_on:
+      - octoprox-1
+      - octoprox-2
+      - octoprox-3
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: octoprox-postgres
+    ports:
+      - "5433:5432"
+    environment:
+      - POSTGRES_USER=octoprox
+      - POSTGRES_PASSWORD=octoprox
+      - POSTGRES_DB=octoprox
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U octoprox"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    container_name: octoprox-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  redis_data:
+  ca_data:

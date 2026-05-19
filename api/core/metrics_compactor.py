@@ -15,9 +15,16 @@ import structlog
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from api.core import utc_now
+from api.core.leadership import Lease
+from api.db.redis import RedisClient
 from api.db.repository import MetricsRepository, ProjectRepository
 
 logger = structlog.get_logger()
+
+# How often a standby instance polls Redis to see if the lease has freed
+# up. Compaction's normal cadence is hourly, so 60s is plenty fast for
+# failover while staying well below the next regular tick.
+_LEASE_RETRY_SECONDS = 60.0
 
 # Compaction tiers: (source_granularity, target_granularity, age_threshold)
 # Data older than age_threshold is compacted from source to target.
@@ -45,26 +52,46 @@ class MetricsCompactor:
     def __init__(
         self,
         session_factory: async_sessionmaker[AsyncSession],
+        redis_client: RedisClient,
+        instance_id: str,
         interval: int = 3600,
     ) -> None:
         self._session_factory = session_factory
+        self._redis_client = redis_client
+        self._instance_id = instance_id
         self._interval = interval
         self._running = False
 
     async def run(self) -> None:
-        """Run the compaction loop."""
+        """Run the compaction loop while holding the global lease.
+
+        Single-leader: writes back compacted rows to Postgres, and two
+        compactors running simultaneously would race on the same source
+        rows and double-count their aggregates.
+        """
         self._running = True
         logger.info("Starting metrics compactor", interval=self._interval)
-
-        while self._running:
-            try:
-                await asyncio.sleep(self._interval)
-                await self._compact_and_retain()
-            except asyncio.CancelledError:
-                logger.info("Metrics compactor stopped")
-                break
-            except Exception as e:
-                logger.error("Metrics compaction error", error=str(e))
+        lease = Lease(
+            self._redis_client,
+            name="metrics_compactor",
+            owner_id=self._instance_id,
+        )
+        try:
+            while self._running:
+                try:
+                    if not lease.is_held and not await lease.try_acquire():
+                        await asyncio.sleep(_LEASE_RETRY_SECONDS)
+                        continue
+                    await asyncio.sleep(self._interval)
+                    if lease.is_held and self._running:
+                        await self._compact_and_retain()
+                except asyncio.CancelledError:
+                    logger.info("Metrics compactor stopped")
+                    break
+                except Exception as e:
+                    logger.error("Metrics compaction error", error=str(e))
+        finally:
+            await lease.release()
 
     async def _compact_and_retain(self) -> None:
         """Run compaction tiers and retention for all projects."""

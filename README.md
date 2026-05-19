@@ -49,6 +49,54 @@ To stop the services:
 docker compose -f docker-compose.ghcr.yml down
 ```
 
+### Running a multi-instance cluster
+
+Octoprox can also run as a horizontally-scaled cluster behind an L4 load
+balancer. Two compose flavours are shipped, mirroring the single-instance
+pair: one builds the image from your checkout, one pulls the pre-built
+production image from GitHub Container Registry.
+
+```bash
+# Local-build cluster (fast iteration on your own code)
+make cluster-up       # 3 octoprox replicas + HAProxy + Postgres + Redis
+make cluster-logs
+make cluster-down
+
+# Production-ready cluster using the pre-built ghcr.io image
+docker compose -f docker-compose.cluster.ghcr.yml up -d
+docker compose -f docker-compose.cluster.ghcr.yml logs -f
+docker compose -f docker-compose.cluster.ghcr.yml down
+```
+
+The full compose-file matrix:
+
+| File                              | Image source         | Instances | Use for                              |
+|-----------------------------------|----------------------|-----------|--------------------------------------|
+| `docker-compose.yml`              | local build          | 1         | day-to-day development               |
+| `docker-compose.ghcr.yml`         | `ghcr.io/.../latest` | 1         | quickest "just run it" demo          |
+| `docker-compose.cluster.yml`      | local build          | 3 + HAProxy | testing distributed code paths      |
+| `docker-compose.cluster.ghcr.yml` | `ghcr.io/.../latest` | 3 + HAProxy | production-ready starting point    |
+
+Endpoints exposed on the host (same for both cluster variants):
+
+| Port | What                                                    |
+|------|---------------------------------------------------------|
+| 8000 | API + Web UI (HAProxy → octoprox-{1,2,3}:8000, HTTP)    |
+| 8080 | Proxy traffic (HAProxy → octoprox-{1,2,3}:8080, TCP)    |
+| 8404 | HAProxy stats UI — useful for seeing which backend served a given request |
+
+All three instances share the same Postgres and Redis, generate distinct
+`OCTOPROX_INSTANCE_ID` values, advertise themselves via Redis heartbeat,
+and elect leaders for singleton background workers (metrics flusher,
+compactor) and per-connector workers (autoscaler, provider syncer). See
+[`docker-compose.cluster.yml`](docker-compose.cluster.yml),
+[`docker-compose.cluster.ghcr.yml`](docker-compose.cluster.ghcr.yml), and
+[`haproxy/haproxy.cfg`](haproxy/haproxy.cfg) for the wiring details.
+
+For the architecture behind multi-instance — what's shared, what's
+elected, how failover works — see the
+[Deployment & Scaling docs page](https://octoprox.com/deployment).
+
 ---
 
 ### Prerequisites (for local development)
@@ -372,8 +420,17 @@ make test          # Run tests
 make lint          # Run linter
 make format        # Format code
 make docker-build  # Build Docker image
-make docker-compose-up    # Start all services
+make docker-compose-up    # Start all services (single instance)
 make docker-compose-down  # Stop all services
+
+# Multi-instance cluster (3 octoprox replicas behind HAProxy)
+make cluster-up          # Start cluster, building image from local source
+make cluster-down        # Stop the cluster
+make cluster-logs        # Tail aggregated cluster logs
+make cluster-rebuild     # Rebuild images and restart
+# Production-ready cluster (pre-built GHCR image) — run docker compose directly:
+#   docker compose -f docker-compose.cluster.ghcr.yml up -d
+
 make web-install   # Install frontend dependencies
 make web-dev       # Run frontend dev server
 make web-build     # Build frontend for production

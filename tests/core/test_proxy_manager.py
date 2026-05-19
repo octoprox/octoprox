@@ -769,11 +769,11 @@ class TestProxyManager:
         await proxy_manager.add_proxy(proxy)
 
         # Should return proxy for allowed domain
-        result = proxy_manager.select_proxy_for_project(project.id, target_host="allowed.com")
+        result = await proxy_manager.select_proxy_for_project(project.id, target_host="allowed.com")
         assert result is not None
 
         # Should return None for blocked domain
-        result = proxy_manager.select_proxy_for_project(project.id, target_host="blocked.com")
+        result = await proxy_manager.select_proxy_for_project(project.id, target_host="blocked.com")
         assert result is None
 
     async def test_sticky_quarantine_blocks_fallback(self, proxy_manager: ProxyManager) -> None:
@@ -814,7 +814,7 @@ class TestProxyManager:
         await proxy_manager.update_proxy_status(proxy2.id, ProxyStatus.HEALTHY)
 
         # First request with session assigns a proxy
-        result = proxy_manager.select_proxy_for_project(project.id, session_id="session-1")
+        result = await proxy_manager.select_proxy_for_project(project.id, session_id="session-1")
         assert result is not None
         assigned_id = result.id
 
@@ -822,14 +822,14 @@ class TestProxyManager:
         proxy_manager._rate_limiter._quarantine_expiry[assigned_id] = __import__("time").monotonic() + 300
 
         # With sticky_quarantine=True, same session should get None (429)
-        result = proxy_manager.select_proxy_for_project(project.id, session_id="session-1")
+        result = await proxy_manager.select_proxy_for_project(project.id, session_id="session-1")
         assert result is None
 
         # are_all_proxies_quarantined should also detect this
         assert proxy_manager.are_all_proxies_quarantined(project.id, session_id="session-1") is True
 
         # A different session should still get a proxy (the non-quarantined one)
-        result = proxy_manager.select_proxy_for_project(project.id, session_id="session-2")
+        result = await proxy_manager.select_proxy_for_project(project.id, session_id="session-2")
         assert result is not None
 
     async def test_sticky_quarantine_disabled_allows_fallback(self, proxy_manager: ProxyManager) -> None:
@@ -870,7 +870,7 @@ class TestProxyManager:
         await proxy_manager.update_proxy_status(proxy2.id, ProxyStatus.HEALTHY)
 
         # First request with session assigns a proxy
-        result = proxy_manager.select_proxy_for_project(project.id, session_id="sess-1")
+        result = await proxy_manager.select_proxy_for_project(project.id, session_id="sess-1")
         assert result is not None
         assigned_id = result.id
 
@@ -878,7 +878,7 @@ class TestProxyManager:
         proxy_manager._rate_limiter._quarantine_expiry[assigned_id] = __import__("time").monotonic() + 300
 
         # With sticky_quarantine=False, same session should fall back to another proxy
-        result = proxy_manager.select_proxy_for_project(project.id, session_id="sess-1")
+        result = await proxy_manager.select_proxy_for_project(project.id, session_id="sess-1")
         assert result is not None
         assert result.id != assigned_id
 

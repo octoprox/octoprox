@@ -1,4 +1,4 @@
-.PHONY: help setup setup-dev install run run-dev test lint format type-check clean build docker-build docker-run docker-compose-up docker-compose-down web-install web-dev web-build
+.PHONY: help setup setup-dev install run run-dev test lint format type-check clean build docker-build docker-run docker-compose-up docker-compose-down cluster-up cluster-down cluster-logs cluster-rebuild web-install web-dev web-build
 
 PYTHON := python3
 VENV := .venv
@@ -32,8 +32,12 @@ help:
 	@echo "Docker targets:"
 	@echo "  docker-build   - Build Docker image"
 	@echo "  docker-run     - Run Docker container"
-	@echo "  docker-compose-up   - Start all services with docker-compose"
+	@echo "  docker-compose-up   - Start all services with docker-compose (single instance)"
 	@echo "  docker-compose-down - Stop all services"
+	@echo "  cluster-up          - Start 3-instance cluster behind HAProxy (local build)"
+	@echo "  cluster-down        - Stop the cluster"
+	@echo "  cluster-logs        - Tail logs from the cluster"
+	@echo "  cluster-rebuild     - Rebuild images and restart the cluster"
 	@echo ""
 	@echo "Frontend targets:"
 	@echo "  web-install    - Install frontend dependencies"
@@ -98,6 +102,22 @@ docker-compose-up:
 
 docker-compose-down:
 	docker-compose down
+
+# Multi-instance cluster: 3 octoprox replicas behind HAProxy.
+# API + Web UI:    http://localhost:8000
+# Proxy traffic:   localhost:8080  (HTTP/SOCKS via Proxy-Authorization)
+# HAProxy stats:   http://localhost:8404
+cluster-up:
+	docker compose -f docker-compose.cluster.yml up -d --build
+
+cluster-down:
+	docker compose -f docker-compose.cluster.yml down
+
+cluster-rebuild:
+	docker compose -f docker-compose.cluster.yml up -d --build --force-recreate
+
+cluster-logs:
+	docker compose -f docker-compose.cluster.yml logs -f --tail=100
 
 # Frontend
 web-install:

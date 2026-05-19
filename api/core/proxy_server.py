@@ -24,6 +24,7 @@ import structlog
 from python_socks.async_.asyncio import Proxy as SocksProxy
 
 from api.core.config import settings
+from api.core.event_bus import event_bus
 from api.core.signals import request_completed, request_rejected
 from api.core.username_params import AuthResult, parse_proxy_username
 from api.models.project import MitmMode, Project
@@ -105,7 +106,7 @@ class ProxyServer:
             if task:
                 self._client_tasks.discard(task)
 
-    def _get_upstream_proxy(
+    async def _get_upstream_proxy(
         self,
         project_id: str | None = None,
         session_id: str | None = None,
@@ -124,10 +125,10 @@ class ProxyServer:
             Selected proxy or None if no healthy proxies available.
         """
         if project_id:
-            return self._proxy_manager.select_proxy_for_project(
+            return await self._proxy_manager.select_proxy_for_project(
                 project_id, session_id, target_host
             )
-        return self._proxy_manager.select_proxy(session_id)
+        return await self._proxy_manager.select_proxy(session_id)
 
     def _authenticate_project(self, headers: dict[str, str]) -> AuthResult | None:
         """Authenticate a client request using Proxy-Authorization header.
@@ -363,7 +364,7 @@ class ProxyServer:
         session_id = sessid if sessid is not None else client_ip
 
         # Select upstream proxy scoped to the authenticated project
-        proxy = self._get_upstream_proxy(
+        proxy = await self._get_upstream_proxy(
             project_id=project.id, session_id=session_id, target_host=target_host
         )
         if not proxy:
@@ -372,12 +373,12 @@ class ProxyServer:
                     client_writer, 429, "Too Many Requests",
                     "All proxies are temporarily rate-limited. Retry later.",
                 )
-                await request_rejected.send_async(
+                await event_bus.publish(request_rejected,
                     self, project_id=project.id, reason="all_proxies_quarantined"
                 )
             else:
                 await self._send_error(client_writer, 502, "Bad Gateway", "No upstream proxy available for this domain")
-                await request_rejected.send_async(
+                await event_bus.publish(request_rejected,
                     self, project_id=project.id, reason="no_proxy_available"
                 )
             return
@@ -458,7 +459,7 @@ class ProxyServer:
                 upstream_writer.close()
                 await upstream_writer.wait_closed()
             if proxy and not client_disconnected:
-                await request_completed.send_async(
+                await event_bus.publish(request_completed,
                     self,
                     proxy_id=proxy.id,
                     project_id=project.id,
@@ -586,7 +587,7 @@ class ProxyServer:
         session_id = sessid if sessid is not None else client_ip
 
         # Select upstream proxy scoped to the authenticated project
-        proxy = self._get_upstream_proxy(
+        proxy = await self._get_upstream_proxy(
             project_id=project_id, session_id=session_id, target_host=parsed_host
         )
         if not proxy:
@@ -595,12 +596,12 @@ class ProxyServer:
                     client_writer, 429, "Too Many Requests",
                     "All proxies are temporarily rate-limited. Retry later.",
                 )
-                await request_rejected.send_async(
+                await event_bus.publish(request_rejected,
                     self, project_id=project_id, reason="all_proxies_quarantined"
                 )
             else:
                 await self._send_error(client_writer, 502, "Bad Gateway", "No upstream proxy available for this domain")
-                await request_rejected.send_async(
+                await event_bus.publish(request_rejected,
                     self, project_id=project_id, reason="no_proxy_available"
                 )
             return
@@ -733,7 +734,7 @@ class ProxyServer:
                 upstream_writer.close()
                 await upstream_writer.wait_closed()
             if proxy:
-                await request_completed.send_async(
+                await event_bus.publish(request_completed,
                     self,
                     proxy_id=proxy.id,
                     project_id=project_id,

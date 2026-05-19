@@ -109,16 +109,51 @@ The web UI will be available at `http://localhost:3000`.
 
 ## Docker Deployment
 
-For production deployments using Docker:
+Octoprox ships with four ready-made Docker Compose flavours so you can
+match the deployment shape to what you actually need — a single
+instance for development, or a horizontally-scaled cluster fronted by
+HAProxy for HA / higher throughput. Two of those flavours use the
+pre-built image from GitHub Container Registry (no local build), and
+two build from your checkout.
+
+| File                              | Image source         | Instances | Use for                              |
+|-----------------------------------|----------------------|-----------|--------------------------------------|
+| `docker-compose.yml`              | local build          | 1         | day-to-day development               |
+| `docker-compose.ghcr.yml`         | `ghcr.io/.../latest` | 1         | quickest "just run it" demo          |
+| `docker-compose.cluster.yml`      | local build          | 3 + HAProxy | testing distributed code paths      |
+| `docker-compose.cluster.ghcr.yml` | `ghcr.io/.../latest` | 3 + HAProxy | production-ready starting point    |
+
+Single-instance shortcuts:
 
 ```bash
-# Build and run with docker-compose
+# Local build
 make docker-compose-up
+make docker-compose-down
 
-# Or build and run manually
+# Build the image manually
 make docker-build
 make docker-run
 ```
+
+Multi-instance cluster shortcuts:
+
+```bash
+# Local build (3 replicas + HAProxy + shared Postgres/Redis)
+make cluster-up
+make cluster-logs
+make cluster-down
+
+# Pre-built GHCR image — production-ready starting point
+docker compose -f docker-compose.cluster.ghcr.yml up -d
+docker compose -f docker-compose.cluster.ghcr.yml logs -f
+docker compose -f docker-compose.cluster.ghcr.yml down
+```
+
+The cluster exposes the same `:8000` (API/UI) and `:8080` (proxy
+traffic) ports as the single-instance setup, plus `:8404` for HAProxy
+stats. See [Deployment & Scaling]({{ site.baseurl }}/deployment) for
+how the multi-instance machinery works — what's shared, what's elected,
+how failover happens.
 
 ## Makefile Commands
 
@@ -133,8 +168,12 @@ Here are the most commonly used commands:
 | `make test` | Run tests with coverage |
 | `make lint` | Run linter (ruff) |
 | `make format` | Format code with ruff |
-| `make docker-compose-up` | Start all services with Docker |
+| `make docker-compose-up` | Start all services with Docker (single instance) |
 | `make docker-compose-down` | Stop all services |
+| `make cluster-up` | Start 3-instance cluster behind HAProxy (local build) |
+| `make cluster-down` | Stop the cluster |
+| `make cluster-logs` | Tail aggregated logs from the cluster |
+| `make cluster-rebuild` | Rebuild images and restart the cluster |
 | `make web-install` | Install frontend dependencies |
 | `make web-dev` | Run frontend dev server |
 | `make web-build` | Build frontend for production |
@@ -142,6 +181,7 @@ Here are the most commonly used commands:
 ## Next Steps
 
 - [Configuration]({{ site.baseurl }}/configuration) - Learn about configuration options
+- [Deployment & Scaling]({{ site.baseurl }}/deployment) - Single vs multi-instance, HA, and how horizontal scaling works
 - [AWS Setup]({{ site.baseurl }}/aws-setup) - Set up AWS cloud connector
 - [GCP Setup]({{ site.baseurl }}/gcp-setup) - Set up GCP cloud connector
 - [Azure Setup]({{ site.baseurl }}/azure-setup) - Set up Azure cloud connector
