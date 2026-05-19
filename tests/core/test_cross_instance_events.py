@@ -22,7 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from api.core.config import Settings
 from api.core.event_bus import EVENT_CHANNEL
 from api.core.proxy_manager import ProxyManager
-from api.db.redis import RedisClient
+from api.db.redis import METRIC_DELTAS_CHANNEL, RedisClient
 from api.db.repository import ProjectRepository
 from api.models.project import Project
 
@@ -353,3 +353,275 @@ class TestReloadPreservesRuntimeState:
         # Counters now reflect the Redis-backed total — definitely not 0.
         assert after.request_count == 5
         assert after.success_count == 5
+
+
+class TestCrossInstanceMetricDeltas:
+    """Peer-published metric deltas land in in-memory counters.
+
+    The hot path no longer writes Redis per request — instead each
+    instance accumulates deltas locally, flushes every few seconds in
+    one Redis pipeline, and announces the deltas on the
+    ``METRIC_DELTAS_CHANNEL`` Pub/Sub channel. The subscriber on every
+    other instance folds the deltas into its in-memory ``Proxy`` /
+    ``Project`` so the UI sees cluster-wide totals without polling
+    Redis.
+    """
+
+    async def test_peer_delta_updates_local_counters(
+        self,
+        started_proxy_manager: ProxyManager,
+        redis_client: RedisClient,
+    ) -> None:
+        from api.models.connector import Connector
+        from api.models.credential import Credential, CredentialType
+        from api.models.proxy import Proxy, ProxyProtocol
+
+        project = Project(name="Delta Project", username="dlt-1", password="p")
+        credential = Credential(
+            name="Cred",
+            type=CredentialType.STATIC_PROXY_PROVIDER,
+            project_id=project.id,
+            config={},
+        )
+        connector = Connector(
+            name="Conn",
+            credential_id=credential.id,
+            credential_type=CredentialType.STATIC_PROXY_PROVIDER,
+            project_id=project.id,
+            config={},
+        )
+        proxy = Proxy(
+            host="delta.example.com",
+            port=8080,
+            protocol=ProxyProtocol.HTTP,
+            connector_id=connector.id,
+        )
+        await started_proxy_manager.add_project(project)
+        await started_proxy_manager.add_credential(credential)
+        await started_proxy_manager.add_connector(connector)
+        await started_proxy_manager.add_proxy(proxy)
+
+        # Sanity: counters start at 0 on this instance.
+        cached = started_proxy_manager.get_proxy(proxy.id)
+        assert cached is not None and cached.request_count == 0
+
+        # Simulate a peer flushing deltas (3 successful requests on its side).
+        payload = json.dumps(
+            {
+                "instance_id": "peer-instance",
+                "proxy_deltas": {
+                    proxy.id: {
+                        "request_count": 3,
+                        "success_count": 3,
+                        "failure_count": 0,
+                        "latency_sum_ms": 90.0,
+                        "bytes_sent": 100,
+                        "bytes_received": 200,
+                    }
+                },
+                "project_deltas": {
+                    project.id: {
+                        "request_count": 3,
+                        "success_count": 3,
+                        "failure_count": 0,
+                        "latency_sum_ms": 90.0,
+                        "bytes_sent": 100,
+                        "bytes_received": 200,
+                    }
+                },
+            }
+        )
+        await redis_client.client.publish(METRIC_DELTAS_CHANNEL, payload)
+
+        async def _ready() -> bool:
+            p = started_proxy_manager.get_proxy(proxy.id)
+            pr = started_proxy_manager.get_project(project.id)
+            return (
+                p is not None and p.request_count == 3 and p.success_count == 3
+                and pr is not None and pr.request_count == 3
+            )
+
+        assert await _wait_until(_ready)
+
+        # Weighted-average latency from the peer's deltas.
+        final = started_proxy_manager.get_proxy(proxy.id)
+        assert final is not None
+        assert final.avg_latency_ms == pytest.approx(30.0)
+        assert final.bytes_sent == 100
+        assert final.bytes_received == 200
+
+    async def test_self_echoes_are_ignored(
+        self,
+        started_proxy_manager: ProxyManager,
+        redis_client: RedisClient,
+    ) -> None:
+        my_id = started_proxy_manager._settings.instance_id
+        # If we accidentally applied our own published delta we'd double-count.
+        payload = json.dumps(
+            {
+                "instance_id": my_id,
+                "proxy_deltas": {
+                    "doesnt-exist": {
+                        "request_count": 999,
+                        "success_count": 999,
+                        "failure_count": 0,
+                        "latency_sum_ms": 0.0,
+                        "bytes_sent": 0,
+                        "bytes_received": 0,
+                    }
+                },
+                "project_deltas": {},
+            }
+        )
+        await redis_client.client.publish(METRIC_DELTAS_CHANNEL, payload)
+        await asyncio.sleep(0.2)
+        # No proxy with that id; in-memory caches are unaffected.
+        assert started_proxy_manager.get_proxy("doesnt-exist") is None
+
+    async def test_flush_loop_does_not_double_apply_locally(
+        self,
+        started_proxy_manager: ProxyManager,
+    ) -> None:
+        """``_flush_pending_metrics`` applies the delta to in-memory AND
+        publishes the same delta on the channel. The publisher's own
+        subscriber receives the message too (Redis Pub/Sub is
+        broadcast), but must drop it by ``instance_id`` to avoid
+        double-counting locally.
+        """
+        from api.models.connector import Connector
+        from api.models.credential import Credential, CredentialType
+        from api.models.proxy import Proxy, ProxyProtocol
+
+        project = Project(name="Self-echo Project", username="se-1", password="p")
+        credential = Credential(
+            name="Cred",
+            type=CredentialType.STATIC_PROXY_PROVIDER,
+            project_id=project.id,
+            config={},
+        )
+        connector = Connector(
+            name="Conn",
+            credential_id=credential.id,
+            credential_type=CredentialType.STATIC_PROXY_PROVIDER,
+            project_id=project.id,
+            config={},
+        )
+        proxy = Proxy(
+            host="se.example.com",
+            port=8080,
+            protocol=ProxyProtocol.HTTP,
+            connector_id=connector.id,
+        )
+        await started_proxy_manager.add_project(project)
+        await started_proxy_manager.add_credential(credential)
+        await started_proxy_manager.add_connector(connector)
+        await started_proxy_manager.add_proxy(proxy)
+
+        # Drive 7 request completions, then flush.
+        for _ in range(7):
+            await started_proxy_manager._handle_request_stats(
+                proxy_id=proxy.id, project_id=project.id,
+                success=True, latency_ms=10.0,
+                bytes_sent=1, bytes_received=2,
+            )
+        await started_proxy_manager._flush_pending_metrics()
+
+        # Local apply happened inside flush. The subsequent Pub/Sub
+        # round-trip — which the publisher's own subscriber also
+        # receives — must NOT bump the counters a second time. Give
+        # the subscriber loop comfortably more time than a self-echo
+        # would take to land.
+        await asyncio.sleep(0.5)
+        cached = started_proxy_manager.get_proxy(proxy.id)
+        assert cached is not None
+        assert cached.request_count == 7
+        assert cached.success_count == 7
+        # If self-echo had been applied we'd see 14 here.
+        cached_project = started_proxy_manager.get_project(project.id)
+        assert cached_project is not None
+        assert cached_project.request_count == 7
+
+        # And no leftover pending — the flush drained everything.
+        assert proxy.id not in started_proxy_manager._pending_proxy_deltas
+        assert project.id not in started_proxy_manager._pending_project_deltas
+
+    async def test_handle_request_stats_accumulates_pending_delta(
+        self,
+        started_proxy_manager: ProxyManager,
+        redis_client: RedisClient,
+    ) -> None:
+        """The hot path neither writes Redis nor bumps in-memory counters.
+
+        Per-request handlers only accumulate into the pending delta —
+        in-memory counters and Redis are both updated at the next
+        ``_flush_pending_metrics`` tick, in the same code path peers
+        run when their subscribers fire. This is what keeps the
+        cluster-wide view consistent: every instance applies the same
+        delta at the same logical moment.
+        """
+        from api.models.connector import Connector
+        from api.models.credential import Credential, CredentialType
+        from api.models.proxy import Proxy, ProxyProtocol
+
+        project = Project(name="Pending Project", username="pnd-1", password="p")
+        credential = Credential(
+            name="Cred",
+            type=CredentialType.STATIC_PROXY_PROVIDER,
+            project_id=project.id,
+            config={},
+        )
+        connector = Connector(
+            name="Conn",
+            credential_id=credential.id,
+            credential_type=CredentialType.STATIC_PROXY_PROVIDER,
+            project_id=project.id,
+            config={},
+        )
+        proxy = Proxy(
+            host="pending.example.com",
+            port=8080,
+            protocol=ProxyProtocol.HTTP,
+            connector_id=connector.id,
+        )
+        await started_proxy_manager.add_project(project)
+        await started_proxy_manager.add_credential(credential)
+        await started_proxy_manager.add_connector(connector)
+        await started_proxy_manager.add_proxy(proxy)
+
+        # Drive 4 request completions through the internal handler.
+        for _ in range(4):
+            await started_proxy_manager._handle_request_stats(
+                proxy_id=proxy.id,
+                project_id=project.id,
+                success=True,
+                latency_ms=50.0,
+                bytes_sent=10,
+                bytes_received=20,
+            )
+
+        # Hot path didn't touch in-memory — peers must see the same
+        # values, so the local instance can't be ahead.
+        cached = started_proxy_manager.get_proxy(proxy.id)
+        assert cached is not None
+        assert cached.request_count == 0
+
+        # Pending delta carries the accumulated batch — no Redis write yet.
+        pending = started_proxy_manager._pending_proxy_deltas[proxy.id]
+        assert pending["request_count"] == 4
+        assert pending["success_count"] == 4
+        from api.db.redis import PROXY_METRICS_KEY
+        ttl_or_data = await redis_client.client.hgetall(PROXY_METRICS_KEY.format(proxy_id=proxy.id))
+        # Redis untouched on the hot path. Whatever's there came from
+        # prior unrelated activity (empty in a clean test).
+        assert not ttl_or_data or int(ttl_or_data.get("request_count", "0")) == 0
+
+        # Flush drains pending → Redis HINCRBY → applies locally → publishes.
+        await started_proxy_manager._flush_pending_metrics()
+        assert proxy.id not in started_proxy_manager._pending_proxy_deltas
+        data = await redis_client.client.hgetall(PROXY_METRICS_KEY.format(proxy_id=proxy.id))
+        assert int(data["request_count"]) == 4
+        assert int(data["success_count"]) == 4
+        cached_after = started_proxy_manager.get_proxy(proxy.id)
+        assert cached_after is not None
+        assert cached_after.request_count == 4
+        assert cached_after.success_count == 4

@@ -45,8 +45,20 @@ from api.core.signals import (
     proxy_update_requested,
     request_completed,
 )
-from api.core.stats import apply_metrics, combine_metrics
-from api.db.redis import INSTANCE_REGISTRY_KEY, RedisClient
+from api.core.stats import (
+    MetricDelta,
+    accumulate_delta,
+    apply_delta,
+    apply_metrics,
+    combine_metrics,
+    empty_delta,
+    merge_delta_into,
+)
+from api.db.redis import (
+    INSTANCE_REGISTRY_KEY,
+    METRIC_DELTAS_CHANNEL,
+    RedisClient,
+)
 from api.db.repository import (
     ConnectorRepository,
     CredentialRepository,
@@ -108,6 +120,13 @@ class ProxyManager:
             self, redis_client, settings.instance_id
         )
         self._rate_limiter = RateLimiter(redis_client)
+        # Pending metric deltas accumulated since the last flush. The
+        # per-request handler bumps local in-memory counters AND
+        # appends here; ``_periodic_metric_flush_loop`` drains both
+        # dicts in a single Redis pipeline and announces the same
+        # deltas on Pub/Sub so peers can update without polling.
+        self._pending_proxy_deltas: dict[str, MetricDelta] = {}
+        self._pending_project_deltas: dict[str, MetricDelta] = {}
         self._running = False
         self._tasks: list[asyncio.Task[None]] = []
 
@@ -175,11 +194,15 @@ class ProxyManager:
         task = asyncio.create_task(self._periodic_full_reload_loop())
         self._tasks.append(task)
 
-        # Fast metric refresh: pulls Redis-backed counters into in-memory
-        # so per-instance views converge with the cluster total every few
-        # seconds (otherwise the UI flaps as polls round-robin across
-        # instances that each handled only part of the traffic).
-        task = asyncio.create_task(self._periodic_metric_refresh_loop())
+        # Drain accumulated request-metric deltas to Redis (batched) and
+        # announce them on Pub/Sub so peers update their in-memory view.
+        # Keeps the hot path free of per-request Redis writes.
+        task = asyncio.create_task(self._periodic_metric_flush_loop())
+        self._tasks.append(task)
+
+        # Receive peer instances' metric deltas and fold them into local
+        # in-memory counters.
+        task = asyncio.create_task(self._metric_delta_subscriber_loop())
         self._tasks.append(task)
 
         # Subscribe to cross-instance cache-invalidation events.
@@ -455,22 +478,26 @@ class ProxyManager:
     ) -> None:
         """Handle request statistics update (internal implementation).
 
-        Only writes to Redis. The in-memory counters on this instance's
-        cached ``Proxy`` / ``Project`` are intentionally NOT incremented
-        here — that would produce per-instance counter divergence (A
-        handled 2, B handled 1, C handled 0), which the UI sees as
-        flapping when it round-robins polls across instances. Instead,
-        the periodic metric-refresh loop pulls the Redis-backed total
-        back into in-memory at a fast cadence, so all instances see the
-        same cluster-wide view.
+        Accumulates the request's contribution into a pending delta —
+        nothing else. The hot path makes zero Redis calls (except the
+        rate-limiter check below, which is correctness-critical and
+        only opt-in).
+
+        In-memory counters on ``Proxy`` / ``Project`` are intentionally
+        NOT bumped here. The local instance would otherwise be ahead of
+        its peers between the request and the next flush, which the UI
+        would see as flapping when round-robin polls hit different
+        instances. Instead, the flush loop applies the same delta to
+        in-memory at the same moment it announces it to peers — see
+        ``_flush_pending_metrics``.
         """
         proxy = self._proxies.get(proxy_id)
         if proxy:
-            await self._redis_client.update_proxy_metrics(
-                proxy_id, success, latency_ms, bytes_sent, bytes_received
+            accumulate_delta(
+                self._pending_proxy_deltas.setdefault(proxy_id, empty_delta()),
+                success, latency_ms, bytes_sent, bytes_received,
             )
 
-            # Rate limit tracking
             connector = self._connectors.get(proxy.connector_id)
             if connector:
                 rl_config = connector.parsed_rate_limit_config
@@ -484,12 +511,11 @@ class ProxyManager:
                         quarantine_seconds_max=rl_config.quarantine_seconds_max,
                     )
 
-        # Project-level: same — Redis is authoritative; refresh loop
-        # propagates back into in-memory.
         project = self._projects.get(project_id)
         if project:
-            await self._redis_client.update_project_metrics(
-                project_id, success, latency_ms, bytes_sent, bytes_received
+            accumulate_delta(
+                self._pending_project_deltas.setdefault(project_id, empty_delta()),
+                success, latency_ms, bytes_sent, bytes_received,
             )
 
     async def stop(self) -> None:
@@ -658,6 +684,13 @@ class ProxyManager:
             else:
                 existing_proxy.merge_definition_from(fresh_proxy)
 
+        # Flush our own pending deltas first so Redis has them before
+        # we read it back. Otherwise the upcoming ``_hydrate_from_redis``
+        # would overwrite local in-memory counters with stale
+        # cluster-wide totals that don't yet include the requests this
+        # instance has accumulated since the last flush.
+        await self._flush_pending_metrics()
+
         # Re-hydrate runtime state (status, metrics) from Redis so this
         # instance's view converges with the cross-instance source of truth.
         await self._hydrate_from_redis()
@@ -683,59 +716,149 @@ class ProxyManager:
             except Exception:
                 logger.warning("Periodic full reload failed", exc_info=True)
 
-    async def _refresh_metrics_from_redis(self) -> None:
-        """Refresh in-memory counters from the cluster-wide source of truth.
+    async def _flush_pending_metrics(self) -> None:
+        """Drain accumulated metric deltas to Redis and announce to peers.
 
-        Per-request handling on each instance no longer increments the
-        local counter — Redis HINCRBY does, and this loop folds the
-        Redis current-window + Postgres historical cumulative back into
-        every instance's in-memory ``Proxy`` / ``Project``. Without this
-        every instance would only ever see counters reflecting requests
-        it personally handled, and the UI would flap as it round-robins
-        polls across instances.
+        Operation:
 
-        Status and quarantine state are deliberately NOT touched here —
-        they have their own cross-instance propagation via Pub/Sub
-        (``proxy_changed`` / ``proxy_quarantine_changed``), and a
-        ``KEYS instance_registry:*``-style refresh would re-do per-proxy
-        Redis TTL lookups that aren't needed at this cadence.
+        1. Swap the pending dicts out atomically (Python assignment is
+           atomic between awaits) so new requests accumulate into a
+           fresh dict and we own the snapshot.
+        2. Apply the snapshot to Redis in a single pipelined batch.
+           If that fails, merge the snapshot back into the pending
+           dicts so the next iteration retries.
+        3. Publish the same snapshot on the ``METRIC_DELTAS_CHANNEL``
+           Pub/Sub channel so peer instances can update their own
+           in-memory counters without reading Redis. Pub/Sub is
+           best-effort; the 60s ``full_reload`` is the safety net for
+           dropped messages.
         """
-        redis_proxy_metrics = await self._redis_client.get_all_proxy_metrics()
-        redis_project_metrics = await self._redis_client.get_all_project_metrics()
-        async with self._session_factory() as session:
-            repo = MetricsRepository(session)
-            postgres_proxy_metrics = await repo.get_cumulative_metrics_for_all_proxies()
-            postgres_project_metrics = await repo.get_cumulative_project_metrics()
+        if not self._pending_proxy_deltas and not self._pending_project_deltas:
+            return
 
-        for proxy_id, proxy in self._proxies.items():
-            pg = postgres_proxy_metrics.get(proxy_id, {})
-            rd = redis_proxy_metrics.get(proxy_id, {})
-            apply_metrics(proxy, combine_metrics(pg, rd))
+        proxy_deltas = self._pending_proxy_deltas
+        project_deltas = self._pending_project_deltas
+        self._pending_proxy_deltas = {}
+        self._pending_project_deltas = {}
 
-        for project_id, project in self._projects.items():
-            pg = postgres_project_metrics.get(project_id, {})
-            rd = redis_project_metrics.get(project_id, {})
-            apply_metrics(project, combine_metrics(pg, rd))
+        try:
+            await self._redis_client.flush_metric_deltas(proxy_deltas, project_deltas)
+        except Exception:
+            logger.warning(
+                "Failed to flush metric deltas; merging back into pending",
+                exc_info=True,
+            )
+            for pid, d in proxy_deltas.items():
+                merge_delta_into(
+                    self._pending_proxy_deltas.setdefault(pid, empty_delta()), d
+                )
+            for pid, d in project_deltas.items():
+                merge_delta_into(
+                    self._pending_project_deltas.setdefault(pid, empty_delta()), d
+                )
+            return
 
-    async def _periodic_metric_refresh_loop(self, interval_seconds: float = 5.0) -> None:
-        """Background loop: fold Redis-backed metric totals into in-memory.
+        # Apply locally now that Redis is consistent. We use the same
+        # code path peers will run when they receive the Pub/Sub
+        # message below, so every instance updates its in-memory view
+        # at the same logical moment instead of the local one leading
+        # peers between request handling and propagation.
+        self._apply_peer_metric_deltas(proxy_deltas, project_deltas)
 
-        Runs at a faster cadence than ``full_reload`` because per-request
-        increments now live exclusively in Redis. 5s is a good default —
-        fast enough that the UI feels live, slow enough that the
-        Postgres ``get_cumulative_metrics_for_all_proxies`` query stays
-        cheap even with thousands of proxies.
+        try:
+            payload = json.dumps(
+                {
+                    "instance_id": self._settings.instance_id,
+                    "proxy_deltas": proxy_deltas,
+                    "project_deltas": project_deltas,
+                }
+            )
+            await self._redis_client.client.publish(METRIC_DELTAS_CHANNEL, payload)
+        except Exception:
+            logger.warning(
+                "Failed to publish metric deltas to peers (Redis already updated; "
+                "cluster will converge via the 60s safety reload)",
+                exc_info=True,
+            )
+
+    async def _periodic_metric_flush_loop(self, interval_seconds: float = 5.0) -> None:
+        """Periodically flush accumulated metric deltas.
+
+        Default cadence is 5s — fast enough that the UI feels live,
+        slow enough that the Redis pipeline batches many requests
+        into a single round-trip. On a busy host this turns 10k
+        per-request Redis writes per second into one batched write
+        every 5s carrying 50k aggregated increments.
         """
         while self._running:
             try:
                 await asyncio.sleep(interval_seconds)
                 if not self._running:
                     break
-                await self._refresh_metrics_from_redis()
+                await self._flush_pending_metrics()
             except asyncio.CancelledError:
                 break
             except Exception:
-                logger.warning("Periodic metric refresh failed", exc_info=True)
+                logger.warning("Periodic metric flush failed", exc_info=True)
+
+    async def _metric_delta_subscriber_loop(self) -> None:
+        """Listen for peer instances' metric deltas and apply them to in-memory.
+
+        Drops self-echoes by ``instance_id``. The applied delta updates
+        in-memory ``Proxy`` / ``Project`` counters using the same
+        weighted-average math as ``increment_stats`` — see
+        ``stats.apply_delta``. Reconnects on transient Redis failures
+        so a brief blip doesn't silently mute cross-instance updates.
+        """
+        my_id = self._settings.instance_id
+        while self._running:
+            try:
+                pubsub = self._redis_client.client.pubsub()
+                await pubsub.subscribe(METRIC_DELTAS_CHANNEL)
+                try:
+                    async for message in pubsub.listen():
+                        if not self._running:
+                            break
+                        if message.get("type") != "message":
+                            continue
+                        try:
+                            data = message.get("data")
+                            if isinstance(data, bytes):
+                                data = data.decode("utf-8")
+                            payload = json.loads(data)
+                        except (TypeError, ValueError, json.JSONDecodeError):
+                            logger.debug("Skipping malformed metric-delta message")
+                            continue
+                        if payload.get("instance_id") == my_id:
+                            continue
+                        self._apply_peer_metric_deltas(
+                            payload.get("proxy_deltas") or {},
+                            payload.get("project_deltas") or {},
+                        )
+                finally:
+                    with contextlib.suppress(Exception):
+                        await pubsub.unsubscribe(METRIC_DELTAS_CHANNEL)
+                        await pubsub.aclose()  # type: ignore[no-untyped-call]
+            except asyncio.CancelledError:
+                break
+            except Exception:
+                logger.warning("Metric-delta subscriber failed, reconnecting", exc_info=True)
+                await asyncio.sleep(1.0)
+
+    def _apply_peer_metric_deltas(
+        self,
+        proxy_deltas: dict[str, dict[str, Any]],
+        project_deltas: dict[str, dict[str, Any]],
+    ) -> None:
+        """Fold peer deltas into local in-memory counters."""
+        for proxy_id, delta in proxy_deltas.items():
+            proxy = self._proxies.get(proxy_id)
+            if proxy is not None:
+                apply_delta(proxy, delta)
+        for project_id, delta in project_deltas.items():
+            project = self._projects.get(project_id)
+            if project is not None:
+                apply_delta(project, delta)
 
     async def reload_project(self, project_id: str) -> None:
         """Re-read a project from Postgres into the cache.
