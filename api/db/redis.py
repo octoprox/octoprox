@@ -24,6 +24,10 @@ STICKY_BINDING_KEY = "sticky:{project_id}:{session_id}"
 MITM_REQUESTS_KEY = "mitm:requests:{project_id}"
 INSTANCE_REGISTRY_KEY = "instance_registry:{instance_id}"
 INSTANCE_REGISTRY_SCAN = "instance_registry:*"
+# Pub/sub channel used by ``ProxyManager`` to broadcast accumulated
+# metric deltas across instances so peers can update in-memory totals
+# without each having to read Redis on a polling cadence.
+METRIC_DELTAS_CHANNEL = "octoprox:metric_deltas"
 # Per-proxy rate-limiter state (used by api.core.rate_limiter)
 PROXY_QUARANTINE_KEY = "proxy:quarantine:{proxy_id}"
 PROXY_REQUESTS_KEY = "proxy:requests:{proxy_id}"
@@ -139,6 +143,53 @@ class RedisClient:
             pipe.hincrby(key, "bytes_received", bytes_received)
         pipe.hset(key, "updated_at", utc_now().isoformat())
         await pipe.execute()
+
+    async def flush_metric_deltas(
+        self,
+        proxy_deltas: dict[str, dict[str, Any]],
+        project_deltas: dict[str, dict[str, Any]],
+    ) -> None:
+        """Apply batched per-entity metric deltas in a single pipeline.
+
+        Each delta dict mirrors the per-request fields written by
+        ``update_proxy_metrics`` / ``update_project_metrics`` but
+        carries an aggregate across many requests. Used by the
+        periodic flush loop in ``ProxyManager`` so the hot path no
+        longer pays a Redis round-trip per request.
+        """
+        if not proxy_deltas and not project_deltas:
+            return
+        now = utc_now().isoformat()
+        pipe = self.client.pipeline()
+        for proxy_id, d in proxy_deltas.items():
+            key = PROXY_METRICS_KEY.format(proxy_id=proxy_id)
+            self._pipeline_metric_delta(pipe, key, d, now)
+        for project_id, d in project_deltas.items():
+            key = PROJECT_METRICS_KEY.format(project_id=project_id)
+            self._pipeline_metric_delta(pipe, key, d, now)
+        await pipe.execute()
+
+    @staticmethod
+    def _pipeline_metric_delta(
+        pipe: Any, key: str, delta: dict[str, Any], now_iso: str
+    ) -> None:
+        """Queue HINCRBY/HINCRBYFLOAT ops for one entity onto a Redis pipeline.
+
+        Zero-valued fields are skipped so we don't emit no-op writes.
+        """
+        if delta.get("request_count"):
+            pipe.hincrby(key, "request_count", delta["request_count"])
+        if delta.get("success_count"):
+            pipe.hincrby(key, "success_count", delta["success_count"])
+        if delta.get("failure_count"):
+            pipe.hincrby(key, "failure_count", delta["failure_count"])
+        if delta.get("latency_sum_ms"):
+            pipe.hincrbyfloat(key, "latency_sum_ms", delta["latency_sum_ms"])
+        if delta.get("bytes_sent"):
+            pipe.hincrby(key, "bytes_sent", delta["bytes_sent"])
+        if delta.get("bytes_received"):
+            pipe.hincrby(key, "bytes_received", delta["bytes_received"])
+        pipe.hset(key, "updated_at", now_iso)
 
     async def get_proxy_metrics(self, proxy_id: str) -> dict[str, Any] | None:
         """Get proxy metrics from Redis."""
