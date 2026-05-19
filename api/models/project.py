@@ -76,6 +76,33 @@ class Project(BaseModel):
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
 
+    def merge_definition_from(self, other: "Project") -> None:
+        """Adopt the Postgres-backed *definition* fields from ``other``.
+
+        Used by ``ProxyManager.reload_project`` and ``full_reload`` to
+        apply a fresh-from-DB ``Project`` to the existing cached instance
+        without clobbering the per-request aggregate counters that live
+        on this object in memory.
+
+        Adding a new column to the projects table? Add the field here
+        too. Adding a new runtime-only field? Leave it out.
+        """
+        self.name = other.name
+        self.description = other.description
+        self.username = other.username
+        self.password = other.password
+        self.routing_strategy = other.routing_strategy
+        self.health_check_interval = other.health_check_interval
+        self.health_check_timeout = other.health_check_timeout
+        self.connection_timeout = other.connection_timeout
+        self.max_retries = other.max_retries
+        self.tls_mitm_mode = other.tls_mitm_mode
+        self.tls_mitm_engine = other.tls_mitm_engine
+        self.tls_mitm_browser = other.tls_mitm_browser
+        self.metrics_retention_days = other.metrics_retention_days
+        self.created_at = other.created_at
+        self.updated_at = other.updated_at
+
 
 class ProjectCreate(BaseModel):
     """Schema for creating a new project."""

@@ -10,6 +10,7 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, ValidationError
 
 from api.core.auth import RequireEditorDep
+from api.core.event_bus import event_bus
 from api.core.signals import provider_connector_sync_requested
 from api.models.connector import (
     Connector,
@@ -157,7 +158,7 @@ async def create_connector(
     # Use create_task to avoid blocking the API response during IP discovery
     if is_syncable_credential_type(credential_type_enum):
         asyncio.create_task(
-            provider_connector_sync_requested.send_async(None, connector=connector)
+            event_bus.publish(provider_connector_sync_requested, None, connector=connector)
         )
 
     credential_type = credential.type.value if hasattr(credential.type, 'value') else credential.type
@@ -251,7 +252,7 @@ async def update_connector(
     # Use create_task to avoid blocking the API response during IP discovery
     if credential and is_syncable_credential_type(credential.type):
         asyncio.create_task(
-            provider_connector_sync_requested.send_async(None, connector=connector)
+            event_bus.publish(provider_connector_sync_requested, None, connector=connector)
         )
 
     credential_name = credential.name if credential else None

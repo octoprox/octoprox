@@ -9,14 +9,24 @@ import structlog
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from api.core.config import Settings
+from api.core.leadership import Lease
 from api.db.redis import RedisClient
 from api.db.repository import MetricsRepository
 
 logger = structlog.get_logger()
 
+# How often a standby instance polls Redis to see if the lease has freed
+# up. Set well above the lease TTL (5s) so non-leaders don't hammer Redis
+# but still take over within ~30s of a leader dying.
+_LEASE_RETRY_SECONDS = 30.0
+
 
 class MetricsFlusher:
     """Periodically flushes metrics from Redis to Postgres for historical storage.
+
+    Singleton across Octoprox instances: only the leaseholder runs the
+    flush. Two flushers writing the same Redis-aggregated counts to
+    Postgres would double-count, so this is leader-elected.
 
     Args:
         session_factory: Async session factory for database operations.
@@ -32,23 +42,35 @@ class MetricsFlusher:
     ) -> None:
         self._session_factory = session_factory
         self._redis_client = redis_client
+        self._settings = settings
         self._interval = settings.metrics_flush_interval
         self._running = False
 
     async def run(self) -> None:
-        """Run the metrics flush loop."""
+        """Run the metrics flush loop while holding the global lease."""
         self._running = True
         logger.info("Starting metrics flusher", interval=self._interval)
-
-        while self._running:
-            try:
-                await asyncio.sleep(self._interval)
-                await self._flush_metrics()
-            except asyncio.CancelledError:
-                logger.info("Metrics flusher stopped")
-                break
-            except Exception as e:
-                logger.error("Metrics flush error", error=str(e))
+        lease = Lease(
+            self._redis_client,
+            name="metrics_flusher",
+            owner_id=self._settings.instance_id,
+        )
+        try:
+            while self._running:
+                try:
+                    if not lease.is_held and not await lease.try_acquire():
+                        await asyncio.sleep(_LEASE_RETRY_SECONDS)
+                        continue
+                    await asyncio.sleep(self._interval)
+                    if lease.is_held and self._running:
+                        await self._flush_metrics()
+                except asyncio.CancelledError:
+                    logger.info("Metrics flusher stopped")
+                    break
+                except Exception as e:
+                    logger.error("Metrics flush error", error=str(e))
+        finally:
+            await lease.release()
 
     async def _flush_metrics(self) -> None:
         """Flush all proxy and project metrics from Redis to Postgres."""

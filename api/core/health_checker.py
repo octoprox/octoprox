@@ -4,11 +4,17 @@
 """Health checker for proxy pool.
 
 Emits health_check_completed signals instead of directly calling ProxyManager.
+
+When running multiple Octoprox instances, each instance only checks the
+proxies it "owns" under rendezvous (HRW) hashing over the live instance
+set advertised in Redis. Adding or removing an instance only re-homes
+1/N of the proxies — no central coordinator, no rebalance ceremony.
 """
 
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import time
 from datetime import timedelta
 from typing import TYPE_CHECKING, Protocol
@@ -19,7 +25,9 @@ from httpx_socks import AsyncProxyTransport  # type: ignore[import-untyped]
 
 from api.core import utc_now
 from api.core.config import settings
+from api.core.event_bus import event_bus
 from api.core.signals import health_check_completed
+from api.db.redis import INSTANCE_REGISTRY_SCAN, RedisClient
 from api.models.connector import Connector
 from api.models.proxy import Proxy, ProxyProtocol, ProxyStatus
 
@@ -30,6 +38,24 @@ logger = structlog.get_logger()
 
 # Default healthcheck URL
 DEFAULT_HEALTHCHECK_URL = "https://httpbin.org/ip"
+
+def _hrw_owner(proxy_id: str, instances: list[str]) -> str:
+    """Return the instance id that owns this proxy under rendezvous hashing.
+
+    HRW picks the instance whose hash(instance_id || proxy_id) is highest.
+    Stable across runs, fair under add/remove (only ~1/N moves), and
+    requires no membership broadcasts beyond a known peer set.
+    """
+    best_score: bytes = b""
+    best_owner = ""
+    for inst in instances:
+        digest = hashlib.blake2s(
+            f"{inst}|{proxy_id}".encode(), digest_size=16
+        ).digest()
+        if digest > best_score:
+            best_score = digest
+            best_owner = inst
+    return best_owner
 
 
 class ProxyDataProvider(Protocol):
@@ -63,14 +89,25 @@ class HealthChecker:
     Subscribers (like ProxyManager) handle updating proxy status.
     """
 
-    def __init__(self, proxy_data_provider: ProxyDataProvider) -> None:
+    def __init__(
+        self,
+        proxy_data_provider: ProxyDataProvider,
+        redis_client: RedisClient,
+        instance_id: str,
+    ) -> None:
         """Initialize the health checker.
 
         Args:
             proxy_data_provider: Provider for read-only access to proxy data.
                                  Typically the ProxyManager instance.
+            redis_client: Connected Redis client (used for live instance
+                discovery so HRW can shard ownership).
+            instance_id: This process's identifier (matches the value
+                published to `instance_registry:<id>` by the heartbeat).
         """
         self._proxy_data_provider = proxy_data_provider
+        self._redis_client = redis_client
+        self._instance_id = instance_id
         self._interval = settings.health_check_interval
         self._timeout = settings.health_check_timeout
 
@@ -89,15 +126,42 @@ class HealthChecker:
                 logger.error("Health check error", error=str(e))
                 await asyncio.sleep(self._interval)
 
+    async def _live_instances(self) -> list[str]:
+        """Return the sorted list of live instance ids advertised in Redis.
+
+        Always includes our own id (covers the bootstrap window before the
+        heartbeat has written its first key).
+        """
+        ids: set[str] = {self._instance_id}
+        try:
+            async for key in self._redis_client.client.scan_iter(
+                match=INSTANCE_REGISTRY_SCAN
+            ):
+                if isinstance(key, bytes):
+                    key = key.decode("utf-8")
+                _, _, ident = key.partition(":")
+                if ident:
+                    ids.add(ident)
+        except Exception:
+            logger.warning(
+                "Instance registry scan failed; running solo this tick",
+                exc_info=True,
+            )
+        return sorted(ids)
+
     async def _check_all_proxies(self) -> None:
-        """Check health of all proxies."""
+        """Check health of all proxies this instance owns under HRW.
+
+        Skips proxies that are draining/terminating or belong to disabled
+        connectors, then narrows the remainder to those rendezvous-hashed
+        to this instance over the live peer set. Brief overlap during
+        membership changes is harmless — Redis is last-writer-wins on the
+        status snapshot.
+        """
         proxies = self._proxy_data_provider.proxies
         if not proxies:
             return
 
-        # Skip proxies that are:
-        # - draining or terminating (being removed from the pool)
-        # - belonging to disabled connectors (not in use)
         active_proxies = [
             p for p in proxies
             if p.status not in (ProxyStatus.DRAINING, ProxyStatus.TERMINATING)
@@ -107,9 +171,31 @@ class HealthChecker:
         if not active_proxies:
             return
 
-        logger.debug("Running health checks", proxy_count=len(active_proxies))
+        instances = await self._live_instances()
+        if len(instances) == 1:
+            owned = active_proxies
+        else:
+            owned = [
+                p for p in active_proxies
+                if _hrw_owner(p.id, instances) == self._instance_id
+            ]
 
-        tasks = [self._check_proxy(proxy) for proxy in active_proxies]
+        if not owned:
+            logger.debug(
+                "No proxies owned this tick",
+                instance_count=len(instances),
+                candidates=len(active_proxies),
+            )
+            return
+
+        logger.debug(
+            "Running health checks",
+            proxy_count=len(owned),
+            instance_count=len(instances),
+            total_candidates=len(active_proxies),
+        )
+
+        tasks = [self._check_proxy(proxy) for proxy in owned]
         await asyncio.gather(*tasks, return_exceptions=True)
 
     def _get_proxy_mounts(
@@ -176,7 +262,7 @@ class HealthChecker:
                         proxy_id=proxy.id,
                         latency_ms=round(latency_ms, 2),
                     )
-                    await health_check_completed.send_async(
+                    await event_bus.publish(health_check_completed,
                         self,
                         proxy_id=proxy.id,
                         status=ProxyStatus.HEALTHY,
@@ -223,7 +309,7 @@ class HealthChecker:
                 created_at=proxy.created_at.isoformat(),
             )
             # Keep status as INITIALIZING but track failures
-            await health_check_completed.send_async(
+            await event_bus.publish(health_check_completed,
                 self,
                 proxy_id=proxy.id,
                 status=ProxyStatus.INITIALIZING,
@@ -249,7 +335,7 @@ class HealthChecker:
                 failures=new_failures,
             )
 
-        await health_check_completed.send_async(
+        await event_bus.publish(health_check_completed,
             self,
             proxy_id=proxy.id,
             status=status,

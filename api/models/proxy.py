@@ -87,6 +87,31 @@ class Proxy(BaseModel):
             return 0.0
         return (self.success_count / self.request_count) * 100
 
+    def merge_definition_from(self, other: "Proxy") -> None:
+        """Adopt the Postgres-backed *definition* fields from ``other``.
+
+        Used by ``ProxyManager.reload_proxy`` and ``full_reload`` to apply
+        a fresh-from-DB ``Proxy`` to the existing cached instance without
+        clobbering runtime state — ``status``, ``last_check_latency_ms``,
+        ``consecutive_failures`` (refreshed from Redis), and the
+        per-request counters (``request_count`` and friends, incremented
+        in-process and reconciled with Redis on the next hydrate).
+
+        Adding a new column to the proxies table? Add the field here
+        too. Adding a new runtime-only field? Leave it out.
+        """
+        self.host = other.host
+        self.port = other.port
+        self.protocol = other.protocol
+        self.username = other.username
+        self.password = other.password
+        self.display_host = other.display_host
+        self.connector_id = other.connector_id
+        self.tags = other.tags
+        self.metadata = other.metadata
+        self.created_at = other.created_at
+        self.updated_at = other.updated_at
+
 
 class ProxyCreate(BaseModel):
     """Schema for creating a new proxy."""

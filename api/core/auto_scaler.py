@@ -25,6 +25,8 @@ import structlog
 
 from api.core import utc_now
 from api.core.demand_tracker import DemandLevel
+from api.core.event_bus import event_bus
+from api.core.leadership import Lease
 from api.core.signals import (
     connector_error_updated,
     connector_remove_requested,
@@ -37,6 +39,7 @@ from api.core.signals import (
     scale_down_requested,
     scale_up_requested,
 )
+from api.db.redis import AUTOSCALER_LAST_ACTION_KEY, RedisClient
 from api.models.connector import CloudConnectorConfig, Connector
 from api.models.credential import CredentialType
 from api.models.proxy import Proxy, ProxyStatus
@@ -98,14 +101,23 @@ class AutoScaler:
                        Typically the ProxyManager instance.
     """
 
-    def __init__(self, data_provider: AutoScalerDataProvider) -> None:
+    def __init__(
+        self,
+        data_provider: AutoScalerDataProvider,
+        redis_client: RedisClient,
+        instance_id: str,
+    ) -> None:
         self._data_provider = data_provider
+        self._redis_client = redis_client
+        self._instance_id = instance_id
         self._running = False
-        # Track scheduled rotation times per proxy: proxy_id -> rotation_time
+        # Track scheduled rotation times per proxy: proxy_id -> rotation_time.
+        # Kept in-process; on lease handover the new owner re-derives rotation
+        # times from connector config on the next tick. Brief drift is fine
+        # (rotation is an optimisation, not a correctness invariant).
         self._rotation_schedule: dict[str, datetime] = {}
-        # Track last scaling action time per connector: connector_id -> datetime
-        self._last_scale_action_at: dict[str, datetime] = {}
-        # Track last demand level per connector: connector_id -> DemandLevel
+        # Track last demand level per connector: connector_id -> DemandLevel.
+        # Same in-process trade-off; on handover hysteresis resets for one cycle.
         self._last_demand_level: dict[str, DemandLevel] = {}
 
     async def run(self) -> None:
@@ -160,13 +172,30 @@ class AutoScaler:
 
         return False
 
-    def _is_in_scaling_cooldown(self, connector_id: str) -> bool:
+    async def _is_in_scaling_cooldown(self, connector_id: str) -> bool:
         """Check if a connector is in scaling cooldown.
 
-        Returns True if a scaling action happened less than SCALING_COOLDOWN_SECONDS ago.
+        Returns True if a scaling action happened less than
+        SCALING_COOLDOWN_SECONDS ago, regardless of which Octoprox instance
+        recorded that action. State lives in a Redis hash so a lease
+        handover does not lose the cooldown.
         """
-        last_action = self._last_scale_action_at.get(connector_id)
-        if not last_action:
+        try:
+            raw = await self._redis_client.client.hget(  # type: ignore[misc]
+                AUTOSCALER_LAST_ACTION_KEY, connector_id
+            )
+        except Exception:
+            logger.warning(
+                "Cooldown lookup failed; allowing scaling",
+                connector_id=connector_id,
+                exc_info=True,
+            )
+            return False
+        if not raw:
+            return False
+        try:
+            last_action = datetime.fromisoformat(raw)
+        except ValueError:
             return False
 
         elapsed = (utc_now() - last_action).total_seconds()
@@ -178,6 +207,21 @@ class AutoScaler:
             )
             return True
         return False
+
+    async def _record_scale_action(self, connector_id: str) -> None:
+        """Mark a scaling action so peers also observe the cooldown."""
+        try:
+            await self._redis_client.client.hset(  # type: ignore[misc]
+                AUTOSCALER_LAST_ACTION_KEY,
+                connector_id,
+                utc_now().isoformat(),
+            )
+        except Exception:
+            logger.warning(
+                "Cooldown write failed; cooldown will not be honoured cross-instance",
+                connector_id=connector_id,
+                exc_info=True,
+            )
 
     @staticmethod
     def _get_max_step_sizes(min_proxies: int, max_proxies: int) -> tuple[int, int]:
@@ -203,7 +247,7 @@ class AutoScaler:
         new_consecutive_errors = connector.consecutive_errors + 1
 
         # Emit signal - ProxyManager will persist the error
-        await connector_error_updated.send_async(
+        await event_bus.publish(connector_error_updated,
             self,
             connector_id=connector.id,
             error=error,
@@ -224,7 +268,7 @@ class AutoScaler:
             return  # No error to clear
 
         # Emit signal - ProxyManager will persist the cleared state
-        await connector_error_updated.send_async(
+        await event_bus.publish(connector_error_updated,
             self,
             connector_id=connector.id,
             error=None,
@@ -237,7 +281,13 @@ class AutoScaler:
         connector.consecutive_errors = 0
 
     async def _check_all_connectors(self) -> None:
-        """Check scaling and rotation for all cloud connectors."""
+        """Check scaling and rotation for all cloud connectors.
+
+        Each connector is gated by `lease:autoscaler:<connector_id>` so
+        two Octoprox instances cannot double-scale the same cloud account.
+        Different connectors can be processed by different instances in
+        parallel (each acquires its own lease).
+        """
         connectors = self._data_provider.connectors
 
         for connector in connectors:
@@ -253,6 +303,17 @@ class AutoScaler:
             ):
                 continue
 
+            lease = Lease(
+                self._redis_client,
+                name=f"autoscaler:{connector.id}",
+                owner_id=self._instance_id,
+            )
+            if not await lease.try_acquire():
+                logger.debug(
+                    "Skipping connector: autoscaler lease held by peer",
+                    connector_id=connector.id,
+                )
+                continue
             try:
                 # If connector is disabled, drain and terminate all its proxies
                 if not connector.enabled:
@@ -267,6 +328,8 @@ class AutoScaler:
                     connector_id=connector.id,
                     error=str(e),
                 )
+            finally:
+                await lease.release()
 
     async def _drain_disabled_connector(self, connector: Connector, credential: Any) -> None:
         """Drain and terminate all proxies for a disabled connector.
@@ -290,7 +353,7 @@ class AutoScaler:
                     "All proxies terminated for connector pending deletion, requesting removal",
                     connector_id=connector.id,
                 )
-                await connector_remove_requested.send_async(self, connector_id=connector.id)
+                await event_bus.publish(connector_remove_requested, self, connector_id=connector.id)
             return
 
         for proxy in proxies:
@@ -305,7 +368,7 @@ class AutoScaler:
                     connector_id=connector.id,
                     proxy_id=proxy.id,
                 )
-                await proxy_draining_requested.send_async(self, proxy_id=proxy.id)
+                await event_bus.publish(proxy_draining_requested, self, proxy_id=proxy.id)
 
     async def _check_connector_scaling(
         self, connector: Connector, credential: Any
@@ -320,7 +383,7 @@ class AutoScaler:
             return
 
         # Check scaling cooldown (only for demand-based scaling)
-        if self._is_in_scaling_cooldown(connector.id):
+        if await self._is_in_scaling_cooldown(connector.id):
             return
 
         # Get current proxies (excluding draining/terminating)
@@ -411,7 +474,7 @@ class AutoScaler:
         )
 
         # Emit signal for observability
-        await scale_up_requested.send_async(
+        await event_bus.publish(scale_up_requested,
             self,
             connector_id=connector.id,
             count=count,
@@ -436,7 +499,7 @@ class AutoScaler:
                     # Schedule rotation for this new proxy
                     self._schedule_rotation(proxy, cloud_config)
                     # Request proxy manager to add the proxy
-                    await proxy_add_requested.send_async(self, proxy=proxy)
+                    await event_bus.publish(proxy_add_requested, self, proxy=proxy)
                     logger.info(
                         "Created new proxy instance",
                         proxy_id=proxy.id,
@@ -456,7 +519,7 @@ class AutoScaler:
         # Clear error state and record cooldown if we had at least one success
         if had_success:
             await self._clear_connector_error(connector)
-            self._last_scale_action_at[connector.id] = utc_now()
+            await self._record_scale_action(connector.id)
 
     async def _scale_down(self, connector: Connector, count: int) -> None:
         """Scale down by draining and terminating proxy instances.
@@ -470,7 +533,7 @@ class AutoScaler:
         )
 
         # Emit signal for observability
-        await scale_down_requested.send_async(
+        await event_bus.publish(scale_down_requested,
             self,
             connector_id=connector.id,
             count=count,
@@ -489,10 +552,10 @@ class AutoScaler:
         proxies_to_remove = sorted(proxies, key=sort_key)[:count]
 
         for proxy in proxies_to_remove:
-            await proxy_draining_requested.send_async(self, proxy_id=proxy.id)
+            await event_bus.publish(proxy_draining_requested, self, proxy_id=proxy.id)
 
         if proxies_to_remove:
-            self._last_scale_action_at[connector.id] = utc_now()
+            await self._record_scale_action(connector.id)
 
     def _schedule_rotation(self, proxy: Proxy, typed_config: CloudConnectorConfig) -> None:
         """Schedule rotation for a proxy based on config."""
@@ -566,7 +629,7 @@ class AutoScaler:
         )
 
         # Emit signal for observability
-        await proxy_rotation_started.send_async(
+        await event_bus.publish(proxy_rotation_started,
             self,
             old_proxy_id=proxy.id,
             connector_id=connector.id,
@@ -584,7 +647,7 @@ class AutoScaler:
                 if new_proxy:
                     new_proxy.connector_id = connector.id
                     self._schedule_rotation(new_proxy, cloud_config)
-                    await proxy_add_requested.send_async(self, proxy=new_proxy)
+                    await event_bus.publish(proxy_add_requested, self, proxy=new_proxy)
                     logger.info(
                         "Created replacement proxy",
                         old_proxy_id=proxy.id,
@@ -604,7 +667,7 @@ class AutoScaler:
                 # Continue with draining anyway - we'll try again next cycle
 
         # Start draining the old proxy
-        await proxy_draining_requested.send_async(self, proxy_id=proxy.id)
+        await event_bus.publish(proxy_draining_requested, self, proxy_id=proxy.id)
 
     async def _handle_draining_proxy(self, proxy: Proxy) -> None:
         """Handle a proxy that is draining - check if traffic has stopped.
@@ -640,7 +703,7 @@ class AutoScaler:
                 bytes_sent=current_bytes_sent,
                 bytes_received=current_bytes_received,
             )
-            await proxy_terminating_requested.send_async(self, proxy_id=proxy.id)
+            await event_bus.publish(proxy_terminating_requested, self, proxy_id=proxy.id)
         else:
             # Traffic still flowing - update previous values for next check
             proxy.metadata["draining_prev_bytes_sent"] = current_bytes_sent
@@ -675,11 +738,11 @@ class AutoScaler:
                 # Remove from rotation schedule
                 self._rotation_schedule.pop(proxy.id, None)
                 # Request proxy manager to remove the proxy
-                await proxy_remove_requested.send_async(self, proxy_id=proxy.id)
+                await event_bus.publish(proxy_remove_requested, self, proxy_id=proxy.id)
                 logger.info("Terminated proxy instance", proxy_id=proxy.id)
 
                 # Emit signal for observability
-                await proxy_instance_terminated.send_async(
+                await event_bus.publish(proxy_instance_terminated,
                     self,
                     proxy_id=proxy.id,
                     connector_id=connector.id,

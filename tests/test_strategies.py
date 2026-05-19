@@ -30,30 +30,30 @@ class TestRoundRobinStrategy:
         strategy = RoundRobinStrategy()
         assert strategy.name == "round_robin"
 
-    def test_select_empty_list(self):
+    async def test_select_empty_list(self):
         strategy = RoundRobinStrategy()
-        result = strategy.select([])
+        result = await strategy.select([])
         assert result is None
 
-    def test_select_cycles_through_proxies(self, sample_proxies: list[Proxy]):
+    async def test_select_cycles_through_proxies(self, sample_proxies: list[Proxy]):
         strategy = RoundRobinStrategy()
 
         # First cycle
-        assert strategy.select(sample_proxies).id == "proxy-1"
-        assert strategy.select(sample_proxies).id == "proxy-2"
-        assert strategy.select(sample_proxies).id == "proxy-3"
+        assert (await strategy.select(sample_proxies)).id == "proxy-1"
+        assert (await strategy.select(sample_proxies)).id == "proxy-2"
+        assert (await strategy.select(sample_proxies)).id == "proxy-3"
 
         # Second cycle - should wrap around
-        assert strategy.select(sample_proxies).id == "proxy-1"
+        assert (await strategy.select(sample_proxies)).id == "proxy-1"
 
-    def test_reset(self, sample_proxies: list[Proxy]):
+    async def test_reset(self, sample_proxies: list[Proxy]):
         strategy = RoundRobinStrategy()
 
-        strategy.select(sample_proxies)  # Move to index 1
+        await strategy.select(sample_proxies)  # Move to index 1
         strategy.reset()
 
         # Should start from beginning again
-        assert strategy.select(sample_proxies).id == "proxy-1"
+        assert (await strategy.select(sample_proxies)).id == "proxy-1"
 
 
 class TestLeastUsedStrategy:
@@ -63,26 +63,26 @@ class TestLeastUsedStrategy:
         strategy = LeastUsedStrategy()
         assert strategy.name == "least_used"
 
-    def test_select_empty_list(self):
+    async def test_select_empty_list(self):
         strategy = LeastUsedStrategy()
-        result = strategy.select([])
+        result = await strategy.select([])
         assert result is None
 
-    def test_select_returns_least_used(self, sample_proxies: list[Proxy]):
+    async def test_select_returns_least_used(self, sample_proxies: list[Proxy]):
         strategy = LeastUsedStrategy()
 
         # proxy-2 has the lowest request_count (5)
-        result = strategy.select(sample_proxies)
+        result = await strategy.select(sample_proxies)
         assert result.id == "proxy-2"
 
-    def test_select_with_equal_counts(self):
+    async def test_select_with_equal_counts(self):
         strategy = LeastUsedStrategy()
         proxies = [
             Proxy(id="proxy-1", host="p1.example.com", port=8080, connector_id="conn-1", request_count=10),
             Proxy(id="proxy-2", host="p2.example.com", port=8080, connector_id="conn-1", request_count=10),
         ]
 
-        result = strategy.select(proxies)
+        result = await strategy.select(proxies)
         assert result is not None
         assert result.request_count == 10
 
@@ -94,110 +94,116 @@ class TestRandomStrategy:
         strategy = RandomStrategy()
         assert strategy.name == "random"
 
-    def test_select_empty_list(self):
+    async def test_select_empty_list(self):
         strategy = RandomStrategy()
-        result = strategy.select([])
+        result = await strategy.select([])
         assert result is None
 
-    def test_select_returns_valid_proxy(self, sample_proxies: list[Proxy]):
+    async def test_select_returns_valid_proxy(self, sample_proxies: list[Proxy]):
         strategy = RandomStrategy()
 
         for _ in range(10):
-            result = strategy.select(sample_proxies)
+            result = await strategy.select(sample_proxies)
             assert result is not None
             assert result in sample_proxies
 
 
 class TestStickySessionStrategy:
-    """Tests for StickySessionStrategy."""
+    """Tests for StickySessionStrategy.
+
+    These cover the in-process behaviour only — no redis_client is
+    passed, so the strategy operates purely from ``_session_map``.
+    Cross-instance behaviour (Redis read-through inside ``select``) is
+    exercised in tests/core/test_cross_instance_events.py.
+    """
 
     def test_name(self):
         strategy = StickySessionStrategy()
         assert strategy.name == "sticky"
 
-    def test_select_empty_list(self):
+    async def test_select_empty_list(self):
         strategy = StickySessionStrategy()
-        result = strategy.select([])
+        result = await strategy.select([])
         assert result is None
 
-    def test_select_without_session_returns_random(self, sample_proxies: list[Proxy]):
+    async def test_select_without_session_returns_random(self, sample_proxies: list[Proxy]):
         strategy = StickySessionStrategy()
 
-        result = strategy.select(sample_proxies, session_id=None)
+        result = await strategy.select(sample_proxies, session_id=None)
         assert result is not None
         assert result in sample_proxies
 
-    def test_select_same_session_returns_same_proxy(self, sample_proxies: list[Proxy]):
+    async def test_select_same_session_returns_same_proxy(self, sample_proxies: list[Proxy]):
         strategy = StickySessionStrategy()
         session_id = "user-session-123"
 
-        first_result = strategy.select(sample_proxies, session_id=session_id)
+        first_result = await strategy.select(sample_proxies, session_id=session_id)
 
         # Same session should return same proxy
         for _ in range(5):
-            result = strategy.select(sample_proxies, session_id=session_id)
+            result = await strategy.select(sample_proxies, session_id=session_id)
             assert result.id == first_result.id
 
-    def test_select_different_sessions_can_differ(self, sample_proxies: list[Proxy]):
+    async def test_select_different_sessions_can_differ(self, sample_proxies: list[Proxy]):
         strategy = StickySessionStrategy()
 
-        result1 = strategy.select(sample_proxies, session_id="session-1")
-        result2 = strategy.select(sample_proxies, session_id="session-2")
+        result1 = await strategy.select(sample_proxies, session_id="session-1")
+        result2 = await strategy.select(sample_proxies, session_id="session-2")
 
         # Both should be valid proxies (may or may not be the same)
         assert result1 in sample_proxies
         assert result2 in sample_proxies
 
-    def test_reset_clears_session_map(self, sample_proxies: list[Proxy]):
+    async def test_reset_clears_session_map(self, sample_proxies: list[Proxy]):
         strategy = StickySessionStrategy()
         session_id = "user-session-123"
 
-        first_result = strategy.select(sample_proxies, session_id=session_id)
+        first_result = await strategy.select(sample_proxies, session_id=session_id)
         strategy.reset()
 
         # After reset, session map is cleared but consistent hashing should give same result
-        second_result = strategy.select(sample_proxies, session_id=session_id)
+        second_result = await strategy.select(sample_proxies, session_id=session_id)
         assert second_result.id == first_result.id  # Consistent hashing
 
-    def test_sessid_produces_consistent_selection(self, sample_proxies: list[Proxy]):
+    async def test_sessid_produces_consistent_selection(self, sample_proxies: list[Proxy]):
         """Test that a session ID (as extracted from username) produces consistent results."""
         strategy = StickySessionStrategy()
         sessid = "abc123"
 
-        first_result = strategy.select(sample_proxies, session_id=sessid)
+        first_result = await strategy.select(sample_proxies, session_id=sessid)
         assert first_result is not None
 
         for _ in range(5):
-            result = strategy.select(sample_proxies, session_id=sessid)
+            result = await strategy.select(sample_proxies, session_id=sessid)
             assert result.id == first_result.id
 
-    def test_different_sessids_can_map_to_different_proxies(self, sample_proxies: list[Proxy]):
+    async def test_different_sessids_can_map_to_different_proxies(self, sample_proxies: list[Proxy]):
         """Test that different session IDs can map to different proxies."""
         strategy = StickySessionStrategy()
 
         results = {}
         for i in range(20):
             sessid = f"session-{i}"
-            result = strategy.select(sample_proxies, session_id=sessid)
+            result = await strategy.select(sample_proxies, session_id=sessid)
             results[sessid] = result.id
 
         # With 20 different session IDs and 3 proxies, we should see more than 1 proxy used
         unique_proxies = set(results.values())
         assert len(unique_proxies) > 1
 
-    def test_cached_proxy_survives_list_reorder(self, sample_proxies: list[Proxy]):
+    async def test_cached_proxy_survives_list_reorder(self, sample_proxies: list[Proxy]):
         """Test that a cached session binding is stable even if the proxy list order changes."""
         strategy = StickySessionStrategy()
         sessid = "stable-session"
 
-        first_result = strategy.select(sample_proxies, session_id=sessid)
+        first_result = await strategy.select(sample_proxies, session_id=sessid)
 
         # Reverse the proxy list order
         reordered = list(reversed(sample_proxies))
-        result = strategy.select(reordered, session_id=sessid)
+        result = await strategy.select(reordered, session_id=sessid)
         assert result.id == first_result.id
 
-    def test_removed_proxy_triggers_reassignment(self):
+    async def test_removed_proxy_triggers_reassignment(self):
         """Test that removing the bound proxy causes reassignment to another proxy."""
         strategy = StickySessionStrategy()
         proxies = [
@@ -206,11 +212,11 @@ class TestStickySessionStrategy:
         ]
         sessid = "sticky-session"
 
-        first_result = strategy.select(proxies, session_id=sessid)
+        first_result = await strategy.select(proxies, session_id=sessid)
 
         # Remove the selected proxy from the list (simulating it becoming unhealthy)
         remaining = [p for p in proxies if p.id != first_result.id]
-        result = strategy.select(remaining, session_id=sessid)
+        result = await strategy.select(remaining, session_id=sessid)
 
         # Should get the other proxy
         assert result is not None
@@ -225,12 +231,12 @@ class TestHealthBasedStrategy:
         strategy = HealthBasedStrategy()
         assert strategy.name == "health_based"
 
-    def test_select_empty_list(self):
+    async def test_select_empty_list(self):
         strategy = HealthBasedStrategy()
-        result = strategy.select([])
+        result = await strategy.select([])
         assert result is None
 
-    def test_select_prefers_healthy_proxies(self):
+    async def test_select_prefers_healthy_proxies(self):
         strategy = HealthBasedStrategy()
         proxies = [
             Proxy(id="healthy", host="h.example.com", port=8080, connector_id="conn-1", status=ProxyStatus.HEALTHY, success_count=90, request_count=100, avg_latency_ms=50),
@@ -239,10 +245,10 @@ class TestHealthBasedStrategy:
 
         # Run multiple times - should always prefer healthy
         for _ in range(10):
-            result = strategy.select(proxies)
+            result = await strategy.select(proxies)
             assert result.id == "healthy"
 
-    def test_select_falls_back_to_degraded(self):
+    async def test_select_falls_back_to_degraded(self):
         strategy = HealthBasedStrategy()
         proxies = [
             Proxy(id="degraded", host="d.example.com", port=8080, connector_id="conn-1", status=ProxyStatus.DEGRADED, success_count=70, request_count=100),
@@ -251,10 +257,10 @@ class TestHealthBasedStrategy:
 
         # Should prefer degraded over unhealthy
         for _ in range(10):
-            result = strategy.select(proxies)
+            result = await strategy.select(proxies)
             assert result.id == "degraded"
 
-    def test_select_considers_success_rate(self):
+    async def test_select_considers_success_rate(self):
         strategy = HealthBasedStrategy()
         proxies = [
             Proxy(id="high-success", host="h.example.com", port=8080, connector_id="conn-1", status=ProxyStatus.HEALTHY, success_count=95, request_count=100, avg_latency_ms=100),
@@ -262,13 +268,13 @@ class TestHealthBasedStrategy:
         ]
 
         # High success rate should be preferred
-        results = [strategy.select(proxies) for _ in range(20)]
+        results = [await strategy.select(proxies) for _ in range(20)]
         high_success_count = sum(1 for r in results if r.id == "high-success")
 
         # Should mostly select high-success proxy
         assert high_success_count > 10
 
-    def test_select_considers_latency(self):
+    async def test_select_considers_latency(self):
         strategy = HealthBasedStrategy()
         proxies = [
             Proxy(id="fast", host="f.example.com", port=8080, connector_id="conn-1", status=ProxyStatus.HEALTHY, success_count=90, request_count=100, avg_latency_ms=50),
@@ -276,7 +282,7 @@ class TestHealthBasedStrategy:
         ]
 
         # Fast proxy should be preferred
-        results = [strategy.select(proxies) for _ in range(20)]
+        results = [await strategy.select(proxies) for _ in range(20)]
         fast_count = sum(1 for r in results if r.id == "fast")
 
         # Should mostly select fast proxy
@@ -295,4 +301,3 @@ class TestHealthBasedStrategy:
         bad_score = strategy._calculate_score(bad_proxy)
 
         assert good_score > bad_score
-

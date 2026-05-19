@@ -147,3 +147,28 @@ proxy_update_requested = signal("proxy-update-requested")
 # Args: connector (Connector)
 provider_connector_sync_requested = signal("provider-connector-sync-requested")
 
+
+# =============================================================================
+# Cross-instance Cache Invalidation Signals
+# =============================================================================
+#
+# These four are emitted by ProxyManager after every entity write to Postgres.
+# They are the only signals routed across instances via Redis Pub/Sub by the
+# EventBus. Receivers in other instances call ProxyManager.reload_<entity>(id)
+# to refresh their cache. Local handlers can subscribe too — they fire
+# in-process alongside the distributed publish.
+#
+# Sender: ProxyManager
+# Args: entity_id (str), op (Literal["added", "updated", "removed"])
+project_changed = signal("project-changed")
+credential_changed = signal("credential-changed")
+connector_changed = signal("connector-changed")
+proxy_changed = signal("proxy-changed")
+
+# Emitted by RateLimiter when a proxy is quarantined or released.
+# Cross-instance: receivers re-hydrate that proxy's quarantine TTL from
+# Redis so peer-side quarantines block traffic on this instance too.
+# Sender: RateLimiter
+# Args: entity_id (proxy_id, str), op (Literal["quarantined", "released"])
+proxy_quarantine_changed = signal("proxy-quarantine-changed")
+

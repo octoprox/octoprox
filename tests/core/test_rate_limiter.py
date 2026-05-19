@@ -4,12 +4,11 @@
 """Tests for the RateLimiter module."""
 
 import time
-from collections import deque
 
 import pytest
 
-from api.core.rate_limiter import QUARANTINE_KEY, RateLimiter
-from api.db.redis import RedisClient
+from api.core.rate_limiter import RateLimiter
+from api.db.redis import PROXY_QUARANTINE_KEY, PROXY_REQUESTS_KEY, RedisClient
 
 
 @pytest.fixture
@@ -75,8 +74,7 @@ class TestRecordRequest:
                 quarantine_seconds_min=30, quarantine_seconds_max=60,
             )
         assert rate_limiter.is_quarantined("proxy-1") is True
-        # Verify the key was persisted in Redis with a TTL
-        key = QUARANTINE_KEY.format(proxy_id="proxy-1")
+        key = PROXY_QUARANTINE_KEY.format(proxy_id="proxy-1")
         ttl = await redis_client.client.ttl(key)
         assert ttl > 0
 
@@ -106,7 +104,6 @@ class TestRecordRequest:
     async def test_skip_if_already_quarantined(
         self, rate_limiter: RateLimiter, redis_client: RedisClient
     ) -> None:
-        # Quarantine it
         for _ in range(5):
             await rate_limiter.record_request(
                 proxy_id="proxy-1", connector_id="conn-1",
@@ -116,7 +113,7 @@ class TestRecordRequest:
         assert rate_limiter.is_quarantined("proxy-1") is True
 
         # Delete the Redis key manually to detect if a second write happens
-        key = QUARANTINE_KEY.format(proxy_id="proxy-1")
+        key = PROXY_QUARANTINE_KEY.format(proxy_id="proxy-1")
         await redis_client.client.delete(key)
 
         # Record another request — should be a no-op (skip because already quarantined)
@@ -125,14 +122,22 @@ class TestRecordRequest:
             max_requests=5, window_seconds=60,
             quarantine_seconds_min=60, quarantine_seconds_max=60,
         )
-        # Key should still be absent because the skip didn't re-persist
         assert await redis_client.client.ttl(key) < 0
 
     @pytest.mark.asyncio
-    async def test_sliding_window_evicts_old_timestamps(self, rate_limiter: RateLimiter) -> None:
-        old_time = time.monotonic() - 120
-        rate_limiter._request_timestamps["proxy-1"] = deque([old_time] * 8)
+    async def test_sliding_window_evicts_old_timestamps(
+        self, rate_limiter: RateLimiter, redis_client: RedisClient
+    ) -> None:
+        # Seed the ZSET with timestamps from 120s ago (well outside the 60s window)
+        rkey = PROXY_REQUESTS_KEY.format(proxy_id="proxy-1")
+        old_ms = int(time.time() * 1000) - 120_000
+        old_entries: dict[str, float] = {
+            f"old-{i}": old_ms + i for i in range(8)
+        }
+        await redis_client.client.zadd(rkey, mapping=old_entries)
 
+        # Two new requests should NOT trigger quarantine — the old ones are
+        # evicted by the sliding-window check inside record_request.
         for _ in range(2):
             await rate_limiter.record_request(
                 proxy_id="proxy-1", connector_id="conn-1",
@@ -140,10 +145,14 @@ class TestRecordRequest:
                 quarantine_seconds_min=30, quarantine_seconds_max=60,
             )
         assert rate_limiter.is_quarantined("proxy-1") is False
-        assert len(rate_limiter._request_timestamps["proxy-1"]) == 2
+        # Only the two fresh entries should remain
+        remaining = await redis_client.client.zcard(rkey)
+        assert remaining == 2
 
     @pytest.mark.asyncio
-    async def test_timestamps_cleared_after_quarantine(self, rate_limiter: RateLimiter) -> None:
+    async def test_zset_cleared_after_quarantine(
+        self, rate_limiter: RateLimiter, redis_client: RedisClient
+    ) -> None:
         for _ in range(5):
             await rate_limiter.record_request(
                 proxy_id="proxy-1", connector_id="conn-1",
@@ -151,7 +160,8 @@ class TestRecordRequest:
                 quarantine_seconds_min=30, quarantine_seconds_max=60,
             )
         assert rate_limiter.is_quarantined("proxy-1") is True
-        assert len(rate_limiter._request_timestamps.get("proxy-1", [])) == 0
+        rkey = PROXY_REQUESTS_KEY.format(proxy_id="proxy-1")
+        assert await redis_client.client.zcard(rkey) == 0
 
     @pytest.mark.asyncio
     async def test_multiple_proxies_independent(self, rate_limiter: RateLimiter) -> None:
@@ -172,7 +182,6 @@ class TestUnquarantine:
     async def test_unquarantine_quarantined_proxy(
         self, rate_limiter: RateLimiter, redis_client: RedisClient
     ) -> None:
-        # Quarantine via record_request so Redis key exists
         for _ in range(5):
             await rate_limiter.record_request(
                 proxy_id="proxy-1", connector_id="conn-1",
@@ -180,14 +189,14 @@ class TestUnquarantine:
                 quarantine_seconds_min=300, quarantine_seconds_max=300,
             )
         assert rate_limiter.is_quarantined("proxy-1") is True
-        key = QUARANTINE_KEY.format(proxy_id="proxy-1")
+        key = PROXY_QUARANTINE_KEY.format(proxy_id="proxy-1")
         assert await redis_client.client.ttl(key) > 0
 
         result = await rate_limiter.unquarantine("proxy-1")
 
         assert result is True
         assert rate_limiter.is_quarantined("proxy-1") is False
-        assert await redis_client.client.ttl(key) < 0  # Key deleted
+        assert await redis_client.client.ttl(key) < 0
 
     @pytest.mark.asyncio
     async def test_unquarantine_non_quarantined_proxy(self, rate_limiter: RateLimiter) -> None:
@@ -206,7 +215,6 @@ class TestUnquarantine:
 
         await rate_limiter.unquarantine("proxy-1")
 
-        # Should accept requests again without immediate re-quarantine
         await rate_limiter.record_request(
             proxy_id="proxy-1", connector_id="conn-1",
             max_requests=5, window_seconds=60,
@@ -219,24 +227,24 @@ class TestRemoveProxy:
     """Tests for remove_proxy cleanup."""
 
     @pytest.mark.asyncio
-    async def test_removes_state_and_redis_key(
+    async def test_removes_state_and_redis_keys(
         self, rate_limiter: RateLimiter, redis_client: RedisClient
     ) -> None:
-        # Quarantine so Redis key exists
         for _ in range(5):
             await rate_limiter.record_request(
                 proxy_id="proxy-1", connector_id="conn-1",
                 max_requests=5, window_seconds=60,
                 quarantine_seconds_min=300, quarantine_seconds_max=300,
             )
-        key = QUARANTINE_KEY.format(proxy_id="proxy-1")
-        assert await redis_client.client.ttl(key) > 0
+        qkey = PROXY_QUARANTINE_KEY.format(proxy_id="proxy-1")
+        assert await redis_client.client.ttl(qkey) > 0
 
         await rate_limiter.remove_proxy("proxy-1")
 
-        assert "proxy-1" not in rate_limiter._request_timestamps
         assert "proxy-1" not in rate_limiter._quarantine_expiry
-        assert await redis_client.client.ttl(key) < 0
+        assert await redis_client.client.ttl(qkey) < 0
+        rkey = PROXY_REQUESTS_KEY.format(proxy_id="proxy-1")
+        assert await redis_client.client.zcard(rkey) == 0
 
     @pytest.mark.asyncio
     async def test_remove_nonexistent_proxy_is_safe(self, rate_limiter: RateLimiter) -> None:
@@ -250,7 +258,6 @@ class TestRemoveProxies:
     async def test_removes_multiple_proxies(
         self, rate_limiter: RateLimiter, redis_client: RedisClient
     ) -> None:
-        # Quarantine two proxies
         for pid in ("p1", "p2"):
             for _ in range(5):
                 await rate_limiter.record_request(
@@ -266,8 +273,7 @@ class TestRemoveProxies:
         assert "p1" not in rate_limiter._quarantine_expiry
         assert "p2" not in rate_limiter._quarantine_expiry
         for pid in ("p1", "p2"):
-            key = QUARANTINE_KEY.format(proxy_id=pid)
-            assert await redis_client.client.ttl(key) < 0
+            assert await redis_client.client.ttl(PROXY_QUARANTINE_KEY.format(proxy_id=pid)) < 0
 
     @pytest.mark.asyncio
     async def test_empty_list_is_safe(self, rate_limiter: RateLimiter) -> None:
@@ -275,22 +281,18 @@ class TestRemoveProxies:
 
 
 class TestClearConnectorProxies:
-    """Tests for clear_connector_proxies (in-memory only)."""
+    """Tests for clear_connector_proxies (in-memory cache only)."""
 
     def test_clears_specified_proxies(self, rate_limiter: RateLimiter) -> None:
-        rate_limiter._request_timestamps["p1"] = deque([time.monotonic()])
-        rate_limiter._request_timestamps["p2"] = deque([time.monotonic()])
-        rate_limiter._request_timestamps["p3"] = deque([time.monotonic()])
         rate_limiter._quarantine_expiry["p1"] = time.monotonic() + 100
         rate_limiter._quarantine_expiry["p2"] = time.monotonic() + 100
+        rate_limiter._quarantine_expiry["p3"] = time.monotonic() + 100
 
         rate_limiter.clear_connector_proxies(["p1", "p2"])
 
-        assert "p1" not in rate_limiter._request_timestamps
-        assert "p2" not in rate_limiter._request_timestamps
-        assert "p3" in rate_limiter._request_timestamps
         assert "p1" not in rate_limiter._quarantine_expiry
         assert "p2" not in rate_limiter._quarantine_expiry
+        assert "p3" in rate_limiter._quarantine_expiry
 
 
 class TestHydrateFromRedis:
@@ -300,8 +302,7 @@ class TestHydrateFromRedis:
     async def test_restores_quarantine_from_redis(
         self, rate_limiter: RateLimiter, redis_client: RedisClient
     ) -> None:
-        # Simulate a quarantine key left in Redis (as if from a previous run)
-        key = QUARANTINE_KEY.format(proxy_id="proxy-1")
+        key = PROXY_QUARANTINE_KEY.format(proxy_id="proxy-1")
         await redis_client.client.setex(key, 45, "1")
 
         await rate_limiter.hydrate_from_redis(["proxy-1", "proxy-2"])
@@ -313,10 +314,38 @@ class TestHydrateFromRedis:
 
     @pytest.mark.asyncio
     async def test_skips_expired_keys(self, rate_limiter: RateLimiter) -> None:
-        # No key in Redis — should not restore
         await rate_limiter.hydrate_from_redis(["proxy-1"])
         assert rate_limiter.is_quarantined("proxy-1") is False
 
     @pytest.mark.asyncio
     async def test_empty_proxy_list(self, rate_limiter: RateLimiter) -> None:
         await rate_limiter.hydrate_from_redis([])
+
+
+class TestCrossInstanceSlidingWindow:
+    """Two RateLimiter instances sharing Redis see the same sliding window."""
+
+    @pytest.mark.asyncio
+    async def test_two_limiters_share_counts(
+        self, redis_client: RedisClient
+    ) -> None:
+        a = RateLimiter(redis_client)
+        b = RateLimiter(redis_client)
+        for _ in range(3):
+            await a.record_request(
+                proxy_id="shared", connector_id="conn-1",
+                max_requests=5, window_seconds=60,
+                quarantine_seconds_min=30, quarantine_seconds_max=60,
+            )
+        for _ in range(2):
+            await b.record_request(
+                proxy_id="shared", connector_id="conn-1",
+                max_requests=5, window_seconds=60,
+                quarantine_seconds_min=30, quarantine_seconds_max=60,
+            )
+        # b's 2nd record hits the combined limit (3+2=5), quarantining via
+        # b's local cache. a's local cache doesn't know yet (A2 phase will
+        # propagate via pub/sub), but the Redis key is set.
+        assert b.is_quarantined("shared") is True
+        key = PROXY_QUARANTINE_KEY.format(proxy_id="shared")
+        assert await redis_client.client.ttl(key) > 0

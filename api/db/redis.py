@@ -14,12 +14,24 @@ from api.models.proxy import ProxyStatus
 
 logger = structlog.get_logger()
 
-# Redis key prefixes
+# Redis key prefixes. Keep all key formats in this module so the global
+# layout is auditable from one place.
 PROXY_STATUS_KEY = "proxy:status:{proxy_id}"
 PROXY_METRICS_KEY = "proxy:metrics:{proxy_id}"
 PROJECT_METRICS_KEY = "project:metrics:{project_id}"
 SESSION_KEY = "session:{session_id}"
+STICKY_BINDING_KEY = "sticky:{project_id}:{session_id}"
 MITM_REQUESTS_KEY = "mitm:requests:{project_id}"
+INSTANCE_REGISTRY_KEY = "instance_registry:{instance_id}"
+INSTANCE_REGISTRY_SCAN = "instance_registry:*"
+# Per-proxy rate-limiter state (used by api.core.rate_limiter)
+PROXY_QUARANTINE_KEY = "proxy:quarantine:{proxy_id}"
+PROXY_REQUESTS_KEY = "proxy:requests:{proxy_id}"
+# Lease keys (used by api.core.leadership). Lease names embed the
+# resource id, e.g. "metrics_flusher", "autoscaler:<connector_id>".
+LEASE_KEY = "lease:{name}"
+# Cross-instance autoscaler cooldown state (hash, field=connector_id)
+AUTOSCALER_LAST_ACTION_KEY = "autoscaler:last_action"
 
 
 class RedisClient:
@@ -244,6 +256,23 @@ class RedisClient:
     async def delete_session(self, session_id: str) -> None:
         """Delete a session."""
         key = SESSION_KEY.format(session_id=session_id)
+        await self.client.delete(key)
+
+    # Sticky-session bindings (project-scoped) used by select_proxy_for_project
+    # to maintain session→proxy affinity across instances.
+    async def get_sticky_binding(self, project_id: str, session_id: str) -> str | None:
+        key = STICKY_BINDING_KEY.format(project_id=project_id, session_id=session_id)
+        result: str | None = await self.client.get(key)
+        return result
+
+    async def set_sticky_binding(
+        self, project_id: str, session_id: str, proxy_id: str, ttl_seconds: int = 300
+    ) -> None:
+        key = STICKY_BINDING_KEY.format(project_id=project_id, session_id=session_id)
+        await self.client.setex(key, ttl_seconds, proxy_id)
+
+    async def delete_sticky_binding(self, project_id: str, session_id: str) -> None:
+        key = STICKY_BINDING_KEY.format(project_id=project_id, session_id=session_id)
         await self.client.delete(key)
 
     # MITM request recording operations

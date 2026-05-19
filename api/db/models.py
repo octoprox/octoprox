@@ -74,6 +74,8 @@ class ProjectModel(Base):
     # Metrics settings
     metrics_retention_days: Mapped[int] = mapped_column(Integer, default=90)
 
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
+
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now, onupdate=utc_now)
 
@@ -91,6 +93,7 @@ class CredentialModel(Base):
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     type: Mapped[str] = mapped_column(String(50), nullable=False)
     config: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now, onupdate=utc_now)
 
@@ -118,6 +121,7 @@ class ConnectorModel(Base):
     consecutive_errors: Mapped[int] = mapped_column(Integer, default=0)
     routing_config: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     rate_limit_config: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now, onupdate=utc_now)
 
@@ -146,6 +150,7 @@ class ProxyModel(Base):
     connector_id: Mapped[str] = mapped_column(String(36), ForeignKey("connectors.id", ondelete="CASCADE"), nullable=False)
     tags: Mapped[list[str]] = mapped_column(JSON, default=list)
     metadata_: Mapped[dict[str, Any]] = mapped_column("metadata", JSON, default=dict)
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now, onupdate=utc_now)
 
