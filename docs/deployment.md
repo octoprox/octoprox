@@ -84,7 +84,7 @@ docker compose -f docker-compose.cluster.ghcr.yml down
 - **In-memory cache.** Every instance still holds the full
   projects/credentials/connectors/proxies cache in RAM. 5 instances =
   5× the same memory footprint. (See the
-  [DISTRIBUTION-OPTION-B.md](https://github.com/octoprox/octoprox/blob/main/DISTRIBUTION-OPTION-B.md)
+  [TODO-control-data-plane-split.md](https://github.com/octoprox/octoprox/blob/main/TODO-control-data-plane-split.md)
   plan for the future tier-split that fixes this.)
 - **Postgres write throughput.** Definitions and historical metrics still
   live in one DB; the metrics flusher is leader-elected so only one
@@ -98,7 +98,8 @@ docker compose -f docker-compose.cluster.ghcr.yml down
 
 Rule of thumb: a cluster scales *concurrent request handling* and gives you
 HA. To scale beyond what a single Redis or a single host's memory can take,
-see Option B in the distribution plan.
+see [TODO-control-data-plane-split.md](https://github.com/octoprox/octoprox/blob/main/TODO-control-data-plane-split.md)
+for the planned tier split.
 
 ## How it works under the hood
 
@@ -223,15 +224,15 @@ Before pointing real traffic at the cluster, edit either compose file:
 
 ## When to outgrow this
 
-Option A (a fleet of identical instances sharing one Redis + Postgres)
-scales request handling and gives you HA. It hits a ceiling when one of
-the shared resources saturates — typically Redis throughput at a few tens
-of thousands of proxied requests per second, or per-host memory when the
+A fleet of identical instances sharing one Redis + Postgres scales
+request handling and gives you HA. It hits a ceiling when one of the
+shared resources saturates — typically Redis throughput at a few tens of
+thousands of proxied requests per second, or per-host memory when the
 proxy pool grows past ~100k entries.
 
 The next step is a tiered topology that splits the control plane (CRUD,
 config) from the data plane (request termination) and replaces the
 "every instance loads everything" cache with a snapshot pushed from the
 control plane. The design is documented in
-[DISTRIBUTION-OPTION-B.md](https://github.com/octoprox/octoprox/blob/main/DISTRIBUTION-OPTION-B.md)
+[TODO-control-data-plane-split.md](https://github.com/octoprox/octoprox/blob/main/TODO-control-data-plane-split.md)
 in the repo — read that when you genuinely need it, not before.
