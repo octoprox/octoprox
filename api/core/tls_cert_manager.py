@@ -7,6 +7,10 @@ Handles CA certificate generation/loading and per-domain certificate
 generation for TLS MITM proxying.
 """
 
+from __future__ import annotations
+
+import asyncio
+import contextlib
 import os
 import ssl
 import tempfile
@@ -14,12 +18,18 @@ import threading
 from collections import OrderedDict
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import structlog
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.x509.oid import NameOID
+
+from api.core.fileio import atomic_write
+
+if TYPE_CHECKING:
+    from api.db.redis import RedisClient
 
 logger = structlog.get_logger()
 
@@ -34,6 +44,28 @@ _RSA_KEY_SIZE = 2048
 
 # Maximum number of cached domain SSL contexts
 _MAX_CACHE_SIZE = 1000
+
+# CA bootstrap coordination (clustered startup).
+#
+# All instances share one CA volume, so on a fresh volume they would
+# otherwise race to each generate their own CA. Generation is gated behind a
+# short Redis lock (reusing the `lease:` keyspace) so exactly one instance
+# generates while its peers wait for the result and load it.
+_CA_BOOTSTRAP_LEASE_NAME = "ca-bootstrap"
+_CA_BOOTSTRAP_LOCK_TTL_MS = 30_000  # generation takes <1s; ample headroom
+_CA_BOOTSTRAP_TIMEOUT_S = 60.0  # how long a peer waits for the CA to appear
+_CA_BOOTSTRAP_POLL_S = 0.25
+
+# Lua: DEL the lock iff we still own it, so a slow generator whose lock has
+# already expired and been re-taken by a peer cannot delete the peer's lock.
+_CA_LOCK_RELEASE = """
+if redis.call('GET', KEYS[1]) == ARGV[1] then
+    return redis.call('DEL', KEYS[1])
+else
+    return 0
+end
+"""
+
 
 # ---------------------------------------------------------------------------
 # ClientHello capture via _msg_callback
@@ -90,28 +122,91 @@ class TLSCertManager:
         """Path to the CA certificate file."""
         return self._ca_cert_path
 
-    def initialize(self) -> None:
-        """Load or generate the CA certificate.
+    async def bootstrap(
+        self,
+        redis_client: RedisClient,
+        instance_id: str,
+        *,
+        timeout_s: float = _CA_BOOTSTRAP_TIMEOUT_S,
+    ) -> None:
+        """Load the CA, generating it once if the shared volume is empty.
 
-        If CA cert/key files exist at the configured paths, loads them.
-        Otherwise, generates a new self-signed CA and writes to disk.
+        Every instance shares one CA volume so that the leaf certs minted by
+        any instance validate against the same CA, regardless of which
+        backend HAProxy routes a given client to. On a fresh volume this
+        ensures exactly one instance generates the CA:
+
+        * Fast path — if the CA already exists, just load it.
+        * Otherwise acquire a short Redis lock; the winner generates and
+          writes the CA atomically while peers poll until it appears, then
+          load it.
+
+        Coordination is mandatory: a Redis error is treated as "didn't get
+        the lock, retry" (never as licence to generate locally, which would
+        let every instance mint its own CA). A transient blip self-heals on
+        the next poll; a lasting outage surfaces as a ``TimeoutError`` so
+        startup fails loudly rather than producing divergent CAs.
         """
+        if self._load_if_present():
+            return
+
+        from api.db.redis import LEASE_KEY
+
+        lock_key = LEASE_KEY.format(name=_CA_BOOTSTRAP_LEASE_NAME)
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout_s
+
+        while True:
+            if self._load_if_present():
+                return
+            if loop.time() >= deadline:
+                raise TimeoutError(
+                    f"Timed out waiting for the MITM CA after {timeout_s:.0f}s"
+                )
+
+            # Become the sole generator, or stand by while a peer generates.
+            try:
+                acquired = await redis_client.client.set(
+                    lock_key, instance_id, nx=True, px=_CA_BOOTSTRAP_LOCK_TTL_MS
+                )
+            except Exception:
+                logger.warning(
+                    "CA bootstrap: Redis unavailable, retrying", exc_info=True
+                )
+                acquired = None
+
+            if acquired:
+                try:
+                    # Re-check under the lock: a peer may have generated the
+                    # CA between our existence check and acquiring the lock.
+                    if not self._load_if_present():
+                        self._generate_ca()
+                        self._log_ca("Generated new")
+                finally:
+                    with contextlib.suppress(Exception):
+                        await redis_client.client.eval(  # type: ignore[misc]
+                            _CA_LOCK_RELEASE, 1, lock_key, instance_id
+                        )
+                return
+
+            # A peer holds the lock (or Redis blipped). Wait, then retry.
+            await asyncio.sleep(_CA_BOOTSTRAP_POLL_S)
+
+    def _load_if_present(self) -> bool:
+        """Load the CA if both files exist. Returns True if loaded."""
         if self._ca_cert_path.exists() and self._ca_key_path.exists():
             self._load_ca()
-            fingerprint = self._ca_cert.fingerprint(hashes.SHA256()).hex()  # type: ignore[union-attr]
-            logger.info(
-                "Loaded existing MITM CA certificate",
-                cert_path=str(self._ca_cert_path),
-                fingerprint=fingerprint,
-            )
-        else:
-            self._generate_ca()
-            fingerprint = self._ca_cert.fingerprint(hashes.SHA256()).hex()  # type: ignore[union-attr]
-            logger.info(
-                "Generated new MITM CA certificate",
-                cert_path=str(self._ca_cert_path),
-                fingerprint=fingerprint,
-            )
+            self._log_ca("Loaded existing")
+            return True
+        return False
+
+    def _log_ca(self, action: str) -> None:
+        fingerprint = self._ca_cert.fingerprint(hashes.SHA256()).hex()  # type: ignore[union-attr]
+        logger.info(
+            f"{action} MITM CA certificate",
+            cert_path=str(self._ca_cert_path),
+            fingerprint=fingerprint,
+        )
 
     def get_server_ssl_context(self, hostname: str) -> ssl.SSLContext:
         """Get an SSL context for serving TLS to the client for the given hostname.
@@ -204,22 +299,22 @@ class TLSCertManager:
             .sign(key, hashes.SHA256())
         )
 
-        # Ensure parent directory exists
-        self._ca_cert_path.parent.mkdir(parents=True, exist_ok=True)
-
-        # Write certificate
-        self._ca_cert_path.write_bytes(
-            cert.public_bytes(serialization.Encoding.PEM)
-        )
-
-        # Write private key with restricted permissions
+        cert_pem = cert.public_bytes(serialization.Encoding.PEM)
         key_bytes = key.private_bytes(
             serialization.Encoding.PEM,
             serialization.PrivateFormat.TraditionalOpenSSL,
             serialization.NoEncryption(),
         )
-        self._ca_key_path.write_bytes(key_bytes)
-        os.chmod(self._ca_key_path, 0o600)
+
+        # Ensure parent directory exists, then write both files atomically.
+        # Write the key (0600) first and the cert last: a peer watching the
+        # shared volume gates on "both files present", so publishing the cert
+        # last guarantees the key is already fully in place. os.replace makes
+        # each file appear in a single step, so a reader never observes a
+        # partial or cert/key-mismatched CA.
+        self._ca_cert_path.parent.mkdir(parents=True, exist_ok=True)
+        atomic_write(self._ca_key_path, key_bytes, mode=0o600)
+        atomic_write(self._ca_cert_path, cert_pem, mode=0o644)
 
         self._ca_cert = cert
         self._ca_key = key

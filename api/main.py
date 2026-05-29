@@ -86,7 +86,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         ca_cert_path=Path(settings.tls_mitm_ca_cert_path),
         ca_key_path=Path(settings.tls_mitm_ca_key_path),
     )
-    cert_manager.initialize()
+    await cert_manager.bootstrap(redis_client, settings.instance_id)
     mitm_handler = MitmHandler(cert_manager, redis_client=redis_client)
 
     # Start the HTTP proxy server
