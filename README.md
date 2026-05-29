@@ -62,11 +62,21 @@ make cluster-up       # 3 octoprox replicas + HAProxy + Postgres + Redis
 make cluster-logs
 make cluster-down
 
-# Production-ready cluster using the pre-built ghcr.io image
+# Production-ready cluster using the pre-built ghcr.io image.
+# Download both the compose file and the HAProxy config it mounts:
+curl -O https://raw.githubusercontent.com/octoprox/octoprox/main/docker-compose.cluster.ghcr.yml
+mkdir -p haproxy
+curl -o haproxy/haproxy.cfg https://raw.githubusercontent.com/octoprox/octoprox/main/haproxy/haproxy.cfg
 docker compose -f docker-compose.cluster.ghcr.yml up -d
 docker compose -f docker-compose.cluster.ghcr.yml logs -f
 docker compose -f docker-compose.cluster.ghcr.yml down
 ```
+
+> **Important**: the cluster compose files mount `./haproxy/haproxy.cfg`. If
+> that file is missing when you run `up`, Docker silently creates an empty
+> directory in its place and HAProxy crash-loops printing its usage banner —
+> so make sure the config is present (it ships in your checkout for the
+> local-build variant; download it as shown above for the pre-built image).
 
 The full compose-file matrix:
 
