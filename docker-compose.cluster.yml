@@ -77,7 +77,7 @@ services:
       OCTOPROX_INSTANCE_ID: octoprox-3
 
   haproxy:
-    image: haproxy:2.9-alpine
+    image: haproxy:3.2-alpine
     container_name: octoprox-haproxy
     ports:
       - "8000:8000"   # API + Web UI
