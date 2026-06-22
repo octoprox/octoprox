@@ -13,6 +13,7 @@ A dynamic and flexible proxy manager that acts as an intelligent proxy aggregato
 - **Performance Metrics**: Track latency, success rates, and request counts per proxy
 - **REST API**: Full CRUD operations for managing projects, credentials, connectors, and proxies
 - **Web Dashboard**: React-based UI for monitoring and configuration
+- **TLS Interception**: MITM proxy with HTTP/1.1 and HTTP/2 support, JA3/JA4 and Akamai fingerprint extraction
 
 ## Quick Start
 

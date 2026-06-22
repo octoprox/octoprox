@@ -7,8 +7,8 @@ Intercepts HTTPS traffic by terminating TLS on the client side,
 reading plaintext HTTP requests, logging headers, and relaying
 requests upstream via a pluggable relay strategy.
 
-Uses h11 as a sans-I/O HTTP/1.1 state machine to handle protocol
-parsing and serialization, replacing manual request/response parsing.
+Uses h11 for HTTP/1.1 and h2 (hyper-h2) for HTTP/2 on the client-facing side.
+Protocol is negotiated via ALPN.
 """
 
 import asyncio
@@ -19,6 +19,11 @@ from typing import TYPE_CHECKING
 
 import h11
 import structlog
+
+import h2.config
+import h2.connection
+import h2.events
+import h2.exceptions
 
 from api.core.tls_cert_manager import TLSCertManager, pop_client_hello
 
@@ -46,8 +51,8 @@ class MitmHandler:
     """Handles MITM interception for a single CONNECT tunnel.
 
     Upgrades the client connection to TLS (presenting a generated cert),
-    reads HTTP/1.1 requests, logs headers, and relays them to the target
-    via a pluggable relay strategy (plain, curl_cffi, or rnet).
+    reads HTTP/1.1 or HTTP/2 requests, logs headers, and relays them to
+    the target via a pluggable relay strategy (plain, curl_cffi, or rnet).
     """
 
     def __init__(
@@ -219,6 +224,49 @@ class MitmHandler:
             target_host=target_host,
         )
 
+        # pick code path based on negotiated ALPN protocol
+        negotiated = ssl_object.selected_alpn_protocol() if ssl_object else None
+
+        if negotiated == "h2":
+            bytes_sent, bytes_received = await self._handle_h2(
+                client_reader,
+                client_writer,
+                relay,
+                base_url,
+                proxy_url,
+                project,
+                target_host,
+                tls_info
+            )
+        else:
+            bytes_sent, bytes_received = await self._handle_h1(
+                client_reader,
+                client_writer,
+                relay,
+                base_url,
+                proxy_url,
+                project,
+                target_host,
+                tls_info
+            )
+
+        return bytes_sent, bytes_received
+
+    async def _handle_h1(
+        self,
+        client_reader: asyncio.StreamReader,
+        client_writer: asyncio.StreamWriter,
+        relay: "MitmRelay",
+        base_url: str,
+        proxy_url: str,
+        project: "Project",
+        target_host: str,
+        tls_info: dict[str, str]
+    ) -> tuple[int, int]:
+        """Handle HTTP/1.1 requests via h11."""
+        bytes_sent = 0
+        bytes_received = 0
+
         conn = h11.Connection(our_role=h11.SERVER)
 
         try:
@@ -321,6 +369,338 @@ class MitmHandler:
         except (ConnectionResetError, BrokenPipeError, OSError):
             pass
         finally:
+            await relay.close()
+
+        return bytes_sent, bytes_received
+
+    async def _handle_h2(
+        self,
+        client_reader: asyncio.StreamReader,
+        client_writer: asyncio.StreamWriter,
+        relay: "MitmRelay",
+        base_url: str,
+        proxy_url: str,
+        project: "Project",
+        target_host: str,
+        tls_info: dict[str, str]
+    ) -> tuple[int, int]:
+        """Handle HTTP/2 requests via hyper-h2 with concurrent stream processing."""
+        from api.core.mitm.client_hello import (
+            Http2Fingerprint,
+            H2_SETTINGS_NAMES,
+            h2_fingerprint_to_dict,
+        )
+
+        bytes_sent = 0
+        bytes_received = 0
+
+        config = h2.config.H2Configuration(
+            client_side=False,
+            header_encoding="utf-8"
+        )
+        h2_conn = h2.connection.H2Connection(config=config)
+        h2_conn.initiate_connection()
+
+        write_lock = asyncio.Lock()
+
+        async def _flush() -> int:
+            """Send pending h2 data to client, returns bytes written."""
+            out = h2_conn.data_to_send()
+            if out:
+                client_writer.write(out)
+                await client_writer.drain()
+            return len(out)
+
+        bytes_received += await _flush()
+
+        # fingerprint state
+        h2_fp = Http2Fingerprint()
+        is_fingerprint_done = False
+
+        # track streams: stream_id -> {"headers": [...], "data": [bytes, ...]}
+        streams: dict[int, dict] = {}
+        stream_tasks: set[asyncio.Task] = set()
+
+        async def _handle_stream(
+            stream_id: int,
+            method: str,
+            url: str,
+            headers: list[tuple[str, str]],
+            body: bytes | None
+        ) -> None:
+            """Process a single HTTP/2 stream (runs as async task)."""
+            nonlocal bytes_sent, bytes_received
+
+            forward_headers = [
+                (k, v) for k, v in headers
+                if k.lower() not in _HOP_BY_HOP
+            ]
+
+            req_start = time.monotonic()
+            try:
+                (
+                    status_code,
+                    _reason,
+                    response_headers,
+                    response_body
+                ) = await relay.send_request(
+                    method,
+                    url,
+                    forward_headers,
+                    body,
+                    proxy_url
+                )
+            except Exception as e:
+                logger.debug(
+                    "MITM h2 upstream request failed",
+                    url=url,
+                    error=str(e)
+                )
+                async with write_lock:
+                    h2_conn.send_headers(
+                        stream_id,
+                        [(":status", "502")],
+                        end_stream=True
+                    )
+                    bytes_received += await _flush()
+                return
+
+            req_latency_ms = (time.monotonic() - req_start) * 1000
+
+            # build h2 response headers
+            resp_headers = [(":status", str(status_code))]
+            for k, v in response_headers:
+                if k.lower() not in ("transfer-encoding", "content-length", ":status"):
+                    resp_headers.append((k.lower(), v))
+
+            try:
+                if response_body:
+                    async with write_lock:
+                        h2_conn.send_headers(stream_id, resp_headers)
+                        bytes_received += await _flush()
+
+                    # send body in flow-control-aware chunks
+                    offset = 0
+                    while offset < len(response_body):
+                        # wait for flow control window to open
+                        for _ in range(100):
+                            async with write_lock:
+                                window = h2_conn.local_flow_control_window(stream_id)
+                            if window > 0:
+                                break
+                            await asyncio.sleep(0.05)
+                        else:
+                            # flow control window never opened, give up
+                            break
+
+                        async with write_lock:
+                            window = h2_conn.local_flow_control_window(stream_id)
+                            max_size = min(
+                                h2_conn.local_settings.max_frame_size,
+                                h2_conn.max_outbound_frame_size,
+                                window,
+                            )
+                            if max_size <= 0:
+                                continue
+
+                            chunk = response_body[offset:offset + max_size]
+                            is_end_stream = (offset + len(chunk) >= len(response_body))
+                            h2_conn.send_data(
+                                stream_id,
+                                chunk,
+                                end_stream=is_end_stream,
+                            )
+                            offset += len(chunk)
+                            bytes_received += await _flush()
+                else:
+                    async with write_lock:
+                        h2_conn.send_headers(
+                            stream_id,
+                            resp_headers,
+                            end_stream=True,
+                        )
+                        bytes_received += await _flush()
+            except (h2.exceptions.StreamClosedError, h2.exceptions.ProtocolError):
+                # client reset the stream mid-response
+                return
+
+            bytes_sent += len(body) if body else 0
+
+            self._record_request(
+                project=project,
+                method=method,
+                url=url,
+                request_headers=headers,
+                upstream_headers=relay.last_upstream_headers,
+                request_body_size=len(body) if body else 0,
+                status_code=status_code,
+                response_headers=response_headers,
+                response_body_size=len(response_body),
+                target_host=target_host,
+                proxy_url=proxy_url,
+                latency_ms=req_latency_ms,
+                tls_info=tls_info
+            )
+
+        try:
+            while True:
+                data = await client_reader.read(_READ_SIZE)
+                if not data:
+                    break
+
+                try:
+                    events = h2_conn.receive_data(data)
+                except h2.exceptions.ProtocolError:
+                    break
+
+                for event in events:
+                    if isinstance(event, h2.events.RemoteSettingsChanged):
+                        if not is_fingerprint_done:
+                            h2_fp.settings = [
+                                (s.setting, s.new_value)
+                                for s in event.changed_settings.values()
+                            ]
+                            h2_fp.frames.append(
+                                {
+                                    "type": "SETTINGS",
+                                    "stream_id": 0,
+                                    "settings": {
+                                        H2_SETTINGS_NAMES.get(
+                                            s.setting,
+                                            f"UNKNOWN_{s.setting}"
+                                        ): s.new_value
+                                        for s in event.changed_settings.values()
+                                    }
+                                }
+                            )
+
+                    elif isinstance(event, h2.events.WindowUpdated):
+                        if event.stream_id == 0 and not is_fingerprint_done:
+                            h2_fp.window_update = event.delta
+                            h2_fp.frames.append(
+                                {
+                                    "type": "WINDOW_UPDATE",
+                                    "stream_id": 0,
+                                    "delta": event.delta
+                                }
+                            )
+
+                    elif isinstance(event, h2.events.PriorityUpdated):
+                        if not is_fingerprint_done:
+                            h2_fp.has_priority = True
+                            h2_fp.frames.append(
+                                {
+                                    "type": "PRIORITY",
+                                    "stream_id": event.stream_id,
+                                    "weight": event.weight,
+                                    "depends_on": event.depends_on,
+                                    "exclusive": event.exclusive
+                                }
+                            )
+
+                    elif isinstance(event, h2.events.RequestReceived):
+                        headers_list = [(k, v) for k, v in event.headers]
+
+                        # capture pseudo-header order from first request
+                        if not is_fingerprint_done:
+                            h2_fp.pseudo_header_order = [
+                                k for k, _v in headers_list
+                                if k.startswith(":")
+                            ]
+                            h2_fp.frames.append(
+                                {
+                                    "type": "HEADERS",
+                                    "stream_id": event.stream_id,
+                                    "pseudo_header_order": h2_fp.pseudo_header_order
+                                }
+                            )
+                            # finalize fingerprint
+                            is_fingerprint_done = True
+                            fp_dict = h2_fingerprint_to_dict(h2_fp)
+                            tls_info["h2_fingerprint"] = fp_dict["akamai"]
+                            tls_info["h2_fingerprint_hash"] = fp_dict["akamai_hash"]
+                            tls_info["h2_frames"] = json.dumps(fp_dict["frames"])
+
+                        # extract request details
+                        method = ""
+                        path = ""
+                        regular_headers: list[tuple[str, str]] = []
+
+                        for k, v in headers_list:
+                            if k == ":method":
+                                method = v
+                            elif k == ":path":
+                                path = v
+                            elif k.startswith(":"):
+                                pass  # skip other pseudo-headers
+                            else:
+                                regular_headers.append((k, v))
+
+                        url = f"{base_url}{path}"
+
+                        # initialize stream state
+                        streams[event.stream_id] = {
+                            "method": method,
+                            "url": url,
+                            "headers": regular_headers,
+                            "data": []
+                        }
+
+                        if event.stream_ended is not None:
+                            # no body, dispatch immediately
+                            task = asyncio.create_task(
+                                _handle_stream(
+                                    event.stream_id,
+                                    method,
+                                    url,
+                                    regular_headers,
+                                    None
+                                )
+                            )
+                            stream_tasks.add(task)
+                            task.add_done_callback(stream_tasks.discard)
+                            del streams[event.stream_id]
+
+                    elif isinstance(event, h2.events.DataReceived):
+                        stream_id = event.stream_id
+                        if stream_id in streams:
+                            streams[stream_id]["data"].append(event.data)
+                            # acknowledge received data for flow control
+                            h2_conn.acknowledge_received_data(
+                                event.flow_controlled_length,
+                                stream_id
+                            )
+
+                    elif isinstance(event, h2.events.StreamEnded):
+                        stream_id = event.stream_id
+                        if stream_id in streams:
+                            stream = streams.pop(stream_id)
+                            body = b"".join(stream["data"]) if stream["data"] else None
+                            task = asyncio.create_task(
+                                _handle_stream(
+                                    stream_id,
+                                    stream["method"],
+                                    stream["url"],
+                                    stream["headers"],
+                                    body
+                                )
+                            )
+                            stream_tasks.add(task)
+                            task.add_done_callback(stream_tasks.discard)
+
+                    elif isinstance(event, h2.events.StreamReset):
+                        streams.pop(event.stream_id, None)
+
+                # flush any pending h2 frames (ACKs, WINDOW_UPDATEs, etc.)
+                async with write_lock:
+                    bytes_received += await _flush()
+
+        except (ConnectionResetError, BrokenPipeError, OSError):
+            pass
+        finally:
+            # wait for all in-flight stream tasks
+            if stream_tasks:
+                await asyncio.gather(*stream_tasks, return_exceptions=True)
             await relay.close()
 
         return bytes_sent, bytes_received

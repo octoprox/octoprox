@@ -13,9 +13,8 @@ same extensions but with different payload sizes (e.g., different numbers of
 key_share groups produce different sizes). Niche but useful for advanced
 fingerprinting.
 
-## HTTP/2 Fingerprint (Akamai-style)
+## [DONE] HTTP/2 Fingerprint (Akamai-style)
 
-After the TLS handshake, fingerprint the HTTP/2 SETTINGS frame parameters,
-WINDOW_UPDATE values, and PRIORITY/HEADERS pseudo-header order. This is one of
-the most effective signals for identifying browsers vs bot frameworks. Sometimes
-called "HTTP/2 fingerprint" or referenced in the JA4H spec.
+Implemented: captures SETTINGS, WINDOW_UPDATE, PRIORITY, and pseudo-header order
+from HTTP/2 client connections. Computes Akamai-style fingerprint hash. Displayed
+in MITM Inspector.

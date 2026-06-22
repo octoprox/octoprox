@@ -142,6 +142,17 @@ COMPRESSION_METHOD_NAMES: dict[int, str] = {
     1: "DEFLATE",
 }
 
+# human-readable names for HTTP/2 SETTINGS parameter IDs (RFC 9113 section 6.5.2)
+H2_SETTINGS_NAMES: dict[int, str] = {
+    1: "HEADER_TABLE_SIZE",
+    2: "ENABLE_PUSH",
+    3: "MAX_CONCURRENT_STREAMS",
+    4: "INITIAL_WINDOW_SIZE",
+    5: "MAX_FRAME_SIZE",
+    6: "MAX_HEADER_LIST_SIZE",
+    8: "ENABLE_CONNECT_PROTOCOL",
+}
+
 
 # ---------------------------------------------------------------------------
 # ClientHelloInfo dataclass
@@ -169,6 +180,17 @@ class ClientHelloInfo:
     compress_certificate: list[int] = field(default_factory=list)
     alps_protocols: list[str] = field(default_factory=list)
     psk_key_exchange_modes: list[int] = field(default_factory=list)
+
+
+@dataclass
+class Http2Fingerprint:
+    """Captured HTTP/2 connection fingerprint data."""
+
+    settings: list[tuple[int, int]] = field(default_factory=list)
+    window_update: int = 0
+    has_priority: bool = False
+    pseudo_header_order: list[str] = field(default_factory=list)
+    frames: list[dict[str, Any]] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -610,4 +632,59 @@ def client_hello_to_dict(
         "ja3_full": ja3_full,
         "ja4": ja4,
         "ja4_r": ja4_r,
+    }
+
+
+# ---------------------------------------------------------------------------
+# HTTP/2 fingerprint (Akamai-style)
+# ---------------------------------------------------------------------------
+
+
+def compute_akamai(info: Http2Fingerprint) -> tuple[str, str]:
+    """Compute the Akamai-style HTTP/2 fingerprint.
+
+    Format: ``SETTINGS|WINDOW_UPDATE|PRIORITY|PSEUDO_HEADER_ORDER``
+
+    Returns:
+        Tuple of (md5_hash, full_string).
+    """
+    # settings part: "id:value;id:value" in transmission order
+    settings_str = ";".join(f"{sid}:{val}" for sid, val in info.settings)
+
+    # window update increment (0 if not sent)
+    wu_str = str(info.window_update)
+
+    # priority flag
+    prio_str = "1" if info.has_priority else "0"
+
+    # pseudo-header order: first char after the colon
+    order_str = ",".join(
+        h[1] for h in info.pseudo_header_order
+    ) if info.pseudo_header_order else ""
+
+    akamai_full = f"{settings_str}|{wu_str}|{prio_str}|{order_str}"
+    akamai_hash = hashlib.md5(akamai_full.encode()).hexdigest()
+
+    return akamai_hash, akamai_full
+
+
+def h2_fingerprint_to_dict(info: Http2Fingerprint) -> dict[str, Any]:
+    """Serialize HTTP/2 fingerprint to a JSON-compatible dict."""
+    akamai_hash, akamai_full = compute_akamai(info)
+
+    return {
+        "akamai_hash": akamai_hash,
+        "akamai": akamai_full,
+        "settings": [
+            {
+                "id": sid,
+                "name": H2_SETTINGS_NAMES.get(sid, f"UNKNOWN_{sid}"),
+                "value": val,
+            }
+            for sid, val in info.settings
+        ],
+        "window_update": info.window_update,
+        "has_priority": info.has_priority,
+        "pseudo_header_order": info.pseudo_header_order,
+        "frames": info.frames,
     }
