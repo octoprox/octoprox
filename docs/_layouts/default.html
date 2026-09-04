@@ -8,161 +8,89 @@
   <link rel="icon" type="image/svg+xml" href="{{ site.baseurl }}/assets/favicon/favicon.svg">
   <link rel="icon" type="image/png" sizes="96x96" href="{{ site.baseurl }}/assets/favicon/favicon-96x96.png">
   <link rel="apple-touch-icon" sizes="180x180" href="{{ site.baseurl }}/assets/favicon/apple-touch-icon.png">
+  <meta name="color-scheme" content="light dark">
   <style>
+    /* Tokens mirror the app's light and dark themes (web/src/index.css). */
     :root {
-      --primary: #6366f1;
-      --primary-dark: #4f46e5;
-      --bg: #0f172a;
-      --bg-card: #1e293b;
-      --text: #f1f5f9;
-      --text-muted: #94a3b8;
-      --border: #334155;
+      --bg: #f9fafb; --surface: #ffffff; --raised: #f3f4f6;
+      --fg: #111827; --muted: #6b7280; --subtle: #9ca3af;
+      --line: #e5e7eb; --line-strong: #d1d5db;
+      --primary: #2563eb; --primary-hover: #1d4ed8; --primary-soft: #eff6ff; --primary-soft-fg: #1d4ed8;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #111827; --surface: #1f2937; --raised: #374151;
+        --fg: #f3f4f6; --muted: #9ca3af; --subtle: #6b7280;
+        --line: #374151; --line-strong: #4b5563;
+        --primary: #7c3aed; --primary-hover: #6d28d9; --primary-soft: #1e3a8a; --primary-soft-fg: #93c5fd;
+      }
     }
     * { margin: 0; padding: 0; box-sizing: border-box; }
     html, body { overflow-x: hidden; }
     body {
-      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
-      background: var(--bg);
-      color: var(--text);
-      line-height: 1.6;
+      font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif;
+      background: var(--bg); color: var(--fg); font-size: 15px; line-height: 1.65; -webkit-font-smoothing: antialiased;
     }
-    .container { max-width: 900px; margin: 0 auto; padding: 0 24px; }
-    header {
-      padding: 20px 0;
-      border-bottom: 1px solid var(--border);
-    }
+    a { color: var(--primary); text-decoration: none; }
+    a:hover { color: var(--primary-hover); }
+    .container { max-width: 860px; margin: 0 auto; padding: 0 24px; }
+    header { height: 56px; background: var(--surface); border-bottom: 1px solid var(--line); }
     header .header-container {
-      max-width: 1100px;
-      margin: 0 auto;
-      padding: 0 24px;
-      box-sizing: border-box;
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      flex-wrap: wrap;
-      gap: 12px;
+      max-width: 1100px; height: 100%; margin: 0 auto; padding: 0 20px;
+      display: flex; justify-content: space-between; align-items: center; gap: 12px;
     }
-    .logo { height: 40px; width: auto; }
-    nav a {
-      color: var(--text-muted);
-      text-decoration: none;
-      margin-left: 24px;
-      transition: color 0.2s;
-    }
-    nav a:hover { color: var(--text); }
-    main {
-      padding: 48px 0;
-    }
-    .content h1 {
-      font-size: 2.5rem;
-      margin-bottom: 24px;
-      color: var(--text);
-    }
-    .content h2 {
-      font-size: 1.5rem;
-      margin-top: 48px;
-      margin-bottom: 16px;
-      color: var(--text);
-      border-bottom: 1px solid var(--border);
-      padding-bottom: 8px;
-    }
-    .content h3 {
-      font-size: 1.25rem;
-      margin-top: 32px;
-      margin-bottom: 12px;
-      color: var(--primary);
-    }
-    .content p {
-      margin-bottom: 16px;
-      color: var(--text-muted);
-    }
-    .content a {
-      color: var(--primary);
-      text-decoration: none;
-    }
-    .content a:hover { text-decoration: underline; }
-    .content ul, .content ol {
-      margin-bottom: 16px;
-      padding-left: 24px;
-      color: var(--text-muted);
-    }
-    .content li { margin-bottom: 8px; }
-    .content code {
-      background: var(--bg-card);
-      padding: 2px 6px;
-      border-radius: 4px;
-      font-size: 0.9em;
-    }
-    .content pre {
-      background: var(--bg-card);
-      border: 1px solid var(--border);
-      border-radius: 8px;
-      padding: 16px;
-      overflow-x: auto;
-      margin-bottom: 16px;
-    }
-    .content pre code {
-      background: none;
-      padding: 0;
-    }
-    .content blockquote {
-      border-left: 4px solid var(--primary);
-      padding-left: 16px;
-      margin: 16px 0;
-      color: var(--text-muted);
-      font-style: italic;
-    }
-    .content table {
-      width: 100%;
-      border-collapse: collapse;
-      margin-bottom: 16px;
-    }
-    .content th, .content td {
-      border: 1px solid var(--border);
-      padding: 12px;
-      text-align: left;
-    }
-    .content th {
-      background: var(--bg-card);
-      color: var(--text);
-    }
-    .content td { color: var(--text-muted); }
-    .content strong { color: var(--text); }
-    footer {
-      padding: 40px 0;
-      border-top: 1px solid var(--border);
-      text-align: center;
-      color: var(--text-muted);
-    }
-    footer a { color: var(--primary); text-decoration: none; }
-    .back-link {
-      display: inline-block;
-      margin-bottom: 24px;
-      color: var(--text-muted);
-      text-decoration: none;
-    }
-    .back-link:hover { color: var(--text); }
+    .logo { height: 28px; width: auto; display: block; }
+    .logo-dark { display: none; }
+    @media (prefers-color-scheme: dark) { .logo-light { display: none; } .logo-dark { display: block; } }
+    nav { display: flex; gap: 4px; }
+    nav a { color: var(--muted); font-size: 13.5px; font-weight: 500; padding: 6px 10px; border-radius: 6px; }
+    nav a:hover { color: var(--fg); background: var(--raised); }
+    main { padding: 40px 0 64px; }
+    .back-link { display: inline-flex; align-items: center; gap: 6px; margin-bottom: 20px; color: var(--muted); font-size: 13.5px; }
+    .back-link:hover { color: var(--fg); }
+    .content h1 { font-size: 26px; font-weight: 600; letter-spacing: -0.01em; margin-bottom: 16px; }
+    .content h2 { font-size: 18px; font-weight: 600; margin-top: 40px; margin-bottom: 12px; padding-bottom: 8px; border-bottom: 1px solid var(--line); }
+    .content h3 { font-size: 15px; font-weight: 600; margin-top: 28px; margin-bottom: 8px; }
+    .content p { margin-bottom: 14px; }
+    .content ul, .content ol { margin-bottom: 14px; padding-left: 22px; }
+    .content li { margin-bottom: 6px; }
+    .content li::marker { color: var(--subtle); }
+    .content code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.86em; background: var(--raised); padding: 1px 5px; border-radius: 4px; }
+    .content pre { background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 14px 16px; overflow-x: auto; margin-bottom: 16px; font-size: 13px; line-height: 1.55; }
+    @media (prefers-color-scheme: dark) { .content pre { background: #0b1220; } }
+    .content pre code { background: none; padding: 0; font-size: inherit; }
+    .content blockquote { border-left: 3px solid var(--primary); background: var(--primary-soft); padding: 10px 14px; margin: 16px 0; border-radius: 0 8px 8px 0; font-size: 14px; }
+    .content blockquote p:last-child { margin-bottom: 0; }
+    .content table { width: 100%; border-collapse: collapse; margin-bottom: 16px; font-size: 13.5px; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+    .content th, .content td { border-bottom: 1px solid var(--line); padding: 8px 12px; text-align: left; vertical-align: top; }
+    .content th { background: var(--raised); color: var(--muted); font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; }
+    .content tr:last-child td { border-bottom: none; }
+    .content strong { font-weight: 600; }
+    footer { padding: 32px 0; border-top: 1px solid var(--line); text-align: center; color: var(--muted); font-size: 13px; }
     @media (max-width: 500px) {
-      header .header-container { padding: 0 16px; flex-direction: column; align-items: center; gap: 8px; }
-      .logo { height: auto; width: calc(100vw - 32px); max-width: 280px; }
-      nav a { margin: 0 12px; font-size: 0.9rem; }
+      header .header-container { padding: 0 16px; }
+      .logo { height: 24px; }
+      nav a { padding: 6px 8px; font-size: 13px; }
     }
   </style>
 </head>
 <body>
   <header>
     <div class="header-container">
-      <a href="{{ site.baseurl }}/"><img src="{{ site.baseurl }}/assets/logo/octoprox_horizontal_dark.svg" alt="Octoprox" class="logo"></a>
+      <a href="{{ site.baseurl }}/" aria-label="Octoprox home">
+        <img src="{{ site.baseurl }}/assets/logo/octoprox_horizontal.svg" alt="Octoprox" class="logo logo-light">
+        <img src="{{ site.baseurl }}/assets/logo/octoprox_horizontal_dark.svg" alt="Octoprox" class="logo logo-dark">
+      </a>
       <nav>
+        <a href="{{ site.baseurl }}/getting-started">Docs</a>
         <a href="https://github.com/octoprox/octoprox">GitHub</a>
-        <a href="https://github.com/octoprox/octoprox#quick-start">Docs</a>
       </nav>
     </div>
   </header>
 
   <main>
     <div class="container">
-      <a href="{{ site.baseurl }}/" class="back-link">← Back to Home</a>
+      <a href="{{ site.baseurl }}/" class="back-link">← Back to home</a>
       <div class="content">
         {{ content }}
       </div>
@@ -176,4 +104,3 @@
   </footer>
 </body>
 </html>
-

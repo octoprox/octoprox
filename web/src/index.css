@@ -215,3 +215,24 @@ select:-webkit-autofill:focus {
   caret-color: rgb(var(--color-fg));
   transition: background-color 5000s ease-in-out 0s;
 }
+
+/* Motion for the docked inspector and toasts. Kept subtle and short. */
+@keyframes panel-in {
+  from { opacity: 0; transform: translateX(12px); }
+  to { opacity: 1; transform: none; }
+}
+@keyframes toast-in {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: none; }
+}
+@keyframes pulse-soft {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
+}
+.animate-panel-in { animation: panel-in 0.18s ease-out; }
+.animate-toast-in { animation: toast-in 0.2s ease-out; }
+.animate-pulse-soft { animation: pulse-soft 1.6s ease-in-out infinite; }
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-panel-in, .animate-toast-in, .animate-pulse-soft { animation: none; }
+}

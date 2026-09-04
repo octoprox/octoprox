@@ -11,136 +11,111 @@ layout: null
   <link rel="icon" type="image/svg+xml" href="assets/favicon/favicon.svg">
   <link rel="icon" type="image/png" sizes="96x96" href="assets/favicon/favicon-96x96.png">
   <link rel="apple-touch-icon" sizes="180x180" href="assets/favicon/apple-touch-icon.png">
+  <meta name="color-scheme" content="light dark">
   <style>
+    /* Tokens mirror the app's light and dark themes (web/src/index.css). */
     :root {
-      --primary: #6366f1;
-      --primary-dark: #4f46e5;
-      --bg: #0f172a;
-      --bg-card: #1e293b;
-      --text: #f1f5f9;
-      --text-muted: #94a3b8;
-      --border: #334155;
+      --bg: #f9fafb; --surface: #ffffff; --raised: #f3f4f6;
+      --fg: #111827; --muted: #6b7280; --subtle: #9ca3af;
+      --line: #e5e7eb; --line-strong: #d1d5db;
+      --primary: #2563eb; --primary-hover: #1d4ed8; --primary-soft: #eff6ff; --primary-soft-fg: #1d4ed8;
+      --success: #16a34a; --success-soft: #f0fdf4;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #111827; --surface: #1f2937; --raised: #374151;
+        --fg: #f3f4f6; --muted: #9ca3af; --subtle: #6b7280;
+        --line: #374151; --line-strong: #4b5563;
+        --primary: #7c3aed; --primary-hover: #6d28d9; --primary-soft: #1e3a8a; --primary-soft-fg: #93c5fd;
+        --success: #10b981; --success-soft: #14532d;
+      }
     }
     * { margin: 0; padding: 0; box-sizing: border-box; }
     html, body { overflow-x: hidden; }
     body {
-      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
-      background: var(--bg);
-      color: var(--text);
-      line-height: 1.6;
+      font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif;
+      background: var(--bg); color: var(--fg); font-size: 15px; line-height: 1.65; -webkit-font-smoothing: antialiased;
     }
-    .container { max-width: 1100px; margin: 0 auto; padding: 0 24px; box-sizing: border-box; }
-    header {
-      padding: 20px 0;
-      border-bottom: 1px solid var(--border);
+    a { color: var(--primary); text-decoration: none; }
+    .container { max-width: 1100px; margin: 0 auto; padding: 0 24px; }
+    header { height: 56px; background: var(--surface); border-bottom: 1px solid var(--line); }
+    header .container { height: 100%; display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+    .logo { height: 28px; width: auto; display: block; }
+    .logo-dark { display: none; }
+    @media (prefers-color-scheme: dark) { .logo-light { display: none; } .logo-dark { display: block; } }
+    nav { display: flex; gap: 4px; }
+    nav a { color: var(--muted); font-size: 13.5px; font-weight: 500; padding: 6px 10px; border-radius: 6px; }
+    nav a:hover { color: var(--fg); background: var(--raised); }
+
+    /* Hero */
+    .hero { padding: 88px 0 56px; }
+    .hero .container { max-width: 760px; text-align: center; }
+    .eyebrow {
+      display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px; border-radius: 9999px;
+      background: var(--primary-soft); color: var(--primary-soft-fg); font-size: 12px; font-weight: 600; letter-spacing: 0.02em; margin-bottom: 18px;
     }
-    header .container { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 12px; }
-    .logo { height: 40px; width: auto; }
-    nav a {
-      color: var(--text-muted);
-      text-decoration: none;
-      margin-left: 24px;
-      transition: color 0.2s;
-    }
-    nav a:hover { color: var(--text); }
-    .hero {
-      padding: 80px 0;
-      text-align: center;
-    }
-    .hero h1 {
-      font-size: 3rem;
-      margin-bottom: 16px;
-      background: linear-gradient(135deg, var(--primary), #a855f7);
-      -webkit-background-clip: text;
-      -webkit-text-fill-color: transparent;
-      background-clip: text;
-    }
-    .hero p {
-      font-size: 1.25rem;
-      color: var(--text-muted);
-      max-width: 600px;
-      margin: 0 auto 32px;
-    }
+    .eyebrow::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--success); }
+    .hero h1 { font-size: 40px; font-weight: 600; letter-spacing: -0.02em; line-height: 1.15; margin-bottom: 14px; }
+    .hero p { font-size: 17px; color: var(--muted); max-width: 600px; margin: 0 auto 28px; }
+    .actions { display: flex; justify-content: center; gap: 10px; flex-wrap: wrap; }
     .btn {
-      display: inline-block;
-      padding: 12px 28px;
-      background: var(--primary);
-      color: white;
-      text-decoration: none;
-      border-radius: 8px;
-      font-weight: 500;
-      transition: background 0.2s;
-      margin: 8px;
+      display: inline-flex; align-items: center; height: 40px; padding: 0 18px; border-radius: 8px;
+      font-size: 14px; font-weight: 500; color: #fff; background: var(--primary); transition: background 0.15s;
     }
-    .btn:hover { background: var(--primary-dark); }
-    .btn-outline {
-      background: transparent;
-      border: 1px solid var(--border);
+    .btn:hover { background: var(--primary-hover); }
+    .btn-outline { background: var(--surface); color: var(--fg); border: 1px solid var(--line-strong); }
+    .btn-outline:hover { background: var(--raised); }
+
+    /* Quick start */
+    .quick { padding: 0 0 56px; }
+    .quick .container { max-width: 760px; }
+    .quick pre {
+      background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 16px 18px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 13px; line-height: 1.6; overflow-x: auto;
     }
-    .btn-outline:hover { background: var(--bg-card); }
-    .features {
-      padding: 60px 0;
-    }
-    .features h2 {
-      text-align: center;
-      margin-bottom: 48px;
-      font-size: 2rem;
-    }
-    .feature-grid {
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
-      gap: 24px;
-    }
-    .feature-card {
-      background: var(--bg-card);
-      border: 1px solid var(--border);
-      border-radius: 12px;
-      padding: 24px;
-    }
-    .feature-card h3 {
-      color: var(--primary);
-      margin-bottom: 8px;
-    }
-    .feature-card p { color: var(--text-muted); }
-    .cloud-providers {
-      padding: 60px 0;
-      text-align: center;
-    }
-    .cloud-providers h2 { margin-bottom: 32px; font-size: 2rem; }
-    .provider-links { display: flex; justify-content: center; gap: 16px; flex-wrap: wrap; }
+    @media (prefers-color-scheme: dark) { .quick pre { background: #0b1220; } }
+    .quick pre .c { color: var(--subtle); }
+    .quick .hint { text-align: center; color: var(--muted); font-size: 13px; margin-top: 10px; }
+
+    /* Features */
+    .features { padding: 24px 0 64px; }
+    .features h2, .cloud-providers h2 { font-size: 22px; font-weight: 600; letter-spacing: -0.01em; text-align: center; margin-bottom: 8px; }
+    .lead { text-align: center; color: var(--muted); margin-bottom: 32px; }
+    .feature-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 16px; }
+    .feature-card { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 20px; }
+    .feature-card h3 { font-size: 15px; font-weight: 600; margin-bottom: 6px; display: flex; align-items: center; gap: 10px; }
+    .feature-card h3 svg { width: 18px; height: 18px; color: var(--primary); flex: none; }
+    .feature-card p { color: var(--muted); font-size: 14px; }
+
+    /* Providers */
+    .cloud-providers { padding: 0 0 72px; }
+    .provider-links { display: flex; justify-content: center; gap: 10px; flex-wrap: wrap; }
     .provider-links a {
-      padding: 12px 24px;
-      background: var(--bg-card);
-      border: 1px solid var(--border);
-      border-radius: 8px;
-      color: var(--text);
-      text-decoration: none;
-      transition: border-color 0.2s;
+      display: inline-flex; align-items: center; height: 36px; padding: 0 14px; background: var(--surface); border: 1px solid var(--line);
+      border-radius: 9999px; color: var(--fg); font-size: 13.5px; font-weight: 500; transition: border-color 0.15s, background 0.15s;
     }
-    .provider-links a:hover { border-color: var(--primary); }
-    footer {
-      padding: 40px 0;
-      border-top: 1px solid var(--border);
-      text-align: center;
-      color: var(--text-muted);
-    }
-    footer a { color: var(--primary); text-decoration: none; }
+    .provider-links a:hover { border-color: var(--primary); background: var(--primary-soft); color: var(--primary-soft-fg); }
+
+    footer { padding: 32px 0; border-top: 1px solid var(--line); text-align: center; color: var(--muted); font-size: 13px; }
     @media (max-width: 640px) {
-      .hero h1 { font-size: 2rem; }
-      .hero p { font-size: 1rem; }
+      .hero { padding: 56px 0 40px; }
+      .hero h1 { font-size: 30px; }
+      .hero p { font-size: 15px; }
     }
     @media (max-width: 500px) {
       .container { padding: 0 16px; }
-      header .container { flex-direction: column; align-items: center; gap: 8px; }
-      .logo { height: auto; width: calc(100vw - 32px); max-width: 280px; }
-      nav a { margin: 0 12px; font-size: 0.9rem; }
+      .logo { height: 24px; }
+      nav a { padding: 6px 8px; font-size: 13px; }
     }
   </style>
 </head>
 <body>
   <header>
     <div class="container">
-      <img src="assets/logo/octoprox_horizontal_dark.svg" alt="Octoprox" class="logo">
+      <a href="./" aria-label="Octoprox home">
+        <img src="assets/logo/octoprox_horizontal.svg" alt="Octoprox" class="logo logo-light">
+        <img src="assets/logo/octoprox_horizontal_dark.svg" alt="Octoprox" class="logo logo-dark">
+      </a>
       <nav>
         <a href="getting-started">Docs</a>
         <a href="https://github.com/octoprox/octoprox">GitHub</a>
@@ -150,41 +125,68 @@ layout: null
 
   <section class="hero">
     <div class="container">
-      <h1>Dynamic Proxy Management</h1>
-      <p>An intelligent proxy aggregator that accepts client requests and routes them through managed proxy pools with cloud provider integrations.</p>
-      <a href="getting-started" class="btn">Get Started</a>
-      <a href="https://github.com/octoprox/octoprox" class="btn btn-outline">View on GitHub</a>
+      <span class="eyebrow">Open source · Apache 2.0</span>
+      <h1>One proxy endpoint. Any pool behind it.</h1>
+      <p>Octoprox accepts your client's requests and routes them through proxy pools you manage: cloud instances it provisions for you, provider sessions, or your own static list.</p>
+      <div class="actions">
+        <a href="getting-started" class="btn">Get started</a>
+        <a href="https://github.com/octoprox/octoprox" class="btn btn-outline">View on GitHub</a>
+      </div>
+    </div>
+  </section>
+
+  <section class="quick">
+    <div class="container">
+<pre><span class="c"># Run a single instance with the pre-built image</span>
+curl -O https://raw.githubusercontent.com/octoprox/octoprox/main/docker-compose.ghcr.yml
+docker compose -f docker-compose.ghcr.yml up -d</pre>
+      <p class="hint">Web UI on <code>localhost:8000</code>, proxy on <code>localhost:8080</code>. Default login <code>admin</code> / <code>admin</code>.</p>
     </div>
   </section>
 
   <section class="features">
     <div class="container">
-      <h2>Features</h2>
+      <h2>What it does</h2>
+      <p class="lead">Everything you need to run a proxy pool as a service for your own scrapers and clients.</p>
       <div class="feature-grid">
         <div class="feature-card">
-          <h3>Cloud Integrations</h3>
-          <p>Dynamically provision proxy instances on AWS, GCP, and Azure with automatic setup.</p>
+          <h3><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17.5 19H9a7 7 0 1 1 6.71-9h1.79a4.5 4.5 0 1 1 0 9Z"/></svg>Cloud integrations</h3>
+          <p>Provision proxy instances on AWS, GCP and Azure on demand, with auto-scaling driven by request rate and automatic rotation.</p>
         </div>
         <div class="feature-card">
-          <h3>Smart Routing</h3>
-          <p>Round-robin, least-used, random, sticky session, and health-based routing strategies.</p>
+          <h3><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v18h18"/><path d="m19 9-5 5-4-4-3 3"/></svg>Smart routing</h3>
+          <p>Round-robin, least-used, random, sticky session and health-based strategies, plus per-connector domain filters and rate limits.</p>
         </div>
         <div class="feature-card">
-          <h3>Health Monitoring</h3>
-          <p>Automatic health checks with configurable intervals and failure thresholds.</p>
+          <h3><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>Health monitoring</h3>
+          <p>Automatic health checks with configurable intervals and thresholds; failing proxies are quarantined and released automatically.</p>
         </div>
         <div class="feature-card">
-          <h3>Performance Metrics</h3>
-          <p>Track latency, success rates, and request counts per proxy in real-time.</p>
+          <h3><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/></svg>TLS interception</h3>
+          <p>Optional MITM mode with browser-grade TLS fingerprints, and an inspector for every intercepted request and response.</p>
         </div>
         <div class="feature-card">
-          <h3>REST API</h3>
-          <p>Full CRUD operations for managing projects, credentials, connectors, and proxies.</p>
+          <h3><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v18h18"/><path d="M18 17V9"/><path d="M13 17V5"/><path d="M8 17v-3"/></svg>Metrics</h3>
+          <p>Latency, success rate, request counts and traffic per proxy and per project, with history you can chart over hours or weeks.</p>
         </div>
         <div class="feature-card">
-          <h3>Web Dashboard</h3>
-          <p>React-based UI for monitoring and configuration with real-time updates.</p>
+          <h3><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 17H7A5 5 0 0 1 7 7h2"/><path d="M15 7h2a5 5 0 1 1 0 10h-2"/><line x1="8" x2="16" y1="12" y2="12"/></svg>REST API and dashboard</h3>
+          <p>Full CRUD over projects, credentials, connectors and proxies, and a web dashboard for monitoring and configuration.</p>
         </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="cloud-providers">
+    <div class="container">
+      <h2>Setup guides</h2>
+      <p class="lead">Connect the providers you already use.</p>
+      <div class="provider-links">
+        <a href="aws-setup">AWS</a>
+        <a href="gcp-setup">Google Cloud</a>
+        <a href="azure-setup">Azure</a>
+        <a href="brightdata-setup">BrightData</a>
+        <a href="oxylabs-setup">Oxylabs</a>
       </div>
     </div>
   </section>
@@ -196,4 +198,3 @@ layout: null
   </footer>
 </body>
 </html>
-

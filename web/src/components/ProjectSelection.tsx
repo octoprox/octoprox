@@ -4,296 +4,242 @@
 import { useState } from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { Plus, Server, Activity, Trash2, FolderOpen, Settings } from 'lucide-react'
-import { fetchProjects, createProject, deleteProject, updateProject, ProjectCreate, ProjectUpdate, ProjectSummary } from '../api/client'
+import { Plus, Server, Trash2, FolderOpen, Settings, Pencil, LogOut, Link2, Key } from 'lucide-react'
+import {
+  fetchProjects, createProject, deleteProject, updateProject, logout,
+  ProjectCreate, ProjectUpdate, ProjectSummary,
+} from '../api/client'
 import { useProject } from '../contexts/ProjectContext'
 import { useTheme } from '../contexts/ThemeContext'
 import { useAuth } from '../contexts/AuthContext'
+import { useToast } from '../contexts/ToastContext'
 import { setSettingsOrigin } from '../utils/settingsOrigin'
-import ProjectModal from './ProjectModal'
+import { ProjectForm } from './ProjectForm'
+import { Page } from './layout/Page'
 import octoproxLogo from '../assets/logos/octoprox_horizontal.svg'
 import octoproxLogoDark from '../assets/logos/octoprox_horizontal_dark.svg'
-import { Button, Input, Modal, ModalFooter, Card } from './ui'
+import { Button, Input, Card, Badge, Inspector, ConfirmDialog } from './ui'
 
+type PanelState = { kind: 'new' } | { kind: 'edit'; id: string } | null
+
+function formatStrategy(strategy: string | undefined): string {
+  return (strategy || 'round_robin').split('_').map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(' ')
+}
+
+/**
+ * Project picker. Uses the same top bar, page frame and docked panel as the
+ * rest of the app so creating or editing a project feels like everything else.
+ */
 export default function ProjectSelection() {
   const navigate = useNavigate()
   const location = useLocation()
   const queryClient = useQueryClient()
   const { setSelectedProjectId } = useProject()
   const { isDark } = useTheme()
-  const { canMutate } = useAuth()
-
-  const handleOpenSettings = () => {
-    setSettingsOrigin(location.pathname)
-    navigate('/settings')
-  }
-  const [showCreateModal, setShowCreateModal] = useState(false)
-  const [showEditModal, setShowEditModal] = useState<ProjectSummary | null>(null)
-  const [showDeleteModal, setShowDeleteModal] = useState<ProjectSummary | null>(null)
+  const { canMutate, authStatus } = useAuth()
+  const toast = useToast()
+  const [panel, setPanel] = useState<PanelState>(null)
+  const [pendingDelete, setPendingDelete] = useState<ProjectSummary | null>(null)
   const [deleteConfirmation, setDeleteConfirmation] = useState('')
 
-  const { data, isLoading, error } = useQuery({
-    queryKey: ['projects'],
-    queryFn: fetchProjects,
-  })
+  const { data, isLoading, error } = useQuery({ queryKey: ['projects'], queryFn: fetchProjects, refetchInterval: 30000 })
 
   const createMutation = useMutation({
     mutationFn: createProject,
-    onSuccess: () => {
+    onSuccess: (p) => {
       queryClient.invalidateQueries({ queryKey: ['projects'] })
-      setShowCreateModal(false)
+      setPanel(null)
+      toast.show(`Project "${p.name}" created`)
     },
   })
-
   const updateMutation = useMutation({
-    mutationFn: ({ id, data }: { id: string; data: ProjectUpdate }) =>
-      updateProject(id, data),
+    mutationFn: ({ id, data }: { id: string; data: ProjectUpdate }) => updateProject(id, data),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['projects'] })
-      setShowEditModal(null)
+      setPanel(null)
+      toast.show('Project saved')
     },
   })
-
   const deleteMutation = useMutation({
-    mutationFn: ({ id, confirmation }: { id: string; confirmation: string }) =>
-      deleteProject(id, confirmation),
+    mutationFn: ({ id, confirmation }: { id: string; confirmation: string }) => deleteProject(id, confirmation),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['projects'] })
-      setShowDeleteModal(null)
+      setPendingDelete(null)
       setDeleteConfirmation('')
+      toast.show('Project deleted')
     },
+    onError: (e: Error) => toast.show(e.message || 'Failed to delete project', 'error'),
   })
 
-  const handleSelectProject = (project: ProjectSummary) => {
+  const openProject = (project: ProjectSummary) => {
     setSelectedProjectId(project.id)
-    navigate(`/projects/${project.id}/dashboard`)
+    navigate(`/projects/${project.id}/overview`)
+  }
+  const openSettings = () => {
+    setSettingsOrigin(location.pathname)
+    navigate('/settings')
   }
 
-  const handleCreateProject = (data: ProjectCreate) => {
-    createMutation.mutate(data)
-  }
+  const projects = data?.projects ?? []
+  const editing = panel?.kind === 'edit' ? projects.find((p) => p.id === panel.id) : undefined
 
-  const handleDeleteProject = () => {
-    if (showDeleteModal && deleteConfirmation === 'permanently delete') {
-      deleteMutation.mutate({ id: showDeleteModal.id, confirmation: deleteConfirmation })
-    }
-  }
-
-  if (isLoading) {
-    return (
-      <div className="min-h-screen flex items-center justify-center bg-bg">
-        <div className="text-fg-muted">Loading projects...</div>
-      </div>
+  let panelNode: React.ReactNode = null
+  if (panel?.kind === 'new') {
+    panelNode = (
+      <Inspector
+        title="New project"
+        subtitle="A project is one proxy endpoint with its own pool"
+        onClose={() => setPanel(null)}
+        width={480}
+        footer={
+          <>
+            <span className="flex-1" />
+            <Button type="button" variant="outline" size="sm" onClick={() => setPanel(null)}>Cancel</Button>
+            <Button type="submit" form="project-form" size="sm" disabled={createMutation.isPending}>{createMutation.isPending ? 'Creating…' : 'Create project'}</Button>
+          </>
+        }
+      >
+        <ProjectForm key="new" onSave={(d) => createMutation.mutate(d as ProjectCreate)} error={createMutation.error?.message} formId="project-form" />
+      </Inspector>
     )
-  }
-
-  if (error) {
-    return (
-      <div className="min-h-screen flex items-center justify-center bg-bg">
-        <div className="text-red-500">Failed to load projects</div>
-      </div>
+  } else if (panel?.kind === 'edit' && editing) {
+    panelNode = (
+      <Inspector
+        title="Project settings"
+        subtitle={editing.name}
+        onClose={() => setPanel(null)}
+        width={480}
+        footer={
+          <>
+            <Button type="button" variant="danger-ghost" size="sm" onClick={() => setPendingDelete(editing)}><Trash2 className="w-3.5 h-3.5" /> Delete</Button>
+            <span className="flex-1" />
+            <Button type="button" variant="outline" size="sm" onClick={() => setPanel(null)}>Cancel</Button>
+            <Button type="submit" form="project-form" size="sm" disabled={updateMutation.isPending}>{updateMutation.isPending ? 'Saving…' : 'Save changes'}</Button>
+          </>
+        }
+      >
+        <ProjectForm key={editing.id} project={editing} onSave={(d) => updateMutation.mutate({ id: editing.id, data: d })} error={updateMutation.error?.message} formId="project-form" />
+      </Inspector>
     )
   }
 
   return (
-    <div className="min-h-screen bg-bg p-8">
-      <div className="max-w-6xl mx-auto">
-        <div className="flex items-center justify-between mb-8">
-          <div>
-            <img src={isDark ? octoproxLogoDark : octoproxLogo} alt="Octoprox" className="h-10 mb-1" />
-            <p className="text-fg-muted mt-1">Select a project to manage</p>
-          </div>
-          <div className="flex items-center gap-3">
-            <Button variant="secondary" onClick={handleOpenSettings}>
-              <Settings className="w-5 h-5" />
-              Settings
-            </Button>
-            {canMutate && (
-              <Button
-                onClick={() => {
-                  createMutation.reset()
-                  setShowCreateModal(true)
-                }}
-              >
-                <Plus className="w-5 h-5" />
-                New Project
-              </Button>
-            )}
+    <div className="h-screen flex flex-col bg-bg text-fg overflow-hidden">
+      <header className="h-14 flex-none flex items-center justify-between px-5 border-b border-line bg-surface">
+        <img src={isDark ? octoproxLogoDark : octoproxLogo} alt="Octoprox" className="h-[26px] w-auto" />
+        <div className="flex items-center gap-2">
+          <Button variant="ghost" size="sm" onClick={openSettings}><Settings className="w-3.5 h-3.5" /> Settings</Button>
+          <div className="flex items-center gap-2 pl-2 border-l border-line">
+            <div className="w-7 h-7 rounded-full bg-primary-soft text-primary-soft-fg flex items-center justify-center text-[11px] font-semibold uppercase">{(authStatus?.username ?? '?').slice(0, 2)}</div>
+            <div className="leading-tight hidden sm:block">
+              <div className="text-[13px] font-medium">{authStatus?.username}</div>
+              <div className="text-[11px] text-fg-subtle">{authStatus?.role}</div>
+            </div>
+            <button onClick={() => logout()} className="p-1.5 rounded-md text-fg-muted hover:text-fg hover:bg-surface-raised transition-colors" title="Sign out">
+              <LogOut className="w-4 h-4" />
+            </button>
           </div>
         </div>
+      </header>
 
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-          {data?.projects.map((project) => (
-            <ProjectCard
-              key={project.id}
-              project={project}
-              canMutate={canMutate}
-              onSelect={() => handleSelectProject(project)}
-              onEdit={() => {
-                updateMutation.reset()
-                setShowEditModal(project)
-              }}
-              onDelete={() => setShowDeleteModal(project)}
-            />
-          ))}
-          {data?.projects.length === 0 && (
-            <div className="col-span-full text-center py-12 text-fg-muted">
-              <FolderOpen className="w-16 h-16 mx-auto mb-4 text-fg-subtle" />
-              <p>No projects yet. Create your first project to get started.</p>
+      <div className="flex-1 min-h-0 flex">
+        <Page
+          title="Projects"
+          count={data?.total}
+          subtitle="Pick a project to manage, or create a new one"
+          actions={canMutate ? <Button size="sm" onClick={() => { createMutation.reset(); setPanel({ kind: 'new' }) }}><Plus className="w-3.5 h-3.5" /> New project</Button> : undefined}
+          panel={panelNode}
+        >
+          {isLoading ? (
+            <div className="text-sm text-fg-muted py-10 text-center">Loading projects…</div>
+          ) : error ? (
+            <div className="text-sm text-danger py-10 text-center">Failed to load projects</div>
+          ) : projects.length === 0 ? (
+            <Card className="p-10 text-center">
+              <FolderOpen className="w-10 h-10 mx-auto mb-3 text-fg-subtle" />
+              <h3 className="text-base font-medium">No projects yet</h3>
+              <p className="text-sm text-fg-muted mt-1">Create your first project to get a proxy endpoint.</p>
+              {canMutate && <Button size="sm" className="mt-4" onClick={() => setPanel({ kind: 'new' })}><Plus className="w-3.5 h-3.5" /> New project</Button>}
+            </Card>
+          ) : (
+            <div className="grid grid-cols-[repeat(auto-fill,320px)] auto-rows-fr gap-4">
+              {projects.map((project) => (
+                <ProjectCard
+                  key={project.id}
+                  project={project}
+                  active={panel?.kind === 'edit' && panel.id === project.id}
+                  canMutate={canMutate}
+                  onOpen={() => openProject(project)}
+                  onEdit={() => { updateMutation.reset(); setPanel({ kind: 'edit', id: project.id }) }}
+                  onDelete={() => setPendingDelete(project)}
+                />
+              ))}
             </div>
           )}
-        </div>
+        </Page>
       </div>
 
-      {showCreateModal && (
-        <ProjectModal
-          onClose={() => setShowCreateModal(false)}
-          onSave={(data) => handleCreateProject(data as ProjectCreate)}
-          isLoading={createMutation.isPending}
-          error={createMutation.error?.message}
-        />
-      )}
-
-      {showEditModal && (
-        <ProjectModal
-          project={showEditModal}
-          onClose={() => setShowEditModal(null)}
-          onSave={(data) => updateMutation.mutate({ id: showEditModal.id, data })}
-          isLoading={updateMutation.isPending}
-          error={updateMutation.error?.message}
-        />
-      )}
-
-      {showDeleteModal && (
-        <DeleteProjectModal
-          project={showDeleteModal}
-          confirmation={deleteConfirmation}
-          onConfirmationChange={setDeleteConfirmation}
-          onClose={() => {
-            setShowDeleteModal(null)
-            setDeleteConfirmation('')
-          }}
-          onDelete={handleDeleteProject}
+      {pendingDelete && (
+        <ConfirmDialog
+          title="Delete project?"
+          message={<>This deletes <b className="text-fg">{pendingDelete.name}</b> together with all of its credentials, connectors and proxies. Type <b className="text-fg font-mono text-xs">permanently delete</b> to confirm.</>}
+          confirmLabel="Delete project"
+          confirmDisabled={deleteConfirmation !== 'permanently delete'}
+          onCancel={() => { setPendingDelete(null); setDeleteConfirmation('') }}
+          onConfirm={() => deleteMutation.mutate({ id: pendingDelete.id, confirmation: deleteConfirmation })}
           isLoading={deleteMutation.isPending}
-        />
+        >
+          <Input value={deleteConfirmation} onChange={(e) => setDeleteConfirmation(e.target.value)} placeholder="permanently delete" className="font-mono text-sm" autoFocus />
+        </ConfirmDialog>
       )}
     </div>
   )
 }
 
-function ProjectCard({
-  project,
-  canMutate,
-  onSelect,
-  onEdit,
-  onDelete,
-}: {
+function ProjectCard({ project, active, canMutate, onOpen, onEdit, onDelete }: {
   project: ProjectSummary
+  active: boolean
   canMutate: boolean
-  onSelect: () => void
+  onOpen: () => void
   onEdit: () => void
   onDelete: () => void
 }) {
+  const healthy = project.healthy_proxy_count
+  const total = project.proxy_count
   return (
-    <Card className="shadow-md p-6 hover:shadow-lg transition-shadow flex flex-col h-full">
-      <div className="flex items-start justify-between mb-4">
-        <h3 className="text-xl font-semibold text-fg">{project.name}</h3>
+    <Card
+      className={`p-4 flex flex-col gap-3 cursor-pointer transition-colors hover:border-line-strong ${active ? 'border-primary ring-[3px] ring-primary-soft' : ''}`}
+      onClick={onOpen}
+      role="button"
+      tabIndex={0}
+      onKeyDown={(e) => { if (e.key === 'Enter') onOpen() }}
+    >
+      <div className="flex items-start justify-between gap-2">
+        <div className="min-w-0">
+          <h3 className="text-[15px] font-semibold text-fg truncate" title={project.name}>{project.name}</h3>
+          <p className="text-xs text-fg-muted mt-0.5 line-clamp-2 h-8 leading-4" title={project.description || undefined}>
+            {project.description || <span className="text-fg-subtle italic">No description</span>}
+          </p>
+        </div>
         {canMutate && (
-          <div className="flex items-center gap-2">
-            <button
-              onClick={(e) => {
-                e.stopPropagation()
-                onEdit()
-              }}
-              className="text-gray-400 hover:text-blue-500 transition-colors"
-              title="Edit project"
-            >
-              <Settings className="w-5 h-5" />
-            </button>
-            <button
-              onClick={(e) => {
-                e.stopPropagation()
-                onDelete()
-              }}
-              className="text-gray-400 hover:text-red-500 transition-colors"
-              title="Delete project"
-            >
-              <Trash2 className="w-5 h-5" />
-            </button>
+          <div className="flex items-center gap-0.5 flex-none -mr-1 -mt-1">
+            <button onClick={(e) => { e.stopPropagation(); onEdit() }} className="p-1.5 rounded-md text-fg-subtle hover:text-fg hover:bg-surface-raised" title="Project settings"><Pencil className="w-3.5 h-3.5" /></button>
+            <button onClick={(e) => { e.stopPropagation(); onDelete() }} className="p-1.5 rounded-md text-fg-subtle hover:text-danger hover:bg-danger-soft" title="Delete project"><Trash2 className="w-3.5 h-3.5" /></button>
           </div>
         )}
       </div>
-      <div className="flex-grow">
-        <p className="text-fg-muted text-sm mb-4 line-clamp-2 min-h-[2.5rem]">
-          {project.description || <span className="text-fg-subtle italic">No description</span>}
-        </p>
-        <div className="flex items-center gap-4 text-sm text-fg-muted mb-2">
-          <div className="flex items-center gap-1">
-            <Server className="w-4 h-4" />
-            <span>{project.proxy_count} proxies</span>
-          </div>
-          <div className="flex items-center gap-1">
-            <Activity className="w-4 h-4 text-green-500" />
-            <span>{project.healthy_proxy_count} healthy</span>
-          </div>
-        </div>
-        <div className="text-xs text-fg-subtle mb-4">
-          Strategy: {project.routing_strategy?.replace('_', ' ') || 'round robin'}
-        </div>
+      <div className="flex items-center gap-2 text-xs text-fg-muted tabular-nums">
+        <span className="inline-flex items-center gap-1"><Server className="w-3.5 h-3.5" /> {total} prox{total === 1 ? 'y' : 'ies'}</span>
+        <span className="text-line-strong">·</span>
+        <span className="inline-flex items-center gap-1.5"><span className={`w-2 h-2 rounded-full ${total === 0 ? 'bg-fg-subtle' : healthy === total ? 'bg-success' : healthy === 0 ? 'bg-danger' : 'bg-warning'}`} />{healthy} healthy</span>
+        <span className="text-line-strong">·</span>
+        <span className="inline-flex items-center gap-1" title="Connectors"><Link2 className="w-3.5 h-3.5" /> {project.connector_count}</span>
+        <span className="inline-flex items-center gap-1" title="Credentials"><Key className="w-3.5 h-3.5" /> {project.credential_count}</span>
       </div>
-      <Button onClick={onSelect} className="w-full mt-auto">
-        Open Project
-      </Button>
+      <div className="flex items-center justify-between mt-auto pt-1">
+        <Badge color="gray">{formatStrategy(project.routing_strategy)}</Badge>
+        <span className="text-xs font-medium text-primary">Open →</span>
+      </div>
     </Card>
-  )
-}
-
-function DeleteProjectModal({
-  project,
-  confirmation,
-  onConfirmationChange,
-  onClose,
-  onDelete,
-  isLoading,
-}: {
-  project: ProjectSummary
-  confirmation: string
-  onConfirmationChange: (value: string) => void
-  onClose: () => void
-  onDelete: () => void
-  isLoading: boolean
-}) {
-  const isValid = confirmation === 'permanently delete'
-
-  return (
-    <Modal onClose={onClose} className="p-6">
-      <h2 className="text-xl font-semibold text-red-600 mb-4">Delete Project</h2>
-      <p className="text-fg-muted mb-4">
-        Are you sure you want to delete <strong>{project.name}</strong>? This will also delete
-        all credentials, connectors, and proxies associated with this project.
-      </p>
-      <p className="text-sm text-fg-muted mb-4">
-        Type <strong>permanently delete</strong> to confirm:
-      </p>
-      <Input
-        type="text"
-        value={confirmation}
-        onChange={(e) => onConfirmationChange(e.target.value)}
-        className="mb-4"
-        placeholder="permanently delete"
-      />
-      <ModalFooter>
-        <Button type="button" variant="ghost" onClick={onClose}>
-          Cancel
-        </Button>
-        <Button
-          variant="danger"
-          onClick={onDelete}
-          disabled={!isValid || isLoading}
-        >
-          {isLoading ? 'Deleting...' : 'Delete Project'}
-        </Button>
-      </ModalFooter>
-    </Modal>
   )
 }

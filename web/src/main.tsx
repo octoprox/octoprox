@@ -11,7 +11,8 @@ import './index.css'
 const queryClient = new QueryClient({
   defaultOptions: {
     queries: {
-      refetchInterval: 5000,
+      // No implicit polling: each query that needs live data sets its own interval.
+      refetchInterval: false,
       staleTime: 1000,
     },
   },

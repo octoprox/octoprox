@@ -50,6 +50,9 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
   // Track whether the last applied theme came from the server so we don't echo
   // it back. Also use it to suppress the initial mount PATCH (no-op anyway).
   const skipNextSync = useRef(true)
+  // Last value pushed (or received from) the server, so re-running effects
+  // (StrictMode, remounts) never repeat the same PATCH.
+  const lastSynced = useRef<ThemeId | null>(null)
 
   useEffect(() => {
     applyToDocument(theme)
@@ -57,8 +60,11 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
 
     if (skipNextSync.current) {
       skipNextSync.current = false
+      lastSynced.current = theme
       return
     }
+    if (lastSynced.current === theme) return
+    lastSynced.current = theme
 
     // Best-effort sync to server. Silently ignore failures (e.g. unauthenticated).
     updateSelf({ theme_preference: theme }).catch((err) => {
