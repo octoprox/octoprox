@@ -690,7 +690,7 @@ class TestBrightDataConstants:
     def test_host_and_port_constants(self) -> None:
         """Test BrightData host and port constants."""
         assert BRIGHTDATA_HOST == "brd.superproxy.io"
-        assert BRIGHTDATA_PORT == 33335
+        assert BRIGHTDATA_PORT == 44445
 
 
 class TestBrightDataSyncDeduplicate:

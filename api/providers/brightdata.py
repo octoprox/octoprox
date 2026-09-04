@@ -19,7 +19,7 @@ logger = structlog.get_logger()
 
 # BrightData endpoint configuration
 BRIGHTDATA_HOST = "brd.superproxy.io"
-BRIGHTDATA_PORT = 33335
+BRIGHTDATA_PORT = 44445
 
 # IP discovery endpoint
 IP_DISCOVERY_URL = "https://lumtest.com/myip.json"
