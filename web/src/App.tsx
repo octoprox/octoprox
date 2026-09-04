@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { useState, useEffect, useMemo } from 'react'
-import { BrowserRouter, Routes, Route, Link, Navigate, useParams, useNavigate, useLocation } from 'react-router-dom'
+import { BrowserRouter, Routes, Route, NavLink as RouterNavLink, Navigate, useParams, useNavigate, useLocation } from 'react-router-dom'
 import { Server, BarChart3, LineChart, LogOut, FolderOpen, ChevronDown, ChevronLeft, Key, Link2, Search, Settings as SettingsIcon, ArrowLeft, User as UserIcon, Palette, Users as UsersIcon, DatabaseBackup } from 'lucide-react'
 import SetPassword from './components/SetPassword'
 import Dashboard from './components/Dashboard'
@@ -371,14 +371,20 @@ function ProjectLayout({
 
 function NavLink({ to, icon, label, collapsed }: { to: string; icon: React.ReactNode; label: string; collapsed?: boolean }) {
   return (
-    <Link
+    <RouterNavLink
       to={to}
-      className={`flex items-center gap-3 py-3 text-fg-muted hover:bg-surface-raised hover:text-fg transition-colors ${collapsed ? 'justify-center px-2' : 'px-4'}`}
+      className={({ isActive }) =>
+        `flex items-center gap-3 py-3 border-l-2 transition-colors ${collapsed ? 'justify-center px-2' : 'px-4'} ${
+          isActive
+            ? 'border-primary bg-primary-soft text-primary-soft-fg font-medium'
+            : 'border-transparent text-fg-muted hover:bg-surface-raised hover:text-fg'
+        }`
+      }
       title={collapsed ? label : undefined}
     >
       {icon}
       {!collapsed && label}
-    </Link>
+    </RouterNavLink>
   )
 }
 
