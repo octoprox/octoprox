@@ -37,11 +37,11 @@
     <linearGradient
        id="linearGradient31">
       <stop
-         style="stop-color:#0000ff;stop-opacity:1"
+         style="stop-color:#dadaff;stop-opacity:1"
          offset="0"
          id="stop31" />
       <stop
-         style="stop-color:#d42aff;stop-opacity:1"
+         style="stop-color:#ff6eff;stop-opacity:1"
          offset="1"
          id="stop32" />
     </linearGradient>
@@ -54,29 +54,10 @@
        y2="662.92212"
        gradientUnits="userSpaceOnUse"
        gradientTransform="matrix(0.2843775,0,0,0.2843775,376.42438,128.78713)" />
-    <filter
-       style="color-interpolation-filters:sRGB;"
-       inkscape:label="Invert"
-       id="filter2"
-       x="0"
-       y="0"
-       width="1"
-       height="1">
-      <feColorMatrix
-         type="hueRotate"
-         values="180"
-         result="color1"
-         id="feColorMatrix1" />
-      <feColorMatrix
-         values="-1 0 0 0 1 0 -1 0 0 1 0 0 -1 0 1 -0.21 -0.72 -0.07 2 0 "
-         result="color2"
-         id="feColorMatrix2" />
-    </filter>
   </defs>
   <g
      id="g1"
-     transform="translate(-527.12872,-179.96164)"
-     style="filter:url(#filter2)">
+     transform="translate(-527.12872,-179.96164)">
     <path
        id="path14"
        style="fill:url(#linearGradient32);stroke-width:0.284384"
