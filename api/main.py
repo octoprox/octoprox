@@ -27,6 +27,7 @@ from api.db.redis import get_redis_client
 from api.db.session import get_async_session_factory
 from api.routes import (
     auth,
+    backup,
     brightdata,
     connectors,
     credentials,
@@ -157,6 +158,9 @@ def create_app() -> FastAPI:
     app.include_router(mitm.router, prefix="/api/v1", tags=["MITM"], dependencies=auth_dependency)
     app.include_router(
         users.router, prefix="/api/v1", tags=["Users"], dependencies=auth_dependency
+    )
+    app.include_router(
+        backup.router, prefix="/api/v1", tags=["Backup"], dependencies=auth_dependency
     )
 
     # Serve frontend static files in production (when web/dist exists)

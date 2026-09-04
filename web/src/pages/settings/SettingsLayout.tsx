@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { NavLink, Outlet, useNavigate } from 'react-router-dom'
-import { ArrowLeft, Palette, User as UserIcon, Users as UsersIcon } from 'lucide-react'
+import { ArrowLeft, DatabaseBackup, Palette, User as UserIcon, Users as UsersIcon } from 'lucide-react'
 import { useAuth } from '../../contexts/AuthContext'
 import { cn } from '../../utils/cn'
 import { popSettingsOrigin } from '../../utils/settingsOrigin'
@@ -20,6 +20,7 @@ export default function SettingsLayout() {
     { to: 'account', icon: <UserIcon className="w-4 h-4" />, label: 'Account', show: true },
     { to: 'appearance', icon: <Palette className="w-4 h-4" />, label: 'Appearance', show: true },
     { to: 'users', icon: <UsersIcon className="w-4 h-4" />, label: 'Users', show: isAdmin },
+    { to: 'backup', icon: <DatabaseBackup className="w-4 h-4" />, label: 'Backup & Migration', show: isAdmin },
   ]
 
   return (

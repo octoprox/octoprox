@@ -3,7 +3,7 @@
 
 import { useState, useEffect, useMemo } from 'react'
 import { BrowserRouter, Routes, Route, Link, Navigate, useParams, useNavigate, useLocation } from 'react-router-dom'
-import { Server, BarChart3, LineChart, LogOut, FolderOpen, ChevronDown, ChevronLeft, Key, Link2, Search, Settings as SettingsIcon, ArrowLeft, User as UserIcon, Palette, Users as UsersIcon } from 'lucide-react'
+import { Server, BarChart3, LineChart, LogOut, FolderOpen, ChevronDown, ChevronLeft, Key, Link2, Search, Settings as SettingsIcon, ArrowLeft, User as UserIcon, Palette, Users as UsersIcon, DatabaseBackup } from 'lucide-react'
 import SetPassword from './components/SetPassword'
 import Dashboard from './components/Dashboard'
 import octoproxLogo from './assets/logos/octoprox_horizontal.svg'
@@ -22,6 +22,7 @@ import SettingsLayout from './pages/settings/SettingsLayout'
 import AccountSection from './pages/settings/AccountSection'
 import AppearanceSection from './pages/settings/AppearanceSection'
 import UsersSection from './pages/settings/UsersSection'
+import BackupSection from './pages/settings/BackupSection'
 import { ProjectProvider, useProject } from './contexts/ProjectContext'
 import { AuthProvider, AuthContextValue } from './contexts/AuthContext'
 import { useTheme } from './contexts/ThemeContext'
@@ -135,6 +136,7 @@ function AuthenticatedApp() {
             <Route path="account" element={<AccountSection />} />
             <Route path="appearance" element={<AppearanceSection />} />
             <Route path="users" element={<RequireAdmin><UsersSection /></RequireAdmin>} />
+            <Route path="backup" element={<RequireAdmin><BackupSection /></RequireAdmin>} />
           </Route>
 
           {/* Project-scoped routes */}
@@ -282,7 +284,10 @@ function ProjectLayout({
               <NavLink to={`/projects/${projectId}/settings/account`} icon={<UserIcon />} label="Account" collapsed={sidebarCollapsed} />
               <NavLink to={`/projects/${projectId}/settings/appearance`} icon={<Palette />} label="Appearance" collapsed={sidebarCollapsed} />
               {isAdmin && (
-                <NavLink to={`/projects/${projectId}/settings/users`} icon={<UsersIcon />} label="Users" collapsed={sidebarCollapsed} />
+                <>
+                  <NavLink to={`/projects/${projectId}/settings/users`} icon={<UsersIcon />} label="Users" collapsed={sidebarCollapsed} />
+                  <NavLink to={`/projects/${projectId}/settings/backup`} icon={<DatabaseBackup />} label="Backup & Migration" collapsed={sidebarCollapsed} />
+                </>
               )}
             </>
           ) : (
@@ -355,6 +360,7 @@ function ProjectLayout({
           <Route path="settings/account" element={<AccountSection />} />
           <Route path="settings/appearance" element={<AppearanceSection />} />
           <Route path="settings/users" element={<RequireAdmin><UsersSection /></RequireAdmin>} />
+          <Route path="settings/backup" element={<RequireAdmin><BackupSection /></RequireAdmin>} />
           <Route path="*" element={<Navigate to="dashboard" replace />} />
         </Routes>
       </main>

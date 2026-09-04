@@ -450,6 +450,64 @@ export const downloadCaCertificate = async (): Promise<void> => {
   URL.revokeObjectURL(url)
 }
 
+// Backup / migration API functions
+export interface UserConflict {
+  original_username: string
+  new_username: string
+  new_id: boolean
+  email_cleared: boolean
+}
+
+export interface ImportSummary {
+  users: number
+  projects: number
+  credentials: number
+  connectors: number
+  proxies: number
+  proxy_metrics: number
+  project_metrics: number
+  kept_current_user: boolean
+  user_conflicts: UserConflict[]
+}
+
+export const exportBackup = async (
+  passphrase: string,
+  includeMetrics: boolean
+): Promise<void> => {
+  const response = await api.post(
+    '/backup/export',
+    { passphrase, include_metrics: includeMetrics },
+    { responseType: 'blob' }
+  )
+  // Derive the filename from the Content-Disposition header, falling back to a default.
+  const disposition = response.headers['content-disposition'] || ''
+  const match = disposition.match(/filename="?([^"]+)"?/)
+  const filename = match ? match[1] : 'octoprox-backup.opbak'
+
+  const url = URL.createObjectURL(response.data as Blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = filename
+  a.click()
+  URL.revokeObjectURL(url)
+}
+
+export const importBackup = async (
+  file: File,
+  passphrase: string,
+  keepCurrentUser: boolean
+): Promise<ImportSummary> => {
+  const formData = new FormData()
+  formData.append('file', file)
+  formData.append('passphrase', passphrase)
+  formData.append('mode', 'replace')
+  formData.append('keep_current_user', keepCurrentUser ? 'true' : 'false')
+  const response = await api.post('/backup/import', formData, {
+    headers: { 'Content-Type': 'multipart/form-data' },
+  })
+  return response.data
+}
+
 // Project API functions
 export const fetchProjects = async (): Promise<ProjectListResponse> => {
   const response = await api.get('/projects')
