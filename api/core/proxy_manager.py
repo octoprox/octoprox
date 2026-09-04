@@ -1111,7 +1111,7 @@ class ProxyManager:
     def get_credentials_for_project(self, project_id: str) -> list[Credential]:
         """Get all credentials for a project, ordered by creation time."""
         credentials = [c for c in self._credentials.values() if c.project_id == project_id]
-        return sorted(credentials, key=lambda c: c.created_at)
+        return sorted(credentials, key=lambda c: (c.created_at, c.id))
 
     def get_credential(self, credential_id: str) -> Credential | None:
         """Get a credential by ID."""
@@ -1250,7 +1250,7 @@ class ProxyManager:
     def get_connectors_for_project(self, project_id: str) -> list[Connector]:
         """Get all connectors for a project, ordered by creation time."""
         connectors = [c for c in self._connectors.values() if c.project_id == project_id]
-        return sorted(connectors, key=lambda c: c.created_at)
+        return sorted(connectors, key=lambda c: (c.created_at, c.id))
 
     def get_connector(self, connector_id: str) -> Connector | None:
         """Get a connector by ID."""

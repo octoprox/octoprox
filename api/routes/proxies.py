@@ -115,8 +115,15 @@ async def list_proxies(request: Request, project_id: str) -> ProxyListResponse:
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
 
-    # Get ALL proxies (including from disabled connectors) for display
-    all_proxies = proxy_manager.get_all_proxies_for_project(project_id)
+    # Get ALL proxies (including from disabled connectors) for display.
+    # The manager holds proxies in a dict whose insertion order differs per
+    # API instance (initial DB load order, pubsub reloads, provider syncs),
+    # so behind a round-robin load balancer consecutive polls would otherwise
+    # come back in different orders. Sort deterministically before responding.
+    all_proxies = sorted(
+        proxy_manager.get_all_proxies_for_project(project_id),
+        key=lambda p: (p.created_at, p.id),
+    )
     # Get healthy proxies (only from enabled connectors) for the count
     healthy_proxies = proxy_manager.get_healthy_proxies_for_project(project_id)
 

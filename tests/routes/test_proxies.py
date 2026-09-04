@@ -180,6 +180,46 @@ class TestProxyEndpoints:
         assert data["total"] == 3
         assert len(data["proxies"]) == 3
 
+    def test_list_proxies_order_is_stable(
+        self,
+        authenticated_client: TestClient,
+        created_project: dict[str, Any],
+        created_connector: dict[str, Any],
+        sample_proxy_data: dict[str, Any],
+    ) -> None:
+        """Listing returns creation order regardless of in-memory dict order.
+
+        Each API instance keeps proxies in a dict whose insertion order depends
+        on that instance's history, so the response must be sorted explicitly
+        or a load-balanced UI sees rows shuffle between polls.
+        """
+        project_id = created_project["id"]
+
+        created_ids = []
+        for i in range(3):
+            proxy_data = sample_proxy_data.copy()
+            proxy_data["connector_id"] = created_connector["id"]
+            proxy_data["host"] = f"proxy{i}.example.com"
+            response = authenticated_client.post(
+                f"/api/v1/projects/{project_id}/proxies",
+                json=proxy_data,
+            )
+            assert response.status_code == 201
+            created_ids.append(response.json()["id"])
+
+        def listed_ids() -> list[str]:
+            response = authenticated_client.get(f"/api/v1/projects/{project_id}/proxies")
+            assert response.status_code == 200
+            return [p["id"] for p in response.json()["proxies"]]
+
+        assert listed_ids() == created_ids
+
+        # Simulate a peer instance that loaded the same proxies in a different order.
+        manager = authenticated_client.app.state.proxy_manager
+        manager._proxies = dict(reversed(list(manager._proxies.items())))
+
+        assert listed_ids() == created_ids
+
 
 class TestProxyRoleAccess:
     """Tests for role-based access control on proxy endpoints."""

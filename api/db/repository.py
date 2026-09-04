@@ -352,8 +352,10 @@ class ProxyRepository:
         self._session = session
 
     async def get_all(self) -> list[Proxy]:
-        """Get all proxies."""
-        result = await self._session.execute(select(ProxyModel))
+        """Get all proxies, in creation order."""
+        result = await self._session.execute(
+            select(ProxyModel).order_by(ProxyModel.created_at, ProxyModel.id)
+        )
         models = result.scalars().all()
         return [self._to_domain(m) for m in models]
 
@@ -366,9 +368,11 @@ class ProxyRepository:
         return self._to_domain(model) if model else None
 
     async def get_by_connector(self, connector_id: str) -> list[Proxy]:
-        """Get all proxies for a connector."""
+        """Get all proxies for a connector, in creation order."""
         result = await self._session.execute(
-            select(ProxyModel).where(ProxyModel.connector_id == connector_id)
+            select(ProxyModel)
+            .where(ProxyModel.connector_id == connector_id)
+            .order_by(ProxyModel.created_at, ProxyModel.id)
         )
         models = result.scalars().all()
         return [self._to_domain(m) for m in models]

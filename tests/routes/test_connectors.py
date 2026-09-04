@@ -26,6 +26,47 @@ class TestConnectorEndpoints:
         assert data["total"] == 0
         assert data["connectors"] == []
 
+    def test_list_connectors_order_is_stable(
+        self,
+        authenticated_client: TestClient,
+        created_project: dict[str, Any],
+        created_credential: dict[str, Any],
+        sample_connector_data: dict[str, Any],
+    ) -> None:
+        """Listing order does not depend on the instance's in-memory dict order.
+
+        Timestamps are pinned equal to exercise the id tie-break, which is what
+        keeps bulk-imported entries ordered identically across instances.
+        """
+        project_id = created_project["id"]
+
+        created_ids = []
+        for i in range(3):
+            connector_data = sample_connector_data.copy()
+            connector_data["credential_id"] = created_credential["id"]
+            connector_data["name"] = f"Connector {i}"
+            response = authenticated_client.post(
+                f"/api/v1/projects/{project_id}/connectors",
+                json=connector_data,
+            )
+            assert response.status_code == 201
+            created_ids.append(response.json()["id"])
+
+        def listed_ids() -> list[str]:
+            response = authenticated_client.get(f"/api/v1/projects/{project_id}/connectors")
+            assert response.status_code == 200
+            return [c["id"] for c in response.json()["connectors"]]
+
+        assert listed_ids() == created_ids
+
+        manager = authenticated_client.app.state.proxy_manager
+        pinned = manager._connectors[created_ids[0]].created_at
+        for cid in created_ids:
+            manager._connectors[cid].created_at = pinned
+        manager._connectors = dict(reversed(list(manager._connectors.items())))
+
+        assert listed_ids() == sorted(created_ids)
+
     def test_list_connectors_project_not_found(
         self,
             authenticated_client: TestClient,

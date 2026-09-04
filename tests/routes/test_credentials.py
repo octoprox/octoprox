@@ -25,6 +25,45 @@ class TestCredentialEndpoints:
         assert data["total"] == 0
         assert data["credentials"] == []
 
+    def test_list_credentials_order_is_stable(
+        self,
+        authenticated_client: TestClient,
+        created_project: dict[str, Any],
+        sample_credential_data: dict[str, Any],
+    ) -> None:
+        """Listing order does not depend on the instance's in-memory dict order.
+
+        Timestamps are pinned equal to exercise the id tie-break, which is what
+        keeps bulk-imported entries ordered identically across instances.
+        """
+        project_id = created_project["id"]
+
+        created_ids = []
+        for i in range(3):
+            credential_data = sample_credential_data.copy()
+            credential_data["name"] = f"Credential {i}"
+            response = authenticated_client.post(
+                f"/api/v1/projects/{project_id}/credentials",
+                json=credential_data,
+            )
+            assert response.status_code == 201
+            created_ids.append(response.json()["id"])
+
+        def listed_ids() -> list[str]:
+            response = authenticated_client.get(f"/api/v1/projects/{project_id}/credentials")
+            assert response.status_code == 200
+            return [c["id"] for c in response.json()["credentials"]]
+
+        assert listed_ids() == created_ids
+
+        manager = authenticated_client.app.state.proxy_manager
+        pinned = manager._credentials[created_ids[0]].created_at
+        for cid in created_ids:
+            manager._credentials[cid].created_at = pinned
+        manager._credentials = dict(reversed(list(manager._credentials.items())))
+
+        assert listed_ids() == sorted(created_ids)
+
     def test_list_credentials_project_not_found(
         self,
         authenticated_client: TestClient,

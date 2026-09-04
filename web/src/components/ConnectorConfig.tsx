@@ -213,12 +213,17 @@ export default function ConnectorConfig() {
   const { data: credentialsData } = useQuery({
     queryKey: ['credentials', selectedProjectId],
     queryFn: () => fetchProjectCredentials(selectedProjectId!),
-    enabled: !!selectedProjectId,
+    enabled: !!selectedProjectId && showWizard,
+    refetchInterval: false,
   })
 
+  // Connector options are static for the lifetime of the server.
   const { data: optionsData } = useQuery({
     queryKey: ['connector-options'],
     queryFn: fetchConnectorOptions,
+    enabled: showWizard,
+    refetchInterval: false,
+    staleTime: Infinity,
   })
 
   // Fetch selected credential details (for Oxylabs proxy type)
@@ -226,6 +231,7 @@ export default function ConnectorConfig() {
     queryKey: ['credential', selectedProjectId, formData.credential_id],
     queryFn: () => fetchProjectCredential(selectedProjectId!, formData.credential_id),
     enabled: !!selectedProjectId && !!formData.credential_id && selectedType === 'oxylabs',
+    refetchInterval: false,
   })
 
   // Fetch BrightData zones when credential is selected
@@ -233,6 +239,8 @@ export default function ConnectorConfig() {
     queryKey: ['brightdata-zones', formData.credential_id],
     queryFn: () => fetchBrightDataZones(formData.credential_id),
     enabled: !!formData.credential_id && selectedType === 'brightdata',
+    refetchInterval: false,
+    staleTime: 5 * 60 * 1000,
   })
 
   // Helper to get Oxylabs proxy type from selected credential

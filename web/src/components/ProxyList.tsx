@@ -53,6 +53,7 @@ export default function ProxyList() {
     queryKey: ['connectors', selectedProjectId],
     queryFn: () => fetchProjectConnectors(selectedProjectId!),
     enabled: !!selectedProjectId,
+    refetchInterval: false,
   })
 
   // Filter to only show static_proxy_provider connectors
