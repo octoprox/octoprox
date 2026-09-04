@@ -401,6 +401,130 @@ GET /api/v1/projects/{project_id}/metrics/prometheus
 
 ---
 
+## Backup & Migration
+
+Admin-only endpoints for exporting the entire Octoprox setup to a single
+encrypted file and restoring it on the same or another instance. Useful for
+disaster recovery and for migrating between deployments.
+
+### Export Backup
+
+```bash
+POST /api/v1/backup/export
+```
+
+**Request:**
+```json
+{
+  "passphrase": "correct horse battery staple",
+  "include_metrics": false
+}
+```
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `passphrase` | string | Minimum 8 characters. Required again to import — it cannot be recovered. |
+| `include_metrics` | boolean | Include historical proxy/project metrics. Default `false` (smaller file). |
+
+**Response:** the backup file as `application/octet-stream` with a
+`Content-Disposition: attachment; filename="octoprox-backup-YYYY-MM-DD.opbak"`
+header.
+
+The file covers users (including password hashes), projects, credentials,
+connectors, proxies and, optionally, metrics.
+
+### Import Backup
+
+```bash
+POST /api/v1/backup/import
+Content-Type: multipart/form-data
+```
+
+| Form field | Type | Notes |
+|------------|------|-------|
+| `file` | file | The `.opbak` file produced by export. |
+| `passphrase` | string | The passphrase used when exporting. |
+| `mode` | string | Only `replace` is supported (default). |
+| `keep_current_user` | boolean | Default `false`. See below. |
+
+**Import replaces all existing data** on the instance. The wipe and restore run
+in a single transaction, so a failure leaves the existing data untouched.
+Afterwards the live proxy cache is rebuilt and stale Redis state for the
+replaced projects and proxies is purged.
+
+With `keep_current_user=true` the calling admin's own account survives the
+wipe, so an admin importing a backup taken from another instance is not locked
+out. Imported users that would collide with the kept account are adjusted:
+
+- same `id` → the imported user receives a fresh id
+- same `username` → the imported user is renamed to `<username>-imported`
+  (then `-imported-2`, `-imported-3`, … if needed)
+- same non-empty `email` → the imported user's email is cleared
+
+With `keep_current_user=false` (the default) users are restored exactly as they
+are in the backup; the current session's user may no longer exist, so log in
+again with credentials that are valid in the backup.
+
+**Response:**
+```json
+{
+  "users": 3,
+  "projects": 2,
+  "credentials": 1,
+  "connectors": 2,
+  "proxies": 14,
+  "proxy_metrics": 0,
+  "project_metrics": 0,
+  "kept_current_user": true,
+  "user_conflicts": [
+    {
+      "original_username": "admin",
+      "new_username": "admin-imported",
+      "new_id": true,
+      "email_cleared": false
+    }
+  ]
+}
+```
+
+`users` counts imported rows only; the kept account is not included.
+
+**Errors (HTTP 400):**
+
+- Incorrect passphrase or corrupt file.
+- File is not an Octoprox backup.
+- Backup was created by a newer Octoprox (`format_version` too high).
+- Schema mismatch: the backup's Alembic revision differs from this instance's.
+  Upgrade both instances to the same Octoprox version, then retry. This check
+  runs before decryption, so it does not require the passphrase.
+- `keep_current_user=true` but the caller's account has no database row.
+
+### Backup File Format
+
+An `.opbak` file is a small JSON envelope. The metadata is plain text so an
+importer can check compatibility before asking for the passphrase; the data is
+encrypted:
+
+```json
+{
+  "format": "octoprox-backup",
+  "format_version": 1,
+  "created_at": "2026-09-04T10:15:00+00:00",
+  "app_version": "1.0.1",
+  "schema_version": "<alembic revision>",
+  "includes_metrics": false,
+  "kdf": { "algo": "pbkdf2-sha256", "iterations": 600000, "salt": "<base64>" },
+  "ciphertext": "<base64 Fernet token>"
+}
+```
+
+The ciphertext is gzipped JSON encrypted with Fernet (AES-128-CBC + HMAC-SHA256).
+The key is derived from the passphrase with PBKDF2-HMAC-SHA256 and a random
+per-file salt. Treat the file as sensitive: it contains password hashes and
+provider credentials, protected only by the passphrase.
+
+---
+
 ## Health Check
 
 Public endpoint for load balancer health checks:

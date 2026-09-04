@@ -221,6 +221,11 @@ Before pointing real traffic at the cluster, edit either compose file:
   port mappings and keep them on the internal Docker network only.
 - Mount the MITM CA from durable storage (or a Secret manager) so all
   instances trust the same root and CA rotations propagate cleanly.
+- Take a passphrase-encrypted backup from **Settings → Backup & Migration**
+  (or `POST /api/v1/backup/export`) before upgrades, and store it outside the
+  cluster. Importing on a fresh instance with "Keep my current account" ticked
+  is the supported way to migrate between deployments — see
+  [api.md](api.md#backup--migration).
 
 ## When to outgrow this
 

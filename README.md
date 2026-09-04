@@ -13,6 +13,7 @@ A dynamic and flexible proxy manager that acts as an intelligent proxy aggregato
 - **Performance Metrics**: Track latency, success rates, and request counts per proxy
 - **REST API**: Full CRUD operations for managing projects, credentials, connectors, and proxies
 - **Web Dashboard**: React-based UI for monitoring and configuration
+- **Backup & Migration**: Export the entire setup as an encrypted file and restore it on another instance
 
 ## Quick Start
 
@@ -407,6 +408,29 @@ proxy:
     interval_seconds: 60
     timeout_seconds: 30
 ```
+
+## Backup & Migration
+
+Admins can export the whole setup (users, projects, credentials, connectors,
+proxies and optionally metrics) as a single passphrase-encrypted `.opbak` file
+from **Settings → Backup & Migration**, and restore it on the same or another
+instance.
+
+- **Export** asks for a passphrase (8+ characters). The file is encrypted with
+  it and the passphrase cannot be recovered, so store it safely.
+- **Import** replaces *all* existing data on the target instance in one
+  transaction. Both instances must run the same Octoprox version (the import
+  checks the database schema revision before decrypting).
+- **Keep my current account** (on by default) preserves the importing admin so
+  you are not locked out when restoring a backup from a different instance. An
+  imported user with the same username is renamed to `<username>-imported`, and
+  a clashing email is cleared. Untick it to restore users exactly as they are in
+  the backup; you will then need to log in with credentials from the backup.
+
+The same operations are available via the API — see
+[docs/api.md](docs/api.md#backup--migration). Backup files contain password
+hashes and provider credentials protected only by your passphrase; treat them
+as secrets.
 
 ## Cloud Provider Setup
 

@@ -703,6 +703,38 @@ class ProxyManager:
             proxies=len(self._proxies),
         )
 
+    async def apply_imported_state(
+        self, old_project_ids: list[str], old_proxy_ids: list[str]
+    ) -> None:
+        """Reconcile in-memory + Redis state after a backup import replaced the DB.
+
+        A replace-import wipes every row and restores new ones, so the Redis
+        operational keys for the pre-import entities are now stale and would
+        cause the metrics flusher to insert against deleted ids. Purge them
+        (mirroring ``remove_project``), drop our own un-flushed metric deltas
+        for the old ids, then rebuild the cache from the freshly imported DB.
+        Other instances converge via the 60s periodic full reload.
+        """
+        for proxy_id in old_proxy_ids:
+            await self._redis_client.delete_proxy_status(proxy_id)
+            await self._redis_client.reset_proxy_metrics(proxy_id)
+        for project_id in old_project_ids:
+            await self._redis_client.reset_project_metrics(project_id)
+            await self._redis_client.clear_mitm_requests(project_id)
+        await self._rate_limiter.remove_proxies(old_proxy_ids)
+
+        # Discard pending deltas keyed by now-deleted ids so the next flush
+        # does not resurrect stale metrics in Redis.
+        self._pending_proxy_deltas.clear()
+        self._pending_project_deltas.clear()
+
+        await self.full_reload()
+        logger.info(
+            "Applied imported state",
+            old_projects=len(old_project_ids),
+            old_proxies=len(old_proxy_ids),
+        )
+
     async def _periodic_full_reload_loop(self, interval_seconds: int = 60) -> None:
         """Background safety-net: periodically re-sync the cache from Postgres."""
         while self._running:
