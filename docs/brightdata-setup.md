@@ -29,6 +29,8 @@ BrightData offers several proxy types through zones:
 
 All proxy types support country-based geo-targeting.
 
+Octoprox routes traffic through BrightData's super proxy endpoint at `brd.superproxy.io:44445`. If you restrict outbound traffic from your Octoprox hosts, allow this host and port. BrightData has retired the previous port `33335`; Octoprox migrates existing proxies to the new port automatically on startup.
+
 ## Step 1: Get Your BrightData API Token
 
 1. **Log in to your BrightData dashboard** at [brightdata.com](https://brightdata.com)

@@ -199,7 +199,7 @@ class TestProxyManagerCredentialResolution:
         # Proxy with placeholders (as created by BrightDataProvider)
         proxy = Proxy(
             host="brd.superproxy.io",
-            port=33335,
+            port=44445,
             protocol=ProxyProtocol.HTTP,
             username="brd-customer-{customer_id}-zone-zone1-session-glob_xyz789-country-gb",
             password="{zone_password}",
@@ -244,7 +244,7 @@ class TestProxyManagerCredentialResolution:
         # Proxy with placeholders (as created by BrightDataProvider for ISP)
         proxy = Proxy(
             host="brd.superproxy.io",
-            port=33335,
+            port=44445,
             protocol=ProxyProtocol.HTTP,
             username="brd-customer-{customer_id}-zone-isp_zone-ip-192.168.1.100",
             password="{zone_password}",
@@ -403,7 +403,7 @@ class TestProxyManagerCredentialResolution:
 
         proxy = Proxy(
             host="brd.superproxy.io",
-            port=33335,
+            port=44445,
             protocol=ProxyProtocol.HTTP,
             connector_id="connector-1",
         )
