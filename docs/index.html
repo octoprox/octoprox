@@ -11,25 +11,35 @@ layout: null
   <link rel="icon" type="image/svg+xml" href="assets/favicon/favicon.svg">
   <link rel="icon" type="image/png" sizes="96x96" href="assets/favicon/favicon-96x96.png">
   <link rel="apple-touch-icon" sizes="180x180" href="assets/favicon/apple-touch-icon.png">
-  <meta name="color-scheme" content="light dark">
+    <script>
+    // Light by default; the toggle stores a preference. Applied before paint to avoid a flash.
+    (function () {
+      try { if (localStorage.getItem('octoprox_docs_theme') === 'dark') document.documentElement.setAttribute('data-theme', 'dark'); } catch (e) {}
+    })();
+    function toggleTheme() {
+      var root = document.documentElement, dark = root.getAttribute('data-theme') === 'dark';
+      if (dark) root.removeAttribute('data-theme'); else root.setAttribute('data-theme', 'dark');
+      try { localStorage.setItem('octoprox_docs_theme', dark ? 'light' : 'dark'); } catch (e) {}
+    }
+  </script>
   <style>
     /* Tokens mirror the app's light and dark themes (web/src/index.css). */
     :root {
+      color-scheme: light;
       --bg: #f9fafb; --surface: #ffffff; --raised: #f3f4f6;
       --fg: #111827; --muted: #6b7280; --subtle: #9ca3af;
       --line: #e5e7eb; --line-strong: #d1d5db;
       --primary: #2563eb; --primary-hover: #1d4ed8; --primary-soft: #eff6ff; --primary-soft-fg: #1d4ed8;
       --success: #16a34a; --success-soft: #f0fdf4;
     }
-    @media (prefers-color-scheme: dark) {
-      :root {
+    :root[data-theme="dark"] {
+      color-scheme: dark;
         --bg: #111827; --surface: #1f2937; --raised: #374151;
         --fg: #f3f4f6; --muted: #9ca3af; --subtle: #6b7280;
         --line: #374151; --line-strong: #4b5563;
         --primary: #7c3aed; --primary-hover: #6d28d9; --primary-soft: #1e3a8a; --primary-soft-fg: #93c5fd;
         --success: #10b981; --success-soft: #14532d;
       }
-    }
     * { margin: 0; padding: 0; box-sizing: border-box; }
     html, body { overflow-x: hidden; }
     body {
@@ -40,9 +50,11 @@ layout: null
     .container { max-width: 1100px; margin: 0 auto; padding: 0 24px; }
     header { height: 56px; background: var(--surface); border-bottom: 1px solid var(--line); }
     header .container { height: 100%; display: flex; justify-content: space-between; align-items: center; gap: 12px; }
-    .logo { height: 28px; width: auto; display: block; }
+    .logo { height: 28px; width: 125px; display: block; }
     .logo-dark { display: none; }
-    @media (prefers-color-scheme: dark) { .logo-light { display: none; } .logo-dark { display: block; } }
+    :root[data-theme="dark"] .logo-light { display: none; }
+    :root[data-theme="dark"] .logo-dark { display: block; }
+    .header-right { display: flex; align-items: center; gap: 8px; flex: none; }
     nav { display: flex; gap: 4px; }
     nav a { color: var(--muted); font-size: 13.5px; font-weight: 500; padding: 6px 10px; border-radius: 6px; }
     nav a:hover { color: var(--fg); background: var(--raised); }
@@ -73,7 +85,7 @@ layout: null
       background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 16px 18px;
       font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 13px; line-height: 1.6; overflow-x: auto;
     }
-    @media (prefers-color-scheme: dark) { .quick pre { background: #0b1220; } }
+    :root[data-theme="dark"] .quick pre { background: #0b1220; }
     .quick pre .c { color: var(--subtle); }
     .quick .hint { text-align: center; color: var(--muted); font-size: 13px; margin-top: 10px; }
 
@@ -104,22 +116,38 @@ layout: null
     }
     @media (max-width: 500px) {
       .container { padding: 0 16px; }
-      .logo { height: 24px; }
+      .logo { height: 22px; width: 98px; }
       nav a { padding: 6px 8px; font-size: 13px; }
     }
+    /* Theme toggle */
+    .theme-toggle { display: inline-flex; align-items: center; justify-content: center; width: 34px; height: 34px; border-radius: 6px; border: 1px solid var(--line); background: var(--surface); color: var(--muted); cursor: pointer; flex: none; }
+    .theme-toggle:hover { color: var(--fg); background: var(--raised); }
+    .theme-toggle svg { width: 16px; height: 16px; }
+    .theme-toggle .icon-sun { display: none; }
+    :root[data-theme="dark"] .theme-toggle .icon-sun { display: block; }
+    :root[data-theme="dark"] .theme-toggle .icon-moon { display: none; }
+    /* Header items never shrink; the logo keeps its intrinsic width */
+    .brand { display: inline-flex; align-items: center; flex: none; }
+    .logo { max-width: none; flex: none; }
   </style>
 </head>
 <body>
   <header>
     <div class="container">
-      <a href="./" aria-label="Octoprox home">
+      <a href="./" class="brand" aria-label="Octoprox home">
         <img src="assets/logo/octoprox_horizontal.svg" alt="Octoprox" class="logo logo-light">
         <img src="assets/logo/octoprox_horizontal_dark.svg" alt="Octoprox" class="logo logo-dark">
       </a>
-      <nav>
-        <a href="getting-started">Docs</a>
-        <a href="https://github.com/octoprox/octoprox">GitHub</a>
-      </nav>
+      <div class="header-right">
+        <nav>
+          <a href="getting-started">Docs</a>
+          <a href="https://github.com/octoprox/octoprox">GitHub</a>
+        </nav>
+        <button class="theme-toggle" type="button" onclick="toggleTheme()" aria-label="Toggle dark mode" title="Toggle dark mode">
+          <svg class="icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/></svg>
+          <svg class="icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2"/><path d="M12 20v2"/><path d="m4.93 4.93 1.41 1.41"/><path d="m17.66 17.66 1.41 1.41"/><path d="M2 12h2"/><path d="M20 12h2"/><path d="m6.34 17.66-1.41 1.41"/><path d="m19.07 4.93-1.41 1.41"/></svg>
+        </button>
+      </div>
     </div>
   </header>
 
