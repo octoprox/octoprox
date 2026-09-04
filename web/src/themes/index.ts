@@ -33,10 +33,10 @@ export const THEMES: ThemeMeta[] = [
     label: 'Light',
     mode: 'light',
     swatches: {
-      bg: 'rgb(249 250 251)',
-      surface: 'rgb(255 255 255)',
-      primary: 'rgb(37 99 235)',
-      fg: 'rgb(17 24 39)',
+      bg: '#f9fafb',
+      surface: '#ffffff',
+      primary: '#2563eb',
+      fg: '#111827',
     },
   },
   {
@@ -44,10 +44,10 @@ export const THEMES: ThemeMeta[] = [
     label: 'Dark',
     mode: 'dark',
     swatches: {
-      bg: 'rgb(17 24 39)',
-      surface: 'rgb(31 41 55)',
-      primary: 'rgb(124 58 237)',
-      fg: 'rgb(243 244 246)',
+      bg: '#111827',
+      surface: '#1f2937',
+      primary: '#7c3aed',
+      fg: '#f3f4f6',
     },
   },
   {
@@ -55,10 +55,10 @@ export const THEMES: ThemeMeta[] = [
     label: 'Solarized Light',
     mode: 'light',
     swatches: {
-      bg: 'rgb(253 246 227)',
-      surface: 'rgb(238 232 213)',
-      primary: 'rgb(38 139 210)',
-      fg: 'rgb(101 123 131)',
+      bg: '#fdf6e3',
+      surface: '#eee8d5',
+      primary: '#268bd2',
+      fg: '#657b83',
     },
   },
   {
@@ -66,10 +66,10 @@ export const THEMES: ThemeMeta[] = [
     label: 'Solarized Dark',
     mode: 'dark',
     swatches: {
-      bg: 'rgb(0 43 54)',
-      surface: 'rgb(7 54 66)',
-      primary: 'rgb(38 139 210)',
-      fg: 'rgb(131 148 150)',
+      bg: '#002b36',
+      surface: '#073642',
+      primary: '#268bd2',
+      fg: '#839496',
     },
   },
   {
@@ -77,10 +77,10 @@ export const THEMES: ThemeMeta[] = [
     label: 'Dracula',
     mode: 'dark',
     swatches: {
-      bg: 'rgb(40 42 54)',
-      surface: 'rgb(68 71 90)',
-      primary: 'rgb(189 147 249)',
-      fg: 'rgb(248 248 242)',
+      bg: '#282a36',
+      surface: '#44475a',
+      primary: '#bd93f9',
+      fg: '#f8f8f2',
     },
   },
   {
@@ -88,10 +88,10 @@ export const THEMES: ThemeMeta[] = [
     label: 'Nord',
     mode: 'dark',
     swatches: {
-      bg: 'rgb(46 52 64)',
-      surface: 'rgb(59 66 82)',
-      primary: 'rgb(136 192 208)',
-      fg: 'rgb(236 239 244)',
+      bg: '#2e3440',
+      surface: '#3b4252',
+      primary: '#88c0d0',
+      fg: '#eceff4',
     },
   },
   {
@@ -99,10 +99,10 @@ export const THEMES: ThemeMeta[] = [
     label: 'High Contrast',
     mode: 'dark',
     swatches: {
-      bg: 'rgb(0 0 0)',
-      surface: 'rgb(20 20 20)',
-      primary: 'rgb(255 212 0)',
-      fg: 'rgb(255 255 255)',
+      bg: '#000000',
+      surface: '#141414',
+      primary: '#ffd400',
+      fg: '#ffffff',
     },
   },
 ]
