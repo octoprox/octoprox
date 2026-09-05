@@ -1,0 +1,158 @@
+# Copyright 2026 Octoprox Authors. All rights reserved.
+# SPDX-License-Identifier: LicenseRef-Octoprox-Provider-Descriptors
+#
+# This built-in provider descriptor is NOT licensed under Apache-2.0.
+# See api/providers/builtin/LICENSE for the terms that apply to it.
+#
+# Decodo (formerly Smartproxy).
+# Residential and mobile: sessions through gate.decodo.com:7000 with targeting
+# and session length encoded in the username. ISP and datacenter: one exit IP
+# per sticky gateway port (10001+) on isp.decodo.com / dc.decodo.com, discovered
+# through the proxy; covers both pay-per-GB and pay-per-IP plans (ports iterate
+# through purchased IPs). Written from the public documentation; marked beta
+# until exercised against a live account.
+id: decodo
+name: Decodo
+description: Residential, Mobile, ISP and Datacenter proxies (formerly Smartproxy)
+docs_url: https://help.decodo.com/
+beta: true
+
+credential_fields:
+  - key: proxy_type
+    label: Proxy type
+    type: select
+    required: true
+    default: residential
+    options:
+      - { value: residential, label: Residential }
+      - { value: mobile, label: Mobile }
+      - { value: isp, label: ISP }
+      - { value: datacenter, label: Datacenter }
+  - key: username
+    label: Proxy username
+    required: true
+    help: The proxy (sub-)user name, without the "user-" prefix.
+  - key: password
+    label: Proxy password
+    type: password
+    secret: true
+    required: true
+  - key: api_key
+    label: API key (optional)
+    type: password
+    secret: true
+    help: When set, the key is verified against the Decodo public API on save.
+
+connector_fields:
+  - key: num_proxies
+    label: Number of proxies
+    type: number
+    required: true
+    default: 1
+    min: 1
+    max: 1000
+  - key: country_code
+    label: Country
+    type: select
+    options_preset: countries
+    help: Leave as "All countries" for no geo-targeting.
+  - key: session_duration_minutes
+    label: Session duration (minutes)
+    type: number
+    default: 10
+    min: 1
+    max: 1440
+    show_when: { field: credential.proxy_type, in: [residential, mobile] }
+
+proxy_type_field: credential.proxy_type
+
+validation:
+  when: { field: credential.api_key }
+  call:
+    url: https://api.decodo.com/v2/subscriptions
+    headers:
+      Authorization: "{credential.api_key}"
+  error_message: Invalid Decodo API key
+
+proxy_types:
+  - key: residential
+    label: Residential
+    mode: session
+    host: gate.decodo.com
+    port: 7000
+    username:
+      separator: "-"
+      parts:
+        - text: "user-{credential.username}"
+        - text: "country-{connector.country_code|lower}"
+          when: { field: connector.country_code }
+        - text: "session-{session_id}"
+        - text: "sessionduration-{connector.session_duration_minutes}"
+          when: { field: connector.session_duration_minutes }
+    password: "{credential.password}"
+    tags: [decodo, residential]
+    metadata:
+      country_code: "{connector.country_code}"
+      session_duration_minutes: "{connector.session_duration_minutes}"
+
+  - key: mobile
+    label: Mobile
+    mode: session
+    host: gate.decodo.com
+    port: 7000
+    username:
+      separator: "-"
+      parts:
+        - text: "user-{credential.username}"
+        - text: "country-{connector.country_code|lower}"
+          when: { field: connector.country_code }
+        - text: "session-{session_id}"
+        - text: "sessionduration-{connector.session_duration_minutes}"
+          when: { field: connector.session_duration_minutes }
+    password: "{credential.password}"
+    tags: [decodo, mobile]
+    metadata:
+      country_code: "{connector.country_code}"
+      session_duration_minutes: "{connector.session_duration_minutes}"
+
+  - key: isp
+    label: ISP
+    mode: port
+    port_strategy: sequential
+    host: isp.decodo.com
+    port: 10001
+    username:
+      separator: "-"
+      parts:
+        - text: "user-{credential.username}"
+        - text: "country-{connector.country_code|lower}"
+          when: { field: connector.country_code }
+    password: "{credential.password}"
+    discovery:
+      url: https://ip.decodo.com/json
+      ip_path: proxy.ip
+    tags: [decodo, isp]
+    metadata:
+      country_code: "{connector.country_code}"
+      port: "{port}"
+
+  - key: datacenter
+    label: Datacenter
+    mode: port
+    port_strategy: sequential
+    host: dc.decodo.com
+    port: 10001
+    username:
+      separator: "-"
+      parts:
+        - text: "user-{credential.username}"
+        - text: "country-{connector.country_code|lower}"
+          when: { field: connector.country_code }
+    password: "{credential.password}"
+    discovery:
+      url: https://ip.decodo.com/json
+      ip_path: proxy.ip
+    tags: [decodo, datacenter]
+    metadata:
+      country_code: "{connector.country_code}"
+      port: "{port}"

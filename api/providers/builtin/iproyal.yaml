@@ -1,0 +1,99 @@
+# Copyright 2026 Octoprox Authors. All rights reserved.
+# SPDX-License-Identifier: LicenseRef-Octoprox-Provider-Descriptors
+#
+# This built-in provider descriptor is NOT licensed under Apache-2.0.
+# See api/providers/builtin/LICENSE for the terms that apply to it.
+#
+# IPRoyal residential — targeting, session id and lifetime are encoded in the
+# proxy *password*. With an API token the entry nodes are discovered from the
+# residential API. Marked beta until exercised against a live account.
+id: iproyal
+name: IPRoyal
+description: Residential proxies with sticky sessions
+docs_url: https://docs.iproyal.com/proxies/residential
+beta: true
+
+credential_fields:
+  - key: username
+    label: Proxy username
+    required: true
+  - key: password
+    label: Proxy password
+    type: password
+    secret: true
+    required: true
+  - key: api_token
+    label: API token (optional)
+    type: password
+    secret: true
+    help: From Settings → API in the IPRoyal dashboard. Enables entry-node discovery and validation.
+
+connector_fields:
+  - key: entry_node
+    label: Entry node
+    type: select
+    options_from: entry_nodes
+    help: Defaults to geo.iproyal.com when not selected.
+    show_when: { field: credential.api_token }
+  - key: num_proxies
+    label: Number of proxies
+    type: number
+    required: true
+    default: 1
+    min: 1
+    max: 1000
+  - key: country_code
+    label: Country
+    type: select
+    options_preset: countries
+    help: Leave as "All countries" for no geo-targeting.
+  - key: session_lifetime
+    label: Session lifetime
+    default: 10m
+    pattern: "^[0-9]+[smh]$"
+    help: e.g. 5s, 10m, 24h.
+
+session_id:
+  length: 8
+  alphabet: lower_digits
+
+validation:
+  when: { field: credential.api_token }
+  call:
+    url: https://resi-api.iproyal.com/v1/access/entry-nodes
+    headers:
+      Authorization: "Bearer {credential.api_token}"
+  error_message: Invalid IPRoyal API token
+
+options:
+  entry_nodes:
+    call:
+      url: https://resi-api.iproyal.com/v1/access/entry-nodes
+      headers:
+        Authorization: "Bearer {credential.api_token}"
+    items: "@"
+    value: dns
+    label: dns
+    description: "join(', ', ips)"
+    cache_seconds: 3600
+
+proxy_types:
+  - key: residential
+    label: Residential
+    mode: session
+    host: "{connector.entry_node|or:geo.iproyal.com}"
+    port: 12321
+    username: "{credential.username}"
+    password:
+      separator: "_"
+      parts:
+        - text: "{credential.password}"
+        - text: "country-{connector.country_code|lower}"
+          when: { field: connector.country_code }
+        - text: "session-{session_id}"
+        - text: "lifetime-{connector.session_lifetime}"
+          when: { field: connector.session_lifetime }
+    tags: [iproyal, residential]
+    metadata:
+      country_code: "{connector.country_code}"
+      session_lifetime: "{connector.session_lifetime}"

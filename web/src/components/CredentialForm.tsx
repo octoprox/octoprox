@@ -1,64 +1,41 @@
 // Copyright 2026 Octoprox Authors
 // SPDX-License-Identifier: Apache-2.0
 
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
-import { Eye, EyeOff } from 'lucide-react'
+import { ShieldCheck } from 'lucide-react'
 import {
   createProjectCredential, updateProjectCredential,
-  CredentialType, CredentialCreate, CredentialDetail, OxylabsProxyType,
+  CredentialType, CredentialCreate, CredentialDetail, ProviderSummary,
 } from '../api/client'
 import { useProject } from '../contexts/ProjectContext'
-import { useTheme } from '../contexts/ThemeContext'
-import { Button, Input, Select, Textarea, Label, Alert, Inspector } from './ui'
-import { CREDENTIAL_TYPES } from '../utils/credentials'
-
-export const OXYLABS_PROXY_TYPES: { value: OxylabsProxyType; label: string }[] = [
-  { value: 'residential', label: 'Residential' },
-  { value: 'mobile', label: 'Mobile' },
-  { value: 'isp', label: 'ISP' },
-  { value: 'dedicated_isp', label: 'Dedicated ISP' },
-  { value: 'datacenter', label: 'Datacenter' },
-  { value: 'datacenter_dedicated', label: 'Datacenter Dedicated' },
-]
-
-export const getDefaultCredentialConfig = (type: CredentialType): Record<string, string> => {
-  switch (type) {
-    case 'static_proxy_provider':
-      return { username: '', password: '' }
-    case 'aws':
-      return { access_key: '', secret_key: '' }
-    case 'gcp':
-      return { service_account_json: '', project_id: '' }
-    case 'azure':
-      return { subscription_id: '', tenant_id: '', client_id: '', client_secret: '', key_vault_name: '' }
-    case 'oxylabs':
-      return { proxy_type: 'residential', username: '', password: '' }
-    case 'brightdata':
-      return { token: '' }
-    default:
-      return {}
-  }
-}
+import { useProviders } from '../hooks/useProviders'
+import { Button, Alert, Inspector, Badge } from './ui'
+import { ProviderLogo } from './ProviderLogo'
+import { SchemaForm, defaultValues, serializeValues, FormValues } from './SchemaForm'
 
 /** Grid of provider cards for choosing a credential / connector type. */
 export function TypePicker({ onPick, hint }: { onPick: (type: CredentialType) => void; hint?: string }) {
-  const { isDark } = useTheme()
+  const { providers, isLoading } = useProviders()
   return (
     <div className="space-y-3">
       {hint && <p className="text-xs text-fg-muted">{hint}</p>}
+      {isLoading && <p className="text-xs text-fg-muted">Loading providers…</p>}
       <div className="grid grid-cols-[repeat(auto-fill,minmax(170px,1fr))] gap-2.5">
-        {CREDENTIAL_TYPES.map((ct) => (
+        {providers.map((p) => (
           <button
-            key={ct.value}
+            key={p.id}
             type="button"
-            onClick={() => onPick(ct.value)}
+            onClick={() => onPick(p.id)}
             className="flex items-center gap-3 p-3 border border-line rounded-[10px] text-left hover:border-primary hover:bg-primary-soft transition-colors"
           >
-            <img src={isDark ? ct.logoDark : ct.logo} alt="" className="w-9 h-9 object-contain flex-none" />
+            <ProviderLogo type={p.id} name={p.name} className="w-9 h-9 text-[36px]" />
             <span className="min-w-0">
-              <span className="block text-[13px] font-semibold leading-tight">{ct.name}</span>
-              <span className="block text-[11.5px] text-fg-muted leading-snug mt-0.5">{ct.description}</span>
+              <span className="block text-[13px] font-semibold leading-tight">
+                {p.name}
+                {p.beta && <span className="ml-1.5 text-[10px] font-medium uppercase text-warning">beta</span>}
+              </span>
+              <span className="block text-[11.5px] text-fg-muted leading-snug mt-0.5">{p.description}</span>
             </span>
           </button>
         ))}
@@ -69,18 +46,35 @@ export function TypePicker({ onPick, hint }: { onPick: (type: CredentialType) =>
 
 /** Small "you picked X" card shown at the top of a typed form. */
 export function TypeCard({ type, onChange }: { type: CredentialType; onChange?: () => void }) {
-  const { isDark } = useTheme()
-  const ct = CREDENTIAL_TYPES.find((t) => t.value === type)
-  if (!ct) return null
+  const { get } = useProviders()
+  const p = get(type)
+  if (!p) return null
   return (
     <div className="flex items-center gap-3 p-3 border border-line rounded-[10px]">
-      <img src={isDark ? ct.logoDark : ct.logo} alt="" className="w-9 h-9 object-contain flex-none" />
+      <ProviderLogo type={p.id} name={p.name} className="w-9 h-9 text-[36px]" />
       <span className="min-w-0 flex-1">
-        <span className="block text-[13px] font-semibold leading-tight">{ct.name}</span>
-        <span className="block text-[11.5px] text-fg-muted leading-snug mt-0.5">{ct.description}</span>
+        <span className="block text-[13px] font-semibold leading-tight">
+          {p.name}
+          {p.source === 'custom' && <Badge color="purple" className="ml-2 py-0 text-[10px]">custom</Badge>}
+        </span>
+        <span className="block text-[11.5px] text-fg-muted leading-snug mt-0.5">{p.description}</span>
       </span>
       {onChange && <button type="button" onClick={onChange} className="text-xs text-primary hover:brightness-110">Change</button>}
     </div>
+  )
+}
+
+/** Tells the user which vendor hosts will receive the secrets they are about to enter. */
+export function EgressNotice({ provider }: { provider: ProviderSummary }) {
+  if (!provider.egress_hosts.length) return null
+  return (
+    <p className="text-xs text-fg-muted bg-surface-raised rounded-lg px-3 py-2 flex items-start gap-2">
+      <ShieldCheck className="w-3.5 h-3.5 flex-none mt-0.5 text-fg-subtle" />
+      <span>
+        This credential is sent to <span className="font-mono text-fg">{provider.egress_hosts.join(', ')}</span>
+        {provider.has_validation ? ' and is verified there when you save.' : ' when options are fetched or proxies are provisioned.'}
+      </span>
+    </p>
   )
 }
 
@@ -89,27 +83,37 @@ interface CredentialFormProps {
   credential?: CredentialDetail | null
   onSaved: (credential: CredentialDetail) => void
   formId: string
-  onPending?: (pending: boolean) => void
 }
 
 /**
- * Create/edit form for one credential type. Owns its mutations so callers only
- * need to know when it succeeded.
+ * Create/edit form for one credential type, rendered from the provider's
+ * credential field schema. Owns its mutations so callers only need to know
+ * when it succeeded.
  */
 export function CredentialForm({ type, credential, onSaved, formId }: CredentialFormProps) {
   const queryClient = useQueryClient()
   const { selectedProjectId } = useProject()
+  const { get, presets } = useProviders()
+  const provider = get(type)
+  const fields = provider?.credential_fields ?? []
   const isEditMode = !!credential
   const [name, setName] = useState(credential?.name ?? '')
-  const [config, setConfig] = useState<Record<string, string>>(
-    credential ? (credential.config as Record<string, string>) : getDefaultCredentialConfig(type)
-  )
-  const [showSecrets, setShowSecrets] = useState<Record<string, boolean>>({})
+  const [values, setValues] = useState<FormValues>(() => {
+    const base = defaultValues(fields)
+    if (credential) for (const [k, v] of Object.entries(credential.config)) base[k] = v == null ? '' : String(v)
+    return base
+  })
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
+
+  // Fields may arrive after the first render (catalog still loading): seed defaults once.
+  useEffect(() => {
+    if (!isEditMode && fields.length > 0) setValues((prev) => (Object.keys(prev).length ? prev : defaultValues(fields)))
+  }, [fields, isEditMode])
 
   const invalidate = () => {
     queryClient.invalidateQueries({ queryKey: ['credentials', selectedProjectId] })
     queryClient.invalidateQueries({ queryKey: ['project', selectedProjectId] })
+    queryClient.invalidateQueries({ queryKey: ['providers'] })
   }
 
   const createMutation = useMutation({
@@ -118,95 +122,51 @@ export function CredentialForm({ type, credential, onSaved, formId }: Credential
     onError: (error: Error) => setErrorMessage(error.message || 'Failed to create credential'),
   })
   const updateMutation = useMutation({
-    mutationFn: (data: { name: string; config: Record<string, string> }) => updateProjectCredential(selectedProjectId!, credential!.id, data),
+    mutationFn: (data: { name: string; config: Record<string, unknown> }) => updateProjectCredential(selectedProjectId!, credential!.id, data),
     onSuccess: (updated) => { invalidate(); onSaved(updated) },
     onError: (error: Error) => setErrorMessage(error.message || 'Failed to update credential'),
   })
 
-  const validateServiceAccountJson = (json: string): string | null => {
-    if (!json || !json.trim()) return 'Service account JSON is required'
-    try {
-      const parsed = JSON.parse(json)
-      if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return 'Service account JSON must be a valid JSON object'
-      return null
-    } catch {
-      return 'Invalid JSON format. Please paste a valid service account JSON.'
-    }
-  }
-  const jsonError = type === 'gcp' && config.service_account_json?.trim() ? validateServiceAccountJson(config.service_account_json) : null
+  const scopes = { credential: values, connector: {} }
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault()
     setErrorMessage(null)
-    if (type === 'gcp') {
-      const err = validateServiceAccountJson(config.service_account_json || '')
-      if (err) { setErrorMessage(err); return }
-    }
+    if (!provider) return
+    const config = serializeValues(fields, values, scopes)
+    // Carry over server-captured values (e.g. a customer id) that are not user fields.
+    if (credential) for (const [k, v] of Object.entries(credential.config)) if (!(k in config) && !fields.some((f) => f.key === k)) config[k] = v
     if (isEditMode) updateMutation.mutate({ name, config })
     else createMutation.mutate({ name, type, config })
   }
 
-  const fields = Object.keys(getDefaultCredentialConfig(type))
+  if (!provider) return <p className="text-sm text-fg-muted">Unknown provider type “{type}”.</p>
 
   return (
     <form id={formId} onSubmit={handleSubmit} className="space-y-4" autoComplete="off">
       {errorMessage && <Alert>{errorMessage}</Alert>}
       <div>
-        <Label>Name</Label>
-        <Input type="text" placeholder="e.g. aws-prod" value={name} onChange={(e) => setName(e.target.value)} required />
+        <label className="block text-sm font-medium text-fg-muted mb-1">Name</label>
+        <input
+          type="text"
+          placeholder="e.g. aws-prod"
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          required
+          className="w-full px-4 py-2 border border-line-strong rounded-lg bg-surface text-fg focus:ring-1 focus:ring-ring focus:border-ring placeholder:text-fg-subtle"
+        />
       </div>
-      {fields.map((key) => {
-        const isSecret = ['password', 'secret_key', 'client_secret', 'service_account_json', 'token'].includes(key)
-        if (key === 'proxy_type' && type === 'oxylabs') {
-          return (
-            <div key={key}>
-              <Label>Proxy type</Label>
-              <Select value={config[key] || 'residential'} onChange={(e) => setConfig({ ...config, [key]: e.target.value })}>
-                {OXYLABS_PROXY_TYPES.map((pt) => <option key={pt.value} value={pt.value}>{pt.label}</option>)}
-              </Select>
-            </div>
-          )
-        }
-        if (key === 'customer_id' && type === 'brightdata') return null
-        const label = key.replace(/_/g, ' ').replace(/\b\w/g, (l) => l.toUpperCase())
-        return (
-          <div key={key}>
-            <Label>{label}</Label>
-            {key === 'service_account_json' ? (
-              <>
-                <Textarea
-                  value={config[key] || ''}
-                  onChange={(e) => setConfig({ ...config, [key]: e.target.value })}
-                  className={`font-mono text-xs ${jsonError ? 'border-danger/50 bg-danger-soft' : ''}`}
-                  rows={5}
-                  placeholder="Paste service account JSON here"
-                  autoComplete="off"
-                />
-                {jsonError && <p className="mt-1 text-xs text-danger">{jsonError}</p>}
-              </>
-            ) : (
-              <div className="relative">
-                <Input
-                  type={isSecret && !showSecrets[key] ? 'password' : 'text'}
-                  name={`octoprox-cred-${key}`}
-                  value={config[key] || ''}
-                  onChange={(e) => setConfig({ ...config, [key]: e.target.value })}
-                  className={isSecret ? 'pr-10 font-mono text-sm' : ''}
-                  placeholder={isEditMode && isSecret ? 'Leave unchanged to keep the current secret' : label}
-                  autoComplete={isSecret ? 'new-password' : 'off'}
-                  data-1p-ignore
-                  data-lpignore="true"
-                />
-                {isSecret && (
-                  <button type="button" onClick={() => setShowSecrets({ ...showSecrets, [key]: !showSecrets[key] })} className="absolute right-2.5 top-1/2 -translate-y-1/2 text-fg-subtle hover:text-fg-muted">
-                    {showSecrets[key] ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
-                  </button>
-                )}
-              </div>
-            )}
-          </div>
-        )
-      })}
+      <SchemaForm
+        provider={provider}
+        fields={fields}
+        values={values}
+        onChange={(key, value, fill) => setValues((prev) => ({ ...prev, [key]: value, ...(fill ?? {}) }))}
+        scopes={scopes}
+        presets={presets}
+        credentialConfig={serializeValues(fields, values, scopes)}
+        isEdit={isEditMode}
+      />
+      <EgressNotice provider={provider} />
       <p className="text-xs text-fg-subtle">Secrets are encrypted at rest.</p>
       {/* Hidden submit so Enter works; the visible button lives in the panel footer. */}
       <button type="submit" className="hidden" disabled={createMutation.isPending || updateMutation.isPending} />
@@ -227,11 +187,11 @@ export function NewCredentialPanel({ fixedType, crumb, onBack, onClose, onCreate
   /** Fixed width so a nested step does not resize the panel it replaces. */
   width?: number
 }) {
+  const { labelFor } = useProviders()
   const [type, setType] = useState<CredentialType | null>(fixedType ?? null)
-  const typeLabel = type ? CREDENTIAL_TYPES.find((t) => t.value === type)?.label : null
   return (
     <Inspector
-      title={type ? `New ${typeLabel} credential` : 'Add credential'}
+      title={type ? `New ${labelFor(type)} credential` : 'Add credential'}
       subtitle={type ? 'Encrypted at rest' : 'Choose a provider'}
       crumb={crumb}
       onBack={onBack ?? (type && !fixedType ? () => setType(null) : undefined)}

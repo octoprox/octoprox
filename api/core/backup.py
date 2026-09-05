@@ -39,6 +39,8 @@ from api.db.models import (
     CredentialModel,
     ProjectMetricsModel,
     ProjectModel,
+    ProviderAuditModel,
+    ProviderDescriptorModel,
     ProxyMetricsModel,
     ProxyModel,
     UserModel,
@@ -80,6 +82,8 @@ _ENTITY_SPECS: tuple[_EntitySpec, ...] = (
     _EntitySpec("proxies", ProxyModel),
     _EntitySpec("proxy_metrics", ProxyMetricsModel, is_metric=True, preserve_id=False),
     _EntitySpec("project_metrics", ProjectMetricsModel, is_metric=True, preserve_id=False),
+    _EntitySpec("provider_descriptors", ProviderDescriptorModel),
+    _EntitySpec("provider_audit_log", ProviderAuditModel),
 )
 
 
@@ -383,6 +387,10 @@ async def replace_all(
     # Deleting projects cascades (DB-level ON DELETE CASCADE) to credentials,
     # connectors, proxies and both metrics tables. Users are independent.
     await session.execute(delete(ProjectModel))
+    # Provider descriptors are global (not project-scoped) and their audit log
+    # has no FK, so both are wiped explicitly.
+    await session.execute(delete(ProviderAuditModel))
+    await session.execute(delete(ProviderDescriptorModel))
     if keep_user_id is not None:
         await session.execute(delete(UserModel).where(UserModel.id != keep_user_id))
     else:

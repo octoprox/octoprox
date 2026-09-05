@@ -67,9 +67,11 @@ from api.db.repository import (
     ProxyRepository,
 )
 from api.models.connector import Connector
-from api.models.credential import Credential, CredentialType
+from api.models.credential import Credential
 from api.models.project import Project
 from api.models.proxy import Proxy, ProxyStatus
+from api.providers.registry import ProviderRegistry, get_provider_registry
+from api.providers.store import ProviderStore
 from api.strategies import get_strategy
 
 if TYPE_CHECKING:
@@ -95,10 +97,13 @@ class ProxyManager:
         session_factory: async_sessionmaker[AsyncSession],
         redis_client: RedisClient,
         settings: Settings,
+        provider_registry: ProviderRegistry | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._redis_client = redis_client
         self._settings = settings
+        self._provider_registry = provider_registry or get_provider_registry()
+        self._provider_store = ProviderStore(self._provider_registry, session_factory)
 
         # In-memory cache (loaded from Postgres on start)
         self._projects: dict[str, Project] = {}
@@ -117,7 +122,7 @@ class ProxyManager:
         self._demand_tracker = DemandTracker(redis_client)
         self._auto_scaler = AutoScaler(self, redis_client, settings.instance_id)
         self._provider_syncer = ProxyProviderSyncer(
-            self, redis_client, settings.instance_id
+            self, redis_client, settings.instance_id, self._provider_registry
         )
         self._rate_limiter = RateLimiter(redis_client)
         # Pending metric deltas accumulated since the last flush. The
@@ -144,6 +149,7 @@ class ProxyManager:
             connector_changed,
             credential_changed,
             project_changed,
+            provider_changed,
             proxy_changed,
             proxy_quarantine_changed,
         )
@@ -155,8 +161,13 @@ class ProxyManager:
                 connector_changed,
                 proxy_changed,
                 proxy_quarantine_changed,
+                provider_changed,
             ],
         )
+
+        # Load admin-authored provider descriptors before any connector is
+        # synced, so credentials of custom types resolve to a provider.
+        await self._provider_store.sync_all()
 
         # Load data from Postgres into memory cache
         await self._load_from_database()
@@ -223,6 +234,7 @@ class ProxyManager:
             connector_changed,
             credential_changed,
             project_changed,
+            provider_changed,
             proxy_changed,
             proxy_quarantine_changed,
         )
@@ -233,6 +245,7 @@ class ProxyManager:
             connector_changed.name: self._apply_connector_change,
             proxy_changed.name: self._apply_proxy_change,
             proxy_quarantine_changed.name: self._apply_proxy_quarantine_change,
+            provider_changed.name: self._apply_provider_change,
         }
         my_id = self._settings.instance_id
         while self._running:
@@ -306,6 +319,9 @@ class ProxyManager:
             await self._evict_proxy_from_cache(proxy_id)
             return
         await self.reload_proxy(proxy_id)
+
+    async def _apply_provider_change(self, provider_id: str, op: str | None) -> None:
+        await self._provider_store.reload_one(provider_id, op)
 
     async def _apply_proxy_quarantine_change(
         self, proxy_id: str, op: str | None
@@ -984,6 +1000,15 @@ class ProxyManager:
         logger.debug("Reloaded proxy", proxy_id=proxy_id)
 
     @property
+    def provider_registry(self) -> ProviderRegistry:
+        """The provider registry this manager resolves credential types against."""
+        return self._provider_registry
+
+    @property
+    def provider_store(self) -> ProviderStore:
+        return self._provider_store
+
+    @property
     def rate_limiter(self) -> RateLimiter:
         """Get the rate limiter instance."""
         return self._rate_limiter
@@ -1410,11 +1435,7 @@ class ProxyManager:
         credential = self.get_credential(connector.credential_id)
 
         # Check if this is a cloud provider connector
-        if credential and credential.type in (
-            CredentialType.AWS,
-            CredentialType.GCP,
-            CredentialType.AZURE,
-        ):
+        if credential and self._provider_registry.is_cloud(credential.type):
             # Mark all proxies as terminating - auto-scaler will handle termination
             proxies = self.get_proxies_for_connector(connector_id)
             for proxy in proxies:
@@ -1883,16 +1904,12 @@ class ProxyManager:
             credential = self.get_credential(connector.credential_id)
 
             # Check if this is a cloud provider connector
-            if credential and credential.type in (
-                CredentialType.AWS,
-                CredentialType.GCP,
-                CredentialType.AZURE,
-            ):
+            if credential and self._provider_registry.is_cloud(credential.type):
                 # Mark as terminating - auto-scaler will handle the actual termination
                 logger.info(
                     "Marking cloud proxy for termination",
                     proxy_id=proxy_id,
-                    credential_type=credential.type.value,
+                    credential_type=credential.type,
                 )
                 return await self.mark_proxy_terminating(proxy_id)
 

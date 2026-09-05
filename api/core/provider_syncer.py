@@ -32,10 +32,7 @@ from api.db.redis import RedisClient
 from api.models.connector import Connector
 from api.models.credential import Credential
 from api.models.proxy import Proxy
-from api.providers.registry import (
-    get_provider,
-    is_syncable_credential_type,
-)
+from api.providers.registry import ProviderRegistry, get_provider_registry
 
 if TYPE_CHECKING:
     pass
@@ -77,6 +74,7 @@ class ProxyProviderSyncer:
         data_source: ProviderDataSource,
         redis_client: RedisClient,
         instance_id: str,
+        registry: ProviderRegistry | None = None,
     ) -> None:
         """Initialize the provider syncer.
 
@@ -84,10 +82,13 @@ class ProxyProviderSyncer:
             data_source: Provider for read-only access to connectors, proxies, and credentials.
             redis_client: Connected Redis client (used for per-connector leases).
             instance_id: This process's identifier; stored as the lease holder.
+            registry: Provider registry to instantiate providers from (defaults to
+                the process-wide registry).
         """
         self._data_source = data_source
         self._redis_client = redis_client
         self._instance_id = instance_id
+        self._registry: ProviderRegistry | None = registry
         self._running = False
         # Per-connector in-process locks. The Redis lease prevents
         # concurrent syncs across *different* Octoprox instances, but
@@ -100,6 +101,13 @@ class ProxyProviderSyncer:
         # then runs against the now-current state.
         self._sync_locks: dict[str, asyncio.Lock] = {}
         self._subscribe_to_signals()
+
+    @property
+    def registry(self) -> ProviderRegistry:
+        return self._registry or get_provider_registry()
+
+    def _is_syncable(self, credential: Credential) -> bool:
+        return self.registry.is_syncable(credential.type)
 
     def _get_sync_lock(self, connector_id: str) -> asyncio.Lock:
         if connector_id not in self._sync_locks:
@@ -140,7 +148,7 @@ class ProxyProviderSyncer:
                 continue
 
             credential = self._data_source.get_credential(connector.credential_id)
-            if not credential or not is_syncable_credential_type(credential.type):
+            if not credential or not self._is_syncable(credential):
                 continue
 
             try:
@@ -149,7 +157,7 @@ class ProxyProviderSyncer:
                 logger.error(
                     "Failed to refresh connector proxies",
                     connector_id=connector.id,
-                    credential_type=credential.type.value,
+                    credential_type=credential.type,
                     error=str(e),
                 )
 
@@ -163,7 +171,7 @@ class ProxyProviderSyncer:
         within this process the in-process lock serialises overlapping
         refresh/sync calls for the same connector.
         """
-        provider = get_provider(credential.type, connector, credential)
+        provider = self.registry.create_provider(connector, credential)
         if not provider:
             return
 
@@ -173,7 +181,7 @@ class ProxyProviderSyncer:
             return
 
         proxies = self._data_source.get_proxies_for_connector(connector.id)
-        if not proxies:
+        if not proxies and not provider.needs_periodic_sync():
             logger.debug("No proxies to refresh", connector_id=connector.id)
             return
 
@@ -193,7 +201,7 @@ class ProxyProviderSyncer:
                 logger.info(
                     "Refreshing IPs for connector",
                     connector_id=connector.id,
-                    credential_type=credential.type.value,
+                    credential_type=credential.type,
                     proxy_count=len(proxies),
                 )
 
@@ -203,6 +211,18 @@ class ProxyProviderSyncer:
                     await event_bus.publish(proxy_update_requested, self, proxy=proxy)
                 for proxy_id in proxy_ids_to_remove:
                     await event_bus.publish(proxy_remove_requested, self, proxy_id=proxy_id)
+
+                if provider.needs_periodic_sync():
+                    # List-mode providers can gain entries between refreshes;
+                    # reconcile additions under the same lease.
+                    removed = set(proxy_ids_to_remove)
+                    remaining = [p for p in proxies if p.id not in removed]
+                    proxies_to_add, more_to_remove = await provider.sync_proxies(remaining)
+                    for proxy in proxies_to_add:
+                        await event_bus.publish(proxy_add_requested, self, proxy=proxy)
+                    for proxy_id in more_to_remove:
+                        if proxy_id not in removed:
+                            await event_bus.publish(proxy_remove_requested, self, proxy_id=proxy_id)
             finally:
                 await lease.release()
 
@@ -216,13 +236,13 @@ class ProxyProviderSyncer:
             connector: The connector to sync
         """
         credential = self._data_source.get_credential(connector.credential_id)
-        if not credential or not is_syncable_credential_type(credential.type):
+        if not credential or not self._is_syncable(credential):
             return
 
         logger.info(
             "Connector sync requested",
             connector_id=connector.id,
-            credential_type=credential.type.value,
+            credential_type=credential.type,
         )
         asyncio.create_task(self.sync_connector(connector, credential))
 
@@ -247,14 +267,14 @@ class ProxyProviderSyncer:
             return
 
         credential = self._data_source.get_credential(connector.credential_id)
-        if not credential or not is_syncable_credential_type(credential.type):
+        if not credential or not self._is_syncable(credential):
             return
 
         logger.info(
             "Proxy removed, triggering sync",
             proxy_id=proxy_id,
             connector_id=connector_id,
-            credential_type=credential.type.value,
+            credential_type=credential.type,
         )
         asyncio.create_task(self.sync_connector(connector, credential))
 
@@ -285,12 +305,12 @@ class ProxyProviderSyncer:
                 )
                 return
             try:
-                provider = get_provider(credential.type, connector, credential)
+                provider = self.registry.create_provider(connector, credential)
                 if not provider:
                     logger.warning(
                         "No provider for credential type",
                         connector_id=connector.id,
-                        credential_type=credential.type.value,
+                        credential_type=credential.type,
                     )
                     return
 
@@ -308,7 +328,7 @@ class ProxyProviderSyncer:
                 logger.info(
                     "Connector synced",
                     connector_id=connector.id,
-                    credential_type=credential.type.value,
+                    credential_type=credential.type,
                     added=len(proxies_to_add),
                     removed=len(proxy_ids_to_remove),
                 )
@@ -316,7 +336,7 @@ class ProxyProviderSyncer:
                 logger.error(
                     "Failed to sync connector",
                     connector_id=connector.id,
-                    credential_type=credential.type.value,
+                    credential_type=credential.type,
                     error=str(e),
                 )
             finally:

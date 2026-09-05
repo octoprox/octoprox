@@ -201,3 +201,36 @@ class ProjectMetricsModel(Base):
     bytes_sent: Mapped[int] = mapped_column(Integer, default=0)
     bytes_received: Mapped[int] = mapped_column(Integer, default=0)
     granularity: Mapped[int] = mapped_column(Integer, default=60, nullable=False)
+
+
+class ProviderDescriptorModel(Base):
+    """SQLAlchemy model for admin-authored provider descriptors."""
+
+    __tablename__ = "provider_descriptors"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    spec: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
+    created_by: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now, onupdate=utc_now)
+
+
+class ProviderAuditModel(Base):
+    """SQLAlchemy model for the provider descriptor audit log.
+
+    No foreign key on purpose: history must survive deleting the descriptor.
+    """
+
+    __tablename__ = "provider_audit_log"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    provider_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    action: Mapped[str] = mapped_column(String(20), nullable=False)
+    actor: Mapped[str] = mapped_column(String(255), nullable=False, default="")
+    egress_hosts: Mapped[list[str]] = mapped_column(JSON, default=list)
+    hosts_changed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    spec: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now, index=True)

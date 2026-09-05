@@ -12,7 +12,7 @@ at request time using values from the credential/connector chain.
 import pytest
 
 from api.core.proxy_manager import ProxyManager
-from api.models.connector import BrightDataProxyType, Connector
+from api.models.connector import Connector
 from api.models.credential import Credential, CredentialType
 from api.models.proxy import Proxy, ProxyProtocol
 
@@ -93,14 +93,14 @@ class TestProxyManagerCredentialResolution:
             id="connector-1",
             name="Oxylabs Connector",
             credential_id="credential-1",
-            credential_type=CredentialType.OXYLABS,
+            credential_type="oxylabs",
             project_id="project-1",
             config={"num_proxies": 10, "country_code": "US"},
         )
         credential = Credential(
             id="credential-1",
             name="Oxylabs Credential",
-            type=CredentialType.OXYLABS,
+            type="oxylabs",
             project_id="project-1",
             config={
                 "username": "newuser",
@@ -133,14 +133,14 @@ class TestProxyManagerCredentialResolution:
             id="connector-1",
             name="Oxylabs ISP Connector",
             credential_id="credential-1",
-            credential_type=CredentialType.OXYLABS,
+            credential_type="oxylabs",
             project_id="project-1",
             config={"num_proxies": 5},
         )
         credential = Credential(
             id="credential-1",
             name="Oxylabs Credential",
-            type=CredentialType.OXYLABS,
+            type="oxylabs",
             project_id="project-1",
             config={
                 "username": "ispuser",
@@ -173,12 +173,12 @@ class TestProxyManagerCredentialResolution:
             id="connector-1",
             name="BrightData Connector",
             credential_id="credential-1",
-            credential_type=CredentialType.BRIGHTDATA,
+            credential_type="brightdata",
             project_id="project-1",
             config={
                 "zone_name": "zone1",
                 "zone_password": "zonepass123",
-                "proxy_type": BrightDataProxyType.RESIDENTIAL.value,
+                "proxy_type": "residential",
                 "num_proxies": 10,
                 "country_code": "GB",
             },
@@ -186,7 +186,7 @@ class TestProxyManagerCredentialResolution:
         credential = Credential(
             id="credential-1",
             name="BrightData Credential",
-            type=CredentialType.BRIGHTDATA,
+            type="brightdata",
             project_id="project-1",
             config={
                 "token": "api_token",
@@ -219,19 +219,19 @@ class TestProxyManagerCredentialResolution:
             id="connector-1",
             name="BrightData ISP Connector",
             credential_id="credential-1",
-            credential_type=CredentialType.BRIGHTDATA,
+            credential_type="brightdata",
             project_id="project-1",
             config={
                 "zone_name": "isp_zone",
                 "zone_password": "ispzonepass",
-                "proxy_type": BrightDataProxyType.ISP.value,
+                "proxy_type": "isp",
                 "num_proxies": 5,
             },
         )
         credential = Credential(
             id="credential-1",
             name="BrightData Credential",
-            type=CredentialType.BRIGHTDATA,
+            type="brightdata",
             project_id="project-1",
             config={
                 "token": "api_token",
@@ -343,13 +343,13 @@ class TestProxyManagerCredentialResolution:
             id="connector-1",
             name="Oxylabs Connector",
             credential_id="credential-1",
-            credential_type=CredentialType.OXYLABS,
+            credential_type="oxylabs",
             project_id="project-1",
         )
         credential = Credential(
             id="credential-1",
             name="Oxylabs Credential",
-            type=CredentialType.OXYLABS,
+            type="oxylabs",
             project_id="project-1",
             config={
                 "username": "oxy_user",
@@ -379,19 +379,19 @@ class TestProxyManagerCredentialResolution:
             id="connector-1",
             name="BrightData Connector",
             credential_id="credential-1",
-            credential_type=CredentialType.BRIGHTDATA,
+            credential_type="brightdata",
             project_id="project-1",
             config={
                 "zone_name": "zone1",
                 "zone_password": "zone_secret",
-                "proxy_type": BrightDataProxyType.RESIDENTIAL.value,
+                "proxy_type": "residential",
                 "num_proxies": 5,
             },
         )
         credential = Credential(
             id="credential-1",
             name="BrightData Credential",
-            type=CredentialType.BRIGHTDATA,
+            type="brightdata",
             project_id="project-1",
             config={
                 "token": "api_token",

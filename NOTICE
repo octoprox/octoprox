@@ -15,6 +15,16 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 
+--------------------------------------------------------------------------------
+
+EXCEPTION: Built-in provider descriptors
+
+The provider descriptor files under api/providers/builtin/ (the YAML documents
+describing third-party proxy vendors) are excluded from the Apache License
+grant above. They are proprietary, all rights reserved, and may be used only as
+part of an Octoprox installation. See api/providers/builtin/LICENSE for the
+applicable terms.
+
 ================================================================================
 
 This project includes the following third-party dependencies:

@@ -11,12 +11,12 @@ import {
 } from '../api/client'
 import { useProject } from '../contexts/ProjectContext'
 import { useAuth } from '../contexts/AuthContext'
-import { useTheme } from '../contexts/ThemeContext'
 import { useToast } from '../contexts/ToastContext'
 import { DataTable } from '../components/DataTable'
 import { Page } from '../components/layout/Page'
 import { CredentialForm, NewCredentialPanel, TypeCard } from '../components/CredentialForm'
-import { CREDENTIAL_TYPES } from '../utils/credentials'
+import { useProviders } from '../hooks/useProviders'
+import { ProviderLogo } from '../components/ProviderLogo'
 import { formatDate, formatDateTime } from '../utils/format'
 import { Button, Inspector, ConfirmDialog, KeyValue, InspectorSection } from '../components/ui'
 
@@ -26,7 +26,7 @@ export default function CredentialsPage() {
   const queryClient = useQueryClient()
   const { selectedProjectId } = useProject()
   const { canMutate } = useAuth()
-  const { isDark } = useTheme()
+  const { labelFor } = useProviders()
   const toast = useToast()
   const [panel, setPanel] = useState<PanelState>(null)
   const [pendingDelete, setPendingDelete] = useState<Credential | null>(null)
@@ -65,18 +65,15 @@ export default function CredentialsPage() {
       accessorKey: 'name',
       header: 'Credential',
       meta: { filterVariant: 'text' as const },
-      cell: ({ row }) => {
-        const ct = CREDENTIAL_TYPES.find((t) => t.value === row.original.type)
-        return (
-          <span className="inline-flex items-center gap-2.5 max-w-full">
-            {ct && <img src={isDark ? ct.logoDark : ct.logo} alt="" className="w-5 h-5 object-contain flex-none" />}
-            <span className="font-medium truncate">{row.original.name}</span>
-          </span>
-        )
-      },
+      cell: ({ row }) => (
+        <span className="inline-flex items-center gap-2.5 max-w-full">
+          <ProviderLogo type={row.original.type} className="w-5 h-5 text-[20px]" />
+          <span className="font-medium truncate">{row.original.name}</span>
+        </span>
+      ),
     },
     {
-      accessorFn: (row: Credential) => CREDENTIAL_TYPES.find((t) => t.value === row.type)?.label || row.type,
+      accessorFn: (row: Credential) => labelFor(row.type),
       id: 'type',
       header: 'Type',
       size: 160,
@@ -109,7 +106,7 @@ export default function CredentialsPage() {
         </div>
       ),
     }] as ColumnDef<Credential>[] : []),
-  ], [canMutate, isDark, usedBy])
+  ], [canMutate, labelFor, usedBy])
 
   let panelNode: React.ReactNode = null
   if (panel?.kind === 'edit') {
@@ -200,7 +197,8 @@ function EditCredentialPanel({ credentialId, usedBy, canMutate, onClose, onDelet
     enabled: !!selectedProjectId,
     refetchInterval: false,
   })
-  const typeLabel = detail ? CREDENTIAL_TYPES.find((t) => t.value === detail.type)?.label : ''
+  const { labelFor } = useProviders()
+  const typeLabel = detail ? labelFor(detail.type) : ''
 
   return (
     <Inspector

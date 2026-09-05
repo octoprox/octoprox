@@ -25,6 +25,11 @@ Configuration is loaded from YAML files in the `config/` directory based on the 
 | `OCTOPROX_JWT_EXPIRY_HOURS` | JWT token expiry in hours | 24 |
 | `OCTOPROX_TLS_MITM_CA_CERT_PATH` | Path to the MITM CA certificate | data/ca/octoprox-ca.crt |
 | `OCTOPROX_TLS_MITM_CA_KEY_PATH` | Path to the MITM CA private key | data/ca/octoprox-ca.key |
+| `OCTOPROX_PROVIDERS_DIR` | Directory of operator-supplied provider descriptor YAML files | (unset) |
+| `OCTOPROX_PROVIDER_EGRESS_ALLOW_HTTP` | Allow descriptors to call plain-http vendor APIs (development only) | false |
+| `OCTOPROX_PROVIDER_EGRESS_ALLOW_PRIVATE` | Allow descriptor API calls to private addresses (development only) | false |
+| `OCTOPROX_PROVIDER_HTTP_TIMEOUT_SECONDS` | Timeout for a vendor API request made for a descriptor | 60 |
+| `OCTOPROX_PROVIDER_HTTP_MAX_RESPONSE_BYTES` | Largest vendor API response accepted (0 disables) | 52428800 |
 
 ## Authentication
 

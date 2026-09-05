@@ -1,0 +1,256 @@
+# Copyright 2026 Octoprox Authors. All rights reserved.
+# SPDX-License-Identifier: LicenseRef-Octoprox-Provider-Descriptors
+#
+# This built-in provider descriptor is NOT licensed under Apache-2.0.
+# See api/providers/builtin/LICENSE for the terms that apply to it.
+#
+# Bright Data — zones discovered from the account API (with passwords and, for
+# ISP/datacenter zones, the owned exit IPs). Residential/mobile use global
+# session ids; ISP/datacenter pin one exit IP per slot in the username.
+id: brightdata
+name: Bright Data
+description: Residential, Mobile, ISP and Datacenter proxies via zones
+docs_url: https://docs.brightdata.com/
+
+credential_fields:
+  - key: token
+    label: API token
+    type: password
+    secret: true
+    required: true
+    help: Account-level API token from the Bright Data dashboard.
+
+connector_fields:
+  - key: zone_name
+    label: Zone
+    type: select
+    required: true
+    options_from: zones
+    fill:
+      zone_password: password
+      proxy_type: proxy_type
+    help: Proxy type and zone password follow the selected zone.
+  - key: zone_password
+    label: Zone password
+    type: password
+    secret: true
+    required: true
+    placeholder: Auto-filled from the zone
+  - key: proxy_type
+    label: Proxy type
+    type: select
+    required: true
+    readonly: true
+    help: Derived from the zone.
+    options:
+      - { value: residential, label: Residential }
+      - { value: mobile, label: Mobile }
+      - { value: isp, label: ISP }
+      - { value: datacenter, label: Datacenter }
+  - key: num_proxies
+    label: Number of proxies
+    type: number
+    required: true
+    default: 1
+    min: 1
+    max: 1000
+    max_from_option:
+      - { field: country_code, extra: count }
+      - { field: zone_name, extra: total_ips }
+    help: For ISP and datacenter zones the maximum is the number of IPs the zone (or selected country) has.
+  - key: country_code
+    label: Country
+    type: select
+    options_preset: countries
+    options_from: zone_countries
+    options_from_when: { field: connector.proxy_type, in: [isp, datacenter] }
+    empty_label: All countries
+    help: ISP and datacenter zones list only the countries their IPs are in.
+  - key: healthcheck_url
+    label: Healthcheck URL
+    type: url
+    group: advanced
+    placeholder: https://httpbin.org/ip (default)
+    help: Use a custom URL if the zone is restricted to certain targets.
+
+proxy_type_field: connector.proxy_type
+
+session_id:
+  length: 12
+  alphabet: lower_digits
+  prefix: glob_
+
+validation:
+  call:
+    url: https://api.brightdata.com/status
+    headers:
+      Authorization: "Bearer {credential.token}"
+  success: "status == 'active'"
+  capture:
+    customer_id: customer
+  error_message: Invalid Bright Data API token or inactive account
+
+options:
+  zones:
+    call:
+      url: https://api.brightdata.com/zone/get_active_zones
+      headers:
+        Authorization: "Bearer {credential.token}"
+    items: "@"
+    value: name
+    label: name
+    description: "total_ips && join('', [proxy_type, ' (', type, ') — ', to_string(total_ips), ' IPs']) || join('', [proxy_type || 'unsupported', ' (', type, ')'])"
+    extra:
+      type: type
+      proxy_type:
+        path: type
+        map:
+          - { equals: res_static, to: isp }
+          - { starts_with: res, to: residential }
+          - { starts_with: mobile, to: mobile }
+          - { starts_with: isp, to: isp }
+          - { starts_with: dc, to: datacenter }
+    enrich:
+      - call:
+          url: https://api.brightdata.com/zone
+          params: { zone: "{item.value}" }
+          headers:
+            Authorization: "Bearer {credential.token}"
+        merge:
+          password: "password[0]"
+      - call:
+          url: https://api.brightdata.com/zone/route_ips
+          params: { zone: "{item.value}", list_countries: "true" }
+          headers:
+            Authorization: "Bearer {credential.token}"
+        when: "proxy_type == 'isp' || proxy_type == 'datacenter'"
+        merge:
+          total_ips: "length(@)"
+    filter: "proxy_type && password"
+    cache_seconds: 300
+
+  zone_countries:
+    call:
+      url: https://api.brightdata.com/zone/route_ips
+      params: { zone: "{connector.zone_name}", list_countries: "true" }
+      headers:
+        Authorization: "Bearer {credential.token}"
+    items: "@"
+    value: "country"
+    label: "country"
+    description: "join('', [to_string(count), ' IPs'])"
+    group_by_value: true
+    cache_seconds: 300
+
+proxy_types:
+  - key: residential
+    label: Residential
+    mode: session
+    host: brd.superproxy.io
+    port: 44445
+    username:
+      separator: "-"
+      parts:
+        - text: "brd-customer-{credential.customer_id}"
+        - text: "zone-{connector.zone_name}"
+        - text: "session-{session_id}"
+        - text: "country-{connector.country_code|lower}"
+          when: { field: connector.country_code }
+    password: "{connector.zone_password}"
+    tags: [brightdata, residential]
+    metadata:
+      zone_name: "{connector.zone_name}"
+      country_code: "{connector.country_code}"
+
+  - key: mobile
+    label: Mobile
+    mode: session
+    host: brd.superproxy.io
+    port: 44445
+    username:
+      separator: "-"
+      parts:
+        - text: "brd-customer-{credential.customer_id}"
+        - text: "zone-{connector.zone_name}"
+        - text: "session-{session_id}"
+        - text: "country-{connector.country_code|lower}"
+          when: { field: connector.country_code }
+    password: "{connector.zone_password}"
+    tags: [brightdata, mobile]
+    metadata:
+      zone_name: "{connector.zone_name}"
+      country_code: "{connector.country_code}"
+
+  - key: isp
+    label: ISP
+    mode: port
+    port_strategy: fixed
+    host: brd.superproxy.io
+    port: 44445
+    username:
+      separator: "-"
+      parts:
+        - text: "brd-customer-{credential.customer_id}"
+        - text: "zone-{connector.zone_name}"
+        - text: "ip-{discovered_ip}"
+          when: { field: discovered_ip }
+        - text: "country-{connector.country_code|lower}"
+          when: { field: connector.country_code }
+    password: "{connector.zone_password}"
+    discovery:
+      url: https://lumtest.com/myip.json
+      ip_path: ip
+    known_ips:
+      call:
+        url: https://api.brightdata.com/zone/route_ips
+        params:
+          zone: "{connector.zone_name}"
+          list_countries: "true"
+          country: "{connector.country_code|lower}"
+        headers:
+          Authorization: "Bearer {credential.token}"
+      items: "@"
+      ip: ip
+      country: country
+    tags: [brightdata, isp]
+    metadata:
+      zone_name: "{connector.zone_name}"
+      country_code: "{connector.country_code}"
+      index: "{index}"
+
+  - key: datacenter
+    label: Datacenter
+    mode: port
+    port_strategy: fixed
+    host: brd.superproxy.io
+    port: 44445
+    username:
+      separator: "-"
+      parts:
+        - text: "brd-customer-{credential.customer_id}"
+        - text: "zone-{connector.zone_name}"
+        - text: "ip-{discovered_ip}"
+          when: { field: discovered_ip }
+        - text: "country-{connector.country_code|lower}"
+          when: { field: connector.country_code }
+    password: "{connector.zone_password}"
+    discovery:
+      url: https://lumtest.com/myip.json
+      ip_path: ip
+    known_ips:
+      call:
+        url: https://api.brightdata.com/zone/route_ips
+        params:
+          zone: "{connector.zone_name}"
+          list_countries: "true"
+          country: "{connector.country_code|lower}"
+        headers:
+          Authorization: "Bearer {credential.token}"
+      items: "@"
+      ip: ip
+      country: country
+    tags: [brightdata, datacenter]
+    metadata:
+      zone_name: "{connector.zone_name}"
+      country_code: "{connector.country_code}"
+      index: "{index}"

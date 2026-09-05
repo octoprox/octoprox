@@ -15,7 +15,7 @@ import { useAuth } from '../contexts/AuthContext'
 import { useTheme } from '../contexts/ThemeContext'
 import { useToast } from '../contexts/ToastContext'
 import { formatBytes } from '../utils/format'
-import { CREDENTIAL_TYPES } from '../utils/credentials'
+import { ProviderLogo } from '../components/ProviderLogo'
 import { Page } from '../components/layout/Page'
 import { Sparkline } from '../components/charts/Sparkline'
 import { ProjectPanel } from '../components/ProjectForm'
@@ -369,7 +369,6 @@ export default function Overview() {
             ) : (
               <div className="-mx-1.5">
                 {connectors.map((c) => {
-                  const ct = CREDENTIAL_TYPES.find((t) => t.value === c.credential_type)
                   const max = getConfiguredProxies(c.config, c.credential_type)
                   return (
                     <button
@@ -377,7 +376,7 @@ export default function Overview() {
                       onClick={() => navigate(`${base}/connectors?open=${c.id}`)}
                       className="w-full flex items-center gap-2.5 h-[34px] px-1.5 rounded-md text-[12.5px] hover:bg-surface-raised transition-colors text-left"
                     >
-                      {ct && <img src={isDark ? ct.logoDark : ct.logo} alt="" className="w-4 h-4 object-contain flex-none" />}
+                      <ProviderLogo type={c.credential_type} className="w-4 h-4 text-[16px]" />
                       <span className={cnTrunc(!c.enabled)}>{c.name}</span>
                       {c.last_error && <AlertTriangle className="w-3.5 h-3.5 text-danger flex-none" />}
                       <span className="text-fg-muted tabular-nums flex-none">{c.proxy_count}{max != null && <span className="text-fg-subtle">/{max}</span>}</span>
@@ -451,7 +450,7 @@ function cnTrunc(off: boolean) {
 
 function getConfiguredProxies(config: Record<string, unknown>, type: string | null): number | null {
   if (!type || type === 'static_proxy_provider') return null
-  if (type === 'oxylabs' || type === 'brightdata') return typeof config.num_proxies === 'number' ? config.num_proxies : null
+  if (typeof config.num_proxies === 'number') return config.num_proxies
   return typeof config.max_proxies === 'number' ? config.max_proxies : null
 }
 

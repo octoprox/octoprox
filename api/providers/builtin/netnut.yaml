@@ -1,0 +1,124 @@
+# Copyright 2026 Octoprox Authors. All rights reserved.
+# SPDX-License-Identifier: LicenseRef-Octoprox-Provider-Descriptors
+#
+# This built-in provider descriptor is NOT licensed under Apache-2.0.
+# See api/providers/builtin/LICENSE for the terms that apply to it.
+#
+# NetNut — one gateway for every product; the product token (res, stc, mob, dc),
+# country and a numeric session id are encoded in the username. Based on public
+# documentation and third-party integration guides; marked beta until exercised
+# against a live account.
+id: netnut
+name: NetNut
+description: Residential, Static residential (ISP), Mobile and Datacenter proxies
+docs_url: https://netnut.ai/
+beta: true
+
+credential_fields:
+  - key: proxy_type
+    label: Proxy type
+    type: select
+    required: true
+    default: residential
+    options:
+      - { value: residential, label: Residential (rotating) }
+      - { value: static_residential, label: Static residential (ISP) }
+      - { value: mobile, label: Mobile }
+      - { value: datacenter, label: Datacenter }
+  - key: username
+    label: Username
+    required: true
+  - key: password
+    label: Password
+    type: password
+    secret: true
+    required: true
+
+connector_fields:
+  - key: num_proxies
+    label: Number of proxies
+    type: number
+    required: true
+    default: 1
+    min: 1
+    max: 1000
+  - key: country_code
+    label: Country
+    type: select
+    options_preset: countries
+    help: Leave as "All countries" to use any country.
+
+proxy_type_field: credential.proxy_type
+
+session_id:
+  length: 8
+  alphabet: digits
+
+proxy_types:
+  - key: residential
+    label: Residential
+    mode: session
+    host: gw.netnut.net
+    port: 5959
+    username:
+      separator: "-"
+      parts:
+        - text: "{credential.username}"
+        - text: "res"
+        - text: "{connector.country_code|lower|or:any}"
+        - text: "sid-{session_id}"
+    password: "{credential.password}"
+    tags: [netnut, residential]
+    metadata:
+      country_code: "{connector.country_code}"
+
+  - key: static_residential
+    label: Static residential (ISP)
+    mode: session
+    host: gw.netnut.net
+    port: 5959
+    username:
+      separator: "-"
+      parts:
+        - text: "{credential.username}"
+        - text: "stc"
+        - text: "{connector.country_code|lower|or:any}"
+        - text: "sid-{session_id}"
+    password: "{credential.password}"
+    tags: [netnut, static_residential]
+    metadata:
+      country_code: "{connector.country_code}"
+
+  - key: mobile
+    label: Mobile
+    mode: session
+    host: gw.netnut.net
+    port: 5959
+    username:
+      separator: "-"
+      parts:
+        - text: "{credential.username}"
+        - text: "mob"
+        - text: "{connector.country_code|lower|or:any}"
+        - text: "sid-{session_id}"
+    password: "{credential.password}"
+    tags: [netnut, mobile]
+    metadata:
+      country_code: "{connector.country_code}"
+
+  - key: datacenter
+    label: Datacenter
+    mode: session
+    host: gw.netnut.net
+    port: 5959
+    username:
+      separator: "-"
+      parts:
+        - text: "{credential.username}"
+        - text: "dc"
+        - text: "{connector.country_code|lower|or:any}"
+        - text: "sid-{session_id}"
+    password: "{credential.password}"
+    tags: [netnut, datacenter]
+    metadata:
+      country_code: "{connector.country_code}"

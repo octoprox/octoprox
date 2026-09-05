@@ -18,12 +18,12 @@ from api.models.connector import (
     ConnectorOptionsResponse,
     ConnectorResponse,
     ConnectorUpdate,
-    validate_connector_config,
     validate_rate_limit_config,
     validate_routing_config,
 )
-from api.models.credential import CredentialType
-from api.providers.registry import is_syncable_credential_type
+from api.models.credential import Credential
+from api.providers.registry import ProviderRegistry, UnknownProviderError, get_provider_registry
+from api.providers.sdk.validation import ConfigValidationError
 
 router = APIRouter(prefix="/projects/{project_id}/connectors")
 
@@ -32,6 +32,24 @@ class ConnectorListResponse(BaseModel):
     """Response for listing connectors."""
     total: int
     connectors: list[ConnectorResponse]
+
+
+def _validate_connector_config(
+    registry: ProviderRegistry, credential: Credential, config: dict[str, Any]
+) -> dict[str, Any]:
+    """Validate a connector config for the credential's provider type."""
+    try:
+        return registry.validate_connector_config(credential.type, config, credential.config)
+    except UnknownProviderError as e:
+        raise HTTPException(status_code=422, detail=str(e)) from None
+    except ConfigValidationError as e:
+        raise HTTPException(status_code=422, detail=str(e)) from None
+    except ValidationError as e:
+        # Extract just the error messages from Pydantic validation errors
+        messages = [err.get('msg', str(err)) for err in e.errors()]
+        raise HTTPException(status_code=422, detail="; ".join(messages)) from None
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e)) from None
 
 
 def _connector_to_response(
@@ -75,7 +93,7 @@ async def list_connectors(request: Request, project_id: str) -> ConnectorListRes
     for connector in connectors:
         credential = proxy_manager.get_credential(connector.credential_id)
         credential_name = credential.name if credential else None
-        credential_type = credential.type.value if credential and hasattr(credential.type, 'value') else (credential.type if credential else None)
+        credential_type = credential.type if credential else None
         proxy_count = len(proxy_manager.get_proxies_for_connector(connector.id))
         responses.append(_connector_to_response(connector, credential_name, credential_type, proxy_count))
 
@@ -107,15 +125,8 @@ async def create_connector(
         raise HTTPException(status_code=400, detail="Credential does not belong to this project")
 
     # Validate connector config based on credential type
-    credential_type_enum = credential.type if isinstance(credential.type, CredentialType) else CredentialType(credential.type)
-    try:
-        validated_config = validate_connector_config(credential_type_enum, connector_data.config)
-    except ValidationError as e:
-        # Extract just the error messages from Pydantic validation errors
-        messages = [err.get('msg', str(err)) for err in e.errors()]
-        raise HTTPException(status_code=422, detail="; ".join(messages)) from None
-    except ValueError as e:
-        raise HTTPException(status_code=422, detail=str(e)) from None
+    registry = get_provider_registry()
+    validated_config = _validate_connector_config(registry, credential, connector_data.config)
 
     # Validate routing config if provided
     validated_routing_config: dict[str, Any] = {}
@@ -144,7 +155,7 @@ async def create_connector(
     connector = Connector(
         name=connector_data.name,
         credential_id=connector_data.credential_id,
-        credential_type=credential_type_enum,
+        credential_type=credential.type,
         project_id=project_id,
         config=validated_config,
         routing_config=validated_routing_config,
@@ -156,14 +167,13 @@ async def create_connector(
 
     # Trigger provider sync if this is a syncable provider connector (fire-and-forget)
     # Use create_task to avoid blocking the API response during IP discovery
-    if is_syncable_credential_type(credential_type_enum):
+    if registry.is_syncable(credential.type):
         asyncio.create_task(
             event_bus.publish(provider_connector_sync_requested, None, connector=connector)
         )
 
-    credential_type = credential.type.value if hasattr(credential.type, 'value') else credential.type
     # New connector has 0 proxies initially (provider syncer will add them)
-    return _connector_to_response(connector, credential.name, credential_type, proxy_count=0)
+    return _connector_to_response(connector, credential.name, credential.type, proxy_count=0)
 
 
 @router.get("/{connector_id}", response_model=ConnectorResponse)
@@ -177,7 +187,7 @@ async def get_connector(request: Request, connector_id: str) -> ConnectorRespons
 
     credential = proxy_manager.get_credential(connector.credential_id)
     credential_name = credential.name if credential else None
-    credential_type = credential.type.value if credential and hasattr(credential.type, 'value') else (credential.type if credential else None)
+    credential_type = credential.type if credential else None
     proxy_count = len(proxy_manager.get_proxies_for_connector(connector.id))
     return _connector_to_response(connector, credential_name, credential_type, proxy_count)
 
@@ -207,20 +217,14 @@ async def update_connector(
         if credential.project_id != connector.project_id:
             raise HTTPException(status_code=400, detail="Credential does not belong to this project")
         connector.credential_id = connector_data.credential_id
+        connector.credential_type = credential.type
         current_credential = credential
     if connector_data.config is not None:
         # Validate connector config based on credential type
         if current_credential:
-            credential_type_enum = current_credential.type if isinstance(current_credential.type, CredentialType) else CredentialType(current_credential.type)
-            try:
-                validated_config = validate_connector_config(credential_type_enum, connector_data.config)
-                connector.config = validated_config
-            except ValidationError as e:
-                # Extract just the error messages from Pydantic validation errors
-                messages = [err.get('msg', str(err)) for err in e.errors()]
-                raise HTTPException(status_code=422, detail="; ".join(messages)) from None
-            except ValueError as e:
-                raise HTTPException(status_code=422, detail=str(e)) from None
+            connector.config = _validate_connector_config(
+                get_provider_registry(), current_credential, connector_data.config
+            )
         else:
             connector.config = connector_data.config
     if connector_data.routing_config is not None:
@@ -250,13 +254,13 @@ async def update_connector(
 
     # Trigger provider sync if this is a syncable provider connector (fire-and-forget)
     # Use create_task to avoid blocking the API response during IP discovery
-    if credential and is_syncable_credential_type(credential.type):
+    if credential and get_provider_registry().is_syncable(credential.type):
         asyncio.create_task(
             event_bus.publish(provider_connector_sync_requested, None, connector=connector)
         )
 
     credential_name = credential.name if credential else None
-    credential_type = credential.type.value if credential and hasattr(credential.type, 'value') else (credential.type if credential else None)
+    credential_type = credential.type if credential else None
     proxy_count = len(proxy_manager.get_proxies_for_connector(connector.id))
     return _connector_to_response(connector, credential_name, credential_type, proxy_count)
 

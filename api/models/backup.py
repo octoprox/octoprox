@@ -30,6 +30,8 @@ ENTITY_KEYS = (
     "proxies",
     "proxy_metrics",
     "project_metrics",
+    "provider_descriptors",
+    "provider_audit_log",
 )
 
 
@@ -64,6 +66,8 @@ class BackupPayload(BaseModel):
     proxies: list[dict[str, Any]] = Field(default_factory=list)
     proxy_metrics: list[dict[str, Any]] = Field(default_factory=list)
     project_metrics: list[dict[str, Any]] = Field(default_factory=list)
+    provider_descriptors: list[dict[str, Any]] = Field(default_factory=list)
+    provider_audit_log: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class ExportRequest(BaseModel):
@@ -98,5 +102,7 @@ class ImportSummary(BaseModel):
     proxies: int = 0
     proxy_metrics: int = 0
     project_metrics: int = 0
+    provider_descriptors: int = 0
+    provider_audit_log: int = 0
     kept_current_user: bool = False
     user_conflicts: list[UserConflict] = Field(default_factory=list)

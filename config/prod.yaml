@@ -40,3 +40,14 @@ proxy:
     timeout_seconds: 30
     max_retries: 3
     retry_delay_seconds: 1
+
+# Proxy provider SDK (see docs/providers.md)
+providers:
+  # Directory of operator-supplied provider descriptor YAML files, loaded at startup.
+  # dir: /etc/octoprox/providers
+  egress:
+    allow_http: false      # development only
+    allow_private: false   # development only
+  http:
+    timeout_seconds: 60
+    max_response_bytes: 52428800   # 0 disables the limit

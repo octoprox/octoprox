@@ -434,7 +434,7 @@ def get_azure_architecture(vm_size: str) -> str:
     return _AZURE_VM_SIZE_ARCH.get(vm_size, "x86_64")
 
 
-# --- Oxylabs Country Options ---
+# --- Country Options (geo-targeting presets for proxy providers) ---
 
 class CountryOption(BaseModel):
     """A country option with display metadata."""
@@ -442,7 +442,7 @@ class CountryOption(BaseModel):
     name: str
 
 
-OXYLABS_COUNTRIES: list[CountryOption] = [
+COUNTRIES: list[CountryOption] = [
     # "All" option for no geo-targeting
     CountryOption(code="", name="All (No geo-targeting)"),
     # North America
@@ -503,15 +503,5 @@ OXYLABS_COUNTRIES: list[CountryOption] = [
     CountryOption(code="NG", name="Nigeria"),
 ]
 
-
-# --- BrightData Zone Options ---
-
-class BrightDataZone(BaseModel):
-    """A BrightData zone option with metadata."""
-    name: str
-    type: str  # "res_rotating", "dc_shared", etc.
-    proxy_type: str  # "residential", "datacenter", etc. (mapped)
-    password: str
-    # IP info for ISP/DC zones (populated via route_ips API)
-    country_counts: dict[str, int] | None = None  # e.g. {"us": 5, "de": 3}
-    total_ips: int | None = None
+# Backwards-compatible alias.
+OXYLABS_COUNTRIES = COUNTRIES

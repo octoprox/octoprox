@@ -176,7 +176,7 @@ export interface Proxy {
   protocol: string
   username: string | null
   password: string | null
-  display_host: string  // The host to display in UI (may differ from host for Oxylabs)
+  display_host: string  // The host to display in UI (the discovered exit IP for port-mode provider proxies)
   connector_id: string
   connector_name: string | null
   connector_enabled: boolean
@@ -233,48 +233,140 @@ export interface ProxyUploadResponse {
   errors: ProxyUploadError[]
 }
 
-// Credential types
-export type CredentialType = 'static_proxy_provider' | 'aws' | 'gcp' | 'azure' | 'oxylabs' | 'brightdata'
+// Credential types. `type` names a provider in the catalog (see /providers):
+// the four code-implemented types plus any descriptor id.
+export type CredentialType = string
 
-// Oxylabs proxy types
-export type OxylabsProxyType = 'residential' | 'mobile' | 'isp' | 'dedicated_isp' | 'datacenter' | 'datacenter_dedicated'
+// ---------------------------------------------------------------------------
+// Provider catalog (schemas the forms render from) and admin descriptors
 
-export interface OxylabsCredentialConfig {
-  proxy_type: OxylabsProxyType
-  username: string
-  password: string
+export type ProviderFieldType = 'text' | 'password' | 'number' | 'select' | 'boolean' | 'textarea' | 'url' | 'country'
+
+export interface ProviderOption {
+  value: string
+  label: string
+  description?: string | null
 }
 
-export interface OxylabsConnectorConfig {
-  num_proxies: number
-  country_code?: string | null
-  session_duration_minutes: number
+export interface ProviderCondition {
+  field: string
+  equals?: string | null
+  in?: string[] | null
+  negate?: boolean
 }
 
-// BrightData proxy types
-export type BrightDataProxyType = 'residential' | 'mobile' | 'isp' | 'datacenter'
-
-export interface BrightDataCredentialConfig {
-  token: string
-  customer_id: string
+export interface ProviderField {
+  key: string
+  label: string
+  type: ProviderFieldType
+  required: boolean
+  secret: boolean
+  readonly: boolean
+  default: string | number | boolean | null
+  placeholder: string | null
+  help: string | null
+  group: string
+  options: ProviderOption[]
+  options_preset: 'countries' | null
+  options_from: string | null
+  options_from_when: ProviderCondition | null
+  empty_label: string | null
+  fill: Record<string, string>
+  min: number | null
+  max: number | null
+  max_from_option: { field: string; extra: string }[]
+  depends_on: string[]
+  pattern: string | null
+  transform: 'upper' | 'lower' | 'strip' | null
+  show_when: ProviderCondition | null
 }
 
-export interface BrightDataConnectorConfig {
-  zone_name: string
-  zone_password: string
-  proxy_type: BrightDataProxyType
-  num_proxies: number
-  country_code?: string | null
-  healthcheck_url?: string | null  // Custom healthcheck URL (default: https://httpbin.org/ip)
-}
-
-export interface BrightDataZone {
+export interface ProviderSummary {
+  id: string
   name: string
-  type: string
-  proxy_type: BrightDataProxyType
-  password: string
-  country_counts: Record<string, number> | null
-  total_ips: number | null
+  description: string
+  kind: 'code' | 'descriptor'
+  source: 'builtin' | 'file' | 'plugin' | 'custom'
+  editable: boolean
+  syncable: boolean
+  cloud: boolean
+  beta: boolean
+  logo: string | null
+  docs_url: string | null
+  credential_fields: ProviderField[]
+  connector_fields: ProviderField[]
+  proxy_type_field: string | null
+  proxy_types: { key: string; label: string; mode: string }[]
+  egress_hosts: string[]
+  gateway_hosts: string[]
+  has_validation: boolean
+  credential_count: number
+  connector_count: number
+  version: number
+  updated_at: string | null
+}
+
+/** Raw descriptor document as stored/edited. Kept loose on purpose: the server validates it. */
+export type ProviderSpec = Record<string, any>
+
+export interface ProviderDetail extends ProviderSummary {
+  spec: ProviderSpec | null
+  origin: string
+}
+
+export interface ProviderListResponse {
+  total: number
+  providers: ProviderSummary[]
+  presets: Record<string, ProviderOption[]>
+  countries: CountryOption[]
+}
+
+export interface ProviderValidateResponse {
+  valid: boolean
+  errors: string[]
+  warnings: string[]
+  spec: ProviderSpec | null
+  egress_hosts: string[]
+  gateway_hosts: string[]
+  discovery_hosts: string[]
+  yaml: string | null
+}
+
+export interface ProviderTestResponse {
+  ok: boolean
+  message: string
+  result: unknown
+  traces: { method: string; url: string; status: number | null; elapsed_ms: number; error: string | null; page: number; headers: Record<string, string> }[]
+}
+
+export interface ProviderAuditEntry {
+  id: string
+  provider_id: string
+  action: 'created' | 'updated' | 'deleted' | 'imported'
+  actor: string
+  egress_hosts: string[]
+  hosts_changed: boolean
+  created_at: string
+}
+
+export interface ResolvedProviderOption {
+  value: string
+  label: string
+  description: string | null
+  extra: Record<string, unknown>
+}
+
+/** 409 body returned when a descriptor's egress hosts still need confirming. */
+export interface HostConfirmationRequired {
+  detail: string
+  egress_hosts: string[]
+  unconfirmed_hosts: string[]
+}
+
+export const isHostConfirmationError = (error: unknown): HostConfirmationRequired | null => {
+  const detail = (error as any)?.response?.data?.detail
+  if ((error as any)?.response?.status === 409 && detail && Array.isArray(detail.unconfirmed_hosts)) return detail as HostConfirmationRequired
+  return null
 }
 
 export interface Credential {
@@ -391,7 +483,7 @@ export interface ConnectorOptions {
   gcp_machine_types: InstanceTypeOption[]
   azure_locations: RegionOption[]
   azure_vm_sizes: InstanceTypeOption[]
-  oxylabs_countries: CountryOption[]
+  countries: CountryOption[]
 }
 
 export interface PoolMetrics {
@@ -654,9 +746,68 @@ export const fetchConnectorOptions = async (): Promise<ConnectorOptions> => {
   return response.data
 }
 
-// BrightData API functions
-export const fetchBrightDataZones = async (credentialId: string): Promise<BrightDataZone[]> => {
-  const response = await api.get(`/brightdata/zones/${credentialId}`)
+// Provider catalog + admin descriptor API functions
+export const fetchProviders = async (): Promise<ProviderListResponse> => {
+  const response = await api.get('/providers')
+  return response.data
+}
+
+export const fetchProvider = async (providerId: string): Promise<ProviderDetail> => {
+  const response = await api.get(`/providers/${providerId}`)
+  return response.data
+}
+
+export const resolveProviderOptions = async (
+  providerId: string,
+  optionName: string,
+  body: { credential_id?: string; credential_config?: Record<string, unknown>; connector_config?: Record<string, unknown> },
+): Promise<ResolvedProviderOption[]> => {
+  const response = await api.post(`/providers/${providerId}/options/${optionName}`, body)
+  return response.data.options
+}
+
+export const validateProviderSpec = async (spec: ProviderSpec): Promise<ProviderValidateResponse> => {
+  const response = await api.post('/providers/validate', { spec })
+  return response.data
+}
+
+export const createProvider = async (spec: ProviderSpec, confirmedHosts: string[]): Promise<ProviderDetail> => {
+  const response = await api.post('/providers', { spec, confirmed_hosts: confirmedHosts })
+  return response.data
+}
+
+export const updateProvider = async (
+  providerId: string,
+  data: { spec?: ProviderSpec; enabled?: boolean; confirmed_hosts?: string[] },
+): Promise<ProviderDetail> => {
+  const response = await api.put(`/providers/${providerId}`, data)
+  return response.data
+}
+
+export const deleteProvider = async (providerId: string): Promise<void> => {
+  await api.delete(`/providers/${providerId}`)
+}
+
+export const importProviderYaml = async (yaml: string, confirmedHosts: string[], replace = false): Promise<ProviderDetail> => {
+  const response = await api.post('/providers/import', { yaml, confirmed_hosts: confirmedHosts, replace })
+  return response.data
+}
+
+export const exportProviderYaml = async (providerId: string): Promise<string> => {
+  const response = await api.get(`/providers/${providerId}/export`, { responseType: 'text', transformResponse: [(d) => d] })
+  return response.data as string
+}
+
+export const fetchProviderAudit = async (providerId: string): Promise<{ total: number; entries: ProviderAuditEntry[] }> => {
+  const response = await api.get(`/providers/${providerId}/audit`)
+  return response.data
+}
+
+export const testProvider = async (
+  providerId: string,
+  body: { action: 'validate' | 'options' | 'list_proxies'; credential_config: Record<string, unknown>; connector_config?: Record<string, unknown>; option_name?: string; spec?: ProviderSpec },
+): Promise<ProviderTestResponse> => {
+  const response = await api.post(`/providers/${providerId}/test`, body)
   return response.data
 }
 

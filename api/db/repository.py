@@ -15,13 +15,16 @@ from api.db.models import (
     CredentialModel,
     ProjectMetricsModel,
     ProjectModel,
+    ProviderAuditModel,
+    ProviderDescriptorModel,
     ProxyMetricsModel,
     ProxyModel,
     UserModel,
 )
 from api.models.connector import Connector
-from api.models.credential import Credential, CredentialType
+from api.models.credential import Credential
 from api.models.project import MitmBrowser, MitmEngine, MitmMode, Project
+from api.models.provider import ProviderAuditEntry, ProviderRecord
 from api.models.proxy import Proxy, ProxyProtocol
 from api.models.user import User, UserRole
 
@@ -184,7 +187,7 @@ class CredentialRepository:
         model = CredentialModel(
             id=credential.id,
             name=credential.name,
-            type=credential.type.value if isinstance(credential.type, CredentialType) else credential.type,
+            type=credential.type,
             project_id=credential.project_id,
             config=credential.config,
             created_at=credential.created_at,
@@ -219,7 +222,7 @@ class CredentialRepository:
         return Credential(
             id=model.id,
             name=model.name,
-            type=CredentialType(model.type),
+            type=model.type,
             project_id=model.project_id,
             config=model.config,
             created_at=model.created_at,
@@ -330,7 +333,7 @@ class ConnectorRepository:
             id=model.id,
             name=model.name,
             credential_id=model.credential_id,
-            credential_type=CredentialType(model.credential.type),
+            credential_type=model.credential.type,
             project_id=model.project_id,
             config=model.config,
             routing_config=model.routing_config or {},
@@ -1038,4 +1041,116 @@ class UserRepository:
             theme_preference=model.theme_preference,
             created_at=model.created_at,
             updated_at=model.updated_at,
+        )
+
+
+class ProviderDescriptorRepository:
+    """Repository for admin-authored provider descriptors."""
+
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+
+    async def get_all(self) -> list[ProviderRecord]:
+        result = await self._session.execute(
+            select(ProviderDescriptorModel).order_by(ProviderDescriptorModel.created_at)
+        )
+        return [self._to_domain(m) for m in result.scalars().all()]
+
+    async def get_by_id(self, provider_id: str) -> ProviderRecord | None:
+        result = await self._session.execute(
+            select(ProviderDescriptorModel).where(ProviderDescriptorModel.id == provider_id)
+        )
+        model = result.scalar_one_or_none()
+        return self._to_domain(model) if model else None
+
+    async def create(self, record: ProviderRecord) -> ProviderRecord:
+        model = ProviderDescriptorModel(
+            id=record.id,
+            name=record.name,
+            spec=record.spec,
+            enabled=record.enabled,
+            version=record.version,
+            created_by=record.created_by,
+            created_at=record.created_at,
+            updated_at=record.updated_at,
+        )
+        self._session.add(model)
+        await self._session.flush()
+        return record
+
+    async def update(self, record: ProviderRecord) -> ProviderRecord:
+        result = await self._session.execute(
+            select(ProviderDescriptorModel).where(ProviderDescriptorModel.id == record.id)
+        )
+        model = result.scalar_one_or_none()
+        if model:
+            model.name = record.name
+            model.spec = record.spec
+            model.enabled = record.enabled
+            model.version = record.version
+            model.updated_at = utc_now()
+            record.updated_at = model.updated_at
+            await self._session.flush()
+        return record
+
+    async def delete(self, provider_id: str) -> bool:
+        result = await self._session.execute(
+            delete(ProviderDescriptorModel).where(ProviderDescriptorModel.id == provider_id)
+        )
+        return bool(result.rowcount and result.rowcount > 0)  # type: ignore[attr-defined]
+
+    def _to_domain(self, model: ProviderDescriptorModel) -> ProviderRecord:
+        return ProviderRecord(
+            id=model.id,
+            name=model.name,
+            spec=model.spec,
+            enabled=model.enabled,
+            version=model.version,
+            created_by=model.created_by,
+            created_at=model.created_at,
+            updated_at=model.updated_at,
+        )
+
+
+class ProviderAuditRepository:
+    """Repository for the provider descriptor audit log."""
+
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+
+    async def add(self, entry: ProviderAuditEntry) -> ProviderAuditEntry:
+        self._session.add(
+            ProviderAuditModel(
+                id=entry.id,
+                provider_id=entry.provider_id,
+                action=entry.action,
+                actor=entry.actor,
+                egress_hosts=entry.egress_hosts,
+                hosts_changed=entry.hosts_changed,
+                spec=entry.spec,
+                created_at=entry.created_at,
+            )
+        )
+        await self._session.flush()
+        return entry
+
+    async def get_for_provider(self, provider_id: str, limit: int = 100) -> list[ProviderAuditEntry]:
+        result = await self._session.execute(
+            select(ProviderAuditModel)
+            .where(ProviderAuditModel.provider_id == provider_id)
+            .order_by(ProviderAuditModel.created_at.desc())
+            .limit(limit)
+        )
+        return [self._to_domain(m) for m in result.scalars().all()]
+
+    def _to_domain(self, model: ProviderAuditModel) -> ProviderAuditEntry:
+        return ProviderAuditEntry(
+            id=model.id,
+            provider_id=model.provider_id,
+            action=model.action,  # type: ignore[arg-type]
+            actor=model.actor,
+            egress_hosts=list(model.egress_hosts or []),
+            hosts_changed=model.hosts_changed,
+            spec=model.spec,
+            created_at=model.created_at,
         )

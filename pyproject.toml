@@ -4,7 +4,7 @@ version = "1.1.0"
 description = "A dynamic and flexible proxy manager"
 readme = "README.md"
 requires-python = ">=3.12"
-license = { text = "Apache-2.0" }
+license = { text = "Apache-2.0 AND LicenseRef-Octoprox-Provider-Descriptors" }
 authors = [{ name = "Octoprox Team" }]
 
 dependencies = [
@@ -38,6 +38,7 @@ dependencies = [
     "h11==0.16.0",
     "bcrypt==5.0.0",
     "dpkt==1.9.8",
+    "jmespath==1.1.0",
 ]
 
 [project.optional-dependencies]
@@ -49,10 +50,16 @@ dev = [
     "mypy==1.15.0",
     "httpx==0.28.1",
     "testcontainers[postgres,redis]==4.14.1",
+    "types-jmespath==1.1.0.20260724",
 ]
 
 [project.scripts]
 octoprox = "api.main:run"
+
+# Third-party provider plugins register here. Each entry point resolves to a
+# ProviderDescriptor, a descriptor dict, a YAML path, or a provider class with
+# a ``descriptor`` attribute. See docs/providers.md.
+[project.entry-points."octoprox.providers"]
 
 [build-system]
 requires = ["hatchling"]

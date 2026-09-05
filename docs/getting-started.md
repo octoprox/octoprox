@@ -220,6 +220,7 @@ Here are the most commonly used commands:
 - [AWS Setup]({{ site.baseurl }}/aws-setup) - Set up AWS cloud connector
 - [GCP Setup]({{ site.baseurl }}/gcp-setup) - Set up GCP cloud connector
 - [Azure Setup]({{ site.baseurl }}/azure-setup) - Set up Azure cloud connector
+- [Proxy Providers & SDK]({{ site.baseurl }}/providers) - Add any proxy vendor as a declarative descriptor
 - [BrightData Setup]({{ site.baseurl }}/brightdata-setup) - Set up BrightData proxy provider
 - [Oxylabs Setup]({{ site.baseurl }}/oxylabs-setup) - Set up Oxylabs proxy provider
 - [API Reference]({{ site.baseurl }}/api) - Explore the REST API
