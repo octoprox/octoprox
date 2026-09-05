@@ -8,6 +8,8 @@ nav_id: oxylabs-setup
 
 The Oxylabs Connector allows Octoprox to use Oxylabs proxy services including residential, mobile, ISP, and datacenter proxies. This guide covers how to configure the connector with your Oxylabs credentials.
 
+> **Built-in descriptor:** Oxylabs is implemented as a shipped provider descriptor. Admins can inspect or export it under **Settings → Providers** and use it as a template for other vendors. See the [Providers guide]({{ site.baseurl }}/providers).
+
 ## Prerequisites
 
 - An Oxylabs account with an active subscription
@@ -113,7 +115,7 @@ curl -X POST http://localhost:8000/api/v1/projects/{project_id}/connectors \
 | `country_code` | No | 2-letter country code for geo-targeting (session-based only) | `null` (all countries) |
 | `session_duration_minutes` | No | Session duration in minutes (1-30, session-based only) | `10` |
 
-> **Note:** `country_code` and `session_duration_minutes` only apply to session-based proxy types (residential, mobile). They are ignored for port-based types.
+> **Note:** `country_code` and `session_duration_minutes` only apply to session-based proxy types (residential, mobile) and are encoded in the proxy username as `cc-XX` and `sesstime-N`. They are ignored for port-based types.
 
 ## Proxy Type Endpoints
 

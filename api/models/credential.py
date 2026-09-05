@@ -1,7 +1,13 @@
 # Copyright 2026 Octoprox Authors
 # SPDX-License-Identifier: Apache-2.0
 
-"""Credential model definitions for provider authentication."""
+"""Credential model definitions for provider authentication.
+
+``Credential.type`` is an open string: it names a provider type in the
+provider registry. The :class:`CredentialType` enum only enumerates the
+code-implemented types (static lists and the three clouds); every other type
+comes from a provider descriptor and is validated by the registry.
+"""
 
 import json
 from datetime import datetime
@@ -15,23 +21,11 @@ from api.core import utc_now
 
 
 class CredentialType(str, Enum):
-    """Types of credentials for different providers."""
+    """Code-implemented credential types (descriptor providers are open strings)."""
     STATIC_PROXY_PROVIDER = "static_proxy_provider"
     AWS = "aws"
     GCP = "gcp"
     AZURE = "azure"
-    OXYLABS = "oxylabs"
-    BRIGHTDATA = "brightdata"
-
-
-class OxylabsProxyType(str, Enum):
-    """Types of Oxylabs proxies."""
-    RESIDENTIAL = "residential"
-    MOBILE = "mobile"
-    ISP = "isp"
-    DEDICATED_ISP = "dedicated_isp"
-    DATACENTER = "datacenter"
-    DATACENTER_DEDICATED = "datacenter_dedicated"
 
 
 # --- Typed Config Models for Validation ---
@@ -103,59 +97,28 @@ class AzureCredentialConfig(BaseModel):
         return self
 
 
-class OxylabsCredentialConfig(BaseModel):
-    """Configuration for Oxylabs credentials."""
-    proxy_type: OxylabsProxyType
-    username: str
-    password: str
-
-    @model_validator(mode='after')
-    def validate_required_fields(self) -> 'OxylabsCredentialConfig':
-        """Ensure required fields are not empty."""
-        if not self.username or not self.username.strip():
-            raise ValueError('username is required and cannot be empty')
-        if not self.password or not self.password.strip():
-            raise ValueError('password is required and cannot be empty')
-        return self
+_CODE_CREDENTIAL_MODELS: dict[str, type[BaseModel]] = {
+    CredentialType.STATIC_PROXY_PROVIDER.value: StaticProxyProviderConfig,
+    CredentialType.AWS.value: AWSCredentialConfig,
+    CredentialType.GCP.value: GCPCredentialConfig,
+    CredentialType.AZURE.value: AzureCredentialConfig,
+}
 
 
-class BrightDataCredentialConfig(BaseModel):
-    """Configuration for BrightData credentials."""
-    token: str
-    customer_id: str
-
-    @model_validator(mode='after')
-    def validate_required_fields(self) -> 'BrightDataCredentialConfig':
-        """Ensure required fields are not empty."""
-        if not self.token or not self.token.strip():
-            raise ValueError('token is required and cannot be empty')
-        if not self.customer_id or not self.customer_id.strip():
-            raise ValueError('customer_id is required and cannot be empty')
-        return self
+def is_code_credential_type(credential_type: str) -> bool:
+    """True for the types validated by the Pydantic models in this module."""
+    return str(credential_type) in _CODE_CREDENTIAL_MODELS
 
 
-def validate_credential_config(credential_type: CredentialType, config: dict[str, Any]) -> dict[str, Any]:
-    """Validate credential config based on type and return validated config."""
-    validated: StaticProxyProviderConfig | AWSCredentialConfig | GCPCredentialConfig | AzureCredentialConfig | OxylabsCredentialConfig | BrightDataCredentialConfig
-    if credential_type == CredentialType.STATIC_PROXY_PROVIDER:
-        validated = StaticProxyProviderConfig(**config)
-    elif credential_type == CredentialType.AWS:
-        validated = AWSCredentialConfig(**config)
-    elif credential_type == CredentialType.GCP:
-        validated = GCPCredentialConfig(**config)
-    elif credential_type == CredentialType.AZURE:
-        validated = AzureCredentialConfig(**config)
-    elif credential_type == CredentialType.OXYLABS:
-        validated = OxylabsCredentialConfig(**config)
-    elif credential_type == CredentialType.BRIGHTDATA:
-        # BrightData validation is handled in the route after fetching customer_id from API
-        # Just validate that token is present here
-        if not config.get("token"):
-            raise ValueError("token is required")
-        return config
-    else:
+def validate_credential_config(credential_type: str, config: dict[str, Any]) -> dict[str, Any]:
+    """Validate a code-implemented credential type's config and return the normalised dict.
+
+    Descriptor-driven types are validated by the provider registry, not here.
+    """
+    model = _CODE_CREDENTIAL_MODELS.get(str(credential_type))
+    if model is None:
         raise ValueError(f"Unknown credential type: {credential_type}")
-    return validated.model_dump(exclude_none=True)
+    return model(**config).model_dump(exclude_none=True)
 
 
 class Credential(BaseModel):
@@ -163,7 +126,7 @@ class Credential(BaseModel):
 
     id: str = Field(default_factory=lambda: str(uuid4()))
     name: str
-    type: CredentialType
+    type: str
     project_id: str
     config: dict[str, Any] = Field(default_factory=dict)
 
@@ -171,18 +134,21 @@ class Credential(BaseModel):
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
 
+    @model_validator(mode='after')
+    def _normalise_type(self) -> 'Credential':
+        self.type = str(self.type.value) if isinstance(self.type, Enum) else str(self.type)
+        return self
+
 
 class CredentialCreate(BaseModel):
-    """Schema for creating a new credential."""
-    name: str
-    type: CredentialType
-    config: dict[str, Any] = Field(default_factory=dict)
+    """Schema for creating a new credential.
 
-    @model_validator(mode='after')
-    def validate_config(self) -> 'CredentialCreate':
-        """Validate config based on credential type."""
-        self.config = validate_credential_config(self.type, self.config)
-        return self
+    Config validation happens in the route via the provider registry, which
+    knows every registered type (code and descriptor).
+    """
+    name: str
+    type: str
+    config: dict[str, Any] = Field(default_factory=dict)
 
 
 class CredentialUpdate(BaseModel):
@@ -215,4 +181,3 @@ class CredentialDetailResponse(BaseModel):
     config: dict[str, Any]
     created_at: datetime
     updated_at: datetime
-

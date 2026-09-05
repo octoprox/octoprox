@@ -10,6 +10,8 @@ nav_id: brightdata-setup
 
 The BrightData Connector allows Octoprox to use BrightData proxy services including residential, mobile, ISP, and datacenter proxies. This guide covers how to configure the connector with your BrightData credentials.
 
+> **Built-in descriptor:** Bright Data is implemented as a shipped provider descriptor. Admins can inspect or export it under **Settings → Providers** and use it as a template for other vendors. See the [Providers guide]({{ site.baseurl }}/providers).
+
 ## Prerequisites
 
 - A BrightData account with an active subscription

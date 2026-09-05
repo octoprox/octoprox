@@ -1,0 +1,77 @@
+# Copyright 2026 Octoprox Authors. All rights reserved.
+# SPDX-License-Identifier: LicenseRef-Octoprox-Provider-Descriptors
+#
+# This built-in provider descriptor is NOT licensed under Apache-2.0.
+# See api/providers/builtin/LICENSE for the terms that apply to it.
+#
+# Webshare — the account API returns the concrete proxy list (host, port and
+# per-proxy credentials), which Octoprox mirrors. Marked beta until exercised
+# against a live account.
+id: webshare
+name: Webshare
+description: Datacenter, static residential and rotating residential proxy lists
+docs_url: https://apidocs.webshare.io/
+beta: true
+
+credential_fields:
+  - key: api_key
+    label: API key
+    type: password
+    secret: true
+    required: true
+
+connector_fields:
+  - key: mode
+    label: Connection mode
+    type: select
+    required: true
+    default: direct
+    options:
+      - { value: direct, label: Direct, description: Connect to each proxy's own IP and port }
+      - { value: backbone, label: Backbone, description: Connect through p.webshare.io (required for residential plans) }
+  - key: plan_id
+    label: Plan ID
+    help: Leave empty for the account's default plan.
+  - key: country_codes
+    label: Countries
+    placeholder: US,FR
+    help: Comma-separated ISO country codes to filter the list (optional).
+    transform: upper
+  - key: num_proxies
+    label: Maximum proxies
+    type: number
+    min: 1
+    help: Leave empty to mirror the whole list.
+
+validation:
+  call:
+    url: https://proxy.webshare.io/api/v2/profile/
+    headers:
+      Authorization: "Token {credential.api_key}"
+  error_message: Invalid Webshare API key
+
+proxy_types:
+  - key: proxies
+    label: Proxy list
+    mode: list
+    list:
+      call:
+        url: https://proxy.webshare.io/api/v2/proxy/list/
+        headers:
+          Authorization: "Token {credential.api_key}"
+        params:
+          mode: "{connector.mode}"
+          page_size: "100"
+          plan_id: "{connector.plan_id}"
+          country_code__in: "{connector.country_codes}"
+        paginate:
+          next_url: next
+      items: results
+      host: proxy_address
+      port: port
+      username: username
+      password: password
+      country: country_code
+      identity: id
+      filter: valid
+    tags: [webshare]

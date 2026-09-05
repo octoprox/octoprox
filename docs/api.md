@@ -121,6 +121,8 @@ GET /api/v1/projects/{project_id}/credentials
 
 ### Create Credential
 
+`type` is any provider id from the catalog. The config is validated against the provider's field schema; descriptor providers with a validation call also verify the credential with the vendor and may store captured values (for example Bright Data's customer id).
+
 ```bash
 POST /api/v1/projects/{project_id}/credentials
 Content-Type: application/json
@@ -278,11 +280,13 @@ Returns `200` with `{"status": "ok", "proxy_id": "..."}` on success, `400` if th
 
 ### Get Connector Options
 
-Get available regions, instance types, and other options for each cloud provider:
+Get available regions, instance types, the country list and other static options:
 
 ```bash
 GET /api/v1/connector-options
 ```
+
+Provider-specific dynamic options (zones, entry nodes, sub-users) are served by the [provider options endpoint](#resolve-provider-options).
 
 ### Get Connector
 

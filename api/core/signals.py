@@ -165,6 +165,13 @@ credential_changed = signal("credential-changed")
 connector_changed = signal("connector-changed")
 proxy_changed = signal("proxy-changed")
 
+# Emitted by the providers routes after a custom provider descriptor is
+# created, updated or deleted. Cross-instance: receivers reload that
+# descriptor from Postgres into their provider registry (or unregister it).
+# Sender: providers route
+# Args: entity_id (provider_id, str), op (Literal["added", "updated", "removed"])
+provider_changed = signal("provider-changed")
+
 # Emitted by RateLimiter when a proxy is quarantined or released.
 # Cross-instance: receivers re-hydrate that proxy's quarantine TTL from
 # Redis so peer-side quarantines block traffic on this instance too.

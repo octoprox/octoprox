@@ -1,0 +1,22 @@
+Octoprox Built-in Provider Descriptors
+Copyright 2026 Octoprox Authors. All rights reserved.
+
+The provider descriptor files in this directory (api/providers/builtin/) are
+NOT covered by the Apache License, Version 2.0 that applies to the rest of
+Octoprox.
+
+Permission is granted to use these files solely as part of, and together with,
+an Octoprox installation, for the purpose of provisioning proxies through the
+providers they describe.
+
+Except as stated above, no rights are granted. In particular you may not copy,
+modify, adapt, translate, redistribute, publish, sublicense, sell, or create
+derivative works from these files, in whole or in part, or extract them for use
+outside Octoprox, without prior written permission from the Octoprox Authors.
+
+THE FILES ARE PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+
+Descriptors you author yourself (through the Octoprox UI, a mounted directory,
+or a plugin) are your own work and are not subject to these terms.

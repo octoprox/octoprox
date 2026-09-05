@@ -173,7 +173,7 @@ async def create_proxy(
     if credential is None:
         raise HTTPException(status_code=400, detail="Connector's credential not found")
 
-    credential_type = credential.type if isinstance(credential.type, str) else credential.type.value
+    credential_type = credential.type
     if credential_type != CredentialType.STATIC_PROXY_PROVIDER.value:
         raise HTTPException(
             status_code=400,
@@ -240,7 +240,7 @@ async def upload_proxies(
     if credential is None:
         raise HTTPException(status_code=400, detail="Connector's credential not found")
 
-    credential_type = credential.type if isinstance(credential.type, str) else credential.type.value
+    credential_type = credential.type
     if credential_type != CredentialType.STATIC_PROXY_PROVIDER.value:
         raise HTTPException(
             status_code=400,

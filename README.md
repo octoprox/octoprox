@@ -7,6 +7,7 @@ A dynamic and flexible proxy manager that acts as an intelligent proxy aggregato
 ## Features
 
 - **Cloud Integrations**: Dynamically provision proxy instances on AWS, GCP, and Azure
+- **Proxy Providers & SDK**: Oxylabs, Bright Data, Decodo, Webshare, IPRoyal and NetNut ship as declarative descriptors; admins add any other vendor from the UI without code or a redeploy (see [docs/providers.md](docs/providers.md))
 - **Static Proxy Support**: Manage manually configured proxy servers
 - **Routing Strategies**: Round-robin, least-used, random, sticky session, and health-based routing
 - **Health Monitoring**: Automatic health checks with configurable intervals and thresholds
@@ -442,6 +443,14 @@ For detailed setup instructions, see:
 - [GCP Connector Setup](docs/gcp-setup.md) - Compute Engine VMs as proxy servers
 - [Azure Connector Setup](docs/azure-setup.md) - Azure VMs as proxy servers
 
+## Proxy Providers
+
+Residential, ISP and datacenter vendors are integrated through the provider SDK: each vendor is a YAML descriptor that declares its credential and connector fields, how they turn into proxy endpoints (gateway sessions, port-mapped IPs or an API-served list) and which vendor API calls discover zones or validate credentials. Oxylabs, Bright Data, Decodo, Webshare, IPRoyal and NetNut are shipped; admins can add or duplicate providers under **Settings → Providers**, operators can mount YAML files or install Python plugins.
+
+- [Providers & SDK](docs/providers.md) - Descriptor format, security model, UI builder
+- [BrightData Setup](docs/brightdata-setup.md)
+- [Oxylabs Setup](docs/oxylabs-setup.md)
+
 ## Makefile Commands
 
 ```bash
@@ -472,4 +481,6 @@ make web-build     # Build frontend for production
 
 ## License
 
-This project is licensed under the Apache License, Version 2.0 - see the [LICENSE](LICENSE) file for details.
+Octoprox is licensed under the Apache License, Version 2.0 - see the [LICENSE](LICENSE) file for details.
+
+**Exception:** the built-in provider descriptors in [api/providers/builtin/](api/providers/builtin/) (the YAML files describing Oxylabs, Bright Data, Decodo, Webshare, IPRoyal and NetNut) are proprietary, all rights reserved, and may only be used as part of an Octoprox installation. See [api/providers/builtin/LICENSE](api/providers/builtin/LICENSE). Descriptors you author yourself are your own work.

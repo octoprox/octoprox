@@ -11,12 +11,11 @@ import {
 } from '../api/client'
 import { useProject } from '../contexts/ProjectContext'
 import { useAuth } from '../contexts/AuthContext'
-import { useTheme } from '../contexts/ThemeContext'
 import { useToast } from '../contexts/ToastContext'
 import { DataTable, createSelectionColumn } from '../components/DataTable'
 import { Page } from '../components/layout/Page'
 import { ProxyStatusDot, ProxyStatusBadge, formatQuarantineRemaining } from '../components/ProxyStatus'
-import { CREDENTIAL_TYPES } from '../utils/credentials'
+import { ProviderLogo } from '../components/ProviderLogo'
 import { formatBytes, formatDate, formatDateTime } from '../utils/format'
 import { Button, Input, Select, Label, Alert, Inspector, InspectorSection, StatGrid, KeyValue, ConfirmDialog } from '../components/ui'
 
@@ -304,7 +303,6 @@ function ProxyPanel({ proxy, connectorType, canMutate, onClose, onRelease, onDel
   onSaved: () => void
 }) {
   const { selectedProjectId } = useProject()
-  const { isDark } = useTheme()
   const toast = useToast()
   const [form, setForm] = useState({ host: proxy.host, port: String(proxy.port), protocol: proxy.protocol, username: proxy.username || '', password: proxy.password || '' })
   const dirty = form.host !== proxy.host || form.port !== String(proxy.port) || form.protocol !== proxy.protocol || form.username !== (proxy.username || '') || form.password !== (proxy.password || '')
@@ -315,7 +313,6 @@ function ProxyPanel({ proxy, connectorType, canMutate, onClose, onRelease, onDel
     onError: (e: Error) => toast.show(e.message || 'Failed to save proxy', 'error'),
   })
 
-  const connectorMeta = CREDENTIAL_TYPES.find((t) => t.value === connectorType)
   // Only static-provider proxies are hand-edited; cloud and provider proxies are managed by their connector.
   const isStatic = connectorType === 'static_proxy_provider'
 
@@ -367,7 +364,7 @@ function ProxyPanel({ proxy, connectorType, canMutate, onClose, onRelease, onDel
           <div>
             <Label className="text-xs">Connector</Label>
             <div className="h-9 px-3 rounded-lg bg-surface-raised text-fg-muted text-sm flex items-center gap-2">
-              {connectorMeta && <img src={isDark ? connectorMeta.logoDark : connectorMeta.logo} alt="" className="w-4 h-4" />}
+              {connectorType && <ProviderLogo type={connectorType} className="w-4 h-4 text-[16px]" />}
               <span className="truncate flex-1">{proxy.connector_name || '—'}</span>
               <Lock className="w-3.5 h-3.5 text-fg-subtle" />
             </div>

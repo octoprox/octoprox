@@ -6,7 +6,7 @@ import { NavLink as RouterNavLink, Outlet, useLocation, useNavigate, useParams }
 import { useQuery } from '@tanstack/react-query'
 import {
   BarChart3, Server, Link2, Key, Eye, Settings as SettingsIcon, LogOut, ChevronLeft, ChevronRight,
-  ChevronsUpDown, FolderOpen, ArrowLeft, User as UserIcon, Palette, Users as UsersIcon, DatabaseBackup,
+  ChevronsUpDown, FolderOpen, ArrowLeft, User as UserIcon, Palette, Users as UsersIcon, DatabaseBackup, Puzzle,
 } from 'lucide-react'
 import octoproxLogo from '../../assets/logos/octoprox_horizontal.svg'
 import octoproxLogoDark from '../../assets/logos/octoprox_horizontal_dark.svg'
@@ -31,6 +31,7 @@ const PAGE_TITLES: Record<string, string> = {
   appearance: 'Appearance',
   users: 'Users',
   backup: 'Backup & Migration',
+  providers: 'Providers',
 }
 
 /**
@@ -132,6 +133,7 @@ export default function AppShell({ onLogout }: { onLogout: () => void }) {
                 <>
                   <NavGroup label="Administration" collapsed={collapsed} />
                   <NavItem to={`${settingsBase}/users`} icon={<UsersIcon />} label="Users" collapsed={collapsed} />
+                  <NavItem to={`${settingsBase}/providers`} icon={<Puzzle />} label="Providers" collapsed={collapsed} />
                   <NavItem to={`${settingsBase}/backup`} icon={<DatabaseBackup />} label="Backup & Migration" collapsed={collapsed} />
                 </>
               )}

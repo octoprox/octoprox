@@ -28,13 +28,13 @@ from api.db.session import get_async_session_factory
 from api.routes import (
     auth,
     backup,
-    brightdata,
     connectors,
     credentials,
     health,
     metrics,
     mitm,
     projects,
+    providers,
     proxies,
     users,
 )
@@ -153,7 +153,7 @@ def create_app() -> FastAPI:
         metrics.router, prefix="/api/v1", tags=["Metrics"], dependencies=auth_dependency
     )
     app.include_router(
-        brightdata.router, prefix="/api/v1", tags=["BrightData"], dependencies=auth_dependency
+        providers.router, prefix="/api/v1", tags=["Providers"], dependencies=auth_dependency
     )
     app.include_router(mitm.router, prefix="/api/v1", tags=["MITM"], dependencies=auth_dependency)
     app.include_router(

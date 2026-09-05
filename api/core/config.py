@@ -52,6 +52,17 @@ def _load_yaml_config(config_path: Path) -> dict[str, Any]:
             flat_config["max_retries"] = proxy_cfg["connection"].get("max_retries")
         if "ip_refresh_interval" in proxy_cfg:
             flat_config["ip_refresh_interval"] = proxy_cfg["ip_refresh_interval"]
+    if "providers" in config_data:
+        providers_cfg = config_data["providers"] or {}
+        flat_config["providers_dir"] = providers_cfg.get("dir")
+        if "egress" in providers_cfg:
+            egress_cfg = providers_cfg["egress"] or {}
+            flat_config["provider_egress_allow_http"] = egress_cfg.get("allow_http")
+            flat_config["provider_egress_allow_private"] = egress_cfg.get("allow_private")
+        if "http" in providers_cfg:
+            http_cfg = providers_cfg["http"] or {}
+            flat_config["provider_http_timeout_seconds"] = http_cfg.get("timeout_seconds")
+            flat_config["provider_http_max_response_bytes"] = http_cfg.get("max_response_bytes")
 
     if "tls_mitm" in config_data:
         mitm_cfg = config_data["tls_mitm"]
@@ -193,6 +204,26 @@ class Settings(BaseSettings):
     connection_timeout: int = Field(default=30)
     max_retries: int = Field(default=3)
     ip_refresh_interval: int = Field(default=3600, description="IP refresh interval in seconds for port-based proxies")
+
+    # Provider SDK settings
+    providers_dir: str | None = Field(
+        default=None,
+        description="Directory of operator-supplied provider descriptor YAML files (loaded at startup)",
+    )
+    provider_egress_allow_http: bool = Field(
+        default=False, description="Allow descriptors to call plain-http vendor APIs (development only)"
+    )
+    provider_egress_allow_private: bool = Field(
+        default=False,
+        description="Allow descriptor API calls to private/loopback addresses (development and tests only)",
+    )
+    provider_http_timeout_seconds: float = Field(
+        default=60.0, description="Timeout for a single vendor API request made for a descriptor"
+    )
+    provider_http_max_response_bytes: int = Field(
+        default=50 * 1024 * 1024,
+        description="Largest vendor API response accepted (0 disables the limit)",
+    )
 
     # TLS MITM settings
     tls_mitm_ca_cert_path: str = Field(

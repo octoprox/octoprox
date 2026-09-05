@@ -8,24 +8,25 @@ import { ColumnDef } from '@tanstack/react-table'
 import { Link2, Trash2, Plus, AlertTriangle } from 'lucide-react'
 import {
   fetchProjectConnectors, fetchProjectCredentials, fetchProjectCredential, fetchConnectorOptions,
-  createProjectConnector, updateProjectConnector, deleteProjectConnector, fetchBrightDataZones,
-  Connector, CredentialType, ConnectorCreate, ConnectorUpdate, ConnectorOptions, OxylabsProxyType, BrightDataProxyType,
+  createProjectConnector, updateProjectConnector, deleteProjectConnector,
+  Connector, CredentialType, ConnectorCreate, ConnectorUpdate, ConnectorOptions, ProviderField,
   RoutingConfig, RateLimitConfig, Credential, CredentialDetail,
 } from '../api/client'
 import { useProject } from '../contexts/ProjectContext'
-import { useTheme } from '../contexts/ThemeContext'
 import { useAuth } from '../contexts/AuthContext'
 import { useToast } from '../contexts/ToastContext'
+import { useProviders } from '../hooks/useProviders'
 import { DataTable } from '../components/DataTable'
 import { Page, EmptyState } from '../components/layout/Page'
 import { NewCredentialPanel, TypePicker, TypeCard } from '../components/CredentialForm'
-import { CREDENTIAL_TYPES } from '../utils/credentials'
+import { ProviderLogo } from '../components/ProviderLogo'
+import { SchemaForm, defaultValues, serializeValues } from '../components/SchemaForm'
 import { relativeTime, formatDateTime, formatDate } from '../utils/format'
 import { RichSelect, RichSelectOption } from '../components/RichSelect'
 import { Button, Input, Label, Badge, Alert, ChipInput, Inspector, Tabs, ConfirmDialog, KeyValue, InspectorSection } from '../components/ui'
 
 type DomainFilterMode = 'none' | 'whitelist' | 'blacklist'
-type ConfigTab = 'infrastructure' | 'scaling' | 'advanced' | 'routing' | 'rate_limiting'
+type ConfigTab = string
 
 interface ConnectorFormData {
   name: string
@@ -43,19 +44,15 @@ const EMPTY_FORM: ConnectorFormData = { name: '', credential_id: '', config: {},
 
 const getConfiguredProxies = (connector: Connector): number | null => {
   const config = connector.config
-  const credType = connector.credential_type
-  if (!credType || credType === 'static_proxy_provider') return null
-  if (credType === 'oxylabs' || credType === 'brightdata') return typeof config.num_proxies === 'number' ? config.num_proxies : null
-  if (credType === 'aws' || credType === 'gcp' || credType === 'azure') return typeof config.max_proxies === 'number' ? config.max_proxies : null
+  if (!connector.credential_type || connector.credential_type === 'static_proxy_provider') return null
+  if (typeof config.num_proxies === 'number') return config.num_proxies
+  if (typeof config.max_proxies === 'number') return config.max_proxies
   return null
 }
 
-const getCredentialTypeLabel = (type: string | null) => {
-  if (!type) return 'Unknown'
-  return CREDENTIAL_TYPES.find((ct) => ct.value === type)?.label || type
-}
+const CLOUD_TYPES = new Set(['aws', 'gcp', 'azure'])
 
-const getDefaultConfig = (type: CredentialType | null, options?: ConnectorOptions): Record<string, string> => {
+const getDefaultConfig = (type: CredentialType | null, options?: ConnectorOptions, fields?: ProviderField[]): Record<string, string> => {
   switch (type) {
     case 'static_proxy_provider':
       return {}
@@ -65,12 +62,12 @@ const getDefaultConfig = (type: CredentialType | null, options?: ConnectorOption
       return { project_id: '', instance_name: '', zone: options?.gcp_zones[0]?.code || 'us-central1-a', machine_type: options?.gcp_machine_types[0]?.code || 'e2-micro', network: 'default', tags: '{}', min_proxies: '1', max_proxies: '10', min_rotation_period_minutes: '60', max_rotation_period_minutes: '1440' }
     case 'azure':
       return { subscription_id: '', resource_group: '', instance_name: '', location: options?.azure_locations[0]?.code || 'eastus', vm_size: options?.azure_vm_sizes[0]?.code || 'Standard_B1s', vnet_name: '', subnet_name: '', ssh_public_key: '', tags: '{}', min_proxies: '1', max_proxies: '10', min_rotation_period_minutes: '60', max_rotation_period_minutes: '1440' }
-    case 'oxylabs':
-      return { num_proxies: '1', country_code: '', session_duration_minutes: '10' }
     default:
-      return {}
+      return fields ? defaultValues(fields) : {}
   }
 }
+
+const groupLabel = (group: string) => (group === 'general' ? 'General' : group.charAt(0).toUpperCase() + group.slice(1).replace(/_/g, ' '))
 
 // ---------------------------------------------------------------------------
 // Page
@@ -80,8 +77,8 @@ type PanelState = { kind: 'edit'; id: string } | { kind: 'new' } | null
 export default function ConnectorsPage() {
   const queryClient = useQueryClient()
   const { selectedProjectId } = useProject()
-  const { isDark } = useTheme()
   const { canMutate } = useAuth()
+  const { labelFor } = useProviders()
   const toast = useToast()
   const [searchParams, setSearchParams] = useSearchParams()
   const [panel, setPanel] = useState<PanelState>(null)
@@ -126,15 +123,12 @@ export default function ConnectorsPage() {
       accessorKey: 'name',
       header: 'Connector',
       meta: { filterVariant: 'text' as const },
-      cell: ({ row }) => {
-        const ct = CREDENTIAL_TYPES.find((t) => t.value === row.original.credential_type)
-        return (
-          <span className="inline-flex items-center gap-2.5 max-w-full">
-            {ct && <img src={isDark ? ct.logoDark : ct.logo} alt="" className="w-5 h-5 object-contain flex-none" />}
-            <span className="font-medium truncate">{row.original.name}</span>
-          </span>
-        )
-      },
+      cell: ({ row }) => (
+        <span className="inline-flex items-center gap-2.5 max-w-full">
+          <ProviderLogo type={row.original.credential_type} className="w-5 h-5 text-[20px]" />
+          <span className="font-medium truncate">{row.original.name}</span>
+        </span>
+      ),
     },
     {
       id: 'credential',
@@ -143,7 +137,7 @@ export default function ConnectorsPage() {
       meta: { filterVariant: 'text' as const },
       cell: ({ row }) => (
         <span className="text-fg-muted truncate block">
-          {row.original.credential_name || 'Unknown'} <span className="text-fg-subtle">· {getCredentialTypeLabel(row.original.credential_type)}</span>
+          {row.original.credential_name || 'Unknown'} <span className="text-fg-subtle">· {labelFor(row.original.credential_type)}</span>
         </span>
       ),
     },
@@ -202,7 +196,7 @@ export default function ConnectorsPage() {
         </div>
       ),
     }] as ColumnDef<Connector>[] : []),
-  ], [canMutate, isDark])
+  ], [canMutate, labelFor])
 
   let panelNode: React.ReactNode = null
   if (panel?.kind === 'edit' && openConnector) {
@@ -294,9 +288,15 @@ function ConnectorEditor({ connector, canMutate, onClose, onDelete, onSaved }: {
 }) {
   const queryClient = useQueryClient()
   const { selectedProjectId } = useProject()
+  const { get: getProvider, presets, labelFor } = useProviders()
   const isEdit = !!connector
+  const readOnly = !canMutate
 
   const [type, setType] = useState<CredentialType | null>((connector?.credential_type as CredentialType) ?? null)
+  const provider = getProvider(type)
+  const isCloud = !!type && CLOUD_TYPES.has(type)
+  const isDescriptor = provider?.kind === 'descriptor'
+  const descriptorFields = provider?.connector_fields ?? []
   const [formData, setFormData] = useState<ConnectorFormData>(() => {
     if (!connector) return EMPTY_FORM
     const configForForm: Record<string, string> = {}
@@ -312,7 +312,11 @@ function ConnectorEditor({ connector, canMutate, onClose, onDelete, onSaved }: {
       enabled: connector.enabled,
     }
   })
-  const [activeTab, setActiveTab] = useState<ConfigTab>(connector?.credential_type === 'static_proxy_provider' ? 'routing' : 'infrastructure')
+  const [activeTab, setActiveTab] = useState<ConfigTab>(() => {
+    if (connector?.credential_type === 'static_proxy_provider') return 'routing'
+    if (connector?.credential_type && !CLOUD_TYPES.has(connector.credential_type)) return 'general'
+    return 'infrastructure'
+  })
   const [error, setError] = useState<string | null>(null)
   const [creatingCredential, setCreatingCredential] = useState(false)
 
@@ -328,18 +332,13 @@ function ConnectorEditor({ connector, canMutate, onClose, onDelete, onSaved }: {
     refetchInterval: false,
     staleTime: Infinity,
   })
+  // Descriptor connectors need the credential's config for show_when conditions
+  // (e.g. session fields only for residential) and for remote option lookups.
   const { data: selectedCredentialData } = useQuery({
     queryKey: ['credential', selectedProjectId, formData.credential_id],
     queryFn: () => fetchProjectCredential(selectedProjectId!, formData.credential_id),
-    enabled: !!selectedProjectId && !!formData.credential_id && type === 'oxylabs',
+    enabled: !!selectedProjectId && !!formData.credential_id && isDescriptor,
     refetchInterval: false,
-  })
-  const { data: brightDataZones } = useQuery({
-    queryKey: ['brightdata-zones', formData.credential_id],
-    queryFn: () => fetchBrightDataZones(formData.credential_id),
-    enabled: !!formData.credential_id && type === 'brightdata',
-    refetchInterval: false,
-    staleTime: 5 * 60 * 1000,
   })
 
   const credentialsForType: Credential[] = useMemo(
@@ -365,13 +364,16 @@ function ConnectorEditor({ connector, canMutate, onClose, onDelete, onSaved }: {
   const handleTypeSelect = (t: CredentialType) => {
     setType(t)
     const creds = credentialsData?.credentials.filter((c) => c.type === t) || []
-    setFormData({ ...EMPTY_FORM, credential_id: creds.length === 1 ? creds[0].id : '', config: getDefaultConfig(t, optionsData) })
-    setActiveTab(t === 'static_proxy_provider' ? 'routing' : 'infrastructure')
+    const p = getProvider(t)
+    setFormData({ ...EMPTY_FORM, credential_id: creds.length === 1 ? creds[0].id : '', config: getDefaultConfig(t, optionsData, p?.connector_fields) })
+    setActiveTab(t === 'static_proxy_provider' ? 'routing' : p?.kind === 'descriptor' ? (p.connector_fields[0]?.group ?? 'general') : 'infrastructure')
   }
 
-  const handleConfigChange = (key: string, value: string) => {
-    setFormData((prev) => ({ ...prev, config: { ...prev.config, [key]: value } }))
+  const handleConfigChange = (key: string, value: string, fill?: Record<string, string>) => {
+    setFormData((prev) => ({ ...prev, config: { ...prev.config, [key]: value, ...(fill ?? {}) } }))
   }
+
+  const schemaScopes = { credential: (selectedCredentialData?.config as Record<string, unknown>) ?? {}, connector: formData.config }
 
   const prepareConfigForSubmit = (config: Record<string, string>): Record<string, unknown> => {
     const result: Record<string, unknown> = { ...config }
@@ -385,7 +387,7 @@ function ConnectorEditor({ connector, canMutate, onClose, onDelete, onSaved }: {
     e.preventDefault()
     setError(null)
     if (!formData.credential_id) { setError('Select or create a credential first.'); return }
-    const preparedConfig = prepareConfigForSubmit(formData.config)
+    const preparedConfig = isDescriptor ? serializeValues(descriptorFields, formData.config, schemaScopes) : prepareConfigForSubmit(formData.config)
     if (isEdit) {
       updateMutation.mutate({ name: formData.name, credential_id: formData.credential_id, enabled: formData.enabled, config: preparedConfig, routing_config: formData.routing_config, rate_limit_config: formData.rate_limit_config })
     } else {
@@ -418,19 +420,6 @@ function ConnectorEditor({ connector, canMutate, onClose, onDelete, onSaved }: {
       </Inspector>
     )
   }
-
-  // --- Oxylabs / BrightData derived state
-  const getOxylabsProxyType = (): OxylabsProxyType | null => {
-    if (type !== 'oxylabs' || !selectedCredentialData) return null
-    return (selectedCredentialData.config as { proxy_type?: OxylabsProxyType })?.proxy_type || null
-  }
-  const isSessionBasedOxylabs = () => { const t = getOxylabsProxyType(); return t === 'residential' || t === 'mobile' }
-  const getBrightDataProxyType = (): BrightDataProxyType | null => {
-    if (type !== 'brightdata' || !formData.config.zone_name || !brightDataZones) return null
-    const zone = brightDataZones.find((z) => z.name === formData.config.zone_name)
-    return (zone?.proxy_type as BrightDataProxyType) || null
-  }
-  const isSessionBasedBrightData = () => { const t = getBrightDataProxyType(); return t === 'residential' || t === 'mobile' }
 
   // --- Routing tab
   const getRoutingMode = (): DomainFilterMode => {
@@ -568,123 +557,37 @@ function ConnectorEditor({ connector, canMutate, onClose, onDelete, onSaved }: {
   }
 
   const tabsFor = (t: CredentialType): { id: ConfigTab; label: string }[] => {
-    if (t === 'static_proxy_provider') return [{ id: 'routing', label: 'Routing' }, { id: 'rate_limiting', label: 'Rate limiting' }]
-    if (t === 'oxylabs') return [{ id: 'infrastructure', label: 'General' }, { id: 'routing', label: 'Routing' }, { id: 'rate_limiting', label: 'Rate limiting' }]
-    if (t === 'brightdata') return [{ id: 'infrastructure', label: 'General' }, { id: 'advanced', label: 'Advanced' }, { id: 'routing', label: 'Routing' }, { id: 'rate_limiting', label: 'Rate limiting' }]
-    return [{ id: 'infrastructure', label: 'Infrastructure' }, { id: 'scaling', label: 'Scaling' }, { id: 'advanced', label: 'Advanced' }, { id: 'routing', label: 'Routing' }, { id: 'rate_limiting', label: 'Rate limiting' }]
+    const common = [{ id: 'routing', label: 'Routing' }, { id: 'rate_limiting', label: 'Rate limiting' }]
+    if (t === 'static_proxy_provider') return common
+    if (isDescriptor) {
+      const groups: string[] = []
+      for (const f of descriptorFields) if (!groups.includes(f.group)) groups.push(f.group)
+      if (groups.length === 0) groups.push('general')
+      return [...groups.map((g) => ({ id: g, label: groupLabel(g) })), ...common]
+    }
+    return [{ id: 'infrastructure', label: 'Infrastructure' }, { id: 'scaling', label: 'Scaling' }, { id: 'advanced', label: 'Advanced' }, ...common]
   }
 
-  const renderOxylabsGeneral = () => {
-    const proxyType = getOxylabsProxyType()
-    const isSessionBased = isSessionBasedOxylabs()
-    const countryOptions: RichSelectOption[] = [
-      { value: '', label: 'All countries', description: 'No geo-targeting' },
-      ...(optionsData?.oxylabs_countries || []).map((c) => ({ value: c.code, label: c.name, description: c.code })),
-    ]
-    return (
-      <div className="space-y-4">
-        <div>
-          <Label className="text-xs">Number of proxies <span className="text-danger">*</span></Label>
-          <Input type="number" min="1" value={formData.config.num_proxies || '1'} onChange={(e) => handleConfigChange('num_proxies', e.target.value)} className="px-3 py-1.5 text-sm" required />
-        </div>
-        {isSessionBased && (
-          <>
-            <div>
-              <Label className="text-xs">Country</Label>
-              <RichSelect options={countryOptions} value={formData.config.country_code || ''} onChange={(val) => handleConfigChange('country_code', val)} placeholder="Select country (optional)" />
-              <p className="text-xs text-fg-muted mt-1">Leave as “All countries” for no geo-targeting.</p>
-            </div>
-            <div>
-              <Label className="text-xs">Session duration (minutes) <span className="text-danger">*</span></Label>
-              <Input type="number" min="1" max="30" value={formData.config.session_duration_minutes || '10'} onChange={(e) => handleConfigChange('session_duration_minutes', e.target.value)} className="px-3 py-1.5 text-sm" required />
-              <p className="text-xs text-fg-muted mt-1">1–30 minutes (default 10).</p>
-            </div>
-          </>
-        )}
-        {proxyType && !isSessionBased && (
-          <p className="text-xs text-fg-muted bg-surface-raised p-3 rounded-lg">Port-based proxy type ({proxyType}). IPs are discovered from Oxylabs ports and refreshed every 24 hours.</p>
-        )}
-        {!proxyType && formData.credential_id && (
-          <p className="text-xs text-warning bg-warning-soft p-3 rounded-lg">Loading credential configuration…</p>
-        )}
-      </div>
-    )
-  }
-
-  const renderBrightDataGeneral = () => {
-    const proxyType = getBrightDataProxyType()
-    const isSessionBased = isSessionBasedBrightData()
-    const selectedZone = brightDataZones?.find((z) => z.name === formData.config.zone_name)
-    const selectedZoneIsPortBased = selectedZone && !isSessionBased
-    const countryOptions: RichSelectOption[] = selectedZoneIsPortBased && selectedZone?.country_counts
-      ? [
-        { value: '', label: 'All countries', description: `${selectedZone.total_ips ?? 0} IPs total` },
-        ...Object.entries(selectedZone.country_counts).sort(([, a], [, b]) => b - a).map(([cc, count]) => ({ value: cc.toUpperCase(), label: cc.toUpperCase(), description: `${count} IPs` })),
-      ]
-      : [
-        { value: '', label: 'All countries', description: 'No geo-targeting' },
-        ...(optionsData?.oxylabs_countries || []).map((c) => ({ value: c.code, label: c.name, description: c.code })),
-      ]
-    const zoneOptions: RichSelectOption[] = (brightDataZones || []).map((zone) => ({
-      value: zone.name, label: zone.name,
-      description: zone.total_ips != null ? `${zone.proxy_type} (${zone.type}) — ${zone.total_ips} IPs` : `${zone.proxy_type} (${zone.type})`,
-    }))
-    const cc = formData.config.country_code?.toLowerCase()
-    const maxIps = selectedZoneIsPortBased && selectedZone?.total_ips != null
-      ? (cc && selectedZone.country_counts?.[cc] ? selectedZone.country_counts[cc] : selectedZone.total_ips)
-      : undefined
+  const renderDescriptorGroup = (group: string) => {
+    if (!provider) return null
+    const fields = descriptorFields.filter((f) => f.group === group)
     return (
       <div className="space-y-3">
-        <div className="grid grid-cols-2 gap-x-3 gap-y-3">
-          <div>
-            <Label className="text-xs">Zone <span className="text-danger">*</span></Label>
-            <RichSelect
-              options={zoneOptions}
-              value={formData.config.zone_name || ''}
-              onChange={(val) => {
-                const zone = brightDataZones?.find((z) => z.name === val)
-                if (zone) setFormData((prev) => ({ ...prev, config: { ...prev.config, zone_name: val, zone_password: zone.password, proxy_type: zone.proxy_type } }))
-              }}
-              placeholder={formData.credential_id ? 'Select zone' : 'Select a credential first'}
-              disabled={!formData.credential_id}
-            />
-            <p className="text-xs text-fg-muted mt-1">Proxy type follows the zone.</p>
-          </div>
-          <div>
-            <Label className="text-xs">Zone password <span className="text-danger">*</span></Label>
-            <Input type="text" value={formData.config.zone_password || ''} onChange={(e) => handleConfigChange('zone_password', e.target.value)} className="px-3 py-1.5 text-sm" placeholder="Auto-filled from zone" required />
-          </div>
-          <div>
-            <Label className="text-xs">Number of proxies <span className="text-danger">*</span></Label>
-            <Input type="number" min="1" max={maxIps} value={formData.config.num_proxies || '1'} onChange={(e) => handleConfigChange('num_proxies', e.target.value)} className="px-3 py-1.5 text-sm" required />
-            {maxIps != null && <p className="text-xs text-fg-muted mt-1">Max {maxIps}{cc ? ` in ${cc.toUpperCase()}` : ''}</p>}
-          </div>
-          <div>
-            <Label className="text-xs">Country</Label>
-            <RichSelect
-              options={countryOptions}
-              value={formData.config.country_code || ''}
-              onChange={(val) => {
-                handleConfigChange('country_code', val)
-                if (selectedZoneIsPortBased && selectedZone?.total_ips != null) {
-                  const newMax = val && selectedZone.country_counts?.[val.toLowerCase()] ? selectedZone.country_counts[val.toLowerCase()] : selectedZone.total_ips
-                  if (parseInt(formData.config.num_proxies || '1', 10) > newMax) handleConfigChange('num_proxies', String(newMax))
-                }
-              }}
-              placeholder="Select country (optional)"
-            />
-          </div>
-        </div>
-        {selectedZoneIsPortBased && selectedZone?.total_ips != null && (
-          <div className="text-xs bg-primary-soft/40 p-3 rounded-lg">
-            <p className="font-medium text-primary-soft-fg">{selectedZone.total_ips} IPs available in this zone</p>
-            {selectedZone.country_counts && Object.keys(selectedZone.country_counts).length > 0 && (
-              <p className="text-primary mt-1">{Object.entries(selectedZone.country_counts).sort(([, a], [, b]) => b - a).map(([c, n]) => `${c.toUpperCase()} (${n})`).join(', ')}</p>
-            )}
-          </div>
+        <SchemaForm
+          provider={provider}
+          fields={fields}
+          values={formData.config}
+          onChange={handleConfigChange}
+          scopes={schemaScopes}
+          presets={presets}
+          credentialId={formData.credential_id || null}
+          isEdit={isEdit}
+          disabled={readOnly}
+          columns={2}
+        />
+        {!formData.credential_id && descriptorFields.some((f) => f.options_from) && (
+          <p className="text-xs text-warning bg-warning-soft p-3 rounded-lg">Select a credential to load options from the provider.</p>
         )}
-        {proxyType && isSessionBased && <p className="text-xs text-fg-muted bg-surface-raised p-3 rounded-lg">Session-based proxy type ({proxyType}). Global session IDs are used for routing.</p>}
-        {!formData.config.zone_name && formData.credential_id && <p className="text-xs text-warning bg-warning-soft p-3 rounded-lg">Select a zone to continue.</p>}
       </div>
     )
   }
@@ -738,15 +641,6 @@ function ConnectorEditor({ connector, canMutate, onClose, onDelete, onSaved }: {
   }
 
   const renderAdvanced = () => {
-    if (type === 'brightdata') {
-      return (
-        <div>
-          <Label className="text-xs">Healthcheck URL</Label>
-          <Input type="url" value={formData.config.healthcheck_url || ''} onChange={(e) => handleConfigChange('healthcheck_url', e.target.value)} className="px-3 py-1.5 text-sm" placeholder="https://httpbin.org/ip (default)" />
-          <p className="text-xs text-fg-muted mt-1">Use a custom URL if your BrightData zone is restricted to certain targets.</p>
-        </div>
-      )
-    }
     return (
       <div>
         <Label className="text-xs">Instance tags</Label>
@@ -759,16 +653,15 @@ function ConnectorEditor({ connector, canMutate, onClose, onDelete, onSaved }: {
   const renderTabContent = () => {
     if (activeTab === 'routing') return renderRoutingTab()
     if (activeTab === 'rate_limiting') return renderRateLimitingTab()
+    if (isDescriptor) return renderDescriptorGroup(activeTab)
     if (activeTab === 'advanced') return renderAdvanced()
-    if (type === 'oxylabs') return renderOxylabsGeneral()
-    if (type === 'brightdata') return renderBrightDataGeneral()
-    return renderCloudFields()
+    if (isCloud) return renderCloudFields()
+    return null
   }
 
   const credentialOptions: RichSelectOption[] = credentialsForType.map((c) => ({ value: c.id, label: c.name, description: `Created ${formatDate(c.created_at)}` }))
-  const readOnly = !canMutate
   const saving = createMutation.isPending || updateMutation.isPending
-  const typeLabel = getCredentialTypeLabel(type)
+  const typeLabel = labelFor(type)
 
   return (
     <Inspector

@@ -1,7 +1,14 @@
 # Copyright 2026 Octoprox Authors
 # SPDX-License-Identifier: Apache-2.0
 
-"""Credential management endpoints."""
+"""Credential management endpoints.
+
+Config validation and vendor-side credential checks are delegated to the
+provider registry, so this module is the same for code providers and for
+descriptor providers, including ones added through the admin UI.
+"""
+
+from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, ValidationError
@@ -12,10 +19,16 @@ from api.models.credential import (
     CredentialCreate,
     CredentialDetailResponse,
     CredentialResponse,
-    CredentialType,
     CredentialUpdate,
-    validate_credential_config,
 )
+from api.providers.registry import (
+    ProviderRegistry,
+    ProviderType,
+    UnknownProviderError,
+    get_provider_registry,
+)
+from api.providers.sdk.discovery import CredentialValidator
+from api.providers.sdk.validation import ConfigValidationError
 
 router = APIRouter(prefix="/projects/{project_id}/credentials")
 
@@ -32,7 +45,7 @@ def _credential_to_response(credential: Credential) -> CredentialResponse:
     return CredentialResponse(
         id=credential.id,
         name=credential.name,
-        type=credential.type.value if hasattr(credential.type, 'value') else credential.type,
+        type=credential.type,
         project_id=credential.project_id,
         has_username=bool(config.get("username")),
         has_password=bool(config.get("password")),
@@ -46,12 +59,45 @@ def _credential_to_detail_response(credential: Credential) -> CredentialDetailRe
     return CredentialDetailResponse(
         id=credential.id,
         name=credential.name,
-        type=credential.type.value if hasattr(credential.type, 'value') else credential.type,
+        type=credential.type,
         project_id=credential.project_id,
         config=credential.config,
         created_at=credential.created_at,
         updated_at=credential.updated_at,
     )
+
+
+def _provider_type(registry: ProviderRegistry, type_id: str) -> ProviderType:
+    try:
+        return registry.require(type_id)
+    except UnknownProviderError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from None
+
+
+def _validate_config(ptype: ProviderType, config: dict[str, Any]) -> dict[str, Any]:
+    try:
+        return ptype.credential_validator(config)
+    except ConfigValidationError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from None
+    except ValidationError as exc:
+        messages = [err.get("msg", str(err)) for err in exc.errors()]
+        raise HTTPException(status_code=422, detail="; ".join(messages)) from None
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from None
+
+
+async def _verify_with_vendor(
+    registry: ProviderRegistry, ptype: ProviderType, config: dict[str, Any]
+) -> dict[str, Any]:
+    """Run the descriptor's validation call (if any); returns config with captured values."""
+    if ptype.descriptor is None or ptype.descriptor.validation is None:
+        return config
+    validator = CredentialValidator(ptype.descriptor, registry.runtime)
+    outcome = await validator.validate(config)
+    if not outcome.ok:
+        raise HTTPException(status_code=400, detail=outcome.message)
+    merged: dict[str, Any] = outcome.result or config
+    return merged
 
 
 @router.get("", response_model=CredentialListResponse)
@@ -84,40 +130,16 @@ async def create_credential(
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
 
-    # Validate BrightData token if applicable
-    if credential_data.type == CredentialType.BRIGHTDATA:
-        from api.models.credential import BrightDataCredentialConfig
-        from api.services.brightdata_api import validate_token
-
-        # Get token from config dict (before full validation)
-        token = credential_data.config.get("token")
-        if not token or not token.strip():
-            raise HTTPException(status_code=400, detail="BrightData token is required")
-
-        # Validate token with API and get customer ID
-        validation = await validate_token(token)
-
-        if not validation.valid:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Invalid BrightData token. Status: {validation.status or 'unknown'}"
-            )
-
-        # Store customer ID in config
-        credential_data.config["customer_id"] = validation.customer_id
-
-        # Now validate the complete config with the model
-        try:
-            validated = BrightDataCredentialConfig(**credential_data.config)
-            credential_data.config = validated.model_dump(exclude_none=True)
-        except Exception as e:
-            raise HTTPException(status_code=400, detail=f"Invalid BrightData config: {str(e)}") from e
+    registry = get_provider_registry()
+    ptype = _provider_type(registry, credential_data.type)
+    config = _validate_config(ptype, credential_data.config)
+    config = await _verify_with_vendor(registry, ptype, config)
 
     credential = Credential(
         name=credential_data.name,
-        type=credential_data.type,
+        type=ptype.id,
         project_id=project_id,
-        config=credential_data.config,
+        config=config,
     )
 
     await proxy_manager.add_credential(credential)
@@ -151,53 +173,28 @@ async def update_credential(
     if credential_data.name is not None:
         credential.name = credential_data.name
     if credential_data.config is not None:
-        # Validate config based on credential type
-        credential_type_enum = credential.type if isinstance(credential.type, CredentialType) else CredentialType(credential.type)
-
-        # Handle BrightData specially - need to validate token with API if it changed
-        if credential_type_enum == CredentialType.BRIGHTDATA:
-            from api.models.credential import BrightDataCredentialConfig
-            from api.services.brightdata_api import validate_token
-
-            new_token = credential_data.config.get("token")
-            old_token = credential.config.get("token") if credential.config else None
-
-            if new_token and new_token != old_token:
-                # Token changed - need to re-validate with API
-                if not new_token.strip():
-                    raise HTTPException(status_code=400, detail="BrightData token is required")
-
-                validation = await validate_token(new_token)
-                if not validation.valid:
-                    raise HTTPException(
-                        status_code=400,
-                        detail=f"Invalid BrightData token. Status: {validation.status or 'unknown'}"
-                    )
-                credential_data.config["customer_id"] = validation.customer_id
-            else:
-                # Token not changed - preserve existing customer_id
-                if credential.config and "customer_id" in credential.config:
-                    credential_data.config["customer_id"] = credential.config["customer_id"]
-
-            # Now validate the complete config
-            try:
-                validated = BrightDataCredentialConfig(**credential_data.config)
-                credential.config = validated.model_dump(exclude_none=True)
-            except Exception as e:
-                raise HTTPException(status_code=400, detail=f"Invalid BrightData config: {str(e)}") from e
-        else:
-            try:
-                validated_config = validate_credential_config(credential_type_enum, credential_data.config)
-                credential.config = validated_config
-            except ValidationError as e:
-                # Extract just the error messages from Pydantic validation errors
-                messages = [err.get('msg', str(err)) for err in e.errors()]
-                raise HTTPException(status_code=422, detail="; ".join(messages)) from None
-            except ValueError as e:
-                raise HTTPException(status_code=422, detail=str(e)) from None
+        registry = get_provider_registry()
+        ptype = _provider_type(registry, credential.type)
+        # Values captured by a previous vendor validation (e.g. a customer id)
+        # are not user fields; carry them over unless the new config sets them.
+        incoming = dict(credential_data.config)
+        if ptype.descriptor is not None and ptype.descriptor.validation is not None:
+            for key in ptype.descriptor.validation.capture:
+                if key not in incoming and key in (credential.config or {}):
+                    incoming[key] = credential.config[key]
+        config = _validate_config(ptype, incoming)
+        if _secret_material_changed(ptype, credential.config or {}, config):
+            config = await _verify_with_vendor(registry, ptype, config)
+        credential.config = config
 
     await proxy_manager.update_credential(credential)
     return _credential_to_detail_response(credential)
+
+
+def _secret_material_changed(ptype: ProviderType, old: dict[str, Any], new: dict[str, Any]) -> bool:
+    """Only re-validate with the vendor when a credential field actually changed."""
+    keys = {f.key for f in ptype.credential_fields}
+    return any(old.get(key) != new.get(key) for key in keys)
 
 
 @router.delete("/{credential_id}", status_code=204)
@@ -218,4 +215,3 @@ async def delete_credential(request: Request, credential_id: str, _guard: Requir
         )
 
     await proxy_manager.remove_credential(credential_id)
-
