@@ -167,7 +167,7 @@ class MetricsCompactor:
     ) -> int:
         """Delete metrics older than the project's retention period.
 
-        Compaction only changes granularity — it never removes the coarsest
+        Compaction only changes granularity - it never removes the coarsest
         tier (daily).  This method enforces the hard retention limit by
         deleting *all* rows (any granularity) past the configured age.
 

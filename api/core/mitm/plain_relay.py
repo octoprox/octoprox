@@ -5,7 +5,7 @@
 
 Forwards HTTP requests through the pre-established upstream connection
 using Python's ssl module. The target server sees a Python/OpenSSL TLS
-fingerprint — easily detectable, but useful for debugging.
+fingerprint - easily detectable, but useful for debugging.
 """
 
 import asyncio
@@ -114,7 +114,7 @@ class PlainRelay(MitmRelay):
         status_code = int(parts[1])
         reason = parts[2] if len(parts) > 2 else "OK"
 
-        # Read response headers — list of tuples to preserve duplicates
+        # Read response headers - list of tuples to preserve duplicates
         response_headers: list[tuple[str, str]] = []
         content_length = 0
         is_chunked = False

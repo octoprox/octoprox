@@ -3,7 +3,7 @@
 @tailwind utilities;
 
 /*
- * Theme tokens — semantic CSS variables, R G B triplets so Tailwind alpha
+ * Theme tokens - semantic CSS variables, R G B triplets so Tailwind alpha
  * modifiers work (e.g. bg-primary/10). Each .theme-* class redefines them.
  * Light/Dark values mirror the previous Tailwind gray-based palette so the
  * default look is unchanged.
@@ -190,7 +190,7 @@ body {
   @apply bg-bg text-fg;
 }
 
-/* Dark-mode checkbox styling — keyed off data-theme-mode so it applies
+/* Dark-mode checkbox styling - keyed off data-theme-mode so it applies
    under every dark-mode theme, not just .theme-dark. */
 [data-theme-mode="dark"] input[type="checkbox"] {
   color-scheme: dark;

@@ -9,7 +9,7 @@ attack, so every call passes through :class:`EgressGuard` first:
 
 * HTTPS only (plain HTTP can be enabled for development).
 * The hostname is resolved and every address is checked against private,
-  loopback, link-local, multicast and reserved ranges — cloud metadata
+  loopback, link-local, multicast and reserved ranges - cloud metadata
   endpoints, Redis and the Octoprox API itself are unreachable.
 * The connection is pinned to the vetted address (SNI and Host keep the
   original hostname) so a DNS answer cannot change between check and connect.

@@ -6,7 +6,7 @@ nav_id: deployment
 
 # Deployment & Scaling
 
-<p class="subtitle">Octoprox runs as a single instance for development or as a horizontally-scaled cluster fronted by an L4 load balancer. The same binary serves both — you only change the topology.</p>
+<p class="subtitle">Octoprox runs as a single instance for development or as a horizontally-scaled cluster fronted by an L4 load balancer. The same binary serves both - you only change the topology.</p>
 
 ## Two Deployment Shapes
 
@@ -58,7 +58,7 @@ make cluster-up
 make cluster-logs
 make cluster-down
 
-# Production-ready cluster (pre-built GHCR image) — invoke docker compose directly
+# Production-ready cluster (pre-built GHCR image) - invoke docker compose directly
 docker compose -f docker-compose.cluster.ghcr.yml up -d
 docker compose -f docker-compose.cluster.ghcr.yml logs -f
 docker compose -f docker-compose.cluster.ghcr.yml down
@@ -66,12 +66,12 @@ docker compose -f docker-compose.cluster.ghcr.yml down
 
 ## What you gain by running N instances
 
-- **High availability.** Any instance can die — clients keep being served by
+- **High availability.** Any instance can die - clients keep being served by
   the others. Background workers (metrics flusher, autoscaler, etc.) fail
   over to a surviving instance within ~5 seconds.
 - **Request throughput.** Tunnel termination, TLS/MITM relay, credential
   resolution, and routing decisions all run per-request on the receiving
-  instance — N instances ≈ N× concurrent connections handled in parallel.
+  instance - N instances ≈ N× concurrent connections handled in parallel.
 - **Aggregate bandwidth + file descriptors.** Each host contributes its own
   NIC and `ulimit`.
 - **Sharded health-check capacity.** Each proxy is checked by exactly one
@@ -93,7 +93,7 @@ docker compose -f docker-compose.cluster.ghcr.yml down
   sessions, rate-limit windows, quarantine state, metrics counters,
   heartbeats, and leases.
 - **Cloud-provider API quotas.** Per-connector lease means only one
-  instance calls AWS/GCP/Azure for a given connector at a time —
+  instance calls AWS/GCP/Azure for a given connector at a time -
   intentional, so you don't get throttled by the cloud.
 
 Rule of thumb: a cluster scales *concurrent request handling* and gives you
@@ -116,7 +116,7 @@ membership snapshot used by everything below.
 
 Mutations on one instance reach the others over Redis Pub/Sub on the
 `octoprox:events` channel. Messages carry only
-`(signal_name, instance_id, entity_id, op)` — receivers re-read the entity
+`(signal_name, instance_id, entity_id, op)` - receivers re-read the entity
 from Postgres or Redis and update their cache. The instance that
 published drops its own echo so no infinite loops.
 
@@ -142,7 +142,7 @@ standby takes over on its next poll.
 | Provider syncer   | Per-connector      | Two syncers would call provider APIs twice   |
 
 Per-connector leases mean different connectors can be served by different
-instances in parallel — only the same connector is single-writer.
+instances in parallel - only the same connector is single-writer.
 
 ### Sharded health checks
 
@@ -216,7 +216,7 @@ Before pointing real traffic at the cluster, edit either compose file:
 - Set `OCTOPROX_AUTH_PASSWORD` to something strong (not `admin`).
 - Set `OCTOPROX_JWT_SECRET` to a long random string.
 - Set `OCTOPROX_DB_PASSWORD` (and the matching `POSTGRES_PASSWORD`).
-- Decide whether to expose Postgres (5433) and Redis (6379) on the host —
+- Decide whether to expose Postgres (5433) and Redis (6379) on the host -
   for an internet-facing host you almost certainly want to remove those
   port mappings and keep them on the internal Docker network only.
 - Mount the MITM CA from durable storage (or a Secret manager) so all
@@ -224,14 +224,14 @@ Before pointing real traffic at the cluster, edit either compose file:
 - Take a passphrase-encrypted backup from **Settings → Backup & Migration**
   (or `POST /api/v1/backup/export`) before upgrades, and store it outside the
   cluster. Importing on a fresh instance with "Keep my current account" ticked
-  is the supported way to migrate between deployments — see
+  is the supported way to migrate between deployments - see
   [api.md](api.md#backup--migration).
 
 ## When to outgrow this
 
 A fleet of identical instances sharing one Redis + Postgres scales
 request handling and gives you HA. It hits a ceiling when one of the
-shared resources saturates — typically Redis throughput at a few tens of
+shared resources saturates - typically Redis throughput at a few tens of
 thousands of proxied requests per second, or per-host memory when the
 proxy pool grows past ~100k entries.
 
@@ -240,4 +240,4 @@ config) from the data plane (request termination) and replaces the
 "every instance loads everything" cache with a snapshot pushed from the
 control plane. The design is documented in
 [TODO-control-data-plane-split.md](https://github.com/octoprox/octoprox/blob/main/TODO-control-data-plane-split.md)
-in the repo — read that when you genuinely need it, not before.
+in the repo - read that when you genuinely need it, not before.

@@ -11,7 +11,7 @@ The binding lives in two places:
   of truth, written by ``select`` after assigning a new proxy).
 
 When a request lands on a peer instance for the first time, the peer's
-``select`` reads the Redis binding and warms its own local cache — so
+``select`` reads the Redis binding and warms its own local cache - so
 session affinity survives across instances.
 """
 
@@ -81,7 +81,7 @@ class StickySessionStrategy(RoutingStrategy):
             if proxy.id == cached_proxy_id:
                 self._session_map[session_id] = cached_proxy_id
                 return proxy
-        # Bound proxy is no longer in the eligible set — drop the stale cache
+        # Bound proxy is no longer in the eligible set - drop the stale cache
         # entry so the next call re-binds via consistent hashing.
         self._session_map.pop(session_id, None)
         return None

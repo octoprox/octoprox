@@ -12,7 +12,7 @@ Octoprox tracks per-proxy and per-project metrics including request counts, succ
 
 ## How Counting Works
 
-Octoprox counts at the **CONNECT tunnel level**, not at the individual HTTP request level. When a client opens an HTTPS tunnel via `CONNECT`, that tunnel is counted as a single request in the metrics — regardless of how many HTTP requests flow through it.
+Octoprox counts at the **CONNECT tunnel level**, not at the individual HTTP request level. When a client opens an HTTPS tunnel via `CONNECT`, that tunnel is counted as a single request in the metrics - regardless of how many HTTP requests flow through it.
 
 This distinction matters because most HTTP clients use **connection pooling** (keep-alive). A single CONNECT tunnel can carry dozens or hundreds of sequential HTTP requests without closing the connection.
 
@@ -31,13 +31,13 @@ In the example above, even though `request_count` shows 1, the `bytes_sent` and 
 
 ## Why This Limitation Exists
 
-When HTTPS tunneling is used without TLS interception (MITM disabled), Octoprox creates a raw TCP tunnel between the client and the upstream server. The traffic inside this tunnel is encrypted — the proxy sees only opaque ciphertext and has no way to distinguish where one HTTP request ends and another begins.
+When HTTPS tunneling is used without TLS interception (MITM disabled), Octoprox creates a raw TCP tunnel between the client and the upstream server. The traffic inside this tunnel is encrypted - the proxy sees only opaque ciphertext and has no way to distinguish where one HTTP request ends and another begins.
 
 This is by design: it preserves the client's TLS fingerprint (JA3/JA4), which is critical for anti-detection when scraping.
 
 ## MITM Mode and Accurate Counting
 
-When [TLS interception](tls-interception) is enabled, Octoprox terminates the client's TLS session and parses each HTTP request individually using h11. In this mode, the proxy *can* see individual requests — however, the current metrics implementation still counts at the tunnel level.
+When [TLS interception](tls-interception) is enabled, Octoprox terminates the client's TLS session and parses each HTTP request individually using h11. In this mode, the proxy *can* see individual requests - however, the current metrics implementation still counts at the tunnel level.
 
 > **Note:** Even with MITM enabled, request counting currently reflects tunnel count, not individual HTTP request count. Accurate per-request counting in MITM mode is planned for a future release.
 
@@ -45,8 +45,8 @@ When [TLS interception](tls-interception) is enabled, Octoprox terminates the cl
 
 This counting behavior also affects:
 
-- **Rate limiting** — Rate limits are evaluated per CONNECT tunnel, not per HTTP request within a tunnel. A client sending 100 requests over a single keep-alive connection only triggers one rate limit check.
-- **Latency tracking** — `avg_latency_ms` reflects the time to establish the CONNECT tunnel to the upstream proxy, not the latency of individual HTTP requests within the tunnel.
+- **Rate limiting** - Rate limits are evaluated per CONNECT tunnel, not per HTTP request within a tunnel. A client sending 100 requests over a single keep-alive connection only triggers one rate limit check.
+- **Latency tracking** - `avg_latency_ms` reflects the time to establish the CONNECT tunnel to the upstream proxy, not the latency of individual HTTP requests within the tunnel.
 
 ## Workarounds
 
@@ -80,7 +80,7 @@ Other HTTP libraries have similar options:
 
 ### Use the MITM request log
 
-When TLS interception is enabled, Octoprox records each individual HTTP request in the request log (visible in the web UI under the project's request inspector). This log contains accurate per-request data including method, URL, status code, and latency — even though the top-level metrics count at the tunnel level.
+When TLS interception is enabled, Octoprox records each individual HTTP request in the request log (visible in the web UI under the project's request inspector). This log contains accurate per-request data including method, URL, status code, and latency - even though the top-level metrics count at the tunnel level.
 
 ### Track requests client-side
 

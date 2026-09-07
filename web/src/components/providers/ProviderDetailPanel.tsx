@@ -64,8 +64,8 @@ export function ProviderDetailPanel({ provider, onClose, onDuplicate, onEdit }: 
         </InspectorSection>
       )}
       <InspectorSection title="Fields">
-        <KeyValue label="Credential" value={provider.credential_fields.map((f) => f.key).join(', ') || '—'} mono />
-        <KeyValue label="Connector" value={provider.connector_fields.map((f) => f.key).join(', ') || '—'} mono />
+        <KeyValue label="Credential" value={provider.credential_fields.map((f) => f.key).join(', ') || '-'} mono />
+        <KeyValue label="Connector" value={provider.connector_fields.map((f) => f.key).join(', ') || '-'} mono />
       </InspectorSection>
       <InspectorSection title="Network">
         <KeyValue label="Credentials sent to" value={provider.egress_hosts.join(', ') || 'no vendor API calls'} mono />

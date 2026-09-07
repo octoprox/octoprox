@@ -76,7 +76,7 @@ export default function UsersPage() {
       accessorKey: 'email',
       header: 'Email',
       meta: { filterVariant: 'text' as const },
-      cell: ({ getValue }) => <span className="text-fg-muted truncate block">{getValue<string>() || '—'}</span>,
+      cell: ({ getValue }) => <span className="text-fg-muted truncate block">{getValue<string>() || '-'}</span>,
     },
     {
       accessorKey: 'role',

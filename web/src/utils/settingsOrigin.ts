@@ -11,7 +11,7 @@ export function setSettingsOrigin(path: string): void {
   try {
     sessionStorage.setItem(ORIGIN_KEY, path)
   } catch {
-    // sessionStorage unavailable — back button will fall back to default.
+    // sessionStorage unavailable - back button will fall back to default.
   }
 }
 

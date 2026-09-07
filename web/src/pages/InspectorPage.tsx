@@ -103,7 +103,7 @@ export default function InspectorPage() {
       meta: { filterVariant: 'select' as const },
       cell: ({ getValue }) => {
         const ct = getValue<string>()
-        return <span className="text-xs truncate block text-fg-muted" title={ct}>{ct.split(';')[0] || '—'}</span>
+        return <span className="text-xs truncate block text-fg-muted" title={ct}>{ct.split(';')[0] || '-'}</span>
       },
     },
   ], [])

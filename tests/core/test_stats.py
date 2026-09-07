@@ -255,7 +255,7 @@ class TestEmptyDelta:
         assert d["bytes_received"] == 0
 
     def test_independent_instances(self) -> None:
-        """Each call returns a fresh dict — mutating one doesn't affect the other."""
+        """Each call returns a fresh dict - mutating one doesn't affect the other."""
         a = empty_delta()
         b = empty_delta()
         a["request_count"] = 5
@@ -289,7 +289,7 @@ class TestAccumulateDelta:
         d = empty_delta()
         for latency in (100.0, 200.0, 300.0):
             accumulate_delta(d, success=True, latency_ms=latency, bytes_sent=1, bytes_received=2)
-        # accumulate_delta keeps the SUM of latencies, not the average —
+        # accumulate_delta keeps the SUM of latencies, not the average -
         # that's what makes batched aggregation correct downstream.
         assert d["request_count"] == 3
         assert d["success_count"] == 3
@@ -359,7 +359,7 @@ class TestMergeDeltaInto:
 
 
 class TestApplyDelta:
-    """Tests for apply_delta() — applies a batch of N requests to a target."""
+    """Tests for apply_delta() - applies a batch of N requests to a target."""
 
     def test_no_op_on_zero_requests(self) -> None:
         target = MockStatsObject(request_count=42, avg_latency_ms=99.0)
@@ -418,7 +418,7 @@ class TestApplyDelta:
         assert target.request_count == 2
 
     def test_apply_with_only_partial_keys(self) -> None:
-        """Deltas deserialised from JSON may be missing optional keys —
+        """Deltas deserialised from JSON may be missing optional keys -
         apply_delta uses .get with zero defaults so it stays robust."""
         target = MockStatsObject()
         delta = {"request_count": 4, "success_count": 4, "latency_sum_ms": 400.0}

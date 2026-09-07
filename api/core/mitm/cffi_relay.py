@@ -59,7 +59,7 @@ class CffiRelay(ImpersonationRelay):
             timeout=30,
         )
 
-        # Drop content-encoding — curl_cffi auto-decompresses the body,
+        # Drop content-encoding - curl_cffi auto-decompresses the body,
         # so forwarding the header would cause browsers to double-decompress.
         # Use multi_items() to preserve duplicate headers (e.g. Set-Cookie).
         response_headers = [

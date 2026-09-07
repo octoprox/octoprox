@@ -26,23 +26,23 @@ export function parseApiDate(value: string | null | undefined): Date | null {
 
 export function formatDate(value: string | null | undefined): string {
   const d = parseApiDate(value)
-  return d ? d.toLocaleDateString() : '—'
+  return d ? d.toLocaleDateString() : '-'
 }
 
 export function formatDateTime(value: string | null | undefined): string {
   const d = parseApiDate(value)
-  return d ? d.toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' }) : '—'
+  return d ? d.toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' }) : '-'
 }
 
 export function formatTime(value: string | null | undefined): string {
   const d = parseApiDate(value)
-  return d ? d.toLocaleTimeString() : '—'
+  return d ? d.toLocaleTimeString() : '-'
 }
 
-/** "just now", "5 min ago", "3 h ago", "2 d ago" — relative to the viewer's clock. */
+/** "just now", "5 min ago", "3 h ago", "2 d ago" - relative to the viewer's clock. */
 export function relativeTime(value: string | null | undefined): string {
   const d = parseApiDate(value)
-  if (!d) return '—'
+  if (!d) return '-'
   const diff = Date.now() - d.getTime()
   const m = Math.round(diff / 60000)
   if (m < 1) return 'just now'

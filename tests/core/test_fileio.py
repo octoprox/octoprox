@@ -35,6 +35,6 @@ def test_cleans_up_temp_file_when_a_write_step_fails(
         atomic_write(target, b"payload", mode=0o600)
 
     # The finally block closed the fd and removed the temp file, and the
-    # target was never published — the directory is left clean.
+    # target was never published - the directory is left clean.
     assert not target.exists()
     assert list(tmp_path.iterdir()) == []

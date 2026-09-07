@@ -27,10 +27,10 @@ When using the `sticky` routing strategy, you can control session affinity by em
 **Examples:**
 
 ```
-# Without session ID — uses client IP for session affinity
+# Without session ID - uses client IP for session affinity
 Proxy-Authorization: Basic base64(myuser:password)
 
-# With session ID — uses "order-123" for session affinity
+# With session ID - uses "order-123" for session affinity
 Proxy-Authorization: Basic base64(myuser-sessid-order-123:password)
 
 # Hyphenated username works too

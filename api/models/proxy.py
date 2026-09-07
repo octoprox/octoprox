@@ -92,7 +92,7 @@ class Proxy(BaseModel):
 
         Used by ``ProxyManager.reload_proxy`` and ``full_reload`` to apply
         a fresh-from-DB ``Proxy`` to the existing cached instance without
-        clobbering runtime state — ``status``, ``last_check_latency_ms``,
+        clobbering runtime state - ``status``, ``last_check_latency_ms``,
         ``consecutive_failures`` (refreshed from Redis), and the
         per-request counters (``request_count`` and friends, incremented
         in-process and reconciled with Redis on the next hydrate).

@@ -94,7 +94,7 @@ async def import_backup(
 
     raw = await file.read()
 
-    # 1. Compatibility check first — before decryption, so an incompatible
+    # 1. Compatibility check first - before decryption, so an incompatible
     #    file is rejected without needing the passphrase.
     try:
         envelope = read_envelope(raw)
@@ -116,8 +116,8 @@ async def import_backup(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     # Commit explicitly here (rather than relying on get_db's post-request
-    # commit) so the next step's full_reload — which uses a separate pooled
-    # connection — observes the restored rows instead of stale data.
+    # commit) so the next step's full_reload - which uses a separate pooled
+    # connection - observes the restored rows instead of stale data.
     await session.commit()
 
     # 4. Purge stale Redis state for the replaced entities and rebuild the

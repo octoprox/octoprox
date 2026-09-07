@@ -5,9 +5,9 @@
 
 Provides pluggable TLS interception with multiple upstream relay strategies:
 
-- **Plain**: Python's ssl module — debug-friendly, detectable fingerprint.
-- **CffiRelay**: curl_cffi — browser-grade TLS fingerprints via libcurl.
-- **RnetRelay**: rnet — browser-grade TLS fingerprints via Rust/BoringSSL.
+- **Plain**: Python's ssl module - debug-friendly, detectable fingerprint.
+- **CffiRelay**: curl_cffi - browser-grade TLS fingerprints via libcurl.
+- **RnetRelay**: rnet - browser-grade TLS fingerprints via Rust/BoringSSL.
 
 Use ``create_relay()`` to instantiate the correct relay based on project settings.
 """

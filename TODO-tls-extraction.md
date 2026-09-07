@@ -1,4 +1,4 @@
-# TLS Extraction — Low Priority Future Work
+# TLS Extraction - Low Priority Future Work
 
 ## TCP Fingerprint (p0f-style)
 

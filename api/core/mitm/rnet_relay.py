@@ -82,7 +82,7 @@ class RnetRelay(ImpersonationRelay):
         response_body = await response.bytes()
         # rnet HeaderMap.items() preserves duplicate headers (it's a multi-map).
         # Decode bytes keys/values to str.
-        # Drop content-encoding — rnet auto-decompresses the body,
+        # Drop content-encoding - rnet auto-decompresses the body,
         # so forwarding the header would cause browsers to double-decompress.
         raw_items: list[tuple[object, object]] = (
             list(response.headers.items()) if response.headers else []  # type: ignore[arg-type]

@@ -53,7 +53,7 @@ class TestOptionsResolver:
         assert "total_ips" not in by_value["res_zone"].extra
         assert by_value["isp_zone"].extra["proxy_type"] == "isp"
         assert by_value["isp_zone"].extra["total_ips"] == 2
-        assert by_value["dc_zone"].description == "datacenter (dc_shared) — 2 IPs"
+        assert by_value["dc_zone"].description == "datacenter (dc_shared) - 2 IPs"
         assert by_value["res_zone"].description == "residential (res_rotating)"
         # get_active_zones + 5 passwords + 2 route_ips
         assert len(vendor.api_requests) == 8

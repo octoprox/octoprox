@@ -173,7 +173,7 @@ export function RequestPanel({ record, onClose }: { record: MitmRequestRecord; o
       <StatGrid items={[
         { label: 'Request body', value: formatBytes(record.request_body_size) },
         { label: 'Response body', value: formatBytes(record.response_body_size) },
-        { label: 'Content type', value: <span className="text-xs font-medium" title={record.response_content_type}>{record.response_content_type.split(';')[0] || '—'}</span> },
+        { label: 'Content type', value: <span className="text-xs font-medium" title={record.response_content_type}>{record.response_content_type.split(';')[0] || '-'}</span> },
       ]} />
       <KeyValue label="Via proxy" value={record.proxy_url} mono />
 

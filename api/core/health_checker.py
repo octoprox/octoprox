@@ -8,7 +8,7 @@ Emits health_check_completed signals instead of directly calling ProxyManager.
 When running multiple Octoprox instances, each instance only checks the
 proxies it "owns" under rendezvous (HRW) hashing over the live instance
 set advertised in Redis. Adding or removing an instance only re-homes
-1/N of the proxies — no central coordinator, no rebalance ceremony.
+1/N of the proxies - no central coordinator, no rebalance ceremony.
 """
 
 from __future__ import annotations
@@ -155,7 +155,7 @@ class HealthChecker:
         Skips proxies that are draining/terminating or belong to disabled
         connectors, then narrows the remainder to those rendezvous-hashed
         to this instance over the live peer set. Brief overlap during
-        membership changes is harmless — Redis is last-writer-wins on the
+        membership changes is harmless - Redis is last-writer-wins on the
         status snapshot.
         """
         proxies = self._proxy_data_provider.proxies

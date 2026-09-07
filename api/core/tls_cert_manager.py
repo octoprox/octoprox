@@ -136,7 +136,7 @@ class TLSCertManager:
         backend HAProxy routes a given client to. On a fresh volume this
         ensures exactly one instance generates the CA:
 
-        * Fast path — if the CA already exists, just load it.
+        * Fast path - if the CA already exists, just load it.
         * Otherwise acquire a short Redis lock; the winner generates and
           writes the CA atomically while peers poll until it appears, then
           load it.
@@ -250,7 +250,7 @@ class TLSCertManager:
                 os.unlink(cert_f.name)
                 os.unlink(key_f.name)
 
-        # Force HTTP/1.1 — we parse requests as HTTP/1.1 on the client-facing side
+        # Force HTTP/1.1 - we parse requests as HTTP/1.1 on the client-facing side
         ctx.set_alpn_protocols(["http/1.1"])
 
         # Capture raw ClientHello bytes during the TLS handshake.

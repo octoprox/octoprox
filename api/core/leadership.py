@@ -9,14 +9,14 @@ connector, …) while the others stand by, ready to take over within a few
 seconds if the holder dies.
 
 Acquisition uses ``SET NX PX``. Refresh and release use Lua scripts that
-only mutate the key when the value still matches the lease holder's id —
+only mutate the key when the value still matches the lease holder's id -
 so a slow holder whose lease has expired and been claimed by a peer
 cannot accidentally extend or delete the peer's lease.
 
 This is **not** fenced consensus (Chubby/etcd/Raft); under partition or
 clock skew there may be brief windows where two holders both believe
-they own the lease. For octoprox's workloads — metrics flushes,
-health-check writes, scaling decisions — duplicates are safe and
+they own the lease. For octoprox's workloads - metrics flushes,
+health-check writes, scaling decisions - duplicates are safe and
 recoverable. If a future workload requires strict mutual exclusion,
 swap this primitive for a Postgres advisory lock (`pg_try_advisory_lock`)
 behind the same interface.
@@ -59,7 +59,7 @@ class Lease:
     **Worker death semantics.** If the leaseholder process dies
     (SIGKILL, OOM, network partition) the refresh task stops firing.
     Redis expires the lease key after ``ttl_ms`` and any other instance
-    can ``try_acquire`` it on its next poll — that is how failover
+    can ``try_acquire`` it on its next poll - that is how failover
     happens automatically, with no explicit health check required.
 
     The release script is owner-checked: a zombie refresh that arrives

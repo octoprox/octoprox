@@ -202,16 +202,16 @@ Content-Type: application/json
 
 Connectors support optional domain-based filtering to control which target domains their proxies serve. The `routing_config` field accepts:
 
-- **`domain_whitelist`** — Only route requests for these domains through this connector's proxies.
-- **`domain_blacklist`** — Route all requests *except* these domains through this connector's proxies.
+- **`domain_whitelist`** - Only route requests for these domains through this connector's proxies.
+- **`domain_blacklist`** - Route all requests *except* these domains through this connector's proxies.
 
-Whitelist and blacklist are mutually exclusive — you can set one or the other, but not both.
+Whitelist and blacklist are mutually exclusive - you can set one or the other, but not both.
 
 Domain matching is hierarchical: entering `bing.com` matches `bing.com` and all subdomains (`www.bing.com`, `images.bing.com`, etc.).
 
 **Examples:**
 
-Whitelist — only allow specific domains:
+Whitelist - only allow specific domains:
 ```json
 {
   "routing_config": {
@@ -220,7 +220,7 @@ Whitelist — only allow specific domains:
 }
 ```
 
-Blacklist — block specific domains:
+Blacklist - block specific domains:
 ```json
 {
   "routing_config": {
@@ -243,9 +243,9 @@ Connectors support optional per-proxy rate limiting. When a proxy exceeds `max_r
 | Field | Type | Description |
 |-------|------|-------------|
 | `max_requests` | integer | Max requests per proxy in the window |
-| `window_seconds` | integer | Sliding window duration (1–86400) |
-| `quarantine_seconds_min` | integer | Min quarantine duration (1–86400) |
-| `quarantine_seconds_max` | integer | Max quarantine duration (1–86400) |
+| `window_seconds` | integer | Sliding window duration (1-86400) |
+| `quarantine_seconds_min` | integer | Min quarantine duration (1-86400) |
+| `quarantine_seconds_max` | integer | Max quarantine duration (1-86400) |
 | `sticky_quarantine` | boolean | Block sticky session fallback (default: `false`) |
 
 **Example:**
@@ -427,7 +427,7 @@ POST /api/v1/backup/export
 
 | Field | Type | Notes |
 |-------|------|-------|
-| `passphrase` | string | Minimum 8 characters. Required again to import — it cannot be recovered. |
+| `passphrase` | string | Minimum 8 characters. Required again to import - it cannot be recovered. |
 | `include_metrics` | boolean | Include historical proxy/project metrics. Default `false` (smaller file). |
 
 **Response:** the backup file as `application/octet-stream` with a

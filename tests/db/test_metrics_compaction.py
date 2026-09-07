@@ -481,16 +481,16 @@ class TestGranularityFilters:
         await db_session.commit()
 
         ts = utc_now() - timedelta(hours=1)
-        # Raw row (granularity=60) — should be included for 3600s bucket
+        # Raw row (granularity=60) - should be included for 3600s bucket
         await _insert_project_metrics(
             db_session, project.id, ts, granularity=60, request_count=10
         )
-        # Compacted hourly row (granularity=3600) — should be included
+        # Compacted hourly row (granularity=3600) - should be included
         await _insert_project_metrics(
             db_session, project.id, ts - timedelta(hours=2), granularity=3600,
             request_count=100,
         )
-        # Compacted 6-hourly row (granularity=21600) — should be EXCLUDED
+        # Compacted 6-hourly row (granularity=21600) - should be EXCLUDED
         # because 21600 > 3600
         await _insert_project_metrics(
             db_session, project.id, ts - timedelta(hours=3), granularity=21600,

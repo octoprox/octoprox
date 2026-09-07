@@ -1,4 +1,4 @@
-# Control Plane / Data Plane Split — Future Work
+# Control Plane / Data Plane Split - Future Work
 
 Today Octoprox runs as N identical processes behind an L4 load balancer:
 each one boots the FastAPI management API, the raw TCP proxy server, and
@@ -10,7 +10,7 @@ definitions and historical metrics. See [`docs/deployment.md`](docs/deployment.m
 for the current model.
 
 This document describes a successor topology where those concerns are
-split into three deployables — control plane, data plane, and workers —
+split into three deployables - control plane, data plane, and workers -
 with durable messaging (NATS JetStream) between them. None of it is
 implemented yet. A contributor should be able to read this top-to-bottom
 and pick up the work without prior context.
@@ -25,10 +25,10 @@ it:
   proxy-tunnel latency because they share the same event loop and
   Postgres connection pool with the data plane.
 - Releases of the management API force a TCP-server restart that drops
-  in-flight tunnels — independent rollout of the proxy plane is needed.
+  in-flight tunnels - independent rollout of the proxy plane is needed.
 - Background workers (HealthChecker, AutoScaler) need to scale
   independently of API or data-plane CPU.
-- Cross-instance cache divergence shows up in observability traces — the
+- Cross-instance cache divergence shows up in observability traces - the
   Redis Pub/Sub safety net (60 s `full_reload`) is leaving stale state
   for too long, and you want NATS JetStream's at-least-once delivery
   instead.
@@ -85,7 +85,7 @@ xDS-style from CP to DP, durable messaging for control events.
    - `worker`: HealthChecker + MetricsFlusher + MetricsCompactor +
      AutoScaler + ProviderSyncer. No FastAPI listener, no proxy server.
      Uses the same leases (per-connector for AS/syncer, global for
-     flusher/compactor) and HRW sharding for HealthChecker as today —
+     flusher/compactor) and HRW sharding for HealthChecker as today -
      just in their own tier.
 
 2. **xDS-style config push** (new `api/routes/internal_config.py` and
@@ -93,7 +93,7 @@ xDS-style from CP to DP, durable messaging for control events.
    - Control plane maintains `octoprox:config:version` (monotonic
      counter, bumped on every mutation).
    - On every mutation, CP publishes `(version)` on NATS subject
-     `octoprox.config.changed` — just the version number, not the
+     `octoprox.config.changed` - just the version number, not the
      payload, to keep messages tiny.
    - Data plane subscribes; on message it
      `GET /internal/v1/config?since=<my_version>` against CP to fetch
@@ -112,7 +112,7 @@ xDS-style from CP to DP, durable messaging for control events.
      `.updated`, `octoprox.connector.changed`,
      `octoprox.health.result.<shard_id>`.
    - At-least-once delivery with consumer cursors per data-plane
-     instance — fixes the existing Redis Pub/Sub fire-and-forget gap
+     instance - fixes the existing Redis Pub/Sub fire-and-forget gap
      without inventing new safety nets.
    - Per-request signals (`request_completed`) stay local to the data
      plane and aggregate through the batched-delta path that exists
@@ -127,7 +127,7 @@ xDS-style from CP to DP, durable messaging for control events.
 5. **Data-plane state model**:
    - **Cold (definitions):** full snapshot of
      projects/connectors/credentials/proxies in RAM, refreshed via §2.
-     Stale up to ~2 s on push, ~30 s on poll fallback — acceptable for
+     Stale up to ~2 s on push, ~30 s on poll fallback - acceptable for
      definitions.
    - **Hot (status, quarantine):** Redis lookup with a 1 s local TTL
      cache, invalidated by NATS messages. Worst case: 1 s of routing to
@@ -152,26 +152,26 @@ xDS-style from CP to DP, durable messaging for control events.
 
 ## Trade-offs
 
-- **Pros:** independent scaling per tier — bump data plane on connection
+- **Pros:** independent scaling per tier - bump data plane on connection
   load, workers on proxy count, control plane stays small. Admin queries
   can never starve proxy traffic. NATS gives durable at-least-once
   delivery, so a brief disconnect doesn't desync caches. Deploys per-tier
   mean DP releases don't restart the API and vice versa.
 - **Cons:** three deployables to operate, NATS to run (one extra
   cluster), three log streams to grep. Local dev keeps `role=all` mode.
-  Eventual consistency window: 1–2 s for hot state, 2–30 s for
+  Eventual consistency window: 1-2 s for hot state, 2-30 s for
   definitions. Bulk operations (importing 100k proxies) need debouncing
   on the CP side to avoid notification storms.
 - **Ceiling:** roughly 50 instances and a few hundred thousand proxies.
   Past that, single-Redis throughput and single-Postgres write rate for
   metrics start to bite.
 
-## Implementation breakdown — ~3–4 weeks of focused work
+## Implementation breakdown - ~3-4 weeks of focused work
 
 Each phase is independently shippable: at every step the cluster still
 runs, just with progressively more separated tiers.
 
-### Phase 1 — Wire up the role flag (1 day)
+### Phase 1 - Wire up the role flag (1 day)
 
 - In [api/main.py](api/main.py)'s `lifespan`, branch on `OCTOPROX_ROLE`:
   - `control`: register routes, run write-side `ProxyManager`, no proxy
@@ -185,7 +185,7 @@ runs, just with progressively more separated tiers.
   - `all`: current behaviour, kept for local dev.
 - Add per-role health endpoints (`/healthz`, `/readyz`) for k8s probes.
 
-### Phase 2 — Extract `RoutingTable` (3–5 days)
+### Phase 2 - Extract `RoutingTable` (3-5 days)
 
 - New `api/core/routing_table.py`: read-only view of `_projects`,
   `_proxies`, `_credentials`, `_connectors`, `_project_strategies`. Used
@@ -197,13 +197,13 @@ runs, just with progressively more separated tiers.
   `RoutingTable`, never a `ProxyManager`.
 - Move the request-side helpers (`select_proxy_for_project`, credential
   placeholder resolution, domain filtering) onto `RoutingTable`.
-  Strategies stay where they are — they're pure.
+  Strategies stay where they are - they're pure.
 - Ensure DP has no Postgres connection: factor `_load_from_database` to
   also support `_load_from_snapshot(json)` (used by Phase 3).
 - Tests: a DP process should be able to start without `DATABASE_URL`
   set, given a config snapshot.
 
-### Phase 3 — Internal config endpoint and snapshot push (2–3 days)
+### Phase 3 - Internal config endpoint and snapshot push (2-3 days)
 
 - New `api/routes/internal_config.py`:
   `GET /internal/v1/config?since=<version>` returns a JSON snapshot of
@@ -221,7 +221,7 @@ runs, just with progressively more separated tiers.
 - Tests: mutate on CP, assert DP picks it up via bell within ~1 s and
   via poll within ~30 s if the bell drops.
 
-### Phase 4 — NATS JetStream substrate (3–5 days)
+### Phase 4 - NATS JetStream substrate (3-5 days)
 
 This is where new infra enters.
 
@@ -245,7 +245,7 @@ This is where new infra enters.
   receives the missed events through the consumer cursor (within
   seconds, not the 30 s poll fallback).
 
-### Phase 5 — Move workers to their own role (3–5 days)
+### Phase 5 - Move workers to their own role (3-5 days)
 
 - Today's background tasks are launched inside `ProxyManager.start()`.
   Refactor so they can be started independently of `ProxyManager`
@@ -253,7 +253,7 @@ This is where new infra enters.
   + leases without the cache).
 - HealthChecker, MetricsFlusher, MetricsCompactor, AutoScaler,
   ProviderSyncer now run *only* in `OCTOPROX_ROLE=worker` pods.
-- CP no longer runs HealthChecker etc. — it just exposes CRUD.
+- CP no longer runs HealthChecker etc. - it just exposes CRUD.
 - DP never ran them. It now also stops emitting `request_completed`
   through blinker; instead it writes directly to Redis counters via the
   existing batched-delta pipeline (which MetricsWorker reads in the
@@ -261,7 +261,7 @@ This is where new infra enters.
 - Workers keep all the lease + HRW logic unchanged. Just the host
   process is different.
 
-### Phase 6 — Deployment plumbing (2–3 days)
+### Phase 6 - Deployment plumbing (2-3 days)
 
 - `docker-compose.yml`: define three services `octoprox-control`,
   `octoprox-data`, `octoprox-worker` from the same image, different
@@ -293,23 +293,23 @@ These pieces are already in place and carry through unchanged:
 - `OCTOPROX_INSTANCE_ID` and `OCTOPROX_ROLE` env vars in
   [api/core/config.py](api/core/config.py) (`role` flag is finally
   used).
-- [api/core/event_bus.py](api/core/event_bus.py) `Transport` interface —
+- [api/core/event_bus.py](api/core/event_bus.py) `Transport` interface -
   NATS becomes a third implementation alongside `LocalTransport` and
   `RedisPubSubTransport`.
-- [api/core/leadership.py](api/core/leadership.py) `Lease` primitive —
+- [api/core/leadership.py](api/core/leadership.py) `Lease` primitive -
   used by the worker tier unchanged.
 - Rendezvous-hashing sharding logic in
   [api/core/health_checker.py](api/core/health_checker.py).
 - `version` columns on `projects`, `proxies`, `connectors`,
   `credentials` for optimistic-concurrency cache reloads.
-- `proxy_manager.reload_<entity>(id)` methods — consumed via the
+- `proxy_manager.reload_<entity>(id)` methods - consumed via the
   snapshot endpoint rather than direct Postgres reads on DP.
 - Redis-backed sticky sessions
   ([api/strategies/sticky.py](api/strategies/sticky.py)) and rate
   limiter ([api/core/rate_limiter.py](api/core/rate_limiter.py)).
 - AutoScaler state externalised to Redis hashes.
 - The batched metric-delta pipeline (in-memory pending dicts, periodic
-  flush, Pub/Sub fan-out) — moves wholesale into the data plane.
+  flush, Pub/Sub fan-out) - moves wholesale into the data plane.
 
 ## What to watch for in the current implementation
 

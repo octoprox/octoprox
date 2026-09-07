@@ -10,7 +10,7 @@ const colorMap = {
   yellow: 'bg-warning-soft text-warning',
   red: 'bg-danger-soft text-danger',
   gray: 'bg-surface-raised text-fg-muted',
-  // Decorative palette badges — fixed colors, not theme-driven.
+  // Decorative palette badges - fixed colors, not theme-driven.
   orange: 'bg-orange-100 text-orange-800 dark:bg-orange-900/40 dark:text-orange-400',
   purple: 'bg-purple-100 text-purple-800 dark:bg-purple-900/40 dark:text-purple-400',
   slate: 'bg-slate-200 text-slate-600 dark:bg-slate-700 dark:text-slate-400',

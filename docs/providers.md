@@ -6,24 +6,24 @@ nav_id: providers
 
 # Proxy Providers & the Provider SDK
 
-<p class="subtitle">Add any proxy vendor to Octoprox as a declarative descriptor — from the admin UI, a mounted YAML file, or a Python plugin.</p>
+<p class="subtitle">Add any proxy vendor to Octoprox as a declarative descriptor - from the admin UI, a mounted YAML file, or a Python plugin.</p>
 
 ## Overview
 
 A **provider** is anything a credential's `type` can point at. Octoprox ships four code-implemented providers (a static proxy list and the AWS, GCP and Azure cloud providers) and a set of **descriptor** providers. A descriptor is data, not code: it declares which fields a credential and a connector need, how those fields turn into proxy endpoints, and which vendor API calls discover options (zones, entry nodes, sub-users) or validate a credential.
 
-Because most residential and datacenter vendors expose the same shape — a gateway host, a username or password with encoded targeting parameters, and a REST API for account management — one engine executes every descriptor. Adding a vendor means writing a descriptor, not a provider class.
+Because most residential and datacenter vendors expose the same shape - a gateway host, a username or password with encoded targeting parameters, and a REST API for account management - one engine executes every descriptor. Adding a vendor means writing a descriptor, not a provider class.
 
 ### Shipped descriptors
 
 | Provider | Proxy types | Vendor API used for |
 |----------|-------------|---------------------|
-| **Oxylabs** | residential, mobile (sessions); ISP, dedicated ISP, datacenter, dedicated datacenter (sequential gateway ports with IP discovery) | — |
+| **Oxylabs** | residential, mobile (sessions); ISP, dedicated ISP, datacenter, dedicated datacenter (sequential gateway ports with IP discovery) | - |
 | **Bright Data** | residential, mobile (global sessions); ISP, datacenter (exit IPs pinned per slot) | zone discovery with passwords and owned IPs, credential validation |
 | **Decodo** *(beta)* | residential, mobile (sessions); ISP, datacenter (sticky gateway ports 10001+ with IP discovery, pay-per-GB and pay-per-IP plans) | optional API key validation |
 | **Webshare** *(beta)* | proxy list (mirrors the account's list, direct or backbone) | proxy list, credential validation |
 | **IPRoyal** *(beta)* | residential (sessions, parameters in the password). ISP, datacenter and mobile orders are delivered as per-order IP lists whose API shape is undocumented; import them with the static provider | entry-node discovery, optional token validation |
-| **NetNut** *(beta)* | residential, static residential (ISP), mobile, datacenter (sessions; product token in the username) | — |
+| **NetNut** *(beta)* | residential, static residential (ISP), mobile, datacenter (sessions; product token in the username) | - |
 
 > **Licensing:** the engine, the SDK and the UI are Apache 2.0. The shipped descriptor files in `api/providers/builtin/` are proprietary (all rights reserved) and may only be used as part of an Octoprox installation; see the `LICENSE` file in that directory. Descriptors you author yourself are your own.
 
@@ -33,13 +33,13 @@ Beta descriptors follow the vendor's public documentation but have not yet been 
 
 Admins open **Settings → Providers**. Shipped providers are read-only; any of them can be exported as YAML or duplicated as a starting point.
 
-1. **General** — id (becomes the credential type), name, description, documentation link, logo.
-2. **Credential fields** — what a user enters once per account. Mark API keys and passwords as *secret* so they are never written into proxy rows.
-3. **Connector fields** — per-connector settings such as proxy counts, countries or zones. Fields can be shown conditionally (`show_when`) and selects can load their options from the vendor API.
-4. **Proxy types** — one entry per product line, each with a *mode* (see below), gateway host and port, and username/password templates.
-5. **Discovery** — credential validation, options sources and two-step auth flows, all expressed as HTTP calls with JMESPath extraction.
-6. **Test** — run the descriptor's vendor calls with throwaway config before saving. Requests are shown with secrets redacted.
-7. **YAML** — preview the normalised document, paste one to import, or export it.
+1. **General** - id (becomes the credential type), name, description, documentation link, logo.
+2. **Credential fields** - what a user enters once per account. Mark API keys and passwords as *secret* so they are never written into proxy rows.
+3. **Connector fields** - per-connector settings such as proxy counts, countries or zones. Fields can be shown conditionally (`show_when`) and selects can load their options from the vendor API.
+4. **Proxy types** - one entry per product line, each with a *mode* (see below), gateway host and port, and username/password templates.
+5. **Discovery** - credential validation, options sources and two-step auth flows, all expressed as HTTP calls with JMESPath extraction.
+6. **Test** - run the descriptor's vendor calls with throwaway config before saving. Requests are shown with secrets redacted.
+7. **YAML** - preview the normalised document, paste one to import, or export it.
 
 Saving asks you to confirm the vendor hosts that will receive credential material. Changes take effect immediately on every instance, are versioned, and are written to an audit log with the actor and the host list.
 
@@ -60,8 +60,8 @@ Response size and time limits are operator settings (`provider_http_max_response
 
 Two more tiers exist for operators who deploy Octoprox:
 
-- **Mounted YAML** — set `OCTOPROX_PROVIDERS_DIR` (or `providers.dir` in the YAML config) to a directory of descriptor files. They are loaded at startup, appear in the catalog as source `file`, and are read-only in the UI.
-- **Python entry points** — a package can register providers under the `octoprox.providers` entry-point group. An entry point may resolve to a `ProviderDescriptor`, a descriptor dict, a path to a YAML file, or a class implementing the `SyncableProvider` protocol with a `descriptor` attribute (for vendors that need code, e.g. signed requests). Plugins run in-process with full trust; install only what you would install as part of the image.
+- **Mounted YAML** - set `OCTOPROX_PROVIDERS_DIR` (or `providers.dir` in the YAML config) to a directory of descriptor files. They are loaded at startup, appear in the catalog as source `file`, and are read-only in the UI.
+- **Python entry points** - a package can register providers under the `octoprox.providers` entry-point group. An entry point may resolve to a `ProviderDescriptor`, a descriptor dict, a path to a YAML file, or a class implementing the `SyncableProvider` protocol with a `descriptor` attribute (for vendors that need code, e.g. signed requests). Plugins run in-process with full trust; install only what you would install as part of the image.
 
 ```toml
 [project.entry-points."octoprox.providers"]
@@ -156,7 +156,7 @@ options:
 | Key | Description |
 |-----|-------------|
 | `key`, `label`, `type` | `type` is one of `text`, `password`, `number`, `select`, `boolean`, `textarea`, `url`, `country`. |
-| `required`, `secret`, `readonly`, `default`, `placeholder`, `help` | Form behaviour. Secret values are stored on the credential/connector but only substituted into proxy credentials at request time. `readonly` fields are shown but not editable — use them for values derived from another field via `fill` (Bright Data's proxy type follows the zone). |
+| `required`, `secret`, `readonly`, `default`, `placeholder`, `help` | Form behaviour. Secret values are stored on the credential/connector but only substituted into proxy credentials at request time. `readonly` fields are shown but not editable - use them for values derived from another field via `fill` (Bright Data's proxy type follows the zone). |
 | `group` | Connector fields are grouped into tabs (`general` by default). |
 | `options`, `options_preset`, `options_from` | Static options, the built-in `countries` list, or a named options source. `options_from_when` switches to the remote source only when a condition holds and falls back to the static list otherwise (Bright Data lists only the countries an ISP zone has IPs in, but the full list for residential zones). `empty_label` names the "no value" choice of an optional dynamic select. |
 | `fill` | For remote selects: `{ target_field: option_extra }` copied when an option is chosen. |
@@ -184,7 +184,7 @@ Secret fields render as `{key}` runtime placeholders inside stored proxies; ever
 
 - **Call**: `method`, `url`, `headers`, `params` (empty rendered values are dropped), `body` (JSON, strings templated), `auth` (name of an auth flow), `paginate: { next_url: <JMESPath> }`.
 - **Auth flow** (`auth.<name>`): a call plus `token_path`; the token is cached for `ttl_seconds` and exposed as `{auth.token}`.
-- **Options source** (`options.<name>`): a call plus `items`, `value`, `label`, `description`, `extra` (named JMESPath or value mappings), `enrich` (per-option follow-up calls with `when` and `merge`), `filter` and `cache_seconds`. `label` and `description` are evaluated over the enriched option, so they can mention values from follow-up calls. `group_by_value: true` collapses items sharing a value into one option with a `count` extra — how Bright Data turns a list of exit IPs into countries with IP counts.
+- **Options source** (`options.<name>`): a call plus `items`, `value`, `label`, `description`, `extra` (named JMESPath or value mappings), `enrich` (per-option follow-up calls with `when` and `merge`), `filter` and `cache_seconds`. `label` and `description` are evaluated over the enriched option, so they can mention values from follow-up calls. `group_by_value: true` collapses items sharing a value into one option with a `count` extra - how Bright Data turns a list of exit IPs into countries with IP counts.
 - **Validation**: a call plus optional `success` predicate, `capture` (stored on the credential), `error_message` and `when`.
 
 Value mappings turn API values into yours: `{ path: type, map: [{ starts_with: res, to: residential }], default: unknown }`.

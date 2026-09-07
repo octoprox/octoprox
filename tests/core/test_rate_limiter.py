@@ -116,7 +116,7 @@ class TestRecordRequest:
         key = PROXY_QUARANTINE_KEY.format(proxy_id="proxy-1")
         await redis_client.client.delete(key)
 
-        # Record another request — should be a no-op (skip because already quarantined)
+        # Record another request - should be a no-op (skip because already quarantined)
         await rate_limiter.record_request(
             proxy_id="proxy-1", connector_id="conn-1",
             max_requests=5, window_seconds=60,
@@ -136,7 +136,7 @@ class TestRecordRequest:
         }
         await redis_client.client.zadd(rkey, mapping=old_entries)
 
-        # Two new requests should NOT trigger quarantine — the old ones are
+        # Two new requests should NOT trigger quarantine - the old ones are
         # evicted by the sliding-window check inside record_request.
         for _ in range(2):
             await rate_limiter.record_request(

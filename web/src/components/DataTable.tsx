@@ -265,7 +265,7 @@ export function DataTable<TData, TValue>({
             ) : (
               <>
                 <span className="whitespace-nowrap">
-                  Showing {currentPageIndex * pageSize + 1}–{Math.min((currentPageIndex + 1) * pageSize, totalRows)} of {totalRows}
+                  Showing {currentPageIndex * pageSize + 1}-{Math.min((currentPageIndex + 1) * pageSize, totalRows)} of {totalRows}
                   {enableColumnFilters && columnFilters.length > 0 && (
                     <span className="text-fg-subtle"> (filtered)</span>
                   )}

@@ -113,7 +113,7 @@ class TestCrossInstanceProjectReload:
         redis_client: RedisClient,
     ) -> None:
         # A message tagged with our own instance_id should be ignored even
-        # if the entity id is bogus — no exception should be raised.
+        # if the entity id is bogus - no exception should be raised.
         my_id = started_proxy_manager._settings.instance_id
         payload = json.dumps(
             {
@@ -350,7 +350,7 @@ class TestReloadPreservesRuntimeState:
         assert after is not None
         # Status was set in Redis and must survive the reload.
         assert after.status == ProxyStatus.HEALTHY
-        # Counters now reflect the Redis-backed total — definitely not 0.
+        # Counters now reflect the Redis-backed total - definitely not 0.
         assert after.request_count == 5
         assert after.success_count == 5
 
@@ -358,7 +358,7 @@ class TestReloadPreservesRuntimeState:
 class TestCrossInstanceMetricDeltas:
     """Peer-published metric deltas land in in-memory counters.
 
-    The hot path no longer writes Redis per request — instead each
+    The hot path no longer writes Redis per request - instead each
     instance accumulates deltas locally, flushes every few seconds in
     one Redis pipeline, and announces the deltas on the
     ``METRIC_DELTAS_CHANNEL`` Pub/Sub channel. The subscriber on every
@@ -527,8 +527,8 @@ class TestCrossInstanceMetricDeltas:
         await started_proxy_manager._flush_pending_metrics()
 
         # Local apply happened inside flush. The subsequent Pub/Sub
-        # round-trip — which the publisher's own subscriber also
-        # receives — must NOT bump the counters a second time. Give
+        # round-trip - which the publisher's own subscriber also
+        # receives - must NOT bump the counters a second time. Give
         # the subscriber loop comfortably more time than a self-echo
         # would take to land.
         await asyncio.sleep(0.5)
@@ -541,7 +541,7 @@ class TestCrossInstanceMetricDeltas:
         assert cached_project is not None
         assert cached_project.request_count == 7
 
-        # And no leftover pending — the flush drained everything.
+        # And no leftover pending - the flush drained everything.
         assert proxy.id not in started_proxy_manager._pending_proxy_deltas
         assert project.id not in started_proxy_manager._pending_project_deltas
 
@@ -552,7 +552,7 @@ class TestCrossInstanceMetricDeltas:
     ) -> None:
         """The hot path neither writes Redis nor bumps in-memory counters.
 
-        Per-request handlers only accumulate into the pending delta —
+        Per-request handlers only accumulate into the pending delta -
         in-memory counters and Redis are both updated at the next
         ``_flush_pending_metrics`` tick, in the same code path peers
         run when their subscribers fire. This is what keeps the
@@ -599,13 +599,13 @@ class TestCrossInstanceMetricDeltas:
                 bytes_received=20,
             )
 
-        # Hot path didn't touch in-memory — peers must see the same
+        # Hot path didn't touch in-memory - peers must see the same
         # values, so the local instance can't be ahead.
         cached = started_proxy_manager.get_proxy(proxy.id)
         assert cached is not None
         assert cached.request_count == 0
 
-        # Pending delta carries the accumulated batch — no Redis write yet.
+        # Pending delta carries the accumulated batch - no Redis write yet.
         pending = started_proxy_manager._pending_proxy_deltas[proxy.id]
         assert pending["request_count"] == 4
         assert pending["success_count"] == 4

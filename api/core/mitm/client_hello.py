@@ -19,7 +19,7 @@ from typing import Any
 import dpkt.ssl  # type: ignore[import-untyped]
 
 # ---------------------------------------------------------------------------
-# GREASE values (RFC 8701) — filtered out when computing fingerprints
+# GREASE values (RFC 8701) - filtered out when computing fingerprints
 # ---------------------------------------------------------------------------
 
 GREASE_VALUES: frozenset[int] = frozenset(

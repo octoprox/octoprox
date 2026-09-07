@@ -530,7 +530,7 @@ class TestUserInviteFlow:
         )
         assert resp1.status_code == 200
 
-        # Second use — token is consumed
+        # Second use - token is consumed
         resp2 = authenticated_client.post(
             "/api/v1/auth/set-password",
             json={"token": token, "password": "pass456"},

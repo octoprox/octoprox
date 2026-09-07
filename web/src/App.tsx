@@ -29,7 +29,7 @@ function App() {
   return (
     <BrowserRouter>
       <Routes>
-        {/* Unauthenticated route — accessible without login */}
+        {/* Unauthenticated route - accessible without login */}
         <Route path="/set-password/:token" element={<SetPassword />} />
         {/* All other routes require authentication */}
         <Route path="/*" element={<AuthenticatedApp />} />

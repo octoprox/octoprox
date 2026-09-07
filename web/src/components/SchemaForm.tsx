@@ -180,13 +180,13 @@ function SchemaField({ provider, field, value, values, onChange, scopes, presets
     const rich: RichSelectOption[] = options.map((o) => ({ value: o.value, label: o.label, description: o.description ?? undefined }))
     if (field.readonly) {
       const selected = rich.find((o) => o.value === value)
-      control = <Input value={selected?.label ?? value} readOnly disabled className={`${inputClass} bg-surface-raised`} placeholder={field.placeholder ?? '—'} />
+      control = <Input value={selected?.label ?? value} readOnly disabled className={`${inputClass} bg-surface-raised`} placeholder={field.placeholder ?? '-'} />
     } else {
       control = rich.length > 12
         ? <RichSelect options={rich} value={value} onChange={(v) => onChange(v)} placeholder={field.placeholder ?? `Select ${field.label.toLowerCase()}`} required={field.required} disabled={readOnly} />
         : (
           <Select value={value} onChange={(e) => onChange(e.target.value)} className={inputClass} required={field.required} disabled={readOnly}>
-            {!field.required && !rich.some((o) => o.value === '') && <option value="">{field.empty_label ?? '—'}</option>}
+            {!field.required && !rich.some((o) => o.value === '') && <option value="">{field.empty_label ?? '-'}</option>}
             {rich.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
           </Select>
         )
@@ -278,7 +278,7 @@ function RemoteSelect({ provider, field, value, onChange, credentialId, credenti
 
   const options: RichSelectOption[] = useMemo(() => {
     const list: RichSelectOption[] = (data ?? []).map((o) => ({ value: o.value, label: o.label, description: o.description ?? undefined }))
-    if (!field.required && data) list.unshift({ value: '', label: field.empty_label ?? '—' })
+    if (!field.required && data) list.unshift({ value: '', label: field.empty_label ?? '-' })
     return list
   }, [data, field.required, field.empty_label])
 

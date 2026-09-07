@@ -4,7 +4,7 @@
 # This built-in provider descriptor is NOT licensed under Apache-2.0.
 # See api/providers/builtin/LICENSE for the terms that apply to it.
 #
-# Webshare — the account API returns the concrete proxy list (host, port and
+# Webshare - the account API returns the concrete proxy list (host, port and
 # per-proxy credentials), which Octoprox mirrors. Marked beta until exercised
 # against a live account.
 id: webshare

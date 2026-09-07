@@ -4,7 +4,7 @@
 # This built-in provider descriptor is NOT licensed under Apache-2.0.
 # See api/providers/builtin/LICENSE for the terms that apply to it.
 #
-# Oxylabs — residential/mobile via pr.oxylabs.io sessions; ISP/datacenter via
+# Oxylabs - residential/mobile via pr.oxylabs.io sessions; ISP/datacenter via
 # sequential gateway ports (8001+) with per-port IP discovery.
 id: oxylabs
 name: Oxylabs

@@ -15,7 +15,7 @@ Octoprox can decrypt and re-encrypt HTTPS traffic between your client and the ta
 | Mode | Description | Use Case |
 |------|-------------|----------|
 | **Disabled** | Traffic forwarded through an encrypted tunnel as-is. The proxy cannot inspect headers or content. Your client's TLS fingerprint, User-Agent, and all headers reach the target unchanged. | You handle anti-detection yourself. |
-| **Plain** | Decrypts HTTPS to inspect headers, then re-encrypts using Python's standard TLS library. The target sees a Python/OpenSSL fingerprint — easily detectable by anti-bot systems. | Debugging and development only. |
+| **Plain** | Decrypts HTTPS to inspect headers, then re-encrypts using Python's standard TLS library. The target sees a Python/OpenSSL fingerprint - easily detectable by anti-bot systems. | Debugging and development only. |
 | **Browser Match** | Decrypts HTTPS for inspection, then re-encrypts using a browser-grade TLS engine that matches the client's User-Agent. If your client sends a Chrome User-Agent, the target sees a Chrome TLS fingerprint. | Production scraping with basic anti-detection. |
 | **Browser Override** | Same as Browser Match, but also replaces the client's User-Agent with the selected browser's default. TLS fingerprint and User-Agent are guaranteed consistent. | Maximum anti-detection when you don't need to control the User-Agent. |
 
@@ -53,7 +53,7 @@ This means the upstream TLS fingerprint (JA3/JA4) is always determined by the re
 
 ## Protocol Support
 
-When MITM is **disabled**, Octoprox creates a raw TCP tunnel (`CONNECT`) and is completely protocol-agnostic — HTTP/2, HTTP/3 (QUIC), WebSocket, and any other protocol work transparently.
+When MITM is **disabled**, Octoprox creates a raw TCP tunnel (`CONNECT`) and is completely protocol-agnostic - HTTP/2, HTTP/3 (QUIC), WebSocket, and any other protocol work transparently.
 
 When MITM is **enabled**, the proxy terminates TLS and parses traffic itself. The current implementation uses [h11](https://h11.readthedocs.io/) on the client-facing side, which limits interception to **HTTP/1.1** only. On the relay side, the impersonation engines (`curl_cffi`, `rnet`) negotiate HTTP/2 with the target server automatically.
 
@@ -120,7 +120,7 @@ openssl req -new -x509 -key data/ca/octoprox-ca.key \
 
 ## Docker
 
-In Docker deployments, the CA files are persisted in a named volume (`ca_data`) mounted at `/app/data/ca`. This ensures the CA certificate survives container restarts — clients only need to install it once.
+In Docker deployments, the CA files are persisted in a named volume (`ca_data`) mounted at `/app/data/ca`. This ensures the CA certificate survives container restarts - clients only need to install it once.
 
 ## YAML Configuration
 

@@ -366,7 +366,7 @@ async def _read_request(
             body = b"".join(body_parts) if body_parts else None
             return request_event, body, total_read
 
-        # ConnectionClosed, PAUSED, or other sentinel — stop
+        # ConnectionClosed, PAUSED, or other sentinel - stop
         return None, None, total_read
 
 

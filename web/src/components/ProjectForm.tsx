@@ -8,12 +8,12 @@ import { RichSelect, RichSelectOption } from './RichSelect'
 import { Button, Input, Select, Textarea, Label, Alert, Inspector, Tabs } from './ui'
 
 const engineOptions: RichSelectOption[] = [
-  { value: 'curl_cffi', label: 'curl_cffi', description: 'C/libcurl — mature, Chrome-grade fingerprinting' },
-  { value: 'rnet', label: 'rnet', description: 'Rust/BoringSSL — fast, 113+ browser profiles' },
+  { value: 'curl_cffi', label: 'curl_cffi', description: 'C/libcurl - mature, Chrome-grade fingerprinting' },
+  { value: 'rnet', label: 'rnet', description: 'Rust/BoringSSL - fast, 113+ browser profiles' },
 ]
 
 const browserOptions: RichSelectOption[] = [
-  { value: 'chrome', label: 'Chrome', description: 'Most common — lowest detection risk' },
+  { value: 'chrome', label: 'Chrome', description: 'Most common - lowest detection risk' },
   { value: 'firefox', label: 'Firefox', description: 'Alternative fingerprint' },
   { value: 'safari', label: 'Safari', description: 'macOS/iOS fingerprint' },
   { value: 'edge', label: 'Edge', description: 'Chromium-based, Windows-like' },
@@ -22,7 +22,7 @@ const browserOptions: RichSelectOption[] = [
 
 const mitmModeOptions: RichSelectOption[] = [
   { value: 'off', label: 'Disabled', description: 'Traffic tunneled as-is. You handle anti-detection.' },
-  { value: 'plain', label: 'Plain', description: 'Inspect headers. Python TLS fingerprint — detectable.', badge: 'DEBUG' },
+  { value: 'plain', label: 'Plain', description: 'Inspect headers. Python TLS fingerprint - detectable.', badge: 'DEBUG' },
   { value: 'match_ua', label: 'Browser Match', description: 'Inspect headers. TLS fingerprint matches client User-Agent.', badge: 'PROD' },
   { value: 'override_ua', label: 'Browser Override', description: 'Inspect + override User-Agent. Full fingerprint control.', badge: 'PROD' },
 ]
@@ -36,17 +36,17 @@ const mitmModeInfo: Record<string, { color: string; icon: typeof Info; text: str
   plain: {
     color: 'bg-warning-soft border-warning/30 text-warning',
     icon: AlertTriangle,
-    text: 'Debug mode. Decrypts HTTPS traffic to inspect HTTP headers, then re-encrypts using Python\'s standard TLS library. The target server sees a Python/OpenSSL TLS fingerprint, which is easily detectable by anti-bot systems. Best for development and debugging — not suitable for production scraping against protected targets.',
+    text: 'Debug mode. Decrypts HTTPS traffic to inspect HTTP headers, then re-encrypts using Python\'s standard TLS library. The target server sees a Python/OpenSSL TLS fingerprint, which is easily detectable by anti-bot systems. Best for development and debugging - not suitable for production scraping against protected targets.',
   },
   match_ua: {
     color: 'bg-primary-soft border-primary/30 text-primary-soft-fg',
     icon: Shield,
-    text: 'Browser-grade TLS fingerprint matching your client\'s User-Agent. If your client sends a Chrome User-Agent, the target sees a Chrome TLS fingerprint (JA3/JA4). Note: this replaces your client\'s original TLS fingerprint with the engine\'s impersonation — the target sees the engine\'s fingerprint, not your client\'s.',
+    text: 'Browser-grade TLS fingerprint matching your client\'s User-Agent. If your client sends a Chrome User-Agent, the target sees a Chrome TLS fingerprint (JA3/JA4). Note: this replaces your client\'s original TLS fingerprint with the engine\'s impersonation - the target sees the engine\'s fingerprint, not your client\'s.',
   },
   override_ua: {
     color: 'bg-primary-soft border-primary/30 text-primary-soft-fg',
     icon: Shield,
-    text: 'Full fingerprint control. The TLS fingerprint and User-Agent are guaranteed consistent — both match the selected browser profile. Your client\'s original User-Agent is overridden. Best for maximum anti-detection when you don\'t need to control the User-Agent yourself.',
+    text: 'Full fingerprint control. The TLS fingerprint and User-Agent are guaranteed consistent - both match the selected browser profile. Your client\'s original User-Agent is overridden. Best for maximum anti-detection when you don\'t need to control the User-Agent yourself.',
   },
 }
 

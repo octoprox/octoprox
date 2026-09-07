@@ -6,7 +6,7 @@
 The bus has two transport slots: a local transport (always present) that
 forwards to in-process blinker subscribers, and an optional distributed
 transport (Redis Pub/Sub) for the subset of signals classified as
-cross-instance. The bus itself knows nothing about specific entity types —
+cross-instance. The bus itself knows nothing about specific entity types -
 when a publisher wants the event to reach other instances, it passes
 ``entity_id=<id>`` explicitly; the distributed transport forwards just
 ``(signal_name, instance_id, entity_id, op)``.
@@ -14,12 +14,12 @@ when a publisher wants the event to reach other instances, it passes
 Receivers continue to subscribe via ``signal.connect(handler)`` for
 in-process events. Cross-instance receivers run a dedicated subscriber
 loop (see ``ProxyManager._cross_instance_subscriber_loop``) that bridges
-pub/sub messages directly into per-entity reload methods — they do NOT
+pub/sub messages directly into per-entity reload methods - they do NOT
 re-emit into blinker (that would cause infinite echoes between
 instances).
 
 There is exactly one ``EventBus`` instance per process, exposed via the
-``@lru_cache``-d ``get_event_bus()`` factory — same pattern as
+``@lru_cache``-d ``get_event_bus()`` factory - same pattern as
 ``get_settings()`` / ``get_redis_client(...)`` elsewhere in the
 project. Constructing a second ``EventBus()`` directly is a mistake:
 local subscribers would fire twice and distributed publishes would
@@ -115,7 +115,7 @@ class RedisPubSubTransport(Transport):
         op: str | None,
         **kwargs: Any,
     ) -> None:
-        # The distributed transport ignores unrelated kwargs by design —
+        # The distributed transport ignores unrelated kwargs by design -
         # callers attach domain payload for local subscribers, but only
         # the minimal envelope crosses the wire.
         name = getattr(signal, "name", "")
@@ -165,7 +165,7 @@ class EventBus:
     ) -> None:
         """Wire the distributed transport and the set of signals it carries.
 
-        Idempotent — calling again replaces the prior configuration.
+        Idempotent - calling again replaces the prior configuration.
         """
         self._distributed = transport
         self._cross_instance_names = {
@@ -229,6 +229,6 @@ def get_event_bus() -> EventBus:
     return EventBus()
 
 
-# Module-level convenience alias to the cached singleton — mirrors how
+# Module-level convenience alias to the cached singleton - mirrors how
 # ``api.core.config`` exposes both ``get_settings()`` and ``settings``.
 event_bus = get_event_bus()

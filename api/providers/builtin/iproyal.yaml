@@ -4,7 +4,7 @@
 # This built-in provider descriptor is NOT licensed under Apache-2.0.
 # See api/providers/builtin/LICENSE for the terms that apply to it.
 #
-# IPRoyal residential — targeting, session id and lifetime are encoded in the
+# IPRoyal residential - targeting, session id and lifetime are encoded in the
 # proxy *password*. With an API token the entry nodes are discovered from the
 # residential API. Marked beta until exercised against a live account.
 id: iproyal

@@ -125,7 +125,7 @@ def increment_stats(
 # Redis (one batched ``HINCRBY`` pipeline) and announces the same deltas on
 # pub/sub so peers can update their in-memory view without a Redis read.
 #
-# The wire format is deliberately additive ints / floats — easy to apply
+# The wire format is deliberately additive ints / floats - easy to apply
 # anywhere via ``apply_delta`` or merge back into the pending dict via
 # ``merge_delta_into`` on failure.
 # ---------------------------------------------------------------------------

@@ -82,7 +82,7 @@ export default function ProvidersSection() {
       header: 'Credentials sent to',
       enableSorting: false,
       accessorFn: (row: ProviderSummary) => row.egress_hosts.join(', '),
-      cell: ({ getValue }) => <span className="text-fg-muted font-mono text-[11px] truncate block">{getValue<string>() || '—'}</span>,
+      cell: ({ getValue }) => <span className="text-fg-muted font-mono text-[11px] truncate block">{getValue<string>() || '-'}</span>,
     },
     {
       id: 'usage',
@@ -147,7 +147,7 @@ export default function ProvidersSection() {
     <Page
       title="Providers"
       count={providers.length}
-      subtitle="Proxy vendors Octoprox can provision from. Shipped providers are read-only; add your own as declarative descriptors — no code, no redeploy."
+      subtitle="Proxy vendors Octoprox can provision from. Shipped providers are read-only; add your own as declarative descriptors - no code, no redeploy."
       actions={<Button size="sm" onClick={() => setPanel({ kind: 'new' })}><Plus className="w-3.5 h-3.5" /> New provider</Button>}
       panel={panelNode}
     >

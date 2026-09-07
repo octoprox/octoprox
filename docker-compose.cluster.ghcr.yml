@@ -1,8 +1,8 @@
 # Production-ready multi-instance Octoprox cluster using the
 # pre-built image from GitHub Container Registry.
 #
-# Layout is identical to docker-compose.cluster.yml — three Octoprox
-# replicas fronted by HAProxy, sharing a single Postgres and Redis —
+# Layout is identical to docker-compose.cluster.yml - three Octoprox
+# replicas fronted by HAProxy, sharing a single Postgres and Redis -
 # but pulls ghcr.io/octoprox/octoprox:latest instead of building from
 # the local source tree. Use this as the starting point for a real
 # deployment.

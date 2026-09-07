@@ -12,7 +12,7 @@ attempting decryption.
 Entity rows are carried as plain dicts (full per-column dumps). The exact
 column shape is guaranteed identical between source and target by the
 ``schema_version`` (Alembic head) compatibility gate, so generic dicts are both
-safe and resilient to schema evolution — no per-column duplication that could
+safe and resilient to schema evolution - no per-column duplication that could
 drift away from the SQLAlchemy models.
 """
 

@@ -7,9 +7,9 @@ import { Badge } from '../ui'
 import { Checkbox, Collapsible, HttpCallEditor, KeyValueEditor, ListField, NumberField, SelectField, Spec, TemplateEditor, TextField, ValueSourceInput, fieldPathsOf, slugify } from './editors'
 
 const MODES = [
-  { value: 'session', label: 'Session — gateway + fresh session id per slot' },
-  { value: 'port', label: 'Port — one exit IP per slot (gateway port or pinned IP)' },
-  { value: 'list', label: 'List — the vendor API returns host:port entries' },
+  { value: 'session', label: 'Session - gateway + fresh session id per slot' },
+  { value: 'port', label: 'Port - one exit IP per slot (gateway port or pinned IP)' },
+  { value: 'list', label: 'List - the vendor API returns host:port entries' },
 ]
 
 /** Edits `proxy_types`, `proxy_type_field` and `session_id`. */
@@ -79,7 +79,7 @@ export function ProxyTypeEditor({ spec, onChange }: { spec: Spec; onChange: (pat
                 label="Port strategy"
                 value={t.port_strategy ?? 'sequential'}
                 onChange={(v) => update(i, { port_strategy: v || 'sequential' })}
-                options={[{ value: 'sequential', label: 'Sequential ports — slot n uses first port + n (Oxylabs style)' }, { value: 'fixed', label: 'Fixed port — pin the exit IP with {discovered_ip} in the username (Bright Data style)' }]}
+                options={[{ value: 'sequential', label: 'Sequential ports - slot n uses first port + n (Oxylabs style)' }, { value: 'fixed', label: 'Fixed port - pin the exit IP with {discovered_ip} in the username (Bright Data style)' }]}
               />
               <div className="grid grid-cols-2 gap-3">
                 <TextField label="IP discovery URL (requested through the proxy)" value={t.discovery?.url ?? 'https://httpbin.org/ip'} onChange={(v) => update(i, { discovery: { ...(t.discovery ?? {}), url: v } })} mono />

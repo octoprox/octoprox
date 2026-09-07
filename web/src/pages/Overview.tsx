@@ -242,7 +242,7 @@ export default function Overview() {
         <div className="px-5 py-4 border-b md:border-b-0 md:border-r border-line flex flex-col justify-center gap-0.5 min-w-0">
           <div className="text-xs text-fg-muted">Success rate · {range}</div>
           <div className="text-[40px] font-semibold leading-[44px] tracking-tight tabular-nums">
-            {successRate == null ? '—' : `${successRate.toFixed(1)}%`}
+            {successRate == null ? '-' : `${successRate.toFixed(1)}%`}
           </div>
           <div className="text-xs text-fg-muted tabular-nums">
             {totals.requests.toLocaleString()} requests in the last {range}
@@ -290,7 +290,7 @@ export default function Overview() {
         <Kpi label="Failures" value={compact(totals.failures)} spark={sparks.failures} color={C.failures} compact={projectPanelOpen} />
         <Kpi label="Bytes sent" value={bytesShort(totals.bytesSent)} spark={sparks.sent} color={C.sent} compact={projectPanelOpen} />
         <Kpi label="Bytes received" value={bytesShort(totals.bytesReceived)} spark={sparks.received} color={C.received} compact={projectPanelOpen} />
-        <Kpi label="Requests / min" value={scaling ? scaling.requests_per_minute.toFixed(1) : '—'} sub={scaling ? `${scaling.rate_per_proxy.toFixed(1)} per proxy` : undefined} compact={projectPanelOpen} />
+        <Kpi label="Requests / min" value={scaling ? scaling.requests_per_minute.toFixed(1) : '-'} sub={scaling ? `${scaling.rate_per_proxy.toFixed(1)} per proxy` : undefined} compact={projectPanelOpen} />
       </Card>
 
       <div className="grid grid-cols-1 xl:grid-cols-[minmax(0,2fr)_minmax(0,1fr)] gap-4 items-start">

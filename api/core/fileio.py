@@ -14,7 +14,7 @@ def atomic_write(path: Path, data: bytes, *, mode: int) -> None:
 
     Writes to a temp file in the same directory, fsyncs it, then renames it
     over the target, so a concurrent reader sees either the old file or the
-    complete new one — never a half-written file. The temp file is cleaned up
+    complete new one - never a half-written file. The temp file is cleaned up
     if any step before the rename fails.
     """
     fd, tmp = tempfile.mkstemp(

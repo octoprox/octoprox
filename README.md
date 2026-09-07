@@ -76,7 +76,7 @@ docker compose -f docker-compose.cluster.ghcr.yml down
 
 > **Important**: the cluster compose files mount `./haproxy/haproxy.cfg`. If
 > that file is missing when you run `up`, Docker silently creates an empty
-> directory in its place and HAProxy crash-loops printing its usage banner —
+> directory in its place and HAProxy crash-loops printing its usage banner -
 > so make sure the config is present (it ships in your checkout for the
 > local-build variant; download it as shown above for the pre-built image).
 
@@ -95,7 +95,7 @@ Endpoints exposed on the host (same for both cluster variants):
 |------|---------------------------------------------------------|
 | 8000 | API + Web UI (HAProxy → octoprox-{1,2,3}:8000, HTTP)    |
 | 8080 | Proxy traffic (HAProxy → octoprox-{1,2,3}:8080, TCP)    |
-| 8404 | HAProxy stats UI — useful for seeing which backend served a given request |
+| 8404 | HAProxy stats UI - useful for seeing which backend served a given request |
 
 All three instances share the same Postgres and Redis, generate distinct
 `OCTOPROX_INSTANCE_ID` values, advertise themselves via Redis heartbeat,
@@ -105,8 +105,8 @@ compactor) and per-connector workers (autoscaler, provider syncer). See
 [`docker-compose.cluster.ghcr.yml`](docker-compose.cluster.ghcr.yml), and
 [`haproxy/haproxy.cfg`](haproxy/haproxy.cfg) for the wiring details.
 
-For the architecture behind multi-instance — what's shared, what's
-elected, how failover works — see the
+For the architecture behind multi-instance - what's shared, what's
+elected, how failover works - see the
 [Deployment & Scaling docs page](https://octoprox.com/deployment).
 
 ---
@@ -364,9 +364,9 @@ Configuration is loaded from YAML files in the `config/` directory based on the 
 Octoprox requires authentication for all web UI and API access. Users must log in with a username and password. On first startup, an admin user is automatically created from `OCTOPROX_AUTH_USERNAME` and `OCTOPROX_AUTH_PASSWORD`.
 
 There are three roles:
-- **Admin** — Full access including user management
-- **Editor** — Can manage projects, proxies, credentials, and connectors (no user management)
-- **Viewer** — Read-only access to all data
+- **Admin** - Full access including user management
+- **Editor** - Can manage projects, proxies, credentials, and connectors (no user management)
+- **Viewer** - Read-only access to all data
 
 #### Configuration
 
@@ -428,7 +428,7 @@ instance.
   a clashing email is cleared. Untick it to restore users exactly as they are in
   the backup; you will then need to log in with credentials from the backup.
 
-The same operations are available via the API — see
+The same operations are available via the API - see
 [docs/api.md](docs/api.md#backup--migration). Backup files contain password
 hashes and provider credentials protected only by your passphrase; treat them
 as secrets.
@@ -471,7 +471,7 @@ make cluster-up          # Start cluster, building image from local source
 make cluster-down        # Stop the cluster
 make cluster-logs        # Tail aggregated cluster logs
 make cluster-rebuild     # Rebuild images and restart
-# Production-ready cluster (pre-built GHCR image) — run docker compose directly:
+# Production-ready cluster (pre-built GHCR image) - run docker compose directly:
 #   docker compose -f docker-compose.cluster.ghcr.yml up -d
 
 make web-install   # Install frontend dependencies

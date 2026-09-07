@@ -762,7 +762,7 @@ class MetricsRepository:
 
         Aggregates source-granularity rows older than ``older_than`` into
         target-granularity buckets, inserts the compacted rows, and deletes
-        the originals — all within the current transaction.
+        the originals - all within the current transaction.
 
         Returns the number of source rows deleted.
         """

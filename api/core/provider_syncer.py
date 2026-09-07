@@ -95,7 +95,7 @@ class ProxyProviderSyncer:
         # within ONE instance two events for the same connector
         # (e.g. provider_connector_sync_requested arriving while the
         # periodic refresh is mid-flight) would both try to acquire the
-        # same Redis lease — the second would see "held by us" and skip
+        # same Redis lease - the second would see "held by us" and skip
         # the work entirely, dropping a needed sync. The in-process
         # lock serialises those siblings so the second call waits and
         # then runs against the now-current state.
@@ -289,7 +289,7 @@ class ProxyProviderSyncer:
           than skipping each other.
         * Redis lease ``provider_sync:<connector_id>`` serialises across
           Octoprox processes. A peer holding the lease means this
-          instance skips — that peer's run will pick up the latest state
+          instance skips - that peer's run will pick up the latest state
           from the DB.
         """
         async with self._get_sync_lock(connector.id):

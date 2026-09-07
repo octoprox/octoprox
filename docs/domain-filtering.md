@@ -10,8 +10,8 @@ nav_id: domain-filtering
 
 Connectors support optional domain-based filtering to control which target domains their proxies serve. This is configured per-connector via the `routing_config` field.
 
-- **Whitelist mode** — Only requests for the listed domains are routed through the connector.
-- **Blacklist mode** — All requests *except* those for the listed domains are routed through the connector.
+- **Whitelist mode** - Only requests for the listed domains are routed through the connector.
+- **Blacklist mode** - All requests *except* those for the listed domains are routed through the connector.
 
 Domain matching is hierarchical: `bing.com` matches `bing.com` and all subdomains (`www.bing.com`, `images.bing.com`, etc.).
 

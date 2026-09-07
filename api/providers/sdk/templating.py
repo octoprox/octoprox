@@ -10,7 +10,7 @@ Grammar
 ``{connector.country_code|or:any}``  fallback when the value is empty
 ``{session_id}`` ``{index}`` ``{port}`` ``{discovered_ip}`` ``{auth.token}`` ``{item.name}``
 
-Rendering is plain string substitution — there is no expression language and
+Rendering is plain string substitution - there is no expression language and
 no attribute access, so a descriptor cannot reach anything that is not
 explicitly placed in the :class:`RenderContext`.
 

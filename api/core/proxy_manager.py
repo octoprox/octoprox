@@ -224,7 +224,7 @@ class ProxyManager:
         """Listen on the EventBus distributed channel and reload entities.
 
         Drops self-echoes by ``instance_id``, then dispatches by the
-        signal's own name (no string duplication — the signal objects are
+        signal's own name (no string duplication - the signal objects are
         the source of truth). The handler receives ``(entity_id, op)`` so
         it can short-circuit on "removed" without a wasted DB read.
         Reconnects on failure so a brief Redis hiccup does not silently
@@ -494,7 +494,7 @@ class ProxyManager:
     ) -> None:
         """Handle request statistics update (internal implementation).
 
-        Accumulates the request's contribution into a pending delta —
+        Accumulates the request's contribution into a pending delta -
         nothing else. The hot path makes zero Redis calls (except the
         rate-limiter check below, which is correctness-critical and
         only opt-in).
@@ -504,7 +504,7 @@ class ProxyManager:
         its peers between the request and the next flush, which the UI
         would see as flapping when round-robin polls hit different
         instances. Instead, the flush loop applies the same delta to
-        in-memory at the same moment it announces it to peers — see
+        in-memory at the same moment it announces it to peers - see
         ``_flush_pending_metrics``.
         """
         proxy = self._proxies.get(proxy_id)
@@ -548,7 +548,7 @@ class ProxyManager:
                 await task
         self._tasks.clear()
 
-        # Release the EventBus distributed transport — it holds a reference
+        # Release the EventBus distributed transport - it holds a reference
         # to the redis client, which the lifespan is about to close.
         event_bus.reset_distributed()
 
@@ -655,7 +655,7 @@ class ProxyManager:
             connectors = {c.id: c for c in await connector_repo.get_all()}
             proxies = {p.id: p for p in await proxy_repo.get_all()}
 
-        # Projects — merge in place, preserving aggregate counters.
+        # Projects - merge in place, preserving aggregate counters.
         for pid in list(self._projects.keys()):
             if pid not in projects:
                 self._projects.pop(pid, None)
@@ -672,7 +672,7 @@ class ProxyManager:
                     self._project_strategies[pid] = get_strategy(fresh.routing_strategy)
 
         # Credentials and connectors have no in-memory runtime state of
-        # their own — every field is DB-backed — so an outright replace
+        # their own - every field is DB-backed - so an outright replace
         # is fine, but only for entries that actually changed.
         for cid in list(self._credentials.keys()):
             if cid not in credentials:
@@ -684,7 +684,7 @@ class ProxyManager:
                 self._connectors.pop(cid, None)
         self._connectors.update(connectors)
 
-        # Proxies — patch in place to keep request counters, status, and
+        # Proxies - patch in place to keep request counters, status, and
         # last_check_latency_ms from being clobbered by Pydantic defaults.
         removed_proxy_ids = [pid for pid in self._proxies if pid not in proxies]
         for pid in removed_proxy_ids:
@@ -832,7 +832,7 @@ class ProxyManager:
     async def _periodic_metric_flush_loop(self, interval_seconds: float = 5.0) -> None:
         """Periodically flush accumulated metric deltas.
 
-        Default cadence is 5s — fast enough that the UI feels live,
+        Default cadence is 5s - fast enough that the UI feels live,
         slow enough that the Redis pipeline batches many requests
         into a single round-trip. On a busy host this turns 10k
         per-request Redis writes per second into one batched write
@@ -854,7 +854,7 @@ class ProxyManager:
 
         Drops self-echoes by ``instance_id``. The applied delta updates
         in-memory ``Proxy`` / ``Project`` counters using the same
-        weighted-average math as ``increment_stats`` — see
+        weighted-average math as ``increment_stats`` - see
         ``stats.apply_delta``. Reconnects on transient Redis failures
         so a brief blip doesn't silently mute cross-instance updates.
         """
@@ -966,7 +966,7 @@ class ProxyManager:
         counters (``request_count`` and friends) are deliberately left
         untouched: they are updated by ``_handle_request_stats`` per
         request, and replacing them here would zero them out every time a
-        peer publishes ``proxy_changed`` — causing UI stats to flap.
+        peer publishes ``proxy_changed`` - causing UI stats to flap.
         """
         async with self._session_factory() as session:
             fresh = await ProxyRepository(session).get_by_id(proxy_id)
@@ -982,7 +982,7 @@ class ProxyManager:
         status_data = await self._redis_client.get_proxy_status(proxy_id)
         existing = self._proxies.get(proxy_id)
         if existing is None:
-            # First time we see this proxy — take the fresh entity and
+            # First time we see this proxy - take the fresh entity and
             # apply Redis status. Counters start at zero (the model
             # default), and converge upward via ``_hydrate_from_redis``
             # on the next periodic full reload.

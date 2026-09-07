@@ -67,8 +67,8 @@ class TestBootstrapCoordination:
     async def test_concurrent_bootstrap_yields_single_shared_ca(
         self, redis_client: RedisClient, tmp_path: Path
     ) -> None:
-        # Three managers share one CA directory — as cluster instances share
-        # one volume — and bootstrap concurrently against real Redis.
+        # Three managers share one CA directory - as cluster instances share
+        # one volume - and bootstrap concurrently against real Redis.
         ca_dir = tmp_path / "ca"
         managers = [_mgr(ca_dir) for _ in range(3)]
 
@@ -84,7 +84,7 @@ class TestBootstrapCoordination:
             "octoprox-ca.crt",
             "octoprox-ca.key",
         ]
-        # Every instance ended up using the same CA — the whole point of the
+        # Every instance ended up using the same CA - the whole point of the
         # shared volume, so leaf certs validate across all backends.
         fingerprints = {_mem_fingerprint(mgr) for mgr in managers}
         assert len(fingerprints) == 1

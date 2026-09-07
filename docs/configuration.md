@@ -36,9 +36,9 @@ Configuration is loaded from YAML files in the `config/` directory based on the 
 Octoprox requires authentication for all web UI and API access. On first startup, an admin user is automatically created from `OCTOPROX_AUTH_USERNAME` and `OCTOPROX_AUTH_PASSWORD`.
 
 There are three roles:
-- **Admin** — Full access including user management
-- **Editor** — Can manage projects, proxies, credentials, and connectors (no user management)
-- **Viewer** — Read-only access to all data
+- **Admin** - Full access including user management
+- **Editor** - Can manage projects, proxies, credentials, and connectors (no user management)
+- **Viewer** - Read-only access to all data
 
 ### Configuration
 

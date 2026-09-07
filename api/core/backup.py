@@ -5,7 +5,7 @@
 
 Produces / consumes a passphrase-encrypted, self-contained backup file
 covering every persistent entity (users, projects, credentials, connectors,
-proxies and — optionally — historical metrics). See
+proxies and - optionally - historical metrics). See
 :mod:`api.models.backup` for the file format.
 
 Security model: the payload is gzipped JSON encrypted with Fernet (AES-128-CBC
@@ -116,7 +116,7 @@ def _derive_key(passphrase: str, salt: bytes, iterations: int) -> bytes:
 
 
 # --------------------------------------------------------------------------- #
-# Column (de)serialization — generic over the SQLAlchemy models
+# Column (de)serialization - generic over the SQLAlchemy models
 # --------------------------------------------------------------------------- #
 
 
@@ -364,7 +364,7 @@ async def replace_all(
 
     If ``keep_user_id`` is given, that user row survives the wipe and any
     imported user that would collide with it (same id, username or email) is
-    adjusted — see :func:`_resolve_user_conflicts`.
+    adjusted - see :func:`_resolve_user_conflicts`.
     """
     kept_row: dict[str, Any] | None = None
     if keep_user_id is not None:

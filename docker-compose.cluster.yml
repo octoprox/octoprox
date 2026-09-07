@@ -1,5 +1,5 @@
 # Multi-instance Octoprox cluster, fronted by HAProxy. Builds the
-# image from this checkout — equivalent to docker-compose.yml but
+# image from this checkout - equivalent to docker-compose.yml but
 # scaled out. For a production-ready cluster that pulls the pre-built
 # image from GitHub Container Registry, see docker-compose.cluster.ghcr.yml.
 #

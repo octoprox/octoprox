@@ -113,7 +113,7 @@ export default function ProxiesPage() {
       header: 'Connector',
       enableSorting: false,
       meta: { filterVariant: 'select' as const },
-      cell: ({ getValue }) => <span className="text-fg-muted truncate block">{getValue<string>() || '—'}</span>,
+      cell: ({ getValue }) => <span className="text-fg-muted truncate block">{getValue<string>() || '-'}</span>,
     },
     {
       id: 'status',
@@ -131,7 +131,7 @@ export default function ProxiesPage() {
       meta: { align: 'right' as const },
       cell: ({ getValue, row }) => (
         <span className={row.original.request_count > 0 && getValue<number>() < 90 ? 'text-danger' : ''}>
-          {row.original.request_count > 0 ? `${getValue<number>().toFixed(1)}%` : '—'}
+          {row.original.request_count > 0 ? `${getValue<number>().toFixed(1)}%` : '-'}
         </span>
       ),
     },
@@ -140,7 +140,7 @@ export default function ProxiesPage() {
       header: 'Latency',
       size: 90,
       meta: { align: 'right' as const },
-      cell: ({ getValue, row }) => (row.original.request_count > 0 ? `${Math.round(getValue<number>()).toLocaleString()} ms` : '—'),
+      cell: ({ getValue, row }) => (row.original.request_count > 0 ? `${Math.round(getValue<number>()).toLocaleString()} ms` : '-'),
     },
     {
       id: 'traffic',
@@ -222,7 +222,7 @@ export default function ProxiesPage() {
       <NewProxyPanel
         connectors={staticConnectors}
         onClose={() => setPanel(null)}
-        onCreated={() => { invalidate(); setPanel(null); toast.show('Proxy added — health check running') }}
+        onCreated={() => { invalidate(); setPanel(null); toast.show('Proxy added - health check running') }}
       />
     )
   } else if (panel?.kind === 'upload') {
@@ -351,8 +351,8 @@ function ProxyPanel({ proxy, connectorType, canMutate, onClose, onRelease, onDel
       <InspectorSection title="Traffic">
         <StatGrid items={[
           { label: 'Requests', value: proxy.request_count.toLocaleString() },
-          { label: 'Success', value: proxy.request_count > 0 ? `${proxy.success_rate.toFixed(1)}%` : '—', className: proxy.request_count > 0 && proxy.success_rate < 90 ? 'text-danger' : undefined },
-          { label: 'Latency', value: proxy.request_count > 0 ? `${Math.round(proxy.avg_latency_ms)} ms` : '—' },
+          { label: 'Success', value: proxy.request_count > 0 ? `${proxy.success_rate.toFixed(1)}%` : '-', className: proxy.request_count > 0 && proxy.success_rate < 90 ? 'text-danger' : undefined },
+          { label: 'Latency', value: proxy.request_count > 0 ? `${Math.round(proxy.avg_latency_ms)} ms` : '-' },
           { label: 'Sent ↑', value: formatBytes(proxy.bytes_sent) },
           { label: 'Received ↓', value: formatBytes(proxy.bytes_received) },
           { label: 'Failures', value: proxy.failure_count.toLocaleString(), className: proxy.failure_count > 0 ? 'text-danger' : undefined },
@@ -365,7 +365,7 @@ function ProxyPanel({ proxy, connectorType, canMutate, onClose, onRelease, onDel
             <Label className="text-xs">Connector</Label>
             <div className="h-9 px-3 rounded-lg bg-surface-raised text-fg-muted text-sm flex items-center gap-2">
               {connectorType && <ProviderLogo type={connectorType} className="w-4 h-4 text-[16px]" />}
-              <span className="truncate flex-1">{proxy.connector_name || '—'}</span>
+              <span className="truncate flex-1">{proxy.connector_name || '-'}</span>
               <Lock className="w-3.5 h-3.5 text-fg-subtle" />
             </div>
           </div>

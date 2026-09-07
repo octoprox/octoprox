@@ -4,7 +4,7 @@
 # This built-in provider descriptor is NOT licensed under Apache-2.0.
 # See api/providers/builtin/LICENSE for the terms that apply to it.
 #
-# NetNut — one gateway for every product; the product token (res, stc, mob, dc),
+# NetNut - one gateway for every product; the product token (res, stc, mob, dc),
 # country and a numeric session id are encoded in the username. Based on public
 # documentation and third-party integration guides; marked beta until exercised
 # against a live account.

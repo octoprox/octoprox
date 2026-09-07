@@ -155,7 +155,7 @@ provider_connector_sync_requested = signal("provider-connector-sync-requested")
 # These four are emitted by ProxyManager after every entity write to Postgres.
 # They are the only signals routed across instances via Redis Pub/Sub by the
 # EventBus. Receivers in other instances call ProxyManager.reload_<entity>(id)
-# to refresh their cache. Local handlers can subscribe too — they fire
+# to refresh their cache. Local handlers can subscribe too - they fire
 # in-process alongside the distributed publish.
 #
 # Sender: ProxyManager

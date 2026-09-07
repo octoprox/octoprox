@@ -111,7 +111,7 @@ class TestRandomStrategy:
 class TestStickySessionStrategy:
     """Tests for StickySessionStrategy.
 
-    These cover the in-process behaviour only — no redis_client is
+    These cover the in-process behaviour only - no redis_client is
     passed, so the strategy operates purely from ``_session_map``.
     Cross-instance behaviour (Redis read-through inside ``select``) is
     exercised in tests/core/test_cross_instance_events.py.

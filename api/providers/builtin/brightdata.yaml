@@ -4,7 +4,7 @@
 # This built-in provider descriptor is NOT licensed under Apache-2.0.
 # See api/providers/builtin/LICENSE for the terms that apply to it.
 #
-# Bright Data — zones discovered from the account API (with passwords and, for
+# Bright Data - zones discovered from the account API (with passwords and, for
 # ISP/datacenter zones, the owned exit IPs). Residential/mobile use global
 # session ids; ISP/datacenter pin one exit IP per slot in the username.
 id: brightdata
@@ -99,7 +99,7 @@ options:
     items: "@"
     value: name
     label: name
-    description: "total_ips && join('', [proxy_type, ' (', type, ') — ', to_string(total_ips), ' IPs']) || join('', [proxy_type || 'unsupported', ' (', type, ')'])"
+    description: "total_ips && join('', [proxy_type, ' (', type, ') - ', to_string(total_ips), ' IPs']) || join('', [proxy_type || 'unsupported', ' (', type, ')'])"
     extra:
       type: type
       proxy_type:

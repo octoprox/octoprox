@@ -307,7 +307,7 @@ class TestHRWSharding:
                 continue  # proxies previously owned by d MUST move
             if _hrw_owner(pid, before) != _hrw_owner(pid, after):
                 moved += 1
-        # For non-d owners, almost none should move — HRW only re-homes
+        # For non-d owners, almost none should move - HRW only re-homes
         # keys previously held by the departed instance.
         assert moved == 0, moved
 

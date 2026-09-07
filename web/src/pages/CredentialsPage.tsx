@@ -85,7 +85,7 @@ export default function CredentialsPage() {
       header: 'Used by',
       enableSorting: false,
       accessorFn: (row: Credential) => (usedBy[row.id] ?? []).join(', '),
-      cell: ({ getValue }) => <span className="text-fg-muted truncate block">{getValue<string>() || '—'}</span>,
+      cell: ({ getValue }) => <span className="text-fg-muted truncate block">{getValue<string>() || '-'}</span>,
     },
     {
       accessorKey: 'created_at',

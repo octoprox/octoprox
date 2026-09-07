@@ -14,7 +14,7 @@ export default function BackupSection() {
   return (
     <Page
       title="Backup & Migration"
-      subtitle="Export the whole instance — users, projects, credentials, connectors and proxies — as one encrypted file, or restore one to migrate."
+      subtitle="Export the whole instance - users, projects, credentials, connectors and proxies - as one encrypted file, or restore one to migrate."
     >
       <div className="grid grid-cols-2 gap-4 max-w-5xl items-stretch">
         <ExportCard />
@@ -119,7 +119,7 @@ function ImportCard() {
           <Alert variant="success">
             <p>
               Import complete: {summary.projects} projects, {summary.credentials} credentials, {summary.connectors} connectors, {summary.proxies} proxies, {summary.users} users restored.{' '}
-              {summary.kept_current_user ? 'Your account was kept and you remain signed in.' : 'You will be signed out — please log in again.'}
+              {summary.kept_current_user ? 'Your account was kept and you remain signed in.' : 'You will be signed out - please log in again.'}
             </p>
             {summary.user_conflicts.length > 0 && (
               <ul className="mt-2 list-disc pl-5 text-xs">

@@ -10,7 +10,7 @@ nav_id: getting-started
 
 ## Quick Start with Docker (Recommended)
 
-The fastest way to get Octoprox running is with the pre-built Docker image from GitHub Container Registry. You can run a **single standalone instance** or a **multi-instance cluster** behind HAProxy — pick whichever fits.
+The fastest way to get Octoprox running is with the pre-built Docker image from GitHub Container Registry. You can run a **single standalone instance** or a **multi-instance cluster** behind HAProxy - pick whichever fits.
 
 ### Standalone (single instance)
 
@@ -45,7 +45,7 @@ docker compose -f docker-compose.ghcr.yml down
 
 ### Cluster (multi-instance, behind HAProxy)
 
-For higher availability and throughput, run three Octoprox replicas behind an HAProxy load balancer, all sharing a single Postgres and Redis. The cluster compose file mounts its HAProxy config from `haproxy/haproxy.cfg`, so you need to download **both** files — keep the config in a `haproxy/` directory next to the compose file:
+For higher availability and throughput, run three Octoprox replicas behind an HAProxy load balancer, all sharing a single Postgres and Redis. The cluster compose file mounts its HAProxy config from `haproxy/haproxy.cfg`, so you need to download **both** files - keep the config in a `haproxy/` directory next to the compose file:
 
 ```bash
 # Download the cluster compose file and the HAProxy config it mounts
@@ -65,7 +65,7 @@ Once started, the cluster exposes the same endpoints as the standalone setup, pl
 - **Proxy Server**: [http://localhost:8080](http://localhost:8080)
 - **HAProxy stats**: [http://localhost:8404](http://localhost:8404)
 
-> **Important**: the compose file mounts `./haproxy/haproxy.cfg`. If that file is missing when you run `up`, Docker silently creates an empty directory in its place and HAProxy crash-loops printing its usage banner — so make sure the config is downloaded first. Apply the same production hardening as the standalone setup: set a strong `OCTOPROX_AUTH_PASSWORD`, a secure random `OCTOPROX_JWT_SECRET`, and change `OCTOPROX_DB_PASSWORD` to match `POSTGRES_PASSWORD`.
+> **Important**: the compose file mounts `./haproxy/haproxy.cfg`. If that file is missing when you run `up`, Docker silently creates an empty directory in its place and HAProxy crash-loops printing its usage banner - so make sure the config is downloaded first. Apply the same production hardening as the standalone setup: set a strong `OCTOPROX_AUTH_PASSWORD`, a secure random `OCTOPROX_JWT_SECRET`, and change `OCTOPROX_DB_PASSWORD` to match `POSTGRES_PASSWORD`.
 
 To stop the cluster:
 
@@ -73,7 +73,7 @@ To stop the cluster:
 docker compose -f docker-compose.cluster.ghcr.yml down
 ```
 
-For how the multi-instance machinery works — what's shared, what's elected, and how failover happens — see [Deployment & Scaling]({{ site.baseurl }}/deployment).
+For how the multi-instance machinery works - what's shared, what's elected, and how failover happens - see [Deployment & Scaling]({{ site.baseurl }}/deployment).
 
 ## Local Development Setup
 
@@ -144,7 +144,7 @@ The web UI will be available at `http://localhost:3000`.
 ## Docker Deployment
 
 Octoprox ships with four ready-made Docker Compose flavours so you can
-match the deployment shape to what you actually need — a single
+match the deployment shape to what you actually need - a single
 instance for development, or a horizontally-scaled cluster fronted by
 HAProxy for HA / higher throughput. Two of those flavours use the
 pre-built image from GitHub Container Registry (no local build), and
@@ -177,8 +177,8 @@ make cluster-up
 make cluster-logs
 make cluster-down
 
-# Pre-built GHCR image — production-ready starting point.
-# Needs the compose file + haproxy/haproxy.cfg — see the cluster Quick Start above.
+# Pre-built GHCR image - production-ready starting point.
+# Needs the compose file + haproxy/haproxy.cfg - see the cluster Quick Start above.
 docker compose -f docker-compose.cluster.ghcr.yml up -d
 docker compose -f docker-compose.cluster.ghcr.yml logs -f
 docker compose -f docker-compose.cluster.ghcr.yml down
@@ -187,7 +187,7 @@ docker compose -f docker-compose.cluster.ghcr.yml down
 The cluster exposes the same `:8000` (API/UI) and `:8080` (proxy
 traffic) ports as the single-instance setup, plus `:8404` for HAProxy
 stats. See [Deployment & Scaling]({{ site.baseurl }}/deployment) for
-how the multi-instance machinery works — what's shared, what's elected,
+how the multi-instance machinery works - what's shared, what's elected,
 how failover happens.
 
 ## Makefile Commands

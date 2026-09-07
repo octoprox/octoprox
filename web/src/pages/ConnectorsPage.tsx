@@ -524,7 +524,7 @@ function ConnectorEditor({ connector, canMutate, onClose, onDelete, onSaved }: {
             ))}
           </div>
           <div className="flex items-center justify-between gap-4 border-t border-line pt-3">
-            <Label className="text-xs mb-0">Sticky session quarantine <span className="font-normal text-fg-subtle">— block fallback to other proxies for sticky sessions</span></Label>
+            <Label className="text-xs mb-0">Sticky session quarantine <span className="font-normal text-fg-subtle">- block fallback to other proxies for sticky sessions</span></Label>
             <Toggle
               checked={!!formData.rate_limit_config.sticky_quarantine}
               onChange={(v) => setFormData({ ...formData, rate_limit_config: { ...formData.rate_limit_config, sticky_quarantine: v } })}

@@ -122,7 +122,7 @@ class ImpersonationRelay(MitmRelay):
             detected = detect_browser(user_agent)
             browser = detected if detected is not None else DEFAULT_BROWSER
             if detected is None:
-                # UA doesn't match any known browser — remove it so the
+                # UA doesn't match any known browser - remove it so the
                 # engine sets a consistent one for the impersonation profile
                 forward_headers = [
                     (k, v) for k, v in forward_headers
