@@ -401,7 +401,6 @@ function ConnectorEditor({ connector, canMutate, onClose, onDelete, onSaved }: {
       <NewCredentialPanel
         fixedType={type}
         crumb={isEdit ? 'Edit connector' : 'New connector'}
-        width={600}
         onBack={() => setCreatingCredential(false)}
         onClose={onClose}
         onCreated={(cred: CredentialDetail) => {
@@ -415,7 +414,7 @@ function ConnectorEditor({ connector, canMutate, onClose, onDelete, onSaved }: {
   // --- Step 1 (create only): choose the type
   if (!type) {
     return (
-      <Inspector title="Add connector" subtitle="Step 1 of 2 · Type" onClose={onClose} width={600}>
+      <Inspector title="Add connector" subtitle="Step 1 of 2 · Type" onClose={onClose}>
         <TypePicker onPick={handleTypeSelect} hint="Choose where the proxies come from." />
       </Inspector>
     )
@@ -669,7 +668,6 @@ function ConnectorEditor({ connector, canMutate, onClose, onDelete, onSaved }: {
       subtitle={isEdit ? connector!.name : 'Step 2 of 2 · Configure'}
       onClose={onClose}
       onBack={!isEdit ? () => setType(null) : undefined}
-      width={600}
       footer={canMutate ? (
         <>
           {isEdit && onDelete && <Button type="button" variant="danger-ghost" size="sm" onClick={onDelete}><Trash2 className="w-3.5 h-3.5" /> Delete</Button>}

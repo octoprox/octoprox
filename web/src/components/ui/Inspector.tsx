@@ -19,19 +19,31 @@ interface InspectorProps {
   onBack?: () => void
   onClose: () => void
   footer?: ReactNode
-  /** Panel width in px. Default 440. */
+  /** Panel width in px. Default INSPECTOR_WIDTH; pages should share it so the table does not jump between panels. */
   width?: number
   children: ReactNode
   className?: string
 }
 
-export function Inspector({ title, subtitle, crumb, onBack, onClose, footer, width = 440, children, className }: InspectorProps) {
+/** Standard docked panel width. One value everywhere keeps the content area stable when panels swap. */
+export const INSPECTOR_WIDTH = 600
+/** Wider variant for dense editors (provider builder). */
+export const INSPECTOR_WIDTH_WIDE = 760
+
+export function Inspector({ title, subtitle, crumb, onBack, onClose, footer, width = INSPECTOR_WIDTH, children, className }: InspectorProps) {
   return (
-    <aside
-      style={{ width }}
-      className={cn('flex-none h-full bg-surface border-l border-line flex flex-col min-h-0 animate-panel-in', className)}
-      aria-label={typeof title === 'string' ? title : undefined}
-    >
+    <>
+      {/* Below the xl breakpoint the panel floats over the content instead of squeezing it; the backdrop closes it. */}
+      <div className="fixed inset-0 z-30 bg-overlay/30 xl:hidden" onClick={onClose} aria-hidden />
+      <aside
+        style={{ width, maxWidth: '100vw' }}
+        className={cn(
+          'flex-none h-full bg-surface border-l border-line flex flex-col min-h-0 animate-panel-in',
+          'fixed inset-y-0 right-0 z-40 shadow-2xl xl:static xl:shadow-none xl:z-auto',
+          className
+        )}
+        aria-label={typeof title === 'string' ? title : undefined}
+      >
       <div className="px-4 py-3 border-b border-line flex items-start gap-2 flex-none">
         {onBack && (
           <button
@@ -67,7 +79,8 @@ export function Inspector({ title, subtitle, crumb, onBack, onClose, footer, wid
       {footer && (
         <div className="px-4 py-3 border-t border-line flex items-center gap-2 flex-none bg-surface">{footer}</div>
       )}
-    </aside>
+      </aside>
+    </>
   )
 }
 

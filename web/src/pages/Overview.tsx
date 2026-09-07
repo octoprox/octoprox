@@ -238,8 +238,8 @@ export default function Overview() {
       ) : null}
     >
       {/* Hero: success rate + pool health */}
-      <Card className="grid grid-cols-[240px_minmax(0,1fr)] overflow-hidden">
-        <div className="px-5 py-4 border-r border-line flex flex-col justify-center gap-0.5">
+      <Card className="grid grid-cols-1 md:grid-cols-[240px_minmax(0,1fr)] overflow-hidden">
+        <div className="px-5 py-4 border-b md:border-b-0 md:border-r border-line flex flex-col justify-center gap-0.5 min-w-0">
           <div className="text-xs text-fg-muted">Success rate · {range}</div>
           <div className="text-[40px] font-semibold leading-[44px] tracking-tight tabular-nums">
             {successRate == null ? '—' : `${successRate.toFixed(1)}%`}
@@ -248,10 +248,10 @@ export default function Overview() {
             {totals.requests.toLocaleString()} requests in the last {range}
           </div>
         </div>
-        <div className="px-5 py-4 flex flex-col justify-center gap-2.5">
-          <div className="flex items-center justify-between gap-3">
+        <div className="px-5 py-4 flex flex-col justify-center gap-2.5 min-w-0">
+          <div className="flex items-center justify-between gap-3 flex-wrap">
             <div className="text-sm font-semibold">Pool health</div>
-            <div className="text-xs text-fg-muted tabular-nums">
+            <div className="text-xs text-fg-muted tabular-nums truncate">
               <b className="text-fg font-semibold">{total}</b> proxies · avg latency <b className="text-fg font-semibold">{Math.round(pool?.avg_latency_ms ?? 0)} ms</b>
               {scaling && <> · <b className="text-fg font-semibold">{scaling.requests_per_minute.toFixed(0)}</b> req/min</>}
             </div>
@@ -284,7 +284,7 @@ export default function Overview() {
       </Card>
 
       {/* KPI row */}
-      <Card className="grid grid-cols-6 divide-x divide-line overflow-hidden">
+      <Card className="grid grid-cols-2 sm:grid-cols-3 xl:grid-cols-6 gap-px bg-line overflow-hidden [&>*]:bg-surface">
         <Kpi label="Requests" value={compact(totals.requests)} spark={sparks.requests} color={C.requests} compact={projectPanelOpen} />
         <Kpi label="Successes" value={compact(totals.successes)} spark={sparks.successes} color={C.successes} compact={projectPanelOpen} />
         <Kpi label="Failures" value={compact(totals.failures)} spark={sparks.failures} color={C.failures} compact={projectPanelOpen} />
@@ -293,7 +293,7 @@ export default function Overview() {
         <Kpi label="Requests / min" value={scaling ? scaling.requests_per_minute.toFixed(1) : '—'} sub={scaling ? `${scaling.rate_per_proxy.toFixed(1)} per proxy` : undefined} compact={projectPanelOpen} />
       </Card>
 
-      <div className="grid grid-cols-[minmax(0,2fr)_minmax(0,1fr)] gap-4 items-start">
+      <div className="grid grid-cols-1 xl:grid-cols-[minmax(0,2fr)_minmax(0,1fr)] gap-4 items-start">
         {/* Left: charts */}
         <div className="flex flex-col gap-4 min-w-0">
           <Card className="p-4">
@@ -319,7 +319,7 @@ export default function Overview() {
             )}
           </Card>
 
-          <div className="grid grid-cols-2 gap-4">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             <Card className="p-3.5">
               <CardHeader title={<span className="text-[13px]">Latency</span>} action={<span className="text-xs text-fg-muted">avg {Math.round(pool?.avg_latency_ms ?? 0)} ms</span>} className="mb-1" />
               {chartData.length === 0 ? (

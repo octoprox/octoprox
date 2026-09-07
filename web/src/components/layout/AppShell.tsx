@@ -15,6 +15,7 @@ import octoproxLogoOnlyDark from '../../assets/logos/octoprox_logo_only_dark.svg
 import { useProject } from '../../contexts/ProjectContext'
 import { useAuth } from '../../contexts/AuthContext'
 import { useTheme } from '../../contexts/ThemeContext'
+import { useNavigationGuardContext } from '../../contexts/NavigationGuardContext'
 import { fetchProjectMetrics, fetchProjectScalingMetrics } from '../../api/client'
 import { popSettingsOrigin, setSettingsOrigin } from '../../utils/settingsOrigin'
 import { cn } from '../../utils/cn'
@@ -42,7 +43,10 @@ const PAGE_TITLES: Record<string, string> = {
 export default function AppShell({ onLogout }: { onLogout: () => void }) {
   const { projectId } = useParams()
   const location = useLocation()
-  const navigate = useNavigate()
+  const routerNavigate = useNavigate()
+  const guard = useNavigationGuardContext()
+  // Every navigation the shell performs goes through the unsaved-changes guard.
+  const navigate = (to: string) => guard.request(() => routerNavigate(to))
   const { selectedProject, setSelectedProjectId, isLoading } = useProject()
   const { authStatus, isAdmin } = useAuth()
   const { isDark } = useTheme()
@@ -51,8 +55,22 @@ export default function AppShell({ onLogout }: { onLogout: () => void }) {
   })
 
   useEffect(() => {
+    if (window.matchMedia('(max-width: 1023px)').matches) return // auto-collapsed, not a preference
     try { localStorage.setItem(COLLAPSED_KEY, collapsed ? '1' : '0') } catch { /* ignore */ }
   }, [collapsed])
+
+  // Narrow viewports: collapse the sidebar automatically and restore the saved
+  // preference when there is room again, so the page content never disappears.
+  useEffect(() => {
+    const media = window.matchMedia('(max-width: 1023px)')
+    const apply = () => {
+      if (media.matches) setCollapsed(true)
+      else { try { setCollapsed(localStorage.getItem(COLLAPSED_KEY) === '1') } catch { setCollapsed(false) } }
+    }
+    apply()
+    media.addEventListener('change', apply)
+    return () => media.removeEventListener('change', apply)
+  }, [])
 
   // Keep the project context in sync with the URL.
   useEffect(() => {
@@ -105,7 +123,7 @@ export default function AppShell({ onLogout }: { onLogout: () => void }) {
 
         {/* Project switcher */}
         <button
-          onClick={() => { setSelectedProjectId(null); navigate('/') }}
+          onClick={() => guard.request(() => { setSelectedProjectId(null); routerNavigate('/') })}
           title="Switch project"
           className={cn(
             'flex items-center gap-2 text-[13px] font-medium text-fg hover:bg-surface-raised transition-colors flex-none',
@@ -235,9 +253,16 @@ const navItemCollapsed = 'justify-center w-10 h-10 [&>svg]:w-5 [&>svg]:h-5'
 const navItemExpanded = 'h-[34px] px-2.5'
 
 function NavItem({ to, icon, label, collapsed }: { to: string; icon: ReactNode; label: string; collapsed: boolean }) {
+  const guard = useNavigationGuardContext()
+  const routerNavigate = useNavigate()
   return (
     <RouterNavLink
       to={to}
+      onClick={(e) => {
+        if (!guard.blocked) return
+        e.preventDefault()
+        guard.request(() => routerNavigate(to))
+      }}
       title={collapsed ? label : undefined}
       className={({ isActive }) =>
         cn(

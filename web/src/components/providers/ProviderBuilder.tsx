@@ -1,7 +1,7 @@
 // Copyright 2026 Octoprox Authors
 // SPDX-License-Identifier: Apache-2.0
 
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { AlertTriangle, CheckCircle2, Trash2, Upload } from 'lucide-react'
 import {
@@ -9,7 +9,8 @@ import {
   ProviderDetail, ProviderSpec, ProviderValidateResponse,
 } from '../../api/client'
 import { useProviders } from '../../hooks/useProviders'
-import { Alert, Badge, Button, ConfirmDialog, Inspector, Tabs, Textarea } from '../ui'
+import { useNavigationGuard } from '../../contexts/NavigationGuardContext'
+import { Alert, Badge, Button, ConfirmDialog, Inspector, Tabs, Textarea, INSPECTOR_WIDTH_WIDE } from '../ui'
 import { FieldListEditor } from './FieldListEditor'
 import { ProxyTypeEditor } from './ProxyTypeEditor'
 import { DiscoveryEditor } from './DiscoveryEditor'
@@ -48,31 +49,76 @@ export function duplicateSpec(spec: ProviderSpec): ProviderSpec {
   return copy
 }
 
+/** Where in-progress descriptors are parked so a mis-click or navigation does not lose them. */
+const draftKey = (existingId: string | undefined, seed: ProviderSpec | undefined) =>
+  `octoprox_provider_draft:${existingId ? `edit:${existingId}` : seed?.id ? `copy:${seed.id}` : 'new'}`
+
+function readDraft(key: string): ProviderSpec | null {
+  try { const raw = localStorage.getItem(key); return raw ? (JSON.parse(raw) as ProviderSpec) : null } catch { return null }
+}
+
 /**
  * Admin builder for a provider descriptor: a form over the descriptor document,
  * a dry-run validator, a live test panel and YAML import/export. Saving requires
  * confirming the vendor hosts that will receive credentials.
+ *
+ * Unsaved work is protected three ways: closing or cancelling asks for
+ * confirmation while dirty, leaving the page warns via beforeunload, and the
+ * draft is mirrored to localStorage so it can be restored after navigation.
  */
-export function ProviderBuilder({ existing, initialSpec, onClose, onSaved, onDelete }: {
+export function ProviderBuilder({ existing, initialSpec, onClose, onSaved, onDelete, onDirtyChange }: {
   existing?: ProviderDetail | null
   initialSpec?: ProviderSpec
   onClose: () => void
   onSaved: (p: ProviderDetail) => void
   onDelete?: () => void
+  /** Lets the page refuse to swap panels while there are unsaved changes. */
+  onDirtyChange?: (dirty: boolean) => void
 }) {
   const queryClient = useQueryClient()
   const { presets } = useProviders()
   const isEdit = !!existing
-  const [spec, setSpec] = useState<ProviderSpec>(() => JSON.parse(JSON.stringify(existing?.spec ?? initialSpec ?? EMPTY_SPEC)))
+  const baseline = useMemo(() => JSON.stringify(existing?.spec ?? initialSpec ?? EMPTY_SPEC), [existing, initialSpec])
+  const storageKey = draftKey(existing?.id, initialSpec)
+  const [spec, setSpec] = useState<ProviderSpec>(() => JSON.parse(baseline))
+  const [savedDraft, setSavedDraft] = useState<ProviderSpec | null>(() => {
+    const draft = readDraft(storageKey)
+    return draft && JSON.stringify(draft) !== baseline ? draft : null
+  })
   const [tab, setTab] = useState<Tab>('general')
   const [validation, setValidation] = useState<ProviderValidateResponse | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [pendingHosts, setPendingHosts] = useState<string[] | null>(null)
   const [hostsAcknowledged, setHostsAcknowledged] = useState(false)
   const [yamlDraft, setYamlDraft] = useState<string | null>(null)
-  const [dirty, setDirty] = useState(false)
+  const [confirmDiscard, setConfirmDiscard] = useState(false)
+  const dirty = JSON.stringify(spec) !== baseline
 
-  const patch = (p: Spec) => { setSpec((prev) => ({ ...prev, ...p })); setDirty(true); setValidation(null) }
+  const patch = (p: Spec) => { setSpec((prev) => ({ ...prev, ...p })); setValidation(null) }
+
+  useEffect(() => { onDirtyChange?.(dirty) }, [dirty, onDirtyChange])
+  useNavigationGuard(dirty, 'The provider you are editing has unsaved changes. A draft is kept in this browser, but leaving now discards what is on screen.')
+  useEffect(() => () => onDirtyChange?.(false), [onDirtyChange])
+
+  // Mirror the draft to localStorage while dirty; clear it once it matches the baseline.
+  useEffect(() => {
+    try {
+      if (dirty) localStorage.setItem(storageKey, JSON.stringify(spec))
+      else localStorage.removeItem(storageKey)
+    } catch { /* storage unavailable */ }
+  }, [spec, dirty, storageKey])
+
+  // Browser-level guard for reloads and tab closes.
+  useEffect(() => {
+    if (!dirty) return
+    const handler = (e: BeforeUnloadEvent) => { e.preventDefault(); e.returnValue = '' }
+    window.addEventListener('beforeunload', handler)
+    return () => window.removeEventListener('beforeunload', handler)
+  }, [dirty])
+
+  const clearDraft = () => { try { localStorage.removeItem(storageKey) } catch { /* ignore */ } }
+  const requestClose = () => { if (dirty) setConfirmDiscard(true); else onClose() }
+  const discardAndClose = () => { clearDraft(); setConfirmDiscard(false); onClose() }
 
   const invalidate = () => queryClient.invalidateQueries({ queryKey: ['providers'] })
 
@@ -84,7 +130,7 @@ export function ProviderBuilder({ existing, initialSpec, onClose, onSaved, onDel
 
   const saveMutation = useMutation({
     mutationFn: (confirmedHosts: string[]) => (isEdit ? updateProvider(existing!.id, { spec, confirmed_hosts: confirmedHosts }) : createProvider(spec, confirmedHosts)),
-    onSuccess: (p) => { invalidate(); setDirty(false); setPendingHosts(null); onSaved(p) },
+    onSuccess: (p) => { invalidate(); clearDraft(); setPendingHosts(null); onSaved(p) },
     onError: (e: Error) => {
       const conflict = isHostConfirmationError(e)
       if (conflict) { setPendingHosts(conflict.egress_hosts); setHostsAcknowledged(false); return }
@@ -96,11 +142,11 @@ export function ProviderBuilder({ existing, initialSpec, onClose, onSaved, onDel
   const importMutation = useMutation({
     // First attempt without confirmed hosts: the 409 tells us which hosts to confirm.
     mutationFn: (yaml: string) => importProviderYaml(yaml, [], isEdit),
-    onSuccess: (p) => { invalidate(); onSaved(p) },
+    onSuccess: (p) => { invalidate(); clearDraft(); onSaved(p) },
     onError: (e: Error) => {
       const conflict = isHostConfirmationError(e)
       if (conflict && yamlDraft != null) {
-        importProviderYaml(yamlDraft, conflict.egress_hosts, isEdit).then((p) => { invalidate(); onSaved(p) }).catch((err: Error) => setError(err.message))
+        importProviderYaml(yamlDraft, conflict.egress_hosts, isEdit).then((p) => { invalidate(); clearDraft(); onSaved(p) }).catch((err: Error) => setError(err.message))
         return
       }
       setError(e.message || 'Import failed')
@@ -122,22 +168,29 @@ export function ProviderBuilder({ existing, initialSpec, onClose, onSaved, onDel
   return (
     <>
       <Inspector
-        title={title}
+        title={<>{title}{dirty && <span className="ml-2 text-xs font-normal text-warning">• unsaved</span>}</>}
         subtitle={isEdit ? <span className="font-mono">{existing!.id}</span> : 'Describe a proxy vendor without code'}
-        onClose={onClose}
-        width={760}
+        onClose={requestClose}
+        width={INSPECTOR_WIDTH_WIDE}
         footer={(
           <>
             {isEdit && onDelete && <Button type="button" variant="danger-ghost" size="sm" onClick={onDelete}><Trash2 className="w-3.5 h-3.5" /> Delete</Button>}
             <span className="flex-1" />
             <Button type="button" variant="outline" size="sm" onClick={() => validateMutation.mutate()} disabled={validateMutation.isPending}>{validateMutation.isPending ? 'Checking…' : 'Check'}</Button>
-            <Button type="button" variant="outline" size="sm" onClick={onClose}>Cancel</Button>
+            <Button type="button" variant="outline" size="sm" onClick={requestClose}>Cancel</Button>
             <Button type="button" size="sm" onClick={() => saveMutation.mutate(egressHosts.length && hostsAcknowledged ? egressHosts : [])} disabled={saveMutation.isPending || (isEdit && !dirty)}>
               {saveMutation.isPending ? 'Saving…' : isEdit ? 'Save changes' : 'Create provider'}
             </Button>
           </>
         )}
       >
+        {savedDraft && (
+          <Alert variant="info" className="text-xs flex items-center gap-3">
+            <span className="flex-1">You have an unsaved draft of this provider from earlier.</span>
+            <Button type="button" size="sm" variant="outline" onClick={() => { setSpec(savedDraft); setSavedDraft(null) }}>Restore draft</Button>
+            <Button type="button" size="sm" variant="ghost" onClick={() => { clearDraft(); setSavedDraft(null) }}>Discard</Button>
+          </Alert>
+        )}
         {error && <Alert className="text-xs">{error}</Alert>}
         {validation && (
           <div className="space-y-1.5">
@@ -208,6 +261,15 @@ export function ProviderBuilder({ existing, initialSpec, onClose, onSaved, onDel
         )}
       </Inspector>
 
+      {confirmDiscard && (
+        <ConfirmDialog
+          title="Discard unsaved changes?"
+          message={<>This provider has changes that are not saved. A copy is kept in this browser and offered again the next time you open the builder, but the safest option is to keep editing and save.</>}
+          confirmLabel="Discard changes"
+          onCancel={() => setConfirmDiscard(false)}
+          onConfirm={discardAndClose}
+        />
+      )}
       {pendingHosts && (
         <ConfirmDialog
           title="Confirm where credentials are sent"

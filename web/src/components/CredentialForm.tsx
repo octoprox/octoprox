@@ -21,21 +21,22 @@ export function TypePicker({ onPick, hint }: { onPick: (type: CredentialType) =>
     <div className="space-y-3">
       {hint && <p className="text-xs text-fg-muted">{hint}</p>}
       {isLoading && <p className="text-xs text-fg-muted">Loading providers…</p>}
-      <div className="grid grid-cols-[repeat(auto-fill,minmax(170px,1fr))] gap-2.5">
+      <div className="grid grid-cols-2 gap-2.5">
         {providers.map((p) => (
           <button
             key={p.id}
             type="button"
             onClick={() => onPick(p.id)}
-            className="flex items-center gap-3 p-3 border border-line rounded-[10px] text-left hover:border-primary hover:bg-primary-soft transition-colors"
+            title={p.description}
+            className="flex items-center gap-3 h-[76px] px-3 border border-line rounded-[10px] text-left hover:border-primary hover:bg-primary-soft transition-colors"
           >
             <ProviderLogo type={p.id} name={p.name} className="w-9 h-9 text-[36px]" />
-            <span className="min-w-0">
-              <span className="block text-[13px] font-semibold leading-tight">
-                {p.name}
-                {p.beta && <span className="ml-1.5 text-[10px] font-medium uppercase text-warning">beta</span>}
+            <span className="min-w-0 flex-1">
+              <span className="flex items-center gap-1.5 text-[13px] font-semibold leading-tight">
+                <span className="truncate">{p.name}</span>
+                {p.beta && <span className="flex-none text-[10px] font-medium uppercase text-warning">beta</span>}
               </span>
-              <span className="block text-[11.5px] text-fg-muted leading-snug mt-0.5">{p.description}</span>
+              <span className="block text-[11.5px] text-fg-muted leading-snug mt-0.5 line-clamp-2">{p.description}</span>
             </span>
           </button>
         ))}
@@ -196,7 +197,7 @@ export function NewCredentialPanel({ fixedType, crumb, onBack, onClose, onCreate
       crumb={crumb}
       onBack={onBack ?? (type && !fixedType ? () => setType(null) : undefined)}
       onClose={onClose}
-      width={width ?? 560}
+      width={width}
       footer={type ? (
         <>
           <span className="flex-1" />

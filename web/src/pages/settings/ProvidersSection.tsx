@@ -1,7 +1,7 @@
 // Copyright 2026 Octoprox Authors
 // SPDX-License-Identifier: Apache-2.0
 
-import { useMemo, useState } from 'react'
+import { useCallback, useMemo, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { ColumnDef } from '@tanstack/react-table'
 import { Plus, Puzzle, Trash2 } from 'lucide-react'
@@ -13,7 +13,7 @@ import { Page, EmptyState } from '../../components/layout/Page'
 import { ProviderLogo } from '../../components/ProviderLogo'
 import { ProviderBuilder, duplicateSpec } from '../../components/providers/ProviderBuilder'
 import { ProviderDetailPanel } from '../../components/providers/ProviderDetailPanel'
-import { Badge, Button, ConfirmDialog } from '../../components/ui'
+import { Badge, Button, ConfirmDialog, INSPECTOR_WIDTH_WIDE } from '../../components/ui'
 
 type PanelState = { kind: 'view'; id: string } | { kind: 'edit'; id: string } | { kind: 'new'; spec?: ProviderSpec } | null
 
@@ -22,8 +22,20 @@ export default function ProvidersSection() {
   const queryClient = useQueryClient()
   const { providers, isLoading, byId } = useProviders()
   const toast = useToast()
-  const [panel, setPanel] = useState<PanelState>(null)
+  const [panel, setPanelState] = useState<PanelState>(null)
   const [pendingDelete, setPendingDelete] = useState<ProviderSummary | null>(null)
+  const [builderDirty, setBuilderDirty] = useState(false)
+  const [blockedPanel, setBlockedPanel] = useState<PanelState | undefined>(undefined)
+  const onDirtyChange = useCallback((dirty: boolean) => setBuilderDirty(dirty), [])
+  // Swapping panels unmounts the builder; while it has unsaved changes, ask first.
+  const setPanel = (next: PanelState) => {
+    const leavingBuilder = panel && panel.kind !== 'view'
+    if (builderDirty && leavingBuilder && !(next && 'id' in next && panel && 'id' in panel && next.id === panel.id && next.kind === panel.kind)) {
+      setBlockedPanel(next)
+      return
+    }
+    setPanelState(next)
+  }
 
   const deleteMutation = useMutation({
     mutationFn: (id: string) => deleteProvider(id),
@@ -111,9 +123,10 @@ export default function ProvidersSection() {
       <EditBuilder
         key={panel.id}
         providerId={panel.id}
-        onClose={() => setPanel(null)}
+        onClose={() => setPanelState(null)}
         onDelete={() => setPendingDelete(byId[panel.id])}
-        onSaved={(p) => { setPanel({ kind: 'view', id: p.id }); toast.show('Provider saved') }}
+        onSaved={(p) => { setBuilderDirty(false); setPanelState({ kind: 'view', id: p.id }); toast.show('Provider saved') }}
+        onDirtyChange={onDirtyChange}
       />
     )
   } else if (panel?.kind === 'new') {
@@ -121,8 +134,9 @@ export default function ProvidersSection() {
       <ProviderBuilder
         key={panel.spec?.id ?? 'new'}
         initialSpec={panel.spec}
-        onClose={() => setPanel(null)}
-        onSaved={(p) => { setPanel({ kind: 'view', id: p.id }); toast.show(`Provider "${p.name}" created`) }}
+        onClose={() => setPanelState(null)}
+        onSaved={(p) => { setBuilderDirty(false); setPanelState({ kind: 'view', id: p.id }); toast.show(`Provider "${p.name}" created`) }}
+        onDirtyChange={onDirtyChange}
       />
     )
   }
@@ -156,6 +170,15 @@ export default function ProvidersSection() {
           )}
         </>
       )}
+      {blockedPanel !== undefined && (
+        <ConfirmDialog
+          title="Leave the provider builder?"
+          message="The provider you are editing has unsaved changes. A draft is kept in this browser, but leaving now discards what is on screen."
+          confirmLabel="Leave"
+          onCancel={() => setBlockedPanel(undefined)}
+          onConfirm={() => { setBuilderDirty(false); setPanelState(blockedPanel); setBlockedPanel(undefined) }}
+        />
+      )}
       {pendingDelete && (
         <ConfirmDialog
           title="Delete provider?"
@@ -170,8 +193,8 @@ export default function ProvidersSection() {
   )
 }
 
-function EditBuilder({ providerId, onClose, onSaved, onDelete }: { providerId: string; onClose: () => void; onSaved: (p: ProviderDetail) => void; onDelete: () => void }) {
+function EditBuilder({ providerId, onClose, onSaved, onDelete, onDirtyChange }: { providerId: string; onClose: () => void; onSaved: (p: ProviderDetail) => void; onDelete: () => void; onDirtyChange: (dirty: boolean) => void }) {
   const { data } = useQuery({ queryKey: ['provider', providerId], queryFn: () => fetchProvider(providerId) })
-  if (!data) return <div className="w-[760px] flex-none border-l border-line bg-surface p-6 text-sm text-fg-muted">Loading…</div>
-  return <ProviderBuilder existing={data} onClose={onClose} onSaved={onSaved} onDelete={onDelete} />
+  if (!data) return <div style={{ width: INSPECTOR_WIDTH_WIDE }} className="flex-none border-l border-line bg-surface p-6 text-sm text-fg-muted">Loading…</div>
+  return <ProviderBuilder existing={data} onClose={onClose} onSaved={onSaved} onDelete={onDelete} onDirtyChange={onDirtyChange} />
 }

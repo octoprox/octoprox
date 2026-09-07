@@ -90,7 +90,6 @@ export default function ProjectSelection() {
         title="New project"
         subtitle="A project is one proxy endpoint with its own pool"
         onClose={() => setPanel(null)}
-        width={480}
         footer={
           <>
             <span className="flex-1" />
@@ -108,7 +107,6 @@ export default function ProjectSelection() {
         title="Project settings"
         subtitle={editing.name}
         onClose={() => setPanel(null)}
-        width={480}
         footer={
           <>
             <Button type="button" variant="danger-ghost" size="sm" onClick={() => setPendingDelete(editing)}><Trash2 className="w-3.5 h-3.5" /> Delete</Button>

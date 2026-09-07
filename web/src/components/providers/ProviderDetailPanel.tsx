@@ -4,7 +4,7 @@
 import { useQuery } from '@tanstack/react-query'
 import { Copy, Download, ExternalLink } from 'lucide-react'
 import { exportProviderYaml, fetchProvider, fetchProviderAudit, ProviderSummary } from '../../api/client'
-import { Badge, Button, Inspector, InspectorSection, KeyValue } from '../ui'
+import { Badge, Button, Inspector, InspectorSection, KeyValue, INSPECTOR_WIDTH_WIDE } from '../ui'
 import { ProviderLogo } from '../ProviderLogo'
 import { formatDateTime } from '../../utils/format'
 
@@ -30,7 +30,7 @@ export function ProviderDetailPanel({ provider, onClose, onDuplicate, onEdit }: 
       title={provider.name}
       subtitle={<span className="font-mono">{provider.id}</span>}
       onClose={onClose}
-      width={520}
+      width={INSPECTOR_WIDTH_WIDE}
       footer={(
         <>
           {provider.kind === 'descriptor' && <Button type="button" variant="outline" size="sm" onClick={download}><Download className="w-3.5 h-3.5" /> Export YAML</Button>}

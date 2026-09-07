@@ -210,7 +210,6 @@ export function ProjectPanel({ project, onClose, onSave, isLoading, error }: {
       title="Project settings"
       subtitle={project.name}
       onClose={onClose}
-      width={480}
       footer={
         <>
           <span className="flex-1" />

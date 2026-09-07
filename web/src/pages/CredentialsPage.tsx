@@ -205,7 +205,6 @@ function EditCredentialPanel({ credentialId, usedBy, canMutate, onClose, onDelet
       title={detail ? detail.name : 'Credential'}
       subtitle={detail ? `${typeLabel} credential` : undefined}
       onClose={onClose}
-      width={460}
       footer={canMutate ? (
         <>
           <Button type="button" variant="danger-ghost" size="sm" onClick={onDelete}><Trash2 className="w-3.5 h-3.5" /> Delete</Button>

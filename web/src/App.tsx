@@ -21,6 +21,7 @@ import ProvidersSection from './pages/settings/ProvidersSection'
 import { ProjectProvider } from './contexts/ProjectContext'
 import { AuthProvider, AuthContextValue } from './contexts/AuthContext'
 import { ToastProvider } from './contexts/ToastContext'
+import { NavigationGuardProvider } from './contexts/NavigationGuardContext'
 import { useTheme } from './contexts/ThemeContext'
 import { checkAuthStatus, login, logout, AuthStatus } from './api/client'
 
@@ -129,6 +130,7 @@ function AuthenticatedApp() {
     <AuthProvider value={authContextValue}>
       <ProjectProvider>
         <ToastProvider>
+          <NavigationGuardProvider>
           <Routes>
             {/* Project selection page */}
             <Route path="/" element={<ProjectSelection />} />
@@ -155,6 +157,7 @@ function AuthenticatedApp() {
 
             <Route path="*" element={<Navigate to="/" replace />} />
           </Routes>
+          </NavigationGuardProvider>
         </ToastProvider>
       </ProjectProvider>
     </AuthProvider>
