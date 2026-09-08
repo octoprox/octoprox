@@ -40,8 +40,13 @@ class ProviderStore:
                 descriptors.append(descriptor_from_dict(record.spec))
             except DescriptorLoadError as exc:
                 logger.error("Stored provider descriptor is invalid", provider_id=record.id, error=str(exc))
-        self._registry.replace_custom(descriptors)
-        logger.info("Loaded custom provider descriptors", count=len(descriptors))
+        added, updated, removed = self._registry.replace_custom(descriptors)
+        if added or updated or removed:
+            logger.info(
+                "Custom provider descriptors synced", added=added, updated=updated, removed=removed
+            )
+        else:
+            logger.debug("Custom provider descriptors unchanged", count=len(descriptors))
         return len(descriptors)
 
     async def reload_one(self, provider_id: str, op: str | None) -> None:

@@ -558,6 +558,8 @@ export interface ImportSummary {
   proxies: number
   proxy_metrics: number
   project_metrics: number
+  provider_descriptors: number
+  provider_audit_log: number
   kept_current_user: boolean
   user_conflicts: UserConflict[]
 }

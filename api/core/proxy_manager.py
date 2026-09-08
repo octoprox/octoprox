@@ -638,6 +638,10 @@ class ProxyManager:
     async def full_reload(self) -> None:
         """Re-read all definitions from Postgres, merging into the cache.
 
+        Custom provider descriptors are re-synced first so credentials whose
+        type was just restored (backup import) or announced on a dropped
+        Pub/Sub event resolve to a provider before connectors are reconciled.
+
         Entries no longer present in Postgres are removed (with Redis +
         rate-limiter cleanup for proxies); new entries are added; existing
         entries have their *definition* fields patched in place so runtime
@@ -645,6 +649,7 @@ class ProxyManager:
         merge, runtime fields are re-hydrated from Redis as a safety net so
         the cache converges with the cross-instance source of truth.
         """
+        await self._provider_store.sync_all()
         async with self._session_factory() as session:
             project_repo = ProjectRepository(session)
             credential_repo = CredentialRepository(session)

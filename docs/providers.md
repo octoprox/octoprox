@@ -56,6 +56,10 @@ A descriptor tells Octoprox to send credentials to a URL, so descriptors are tre
 
 Response size and time limits are operator settings (`provider_http_max_response_bytes`, default 50 MB, `0` disables; `provider_http_timeout_seconds`, default 60).
 
+### Backups
+
+Admin-authored descriptors and their audit log are part of the **Backup & Migration** export and are restored by a replace-import, taking effect on the importing instance immediately. Shipped descriptors, mounted YAML files and Python plugins are part of the deployment, not the database, and are not included.
+
 ## Operator-installed providers
 
 Two more tiers exist for operators who deploy Octoprox:

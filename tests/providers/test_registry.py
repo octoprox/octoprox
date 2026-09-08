@@ -72,11 +72,20 @@ def test_descriptor_validation_and_provider_creation(registry: ProviderRegistry)
 
 
 def test_custom_descriptor_lifecycle(registry: ProviderRegistry) -> None:
-    registry.replace_custom([_custom()])
+    assert registry.replace_custom([_custom()]) == (["acme"], [], [])
     ptype = registry.get("acme")
     assert ptype is not None and ptype.editable and ptype.source == "custom"
     assert registry.validate_credential_config("acme", {"username": "u", "password": "p"}) == {"username": "u", "password": "p"}
-    registry.replace_custom([])
+
+    # Re-syncing an identical set is a no-op: same registration object, nothing reported.
+    assert registry.replace_custom([_custom()]) == ([], [], [])
+    assert registry.get("acme") is ptype
+
+    changed = _custom().model_copy(update={"name": "Acme v2"})
+    assert registry.replace_custom([changed]) == ([], ["acme"], [])
+    assert registry.get("acme").name == "Acme v2"  # type: ignore[union-attr]
+
+    assert registry.replace_custom([]) == ([], [], ["acme"])
     assert registry.get("acme") is None
 
 

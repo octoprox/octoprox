@@ -202,11 +202,19 @@ class ProviderRegistry:
             )
         )
 
-    def replace_custom(self, descriptors: list[ProviderDescriptor]) -> None:
-        """Make the set of ``custom`` (database) providers exactly ``descriptors``."""
-        wanted = {d.id for d in descriptors}
-        for type_id in [t.id for t in self._types.values() if t.source == "custom" and t.id not in wanted]:
+    def replace_custom(self, descriptors: list[ProviderDescriptor]) -> tuple[list[str], list[str], list[str]]:
+        """Make the set of ``custom`` (database) providers exactly ``descriptors``.
+
+        Only differences are applied: unchanged descriptors keep their registered
+        validators and factories, so calling this on every safety-net reload is
+        a comparison, not a rebuild. Returns ``(added, updated, removed)`` ids.
+        """
+        wanted = {d.id: d for d in descriptors}
+        removed = [t.id for t in self._types.values() if t.source == "custom" and t.id not in wanted]
+        for type_id in removed:
             self.unregister(type_id)
+        added: list[str] = []
+        updated: list[str] = []
         for descriptor in descriptors:
             existing = self._types.get(descriptor.id)
             if existing is not None and existing.source != "custom":
@@ -214,7 +222,11 @@ class ProviderRegistry:
                     "Custom provider shadows a built-in id and was skipped", provider_id=descriptor.id
                 )
                 continue
+            if existing is not None and existing.descriptor == descriptor:
+                continue
             self.register_descriptor(descriptor, "custom", origin="database")
+            (updated if existing is not None else added).append(descriptor.id)
+        return added, updated, removed
 
     # --- lookup --------------------------------------------------------------------
 

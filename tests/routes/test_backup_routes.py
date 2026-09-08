@@ -254,3 +254,39 @@ class TestKeepCurrentUser:
         assert resp.status_code == 200, resp.text
         assert resp.json()["kept_current_user"] is False
         assert resp.json()["user_conflicts"] == []
+
+
+class TestProviderDescriptorsInBackup:
+    """Admin-authored providers travel with the backup and are live right after import."""
+
+    ACME = {
+        "id": "acme_backup",
+        "name": "Acme Backup",
+        "credential_fields": [{"key": "username", "label": "User", "required": True}, {"key": "password", "label": "Pass", "type": "password", "secret": True, "required": True}],
+        "connector_fields": [{"key": "num_proxies", "label": "N", "type": "number", "default": 1, "min": 1}],
+        "proxy_types": [{"key": "res", "label": "Res", "mode": "session", "host": "gw.acme.test", "port": 9000, "username": "{credential.username}-{session_id}", "password": "{credential.password}"}],
+    }
+
+    def _listed(self, client: TestClient) -> set[str]:
+        return {p["id"] for p in client.get("/api/v1/providers").json()["providers"]}
+
+    def test_custom_provider_round_trips(self, authenticated_client: TestClient) -> None:
+        created = authenticated_client.post("/api/v1/providers", json={"spec": self.ACME, "confirmed_hosts": []})
+        assert created.status_code == 201, created.text
+        try:
+            file_bytes = _export(authenticated_client)
+
+            assert authenticated_client.delete("/api/v1/providers/acme_backup").status_code == 204
+            assert "acme_backup" not in self._listed(authenticated_client)
+
+            resp = _import(authenticated_client, file_bytes)
+            assert resp.status_code == 200, resp.text
+            assert resp.json()["provider_descriptors"] == 1
+            assert resp.json()["provider_audit_log"] >= 1
+
+            # Restored rows are registered without a restart (full_reload re-syncs the store).
+            assert "acme_backup" in self._listed(authenticated_client)
+            detail = authenticated_client.get("/api/v1/providers/acme_backup").json()
+            assert detail["source"] == "custom" and detail["spec"]["name"] == "Acme Backup"
+        finally:
+            authenticated_client.delete("/api/v1/providers/acme_backup")

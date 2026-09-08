@@ -118,7 +118,7 @@ function ImportCard() {
         {summary && (
           <Alert variant="success">
             <p>
-              Import complete: {summary.projects} projects, {summary.credentials} credentials, {summary.connectors} connectors, {summary.proxies} proxies, {summary.users} users restored.{' '}
+              Import complete: {summary.projects} projects, {summary.credentials} credentials, {summary.connectors} connectors, {summary.proxies} proxies, {summary.users} users, {summary.provider_descriptors ?? 0} custom providers restored.{' '}
               {summary.kept_current_user ? 'Your account was kept and you remain signed in.' : 'You will be signed out - please log in again.'}
             </p>
             {summary.user_conflicts.length > 0 && (
