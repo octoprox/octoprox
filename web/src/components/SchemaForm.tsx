@@ -4,7 +4,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { Eye, EyeOff } from 'lucide-react'
-import { ProviderCondition, ProviderField, ProviderOption, ProviderSummary, ResolvedProviderOption, resolveProviderOptions } from '../api/client'
+import { ProviderCondition, ProviderField, ProviderOption, ProviderSpec, ProviderSummary, ResolvedProviderOption, resolveProviderOptions } from '../api/client'
 import { Input, Label, Select, Textarea } from './ui'
 import { RichSelect, RichSelectOption } from './RichSelect'
 
@@ -64,6 +64,8 @@ interface SchemaFormProps {
   credentialId?: string | null
   /** For remote options while creating a credential: the in-progress config. */
   credentialConfig?: Record<string, unknown> | null
+  /** For remote options on an unsaved provider (admin test panel): the draft descriptor to resolve against. */
+  spec?: ProviderSpec | null
   isEdit?: boolean
   disabled?: boolean
   /** Grid columns; credential forms use one column, connector forms two. */
@@ -76,7 +78,7 @@ interface SchemaFormProps {
  * changes) and apply `fill` mappings on change. Number fields may take their
  * maximum from a sibling's selected option (`max_from_option`).
  */
-export function SchemaForm({ provider, fields, values, onChange, scopes, presets, credentialId, credentialConfig, isEdit, disabled, columns = 1 }: SchemaFormProps) {
+export function SchemaForm({ provider, fields, values, onChange, scopes, presets, credentialId, credentialConfig, spec, isEdit, disabled, columns = 1 }: SchemaFormProps) {
   const [loaded, setLoaded] = useState<LoadedOptions>({})
   const onLoaded = useCallback((key: string, options: ResolvedProviderOption[]) => {
     setLoaded((prev) => (prev[key] === options ? prev : { ...prev, [key]: options }))
@@ -96,6 +98,7 @@ export function SchemaForm({ provider, fields, values, onChange, scopes, presets
           presets={presets}
           credentialId={credentialId}
           credentialConfig={credentialConfig}
+          spec={spec}
           isEdit={isEdit}
           disabled={disabled}
           loaded={loaded}
@@ -118,7 +121,7 @@ function optionMax(field: ProviderField, values: FormValues, loaded: LoadedOptio
   return null
 }
 
-function SchemaField({ provider, field, value, values, onChange, scopes, presets, credentialId, credentialConfig, isEdit, disabled, loaded, onLoaded, wide }: {
+function SchemaField({ provider, field, value, values, onChange, scopes, presets, credentialId, credentialConfig, spec, isEdit, disabled, loaded, onLoaded, wide }: {
   provider: ProviderSummary
   field: ProviderField
   value: string
@@ -128,6 +131,7 @@ function SchemaField({ provider, field, value, values, onChange, scopes, presets
   presets: Record<string, ProviderOption[]>
   credentialId?: string | null
   credentialConfig?: Record<string, unknown> | null
+  spec?: ProviderSpec | null
   isEdit?: boolean
   disabled?: boolean
   loaded: LoadedOptions
@@ -170,6 +174,7 @@ function SchemaField({ provider, field, value, values, onChange, scopes, presets
         onChange={onChange}
         credentialId={credentialId}
         credentialConfig={credentialConfig}
+        spec={spec}
         connectorConfig={scopes.connector}
         disabled={readOnly}
         onLoaded={onLoaded}
@@ -248,13 +253,14 @@ function SchemaField({ provider, field, value, values, onChange, scopes, presets
   )
 }
 
-function RemoteSelect({ provider, field, value, onChange, credentialId, credentialConfig, connectorConfig, disabled, onLoaded }: {
+function RemoteSelect({ provider, field, value, onChange, credentialId, credentialConfig, spec, connectorConfig, disabled, onLoaded }: {
   provider: ProviderSummary
   field: ProviderField
   value: string
   onChange: (value: string, fill?: Record<string, string>) => void
   credentialId?: string | null
   credentialConfig?: Record<string, unknown> | null
+  spec?: ProviderSpec | null
   connectorConfig: Record<string, unknown>
   disabled?: boolean
   onLoaded: (key: string, options: ResolvedProviderOption[]) => void
@@ -268,8 +274,12 @@ function RemoteSelect({ provider, field, value, onChange, credentialId, credenti
   const missingDependency = (field.depends_on ?? []).some((k) => dependencies[k] == null)
   const hasSource = !missingDependency && (!!credentialId || (!!credentialConfig && Object.values(credentialConfig).some((v) => v !== '' && v != null)))
   const { data, isLoading, error } = useQuery({
-    queryKey: ['provider-options', provider.id, field.options_from, credentialId ?? null, credentialId ? null : credentialConfig, dependencies],
-    queryFn: () => resolveProviderOptions(provider.id, field.options_from!, credentialId ? { credential_id: credentialId, connector_config: dependencies } : { credential_config: credentialConfig ?? {}, connector_config: dependencies }),
+    queryKey: ['provider-options', provider.id, field.options_from, credentialId ?? null, credentialId ? null : credentialConfig, dependencies, spec ?? null],
+    queryFn: () => resolveProviderOptions(provider.id, field.options_from!, {
+      ...(credentialId ? { credential_id: credentialId } : { credential_config: credentialConfig ?? {} }),
+      connector_config: dependencies,
+      ...(spec ? { spec } : {}),
+    }),
     enabled: hasSource,
     staleTime: 5 * 60 * 1000,
     retry: false,

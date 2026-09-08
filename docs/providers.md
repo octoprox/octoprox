@@ -31,14 +31,14 @@ Beta descriptors follow the vendor's public documentation but have not yet been 
 
 ## Adding a provider from the UI
 
-Admins open **Settings → Providers**. Shipped providers are read-only; any of them can be exported as YAML or duplicated as a starting point.
+Admins open **Settings → Providers**. Shipped providers are read-only; any of them can be exported as YAML or duplicated as a starting point. Every descriptor provider, shipped or custom, has a **Test** tab where it can be tried with throwaway credentials before any credential or connector exists.
 
 1. **General** - id (becomes the credential type), name, description, documentation link, logo.
 2. **Credential fields** - what a user enters once per account. Mark API keys and passwords as *secret* so they are never written into proxy rows.
 3. **Connector fields** - per-connector settings such as proxy counts, countries or zones. Fields can be shown conditionally (`show_when`) and selects can load their options from the vendor API.
 4. **Proxy types** - one entry per product line, each with a *mode* (see below), gateway host and port, and username/password templates.
 5. **Discovery** - credential validation, options sources and two-step auth flows, all expressed as HTTP calls with JMESPath extraction.
-6. **Test** - run the descriptor's vendor calls with throwaway config before saving. Requests are shown with secrets redacted.
+6. **Test** - try the descriptor with throwaway config before saving. The credential and connector forms behave as they will for users: dropdowns load from the vendor, selecting a zone fills the dependent fields, and dependent dropdowns wait for their inputs. *Request through a proxy* validates the credential, builds one proxy endpoint exactly as a connector would (session id, IP discovery or vendor list included) and fetches a URL through it, reporting the status, latency and exit IP. The other actions exercise the vendor API: credential validation, options sources and the proxy list. Requests are shown with secrets redacted and nothing is persisted; the draft stays invisible to other users until it is saved.
 7. **YAML** - preview the normalised document, paste one to import, or export it.
 
 Saving asks you to confirm the vendor hosts that will receive credential material. Changes take effect immediately on every instance, are versioned, and are written to an audit log with the actor and the host list.
@@ -48,7 +48,7 @@ Saving asks you to confirm the vendor hosts that will receive credential materia
 A descriptor tells Octoprox to send credentials to a URL, so descriptors are treated as sensitive configuration:
 
 - Only **admins** can create, edit, import or delete descriptors. Editors use them; viewers see them.
-- Vendor calls are **HTTPS only** and every hostname is resolved and checked against private, loopback, link-local and cloud-metadata ranges before connecting. The connection is pinned to the vetted address. Redirects are not followed and pagination may not leave the original host.
+- Vendor calls are **HTTPS only** and every hostname is resolved and checked against private, loopback, link-local and cloud-metadata ranges before connecting. The connection is pinned to the vetted address. Redirects are not followed and pagination may not leave the original host. The test request through a proxy applies the same checks to the gateway host and to the URL it fetches.
 - Templates are plain `{placeholder}` substitution; extraction is JMESPath. Neither can reach anything outside the values Octoprox explicitly provides.
 - Every egress host must be **confirmed** on save, and again whenever a new host is added. The credential form shows users where their secret is sent.
 - Every mutation is **audited** (`provider_audit_log`) with the actor, action and host list.

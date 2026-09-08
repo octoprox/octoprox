@@ -8,6 +8,7 @@ from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, ValidationError
+from sqlalchemy.exc import IntegrityError
 
 from api.core.auth import RequireEditorDep
 from api.core.event_bus import event_bus
@@ -24,6 +25,7 @@ from api.models.connector import (
 from api.models.credential import Credential
 from api.providers.registry import ProviderRegistry, UnknownProviderError, get_provider_registry
 from api.providers.sdk.validation import ConfigValidationError
+from api.routes.common import unique_name_violation
 
 router = APIRouter(prefix="/projects/{project_id}/connectors")
 
@@ -163,7 +165,10 @@ async def create_connector(
         enabled=connector_data.enabled,
     )
 
-    await proxy_manager.add_connector(connector)
+    try:
+        await proxy_manager.add_connector(connector)
+    except IntegrityError as exc:
+        raise unique_name_violation(exc, "connector", connector.name) from None
 
     # Trigger provider sync if this is a syncable provider connector (fire-and-forget)
     # Use create_task to avoid blocking the API response during IP discovery
@@ -206,7 +211,9 @@ async def update_connector(
     # Get current credential for validation
     current_credential = proxy_manager.get_credential(connector.credential_id)
 
-    # Update fields
+    # Update fields. ``connector`` is the cached object, so a rejected write
+    # must put the old name back.
+    previous_name = connector.name
     if connector_data.name is not None:
         connector.name = connector_data.name
     if connector_data.credential_id is not None:
@@ -248,7 +255,11 @@ async def update_connector(
     if connector_data.enabled is not None:
         connector.enabled = connector_data.enabled
 
-    await proxy_manager.update_connector(connector)
+    try:
+        await proxy_manager.update_connector(connector)
+    except IntegrityError as exc:
+        connector.name = previous_name
+        raise unique_name_violation(exc, "connector", connector_data.name or "") from None
 
     credential = proxy_manager.get_credential(connector.credential_id)
 

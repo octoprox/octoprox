@@ -77,16 +77,30 @@ def clean_custom_providers(test_settings: Settings) -> Iterator[None]:
     engine.dispose()
 
 
+PROXIED_REQUESTS: list[tuple[str, str]] = []
+"""``(proxy_url, target_url)`` pairs sent "through a proxy" by the mocked runtime."""
+
+
+def _proxied_client(proxy_url: str, timeout: float) -> httpx.AsyncClient:
+    def handler(request: httpx.Request) -> httpx.Response:
+        PROXIED_REQUESTS.append((proxy_url, str(request.url)))
+        return httpx.Response(200, json={"origin": "203.0.113.7"})
+
+    return httpx.AsyncClient(transport=httpx.MockTransport(handler), timeout=timeout)
+
+
 @pytest.fixture
 def mocked_vendor(authenticated_client: TestClient) -> Iterator[TestClient]:
-    """Point the registry's SDK runtime at a mock Acme API and relax egress."""
+    """Point the registry's SDK runtime at a mock Acme API and a mock proxy, and relax egress."""
     registry = authenticated_client.app.state.proxy_manager.provider_registry
     original = registry._runtime
     registry._runtime = replace(
         original,
         egress_policy=EgressPolicy(allow_http=True, allow_private=True, pin_dns=False),
         client_factory=lambda: httpx.AsyncClient(transport=httpx.MockTransport(_acme_api)),
+        proxied_client_factory=_proxied_client,
     )
+    PROXIED_REQUESTS.clear()
     yield authenticated_client
     registry._runtime = original
 
@@ -230,6 +244,31 @@ class TestAuthoring:
         assert client.post("/api/v1/providers/oxylabs/options/x", json={}, headers=viewer_auth_headers).status_code == 403
 
 
+class TestBuiltinProviders:
+    """Shipped descriptors can be exercised through the same test endpoint, without a spec."""
+
+    def test_builtin_vendor_calls_and_proxy_request(self, mocked_vendor: TestClient) -> None:
+        client = mocked_vendor
+        no_validation = client.post("/api/v1/providers/oxylabs/test", json={"action": "validate", "credential_config": {"username": "u", "password": "p"}})
+        assert no_validation.status_code == 200 and no_validation.json()["ok"] is False
+        assert "no credential validation" in no_validation.json()["message"]
+
+        request = client.post(
+            "/api/v1/providers/oxylabs/test",
+            json={"action": "proxy_request", "credential_config": {"proxy_type": "residential", "username": "alice", "password": "pw"}, "connector_config": {"num_proxies": 3, "country_code": "DE"}},
+        )
+        assert request.status_code == 200, request.text
+        assert request.json()["ok"] is True and "pr.oxylabs.io:7777" in request.json()["message"]
+        proxy_url, _target = PROXIED_REQUESTS[-1]
+        assert proxy_url.startswith("http://customer-alice-cc-DE-sessid-") and proxy_url.endswith(":pw@pr.oxylabs.io:7777")
+
+    def test_builtin_test_is_admin_only_and_needs_a_descriptor(self, authenticated_client: TestClient, viewer_auth_headers: dict[str, str]) -> None:
+        body = {"action": "proxy_request", "credential_config": {}}
+        assert authenticated_client.post("/api/v1/providers/oxylabs/test", json=body, headers=viewer_auth_headers).status_code == 403
+        assert authenticated_client.post("/api/v1/providers/static/test", json=body).status_code == 404
+        assert authenticated_client.post("/api/v1/providers/nope/test", json=body).status_code == 404
+
+
 class TestUsingACustomProvider:
     def test_credentials_and_connectors_flow(self, mocked_vendor: TestClient, created_project: dict[str, Any]) -> None:
         client = mocked_vendor
@@ -283,6 +322,60 @@ class TestUsingACustomProvider:
         draft = dict(ACME_SPEC, id="acme_draft")
         test = client.post("/api/v1/providers/acme_draft/test", json={"action": "options", "option_name": "regions", "credential_config": {"api_key": "good"}, "spec": draft})
         assert test.status_code == 200 and test.json()["message"] == "2 option(s)"
+
+    def test_request_through_proxy_for_draft_and_stored_provider(self, mocked_vendor: TestClient) -> None:
+        """``proxy_request`` provisions one endpoint in memory and fetches a URL through it; nothing is saved."""
+        client = mocked_vendor
+        config = {"credential_config": {"api_key": "good", "username": "u", "password": "s3cret-pw"}, "connector_config": {"num_proxies": 5, "region": "eu"}}
+
+        draft = client.post("/api/v1/providers/acme_draft/test", json={"action": "proxy_request", "spec": dict(ACME_SPEC, id="acme_draft"), **config})
+        assert draft.status_code == 200, draft.text
+        body = draft.json()
+        assert body["ok"] is True and body["message"].startswith("HTTP 200 through gw.acme.test:9000")
+        assert body["result"]["exit_ip"] == "203.0.113.7" and body["result"]["proxy"]["host"] == "gw.acme.test"
+        assert body["result"]["proxy"]["username"].startswith("u-r-eu-s-") and "password" not in body["result"]["proxy"]
+        # The credential is validated first, as on credential creation, then the request goes through the proxy.
+        assert [(t["url"], t["status"]) for t in body["traces"]] == [("https://api.acme.test/me", 200), ("https://httpbin.org/ip", 200)]
+        assert body["traces"][0]["headers"]["Authorization"] == "***"
+        assert body["traces"][1] == {"method": "GET", "url": "https://httpbin.org/ip", "status": 200, "elapsed_ms": body["traces"][1]["elapsed_ms"], "error": None, "page": 1, "headers": {}}
+        proxy_url, target = PROXIED_REQUESTS[-1]
+        assert proxy_url.startswith("http://u-r-eu-s-") and proxy_url.endswith(":s3cret-pw@gw.acme.test:9000") and target == "https://httpbin.org/ip"
+        assert client.get("/api/v1/providers/acme_draft").status_code == 404  # still unsaved
+
+        _create_acme(client)
+        before = client.get("/api/v1/providers/acme").json()
+        stored = client.post("/api/v1/providers/acme/test", json={"action": "proxy_request", "target_url": "https://example.org/whoami", **config})
+        assert stored.status_code == 200 and stored.json()["ok"] is True
+        assert PROXIED_REQUESTS[-1][1] == "https://example.org/whoami"
+        after = client.get("/api/v1/providers/acme").json()
+        assert (after["credential_count"], after["connector_count"]) == (before["credential_count"], before["connector_count"])
+
+    def test_options_for_an_unsaved_draft(self, mocked_vendor: TestClient, editor_auth_headers: dict[str, str]) -> None:
+        """The builder's test panel drives dynamic selects against the in-editor descriptor."""
+        client = mocked_vendor
+        draft = dict(ACME_SPEC, id="acme_draft")
+        body = {"credential_config": {"api_key": "good"}, "spec": draft}
+        resolved = client.post("/api/v1/providers/acme_draft/options/regions", json=body)
+        assert resolved.status_code == 200, resolved.text
+        assert [o["value"] for o in resolved.json()["options"]] == ["eu", "us"]
+        assert client.get("/api/v1/providers/acme_draft").status_code == 404  # still unsaved
+        assert client.post("/api/v1/providers/acme_draft/options/nope", json=body).status_code == 404
+        # A draft sends credentials wherever it says, so only admins may use one.
+        assert client.post("/api/v1/providers/acme_draft/options/regions", json=body, headers=editor_auth_headers).status_code == 403
+        # A saved credential id is ignored with a draft: the throwaway config is required.
+        assert client.post("/api/v1/providers/acme_draft/options/regions", json={"credential_id": "whatever", "spec": draft}).status_code == 422
+
+    def test_options_endpoint_rejects_private_draft_hosts(self, authenticated_client: TestClient) -> None:
+        """Same static egress checks as saving: a draft cannot probe private networks (strict policy here)."""
+        draft = dict(ACME_SPEC, id="acme_bad", options={"regions": {**ACME_SPEC["options"]["regions"], "call": {"url": "https://10.0.0.1/regions"}}})
+        response = authenticated_client.post("/api/v1/providers/acme_bad/options/regions", json={"credential_config": {"api_key": "k"}, "spec": draft})
+        assert response.status_code == 422 and "not publicly routable" in response.json()["detail"]
+
+    def test_request_through_proxy_rejects_private_targets(self, mocked_vendor: TestClient) -> None:
+        # The relaxed test policy allows private hosts, so check the model-level guard instead.
+        bad = mocked_vendor.post("/api/v1/providers/acme/test", json={"action": "proxy_request", "target_url": "ftp://example.org/", "spec": ACME_SPEC, "credential_config": {"api_key": "good", "username": "u", "password": "p"}})
+        assert bad.status_code == 200 and bad.json()["ok"] is False and "target URL rejected" in bad.json()["message"]
+        assert mocked_vendor.post("/api/v1/providers/acme/test", json={"action": "teleport", "spec": ACME_SPEC}).status_code == 422
 
     def test_test_endpoint_rejects_private_draft_hosts(self, authenticated_client: TestClient) -> None:
         draft = dict(ACME_SPEC, id="acme_bad", validation={"call": {"url": "https://10.0.0.1/steal"}})

@@ -132,10 +132,14 @@ class HostConfirmationRequired(BaseModel):
 
 
 class ProviderTestRequest(BaseModel):
-    action: Literal["validate", "options", "list_proxies"]
+    action: Literal["validate", "options", "list_proxies", "proxy_request"]
     credential_config: dict[str, Any] = Field(default_factory=dict)
     connector_config: dict[str, Any] = Field(default_factory=dict)
     option_name: str | None = None
+    target_url: str | None = Field(
+        default=None,
+        description="proxy_request only: URL fetched through the provisioned proxy (default: the healthcheck URL)",
+    )
     spec: dict[str, Any] | None = Field(
         default=None, description="Unsaved descriptor to test instead of the stored one"
     )
@@ -152,6 +156,9 @@ class ProviderOptionsRequest(BaseModel):
     credential_id: str | None = None
     credential_config: dict[str, Any] | None = None
     connector_config: dict[str, Any] = Field(default_factory=dict)
+    spec: dict[str, Any] | None = Field(
+        default=None, description="Unsaved descriptor to resolve against instead of the stored one (admin)"
+    )
 
 
 class ProviderOptionsResponse(BaseModel):

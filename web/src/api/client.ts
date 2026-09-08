@@ -762,7 +762,7 @@ export const fetchProvider = async (providerId: string): Promise<ProviderDetail>
 export const resolveProviderOptions = async (
   providerId: string,
   optionName: string,
-  body: { credential_id?: string; credential_config?: Record<string, unknown>; connector_config?: Record<string, unknown> },
+  body: { credential_id?: string; credential_config?: Record<string, unknown>; connector_config?: Record<string, unknown>; spec?: ProviderSpec },
 ): Promise<ResolvedProviderOption[]> => {
   const response = await api.post(`/providers/${providerId}/options/${optionName}`, body)
   return response.data.options
@@ -805,9 +805,15 @@ export const fetchProviderAudit = async (providerId: string): Promise<{ total: n
   return response.data
 }
 
+export type ProviderTestAction = 'validate' | 'options' | 'list_proxies' | 'proxy_request'
+
+/**
+ * Exercise a stored provider (built-in or custom) or an unsaved draft (`spec`).
+ * `proxy_request` provisions one proxy endpoint in memory and fetches `target_url` through it.
+ */
 export const testProvider = async (
   providerId: string,
-  body: { action: 'validate' | 'options' | 'list_proxies'; credential_config: Record<string, unknown>; connector_config?: Record<string, unknown>; option_name?: string; spec?: ProviderSpec },
+  body: { action: ProviderTestAction; credential_config: Record<string, unknown>; connector_config?: Record<string, unknown>; option_name?: string; target_url?: string; spec?: ProviderSpec },
 ): Promise<ProviderTestResponse> => {
   const response = await api.post(`/providers/${providerId}/test`, body)
   return response.data

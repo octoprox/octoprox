@@ -43,6 +43,7 @@ from api.models.provider import (
     ProviderValidateRequest,
     ProviderValidateResponse,
 )
+from api.models.user import UserRole
 from api.providers.registry import ProviderRegistry, ProviderType, get_provider_registry
 from api.providers.sdk.descriptor import FieldSpec, ProviderDescriptor
 from api.providers.sdk.discovery import DescriptorTester, OptionsResolver, ResolvedOption
@@ -312,16 +313,27 @@ async def resolve_options(
     """Resolve a descriptor's dynamic select options for a credential.
 
     Editors may pass a saved ``credential_id`` or, while creating a credential,
-    the in-progress ``credential_config``.
+    the in-progress ``credential_config``. Admins may also pass an unsaved
+    ``spec`` so the provider builder's test panel can drive dynamic selects
+    before the descriptor is saved; the static egress checks apply as on save.
     """
     registry = get_provider_registry()
-    ptype = registry.get(provider_id)
-    if ptype is None or ptype.descriptor is None:
-        raise HTTPException(status_code=404, detail="Provider not found")
-    if option_name not in ptype.descriptor.options:
+    if body.spec is not None:
+        if _guard.role != UserRole.ADMIN:
+            raise HTTPException(status_code=403, detail="Only admins can resolve options for an unsaved descriptor")
+        descriptor = _parse_spec(body.spec)
+        errors, _warnings = _static_checks(descriptor, registry)
+        if errors:
+            raise HTTPException(status_code=422, detail="; ".join(errors))
+    else:
+        ptype = registry.get(provider_id)
+        if ptype is None or ptype.descriptor is None:
+            raise HTTPException(status_code=404, detail="Provider not found")
+        descriptor = ptype.descriptor
+    if option_name not in descriptor.options:
         raise HTTPException(status_code=404, detail=f"Provider has no options source '{option_name}'")
     credential_config: dict[str, Any] | None = body.credential_config
-    if body.credential_id:
+    if body.credential_id and body.spec is None:
         proxy_manager = request.app.state.proxy_manager
         credential = proxy_manager.get_credential(body.credential_id)
         if credential is None or credential.type != provider_id:
@@ -329,7 +341,7 @@ async def resolve_options(
         credential_config = credential.config
     if credential_config is None:
         raise HTTPException(status_code=422, detail="credential_id or credential_config is required")
-    resolver = OptionsResolver(ptype.descriptor, registry.runtime)
+    resolver = OptionsResolver(descriptor, registry.runtime)
     outcome = await resolver.resolve(option_name, credential_config, body.connector_config)
     if not outcome.ok:
         raise HTTPException(status_code=502, detail=outcome.message)
@@ -540,10 +552,13 @@ async def provider_audit(
 async def test_provider(
     request: Request, provider_id: str, body: ProviderTestRequest, _admin: RequireAdminDep
 ) -> ProviderTestResponse:
-    """Exercise a descriptor's vendor calls with throwaway config (admin).
+    """Exercise a descriptor with throwaway config (admin).
 
-    ``spec`` lets the builder test an unsaved draft; static egress checks still
-    apply, so a draft cannot be used to probe private networks.
+    Works for shipped and custom providers alike. Besides the vendor API calls,
+    ``proxy_request`` provisions one proxy endpoint in memory and fetches a URL
+    through it, so a provider can be tried end to end before any credential or
+    connector exists. ``spec`` lets the builder test an unsaved draft; static
+    egress checks still apply, so a draft cannot be used to probe private networks.
     """
     registry = get_provider_registry()
     if body.spec is not None:
@@ -557,7 +572,9 @@ async def test_provider(
             raise HTTPException(status_code=404, detail="Provider not found")
         descriptor = ptype.descriptor
     tester = DescriptorTester(descriptor, registry.runtime)
-    outcome = await tester.run(body.action, body.credential_config, body.connector_config, body.option_name)
+    outcome = await tester.run(
+        body.action, body.credential_config, body.connector_config, body.option_name, target_url=body.target_url
+    )
     return ProviderTestResponse(
         ok=outcome.ok, message=outcome.message, result=outcome.result, traces=outcome.trace_dicts()
     )

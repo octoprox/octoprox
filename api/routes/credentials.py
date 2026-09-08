@@ -12,6 +12,7 @@ from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, ValidationError
+from sqlalchemy.exc import IntegrityError
 
 from api.core.auth import RequireEditorDep
 from api.models.credential import (
@@ -29,6 +30,7 @@ from api.providers.registry import (
 )
 from api.providers.sdk.discovery import CredentialValidator
 from api.providers.sdk.validation import ConfigValidationError
+from api.routes.common import unique_name_violation
 
 router = APIRouter(prefix="/projects/{project_id}/credentials")
 
@@ -142,7 +144,10 @@ async def create_credential(
         config=config,
     )
 
-    await proxy_manager.add_credential(credential)
+    try:
+        await proxy_manager.add_credential(credential)
+    except IntegrityError as exc:
+        raise unique_name_violation(exc, "credential", credential.name) from None
     return _credential_to_detail_response(credential)
 
 
@@ -169,7 +174,9 @@ async def update_credential(
     if credential is None:
         raise HTTPException(status_code=404, detail="Credential not found")
 
-    # Update fields
+    # Update fields. ``credential`` is the cached object, so a rejected write
+    # must put the old values back.
+    previous_name = credential.name
     if credential_data.name is not None:
         credential.name = credential_data.name
     if credential_data.config is not None:
@@ -187,7 +194,11 @@ async def update_credential(
             config = await _verify_with_vendor(registry, ptype, config)
         credential.config = config
 
-    await proxy_manager.update_credential(credential)
+    try:
+        await proxy_manager.update_credential(credential)
+    except IntegrityError as exc:
+        credential.name = previous_name
+        raise unique_name_violation(exc, "credential", credential_data.name or "") from None
     return _credential_to_detail_response(credential)
 
 

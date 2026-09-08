@@ -157,6 +157,42 @@ class TestCredentialEndpoints:
         data = response.json()
         assert data["name"] == "Updated Credential"
 
+    def test_duplicate_names_are_rejected_within_a_project(
+        self,
+        authenticated_client: TestClient,
+        created_project: dict[str, Any],
+        created_credential: dict[str, Any],
+        sample_credential_data: dict[str, Any],
+        sample_project_data: dict[str, Any],
+    ) -> None:
+        """The per-project unique index on lower(name) refuses the duplicate and the route makes it a 400."""
+        project_id = created_project["id"]
+        url = f"/api/v1/projects/{project_id}/credentials"
+        duplicate = authenticated_client.post(url, json=sample_credential_data)
+        assert duplicate.status_code == 400 and "already exists" in duplicate.json()["detail"]
+        shouting = authenticated_client.post(url, json={**sample_credential_data, "name": sample_credential_data["name"].upper()})
+        assert shouting.status_code == 400
+
+        other = authenticated_client.post(url, json={**sample_credential_data, "name": "Second"})
+        assert other.status_code == 201, other.text
+        # Renaming onto an existing name is refused; keeping or changing case of your own name is not.
+        rename = authenticated_client.patch(f"{url}/{other.json()['id']}", json={"name": sample_credential_data["name"]})
+        assert rename.status_code == 400
+        # The rejected rename must not linger in the in-memory copy.
+        assert authenticated_client.get(f"{url}/{other.json()['id']}").json()["name"] == "Second"
+        recase = authenticated_client.patch(f"{url}/{other.json()['id']}", json={"name": "SECOND"})
+        assert recase.status_code == 200 and recase.json()["name"] == "SECOND"
+        same = authenticated_client.patch(f"{url}/{created_credential['id']}", json={"name": created_credential["name"]})
+        assert same.status_code == 200
+
+        other_project = authenticated_client.post(
+            "/api/v1/projects",
+            json={**sample_project_data, "name": f"{sample_project_data['name']} B", "username": f"{sample_project_data['username']}_b"},
+        )
+        assert other_project.status_code == 201, other_project.text
+        elsewhere = authenticated_client.post(f"/api/v1/projects/{other_project.json()['id']}/credentials", json=sample_credential_data)
+        assert elsewhere.status_code == 201
+
     def test_delete_credential(
         self,
         authenticated_client: TestClient,

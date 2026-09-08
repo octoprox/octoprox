@@ -17,6 +17,7 @@ from typing import Any
 
 import httpx
 import structlog
+from httpx_socks import AsyncProxyTransport  # type: ignore[import-untyped]
 
 from api.models.proxy import ProxyProtocol
 from api.providers.sdk.descriptor import IpDiscoverySpec, KnownIpsSpec, ListSourceSpec
@@ -30,6 +31,9 @@ ProxiedClientFactory = Callable[[str, float], httpx.AsyncClient]
 
 
 def default_proxied_client_factory(proxy_url: str, timeout: float) -> httpx.AsyncClient:
+    """Client that sends every request through ``proxy_url`` (HTTP or SOCKS)."""
+    if proxy_url.startswith(("socks4://", "socks5://")):
+        return httpx.AsyncClient(transport=AsyncProxyTransport.from_url(proxy_url), timeout=timeout)
     return httpx.AsyncClient(proxy=proxy_url, timeout=timeout)
 
 

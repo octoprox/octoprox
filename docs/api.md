@@ -121,7 +121,7 @@ GET /api/v1/projects/{project_id}/credentials
 
 ### Create Credential
 
-`type` is any provider id from the catalog. The config is validated against the provider's field schema; descriptor providers with a validation call also verify the credential with the vendor and may store captured values (for example Bright Data's customer id).
+`type` is any provider id from the catalog. The config is validated against the provider's field schema; descriptor providers with a validation call also verify the credential with the vendor and may store captured values (for example Bright Data's customer id). Names are unique per project, ignoring case: a duplicate returns `400`.
 
 ```bash
 POST /api/v1/projects/{project_id}/credentials
@@ -170,6 +170,8 @@ GET /api/v1/projects/{project_id}/connectors
 ```
 
 ### Create Connector
+
+Connector names are unique per project, ignoring case: a duplicate returns `400`.
 
 ```bash
 POST /api/v1/projects/{project_id}/connectors

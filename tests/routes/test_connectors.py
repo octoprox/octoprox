@@ -171,6 +171,29 @@ class TestConnectorEndpoints:
         assert data["name"] == "Updated Connector"
         assert data["enabled"] is False
 
+    def test_duplicate_names_are_rejected_within_a_project(
+        self,
+        authenticated_client: TestClient,
+        created_project: dict[str, Any],
+        created_connector: dict[str, Any],
+        sample_connector_data: dict[str, Any],
+    ) -> None:
+        """The per-project unique index on lower(name) is what refuses the duplicate; the route makes it a 400."""
+        project_id = created_project["id"]
+        url = f"/api/v1/projects/{project_id}/connectors"
+        body = {**sample_connector_data, "credential_id": created_connector["credential_id"]}
+        duplicate = authenticated_client.post(url, json=body)
+        assert duplicate.status_code == 400 and "already exists" in duplicate.json()["detail"]
+        assert authenticated_client.post(url, json={**body, "name": body["name"].upper()}).status_code == 400
+
+        other = authenticated_client.post(url, json={**body, "name": "Second"})
+        assert other.status_code == 201, other.text
+        rename = authenticated_client.patch(f"{url}/{other.json()['id']}", json={"name": body["name"]})
+        assert rename.status_code == 400
+        # The rejected rename must not linger in the in-memory copy.
+        assert authenticated_client.get(f"{url}/{other.json()['id']}").json()["name"] == "Second"
+        assert authenticated_client.patch(f"{url}/{other.json()['id']}", json={"name": "second"}).status_code == 200
+
     def test_delete_connector(
         self,
         authenticated_client: TestClient,

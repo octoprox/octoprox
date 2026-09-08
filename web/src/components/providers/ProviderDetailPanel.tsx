@@ -1,14 +1,23 @@
 // Copyright 2026 Octoprox Authors
 // SPDX-License-Identifier: Apache-2.0
 
+import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { Copy, Download, ExternalLink } from 'lucide-react'
 import { exportProviderYaml, fetchProvider, fetchProviderAudit, ProviderSummary } from '../../api/client'
-import { Badge, Button, Inspector, InspectorSection, KeyValue, INSPECTOR_WIDTH_WIDE } from '../ui'
+import { useProviders } from '../../hooks/useProviders'
+import { Badge, Button, Inspector, InspectorSection, KeyValue, Tabs, INSPECTOR_WIDTH_WIDE } from '../ui'
 import { ProviderLogo } from '../ProviderLogo'
+import { TestPanel } from './TestPanel'
 import { formatDateTime } from '../../utils/format'
 
-/** Read-only view of any provider; built-ins can be exported or duplicated into a custom one. */
+type Tab = 'details' | 'test'
+
+/**
+ * Read-only view of any provider; built-ins can be exported or duplicated into a
+ * custom one. Descriptor providers also get a Test tab, so a shipped vendor can be
+ * tried with throwaway credentials before anything is created.
+ */
 export function ProviderDetailPanel({ provider, onClose, onDuplicate, onEdit }: {
   provider: ProviderSummary
   onClose: () => void
@@ -17,6 +26,9 @@ export function ProviderDetailPanel({ provider, onClose, onDuplicate, onEdit }: 
 }) {
   const { data: detail } = useQuery({ queryKey: ['provider', provider.id], queryFn: () => fetchProvider(provider.id) })
   const { data: audit } = useQuery({ queryKey: ['provider-audit', provider.id], queryFn: () => fetchProviderAudit(provider.id), enabled: provider.source === 'custom' })
+  const { presets } = useProviders()
+  const [tab, setTab] = useState<Tab>('details')
+  const testable = provider.kind === 'descriptor'
   const download = async () => {
     const yaml = await exportProviderYaml(provider.id)
     const blob = new Blob([yaml], { type: 'application/yaml' })
@@ -40,6 +52,10 @@ export function ProviderDetailPanel({ provider, onClose, onDuplicate, onEdit }: 
         </>
       )}
     >
+      {testable && <Tabs<Tab> tabs={[{ id: 'details', label: 'Details' }, { id: 'test', label: 'Test' }]} active={tab} onChange={setTab} size="sm" />}
+      {tab === 'test' && testable ? (
+        detail?.spec ? <TestPanel key={provider.id} spec={detail.spec} presets={presets} stored={provider} /> : <p className="text-xs text-fg-muted">Loading…</p>
+      ) : (<>
       <div className="flex items-center gap-3 p-3 border border-line rounded-[10px]">
         <ProviderLogo type={provider.id} name={provider.name} className="w-10 h-10 text-[40px]" />
         <div className="min-w-0 flex-1">
@@ -79,6 +95,7 @@ export function ProviderDetailPanel({ provider, onClose, onDuplicate, onEdit }: 
           ))}
         </InspectorSection>
       )}
+      </>)}
     </Inspector>
   )
 }

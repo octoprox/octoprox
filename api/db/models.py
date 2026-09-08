@@ -88,6 +88,10 @@ class CredentialModel(Base):
     """SQLAlchemy model for provider credentials."""
 
     __tablename__ = "credentials"
+    __table_args__ = (
+        # Names are how connectors and the UI refer to a credential: unique per project, ignoring case.
+        Index("ix_credentials_project_name_unique", "project_id", text("lower(name)"), unique=True),
+    )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
     name: Mapped[str] = mapped_column(String(255), nullable=False)
@@ -109,6 +113,9 @@ class ConnectorModel(Base):
     """SQLAlchemy model for connectors (replaces sources)."""
 
     __tablename__ = "connectors"
+    __table_args__ = (
+        Index("ix_connectors_project_name_unique", "project_id", text("lower(name)"), unique=True),
+    )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
     name: Mapped[str] = mapped_column(String(255), nullable=False)
