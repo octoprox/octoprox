@@ -10,7 +10,7 @@ import {
   fetchProjectConnectors, fetchProjectCredentials, fetchProjectCredential, fetchConnectorOptions,
   createProjectConnector, updateProjectConnector, deleteProjectConnector,
   Connector, CredentialType, ConnectorCreate, ConnectorUpdate, ConnectorOptions, ProviderField,
-  RoutingConfig, RateLimitConfig, Credential, CredentialDetail, CredentialListResponse,
+  RoutingConfig, RateLimitConfig, Credential, CredentialDetail,
 } from '../api/client'
 import { useProject } from '../contexts/ProjectContext'
 import { useAuth } from '../contexts/AuthContext'
@@ -319,10 +319,6 @@ function ConnectorEditor({ connector, canMutate, onClose, onDelete, onSaved }: {
   })
   const [error, setError] = useState<string | null>(null)
   const [creatingCredential, setCreatingCredential] = useState(false)
-  // A credential created from this form. Kept locally because, in a cluster, the
-  // list refetch may be answered by an instance that has not applied the change
-  // yet and would otherwise hide the credential we just selected.
-  const [createdCredential, setCreatedCredential] = useState<CredentialDetail | null>(null)
 
   const { data: credentialsData } = useQuery({
     queryKey: ['credentials', selectedProjectId],
@@ -346,12 +342,8 @@ function ConnectorEditor({ connector, canMutate, onClose, onDelete, onSaved }: {
   })
 
   const credentialsForType: Credential[] = useMemo(
-    () => {
-      const listed = credentialsData?.credentials.filter((c) => c.type === type) || []
-      if (createdCredential && createdCredential.type === type && !listed.some((c) => c.id === createdCredential.id)) return [...listed, createdCredential]
-      return listed
-    },
-    [credentialsData, type, createdCredential]
+    () => credentialsData?.credentials.filter((c) => c.type === type) || [],
+    [credentialsData, type]
   )
 
   const invalidate = () => {
@@ -412,12 +404,6 @@ function ConnectorEditor({ connector, canMutate, onClose, onDelete, onSaved }: {
         onBack={() => setCreatingCredential(false)}
         onClose={onClose}
         onCreated={(cred: CredentialDetail) => {
-          // Seed the caches so the select and the descriptor form see the new
-          // credential immediately, whatever the pending refetch returns.
-          queryClient.setQueryData<CredentialListResponse | undefined>(['credentials', selectedProjectId], (prev) =>
-            prev && !prev.credentials.some((c) => c.id === cred.id) ? { ...prev, total: prev.total + 1, credentials: [...prev.credentials, cred] } : prev)
-          queryClient.setQueryData(['credential', selectedProjectId, cred.id], cred)
-          setCreatedCredential(cred)
           setFormData((prev) => ({ ...prev, credential_id: cred.id }))
           setCreatingCredential(false)
         }}

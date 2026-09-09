@@ -169,13 +169,35 @@ instance trips a limit.
 
 | Port | Served by | What                                             |
 |------|-----------|--------------------------------------------------|
-| 8000 | HAProxy   | API + Web UI (HTTP, round-robin across replicas) |
+| 8000 | HAProxy   | API + Web UI (HTTP, sticky per client, see below)  |
 | 8080 | HAProxy   | Proxy traffic (TCP, least-conn across replicas)  |
 | 8404 | HAProxy   | HAProxy stats UI                                 |
 
 Both 8000 and 8080 use the same HTTP `/health` probe (on port 8000) to
 decide whether a backend is fit. A container with a crashed API server
 gets pulled out of the proxy-traffic backend automatically.
+
+### Read-your-writes on the API
+
+Each instance serves reads from its in-memory copy of projects,
+credentials, connectors and proxies and learns about writes made on other
+instances through Redis a moment later. A client that creates a credential
+on one replica and immediately lists credentials on another can therefore
+miss its own write for a few milliseconds, which in the UI looked like a
+saved item not appearing in the table.
+
+HAProxy avoids this by pinning each browser to one replica with an
+`OCTOPROX_SRV` cookie (`cookie ... insert indirect nocache` in
+`haproxy/haproxy.cfg`). New clients are still spread round-robin, and
+`option redispatch` moves a client to a healthy replica if its pinned one
+goes down. The cookie is handled by HAProxy alone; the instances never see
+it. If you front Octoprox with a different load balancer, configure the
+equivalent session affinity for the API port.
+
+API clients that do not keep cookies, such as scripts using a bearer
+token, are still balanced per request. A script that writes and then
+immediately reads may see the pre-write state from another replica; retry
+the read or reuse a cookie jar if that matters.
 
 ### Inspecting cluster state
 
