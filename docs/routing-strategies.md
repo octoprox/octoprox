@@ -75,10 +75,10 @@ Every connector has one **Countries** setting, on its General (or Infrastructure
 | Residential and mobile pools (Oxylabs, Bright Data, Decodo, IPRoyal, NetNut) | *N* sessions are created **per listed country right away**, geo-targeted in the upstream credentials. Requests for other countries are refused. | *N* sessions are created without a country. In addition, the first `-cc-` request for any country creates *N* sessions geo-targeted to it, **on demand**, and they stay for later requests. |
 | Port-based types that pick IPs from the vendor's list (Bright Data ISP and datacenter) | *N* IPs are pinned per listed country right away, chosen from the IPs the zone has in that country. | IPs are pinned in list order; each keeps its reported country for per-proxy matching. |
 | Port-based types where each gateway port is pinned to an IP (Oxylabs and Decodo ISP and datacenter) | Gateway ports are scanned in order and **only IPs located in the listed countries are kept**, *N* per country. With 5 countries and *N* = 10 the scan aims for 50 proxies and stops early when the ports start returning failures or IPs already held, or after `max_scan_ports` ports. | Ports are taken in order regardless of location; each IP keeps its discovered country for per-proxy matching. |
-
-For every port-based type with countries listed, the periodic IP refresh re-reads each proxy's location. A proxy whose exit moved outside its country is dropped immediately, and the reconciliation that follows the refresh discovers a replacement, so the pool never serves a country it should not.
 | Static connectors | The countries the manually added proxies exit from, used for proxies whose own location is unknown. | Each proxy is matched on its own exit country, looked up when it was added (`proxy.geo_lookup`), set by hand, or refreshed from the Proxies page. |
 | Cloud connectors | Optional: makes the region's instances selectable by country. | Not selectable with `-cc-`. |
+
+For every port-based type with countries listed, the periodic IP refresh re-reads each proxy's location. A proxy whose exit moved outside its country is dropped immediately, and the reconciliation that follows the refresh discovers a replacement, so the pool never serves a country it should not.
 
 ### How a request is matched
 
