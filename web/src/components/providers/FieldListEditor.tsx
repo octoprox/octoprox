@@ -40,7 +40,8 @@ export function FieldListEditor({ spec, scope, fields, onChange }: { spec: Spec;
             <TextField label="Group (connector tab)" value={f.group ?? 'general'} onChange={(v) => update(i, { group: slugify(v) || 'general' })} mono />
             <TextField label="Default" value={f.default == null ? '' : String(f.default)} onChange={(v) => update(i, { default: v === '' ? null : (f.type === 'number' && !Number.isNaN(Number(v)) ? Number(v) : f.type === 'boolean' ? v === 'true' : v) })} />
             <TextField label="Placeholder" value={f.placeholder} onChange={(v) => update(i, { placeholder: v || null })} />
-            <TextField label="Help text" value={f.help} onChange={(v) => update(i, { help: v || null })} className="col-span-2" />
+            <TextField label="Help text (one sentence, under the control)" value={f.help} onChange={(v) => update(i, { help: v || null })} className="col-span-2" />
+            <TextField label="Details (shown behind an info icon next to the label)" value={f.details} onChange={(v) => update(i, { details: v || null })} className="col-span-2" />
           </div>
           <div className="flex flex-wrap gap-x-6">
             <Checkbox label="Required" checked={!!f.required} onChange={(v) => update(i, { required: v })} />

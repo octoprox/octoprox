@@ -108,3 +108,4 @@ class TestValidateRoutingConfig:
         """Test that lists with only whitespace entries are treated as empty."""
         result = validate_routing_config({"domain_whitelist": ["", "  "]})
         assert result == {}
+

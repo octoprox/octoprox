@@ -19,6 +19,7 @@ from api.models.connector import (
     ConnectorOptionsResponse,
     ConnectorResponse,
     ConnectorUpdate,
+    ProxyTarget,
     validate_rate_limit_config,
     validate_routing_config,
 )
@@ -59,6 +60,7 @@ def _connector_to_response(
     credential_name: str | None = None,
     credential_type: str | None = None,
     proxy_count: int = 0,
+    target: ProxyTarget | None = None,
 ) -> ConnectorResponse:
     """Convert a Connector to ConnectorResponse."""
     return ConnectorResponse(
@@ -73,6 +75,7 @@ def _connector_to_response(
         rate_limit_config=connector.rate_limit_config,
         enabled=connector.enabled,
         proxy_count=proxy_count,
+        target=target,
         last_error=connector.last_error,
         last_error_at=connector.last_error_at,
         consecutive_errors=connector.consecutive_errors,
@@ -97,7 +100,7 @@ async def list_connectors(request: Request, project_id: str) -> ConnectorListRes
         credential_name = credential.name if credential else None
         credential_type = credential.type if credential else None
         proxy_count = len(proxy_manager.get_proxies_for_connector(connector.id))
-        responses.append(_connector_to_response(connector, credential_name, credential_type, proxy_count))
+        responses.append(_connector_to_response(connector, credential_name, credential_type, proxy_count, proxy_manager.get_connector_target(connector)))
 
     return ConnectorListResponse(
         total=len(connectors),
@@ -178,7 +181,7 @@ async def create_connector(
         )
 
     # New connector has 0 proxies initially (provider syncer will add them)
-    return _connector_to_response(connector, credential.name, credential.type, proxy_count=0)
+    return _connector_to_response(connector, credential.name, credential.type, proxy_count=0, target=proxy_manager.get_connector_target(connector))
 
 
 @router.get("/{connector_id}", response_model=ConnectorResponse)
@@ -194,7 +197,7 @@ async def get_connector(request: Request, connector_id: str) -> ConnectorRespons
     credential_name = credential.name if credential else None
     credential_type = credential.type if credential else None
     proxy_count = len(proxy_manager.get_proxies_for_connector(connector.id))
-    return _connector_to_response(connector, credential_name, credential_type, proxy_count)
+    return _connector_to_response(connector, credential_name, credential_type, proxy_count, proxy_manager.get_connector_target(connector))
 
 
 @router.patch("/{connector_id}", response_model=ConnectorResponse)
@@ -273,7 +276,7 @@ async def update_connector(
     credential_name = credential.name if credential else None
     credential_type = credential.type if credential else None
     proxy_count = len(proxy_manager.get_proxies_for_connector(connector.id))
-    return _connector_to_response(connector, credential_name, credential_type, proxy_count)
+    return _connector_to_response(connector, credential_name, credential_type, proxy_count, proxy_manager.get_connector_target(connector))
 
 
 @router.delete("/{connector_id}", status_code=204)

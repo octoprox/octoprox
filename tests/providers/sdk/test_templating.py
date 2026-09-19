@@ -10,6 +10,7 @@ from api.providers.sdk.templating import (
     RenderContext,
     TemplateError,
     TemplateRenderer,
+    country_field_key,
     resolve_runtime_placeholders,
 )
 
@@ -101,3 +102,58 @@ class TestRuntimePlaceholders:
         assert resolve_runtime_placeholders("user-{username}", {"username": "bob", "n": 1}) == "user-bob"
         assert resolve_runtime_placeholders("plain", {"username": "bob"}) == "plain"
         assert resolve_runtime_placeholders(None, {}) is None
+
+
+class TestCountryFieldKey:
+    """country_field_key() finds the connector field a proxy type geo-targets with."""
+
+    def test_builtin_session_types_expose_country(self, builtins: dict) -> None:
+        oxy = builtins["oxylabs"]
+        assert country_field_key(oxy, oxy.get_proxy_type("residential")) == "country_code"
+        assert country_field_key(oxy, oxy.get_proxy_type("mobile")) == "country_code"
+        iproyal = builtins["iproyal"]
+        assert country_field_key(iproyal, iproyal.proxy_types[0]) == "country_code"
+
+    def test_port_types_without_country_in_credentials_return_none(self, builtins: dict) -> None:
+        oxy = builtins["oxylabs"]
+        assert country_field_key(oxy, oxy.get_proxy_type("isp")) is None
+        assert country_field_key(oxy, oxy.get_proxy_type("datacenter")) is None
+
+    def test_list_mode_filter_field_is_not_a_credential_country(self, builtins: dict) -> None:
+        webshare = builtins["webshare"]
+        for ptype in webshare.proxy_types:
+            assert country_field_key(webshare, ptype) is None
+
+
+class TestListValuesAndSlotCountry:
+    def test_list_values_collapse(self) -> None:
+        ctx = RenderContext(connector={"country_code": ["US"], "many": ["US", "DE"], "none": []})
+        renderer = TemplateRenderer()
+        assert renderer.render_string("{connector.country_code}", ctx) == "US"
+        assert renderer.render_string("{connector.many|lower}", ctx) == "us,de"
+        assert renderer.render_string("{connector.none|or:any}", ctx) == "any"
+
+    def test_with_country_narrows_field_and_marks_slot(self, ctx: RenderContext) -> None:
+        narrowed = ctx.with_country("country_code", "DE")
+        assert narrowed.lookup("connector.country_code") == "DE"
+        assert narrowed.slot_country == "DE"
+        assert narrowed.with_slot(session_id="zzz").slot_country == "DE"
+        assert ctx.lookup("connector.country_code") == "US"  # original untouched
+        cleared = ctx.with_country("country_code", None)
+        assert cleared.lookup("connector.country_code") == ""
+        assert TemplateRenderer().evaluate(Condition(field="connector.country_code"), cleared) is False
+
+
+class TestListConditions:
+    def test_all_conditions_must_hold(self, ctx: RenderContext) -> None:
+        renderer = TemplateRenderer()
+        spec = TemplateSpec(separator="-", parts=[
+            TemplatePart(text="ip-{discovered_ip}", when=Condition(field="discovered_ip")),
+            TemplatePart(text="country-{connector.country_code|lower}", when=[
+                Condition(field="connector.country_code"),
+                Condition(field="discovered_ip", negate=True),
+            ]),
+        ])
+        assert renderer.render(spec, ctx) == "country-us"
+        pinned = ctx.with_slot(discovered_ip="1.2.3.4")
+        assert renderer.render(spec, pinned) == "ip-1.2.3.4"

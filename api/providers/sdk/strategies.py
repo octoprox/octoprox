@@ -34,7 +34,8 @@ META_SESSION_ID = "session_id"
 META_PROXY_TYPE = "proxy_type"
 META_DISCOVERED_IP = "discovered_ip"
 META_HASHED_IP = "hashed_ip"
-META_COUNTRY = "country"
+META_COUNTRY = "country"  # exit country reported by the vendor (discovery, known IPs, list); upper-case ISO code
+META_GEO = "geo"  # country the slot was provisioned for (per-country slot groups)
 META_LIST_IDENTITY = "list_identity"
 META_PROVIDER = "provider"
 
@@ -85,7 +86,7 @@ class ProxyBuilder:
         metadata = self.metadata(ctx.with_item(listed.raw))
         metadata[META_LIST_IDENTITY] = listed.identity
         if listed.country:
-            metadata[META_COUNTRY] = listed.country
+            metadata[META_COUNTRY] = listed.country.strip().upper()
         return Proxy(
             host=listed.host,
             port=listed.port,
@@ -114,6 +115,8 @@ class ProxyBuilder:
                 metadata[key] = value
         if ctx.session_id is not None:
             metadata[META_SESSION_ID] = ctx.session_id
+        if ctx.slot_country:
+            metadata[META_GEO] = ctx.slot_country
         return metadata
 
     def slot_count(self, ctx: RenderContext) -> int:
@@ -194,6 +197,12 @@ class PortModeStrategy(SyncStrategy):
     discovered through the proxy. ``fixed``: every slot uses the same port and
     the IP is pinned via ``{discovered_ip}`` in the username, sourced from the
     vendor's known-IP API when configured and discovered otherwise.
+
+    With ``countries`` set (a connector that lists countries the credentials
+    cannot geo-target with, e.g. Oxylabs ISP), the slot count applies per
+    country: ports are scanned (or known IPs picked) and only IPs located in
+    one of the wanted countries are kept, until every country has its count
+    or discovery starts returning failures or IPs already held.
     """
 
     def __init__(
@@ -202,6 +211,7 @@ class PortModeStrategy(SyncStrategy):
         ctx: RenderContext,
         discoverer: IpDiscoverer,
         known_ips: KnownIpsSource | None = None,
+        countries: list[str] | None = None,
     ) -> None:
         self._builder = builder
         self._ctx = ctx
@@ -209,6 +219,7 @@ class PortModeStrategy(SyncStrategy):
         self._known_ips = known_ips
         self._spec = builder.ptype
         self._base_port = int(self._spec.port or 0)
+        self._countries: list[str] = [c.strip().upper() for c in (countries or []) if c and c.strip()]
 
     def is_session_based(self) -> bool:
         return False
@@ -221,9 +232,168 @@ class PortModeStrategy(SyncStrategy):
 
     async def sync(self, existing: list[Proxy]) -> SyncResult:
         target = self._builder.slot_count(self._ctx)
+        if self._countries:
+            return await self._sync_by_country(existing, target)
         if self._sequential:
             return await self._sync_sequential(existing, target)
         return await self._sync_fixed(existing, target)
+
+    # --- country-filtered sync ------------------------------------------------------
+
+    @staticmethod
+    def _proxy_country(proxy: Proxy) -> str | None:
+        value = proxy.metadata.get(META_COUNTRY)
+        return value.strip().upper() if isinstance(value, str) and value.strip() else None
+
+    @property
+    def _allowed_countries(self) -> set[str] | None:
+        """Countries a proxy of this strategy may exit from, or None when unconstrained.
+
+        Either the discovery filter (types that cannot geo-target their
+        credentials) or, for a per-country slot group, the group's country.
+        """
+        if self._countries:
+            return set(self._countries)
+        if self._ctx.slot_country:
+            return {self._ctx.slot_country.strip().upper()}
+        return None
+
+    def needs_periodic_sync(self) -> bool:
+        # With a country constraint, refresh may drop proxies that moved
+        # elsewhere; the reconciliation right after it discovers replacements.
+        return self._allowed_countries is not None
+
+    def _moved_out(self, proxy: Proxy, country: str) -> bool:
+        """True when a refreshed location falls outside the allowed countries."""
+        allowed = self._allowed_countries
+        code = country.strip().upper() if country else ""
+        if allowed is None or not code or code in allowed:
+            return False
+        logger.info(
+            "Proxy exit location moved outside the configured countries, removing",
+            proxy_id=proxy.id, ip=proxy.metadata.get(META_DISCOVERED_IP), country=code, allowed=sorted(allowed),
+        )
+        return True
+
+    async def _sync_by_country(self, existing: list[Proxy], per_country: int) -> SyncResult:
+        """Keep ``per_country`` proxies for each wanted country; discover the rest."""
+        wanted: dict[str, int] = {country: per_country for country in self._countries}
+        keep: list[Proxy] = []
+        to_remove: list[str] = []
+        for proxy in _sort_proxies_healthy_first(existing):
+            country = self._proxy_country(proxy)
+            if country is not None and wanted.get(country, 0) > 0:
+                wanted[country] -= 1
+                keep.append(proxy)
+            else:
+                # Located outside the wanted countries (or surplus): let it go.
+                to_remove.append(proxy.id)
+        if not any(wanted.values()):
+            return [], to_remove
+        existing_ips = self._existing_ips(keep)
+        if self._sequential:
+            to_add = await self._scan_ports_for_countries({p.port for p in keep}, existing_ips, wanted)
+        else:
+            to_add = await self._fill_fixed_for_countries(len(keep), existing_ips, wanted)
+        return to_add, to_remove
+
+    async def _scan_ports_for_countries(
+        self, used_ports: set[int], existing_ips: set[str], wanted: dict[str, int]
+    ) -> list[Proxy]:
+        """Walk the gateway ports upwards, keeping only IPs in wanted countries.
+
+        Stops when every country has its count, after the configured run of
+        failures or duplicate IPs (the account's allocation is exhausted), or
+        at ``max_scan_ports``.
+        """
+        discovery = self._spec.discovery
+        assert discovery is not None
+        proxies: list[Proxy] = []
+        consecutive_failures = 0
+        consecutive_duplicates = 0
+        scanned = 0
+        port = self._base_port
+        while any(wanted.values()) and scanned < discovery.max_scan_ports:
+            if port in used_ports:
+                port += 1
+                continue
+            scanned += 1
+            index = port - self._base_port
+            proxy = self._build_slot(index, port, ProxyStatus.INITIALIZING)
+            ip, country = await self._discover(proxy, index, port)
+            port += 1
+            if ip is None:
+                consecutive_failures += 1
+                if consecutive_failures >= discovery.max_consecutive_failures:
+                    logger.warning("Too many consecutive failed ports, stopping country scan", port=port - 1, wanted=wanted)
+                    break
+                continue
+            consecutive_failures = 0
+            if ip in existing_ips:
+                consecutive_duplicates += 1
+                if consecutive_duplicates >= discovery.max_consecutive_duplicates:
+                    logger.warning("Ports keep returning IPs already held, stopping country scan", port=port - 1, wanted=wanted)
+                    break
+                continue
+            consecutive_duplicates = 0
+            code = country.strip().upper() if country else ""
+            if not code or wanted.get(code, 0) <= 0:
+                logger.debug("Skipping port outside wanted countries", port=port - 1, ip=ip, country=code or None)
+                continue
+            existing_ips.add(ip)
+            self._assign_ip(proxy, index, port - 1, ip, code)
+            wanted[code] -= 1
+            proxies.append(proxy)
+        if any(wanted.values()):
+            logger.warning("Country scan ended short of target", remaining=wanted, scanned=scanned)
+        return proxies
+
+    async def _fill_fixed_for_countries(
+        self, start_index: int, existing_ips: set[str], wanted: dict[str, int]
+    ) -> list[Proxy]:
+        """Fixed-port strategy: pick wanted-country IPs from the vendor list, else retry discovery."""
+        discovery = self._spec.discovery
+        assert discovery is not None
+        proxies: list[Proxy] = []
+        index = start_index
+        if self._known_ips is not None:
+            known = await self._known_ips.fetch(self._ctx)
+            if known:
+                for entry in known:
+                    code = entry.country.strip().upper()
+                    if entry.ip in existing_ips or wanted.get(code, 0) <= 0:
+                        continue
+                    proxy = self._build_slot(index, self._base_port, ProxyStatus.INITIALIZING)
+                    self._assign_ip(proxy, index, self._base_port, entry.ip, code)
+                    existing_ips.add(entry.ip)
+                    wanted[code] -= 1
+                    proxies.append(proxy)
+                    index += 1
+                if any(wanted.values()):
+                    logger.warning("Vendor IP list does not cover the wanted countries", remaining=wanted)
+                return proxies
+            logger.warning("Known-IP API unavailable, falling back to per-slot discovery")
+        consecutive_failures = 0
+        attempts_left = discovery.max_scan_ports
+        while any(wanted.values()) and attempts_left > 0:
+            attempts_left -= 1
+            proxy = self._build_slot(index, self._base_port, ProxyStatus.INITIALIZING)
+            ip, country = await self._discover(proxy, index, self._base_port)
+            if ip is None:
+                consecutive_failures += 1
+                if consecutive_failures >= discovery.max_consecutive_failures:
+                    break
+                continue
+            consecutive_failures = 0
+            code = country.strip().upper() if country else ""
+            if ip in existing_ips or not code or wanted.get(code, 0) <= 0:
+                continue
+            existing_ips.add(ip)
+            self._assign_ip(proxy, index, self._base_port, ip, code)
+            wanted[code] -= 1
+            proxies.append(proxy)
+            index += 1
+        return proxies
 
     async def _sync_sequential(self, existing: list[Proxy], target: int) -> SyncResult:
         target_ports = set(range(self._base_port, self._base_port + target))
@@ -312,7 +482,7 @@ class PortModeStrategy(SyncStrategy):
         attempts = 1 if self._sequential else discovery.max_retries_per_slot
         saw_duplicate = False
         for attempt in range(attempts):
-            ip = await self._discover(proxy, index, port)
+            ip, country = await self._discover(proxy, index, port)
             if ip is None:
                 return "failed"
             if ip in existing_ips:
@@ -322,7 +492,7 @@ class PortModeStrategy(SyncStrategy):
                 )
                 continue
             existing_ips.add(ip)
-            self._assign_ip(proxy, index, port, ip, "")
+            self._assign_ip(proxy, index, port, ip, country)
             return "added"
         return "duplicate" if saw_duplicate else "failed"
 
@@ -358,6 +528,9 @@ class PortModeStrategy(SyncStrategy):
                 continue
             seen.add(ip)
             country = by_ip[ip]
+            if self._moved_out(proxy, country):
+                to_remove.append(proxy.id)
+                continue
             if country and proxy.metadata.get(META_COUNTRY) != country:
                 proxy.metadata[META_COUNTRY] = country
             updated.append(proxy)
@@ -369,7 +542,7 @@ class PortModeStrategy(SyncStrategy):
         seen: set[str] = set()
         for proxy in proxies:
             index = self._slot_index(proxy)
-            ip = await self._discover(proxy, index, proxy.port)
+            ip, country = await self._discover(proxy, index, proxy.port)
             if ip is None:
                 updated.append(proxy)
                 continue
@@ -378,11 +551,16 @@ class PortModeStrategy(SyncStrategy):
                 to_remove.append(proxy.id)
                 continue
             seen.add(ip)
+            if self._moved_out(proxy, country):
+                to_remove.append(proxy.id)
+                continue
             if ip != proxy.metadata.get(META_DISCOVERED_IP):
                 logger.info(
                     "Proxy IP changed", proxy_id=proxy.id, old_ip=proxy.metadata.get(META_DISCOVERED_IP), new_ip=ip
                 )
-                self._assign_ip(proxy, index, proxy.port, ip, proxy.metadata.get(META_COUNTRY, ""))
+                self._assign_ip(proxy, index, proxy.port, ip, country or proxy.metadata.get(META_COUNTRY, ""))
+            elif country and proxy.metadata.get(META_COUNTRY) != country:
+                proxy.metadata[META_COUNTRY] = country
             updated.append(proxy)
         return updated, to_remove
 
@@ -391,9 +569,9 @@ class PortModeStrategy(SyncStrategy):
     def _build_slot(self, index: int, port: int, status: ProxyStatus) -> Proxy:
         return self._builder.build(self._ctx.with_slot(index=index, port=port), port=port, status=status)
 
-    async def _discover(self, proxy: Proxy, index: int, port: int) -> str | None:
+    async def _discover(self, proxy: Proxy, index: int, port: int) -> tuple[str | None, str]:
         url = self._builder.resolved_url(proxy, self._ctx)
-        return await self._discoverer.discover(
+        return await self._discoverer.discover_with_country(
             url, log_context={"proxy_id": proxy.id, "index": index, "port": port}
         )
 
@@ -403,7 +581,8 @@ class PortModeStrategy(SyncStrategy):
         if not self._sequential:
             proxy.metadata[META_HASHED_IP] = ip
         if country:
-            proxy.metadata[META_COUNTRY] = country
+            # Vendors report codes in either case; stored values are always upper-case ISO codes.
+            proxy.metadata[META_COUNTRY] = country.strip().upper()
         proxy.status = ProxyStatus.HEALTHY
         if not self._sequential:
             self._builder.rerender(proxy, self._ctx.with_slot(index=index, port=port, discovered_ip=ip))

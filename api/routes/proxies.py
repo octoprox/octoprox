@@ -12,6 +12,7 @@ from pydantic import BaseModel
 from api.core.auth import RequireEditorDep
 from api.models.credential import CredentialType
 from api.models.proxy import Proxy, ProxyCreate, ProxyProtocol, ProxyResponse, ProxyUpdate
+from api.providers.sdk.strategies import META_COUNTRY
 
 router = APIRouter(prefix="/projects/{project_id}/proxies")
 
@@ -101,6 +102,7 @@ def _proxy_to_response(
         bytes_received=proxy.bytes_received,
         quarantined=quarantined,
         quarantine_remaining_seconds=round(quarantine_remaining_seconds, 1),
+        country=proxy.country,
         tags=proxy.tags,
         created_at=proxy.created_at,
     )
@@ -151,7 +153,12 @@ async def list_proxies(request: Request, project_id: str) -> ProxyListResponse:
 async def create_proxy(
     request: Request, proxy_data: ProxyCreate, project_id: str, _guard: RequireEditorDep
 ) -> ProxyResponse:
-    """Add a new proxy to the pool. Only allowed for STATIC_PROXY_PROVIDER connectors."""
+    """Add a new proxy to the pool. Only allowed for STATIC_PROXY_PROVIDER connectors.
+
+    Unless ``country`` is given, the exit IP and country are looked up
+    afterwards by the GeoLookup service, which reacts to the proxy_added
+    signal (``proxy.geo_lookup`` settings).
+    """
     proxy_manager = request.app.state.proxy_manager
 
     # Validate project exists
@@ -180,6 +187,9 @@ async def create_proxy(
             detail="Proxies can only be manually added to STATIC_PROXY_PROVIDER connectors"
         )
 
+    metadata = dict(proxy_data.metadata)
+    if proxy_data.country:
+        metadata[META_COUNTRY] = proxy_data.country
     proxy = Proxy(
         host=proxy_data.host,
         port=proxy_data.port,
@@ -188,7 +198,7 @@ async def create_proxy(
         password=proxy_data.password,
         connector_id=proxy_data.connector_id,
         tags=proxy_data.tags,
-        metadata=proxy_data.metadata,
+        metadata=metadata,
     )
 
     await proxy_manager.add_proxy(proxy)
@@ -351,6 +361,11 @@ async def update_proxy(
         proxy.tags = proxy_data.tags
     if proxy_data.metadata is not None:
         proxy.metadata = proxy_data.metadata
+    if proxy_data.country is not None:
+        if proxy_data.country:
+            proxy.metadata[META_COUNTRY] = proxy_data.country
+        else:
+            proxy.metadata.pop(META_COUNTRY, None)
 
     # Persist the update
     await proxy_manager.update_proxy(proxy)
@@ -380,6 +395,37 @@ async def delete_proxy(request: Request, proxy_id: str, _guard: RequireEditorDep
 
     if not await proxy_manager.delete_proxy_async(proxy_id):
         raise HTTPException(status_code=404, detail="Proxy not found")
+
+
+@router.post("/{proxy_id}/locate", response_model=ProxyResponse)
+async def locate_proxy(request: Request, proxy_id: str, _guard: RequireEditorDep) -> ProxyResponse:
+    """Look up a proxy's exit IP and country now, by requesting through it.
+
+    Records the result on the proxy and returns it. Fails with 502 when the
+    request through the proxy does not succeed.
+    """
+    proxy_manager = request.app.state.proxy_manager
+    proxy = proxy_manager.get_proxy(proxy_id)
+    if proxy is None:
+        raise HTTPException(status_code=404, detail="Proxy not found")
+
+    geo_lookup = getattr(request.app.state, "geo_lookup", None)
+    if geo_lookup is None:
+        raise HTTPException(status_code=503, detail="Exit location lookup is not available")
+
+    updated = await geo_lookup.enrich(proxy_manager, proxy_id)
+    if updated is None:
+        raise HTTPException(status_code=502, detail="Could not determine the exit location through this proxy")
+
+    connector = proxy_manager.get_connector(updated.connector_id)
+    rate_limiter = proxy_manager.rate_limiter
+    return _proxy_to_response(
+        updated,
+        connector.name if connector else None,
+        connector.enabled if connector else True,
+        quarantined=rate_limiter.is_quarantined(updated.id),
+        quarantine_remaining_seconds=rate_limiter.get_quarantine_remaining(updated.id),
+    )
 
 
 @router.post("/{proxy_id}/unquarantine", status_code=200)

@@ -3,9 +3,9 @@
 
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { Eye, EyeOff } from 'lucide-react'
+import { Eye, EyeOff, X } from 'lucide-react'
 import { ProviderCondition, ProviderField, ProviderOption, ProviderSpec, ProviderSummary, ResolvedProviderOption, resolveProviderOptions } from '../api/client'
-import { Input, Label, Select, Textarea } from './ui'
+import { InfoTip, Input, Label, Select, Textarea } from './ui'
 import { RichSelect, RichSelectOption } from './RichSelect'
 
 export type FormValues = Record<string, string>
@@ -36,6 +36,11 @@ export function defaultValues(fields: ProviderField[]): FormValues {
   return values
 }
 
+/** Country fields hold a list of ISO codes; the form keeps them as a comma-separated string. */
+export const isCountryField = (f: ProviderField) => f.type === 'country' || f.options_preset === 'countries'
+export const splitCountries = (raw: string | undefined | null): string[] =>
+  (raw ?? '').split(',').map((c) => c.trim().toUpperCase()).filter(Boolean)
+
 /** Convert form strings back to typed values for the API. Hidden fields are dropped. */
 export function serializeValues(fields: ProviderField[], values: FormValues, scopes: SchemaScopes): Record<string, unknown> {
   const out: Record<string, unknown> = {}
@@ -45,9 +50,50 @@ export function serializeValues(fields: ProviderField[], values: FormValues, sco
     if (raw == null || raw === '') continue
     if (f.type === 'number') { const n = Number(raw); out[f.key] = Number.isNaN(n) ? raw : n }
     else if (f.type === 'boolean') out[f.key] = raw === 'true'
+    else if (isCountryField(f)) { const codes = splitCountries(raw); if (codes.length) out[f.key] = codes }
     else out[f.key] = raw
   }
   return out
+}
+
+/** Picks several countries from a preset list. `value` is the comma-separated form string. */
+export function MultiCountryPicker({ options, value, onChange, disabled, placeholder }: {
+  options: ProviderOption[]
+  value: string
+  onChange: (value: string) => void
+  disabled?: boolean
+  placeholder?: string
+}) {
+  const selected = splitCountries(value)
+  const find = (code: string) => options.find((o) => o.value.toUpperCase() === code)
+  // Vendor lists often label a country with its bare code in lower case ("nz"); show codes upper-cased.
+  const displayLabel = (o: ProviderOption) => (o.label.toUpperCase() === o.value.toUpperCase() ? o.value.toUpperCase() : o.label)
+  const labelFor = (code: string) => { const o = find(code); return o ? displayLabel(o) : code }
+  const available: RichSelectOption[] = options
+    .filter((o) => o.value && !selected.includes(o.value.toUpperCase()))
+    .map((o) => ({ value: o.value.toUpperCase(), label: displayLabel(o), description: o.description ?? o.value.toUpperCase() }))
+  const add = (code: string) => { if (code) onChange([...selected, code.toUpperCase()].join(',')) }
+  const remove = (code: string) => onChange(selected.filter((c) => c !== code).join(','))
+  return (
+    <div className="space-y-1.5">
+      {selected.length > 0 && (
+        <div className="flex flex-wrap gap-1">
+          {selected.map((code) => (
+            <span key={code} className="inline-flex items-center gap-1.5 pl-2 pr-1.5 py-0.5 rounded-full border border-line bg-surface-raised text-xs">
+              <span className="font-mono font-medium">{code}</span>
+              <span className="text-fg-muted truncate max-w-[10rem]">{labelFor(code)}</span>
+              {!disabled && (
+                <button type="button" onClick={() => remove(code)} className="text-fg-subtle hover:text-fg" aria-label={`Remove ${code}`}>
+                  <X className="w-3 h-3" />
+                </button>
+              )}
+            </span>
+          ))}
+        </div>
+      )}
+      <RichSelect options={available} value="" onChange={add} disabled={disabled} placeholder={placeholder ?? (selected.length ? 'Add another country' : 'All countries')} />
+    </div>
+  )
 }
 
 /** Options currently loaded for each dynamic select, keyed by field key. Shared so siblings can read extras. */
@@ -110,13 +156,15 @@ export function SchemaForm({ provider, fields, values, onChange, scopes, presets
   )
 }
 
-/** Resolve `max_from_option`: the first referenced sibling option that carries a numeric extra wins. */
+/** Resolve `max_from_option`: the first referenced sibling option that carries a numeric extra wins.
+ * A multi-value sibling (countries) sums the extra across its selected options. */
 function optionMax(field: ProviderField, values: FormValues, loaded: LoadedOptions): number | null {
+  const toNumber = (raw: unknown) => (typeof raw === 'number' ? raw : typeof raw === 'string' ? Number(raw) : NaN)
   for (const ref of field.max_from_option ?? []) {
-    const selected = loaded[ref.field]?.find((o) => o.value === values[ref.field])
-    const raw = selected?.extra?.[ref.extra]
-    const n = typeof raw === 'number' ? raw : typeof raw === 'string' ? Number(raw) : NaN
-    if (!Number.isNaN(n) && n > 0) return n
+    const wanted = (values[ref.field] ?? '').split(',').map((v) => v.trim().toUpperCase()).filter(Boolean)
+    const matches = (loaded[ref.field] ?? []).filter((o) => wanted.includes(o.value.toUpperCase()))
+    const total = matches.reduce((sum, o) => { const n = toNumber(o.extra?.[ref.extra]); return Number.isNaN(n) ? sum : sum + n }, 0)
+    if (total > 0) return total
   }
   return null
 }
@@ -154,7 +202,10 @@ function SchemaField({ provider, field, value, values, onChange, scopes, presets
 
   const label = (
     <Label className="text-xs">
-      {field.label}{field.required && <span className="text-danger ml-1">*</span>}
+      <span className="inline-flex items-center gap-1.5">
+        <span>{field.label}{field.required && <span className="text-danger ml-1">*</span>}</span>
+        {field.details && <InfoTip label={`About ${field.label.toLowerCase()}`}>{field.details}</InfoTip>}
+      </span>
     </Label>
   )
   const help = (field.help || dynamicMax != null) && (
@@ -180,7 +231,10 @@ function SchemaField({ provider, field, value, values, onChange, scopes, presets
         onLoaded={onLoaded}
       />
     )
-  } else if (field.type === 'select' || field.type === 'country') {
+  } else if (isCountryField(field)) {
+    const options: ProviderOption[] = field.options.length ? field.options : presets.countries ?? []
+    control = <MultiCountryPicker options={options} value={value} onChange={onChange} disabled={readOnly} placeholder={field.placeholder ?? undefined} />
+  } else if (field.type === 'select') {
     const options: ProviderOption[] = field.options.length ? field.options : (field.options_preset ? presets[field.options_preset] ?? [] : presets.countries ?? [])
     const rich: RichSelectOption[] = options.map((o) => ({ value: o.value, label: o.label, description: o.description ?? undefined }))
     if (field.readonly) {
@@ -307,6 +361,17 @@ function RemoteSelect({ provider, field, value, onChange, credentialId, credenti
   const placeholder = missingDependency
     ? `Select ${(field.depends_on ?? []).join(', ').replace(/_/g, ' ')} first`
     : !hasSource ? 'Select a credential first' : isLoading ? 'Loading…' : options.length ? (field.placeholder ?? `Select ${field.label.toLowerCase()}`) : 'No options returned'
+
+  if (isCountryField(field)) {
+    // Vendor-listed countries (e.g. the countries an ISP zone has IPs in) are still a multi-select.
+    const countryOptions: ProviderOption[] = (data ?? []).map((o) => ({ value: o.value, label: o.label, description: o.description ?? undefined }))
+    return (
+      <>
+        <MultiCountryPicker options={countryOptions} value={value} onChange={(v) => onChange(v)} disabled={disabled || !hasSource || isLoading} placeholder={hasSource && !isLoading ? undefined : placeholder} />
+        {error && <p className="text-xs text-danger mt-1">{(error as Error).message || 'Could not load options'}</p>}
+      </>
+    )
+  }
 
   return (
     <>

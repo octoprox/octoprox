@@ -9,8 +9,10 @@
 # and session length encoded in the username. ISP and datacenter: one exit IP
 # per sticky gateway port (10001+) on isp.decodo.com / dc.decodo.com, discovered
 # through the proxy; covers both pay-per-GB and pay-per-IP plans (ports iterate
-# through purchased IPs). Written from the public documentation; marked beta
-# until exercised against a live account.
+# through purchased IPs). Like Oxylabs, each port is pinned to an IP and its
+# location, so listed countries filter discovery rather than being sent in the
+# username. Written from the public documentation; marked beta until exercised
+# against a live account.
 id: decodo
 name: Decodo
 description: Residential, Mobile, ISP and Datacenter proxies (formerly Smartproxy)
@@ -51,11 +53,20 @@ connector_fields:
     default: 1
     min: 1
     max: 1000
+    help: Per country when countries are listed.
+    details: >-
+      Residential and mobile pools with no country also get this many sessions per country that clients
+      request with -cc-, created the first time it is requested. ISP and datacenter keep this many ports
+      per listed country.
   - key: country_code
-    label: Country
+    label: Countries
     type: select
     options_preset: countries
-    help: Leave as "All countries" for no geo-targeting.
+    help: Leave empty for all countries.
+    details: >-
+      Residential and mobile: "Number of proxies" sessions are created per listed country, geo-targeted in
+      the username. ISP and datacenter: gateway ports are scanned and only IPs located in the listed
+      countries are kept, "Number of proxies" per country, until the ports run out.
   - key: session_duration_minutes
     label: Session duration (minutes)
     type: number
@@ -125,15 +136,13 @@ proxy_types:
       separator: "-"
       parts:
         - text: "user-{credential.username}"
-        - text: "country-{connector.country_code|lower}"
-          when: { field: connector.country_code }
     password: "{credential.password}"
     discovery:
       url: https://ip.decodo.com/json
       ip_path: proxy.ip
+      country_path: country.code
     tags: [decodo, isp]
     metadata:
-      country_code: "{connector.country_code}"
       port: "{port}"
 
   - key: datacenter
@@ -146,13 +155,11 @@ proxy_types:
       separator: "-"
       parts:
         - text: "user-{credential.username}"
-        - text: "country-{connector.country_code|lower}"
-          when: { field: connector.country_code }
     password: "{credential.password}"
     discovery:
       url: https://ip.decodo.com/json
       ip_path: proxy.ip
+      country_path: country.code
     tags: [decodo, datacenter]
     metadata:
-      country_code: "{connector.country_code}"
       port: "{port}"

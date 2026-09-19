@@ -36,6 +36,15 @@ proxy:
     unhealthy_threshold: 3
     healthy_threshold: 2
 
+  # Exit-location lookup for manually added (static) proxies: one request is
+  # made through each new proxy to learn its IP and country for -cc- routing.
+  geo_lookup:
+    enabled: true
+    url: https://lumtest.com/myip.json
+    ip_path: ip
+    country_path: country
+    timeout_seconds: 15
+
   connection:
     timeout_seconds: 30
     max_retries: 3

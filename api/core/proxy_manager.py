@@ -21,6 +21,7 @@ from api.core.demand_tracker import DemandTracker
 from api.core.domain_filter import is_domain_allowed
 from api.core.event_bus import EVENT_CHANNEL, RedisPubSubTransport, event_bus
 from api.core.health_checker import HealthChecker
+from api.core.leadership import Lease
 from api.core.metrics_compactor import MetricsCompactor
 from api.core.metrics_flusher import MetricsFlusher
 from api.core.provider_syncer import ProxyProviderSyncer
@@ -66,11 +67,13 @@ from api.db.repository import (
     ProjectRepository,
     ProxyRepository,
 )
-from api.models.connector import Connector
+from api.models.connector import Connector, ProxyTarget
 from api.models.credential import Credential
 from api.models.project import Project
 from api.models.proxy import Proxy, ProxyStatus
 from api.providers.registry import ProviderRegistry, get_provider_registry
+from api.providers.sdk.provider import DescriptorProvider
+from api.providers.sdk.strategies import META_GEO
 from api.providers.store import ProviderStore
 from api.strategies import get_strategy
 
@@ -110,6 +113,8 @@ class ProxyManager:
         self._proxies: dict[str, Proxy] = {}
         self._credentials: dict[str, Credential] = {}
         self._connectors: dict[str, Connector] = {}
+        # One lock per (connector, country) so a burst of -cc- requests provisions a group once
+        self._geo_provision_locks: dict[tuple[str, str], asyncio.Lock] = {}
         # Per-project strategies (project_id -> strategy)
         self._project_strategies: dict[str, RoutingStrategy] = {}
         # Default strategy for backward compatibility
@@ -1462,26 +1467,178 @@ class ProxyManager:
         # Non-cloud connector: remove directly
         return await self.remove_connector(connector_id)
 
-    def _get_enabled_connector_ids(
-        self, project_id: str, target_host: str | None = None
-    ) -> set[str]:
-        """Get IDs of enabled connectors for a project.
+    def _enabled_connectors(self, project_id: str, target_host: str | None = None) -> list[Connector]:
+        """Enabled connectors of a project that may serve ``target_host``.
 
         Args:
             project_id: The project to get connectors for.
             target_host: If provided, only return connectors whose domain
                 routing config allows this host.
         """
-        connector_ids: set[str] = set()
-        for c in self._connectors.values():
-            if c.project_id != project_id or not c.enabled:
+        return [
+            c for c in self._connectors.values()
+            if c.project_id == project_id
+            and c.enabled
+            and (not target_host or is_domain_allowed(target_host, c.parsed_routing_config))
+        ]
+
+    def _get_enabled_connector_ids(
+        self, project_id: str, target_host: str | None = None
+    ) -> set[str]:
+        """IDs of the connectors returned by _enabled_connectors."""
+        return {c.id for c in self._enabled_connectors(project_id, target_host)}
+
+    # --- Country routing (-cc-<code> username suffix) -------------------------
+    #
+    # A connector declares the countries its proxies exit from (``countries``
+    # on static/cloud connectors, the provider's country field on descriptor
+    # connectors). Given a requested country:
+    #   - connectors listing countries serve it only if it is listed;
+    #   - a proxy with a known exit country (vendor-reported ``country`` or
+    #     the ``geo`` it was provisioned for) must match exactly;
+    #   - a proxy with no known country is eligible only through its
+    #     connector's list;
+    #   - descriptor pools whose credentials carry a country and list none
+    #     ("All countries") get a slot group for the country on demand.
+    # Without a requested country every proxy is eligible, except on-demand
+    # geo groups of "All countries" pools, which keep serving only the
+    # clients that asked for that country.
+
+    def _descriptor_provider(self, connector: Connector) -> DescriptorProvider | None:
+        """A DescriptorProvider for the connector, or None for code-implemented types."""
+        credential = self._credentials.get(connector.credential_id)
+        if credential is None:
+            return None
+        try:
+            provider = self._provider_registry.create_provider(connector, credential)
+        except ValueError:
+            return None
+        return provider if isinstance(provider, DescriptorProvider) else None
+
+    def get_connector_target(self, connector: Connector) -> ProxyTarget | None:
+        """Intended pool size for a connector, or None when it has no target of its own.
+
+        Cloud connectors scale up to ``max_proxies``; provider connectors
+        derive it per country from their descriptor; static connectors hold
+        whatever was added to them.
+        """
+        cloud = connector.cloud_config
+        if cloud is not None:
+            return ProxyTarget(total=cloud.max_proxies)
+        provider = self._descriptor_provider(connector)
+        if provider is None:
+            return None
+        return provider.proxy_target(self.get_proxies_for_connector(connector.id))
+
+    def _accepts_request_country(self, connector: Connector) -> bool:
+        """Whether the connector provisions slot groups for unlisted countries on demand."""
+        if connector.countries:
+            return False
+        provider = self._descriptor_provider(connector)
+        return provider is not None and provider.accepts_request_country()
+
+    def _eligible_proxies(
+        self,
+        project_id: str,
+        target_host: str | None,
+        country: str | None,
+        *,
+        include_quarantined: bool,
+    ) -> list[Proxy]:
+        """Healthy proxies a request may use, after domain and country filtering."""
+        wanted = country.strip().upper() if country else None
+        connectors: dict[str, tuple[list[str], bool]] = {}
+        for c in self._enabled_connectors(project_id, target_host):
+            declared = c.countries
+            if wanted and declared and wanted not in declared:
                 continue
-            if target_host:
-                routing = c.parsed_routing_config
-                if not is_domain_allowed(target_host, routing):
+            connectors[c.id] = (declared, wanted is None and not declared and self._accepts_request_country(c))
+
+        eligible: list[Proxy] = []
+        for p in self._proxies.values():
+            entry = connectors.get(p.connector_id)
+            if entry is None or p.status != ProxyStatus.HEALTHY:
+                continue
+            if not include_quarantined and self._rate_limiter.is_quarantined(p.id):
+                continue
+            declared, hide_geo_groups = entry
+            proxy_country = p.country
+            if wanted:
+                if proxy_country is not None:
+                    if proxy_country != wanted:
+                        continue
+                elif wanted not in declared:
                     continue
-            connector_ids.add(c.id)
-        return connector_ids
+            elif hide_geo_groups and p.metadata.get(META_GEO):
+                continue
+            eligible.append(p)
+        return eligible
+
+    async def _provision_country_slots(
+        self, project_id: str, target_host: str | None, country: str
+    ) -> bool:
+        """Create slot groups for ``country`` on every eligible "All countries" pool.
+
+        Runs at most once per (connector, country) per instance at a time; a
+        Redis lease keeps cluster peers from provisioning the same group. A
+        peer that loses the lease waits briefly for the winner's proxies to
+        arrive through the cross-instance change feed.
+        """
+        provisioned = False
+        for connector in self._enabled_connectors(project_id, target_host):
+            if not self._accepts_request_country(connector):
+                continue
+            if self._has_geo_group(connector.id, country):
+                continue
+            lock = self._geo_provision_locks.setdefault((connector.id, country), asyncio.Lock())
+            async with lock:
+                if self._has_geo_group(connector.id, country):
+                    continue
+                lease = Lease(
+                    self._redis_client,
+                    name=f"geo_provision:{connector.id}:{country}",
+                    owner_id=self._settings.instance_id,
+                )
+                if not await lease.try_acquire():
+                    await self._wait_for_geo_group(connector.id, country)
+                    continue
+                try:
+                    provider = self._descriptor_provider(connector)
+                    if provider is None:
+                        continue
+                    to_add = await provider.provision_country(
+                        self.get_proxies_for_connector(connector.id), country
+                    )
+                    for proxy in to_add:
+                        await self.add_proxy(proxy)
+                    if to_add:
+                        provisioned = True
+                        logger.info(
+                            "Provisioned country slot group on demand",
+                            connector_id=connector.id, country=country, slots=len(to_add),
+                        )
+                except Exception as exc:
+                    logger.error(
+                        "Failed to provision country slot group",
+                        connector_id=connector.id, country=country, error=str(exc),
+                    )
+                finally:
+                    await lease.release()
+        return provisioned
+
+    def _has_geo_group(self, connector_id: str, country: str) -> bool:
+        return any(
+            p.connector_id == connector_id and p.metadata.get(META_GEO) == country
+            for p in self._proxies.values()
+        )
+
+    async def _wait_for_geo_group(self, connector_id: str, country: str, timeout: float = 3.0) -> None:
+        """Poll the local cache until a peer's slot group for ``country`` shows up (or timeout)."""
+        deadline = asyncio.get_running_loop().time() + timeout
+        while asyncio.get_running_loop().time() < deadline:
+            if self._has_geo_group(connector_id, country):
+                return
+            await asyncio.sleep(0.2)
 
     def get_proxies_for_project(self, project_id: str) -> list[Proxy]:
         """Get all proxies for a project (via enabled connectors only)."""
@@ -1493,25 +1650,44 @@ class ProxyManager:
         connector_ids = {c.id for c in self._connectors.values() if c.project_id == project_id}
         return [p for p in self._proxies.values() if p.connector_id in connector_ids]
 
-    def get_healthy_proxies_for_project(
-        self, project_id: str, target_host: str | None = None
-    ) -> list[Proxy]:
-        """Get healthy proxies for a project (from enabled connectors only).
+    def get_healthy_proxies_for_project(self, project_id: str) -> list[Proxy]:
+        """Every healthy, non-quarantined proxy of the project's enabled connectors.
 
-        Excludes quarantined proxies (rate-limited).
-
-        Args:
-            project_id: The project to get proxies for.
-            target_host: If provided, only return proxies from connectors whose
-                domain routing config allows this host.
+        This is the pool-health view used by the API and the dashboard. It
+        applies no routing rules: on-demand country groups count as healthy
+        here even though untargeted requests do not use them. Routing goes
+        through get_routable_proxies_for_project instead.
         """
-        connector_ids = self._get_enabled_connector_ids(project_id, target_host)
+        connector_ids = self._get_enabled_connector_ids(project_id)
         return [
             p for p in self._proxies.values()
             if p.connector_id in connector_ids
             and p.status == ProxyStatus.HEALTHY
             and not self._rate_limiter.is_quarantined(p.id)
         ]
+
+    def get_routable_proxies_for_project(
+        self,
+        project_id: str,
+        target_host: str | None = None,
+        country: str | None = None,
+    ) -> list[Proxy]:
+        """Healthy proxies a request may be routed to.
+
+        Excludes quarantined proxies (rate-limited) and applies the request's
+        constraints:
+
+        Args:
+            project_id: The project to get proxies for.
+            target_host: If provided, only return proxies from connectors whose
+                domain routing config allows this host.
+            country: If provided (ISO 3166-1 alpha-2), only return proxies
+                that serve this country: proxies whose known exit country
+                matches, or unlabelled proxies of a connector that lists it.
+                Without it, on-demand country groups of "all countries" pools
+                are left out, so untargeted traffic keeps its default exits.
+        """
+        return self._eligible_proxies(project_id, target_host, country, include_quarantined=False)
 
     def _is_sticky_quarantine_blocked(
         self, project_id: str, session_id: str | None
@@ -1544,6 +1720,7 @@ class ProxyManager:
         project_id: str,
         target_host: str | None = None,
         session_id: str | None = None,
+        country: str | None = None,
     ) -> bool:
         """Check if proxy selection failed due to quarantine.
 
@@ -1554,11 +1731,7 @@ class ProxyManager:
         if self._is_sticky_quarantine_blocked(project_id, session_id):
             return True
 
-        connector_ids = self._get_enabled_connector_ids(project_id, target_host)
-        healthy = [
-            p for p in self._proxies.values()
-            if p.connector_id in connector_ids and p.status == ProxyStatus.HEALTHY
-        ]
+        healthy = self._eligible_proxies(project_id, target_host, country, include_quarantined=True)
         if not healthy:
             return False
         return all(self._rate_limiter.is_quarantined(p.id) for p in healthy)
@@ -1576,6 +1749,7 @@ class ProxyManager:
         project_id: str,
         session_id: str | None = None,
         target_host: str | None = None,
+        country: str | None = None,
     ) -> Proxy | None:
         """Select a proxy for a specific project using the project's routing strategy.
 
@@ -1598,11 +1772,18 @@ class ProxyManager:
             session_id: Session identifier for sticky routing.
             target_host: If provided, only consider proxies from connectors
                 whose domain routing config allows this host.
+            country: If provided, only consider proxies that serve this
+                country (see get_routable_proxies_for_project). "All countries"
+                provider pools get a slot group for it on first use.
         """
         if self._is_sticky_quarantine_blocked(project_id, session_id):
             return None
 
-        healthy_proxies = self.get_healthy_proxies_for_project(project_id, target_host)
+        healthy_proxies = self.get_routable_proxies_for_project(project_id, target_host, country)
+        if country and not healthy_proxies:
+            wanted = country.strip().upper()
+            if await self._provision_country_slots(project_id, target_host, wanted):
+                healthy_proxies = self.get_routable_proxies_for_project(project_id, target_host, wanted)
         strategy = self._project_strategies.get(project_id, self._strategy)
 
         # The strategy handles whatever cross-instance state it needs
@@ -1698,22 +1879,6 @@ class ProxyManager:
         await event_bus.publish(proxy_changed, self, entity_id=proxy_id, op="removed")
 
         return True
-
-    async def select_proxy(self, session_id: str | None = None) -> Proxy | None:
-        """Select a proxy using the current (global) routing strategy.
-
-        Project-scoped traffic uses select_proxy_for_project instead; this is
-        the unscoped fallback. Kept async for API consistency with the
-        project-scoped variant.
-        """
-        proxy = await self._strategy.select(
-            self.healthy_proxies,
-            session_id,
-            redis_client=self._redis_client,
-        )
-        if proxy:
-            return self.resolve_proxy_credentials(proxy)
-        return None
 
     def set_strategy(self, strategy_name: str) -> None:
         """Change the routing strategy."""

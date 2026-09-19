@@ -116,3 +116,94 @@ class TestPasswordEncodedProviders:
         to_add, _ = await DescriptorProvider(builtins["decodo"], connector, credential, runtime).sync_proxies([])
         assert re.fullmatch(r"user-smith-country-us-session-[a-z0-9]{12}-sessionduration-90", to_add[0].username or "")
         assert to_add[0].host == "gate.decodo.com" and to_add[0].port == 7000
+
+
+class TestOxylabsCountryGroups:
+    """A connector listing several countries gets num_proxies slots per country."""
+
+    def _provider(self, builtins: dict[str, ProviderDescriptor], runtime: SdkRuntime, connector_config: dict[str, object]) -> DescriptorProvider:
+        credential = make_credential("oxylabs", {"proxy_type": "residential", "username": "alice", "password": "pw"})
+        return DescriptorProvider(builtins["oxylabs"], make_connector("oxylabs", connector_config), credential, runtime)
+
+    async def test_slots_per_country(self, builtins: dict[str, ProviderDescriptor], runtime: SdkRuntime) -> None:
+        provider = self._provider(builtins, runtime, {"num_proxies": 2, "country_code": ["US", "de"]})
+        assert provider.countries == ["US", "DE"]
+        assert not provider.accepts_request_country()
+        to_add, to_remove = await provider.sync_proxies([])
+        assert to_remove == [] and len(to_add) == 4
+        by_geo: dict[str, list[Proxy]] = {}
+        for proxy in to_add:
+            by_geo.setdefault(proxy.metadata["geo"], []).append(proxy)
+        assert {k: len(v) for k, v in by_geo.items()} == {"US": 2, "DE": 2}
+        for proxy in by_geo["DE"]:
+            assert re.fullmatch(r"customer-alice-cc-DE-sessid-[a-z0-9]{12}", proxy.username or "")
+            assert proxy.metadata["country_code"] == "DE"
+
+    async def test_sync_keeps_groups_and_drops_removed_country(self, builtins: dict[str, ProviderDescriptor], runtime: SdkRuntime) -> None:
+        provider = self._provider(builtins, runtime, {"num_proxies": 1, "country_code": ["US", "DE"]})
+        existing, _ = await provider.sync_proxies([])
+        # Admin drops DE.
+        narrowed = self._provider(builtins, runtime, {"num_proxies": 1, "country_code": ["US"]})
+        to_add, to_remove = await narrowed.sync_proxies(existing)
+        assert to_add == []
+        assert to_remove == [p.id for p in existing if p.metadata["geo"] == "DE"]
+
+    async def test_legacy_single_country_rows_are_adopted(self, builtins: dict[str, ProviderDescriptor], runtime: SdkRuntime) -> None:
+        provider = self._provider(builtins, runtime, {"num_proxies": 1, "country_code": "US"})
+        legacy = Proxy(
+            id="legacy", host="pr.oxylabs.io", port=7777, connector_id="conn-1", status=ProxyStatus.HEALTHY,
+            username="customer-alice-cc-US-sessid-abc", password="{password}",
+            metadata={"provider": "oxylabs", "proxy_type": "residential", "session_id": "abc", "country_code": "US"},
+        )
+        to_add, to_remove = await provider.sync_proxies([legacy])
+        assert to_add == [] and to_remove == []
+
+    async def test_all_countries_pool_provisions_on_demand(self, builtins: dict[str, ProviderDescriptor], runtime: SdkRuntime) -> None:
+        provider = self._provider(builtins, runtime, {"num_proxies": 2})
+        assert provider.accepts_request_country()
+        base, _ = await provider.sync_proxies([])
+        assert len(base) == 2 and all("geo" not in p.metadata for p in base)
+        fr = await provider.provision_country(base, "fr")
+        assert len(fr) == 2
+        assert all(p.metadata["geo"] == "FR" and "-cc-FR-" in (p.username or "") for p in fr)
+        # A later sync keeps the on-demand group alive and adds nothing.
+        to_add, to_remove = await provider.sync_proxies([*base, *fr])
+        assert to_add == [] and to_remove == []
+        # Provisioning the same country again is a no-op.
+        assert await provider.provision_country([*base, *fr], "FR") == []
+
+    async def test_port_type_lists_countries_but_never_on_demand(self, builtins: dict[str, ProviderDescriptor], runtime: SdkRuntime) -> None:
+        credential = make_credential("oxylabs", {"proxy_type": "isp", "username": "alice", "password": "pw"})
+        provider = DescriptorProvider(builtins["oxylabs"], make_connector("oxylabs", {"num_proxies": 1}), credential, runtime)
+        assert provider.country_key is None
+        assert not provider.accepts_request_country()
+
+
+class TestProxyTarget:
+    def _provider(self, builtins: dict[str, ProviderDescriptor], runtime: SdkRuntime, proxy_type: str, connector_config: dict[str, object]) -> DescriptorProvider:
+        credential = make_credential("oxylabs", {"proxy_type": proxy_type, "username": "alice", "password": "pw"})
+        return DescriptorProvider(builtins["oxylabs"], make_connector("oxylabs", connector_config), credential, runtime)
+
+    async def test_listed_countries_multiply_the_count(self, builtins: dict[str, ProviderDescriptor], runtime: SdkRuntime) -> None:
+        provider = self._provider(builtins, runtime, "residential", {"num_proxies": 2, "country_code": ["US", "DE"]})
+        target = provider.proxy_target([])
+        assert (target.total, target.per_country, target.countries, target.on_demand) == (4, 2, ["US", "DE"], [])
+
+    async def test_all_countries_pool_counts_on_demand_groups(self, builtins: dict[str, ProviderDescriptor], runtime: SdkRuntime) -> None:
+        provider = self._provider(builtins, runtime, "residential", {"num_proxies": 1})
+        base, _ = await provider.sync_proxies([])
+        assert provider.proxy_target(base).total == 1
+        es = await provider.provision_country(base, "ES")
+        fr = await provider.provision_country([*base, *es], "FR")
+        target = provider.proxy_target([*base, *es, *fr])
+        assert target.total == 3 and target.per_country == 1
+        assert target.countries == ["ES", "FR"] and target.on_demand == ["ES", "FR"]
+
+    async def test_port_filter_counts_listed_countries(self, builtins: dict[str, ProviderDescriptor], runtime: SdkRuntime) -> None:
+        provider = self._provider(builtins, runtime, "isp", {"num_proxies": 3, "country_code": ["US", "DE", "FR"]})
+        target = provider.proxy_target([])
+        assert (target.total, target.per_country, target.countries, target.on_demand) == (9, 3, ["US", "DE", "FR"], [])
+
+    async def test_plain_port_type_is_just_the_count(self, builtins: dict[str, ProviderDescriptor], runtime: SdkRuntime) -> None:
+        target = self._provider(builtins, runtime, "isp", {"num_proxies": 5}).proxy_target([])
+        assert (target.total, target.per_country, target.countries) == (5, None, [])

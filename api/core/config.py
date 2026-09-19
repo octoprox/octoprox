@@ -52,6 +52,13 @@ def _load_yaml_config(config_path: Path) -> dict[str, Any]:
             flat_config["max_retries"] = proxy_cfg["connection"].get("max_retries")
         if "ip_refresh_interval" in proxy_cfg:
             flat_config["ip_refresh_interval"] = proxy_cfg["ip_refresh_interval"]
+        if "geo_lookup" in proxy_cfg:
+            geo_cfg = proxy_cfg["geo_lookup"] or {}
+            flat_config["geo_lookup_enabled"] = geo_cfg.get("enabled")
+            flat_config["geo_lookup_url"] = geo_cfg.get("url")
+            flat_config["geo_lookup_ip_path"] = geo_cfg.get("ip_path")
+            flat_config["geo_lookup_country_path"] = geo_cfg.get("country_path")
+            flat_config["geo_lookup_timeout_seconds"] = geo_cfg.get("timeout_seconds")
     if "providers" in config_data:
         providers_cfg = config_data["providers"] or {}
         flat_config["providers_dir"] = providers_cfg.get("dir")
@@ -204,6 +211,16 @@ class Settings(BaseSettings):
     connection_timeout: int = Field(default=30)
     max_retries: int = Field(default=3)
     ip_refresh_interval: int = Field(default=3600, description="IP refresh interval in seconds for port-based proxies")
+
+    # Exit-location lookup for manually added (static) proxies: a request is
+    # made through the proxy to a JSON endpoint reporting the caller's IP and country.
+    geo_lookup_enabled: bool = Field(
+        default=True, description="Look up the exit IP and country of static proxies when they are added"
+    )
+    geo_lookup_url: str = Field(default="https://lumtest.com/myip.json", description="JSON endpoint requested through the proxy")
+    geo_lookup_ip_path: str = Field(default="ip", description="JMESPath to the IP in the response")
+    geo_lookup_country_path: str = Field(default="country", description="JMESPath to the ISO country code in the response")
+    geo_lookup_timeout_seconds: float = Field(default=15.0, description="Timeout for one lookup request")
 
     # Provider SDK settings
     providers_dir: str | None = Field(

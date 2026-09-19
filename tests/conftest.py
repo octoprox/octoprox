@@ -72,6 +72,7 @@ def test_settings(
         health_check_interval=3600,  # Disable health checks in tests
         metrics_flush_interval=3600,  # Disable metrics flushing in tests
         proxy_port=0,  # Use port 0 to let OS assign a free port
+        geo_lookup_enabled=False,  # No requests through proxies in tests
     )
 
 

@@ -3,7 +3,11 @@
 
 """Tests for username parameter parsing."""
 
-from api.core.username_params import parse_proxy_username
+from api.core.username_params import (
+    UsernameParams,
+    parse_proxy_username,
+    parse_username_params,
+)
 
 
 class TestParseProxyUsername:
@@ -52,3 +56,52 @@ class TestParseProxyUsername:
     def test_username_ending_with_sessid(self) -> None:
         """Test username that ends with 'sessid' but no separator."""
         assert parse_proxy_username("myuser-sessid") == ("myuser-sessid", None)
+
+
+class TestParseUsernameParams:
+    """Tests for parse_username_params() (sessid + country)."""
+
+    def test_plain_username(self) -> None:
+        assert parse_username_params("myuser") == UsernameParams("myuser", None, None)
+
+    def test_sessid_only(self) -> None:
+        assert parse_username_params("myuser-sessid-abc-123") == UsernameParams("myuser", "abc-123", None)
+
+    def test_country_only(self) -> None:
+        assert parse_username_params("myuser-cc-us") == UsernameParams("myuser", None, "US")
+
+    def test_country_is_upper_cased(self) -> None:
+        assert parse_username_params("myuser-cc-Gb").country == "GB"
+
+    def test_sessid_then_country(self) -> None:
+        assert parse_username_params("myuser-sessid-abc-cc-gb") == UsernameParams("myuser", "abc", "GB")
+
+    def test_country_then_sessid(self) -> None:
+        assert parse_username_params("myuser-cc-gb-sessid-abc") == UsernameParams("myuser", "abc", "GB")
+
+    def test_sessid_with_hyphens_before_country(self) -> None:
+        assert parse_username_params("myuser-sessid-a-b-c-cc-de") == UsernameParams("myuser", "a-b-c", "DE")
+
+    def test_hyphenated_username_with_both(self) -> None:
+        assert parse_username_params("my-project-cc-fr-sessid-x") == UsernameParams("my-project", "x", "FR")
+
+    def test_empty_country_value(self) -> None:
+        assert parse_username_params("myuser-cc-") == UsernameParams("myuser", None, None)
+
+    def test_empty_country_before_sessid(self) -> None:
+        assert parse_username_params("myuser-cc--sessid-abc") == UsernameParams("myuser", "abc", None)
+
+    def test_empty_sessid_before_country(self) -> None:
+        assert parse_username_params("myuser-sessid--cc-us") == UsernameParams("myuser", None, "US")
+
+    def test_no_username_before_country_separator(self) -> None:
+        assert parse_username_params("-cc-us") == UsernameParams("-cc-us", None, None)
+
+    def test_partial_keyword_no_match(self) -> None:
+        assert parse_username_params("myuser-ccx-us") == UsernameParams("myuser-ccx-us", None, None)
+
+    def test_repeated_country_separator_keeps_first(self) -> None:
+        assert parse_username_params("a-cc-us-cc-gb") == UsernameParams("a", None, "US-CC-GB")
+
+    def test_legacy_wrapper_ignores_country(self) -> None:
+        assert parse_proxy_username("myuser-cc-us-sessid-abc") == ("myuser", "abc")

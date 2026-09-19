@@ -585,15 +585,15 @@ class TestProxyManager:
         await proxy_manager.add_proxy(proxy)
 
         # Should find proxy for whitelisted domain
-        healthy = proxy_manager.get_healthy_proxies_for_project(project.id, target_host="example.com")
+        healthy = proxy_manager.get_routable_proxies_for_project(project.id, target_host="example.com")
         assert len(healthy) == 1
 
         # Should find proxy for subdomain of whitelisted domain
-        healthy = proxy_manager.get_healthy_proxies_for_project(project.id, target_host="www.example.com")
+        healthy = proxy_manager.get_routable_proxies_for_project(project.id, target_host="www.example.com")
         assert len(healthy) == 1
 
         # Should NOT find proxy for non-whitelisted domain
-        healthy = proxy_manager.get_healthy_proxies_for_project(project.id, target_host="other.com")
+        healthy = proxy_manager.get_routable_proxies_for_project(project.id, target_host="other.com")
         assert len(healthy) == 0
 
     async def test_domain_blacklist_filters_proxies(self, proxy_manager: ProxyManager) -> None:
@@ -630,15 +630,15 @@ class TestProxyManager:
         await proxy_manager.add_proxy(proxy)
 
         # Should find proxy for non-blacklisted domain
-        healthy = proxy_manager.get_healthy_proxies_for_project(project.id, target_host="example.com")
+        healthy = proxy_manager.get_routable_proxies_for_project(project.id, target_host="example.com")
         assert len(healthy) == 1
 
         # Should NOT find proxy for blacklisted domain
-        healthy = proxy_manager.get_healthy_proxies_for_project(project.id, target_host="ads.example.com")
+        healthy = proxy_manager.get_routable_proxies_for_project(project.id, target_host="ads.example.com")
         assert len(healthy) == 0
 
         # Should NOT find proxy for subdomain of blacklisted domain
-        healthy = proxy_manager.get_healthy_proxies_for_project(project.id, target_host="sub.ads.example.com")
+        healthy = proxy_manager.get_routable_proxies_for_project(project.id, target_host="sub.ads.example.com")
         assert len(healthy) == 0
 
     async def test_no_routing_config_allows_all(self, proxy_manager: ProxyManager) -> None:
@@ -674,7 +674,7 @@ class TestProxyManager:
         await proxy_manager.add_proxy(proxy)
 
         # Should allow any domain
-        healthy = proxy_manager.get_healthy_proxies_for_project(project.id, target_host="anything.com")
+        healthy = proxy_manager.get_routable_proxies_for_project(project.id, target_host="anything.com")
         assert len(healthy) == 1
 
     async def test_mixed_connectors_domain_filtering(self, proxy_manager: ProxyManager) -> None:
@@ -727,11 +727,11 @@ class TestProxyManager:
         await proxy_manager.add_proxy(proxy2)
 
         # google.com: both connectors should match (conn1 whitelist, conn2 open)
-        healthy = proxy_manager.get_healthy_proxies_for_project(project.id, target_host="google.com")
+        healthy = proxy_manager.get_routable_proxies_for_project(project.id, target_host="google.com")
         assert len(healthy) == 2
 
         # bing.com: only conn2 should match (conn1 restricts to google.com)
-        healthy = proxy_manager.get_healthy_proxies_for_project(project.id, target_host="bing.com")
+        healthy = proxy_manager.get_routable_proxies_for_project(project.id, target_host="bing.com")
         assert len(healthy) == 1
         assert healthy[0].connector_id == conn2.id
 

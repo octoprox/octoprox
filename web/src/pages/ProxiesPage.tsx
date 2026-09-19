@@ -4,10 +4,10 @@
 import { useState, useRef, useMemo, useCallback, useEffect } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { ColumnDef, VisibilityState } from '@tanstack/react-table'
-import { Plus, Trash2, Upload, Lock, ShieldOff } from 'lucide-react'
+import { Plus, Trash2, Upload, Lock, ShieldOff, MapPin } from 'lucide-react'
 import {
   fetchProjectProxies, fetchProjectConnectors, createProjectProxy, updateProjectProxy, deleteProjectProxy,
-  unquarantineProjectProxy, uploadProjectProxies, Proxy, ProxyCreate, ProxyUpdate, ProxyUploadResponse, CredentialType,
+  unquarantineProjectProxy, uploadProjectProxies, locateProjectProxy, Proxy, ProxyCreate, ProxyUpdate, ProxyUploadResponse, CredentialType,
 } from '../api/client'
 import { useProject } from '../contexts/ProjectContext'
 import { useAuth } from '../contexts/AuthContext'
@@ -16,6 +16,8 @@ import { DataTable, createSelectionColumn } from '../components/DataTable'
 import { Page } from '../components/layout/Page'
 import { ProxyStatusDot, ProxyStatusBadge, formatQuarantineRemaining } from '../components/ProxyStatus'
 import { ProviderLogo } from '../components/ProviderLogo'
+import { useProviders } from '../hooks/useProviders'
+import { RichSelect, RichSelectOption } from '../components/RichSelect'
 import { formatBytes, formatDate, formatDateTime } from '../utils/format'
 import { Button, Input, Select, Label, Alert, Inspector, InspectorSection, StatGrid, KeyValue, ConfirmDialog } from '../components/ui'
 
@@ -114,6 +116,17 @@ export default function ProxiesPage() {
       enableSorting: false,
       meta: { filterVariant: 'select' as const },
       cell: ({ getValue }) => <span className="text-fg-muted truncate block">{getValue<string>() || '-'}</span>,
+    },
+    {
+      id: 'country',
+      accessorFn: (row: Proxy) => row.country ?? '',
+      header: 'Country',
+      size: 90,
+      meta: { filterVariant: 'select' as const },
+      cell: ({ getValue }) => {
+        const code = getValue<string>()
+        return code ? <span className="font-mono text-xs font-medium">{code}</span> : <span className="text-fg-subtle">-</span>
+      },
     },
     {
       id: 'status',
@@ -304,14 +317,24 @@ function ProxyPanel({ proxy, connectorType, canMutate, onClose, onRelease, onDel
 }) {
   const { selectedProjectId } = useProject()
   const toast = useToast()
-  const [form, setForm] = useState({ host: proxy.host, port: String(proxy.port), protocol: proxy.protocol, username: proxy.username || '', password: proxy.password || '' })
-  const dirty = form.host !== proxy.host || form.port !== String(proxy.port) || form.protocol !== proxy.protocol || form.username !== (proxy.username || '') || form.password !== (proxy.password || '')
+  const { presets } = useProviders()
+  const [form, setForm] = useState({ host: proxy.host, port: String(proxy.port), protocol: proxy.protocol, username: proxy.username || '', password: proxy.password || '', country: proxy.country || '' })
+  const dirty = form.host !== proxy.host || form.port !== String(proxy.port) || form.protocol !== proxy.protocol || form.username !== (proxy.username || '') || form.password !== (proxy.password || '') || form.country !== (proxy.country || '')
 
   const updateMutation = useMutation({
     mutationFn: (d: ProxyUpdate) => updateProjectProxy(selectedProjectId!, proxy.id, d),
     onSuccess: onSaved,
     onError: (e: Error) => toast.show(e.message || 'Failed to save proxy', 'error'),
   })
+  const locateMutation = useMutation({
+    mutationFn: () => locateProjectProxy(selectedProjectId!, proxy.id),
+    onSuccess: (p) => { toast.show(p.country ? `Exit location: ${p.display_host} (${p.country})` : `Exit IP: ${p.display_host}`, 'success'); onSaved() },
+    onError: (e: Error) => toast.show(e.message || 'Could not determine the exit location', 'error'),
+  })
+  const countryOptions: RichSelectOption[] = [
+    { value: '', label: 'Unknown', description: 'Not selectable with -cc-' },
+    ...(presets.countries ?? []).filter((o) => o.value).map((o) => ({ value: o.value, label: o.label, description: o.value })),
+  ]
 
   // Only static-provider proxies are hand-edited; cloud and provider proxies are managed by their connector.
   const isStatic = connectorType === 'static_proxy_provider'
@@ -360,7 +383,7 @@ function ProxyPanel({ proxy, connectorType, canMutate, onClose, onRelease, onDel
       </InspectorSection>
 
       <InspectorSection title="Configuration">
-        <form id="proxy-form" onSubmit={(e) => { e.preventDefault(); updateMutation.mutate({ host: form.host, port: parseInt(form.port), protocol: form.protocol, username: form.username || undefined, password: form.password || undefined }) }} className="space-y-3">
+        <form id="proxy-form" onSubmit={(e) => { e.preventDefault(); updateMutation.mutate({ host: form.host, port: parseInt(form.port), protocol: form.protocol, username: form.username || undefined, password: form.password || undefined, ...(isStatic && form.country !== (proxy.country || '') ? { country: form.country } : {}) }) }} className="space-y-3">
           <div>
             <Label className="text-xs">Connector</Label>
             <div className="h-9 px-3 rounded-lg bg-surface-raised text-fg-muted text-sm flex items-center gap-2">
@@ -395,11 +418,29 @@ function ProxyPanel({ proxy, connectorType, canMutate, onClose, onRelease, onDel
               <Input type="password" value={form.password} onChange={(e) => setForm({ ...form, password: e.target.value })} placeholder="Optional" disabled={!canMutate || !isStatic} autoComplete="new-password" />
             </div>
           </div>
-          {!isStatic && <p className="text-xs text-fg-subtle">Provisioned by its connector; edit the connector to change how these proxies are created.</p>}
+          {isStatic ? (
+            <div>
+              <Label className="text-xs">Exit country</Label>
+              <div className="flex items-start gap-2">
+                <div className="flex-1 min-w-0">
+                  <RichSelect options={countryOptions} value={form.country} onChange={(v) => setForm({ ...form, country: v })} placeholder="Unknown" disabled={!canMutate} />
+                </div>
+                {canMutate && (
+                  <Button type="button" variant="outline" size="sm" onClick={() => locateMutation.mutate()} disabled={locateMutation.isPending} title="Request through this proxy to detect its exit IP and country">
+                    <MapPin className="w-3.5 h-3.5" /> {locateMutation.isPending ? 'Detecting…' : 'Detect'}
+                  </Button>
+                )}
+              </div>
+              <p className="text-xs text-fg-subtle mt-1">Looked up through the proxy when it was added. Set it by hand if the lookup was wrong or unavailable.</p>
+            </div>
+          ) : (
+            <p className="text-xs text-fg-subtle">Provisioned by its connector; edit the connector to change how these proxies are created.</p>
+          )}
         </form>
       </InspectorSection>
 
       <InspectorSection title="Details">
+        <KeyValue label="Country" value={proxy.country || '-'} mono />
         <KeyValue label="Upstream host" value={proxy.host} mono />
         <KeyValue label="Successes" value={proxy.success_count.toLocaleString()} />
         <KeyValue label="Added" value={formatDateTime(proxy.created_at)} />
@@ -410,8 +451,13 @@ function ProxyPanel({ proxy, connectorType, canMutate, onClose, onRelease, onDel
 
 function NewProxyPanel({ connectors, onClose, onCreated }: { connectors: { id: string; name: string }[]; onClose: () => void; onCreated: () => void }) {
   const { selectedProjectId } = useProject()
-  const [form, setForm] = useState({ host: '', port: '', protocol: 'http', connector_id: connectors[0]?.id ?? '', username: '', password: '' })
+  const { presets } = useProviders()
+  const [form, setForm] = useState({ host: '', port: '', protocol: 'http', connector_id: connectors[0]?.id ?? '', username: '', password: '', country: '' })
   const [error, setError] = useState<string | null>(null)
+  const countryOptions: RichSelectOption[] = [
+    { value: '', label: 'Detect automatically', description: 'One request goes through the proxy after it is added' },
+    ...(presets.countries ?? []).filter((o) => o.value).map((o) => ({ value: o.value, label: o.label, description: o.value })),
+  ]
   const createMutation = useMutation({
     mutationFn: (d: ProxyCreate) => createProjectProxy(selectedProjectId!, d),
     onSuccess: onCreated,
@@ -436,7 +482,7 @@ function NewProxyPanel({ connectors, onClose, onCreated }: { connectors: { id: s
         onSubmit={(e) => {
           e.preventDefault()
           setError(null)
-          createMutation.mutate({ host: form.host, port: parseInt(form.port), protocol: form.protocol, connector_id: form.connector_id, username: form.username || undefined, password: form.password || undefined })
+          createMutation.mutate({ host: form.host, port: parseInt(form.port), protocol: form.protocol, connector_id: form.connector_id, username: form.username || undefined, password: form.password || undefined, country: form.country || undefined })
         }}
       >
         {error && <Alert>{error}</Alert>}
@@ -462,6 +508,10 @@ function NewProxyPanel({ connectors, onClose, onCreated }: { connectors: { id: s
           <Select value={form.protocol} onChange={(e) => setForm({ ...form, protocol: e.target.value })}>
             {PROTOCOLS.map((p) => <option key={p} value={p}>{p.toUpperCase()}</option>)}
           </Select>
+        </div>
+        <div>
+          <Label className="text-xs">Exit country</Label>
+          <RichSelect options={countryOptions} value={form.country} onChange={(v) => setForm({ ...form, country: v })} placeholder="Detect automatically" />
         </div>
         <InspectorSection title="Authentication">
           <div className="grid grid-cols-2 gap-3">

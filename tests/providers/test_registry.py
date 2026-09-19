@@ -57,10 +57,12 @@ def test_descriptor_validation_and_provider_creation(registry: ProviderRegistry)
     with pytest.raises(ConfigValidationError):
         registry.validate_credential_config("oxylabs", {"proxy_type": "residential"})
     connector_config = registry.validate_connector_config("oxylabs", {"num_proxies": "2", "country_code": "us", "session_duration_minutes": "5"}, config)
-    assert connector_config == {"num_proxies": 2, "country_code": "US", "session_duration_minutes": 5}
-    # Hidden session fields are dropped for port-based types.
-    isp = registry.validate_connector_config("oxylabs", {"num_proxies": 2, "country_code": "US"}, {"proxy_type": "isp"})
-    assert isp == {"num_proxies": 2}
+    assert connector_config == {"num_proxies": 2, "country_code": ["US"], "session_duration_minutes": 5}
+    # Hidden session fields are dropped for port-based types; countries stay (they filter discovery).
+    isp = registry.validate_connector_config(
+        "oxylabs", {"num_proxies": 2, "country_code": "US", "session_duration_minutes": 5}, {"proxy_type": "isp"}
+    )
+    assert isp == {"num_proxies": 2, "country_code": ["US"]}
     # Captured keys survive credential validation.
     assert registry.validate_credential_config("brightdata", {"token": "t", "customer_id": "c"}) == {"token": "t", "customer_id": "c"}
 

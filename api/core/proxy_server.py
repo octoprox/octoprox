@@ -26,7 +26,7 @@ from python_socks.async_.asyncio import Proxy as SocksProxy
 from api.core.config import settings
 from api.core.event_bus import event_bus
 from api.core.signals import request_completed, request_rejected
-from api.core.username_params import AuthResult, parse_proxy_username
+from api.core.username_params import AuthResult, parse_username_params
 from api.models.project import MitmMode, Project
 from api.models.proxy import Proxy, ProxyProtocol
 
@@ -108,41 +108,46 @@ class ProxyServer:
 
     async def _get_upstream_proxy(
         self,
-        project_id: str | None = None,
+        project_id: str,
         session_id: str | None = None,
         target_host: str | None = None,
+        country: str | None = None,
     ) -> Proxy | None:
-        """Select an upstream proxy using the configured strategy.
+        """Select an upstream proxy from the authenticated project's pool.
+
+        Every request is authenticated against a project before it gets here
+        (see _handle_client), so selection is always project-scoped and uses
+        that project's routing strategy.
 
         Args:
-            project_id: If provided, selects from project-scoped proxies using
-                        the project's routing strategy.
+            project_id: The authenticated project.
             session_id: Session identifier for sticky routing.
             target_host: If provided, only consider proxies from connectors
                 whose domain routing config allows this host.
+            country: If provided, only consider proxies that serve this
+                country (from the -cc- username suffix).
 
         Returns:
             Selected proxy or None if no healthy proxies available.
         """
-        if project_id:
-            return await self._proxy_manager.select_proxy_for_project(
-                project_id, session_id, target_host
-            )
-        return await self._proxy_manager.select_proxy(session_id)
+        return await self._proxy_manager.select_proxy_for_project(
+            project_id, session_id, target_host, country
+        )
 
     def _authenticate_project(self, headers: dict[str, str]) -> AuthResult | None:
         """Authenticate a client request using Proxy-Authorization header.
 
         Expects HTTP Basic Auth in the Proxy-Authorization header with
-        project username and password. The username may contain a session ID
-        suffix in the format: <username>-sessid-<session_id>
+        project username and password. The username may carry routing
+        parameters as suffixes, in any order:
+        <username>[-sessid-<session_id>][-cc-<country_code>]
 
         Args:
             headers: Request headers (lowercase keys)
 
         Returns:
-            AuthResult with authenticated Project and optional sessid,
-            or None if authentication fails.
+            AuthResult with authenticated Project and optional sessid and
+            country, or None if authentication fails.
         """
         auth_header = headers.get("proxy-authorization", "")
         if not auth_header:
@@ -161,10 +166,11 @@ class ProxyServer:
         except (ValueError, UnicodeDecodeError):
             return None
 
-        # Parse session parameters from username
-        real_username, sessid = parse_proxy_username(username)
+        # Parse routing parameters (sessid, country) from username
+        params = parse_username_params(username)
+        real_username = params.username
 
-        # Look up project by the real username (without session suffix)
+        # Look up project by the real username (without parameter suffixes)
         project = self._proxy_manager.get_project_by_username(real_username)
         if not project:
             logger.debug("Project not found for username", username=real_username)
@@ -175,7 +181,14 @@ class ProxyServer:
             logger.debug("Invalid password for project", project_id=project.id)
             return None
 
-        return AuthResult(project=project, sessid=sessid)
+        return AuthResult(project=project, sessid=params.sessid, country=params.country)
+
+    @staticmethod
+    def _no_proxy_message(country: str | None) -> str:
+        """Human-readable 502 body when no upstream proxy matched the request."""
+        if country:
+            return f"No upstream proxy available for country {country} and this domain"
+        return "No upstream proxy available for this domain"
 
     async def _connect_via_proxy(
         self,
@@ -268,6 +281,7 @@ class ProxyServer:
 
             project = auth_result.project
             sessid = auth_result.sessid
+            country = auth_result.country
             project_id = project.id
             logger.debug(
                 "Authenticated project",
@@ -275,16 +289,18 @@ class ProxyServer:
                 project_name=project.name,
                 client_addr=client_addr,
                 sessid=sessid,
+                country=country,
             )
 
             if method.upper() == "CONNECT":
                 await self._handle_connect(
-                    client_reader, client_writer, target, headers, project, client_ip, sessid
+                    client_reader, client_writer, target, headers, project, client_ip, sessid,
+                    country,
                 )
             else:
                 await self._handle_http(
                     client_reader, client_writer, method, target, version, headers, project_id,
-                    client_ip, sessid
+                    client_ip, sessid, country,
                 )
 
         except asyncio.CancelledError:
@@ -350,6 +366,7 @@ class ProxyServer:
         project: Project,
         client_ip: str | None = None,
         sessid: str | None = None,
+        country: str | None = None,
     ) -> None:
         """Handle HTTPS CONNECT tunneling."""
         # Parse target host:port before proxy selection (needed for domain filtering)
@@ -365,10 +382,12 @@ class ProxyServer:
 
         # Select upstream proxy scoped to the authenticated project
         proxy = await self._get_upstream_proxy(
-            project_id=project.id, session_id=session_id, target_host=target_host
+            project_id=project.id, session_id=session_id, target_host=target_host, country=country
         )
         if not proxy:
-            if self._proxy_manager.are_all_proxies_quarantined(project.id, target_host, session_id):
+            if self._proxy_manager.are_all_proxies_quarantined(
+                project.id, target_host, session_id, country
+            ):
                 await self._send_error(
                     client_writer, 429, "Too Many Requests",
                     "All proxies are temporarily rate-limited. Retry later.",
@@ -377,7 +396,9 @@ class ProxyServer:
                     self, project_id=project.id, reason="all_proxies_quarantined"
                 )
             else:
-                await self._send_error(client_writer, 502, "Bad Gateway", "No upstream proxy available for this domain")
+                await self._send_error(
+                    client_writer, 502, "Bad Gateway", self._no_proxy_message(country)
+                )
                 await event_bus.publish(request_rejected,
                     self, project_id=project.id, reason="no_proxy_available"
                 )
@@ -578,6 +599,7 @@ class ProxyServer:
         project_id: str,
         client_ip: str | None = None,
         sessid: str | None = None,
+        country: str | None = None,
     ) -> None:
         """Handle regular HTTP request forwarding."""
         # Parse target host before proxy selection (needed for domain filtering)
@@ -588,10 +610,12 @@ class ProxyServer:
 
         # Select upstream proxy scoped to the authenticated project
         proxy = await self._get_upstream_proxy(
-            project_id=project_id, session_id=session_id, target_host=parsed_host
+            project_id=project_id, session_id=session_id, target_host=parsed_host, country=country
         )
         if not proxy:
-            if self._proxy_manager.are_all_proxies_quarantined(project_id, parsed_host, session_id):
+            if self._proxy_manager.are_all_proxies_quarantined(
+                project_id, parsed_host, session_id, country
+            ):
                 await self._send_error(
                     client_writer, 429, "Too Many Requests",
                     "All proxies are temporarily rate-limited. Retry later.",
@@ -600,7 +624,9 @@ class ProxyServer:
                     self, project_id=project_id, reason="all_proxies_quarantined"
                 )
             else:
-                await self._send_error(client_writer, 502, "Bad Gateway", "No upstream proxy available for this domain")
+                await self._send_error(
+                    client_writer, 502, "Bad Gateway", self._no_proxy_message(country)
+                )
                 await event_bus.publish(request_rejected,
                     self, project_id=project_id, reason="no_proxy_available"
                 )

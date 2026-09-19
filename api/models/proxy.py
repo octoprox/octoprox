@@ -8,7 +8,7 @@ from enum import Enum
 from typing import Any
 from uuid import uuid4
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from api.core import utc_now
 
@@ -81,6 +81,19 @@ class Proxy(BaseModel):
         return self.display_host if self.display_host else self.host
 
     @property
+    def country(self) -> str | None:
+        """Exit country (upper-case ISO code) if known.
+
+        Prefers the country discovered or listed by the vendor (``metadata.country``)
+        over the country the slot was provisioned for (``metadata.geo``).
+        """
+        for key in ("country", "geo"):
+            value = self.metadata.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip().upper()
+        return None
+
+    @property
     def success_rate(self) -> float:
         """Calculate success rate percentage."""
         if self.request_count == 0:
@@ -113,6 +126,18 @@ class Proxy(BaseModel):
         self.updated_at = other.updated_at
 
 
+def _normalize_optional_country(value: str | None) -> str | None:
+    """Upper-case ISO code, ``""`` to clear, or None when not provided."""
+    if value is None:
+        return None
+    code = value.strip().upper()
+    if code == "":
+        return ""
+    if len(code) != 2 or not code.isascii() or not code.isalpha():
+        raise ValueError("country must be a two-letter ISO 3166-1 alpha-2 code")
+    return code
+
+
 class ProxyCreate(BaseModel):
     """Schema for creating a new proxy."""
     host: str
@@ -123,6 +148,14 @@ class ProxyCreate(BaseModel):
     password: str | None = None
     tags: list[str] = Field(default_factory=list)
     metadata: dict[str, Any] = Field(default_factory=dict)
+    # Exit country (ISO code). When omitted the exit location is looked up through the proxy.
+    country: str | None = None
+
+    @field_validator("country")
+    @classmethod
+    def _country(cls, value: str | None) -> str | None:
+        code = _normalize_optional_country(value)
+        return code or None
 
 
 class ProxyUpdate(BaseModel):
@@ -134,6 +167,13 @@ class ProxyUpdate(BaseModel):
     password: str | None = None
     tags: list[str] | None = None
     metadata: dict[str, Any] | None = None
+    # Exit country (ISO code); an empty string clears it.
+    country: str | None = None
+
+    @field_validator("country")
+    @classmethod
+    def _country(cls, value: str | None) -> str | None:
+        return _normalize_optional_country(value)
 
 
 class ProxyResponse(BaseModel):
@@ -158,6 +198,7 @@ class ProxyResponse(BaseModel):
     bytes_received: int = 0
     quarantined: bool = False
     quarantine_remaining_seconds: float = 0.0
+    country: str | None = None  # Exit country (ISO code) when discovered or provisioned per geo
     tags: list[str]
     created_at: datetime
 

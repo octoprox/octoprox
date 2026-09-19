@@ -106,6 +106,11 @@ tls_mitm:
 | `proxy.health_check.enabled` | Enable automatic health checks | true |
 | `proxy.health_check.interval_seconds` | Interval between health checks | 60 |
 | `proxy.health_check.timeout_seconds` | Timeout for health check requests | 30 |
+| `proxy.geo_lookup.enabled` | Look up the exit IP and country of static proxies when they are added (one request through the proxy) | true |
+| `proxy.geo_lookup.url` | JSON endpoint requested through the proxy | https://lumtest.com/myip.json |
+| `proxy.geo_lookup.ip_path` | JMESPath to the IP in the response | ip |
+| `proxy.geo_lookup.country_path` | JMESPath to the ISO country code in the response | country |
+| `proxy.geo_lookup.timeout_seconds` | Timeout for one lookup request | 15 |
 
 ## Database Configuration
 

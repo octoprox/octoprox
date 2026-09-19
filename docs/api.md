@@ -238,6 +238,25 @@ No restrictions (default):
 }
 ```
 
+#### Countries (config)
+
+Connectors declare the countries their proxies exit from inside `config`, so clients can pick them with a `-cc-<code>` suffix on the proxy username (see [Country Routing]({{ site.baseurl }}/routing-strategies#country-routing)). Codes are ISO 3166-1 alpha-2 and are normalised to upper case; an empty list is dropped.
+
+- Static and cloud connectors: `config.countries`, a list of codes.
+- Provider connectors: the provider's country field (`config.country_code` for the built-in descriptors). It accepts one code, a list, or a comma-separated string and is always returned as a list. Listing several countries provisions `num_proxies` slots per country.
+
+```json
+{
+  "name": "EU residential",
+  "credential_id": "…",
+  "config": { "num_proxies": 5, "country_code": ["DE", "FR", "NL"] }
+}
+```
+
+Proxy responses include `country`, the exit country when the vendor reported it or the slot was provisioned for one. Connector responses include `target`: the intended pool size (`total`, or null when the connector has none) and how it is derived, `per_country` times the `countries` that have a slot group, with the ones created on demand listed in `on_demand`.
+
+Manually added proxies (static connectors) get their exit location looked up right after they are created: one request goes through the proxy to the `proxy.geo_lookup` endpoint and the discovered IP becomes `display_host` while the country lands in `country`. Pass `country` on `POST .../proxies` to set it yourself and skip the lookup, set `country` to `""` on `PATCH .../proxies/{id}` to clear it, or call `POST .../proxies/{id}/locate` to re-run the lookup and get the updated proxy back (502 when the request through the proxy fails).
+
 #### Rate Limiting (rate_limit_config)
 
 Connectors support optional per-proxy rate limiting. When a proxy exceeds `max_requests` within `window_seconds`, it is quarantined (excluded from selection) for a random duration between `quarantine_seconds_min` and `quarantine_seconds_max`. See the [Rate Limiting]({{ site.baseurl }}/rate-limiting) guide for details.

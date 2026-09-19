@@ -131,6 +131,92 @@ class TestProxyEndpoints:
         assert data["host"] == "updated.example.com"
         assert data["port"] == 9090
 
+    def test_create_proxy_with_country(
+        self,
+        authenticated_client: TestClient,
+        created_project: dict[str, Any],
+        created_connector: dict[str, Any],
+        sample_proxy_data: dict[str, Any],
+    ) -> None:
+        """A manual country is stored upper-cased and returned."""
+        project_id = created_project["id"]
+        response = authenticated_client.post(
+            f"/api/v1/projects/{project_id}/proxies",
+            json={**sample_proxy_data, "connector_id": created_connector["id"], "country": "gb"},
+        )
+        assert response.status_code == 201, response.text
+        assert response.json()["country"] == "GB"
+
+    def test_create_proxy_rejects_bad_country(
+        self,
+        authenticated_client: TestClient,
+        created_project: dict[str, Any],
+        created_connector: dict[str, Any],
+        sample_proxy_data: dict[str, Any],
+    ) -> None:
+        project_id = created_project["id"]
+        response = authenticated_client.post(
+            f"/api/v1/projects/{project_id}/proxies",
+            json={**sample_proxy_data, "connector_id": created_connector["id"], "country": "GBR"},
+        )
+        assert response.status_code == 422
+
+    def test_update_proxy_country_set_and_clear(
+        self,
+        authenticated_client: TestClient,
+        created_project: dict[str, Any],
+        created_proxy: dict[str, Any],
+    ) -> None:
+        project_id = created_project["id"]
+        proxy_id = created_proxy["id"]
+        assert created_proxy["country"] is None
+
+        response = authenticated_client.patch(f"/api/v1/projects/{project_id}/proxies/{proxy_id}", json={"country": "de"})
+        assert response.status_code == 200
+        assert response.json()["country"] == "DE"
+
+        response = authenticated_client.patch(f"/api/v1/projects/{project_id}/proxies/{proxy_id}", json={"country": ""})
+        assert response.status_code == 200
+        assert response.json()["country"] is None
+
+    def test_locate_proxy_records_exit_location(
+        self,
+        authenticated_client: TestClient,
+        created_project: dict[str, Any],
+        created_proxy: dict[str, Any],
+        monkeypatch: Any,
+    ) -> None:
+        from unittest.mock import AsyncMock
+
+        from api.core.geo_lookup import GeoLookup
+
+        monkeypatch.setattr(GeoLookup, "locate", AsyncMock(return_value=("198.51.100.7", "NL")))
+        project_id = created_project["id"]
+        proxy_id = created_proxy["id"]
+
+        response = authenticated_client.post(f"/api/v1/projects/{project_id}/proxies/{proxy_id}/locate")
+        assert response.status_code == 200, response.text
+        data = response.json()
+        assert data["country"] == "NL"
+        assert data["display_host"] == "198.51.100.7"
+        assert data["host"] == created_proxy["host"]
+
+    def test_locate_proxy_failure_is_502(
+        self,
+        authenticated_client: TestClient,
+        created_project: dict[str, Any],
+        created_proxy: dict[str, Any],
+        monkeypatch: Any,
+    ) -> None:
+        from unittest.mock import AsyncMock
+
+        from api.core.geo_lookup import GeoLookup
+
+        monkeypatch.setattr(GeoLookup, "locate", AsyncMock(return_value=(None, "")))
+        project_id = created_project["id"]
+        response = authenticated_client.post(f"/api/v1/projects/{project_id}/proxies/{created_proxy['id']}/locate")
+        assert response.status_code == 502
+
     def test_delete_proxy(
         self,
         authenticated_client: TestClient,

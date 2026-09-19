@@ -188,7 +188,13 @@ export function TemplateEditor({ label, value, onChange, fieldPaths, help }: { l
                 <Input value={part.text ?? ''} onChange={(e) => { const n = [...parts]; n[i] = { ...part, text: e.target.value }; setParts(n) }} className="px-2.5 py-1 text-xs font-mono flex-1" placeholder="cc-{connector.country_code}" />
                 <button type="button" onClick={() => setParts(parts.filter((_, j) => j !== i))} className="p-1 text-fg-subtle hover:text-danger"><Trash2 className="w-3.5 h-3.5" /></button>
               </div>
-              <ConditionEditor label={<span className="text-xs">Only include when…</span>} value={part.when} onChange={(w) => { const n = [...parts]; n[i] = w ? { ...part, when: w } : { text: part.text }; setParts(n) }} fieldPaths={fieldPaths} />
+              {Array.isArray(part.when) ? (
+                <p className="text-xs text-fg-muted">
+                  Included only when all of: {part.when.map((c: Spec) => `${c.field} ${c.negate ? 'not ' : ''}${c.equals != null ? `= ${c.equals}` : c.in ? `in [${c.in.join(', ')}]` : 'set'}`).join('; ')}. Edit the list in the YAML view.
+                </p>
+              ) : (
+                <ConditionEditor label={<span className="text-xs">Only include when…</span>} value={part.when} onChange={(w) => { const n = [...parts]; n[i] = w ? { ...part, when: w } : { text: part.text }; setParts(n) }} fieldPaths={fieldPaths} />
+              )}
             </div>
           ))}
           <button type="button" onClick={() => setParts([...parts, { text: '' }])} className="inline-flex items-center gap-1 text-xs text-primary hover:brightness-110"><Plus className="w-3.5 h-3.5" /> Add part</button>

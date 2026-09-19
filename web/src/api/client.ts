@@ -190,6 +190,7 @@ export interface Proxy {
   bytes_received: number
   quarantined: boolean
   quarantine_remaining_seconds: number
+  country: string | null  // Exit country (ISO code) when discovered or provisioned per geo
   tags: string[]
   created_at: string
 }
@@ -208,6 +209,8 @@ export interface ProxyCreate {
   username?: string
   password?: string
   tags?: string[]
+  /** Exit country (ISO code). Omit to have it looked up through the proxy. */
+  country?: string
 }
 
 export interface ProxyUpdate {
@@ -217,6 +220,8 @@ export interface ProxyUpdate {
   username?: string
   password?: string
   tags?: string[]
+  /** Exit country (ISO code); empty string clears it. */
+  country?: string
 }
 
 export interface ProxyUploadError {
@@ -265,6 +270,7 @@ export interface ProviderField {
   default: string | number | boolean | null
   placeholder: string | null
   help: string | null
+  details: string | null
   group: string
   options: ProviderOption[]
   options_preset: 'countries' | null
@@ -414,6 +420,14 @@ export interface RateLimitConfig {
   sticky_quarantine?: boolean
 }
 
+/** Intended pool size of a connector and how it is derived; total is null when there is no target. */
+export interface ProxyTarget {
+  total: number | null
+  per_country: number | null
+  countries: string[]
+  on_demand: string[]
+}
+
 export interface Connector {
   id: string
   name: string
@@ -426,6 +440,7 @@ export interface Connector {
   rate_limit_config: RateLimitConfig
   enabled: boolean
   proxy_count: number
+  target: ProxyTarget | null
   // Cloud provider error tracking
   last_error: string | null
   last_error_at: string | null
@@ -645,6 +660,11 @@ export const updateProjectProxy = async (projectId: string, proxyId: string, dat
 
 export const deleteProjectProxy = async (projectId: string, proxyId: string): Promise<void> => {
   await api.delete(`/projects/${projectId}/proxies/${proxyId}`)
+}
+
+export const locateProjectProxy = async (projectId: string, proxyId: string): Promise<Proxy> => {
+  const response = await api.post(`/projects/${projectId}/proxies/${proxyId}/locate`)
+  return response.data
 }
 
 export const unquarantineProjectProxy = async (projectId: string, proxyId: string): Promise<void> => {
