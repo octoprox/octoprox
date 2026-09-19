@@ -19,6 +19,7 @@ from api.core.auto_scaler import AutoScaler
 from api.core.config import Settings
 from api.core.demand_tracker import DemandTracker
 from api.core.domain_filter import is_domain_allowed
+from api.core.entity_index import ConnectorIndex, ProxyIndex
 from api.core.event_bus import EVENT_CHANNEL, RedisPubSubTransport, event_bus
 from api.core.health_checker import HealthChecker
 from api.core.leadership import Lease
@@ -110,9 +111,9 @@ class ProxyManager:
 
         # In-memory cache (loaded from Postgres on start)
         self._projects: dict[str, Project] = {}
-        self._proxies: dict[str, Proxy] = {}
+        self._proxies: ProxyIndex = ProxyIndex()
         self._credentials: dict[str, Credential] = {}
-        self._connectors: dict[str, Connector] = {}
+        self._connectors: ConnectorIndex = ConnectorIndex()
         # One lock per (connector, country) so a burst of -cc- requests provisions a group once
         self._geo_provision_locks: dict[tuple[str, str], asyncio.Lock] = {}
         # Per-project strategies (project_id -> strategy)
@@ -709,6 +710,7 @@ class ProxyManager:
                 self._proxies[pid] = fresh_proxy
             else:
                 existing_proxy.merge_definition_from(fresh_proxy)
+                self._proxies.reindex(pid)
 
         # Flush our own pending deltas first so Redis has them before
         # we read it back. Otherwise the upcoming ``_hydrate_from_redis``
@@ -1003,6 +1005,7 @@ class ProxyManager:
             self._proxies[proxy_id] = fresh
         else:
             existing.merge_definition_from(fresh)
+            self._proxies.reindex(proxy_id)
             if status_data:
                 existing.status = status_data["status"]
                 existing.last_check_latency_ms = status_data["latency_ms"]
@@ -1133,10 +1136,7 @@ class ProxyManager:
         for cid in connector_ids_to_remove:
             del self._connectors[cid]
 
-        self._proxies = {
-            pid: p for pid, p in self._proxies.items()
-            if p.connector_id not in connector_ids_to_remove
-        }
+        self._proxies.remove_groups(connector_ids_to_remove)
 
         logger.info("Removed project", project_id=project_id)
         await event_bus.publish(project_changed, self, entity_id=project_id, op="removed")
@@ -1284,7 +1284,7 @@ class ProxyManager:
     # Connector methods
     def get_connectors_for_project(self, project_id: str) -> list[Connector]:
         """Get all connectors for a project, ordered by creation time."""
-        connectors = [c for c in self._connectors.values() if c.project_id == project_id]
+        connectors = self._connectors.for_project(project_id)
         return sorted(connectors, key=lambda c: (c.created_at, c.id))
 
     def get_connector(self, connector_id: str) -> Connector | None:
@@ -1323,7 +1323,7 @@ class ProxyManager:
 
         # Only clear rate limiter state if the rate limit config actually changed
         if rate_limit_changed:
-            proxy_ids = [p.id for p in self._proxies.values() if p.connector_id == connector.id]
+            proxy_ids = [p.id for p in self._proxies.for_connector(connector.id)]
             self._rate_limiter.clear_connector_proxies(proxy_ids)
 
         self._connectors[connector.id] = connector
@@ -1414,10 +1414,7 @@ class ProxyManager:
         # Remove from cache
         del self._connectors[connector_id]
         # Also remove associated proxies from cache
-        self._proxies = {
-            pid: p for pid, p in self._proxies.items()
-            if p.connector_id != connector_id
-        }
+        self._proxies.remove_groups([connector_id])
         logger.info("Removed connector", connector_id=connector_id)
         await event_bus.publish(connector_changed, self, entity_id=connector_id, op="removed")
         return True
@@ -1476,10 +1473,8 @@ class ProxyManager:
                 routing config allows this host.
         """
         return [
-            c for c in self._connectors.values()
-            if c.project_id == project_id
-            and c.enabled
-            and (not target_host or is_domain_allowed(target_host, c.parsed_routing_config))
+            c for c in self._connectors.for_project(project_id)
+            if c.enabled and (not target_host or is_domain_allowed(target_host, c.parsed_routing_config))
         ]
 
     def _get_enabled_connector_ids(
@@ -1555,9 +1550,9 @@ class ProxyManager:
             connectors[c.id] = (declared, wanted is None and not declared and self._accepts_request_country(c))
 
         eligible: list[Proxy] = []
-        for p in self._proxies.values():
-            entry = connectors.get(p.connector_id)
-            if entry is None or p.status != ProxyStatus.HEALTHY:
+        for p in self._proxies.for_connectors(connectors):
+            entry = connectors[p.connector_id]
+            if p.status != ProxyStatus.HEALTHY:
                 continue
             if not include_quarantined and self._rate_limiter.is_quarantined(p.id):
                 continue
@@ -1627,10 +1622,7 @@ class ProxyManager:
         return provisioned
 
     def _has_geo_group(self, connector_id: str, country: str) -> bool:
-        return any(
-            p.connector_id == connector_id and p.metadata.get(META_GEO) == country
-            for p in self._proxies.values()
-        )
+        return any(p.metadata.get(META_GEO) == country for p in self._proxies.for_connector(connector_id))
 
     async def _wait_for_geo_group(self, connector_id: str, country: str, timeout: float = 3.0) -> None:
         """Poll the local cache until a peer's slot group for ``country`` shows up (or timeout)."""
@@ -1642,13 +1634,11 @@ class ProxyManager:
 
     def get_proxies_for_project(self, project_id: str) -> list[Proxy]:
         """Get all proxies for a project (via enabled connectors only)."""
-        connector_ids = self._get_enabled_connector_ids(project_id)
-        return [p for p in self._proxies.values() if p.connector_id in connector_ids]
+        return self._proxies.for_connectors(self._get_enabled_connector_ids(project_id))
 
     def get_all_proxies_for_project(self, project_id: str) -> list[Proxy]:
         """Get all proxies for a project, including those from disabled connectors."""
-        connector_ids = {c.id for c in self._connectors.values() if c.project_id == project_id}
-        return [p for p in self._proxies.values() if p.connector_id in connector_ids]
+        return self._proxies.for_connectors(c.id for c in self._connectors.for_project(project_id))
 
     def get_healthy_proxies_for_project(self, project_id: str) -> list[Proxy]:
         """Every healthy, non-quarantined proxy of the project's enabled connectors.
@@ -1658,12 +1648,9 @@ class ProxyManager:
         here even though untargeted requests do not use them. Routing goes
         through get_routable_proxies_for_project instead.
         """
-        connector_ids = self._get_enabled_connector_ids(project_id)
         return [
-            p for p in self._proxies.values()
-            if p.connector_id in connector_ids
-            and p.status == ProxyStatus.HEALTHY
-            and not self._rate_limiter.is_quarantined(p.id)
+            p for p in self._proxies.for_connectors(self._get_enabled_connector_ids(project_id))
+            if p.status == ProxyStatus.HEALTHY and not self._rate_limiter.is_quarantined(p.id)
         ]
 
     def get_routable_proxies_for_project(
@@ -1738,10 +1725,9 @@ class ProxyManager:
 
     def get_quarantined_count_for_project(self, project_id: str) -> int:
         """Get the number of quarantined proxies for a project."""
-        connector_ids = {c.id for c in self._connectors.values() if c.project_id == project_id and c.enabled}
         return sum(
-            1 for p in self._proxies.values()
-            if p.connector_id in connector_ids and self._rate_limiter.is_quarantined(p.id)
+            1 for p in self._proxies.for_connectors(self._get_enabled_connector_ids(project_id))
+            if self._rate_limiter.is_quarantined(p.id)
         )
 
     async def select_proxy_for_project(
@@ -2088,13 +2074,12 @@ class ProxyManager:
 
     def get_proxies_for_connector(self, connector_id: str) -> list[Proxy]:
         """Get all proxies for a specific connector."""
-        return [p for p in self._proxies.values() if p.connector_id == connector_id]
+        return self._proxies.for_connector(connector_id)
 
     def get_active_proxies_for_connector(self, connector_id: str) -> list[Proxy]:
         """Get active (non-draining, non-terminating) proxies for a connector."""
         return [
-            p for p in self._proxies.values()
-            if p.connector_id == connector_id
-            and p.status not in (ProxyStatus.DRAINING, ProxyStatus.TERMINATING)
+            p for p in self._proxies.for_connector(connector_id)
+            if p.status not in (ProxyStatus.DRAINING, ProxyStatus.TERMINATING)
         ]
 
