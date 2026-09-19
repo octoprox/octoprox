@@ -7,6 +7,8 @@ from typing import Any
 
 from starlette.testclient import TestClient
 
+from api.core.entity_index import ProxyIndex
+
 
 class TestProxyEndpoints:
     """Tests for proxy CRUD endpoints."""
@@ -302,7 +304,7 @@ class TestProxyEndpoints:
 
         # Simulate a peer instance that loaded the same proxies in a different order.
         manager = authenticated_client.app.state.proxy_manager
-        manager._proxies = dict(reversed(list(manager._proxies.items())))
+        manager._proxies = ProxyIndex(reversed(list(manager._proxies.items())))
 
         assert listed_ids() == created_ids
 

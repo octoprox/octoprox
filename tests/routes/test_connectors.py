@@ -7,6 +7,8 @@ from typing import Any
 
 from starlette.testclient import TestClient
 
+from api.core.entity_index import ConnectorIndex
+
 
 class TestConnectorEndpoints:
     """Tests for connector CRUD endpoints."""
@@ -63,7 +65,7 @@ class TestConnectorEndpoints:
         pinned = manager._connectors[created_ids[0]].created_at
         for cid in created_ids:
             manager._connectors[cid].created_at = pinned
-        manager._connectors = dict(reversed(list(manager._connectors.items())))
+        manager._connectors = ConnectorIndex(reversed(list(manager._connectors.items())))
 
         assert listed_ids() == sorted(created_ids)
 
