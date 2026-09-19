@@ -10,6 +10,7 @@ place a :class:`~api.models.proxy.Proxy` row is assembled from a descriptor.
 
 from __future__ import annotations
 
+import asyncio
 from abc import ABC, abstractmethod
 from typing import Any, Literal
 
@@ -155,7 +156,11 @@ class SyncStrategy(ABC):
 
     @abstractmethod
     async def refresh(self, proxies: list[Proxy]) -> SyncResult:
-        """Return ``(updated_proxies, proxy_ids_to_remove)``."""
+        """Return ``(changed_proxies, proxy_ids_to_remove)``.
+
+        Only proxies whose definition actually changed are returned, so the
+        syncer writes and announces nothing for a stable pool.
+        """
 
 
 class SessionModeStrategy(SyncStrategy):
@@ -533,19 +538,35 @@ class PortModeStrategy(SyncStrategy):
                 continue
             if country and proxy.metadata.get(META_COUNTRY) != country:
                 proxy.metadata[META_COUNTRY] = country
-            updated.append(proxy)
+                updated.append(proxy)  # only changed rows are written back and announced
         return updated, to_remove
 
     async def _refresh_by_discovery(self, proxies: list[Proxy]) -> SyncResult:
+        """Re-probe every proxy's exit, a few at a time, and report only what changed.
+
+        Probes run concurrently (``discovery.refresh_concurrency``) so a large
+        connector refreshes in seconds rather than one timeout at a time;
+        results are then applied in the original order so duplicate handling
+        stays deterministic. Proxies whose probe failed are left as they are.
+        """
+        discovery = self._spec.discovery
+        assert discovery is not None
+        semaphore = asyncio.Semaphore(discovery.refresh_concurrency)
+
+        async def probe(proxy: Proxy) -> tuple[int, str | None, str]:
+            index = self._slot_index(proxy)
+            async with semaphore:
+                ip, country = await self._discover(proxy, index, proxy.port)
+            return index, ip, country
+
+        results = await asyncio.gather(*(probe(p) for p in proxies))
+
         updated: list[Proxy] = []
         to_remove: list[str] = []
         seen: set[str] = set()
-        for proxy in proxies:
-            index = self._slot_index(proxy)
-            ip, country = await self._discover(proxy, index, proxy.port)
+        for proxy, (index, ip, country) in zip(proxies, results, strict=True):
             if ip is None:
-                updated.append(proxy)
-                continue
+                continue  # probe failed; keep what we know
             if ip in seen:
                 logger.warning("Duplicate IP on refresh, removing proxy", proxy_id=proxy.id, ip=ip)
                 to_remove.append(proxy.id)
@@ -559,9 +580,10 @@ class PortModeStrategy(SyncStrategy):
                     "Proxy IP changed", proxy_id=proxy.id, old_ip=proxy.metadata.get(META_DISCOVERED_IP), new_ip=ip
                 )
                 self._assign_ip(proxy, index, proxy.port, ip, country or proxy.metadata.get(META_COUNTRY, ""))
+                updated.append(proxy)
             elif country and proxy.metadata.get(META_COUNTRY) != country:
                 proxy.metadata[META_COUNTRY] = country
-            updated.append(proxy)
+                updated.append(proxy)
         return updated, to_remove
 
     # --- helpers -----------------------------------------------------------------

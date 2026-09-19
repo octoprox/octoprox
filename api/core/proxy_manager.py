@@ -1601,9 +1601,22 @@ class ProxyManager:
                     provider = self._descriptor_provider(connector)
                     if provider is None:
                         continue
-                    to_add = await provider.provision_country(
-                        self.get_proxies_for_connector(connector.id), country
-                    )
+                    # Postgres is the authority on what exists. A peer may have
+                    # provisioned this group moments ago and released the lease
+                    # before its proxy_changed events reached us; provisioning
+                    # from the local cache would then create a second group.
+                    existing = await self._fetch_connector_proxies(connector.id)
+                    for proxy in existing:
+                        if proxy.id not in self._proxies:
+                            await self.reload_proxy(proxy.id)
+                    if any(p.metadata.get(META_GEO) == country for p in existing):
+                        logger.debug(
+                            "Country slot group already provisioned by a peer",
+                            connector_id=connector.id, country=country,
+                        )
+                        provisioned = True
+                        continue
+                    to_add = await provider.provision_country(existing, country)
                     for proxy in to_add:
                         await self.add_proxy(proxy)
                     if to_add:
@@ -1620,6 +1633,11 @@ class ProxyManager:
                 finally:
                     await lease.release()
         return provisioned
+
+    async def _fetch_connector_proxies(self, connector_id: str) -> list[Proxy]:
+        """The connector's proxies as persisted in Postgres (authoritative across the cluster)."""
+        async with self._session_factory() as session:
+            return await ProxyRepository(session).get_by_connector(connector_id)
 
     def _has_geo_group(self, connector_id: str, country: str) -> bool:
         return any(p.metadata.get(META_GEO) == country for p in self._proxies.for_connector(connector_id))

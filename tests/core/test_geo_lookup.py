@@ -9,20 +9,22 @@ from unittest.mock import AsyncMock, MagicMock
 import httpx
 import pytest
 
+from api.core.config import Settings
 from api.core.geo_lookup import GeoLookup
 from api.models.proxy import Proxy, ProxyProtocol
 
 
-def _settings(**overrides: object) -> MagicMock:
-    settings = MagicMock()
-    settings.geo_lookup_enabled = True
-    settings.geo_lookup_url = "https://geo.example.test/myip.json"
-    settings.geo_lookup_ip_path = "ip"
-    settings.geo_lookup_country_path = "country"
-    settings.geo_lookup_timeout_seconds = 5.0
-    for key, value in overrides.items():
-        setattr(settings, key, value)
-    return settings
+def _settings(**overrides: object) -> Settings:
+    values: dict[str, object] = {
+        "geo_lookup_enabled": True,
+        "geo_lookup_url": "https://geo.example.test/myip.json",
+        "geo_lookup_ip_path": "ip",
+        "geo_lookup_country_path": "country",
+        "geo_lookup_timeout_seconds": 5.0,
+        "instance_id": "test-instance",
+    }
+    values.update(overrides)
+    return Settings(**values)  # type: ignore[arg-type]
 
 
 def _factory(payload: object, status: int = 200, seen: list[str] | None = None):

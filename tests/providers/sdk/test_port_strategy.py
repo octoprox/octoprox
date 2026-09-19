@@ -82,8 +82,9 @@ class TestOxylabsSequentialPorts:
         ]
         updated, to_remove = await self._provider(builtins, vendor, 3).refresh_ips(proxies)
         assert to_remove == ["b"]
-        assert [(p.id, p.metadata["discovered_ip"]) for p in updated] == [("a", "1.1.1.1"), ("c", "9.9.9.9")]
-        assert updated[1].display_host == "9.9.9.9"
+        # "a" is unchanged and therefore not reported; only "c" moved to a new IP.
+        assert [(p.id, p.metadata["discovered_ip"]) for p in updated] == [("c", "9.9.9.9")]
+        assert updated[0].display_host == "9.9.9.9"
 
 
 class TestBrightDataPinnedIps:
@@ -388,3 +389,37 @@ class TestRefreshDropsRelocatedProxies:
         held = Proxy(id="p1", host="isp.oxylabs.io", port=8001, connector_id="conn-1", status=ProxyStatus.HEALTHY, metadata={"discovered_ip": "1.1.1.1", "country": "US"})
         updated, to_remove = await provider.refresh_ips([held])
         assert to_remove == [] and updated[0].metadata["country"] == "FR"
+
+
+class TestRefreshReportsOnlyChanges:
+    async def test_stable_pool_reports_nothing_and_one_stale_country_is_fixed(self, builtins: dict[str, ProviderDescriptor]) -> None:
+        vendor = MockVendor(api_handler=lambda r: json_response({}))
+        vendor.discovery_handler = _geo_discovery_by_port({p: (f"1.1.1.{p - 8000}", "US") for p in range(8001, 8011)})(vendor)
+        credential = make_credential("oxylabs", {"proxy_type": "isp", "username": "alice", "password": "pw"})
+        provider = DescriptorProvider(builtins["oxylabs"], make_connector("oxylabs", {"num_proxies": 10}), credential, vendor.runtime())
+        proxies = [
+            Proxy(id=f"p{p}", host="isp.oxylabs.io", port=p, connector_id="conn-1", status=ProxyStatus.HEALTHY,
+                  metadata={"discovered_ip": f"1.1.1.{p - 8000}", "country": "US"})
+            for p in range(8001, 8011)
+        ]
+        proxies[3].metadata["country"] = "CA"  # stale location, as after a release that added country_path
+
+        updated, to_remove = await provider.refresh_ips(proxies)
+
+        assert len(vendor.discovery_requests) == 10  # every proxy probed
+        assert to_remove == []
+        assert [p.id for p in updated] == ["p8004"] and updated[0].metadata["country"] == "US"
+
+    async def test_failed_probe_leaves_proxy_untouched(self, builtins: dict[str, ProviderDescriptor]) -> None:
+        vendor = MockVendor(api_handler=lambda r: json_response({}))
+        vendor.discovery_handler = _geo_discovery_by_port({8001: None, 8002: ("2.2.2.2", "DE")})(vendor)
+        credential = make_credential("oxylabs", {"proxy_type": "isp", "username": "alice", "password": "pw"})
+        provider = DescriptorProvider(builtins["oxylabs"], make_connector("oxylabs", {"num_proxies": 2}), credential, vendor.runtime())
+        proxies = [
+            Proxy(id="a", host="isp.oxylabs.io", port=8001, connector_id="conn-1", metadata={"discovered_ip": "1.1.1.1", "country": "US"}),
+            Proxy(id="b", host="isp.oxylabs.io", port=8002, connector_id="conn-1", metadata={"discovered_ip": "2.2.2.2"}),
+        ]
+        updated, to_remove = await provider.refresh_ips(proxies)
+        assert to_remove == []
+        assert [p.id for p in updated] == ["b"] and updated[0].metadata["country"] == "DE"
+        assert proxies[0].metadata == {"discovered_ip": "1.1.1.1", "country": "US"}

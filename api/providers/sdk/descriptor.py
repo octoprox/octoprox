@@ -412,6 +412,9 @@ class IpDiscoverySpec(BaseModel):
         ge=1,
         description="Sequential-port strategy with a country filter: give up after scanning this many ports",
     )
+    refresh_concurrency: int = Field(
+        default=8, ge=1, le=64, description="How many proxies the periodic IP refresh probes at once"
+    )
 
     @field_validator("url")
     @classmethod

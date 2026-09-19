@@ -172,6 +172,8 @@ class TestOnDemandCountryGroups:
         async def fake_add(proxy: Proxy) -> None:
             manager._proxies[proxy.id] = proxy
         manager.add_proxy = fake_add  # type: ignore[method-assign]
+        # Postgres mirrors the cache unless a test says otherwise.
+        manager._fetch_connector_proxies = AsyncMock(side_effect=lambda cid: manager.get_proxies_for_connector(cid))  # type: ignore[method-assign]
         manager._redis_client.client.set = AsyncMock(return_value=True)
         manager._redis_client.client.eval = AsyncMock(return_value=1)
         manager._redis_client.client.delete = AsyncMock(return_value=1)
@@ -217,6 +219,27 @@ class TestOnDemandCountryGroups:
     async def test_geo_group_serves_only_its_country(self, manager: ProxyManager) -> None:
         await manager.select_proxy_for_project("project-1", country="DE")
         assert manager.get_routable_proxies_for_project("project-1", country="FR") == []
+
+    async def test_group_provisioned_by_a_peer_is_adopted_not_duplicated(self, manager: ProxyManager) -> None:
+        """Cluster: a peer created the DE group and released the lease before our cache heard about it."""
+        peer_slots = [
+            _healthy(Proxy(
+                id=f"peer-{i}", host="pr.oxylabs.io", port=7777, protocol=ProxyProtocol.HTTP,
+                username=f"customer-alice-cc-DE-sessid-peer{i}-sesstime-10", password="{password}",
+                connector_id="conn-any",
+                metadata={"provider": "oxylabs", "proxy_type": "residential", "session_id": f"peer{i}", "geo": "DE"},
+            ))
+            for i in range(2)
+        ]
+        in_db = {p.id: p for p in [*manager.get_proxies_for_connector("conn-any"), *peer_slots]}
+        manager._fetch_connector_proxies = AsyncMock(return_value=list(in_db.values()))  # type: ignore[method-assign]
+        manager.reload_proxy = AsyncMock(side_effect=lambda pid: manager._proxies.__setitem__(pid, in_db[pid]))  # type: ignore[method-assign]
+
+        selected = await manager.select_proxy_for_project("project-1", country="DE")
+
+        assert selected is not None and selected.id in {"peer-0", "peer-1"}
+        de_group = [p for p in manager._proxies.values() if p.metadata.get("geo") == "DE"]
+        assert sorted(p.id for p in de_group) == ["peer-0", "peer-1"]  # adopted, not doubled
 
     async def test_lease_lost_waits_and_provisions_nothing(self, manager: ProxyManager) -> None:
         manager._redis_client.client.set = AsyncMock(return_value=False)

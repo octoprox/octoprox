@@ -16,6 +16,7 @@ Proxies page.
 lookup runs per proxy in a cluster; the update then reaches peers through the
 regular cross-instance change feed.
 
+
 A future improvement is an offline lookup (for example a MaxMind database)
 that needs no request through the proxy.
 """
@@ -23,10 +24,11 @@ that needs no request through the proxy.
 from __future__ import annotations
 
 import asyncio
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 import structlog
 
+from api.core.config import Settings
 from api.core.signals import proxy_added
 from api.models.credential import CredentialType
 from api.models.proxy import Proxy
@@ -44,19 +46,19 @@ class GeoLookup:
     """Looks up a proxy's exit IP and country by requesting through it."""
 
     def __init__(
-        self, settings: Any, client_factory: ProxiedClientFactory | None = None, concurrency: int = 5
+        self, settings: Settings, client_factory: ProxiedClientFactory | None = None, concurrency: int = 5
     ) -> None:
-        self.enabled: bool = bool(settings.geo_lookup_enabled)
+        self.enabled = settings.geo_lookup_enabled
         self._spec = IpDiscoverySpec(
             url=settings.geo_lookup_url,
             ip_path=settings.geo_lookup_ip_path,
             country_path=settings.geo_lookup_country_path or None,
-            timeout_seconds=float(settings.geo_lookup_timeout_seconds),
+            timeout_seconds=settings.geo_lookup_timeout_seconds,
         )
         self._discoverer = IpDiscoverer(self._spec, client_factory=client_factory)
         self._semaphore = asyncio.Semaphore(concurrency)
         self._proxy_manager: ProxyManager | None = None
-        self._tasks: set[asyncio.Task[None]] = set()
+        self._tasks: set[asyncio.Task[None]] = set()  # in-flight lookups
 
     # --- lifecycle -----------------------------------------------------------------
 
@@ -69,10 +71,11 @@ class GeoLookup:
     async def stop(self) -> None:
         """Unsubscribe and cancel lookups still in flight."""
         proxy_added.disconnect(self._on_proxy_added)
-        for task in list(self._tasks):
+        tasks = list(self._tasks)
+        for task in tasks:
             task.cancel()
-        if self._tasks:
-            await asyncio.gather(*self._tasks, return_exceptions=True)
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
         self._tasks.clear()
 
     def wants_lookup(self, proxy: Proxy) -> bool:
@@ -84,7 +87,7 @@ class GeoLookup:
             return False
         return proxy.country is None
 
-    async def _on_proxy_added(self, sender: Any, proxy_id: str, connector_id: str, **_: Any) -> None:
+    async def _on_proxy_added(self, sender: object, proxy_id: str, connector_id: str, **_: object) -> None:
         """proxy_added handler: schedule a lookup without holding up the publisher."""
         if not self.enabled or self._proxy_manager is None:
             return

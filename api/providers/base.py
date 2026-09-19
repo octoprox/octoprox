@@ -55,7 +55,12 @@ class SyncableProvider(Protocol):
         ...
 
     async def refresh_ips(self, proxies: list[Proxy]) -> tuple[list[Proxy], list[str]]:
-        """Return ``(updated_proxies, proxy_ids_to_remove)`` after re-checking IPs."""
+        """Return ``(changed_proxies, proxy_ids_to_remove)`` after re-checking IPs.
+
+        Only proxies whose definition changed (IP, credentials, country) need
+        to be returned; the syncer persists and announces each one. Returning
+        unchanged proxies is harmless but costs a write and an event apiece.
+        """
         ...
 
 
