@@ -56,6 +56,24 @@ class ProxyServer:
         self._timeout = settings.connection_timeout
         self._client_tasks: set[asyncio.Task[None]] = set()
 
+    @property
+    def is_listening(self) -> bool:
+        """True while the listener socket is accepting client connections."""
+        return self._server is not None and self._server.is_serving()
+
+    @property
+    def active_connections(self) -> int:
+        """Number of client connections currently being served."""
+        return len(self._client_tasks)
+
+    @property
+    def port(self) -> int:
+        """The port actually bound, which differs from the configured one when it was 0."""
+        if self._server is not None and self._server.sockets:
+            bound: int = self._server.sockets[0].getsockname()[1]
+            return bound
+        return self._port
+
     async def start(self) -> None:
         """Start the proxy server."""
         self._server = await asyncio.start_server(

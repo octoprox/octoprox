@@ -550,6 +550,145 @@ provider credentials, protected only by the passphrase.
 
 ---
 
+## System Statistics
+
+Admin-only. One endpoint returning what exists in the install, what it costs in
+Postgres and Redis, and which background workers are alive. This is what the
+**Settings → System** page renders.
+
+```bash
+GET /api/v1/system/stats
+```
+
+Editors and viewers receive `403`.
+
+**Response sections:**
+
+| Section | Scope | Contents |
+|---------|-------|----------|
+| `runtime` | This instance | Version, instance id, role, uptime, ports, worker intervals. |
+| `inventory` | Whole install | Exact counts of projects, credentials, connectors, proxies, users and providers, plus the live pool's health breakdown. |
+| `projects` | Whole install | Per-project credential, connector and proxy counts, busiest first. |
+| `database` | Whole install | Database size, per-table size (indexes included), server connections and this instance's pool usage. |
+| `redis` | Whole install | Memory, throughput, hit rate and a breakdown of the keyspace by purpose. |
+| `cache` | This instance | Entry counts of every in-memory cache the process holds. |
+| `workers` | Mixed | `tasks` are this instance's background loops; `leases` and `instances` are cluster-wide. |
+
+**Scope matters behind a load balancer.** `runtime`, `cache` and
+`workers.tasks` describe only the instance that answered the request. With
+several replicas, repeated calls may land on different instances and report
+different numbers - that is accurate, not a bug. Everything Postgres- or
+Redis-derived is the same from every instance.
+
+**Cost.** Entity counts are exact. Table row counts are planner estimates
+(`pg_class.reltuples`), so they stay cheap on metric tables with millions of
+rows, drift until the next `ANALYZE`, and are `null` on a table autovacuum has
+not reached yet. The Redis keyspace breakdown is a bounded `SCAN`; past 50,000
+keys it reports a sample and sets `"truncated": true`.
+
+**Example (abridged):**
+```json
+{
+  "generated_at": "2026-09-19T21:52:35.740343",
+  "runtime": { "version": "2.2.2", "role": "all", "uptime_seconds": 3841.2 },
+  "inventory": {
+    "projects": 2, "credentials": 8, "connectors": 9, "connectors_enabled": 2,
+    "proxies": 29, "users": 1, "users_by_role": { "admin": 1 },
+    "proxies_by_status": { "healthy": 19, "unhealthy": 10 }
+  },
+  "database": {
+    "name": "octoprox",
+    "size_bytes": 8985623,
+    "tables": [
+      { "name": "proxies", "row_estimate": 29, "total_bytes": 294912,
+        "table_bytes": 65536, "index_bytes": 229376 }
+    ],
+    "backends": 2, "pool_size": 5, "pool_checked_out": 1
+  },
+  "redis": {
+    "used_memory_bytes": 1558312, "total_keys": 33, "ops_per_sec": 4,
+    "groups": [ { "label": "Proxy health", "keys": 29 } ],
+    "truncated": false
+  },
+  "workers": {
+    "tasks": [ { "name": "provider_syncer", "state": "running", "error": null } ],
+    "leases": [
+      { "name": "metrics_flusher", "kind": "Metrics flush", "target": null,
+        "holder": "66eb615b-…", "held_by_self": true, "ttl_ms": 4027 }
+    ],
+    "instances": [ { "instance_id": "66eb615b-…", "role": "all", "is_self": true, "ttl_seconds": 9 } ]
+  }
+}
+```
+
+A `workers.tasks` entry whose `state` is not `running` means a background loop
+on that instance has stopped; `error` carries the exception that ended it.
+`leases` answers "which instance is doing the singleton work right now" -
+metrics flushing, compaction and system snapshots globally, auto-scaling and
+provider sync (discovery and IP refresh) per connector.
+
+### System Trends
+
+```bash
+GET /api/v1/system/stats/history?range=24h
+```
+
+Admin-only. Returns the gauge history behind the **Trends** charts on the
+System page. Ranges: `1h`, `24h` (raw snapshots) and `7d`, `30d`, `90d`
+(averaged into buckets).
+
+Snapshots are written by the `system_snapshotter` worker on whichever instance
+holds its lease, so unlike the per-instance sections of `/system/stats`, this
+series reads the same from every instance.
+
+**Gauges, not counters.** These are readings like "how big is the database",
+so downsampling a range **averages** them. Summing, as the proxy and project
+metrics pipelines do for request counts, would invent a number that was never
+true at any instant. `bucket_seconds` is `null` for raw ranges and set when
+points are averages, so a chart can say which it is showing.
+
+| Field | Notes |
+|-------|-------|
+| `snapshots` | Points oldest-first: database and Redis size, Redis keys, entity counts, proxy totals by health. |
+| `table_growth` | Per-table size at both edges of the window plus the delta, biggest mover first. A difference between two points, so no bucketing is involved. |
+| `bucket_seconds` | Bucket width, or `null` when points are raw. |
+| `interval_seconds` | The configured snapshot cadence, so a client can tell a real gap from an expected one. |
+
+**Configuration** (`config/*.yaml`, or `OCTOPROX_SYSTEM_METRICS_*` env vars):
+
+```yaml
+system:
+  metrics_interval: 300        # seconds between snapshots; 0 disables the worker
+  metrics_retention_days: 90   # 0 keeps snapshots forever
+```
+
+The interval is floored at 60 seconds. At the default cadence this is one row
+every five minutes for the whole install - about 26k rows over the 90-day
+window - so retention alone keeps it bounded and there are no compaction tiers
+like the ones `proxy_metrics` and `project_metrics` use.
+
+**Example:**
+```json
+{
+  "range": "7d",
+  "bucket_seconds": 3600,
+  "interval_seconds": 300,
+  "snapshots": [
+    {
+      "timestamp": "2026-09-19T21:00:00",
+      "database_size_bytes": 8985623, "redis_memory_bytes": 1558312, "redis_keys": 33,
+      "projects": 2, "credentials": 8, "connectors": 9, "connectors_enabled": 2, "users": 1,
+      "proxies_total": 29, "proxies_healthy": 19, "proxies_unhealthy": 10
+    }
+  ],
+  "table_growth": [
+    { "name": "project_metrics", "first_bytes": 131072, "last_bytes": 212992, "delta_bytes": 81920 }
+  ]
+}
+```
+
+---
+
 ## Health Check
 
 Public endpoint for load balancer health checks:

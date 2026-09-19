@@ -19,6 +19,7 @@ from api.db.models import (
     ProviderDescriptorModel,
     ProxyMetricsModel,
     ProxyModel,
+    SystemMetricsModel,
     UserModel,
 )
 from api.models.connector import Connector
@@ -460,7 +461,7 @@ def _strip_tz(dt: datetime) -> datetime:
 
 
 def _bucket_expressions(
-    model: type[ProjectMetricsModel] | type[ProxyMetricsModel],
+    model: type[ProjectMetricsModel] | type[ProxyMetricsModel] | type[SystemMetricsModel],
     bucket_seconds: int,
 ) -> tuple[Any, Any]:
     """Build bucket-epoch and bucket-timestamp expressions for time bucketing.
@@ -927,6 +928,118 @@ class MetricsRepository:
         )
         result = await self._session.execute(query)
         return [row[0] for row in result.all()]
+
+
+# Gauge columns carried through the history endpoints, in chart order. Kept in
+# one place so the raw and the bucketed query can never drift apart.
+_SYSTEM_GAUGES: tuple[str, ...] = (
+    "database_size_bytes",
+    "redis_memory_bytes",
+    "redis_keys",
+    "projects",
+    "credentials",
+    "connectors",
+    "connectors_enabled",
+    "users",
+    "proxies_total",
+    "proxies_healthy",
+    "proxies_unhealthy",
+)
+
+
+class SystemMetricsRepository:
+    """Reads and writes install-wide gauge snapshots."""
+
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+
+    async def save_snapshot(self, **values: Any) -> None:
+        """Insert one snapshot row. Caller commits."""
+        self._session.add(SystemMetricsModel(timestamp=utc_now(), **values))
+
+    async def get_latest_timestamp(self) -> datetime | None:
+        """Timestamp of the newest snapshot, or None when the table is empty.
+
+        The snapshotter uses this to decide whether a tick is due, so a
+        restart or a lease handover does not write an off-cadence extra row.
+        """
+        query = select(SystemMetricsModel.timestamp).order_by(
+            SystemMetricsModel.timestamp.desc()
+        ).limit(1)
+        result = await self._session.execute(query)
+        return result.scalar_one_or_none()
+
+    async def get_history(self, since: datetime, limit: int = 2000) -> list[dict[str, Any]]:
+        """Raw snapshots since ``since``, oldest first."""
+        query = (
+            select(SystemMetricsModel)
+            .where(SystemMetricsModel.timestamp >= since)
+            .order_by(SystemMetricsModel.timestamp.desc())
+            .limit(limit)
+        )
+        result = await self._session.execute(query)
+        models = list(result.scalars().all())
+        models.reverse()
+        return [
+            {"timestamp": m.timestamp, **{g: getattr(m, g) for g in _SYSTEM_GAUGES}}
+            for m in models
+        ]
+
+    async def get_history_aggregated(
+        self, since: datetime, bucket_seconds: int
+    ) -> list[dict[str, Any]]:
+        """Snapshots downsampled into fixed-width buckets, oldest first.
+
+        Every column is averaged. These are gauges - a database size or a proxy
+        count - so summing them across a bucket would invent a number that was
+        never true at any instant. Counts are rounded back to whole units.
+        """
+        bucket_epoch, bucket_ts = _bucket_expressions(SystemMetricsModel, bucket_seconds)
+        agg_cols = [
+            func.avg(getattr(SystemMetricsModel, gauge)).label(gauge) for gauge in _SYSTEM_GAUGES
+        ]
+
+        query = (
+            select(bucket_ts, *agg_cols)
+            .where(SystemMetricsModel.timestamp >= since)
+            .group_by(bucket_epoch)
+            .order_by(bucket_epoch.asc())
+        )
+        result = await self._session.execute(query)
+        return [
+            {
+                "timestamp": row.bucket_ts,
+                **{gauge: int(round(float(getattr(row, gauge) or 0))) for gauge in _SYSTEM_GAUGES},
+            }
+            for row in result.all()
+        ]
+
+    async def get_table_sizes_at_edges(
+        self, since: datetime
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        """The per-table sizes from the oldest and newest snapshot in the window.
+
+        Growth per table is a difference between two points, so it needs no
+        bucketing - which is why these breakdowns stay in a JSON column
+        instead of being normalised into rows.
+        """
+        base = select(SystemMetricsModel.table_sizes).where(
+            SystemMetricsModel.timestamp >= since
+        )
+        oldest = await self._session.execute(
+            base.order_by(SystemMetricsModel.timestamp.asc()).limit(1)
+        )
+        newest = await self._session.execute(
+            base.order_by(SystemMetricsModel.timestamp.desc()).limit(1)
+        )
+        return oldest.scalar_one_or_none() or {}, newest.scalar_one_or_none() or {}
+
+    async def delete_older_than(self, cutoff: datetime) -> int:
+        """Drop snapshots past the retention window. Caller commits."""
+        result = await self._session.execute(
+            delete(SystemMetricsModel).where(SystemMetricsModel.timestamp < cutoff)
+        )
+        return int(result.rowcount or 0)  # type: ignore[attr-defined]
 
 
 class UserRepository:

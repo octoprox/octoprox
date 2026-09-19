@@ -8,6 +8,7 @@ from typing import Any
 
 from sqlalchemy import (
     JSON,
+    BigInteger,
     Boolean,
     DateTime,
     Float,
@@ -208,6 +209,47 @@ class ProjectMetricsModel(Base):
     bytes_sent: Mapped[int] = mapped_column(Integer, default=0)
     bytes_received: Mapped[int] = mapped_column(Integer, default=0)
     granularity: Mapped[int] = mapped_column(Integer, default=60, nullable=False)
+
+
+class SystemMetricsModel(Base):
+    """Periodic install-wide gauge readings, for the admin trend charts.
+
+    Distinct from the other two metrics tables in three ways, all consequences
+    of these being gauges rather than counters:
+
+    * One row per snapshot for the whole install, not per entity - so the
+      volume is small enough that retention alone replaces compaction tiers.
+    * Downsampling a range AVERAGES these columns. Summing a database size
+      across a bucket would be meaningless.
+    * There is no ``granularity`` column, because rows are never rewritten
+      into coarser ones.
+    """
+
+    __tablename__ = "system_metrics"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    timestamp: Mapped[datetime] = mapped_column(DateTime, default=utc_now, index=True)
+
+    # Storage
+    database_size_bytes: Mapped[int] = mapped_column(BigInteger, default=0)
+    redis_memory_bytes: Mapped[int] = mapped_column(BigInteger, default=0)
+    redis_keys: Mapped[int] = mapped_column(BigInteger, default=0)
+
+    # Inventory
+    projects: Mapped[int] = mapped_column(Integer, default=0)
+    credentials: Mapped[int] = mapped_column(Integer, default=0)
+    connectors: Mapped[int] = mapped_column(Integer, default=0)
+    connectors_enabled: Mapped[int] = mapped_column(Integer, default=0)
+    users: Mapped[int] = mapped_column(Integer, default=0)
+
+    # Pool
+    proxies_total: Mapped[int] = mapped_column(Integer, default=0)
+    proxies_healthy: Mapped[int] = mapped_column(Integer, default=0)
+    proxies_unhealthy: Mapped[int] = mapped_column(Integer, default=0)
+
+    # Breakdowns: {table_name: total_bytes} and {status: count}
+    table_sizes: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    proxy_status_counts: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
 
 
 class ProviderDescriptorModel(Base):

@@ -122,6 +122,12 @@ class TLSCertManager:
         """Path to the CA certificate file."""
         return self._ca_cert_path
 
+    @property
+    def cached_contexts(self) -> int:
+        """Number of per-host TLS server contexts currently cached."""
+        with self._cache_lock:
+            return len(self._context_cache)
+
     async def bootstrap(
         self,
         redis_client: RedisClient,

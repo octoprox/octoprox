@@ -37,6 +37,35 @@ LEASE_KEY = "lease:{name}"
 # Cross-instance autoscaler cooldown state (hash, field=connector_id)
 AUTOSCALER_LAST_ACTION_KEY = "autoscaler:last_action"
 
+# Logical grouping of the keyspace, used by the admin system view to report
+# what Redis memory is being spent on. Every prefix written above appears
+# here; anything unmatched falls into ``OTHER_KEY_GROUP``.
+REDIS_KEY_GROUPS: tuple[tuple[str, str], ...] = (
+    ("proxy:status:", "Proxy health"),
+    ("proxy:metrics:", "Proxy metrics"),
+    ("proxy:quarantine:", "Quarantine"),
+    ("proxy:requests:", "Rate-limit windows"),
+    ("project:metrics:", "Project metrics"),
+    ("sticky:", "Sticky bindings"),
+    ("session:", "Sessions"),
+    ("mitm:requests:", "MITM captures"),
+    ("instance_registry:", "Instance heartbeats"),
+    ("lease:", "Worker leases"),
+    ("autoscaler:", "Auto-scaler state"),
+)
+
+OTHER_KEY_GROUP = "Other"
+
+LEASE_SCAN = "lease:*"
+
+
+def classify_key(key: str) -> str:
+    """Return the :data:`REDIS_KEY_GROUPS` label a Redis key belongs to."""
+    for prefix, label in REDIS_KEY_GROUPS:
+        if key.startswith(prefix):
+            return label
+    return OTHER_KEY_GROUP
+
 
 class RedisClient:
     """Redis client wrapper for operational data.

@@ -1008,5 +1008,191 @@ export const setPasswordWithToken = async (token: string, password: string): Pro
   return data
 }
 
+// System statistics (admin only)
+export interface SystemRuntime {
+  version: string
+  instance_id: string
+  role: string
+  environment: string
+  python_version: string
+  platform: string
+  pid: number
+  started_at: string | null
+  uptime_seconds: number
+  api_port: number
+  proxy_port: number
+  log_level: string
+  health_check_interval: number
+  metrics_flush_interval: number
+  ip_refresh_interval: number
+}
+
+export interface SystemInventory {
+  projects: number
+  credentials: number
+  connectors: number
+  connectors_enabled: number
+  connectors_failing: number
+  proxies: number
+  users: number
+  users_active: number
+  users_by_role: Record<string, number>
+  providers_total: number
+  providers_builtin: number
+  providers_custom: number
+  custom_providers_enabled: number
+  proxies_by_status: Record<string, number>
+}
+
+export interface SystemProjectUsage {
+  id: string
+  name: string
+  credentials: number
+  connectors: number
+  proxies: number
+}
+
+export interface SystemTableStats {
+  name: string
+  row_estimate: number | null
+  total_bytes: number
+  table_bytes: number
+  index_bytes: number
+}
+
+export interface SystemDatabase {
+  name: string
+  size_bytes: number
+  tables: SystemTableStats[]
+  backends: number | null
+  pool_size: number | null
+  pool_checked_out: number | null
+  error: string | null
+}
+
+export interface SystemRedis {
+  version: string
+  uptime_seconds: number
+  used_memory_bytes: number
+  used_memory_peak_bytes: number
+  used_memory_rss_bytes: number
+  maxmemory_bytes: number
+  connected_clients: number
+  ops_per_sec: number
+  keyspace_hits: number
+  keyspace_misses: number
+  total_keys: number
+  groups: { label: string; keys: number }[]
+  scanned_keys: number
+  truncated: boolean
+  error: string | null
+}
+
+export interface SystemCache {
+  projects: number
+  credentials: number
+  connectors: number
+  proxies: number
+  project_strategies: number
+  geo_provision_locks: number
+  pending_proxy_deltas: number
+  pending_project_deltas: number
+  quarantined_proxies: number
+  tls_contexts: number
+  provider_types: number
+}
+
+export type WorkerState = 'running' | 'done' | 'cancelled' | 'failed'
+
+export interface SystemWorkerTask {
+  name: string
+  description: string
+  state: WorkerState
+  error: string | null
+}
+
+export interface SystemLease {
+  name: string
+  kind: string
+  target: string | null
+  holder: string
+  held_by_self: boolean
+  ttl_ms: number
+}
+
+export interface SystemInstance {
+  instance_id: string
+  role: string
+  is_self: boolean
+  ttl_seconds: number
+}
+
+export interface SystemWorkers {
+  tasks: SystemWorkerTask[]
+  leases: SystemLease[]
+  instances: SystemInstance[]
+  proxy_server_listening: boolean
+  proxy_server_connections: number
+  geo_lookup_enabled: boolean
+  geo_lookups_in_flight: number
+}
+
+export interface SystemStats {
+  generated_at: string
+  runtime: SystemRuntime
+  inventory: SystemInventory
+  projects: SystemProjectUsage[]
+  database: SystemDatabase
+  redis: SystemRedis
+  cache: SystemCache
+  workers: SystemWorkers
+}
+
+export const fetchSystemStats = async (): Promise<SystemStats> => {
+  const response = await api.get('/system/stats')
+  return response.data
+}
+
+export const SYSTEM_HISTORY_RANGES = ['1h', '24h', '7d', '30d', '90d'] as const
+export type SystemHistoryRange = (typeof SYSTEM_HISTORY_RANGES)[number]
+
+export interface SystemMetricsPoint {
+  timestamp: string
+  database_size_bytes: number
+  redis_memory_bytes: number
+  redis_keys: number
+  projects: number
+  credentials: number
+  connectors: number
+  connectors_enabled: number
+  users: number
+  proxies_total: number
+  proxies_healthy: number
+  proxies_unhealthy: number
+}
+
+export interface TableGrowth {
+  name: string
+  first_bytes: number
+  last_bytes: number
+  delta_bytes: number
+}
+
+export interface SystemMetricsHistory {
+  range: SystemHistoryRange
+  /** Null when points are raw snapshots; set when they are bucket averages. */
+  bucket_seconds: number | null
+  interval_seconds: number
+  snapshots: SystemMetricsPoint[]
+  table_growth: TableGrowth[]
+}
+
+export const fetchSystemHistory = async (
+  range: SystemHistoryRange
+): Promise<SystemMetricsHistory> => {
+  const response = await api.get('/system/stats/history', { params: { range } })
+  return response.data
+}
+
 export default api
 

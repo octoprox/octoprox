@@ -71,6 +71,7 @@ def test_settings(
         log_level="DEBUG",
         health_check_interval=3600,  # Disable health checks in tests
         metrics_flush_interval=3600,  # Disable metrics flushing in tests
+        system_metrics_interval=0,  # No background system snapshots in tests
         proxy_port=0,  # Use port 0 to let OS assign a free port
         geo_lookup_enabled=False,  # No requests through proxies in tests
     )
@@ -127,6 +128,7 @@ async def db_session(
     async with db_engine.begin() as conn:
         # Use CASCADE to handle foreign key constraints
         await conn.execute(text("TRUNCATE TABLE proxy_metrics CASCADE"))
+        await conn.execute(text("TRUNCATE TABLE system_metrics CASCADE"))
         await conn.execute(text("TRUNCATE TABLE proxies CASCADE"))
         await conn.execute(text("TRUNCATE TABLE connectors CASCADE"))
         await conn.execute(text("TRUNCATE TABLE credentials CASCADE"))
@@ -195,6 +197,7 @@ def app_with_lifespan(test_settings: Settings) -> Any:
     import api.db.session
     import api.main
     import api.routes.auth
+    import api.routes.system
     from api.db.session import get_async_session_factory
     from api.main import create_app
 
@@ -208,6 +211,7 @@ def app_with_lifespan(test_settings: Settings) -> Any:
     api.routes.auth.settings = test_settings
     api.core.auth.settings = test_settings
     api.db.session.settings = test_settings
+    api.routes.system.settings = test_settings
 
     app = create_app()
 

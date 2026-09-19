@@ -14,6 +14,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
+from api import __version__
+from api.core import utc_now
 from api.core.auth import require_auth
 from api.core.config import settings
 from api.core.geo_lookup import GeoLookup
@@ -37,6 +39,7 @@ from api.routes import (
     projects,
     providers,
     proxies,
+    system,
     users,
 )
 
@@ -48,7 +51,8 @@ logger = structlog.get_logger()
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Application lifespan manager."""
-    logger.info("Starting Octoprox", version="0.1.0")
+    logger.info("Starting Octoprox", version=__version__)
+    app.state.started_at = utc_now()
 
     # Run database migrations (uses sync URL)
     logger.info("Running database migrations")
@@ -95,6 +99,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     )
     await cert_manager.bootstrap(redis_client, settings.instance_id)
     mitm_handler = MitmHandler(cert_manager, redis_client=redis_client)
+    app.state.cert_manager = cert_manager
 
     # Start the HTTP proxy server
     proxy_server = ProxyServer(proxy_manager, mitm_handler=mitm_handler)
@@ -116,7 +121,7 @@ def create_app() -> FastAPI:
     app = FastAPI(
         title="Octoprox",
         description="A dynamic and flexible proxy manager",
-        version="0.1.0",
+        version=__version__,
         lifespan=lifespan,
     )
 
@@ -168,6 +173,9 @@ def create_app() -> FastAPI:
     )
     app.include_router(
         backup.router, prefix="/api/v1", tags=["Backup"], dependencies=auth_dependency
+    )
+    app.include_router(
+        system.router, prefix="/api/v1", tags=["System"], dependencies=auth_dependency
     )
 
     # Serve frontend static files in production (when web/dist exists)
