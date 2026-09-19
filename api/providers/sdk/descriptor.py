@@ -114,7 +114,10 @@ class FieldSpec(BaseModel):
     )
     default: str | int | float | bool | None = None
     placeholder: str | None = None
-    help: str | None = None
+    help: str | None = Field(default=None, description="One short sentence shown under the control")
+    details: str | None = Field(
+        default=None, description="Longer explanation shown behind an info icon next to the label"
+    )
     group: str = "general"
     options: list[OptionSpec] = Field(default_factory=list)
     options_preset: Literal["countries"] | None = None
@@ -349,12 +352,16 @@ class ValidationSpec(BaseModel):
 
 
 class TemplatePart(BaseModel):
-    """A segment of a composed template, included only when ``when`` holds."""
+    """A segment of a composed template, included only when ``when`` holds.
+
+    ``when`` may be one condition or a list, in which case every condition
+    must hold (e.g. include a country only while no IP is pinned yet).
+    """
 
     model_config = ConfigDict(extra="forbid")
 
     text: str
-    when: Condition | None = None
+    when: Condition | list[Condition] | None = None
 
 
 class TemplateSpec(BaseModel):
@@ -386,6 +393,10 @@ class IpDiscoverySpec(BaseModel):
 
     url: str = "https://httpbin.org/ip"
     ip_path: str = Field(default="origin", description="JMESPath into the JSON body; '@text' for raw text")
+    country_path: str | None = Field(
+        default=None,
+        description="JMESPath to the exit country (ISO code) in the JSON body; recorded on the proxy when present",
+    )
     timeout_seconds: float = Field(default=30.0, gt=0)
     max_retries_per_slot: int = Field(
         default=3, ge=1, description="Fixed-port strategy: attempts per slot when the IP duplicates one we have"
@@ -395,6 +406,11 @@ class IpDiscoverySpec(BaseModel):
     )
     max_consecutive_duplicates: int = Field(
         default=3, ge=1, description="Sequential-port strategy: stop after this many ports in a row return known IPs"
+    )
+    max_scan_ports: int = Field(
+        default=500,
+        ge=1,
+        description="Sequential-port strategy with a country filter: give up after scanning this many ports",
     )
 
     @field_validator("url")
@@ -585,6 +601,18 @@ class ProviderDescriptor(BaseModel):
     def find_field(self, scope: FieldScope, key: str) -> FieldSpec | None:
         fields = self.credential_fields if scope == "credential" else self.connector_fields
         return next((f for f in fields if f.key == key), None)
+
+    def country_field(self) -> FieldSpec | None:
+        """The connector field holding the connector's countries, if the descriptor has one.
+
+        A field of type ``country`` or a select using the ``countries``
+        preset. Its value may be one code or a list; slots are provisioned
+        per listed country.
+        """
+        return next(
+            (f for f in self.connector_fields if f.type == "country" or f.options_preset == "countries"),
+            None,
+        )
 
     def secret_keys(self) -> set[str]:
         """Config keys whose values must never be baked into stored proxies."""

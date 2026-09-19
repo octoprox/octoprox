@@ -278,8 +278,9 @@ class TestProxyRequest:
             {"zone_name": "isp_zone", "zone_password": "zp", "proxy_type": "isp", "num_proxies": 3, "country_code": "US"},
         )
         assert outcome.ok, outcome.message
-        assert outcome.result["proxy"]["username"] == "brd-customer-c_777-zone-isp_zone-ip-1.1.1.1-country-us"
-        assert vendor.discovery_requests[0][0] == "http://brd-customer-c_777-zone-isp_zone-ip-1.1.1.1-country-us:zp@brd.superproxy.io:44445"
+        # Once the IP is pinned the country is left out; only the pre-pin discovery request carried it.
+        assert outcome.result["proxy"]["username"] == "brd-customer-c_777-zone-isp_zone-ip-1.1.1.1"
+        assert vendor.discovery_requests[0][0] == "http://brd-customer-c_777-zone-isp_zone-ip-1.1.1.1:zp@brd.superproxy.io:44445"
         # Validation trace first (redacted), then the proxied request.
         assert [t.url for t in outcome.traces] == ["https://api.brightdata.com/status", "https://httpbin.org/ip"]
         assert outcome.traces[0].headers["Authorization"] == "***"

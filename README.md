@@ -10,6 +10,7 @@ A dynamic and flexible proxy manager that acts as an intelligent proxy aggregato
 - **Proxy Providers & SDK**: Oxylabs, Bright Data, Decodo, Webshare, IPRoyal and NetNut ship as declarative descriptors; admins add any other vendor from the UI without code or a redeploy (see [docs/providers.md](docs/providers.md))
 - **Static Proxy Support**: Manage manually configured proxy servers
 - **Routing Strategies**: Round-robin, least-used, random, sticky session, and health-based routing
+- **Per-request Targeting**: Pick a sticky session (`-sessid-`) or an exit country (`-cc-`) from the proxy username, so one project can serve many locations
 - **Health Monitoring**: Automatic health checks with configurable intervals and thresholds
 - **Performance Metrics**: Track latency, success rates, and request counts per proxy
 - **REST API**: Full CRUD operations for managing projects, credentials, connectors, and proxies

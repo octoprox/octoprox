@@ -73,9 +73,14 @@ class FieldSetValidator:
                 # Hidden fields are dropped so stale values never leak into templates.
                 continue
             try:
-                result[spec.key] = self._coerce(spec, raw, remote=self._uses_remote_options(spec, ctx))
+                coerced = self._coerce(spec, raw, remote=self._uses_remote_options(spec, ctx))
             except ValueError as exc:
                 errors.append(str(exc))
+                continue
+            if coerced == []:
+                # An empty country list means "no restriction"; leave the key out.
+                continue
+            result[spec.key] = coerced
         for key in self._extra_allowed:
             if key in source and source[key] is not None:
                 result[key] = source[key]
@@ -89,11 +94,18 @@ class FieldSetValidator:
             return False
         return self._renderer.evaluate(spec.options_from_when, ctx)
 
+    @staticmethod
+    def is_country_field(spec: FieldSpec) -> bool:
+        """Country fields hold a list of ISO codes (one code is a one-element list)."""
+        return spec.type == "country" or spec.options_preset == "countries"
+
     def _coerce(self, spec: FieldSpec, raw: Any, *, remote: bool = False) -> Any:
         if spec.type == "number":
             return self._coerce_number(spec, raw)
         if spec.type == "boolean":
             return self._coerce_bool(spec, raw)
+        if self.is_country_field(spec):
+            return self._coerce_countries(spec, raw, remote=remote)
         text = str(raw)
         if spec.transform == "strip" or spec.type != "textarea":
             text = text.strip()
@@ -101,10 +113,6 @@ class FieldSetValidator:
             text = text.upper()
         elif spec.transform == "lower":
             text = text.lower()
-        if spec.type == "country":
-            text = text.upper()
-            if not COUNTRY_CODE_PATTERN.match(text):
-                raise ValueError(f"{spec.label} must be a 2-letter country code (e.g. US, GB)")
         if spec.type == "url" and not re.match(r"^https?://\S+$", text):
             raise ValueError(f"{spec.label} must be an http(s) URL")
         if spec.pattern is not None and not re.search(spec.pattern, text):
@@ -121,6 +129,29 @@ class FieldSetValidator:
         if spec.max is not None and len(text) > spec.max:
             raise ValueError(f"{spec.label} must be at most {int(spec.max)} characters")
         return text
+
+    def _coerce_countries(self, spec: FieldSpec, raw: Any, *, remote: bool) -> list[str]:
+        """Normalise a country field to a list of upper-case ISO codes.
+
+        Accepts a list or a comma-separated string. Codes must be two letters
+        and, for preset-backed selects, members of the preset (unless the
+        field's options come from the vendor API).
+        """
+        items: list[Any] = raw.split(",") if isinstance(raw, str) else list(raw) if isinstance(raw, list | tuple) else [raw]
+        allowed = None if remote else self._static_option_values(spec)
+        codes: list[str] = []
+        for item in items:
+            text = str(item).strip().upper()
+            if not text:
+                continue
+            if not COUNTRY_CODE_PATTERN.match(text):
+                raise ValueError(f"{spec.label} must be a 2-letter country code (e.g. US, GB)")
+            if allowed is not None and text not in allowed:
+                choices = ", ".join(sorted(v for v in allowed if v))
+                raise ValueError(f"{spec.label} must be one of: {choices}")
+            if text not in codes:
+                codes.append(text)
+        return codes
 
     @staticmethod
     def _coerce_number(spec: FieldSpec, raw: Any) -> int | float:

@@ -29,7 +29,7 @@ def test_defaults_coercion_and_normalisation() -> None:
         "username": "alice",
         "password": "pw",
         "num_proxies": 3,
-        "country_code": "US",
+        "country_code": ["US"],
         "mode": "a",
         "enabled_thing": True,
         "lifetime": "10m",
@@ -79,10 +79,12 @@ def test_preset_options_membership() -> None:
     validator = FieldSetValidator(
         [FieldSpec(key="country_code", label="Country", type="select", options_preset="countries")],
         "connector",
-        presets={"countries": [OptionSpec(value="", label="All"), OptionSpec(value="US", label="United States")]},
+        presets={"countries": [OptionSpec(value="", label="All"), OptionSpec(value="US", label="United States"), OptionSpec(value="GB", label="United Kingdom")]},
     )
     assert validator.validate({"country_code": ""}) == {}
-    assert validator.validate({"country_code": "US"}) == {"country_code": "US"}
+    assert validator.validate({"country_code": "US"}) == {"country_code": ["US"]}
+    assert validator.validate({"country_code": "us, gb"}) == {"country_code": ["US", "GB"]}
+    assert validator.validate({"country_code": ["GB", "us", "GB"]}) == {"country_code": ["GB", "US"]}
     with pytest.raises(ConfigValidationError):
         validator.validate({"country_code": "XX"})
 
@@ -100,11 +102,11 @@ def test_remote_options_skip_static_membership_only_when_active() -> None:
     )
     validator = FieldSetValidator([field], "connector", presets={"countries": [OptionSpec(value="US", label="US")]})
     # ISP: options come from the vendor, so any code is accepted.
-    assert validator.validate({"country_code": "xx", "proxy_type": "isp"}) == {"country_code": "xx"}
+    assert validator.validate({"country_code": "xx", "proxy_type": "isp"}) == {"country_code": ["XX"]}
     # Residential: static preset applies.
     with pytest.raises(ConfigValidationError):
         validator.validate({"country_code": "xx", "proxy_type": "residential"})
-    assert validator.validate({"country_code": "us", "proxy_type": "residential"}) == {"country_code": "US"}
+    assert validator.validate({"country_code": "us", "proxy_type": "residential"}) == {"country_code": ["US"]}
 
 
 def test_field_spec_option_source_rules() -> None:

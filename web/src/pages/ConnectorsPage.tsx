@@ -20,10 +20,11 @@ import { DataTable } from '../components/DataTable'
 import { Page, EmptyState } from '../components/layout/Page'
 import { NewCredentialPanel, TypePicker, TypeCard } from '../components/CredentialForm'
 import { ProviderLogo } from '../components/ProviderLogo'
-import { SchemaForm, defaultValues, serializeValues } from '../components/SchemaForm'
+import { SchemaForm, MultiCountryPicker, defaultValues, serializeValues, splitCountries } from '../components/SchemaForm'
 import { relativeTime, formatDateTime, formatDate } from '../utils/format'
+import { targetTotal, describeTarget } from '../utils/connectors'
 import { RichSelect, RichSelectOption } from '../components/RichSelect'
-import { Button, Input, Label, Badge, Alert, ChipInput, Inspector, Tabs, ConfirmDialog, KeyValue, InspectorSection } from '../components/ui'
+import { Button, Input, Label, Badge, Alert, ChipInput, Inspector, Tabs, ConfirmDialog, KeyValue, InspectorSection, InfoTip } from '../components/ui'
 
 type DomainFilterMode = 'none' | 'whitelist' | 'blacklist'
 type ConfigTab = string
@@ -41,14 +42,6 @@ const EMPTY_FORM: ConnectorFormData = { name: '', credential_id: '', config: {},
 
 // ---------------------------------------------------------------------------
 // Helpers shared by the table and the editor
-
-const getConfiguredProxies = (connector: Connector): number | null => {
-  const config = connector.config
-  if (!connector.credential_type || connector.credential_type === 'static_proxy_provider') return null
-  if (typeof config.num_proxies === 'number') return config.num_proxies
-  if (typeof config.max_proxies === 'number') return config.max_proxies
-  return null
-}
 
 const CLOUD_TYPES = new Set(['aws', 'gcp', 'azure'])
 
@@ -146,10 +139,10 @@ export default function ConnectorsPage() {
       header: 'Proxies',
       size: 150,
       cell: ({ row }) => {
-        const max = getConfiguredProxies(row.original)
+        const max = targetTotal(row.original)
         const n = row.original.proxy_count
         return (
-          <span className="inline-flex items-center gap-2.5">
+          <span className="inline-flex items-center gap-2.5" title={describeTarget(row.original)}>
             <span className="tabular-nums font-medium">{n}{max != null && <span className="text-fg-subtle font-normal"> / {max}</span>}</span>
             {max != null && max > 0 && (
               <span className="w-16 h-1 rounded-full bg-primary-soft overflow-hidden inline-block">
@@ -301,7 +294,7 @@ function ConnectorEditor({ connector, canMutate, onClose, onDelete, onSaved }: {
     if (!connector) return EMPTY_FORM
     const configForForm: Record<string, string> = {}
     for (const [key, value] of Object.entries(connector.config || {})) {
-      configForForm[key] = key === 'tags' && typeof value === 'object' ? JSON.stringify(value) : String(value ?? '')
+      configForForm[key] = key === 'tags' && typeof value === 'object' ? JSON.stringify(value) : Array.isArray(value) ? value.join(',') : String(value ?? '')
     }
     return {
       name: connector.name,
@@ -313,7 +306,7 @@ function ConnectorEditor({ connector, canMutate, onClose, onDelete, onSaved }: {
     }
   })
   const [activeTab, setActiveTab] = useState<ConfigTab>(() => {
-    if (connector?.credential_type === 'static_proxy_provider') return 'routing'
+    if (connector?.credential_type === 'static_proxy_provider') return 'general'
     if (connector?.credential_type && !CLOUD_TYPES.has(connector.credential_type)) return 'general'
     return 'infrastructure'
   })
@@ -366,7 +359,7 @@ function ConnectorEditor({ connector, canMutate, onClose, onDelete, onSaved }: {
     const creds = credentialsData?.credentials.filter((c) => c.type === t) || []
     const p = getProvider(t)
     setFormData({ ...EMPTY_FORM, credential_id: creds.length === 1 ? creds[0].id : '', config: getDefaultConfig(t, optionsData, p?.connector_fields) })
-    setActiveTab(t === 'static_proxy_provider' ? 'routing' : p?.kind === 'descriptor' ? (p.connector_fields[0]?.group ?? 'general') : 'infrastructure')
+    setActiveTab(t === 'static_proxy_provider' ? 'general' : p?.kind === 'descriptor' ? (p.connector_fields[0]?.group ?? 'general') : 'infrastructure')
   }
 
   const handleConfigChange = (key: string, value: string, fill?: Record<string, string>) => {
@@ -380,6 +373,9 @@ function ConnectorEditor({ connector, canMutate, onClose, onDelete, onSaved }: {
     if (config.tags) {
       try { result.tags = JSON.parse(config.tags) } catch { result.tags = {} }
     }
+    const countries = splitCountries(config.countries)
+    if (countries.length) result.countries = countries
+    else delete result.countries
     return result
   }
 
@@ -547,7 +543,7 @@ function ConnectorEditor({ connector, canMutate, onClose, onDelete, onSaved }: {
     const labels: Record<string, string> = {
       instance_name: 'Instance name', region: 'Region', instance_type: 'Instance type', key_pair_name: 'Key pair', security_group: 'Security group',
       project_id: 'Project ID', zone: 'Zone', machine_type: 'Machine type', network: 'Network', subnetwork: 'Subnetwork', ssh_key: 'SSH key',
-      ssh_public_key: 'SSH public key', subscription_id: 'Subscription ID', num_proxies: 'Number of proxies', country_code: 'Country',
+      ssh_public_key: 'SSH public key', subscription_id: 'Subscription ID', num_proxies: 'Number of proxies', country_code: 'Countries', countries: 'Countries',
       session_duration_minutes: 'Session duration', location: 'Location', vm_size: 'VM size', resource_group: 'Resource group',
       vnet_name: 'Virtual network', subnet_name: 'Subnet', min_proxies: 'Min proxies', max_proxies: 'Max proxies',
       min_rotation_period_minutes: 'Min rotation (min)', max_rotation_period_minutes: 'Max rotation (min)',
@@ -557,7 +553,7 @@ function ConnectorEditor({ connector, canMutate, onClose, onDelete, onSaved }: {
 
   const tabsFor = (t: CredentialType): { id: ConfigTab; label: string }[] => {
     const common = [{ id: 'routing', label: 'Routing' }, { id: 'rate_limiting', label: 'Rate limiting' }]
-    if (t === 'static_proxy_provider') return common
+    if (t === 'static_proxy_provider') return [{ id: 'general', label: 'General' }, ...common]
     if (isDescriptor) {
       const groups: string[] = []
       for (const f of descriptorFields) if (!groups.includes(f.group)) groups.push(f.group)
@@ -594,9 +590,9 @@ function ConnectorEditor({ connector, canMutate, onClose, onDelete, onSaved }: {
   const renderCloudFields = () => {
     const scalingFields = ['min_proxies', 'max_proxies', 'min_rotation_period_minutes', 'max_rotation_period_minutes']
     const infraFields: Record<string, string[]> = {
-      aws: ['instance_name', 'region', 'instance_type', 'key_pair_name', 'security_group'],
-      gcp: ['project_id', 'instance_name', 'zone', 'machine_type', 'network'],
-      azure: ['subscription_id', 'resource_group', 'instance_name', 'location', 'vm_size', 'vnet_name', 'subnet_name', 'ssh_public_key'],
+      aws: ['instance_name', 'region', 'instance_type', 'key_pair_name', 'security_group', 'countries'],
+      gcp: ['project_id', 'instance_name', 'zone', 'machine_type', 'network', 'countries'],
+      azure: ['subscription_id', 'resource_group', 'instance_name', 'location', 'vm_size', 'vnet_name', 'subnet_name', 'ssh_public_key', 'countries'],
     }
     const requiredFields: Record<string, string[]> = {
       aws: ['instance_name', 'region', 'instance_type', 'key_pair_name', 'security_group'],
@@ -621,11 +617,25 @@ function ConnectorEditor({ connector, canMutate, onClose, onDelete, onSaved }: {
           const regionOptions = regionDropdownFields[key]
           const instanceTypeOptions = instanceTypeDropdownFields[key]
           const required = requiredFields[type]?.includes(key) || false
-          const wide = key === 'ssh_public_key'
+          const wide = key === 'ssh_public_key' || key === 'countries'
           return (
             <div key={key} className={wide ? 'col-span-2' : ''}>
-              <Label className="text-xs">{getFieldLabel(key)}{required && <span className="text-danger ml-1">*</span>}</Label>
-              {regionOptions && regionOptions.length > 0 ? (
+              <Label className="text-xs">
+                <span className="inline-flex items-center gap-1.5">
+                  <span>{getFieldLabel(key)}{required && <span className="text-danger ml-1">*</span>}</span>
+                  {key === 'countries' && (
+                    <InfoTip label="About countries">
+                      Lets clients pick these instances with a <code className="bg-surface-raised px-1 rounded">-cc-&lt;code&gt;</code> username suffix. Leave empty if the instances should not be selectable by country.
+                    </InfoTip>
+                  )}
+                </span>
+              </Label>
+              {key === 'countries' ? (
+                <>
+                  <MultiCountryPicker options={presets.countries ?? []} value={formData.config.countries || ''} onChange={(val) => handleConfigChange('countries', val)} />
+                  <p className="text-xs text-fg-muted mt-1">Optional.</p>
+                </>
+              ) : regionOptions && regionOptions.length > 0 ? (
                 <RichSelect options={regionOptions} value={formData.config[key] || ''} onChange={(val) => handleConfigChange(key, val)} placeholder={`Select ${getFieldLabel(key).toLowerCase()}`} required={required} />
               ) : instanceTypeOptions && instanceTypeOptions.length > 0 ? (
                 <RichSelect options={instanceTypeOptions} value={formData.config[key] || ''} onChange={(val) => handleConfigChange(key, val)} placeholder={`Select ${getFieldLabel(key).toLowerCase()}`} required={required} />
@@ -649,9 +659,25 @@ function ConnectorEditor({ connector, canMutate, onClose, onDelete, onSaved }: {
     )
   }
 
+  const renderStaticGeneral = () => (
+    <div>
+      <Label className="text-xs">
+        <span className="inline-flex items-center gap-1.5">
+          <span>Countries</span>
+          <InfoTip label="About countries">
+            Where the proxies you add to this connector exit from, used for proxies whose own location is unknown. Each proxy also gets its own exit country when it is added, looked up through the proxy. Clients pick a country with a <code className="bg-surface-raised px-1 rounded">-cc-&lt;code&gt;</code> username suffix.
+          </InfoTip>
+        </span>
+      </Label>
+      <MultiCountryPicker options={presets.countries ?? []} value={formData.config.countries || ''} onChange={(val) => handleConfigChange('countries', val)} disabled={readOnly} />
+      <p className="text-xs text-fg-muted mt-1">Leave empty if the location is unknown or mixed.</p>
+    </div>
+  )
+
   const renderTabContent = () => {
     if (activeTab === 'routing') return renderRoutingTab()
     if (activeTab === 'rate_limiting') return renderRateLimitingTab()
+    if (type === 'static_proxy_provider' && activeTab === 'general') return renderStaticGeneral()
     if (isDescriptor) return renderDescriptorGroup(activeTab)
     if (activeTab === 'advanced') return renderAdvanced()
     if (isCloud) return renderCloudFields()
@@ -721,7 +747,10 @@ function ConnectorEditor({ connector, canMutate, onClose, onDelete, onSaved }: {
 
       {isEdit && connector && (
         <InspectorSection title="Details">
-          <KeyValue label="Proxies" value={<>{connector.proxy_count}{getConfiguredProxies(connector) != null && <span className="text-fg-subtle font-normal"> / {getConfiguredProxies(connector)}</span>}</>} />
+          <KeyValue label="Proxies" value={<span title={describeTarget(connector)}>{connector.proxy_count}{targetTotal(connector) != null && <span className="text-fg-subtle font-normal"> / {targetTotal(connector)}</span>}</span>} />
+          {connector.target?.per_country != null && connector.target.countries.length > 0 && (
+            <KeyValue label="Per country" value={<span title={connector.target.countries.join(', ')}>{connector.target.per_country} × {connector.target.countries.length}{connector.target.on_demand.length > 0 && <span className="text-fg-subtle font-normal"> ({connector.target.on_demand.length} on demand)</span>}</span>} />
+          )}
           <KeyValue label="Credential type" value={typeLabel} />
           <KeyValue label="Created" value={formatDateTime(connector.created_at)} />
           <KeyValue label="Updated" value={formatDateTime(connector.updated_at)} />

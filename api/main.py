@@ -16,6 +16,7 @@ from fastapi.staticfiles import StaticFiles
 
 from api.core.auth import require_auth
 from api.core.config import settings
+from api.core.geo_lookup import GeoLookup
 from api.core.logging import setup_logging
 from api.core.mitm import MitmHandler
 from api.core.proxy_manager import ProxyManager
@@ -82,6 +83,11 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # Start background tasks (loads from DB, hydrates from Redis)
     await proxy_manager.start()
 
+    # Look up the exit location of static proxies as they are added
+    geo_lookup = GeoLookup(settings)
+    app.state.geo_lookup = geo_lookup
+    await geo_lookup.start(proxy_manager)
+
     # Initialize TLS MITM certificate manager
     cert_manager = TLSCertManager(
         ca_cert_path=Path(settings.tls_mitm_ca_cert_path),
@@ -100,6 +106,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # Cleanup
     logger.info("Shutting down Octoprox")
     await proxy_server.stop()
+    await geo_lookup.stop()
     await proxy_manager.stop()
     await redis_client.close()
 

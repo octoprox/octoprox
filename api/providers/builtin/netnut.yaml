@@ -42,11 +42,19 @@ connector_fields:
     default: 1
     min: 1
     max: 1000
+    help: Per country when countries are listed.
+    details: >-
+      With no country, this many sessions are created without a country plus this many per country that
+      clients request with -cc-, the first time it is requested.
   - key: country_code
-    label: Country
+    label: Countries
     type: select
     options_preset: countries
-    help: Leave as "All countries" to use any country.
+    help: Leave empty for all countries.
+    details: >-
+      With no country, clients pick any with -cc- and sessions for it are created on first use. With
+      countries listed, "Number of proxies" sessions are created per country right away, geo-targeted in
+      the credentials.
 
 proxy_type_field: credential.proxy_type
 

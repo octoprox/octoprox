@@ -7,7 +7,7 @@ from datetime import datetime
 from typing import Any
 from uuid import uuid4
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from api.core import utc_now
 from api.models.cloud_options import (
@@ -34,17 +34,68 @@ from api.models.credential import CredentialType
 
 # --- Typed Config Models for Validation ---
 
+def normalize_country_code(value: str | None) -> str | None:
+    """Normalise a country code to upper-case ISO 3166-1 alpha-2, or None if blank.
+
+    Raises ValueError for values that cannot be a country code (anything
+    other than two ASCII letters).
+    """
+    if value is None:
+        return None
+    code = value.strip().upper()
+    if not code:
+        return None
+    if len(code) != 2 or not code.isascii() or not code.isalpha():
+        raise ValueError(f'country must be a two-letter ISO 3166-1 alpha-2 code, got {value!r}')
+    return code
+
+
+def normalize_country_list(value: Any) -> list[str]:
+    """Normalise a countries value (list, or comma-separated string) to unique upper-case codes.
+
+    Order is preserved; blanks are dropped. Raises ValueError on a malformed code.
+    """
+    if value is None:
+        return []
+    raw: list[Any] = value.split(",") if isinstance(value, str) else list(value)
+    result: list[str] = []
+    for item in raw:
+        code = normalize_country_code(str(item)) if item is not None else None
+        if code and code not in result:
+            result.append(code)
+    return result
+
+
 class StaticProxyProviderConnectorConfig(BaseModel):
-    """Configuration for Static Proxy Provider connectors (no additional config needed)."""
-    pass
+    """Configuration for Static Proxy Provider connectors.
+
+    ``countries`` declares which countries the manually added proxies exit
+    from, so clients can pick them with a ``-cc-<code>`` username suffix.
+    """
+    countries: list[str] = Field(default_factory=list)
+
+    @field_validator('countries', mode='before')
+    @classmethod
+    def _normalize_countries(cls, value: Any) -> list[str]:
+        return normalize_country_list(value)
 
 
 class CloudConnectorConfig(BaseModel):
-    """Base configuration for cloud connectors with common scaling fields."""
+    """Base configuration for cloud connectors with common scaling fields.
+
+    ``countries`` is optional: set it when the region's instances should be
+    selectable with a ``-cc-<code>`` username suffix.
+    """
     min_proxies: int = 1
     max_proxies: int = 10
     min_rotation_period_minutes: int = 60
     max_rotation_period_minutes: int = 1440
+    countries: list[str] = Field(default_factory=list)
+
+    @field_validator('countries', mode='before')
+    @classmethod
+    def _normalize_countries(cls, value: Any) -> list[str]:
+        return normalize_country_list(value)
 
 
 class AWSConnectorConfig(CloudConnectorConfig):
@@ -241,7 +292,11 @@ def validate_connector_config(credential_type: str, config: dict[str, Any]) -> d
     model = _CODE_CONNECTOR_MODELS.get(str(credential_type))
     if model is None:
         raise ValueError(f"Unknown credential type: {credential_type}")
-    return model(**config).model_dump(exclude_none=True)
+    result = model(**config).model_dump(exclude_none=True)
+    if not result.get("countries"):
+        # An empty list means "no country declared"; keep stored configs clean.
+        result.pop("countries", None)
+    return result
 
 
 def get_cloud_config(
@@ -309,6 +364,29 @@ class Connector(BaseModel):
         return RoutingConfig(**self.routing_config)
 
     @property
+    def countries(self) -> list[str]:
+        """Countries this connector's proxies exit from, for ``-cc-`` routing (upper-case ISO codes).
+
+        Read from ``config.countries`` (static and cloud connectors) or from
+        the provider's country field ``config.country_code`` (descriptor
+        connectors), which may hold one code or a list. Empty means the
+        connector declares no country: descriptor pools whose credentials
+        carry a country then serve any requested country on demand, and
+        other connectors are matched per proxy on the discovered country.
+        """
+        if not self.config:
+            return []
+        for key in ("countries", "country_code"):
+            value = self.config.get(key)
+            if value is None or value == "" or value == []:
+                continue
+            try:
+                return normalize_country_list(value)
+            except ValueError:
+                return []
+        return []
+
+    @property
     def parsed_rate_limit_config(self) -> RateLimitConfig | None:
         """Get the typed rate limit config, or None if not configured."""
         if not self.rate_limit_config:
@@ -337,6 +415,22 @@ class ConnectorUpdate(BaseModel):
     enabled: bool | None = None
 
 
+class ProxyTarget(BaseModel):
+    """How many proxies a connector is meant to hold, and how that number comes about.
+
+    ``total`` is None when the connector has no target of its own (static
+    connectors, list-mode providers that mirror a vendor list). For
+    provider connectors the count applies per country: ``per_country`` times
+    the number of country groups, where ``countries`` are the groups that
+    exist (listed on the connector, or created on demand for an "all
+    countries" pool, the latter also in ``on_demand``).
+    """
+    total: int | None = None
+    per_country: int | None = None
+    countries: list[str] = Field(default_factory=list)
+    on_demand: list[str] = Field(default_factory=list)
+
+
 class ConnectorResponse(BaseModel):
     """Schema for connector API responses."""
     id: str
@@ -350,6 +444,8 @@ class ConnectorResponse(BaseModel):
     rate_limit_config: dict[str, Any] = Field(default_factory=dict)
     enabled: bool
     proxy_count: int
+    # Intended pool size and how it is derived (None when there is no target)
+    target: ProxyTarget | None = None
     # Cloud provider error tracking
     last_error: str | None = None
     last_error_at: datetime | None = None

@@ -61,6 +61,13 @@ AZURE_CREDENTIAL_FIELDS = [
     FieldSpec(key="key_vault_name", label="Key vault name"),
 ]
 
+COUNTRIES_FIELD = FieldSpec(
+    key="countries",
+    label="Countries",
+    type="country",
+    help="Countries these proxies exit from. Clients select one with a -cc-<code> username suffix.",
+)
+
 CLOUD_SCALING_FIELDS = [
     FieldSpec(key="min_proxies", label="Min proxies", type="number", default=1, min=0, group="scaling"),
     FieldSpec(key="max_proxies", label="Max proxies", type="number", default=10, min=1, group="scaling"),
@@ -78,6 +85,7 @@ AWS_CONNECTOR_FIELDS = [
     FieldSpec(key="instance_type", label="Instance type", required=True),
     FieldSpec(key="key_pair_name", label="Key pair", required=True),
     FieldSpec(key="security_group", label="Security group", required=True),
+    COUNTRIES_FIELD,
     *CLOUD_SCALING_FIELDS,
 ]
 
@@ -87,6 +95,7 @@ GCP_CONNECTOR_FIELDS = [
     FieldSpec(key="zone", label="Zone", required=True, default="us-central1-a"),
     FieldSpec(key="machine_type", label="Machine type", required=True, default="e2-micro"),
     FieldSpec(key="network", label="Network", default="default"),
+    COUNTRIES_FIELD,
     *CLOUD_SCALING_FIELDS,
 ]
 
@@ -99,6 +108,7 @@ AZURE_CONNECTOR_FIELDS = [
     FieldSpec(key="vnet_name", label="Virtual network"),
     FieldSpec(key="subnet_name", label="Subnet"),
     FieldSpec(key="ssh_public_key", label="SSH public key", type="textarea", required=True),
+    COUNTRIES_FIELD,
     *CLOUD_SCALING_FIELDS,
 ]
 
@@ -111,7 +121,7 @@ def code_provider_definitions() -> list[dict[str, Any]]:
             "name": "Static Proxy Provider",
             "description": "Manually managed proxy servers",
             "credential_fields": STATIC_CREDENTIAL_FIELDS,
-            "connector_fields": [],
+            "connector_fields": [COUNTRIES_FIELD],
             "cloud": False,
         },
         {

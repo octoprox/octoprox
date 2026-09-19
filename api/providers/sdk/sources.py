@@ -52,34 +52,49 @@ class IpDiscoverer:
 
     async def discover(self, proxy_url: str, *, log_context: dict[str, Any] | None = None) -> str | None:
         """Return the discovered IP, or ``None`` when the request fails."""
+        ip, _country = await self.discover_with_country(proxy_url, log_context=log_context)
+        return ip
+
+    async def discover_with_country(
+        self, proxy_url: str, *, log_context: dict[str, Any] | None = None
+    ) -> tuple[str | None, str]:
+        """Return ``(ip, country)``; ip is ``None`` on failure, country is ``""`` when not reported.
+
+        The country comes from ``country_path`` when the spec declares one.
+        """
         context = log_context or {}
         try:
             async with self._client_factory(proxy_url, self._spec.timeout_seconds) as client:
                 response = await client.get(self._spec.url)
         except httpx.TimeoutException:
             logger.warning("IP discovery timed out", **context)
-            return None
+            return None, ""
         except httpx.HTTPError as exc:
             logger.warning("IP discovery request failed", error=str(exc), **context)
-            return None
+            return None, ""
         if response.status_code != 200:
             logger.warning("IP discovery returned an error", status_code=response.status_code, **context)
-            return None
-        ip = self._extract_ip(response)
+            return None, ""
+        ip, country = self._extract(response)
         if not ip:
             logger.warning("IP discovery response had no IP", **context)
-        return ip
+        return ip, country
 
-    def _extract_ip(self, response: httpx.Response) -> str | None:
+    def _extract(self, response: httpx.Response) -> tuple[str | None, str]:
         if self._spec.ip_path == "@text":
             text = response.text.strip()
-            return text or None
+            return (text or None), ""
         try:
             document = response.json()
         except ValueError:
-            return None
+            return None, ""
         value = self._extractor.extract_str(self._spec.ip_path, document)
-        return value.strip() if value else None
+        ip = value.strip() if value else None
+        country = ""
+        if self._spec.country_path:
+            raw = self._extractor.extract_str(self._spec.country_path, document)
+            country = raw.strip().upper() if raw else ""
+        return ip, country
 
 
 @dataclass(frozen=True)
@@ -108,7 +123,7 @@ class KnownIpsSource:
             ip = self._extractor.extract_str(self._spec.ip, item)
             if not ip:
                 continue
-            country = self._extractor.extract_str(self._spec.country, item) or ""
+            country = (self._extractor.extract_str(self._spec.country, item) or "").strip().upper()
             entries.append(KnownIp(ip=ip, country=country))
         return entries
 
@@ -168,7 +183,7 @@ class ListSource:
                     username=self._extractor.extract_str(self._spec.username, item),
                     password=self._extractor.extract_str(self._spec.password, item),
                     protocol=protocol,
-                    country=(self._extractor.extract_str(self._spec.country, item) or ""),
+                    country=(self._extractor.extract_str(self._spec.country, item) or "").strip().upper(),
                     raw=item if isinstance(item, dict) else {},
                 )
             )

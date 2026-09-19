@@ -10,6 +10,10 @@ Grammar
 ``{connector.country_code|or:any}``  fallback when the value is empty
 ``{session_id}`` ``{index}`` ``{port}`` ``{discovered_ip}`` ``{auth.token}`` ``{item.name}``
 
+A config value that is a list (a multi-country field) renders as its single
+element, or joined with commas when it holds several. Slot-level rendering
+narrows it to one country via :meth:`RenderContext.with_country`.
+
 Rendering is plain string substitution - there is no expression language and
 no attribute access, so a descriptor cannot reach anything that is not
 explicitly placed in the :class:`RenderContext`.
@@ -28,7 +32,13 @@ from dataclasses import dataclass, field
 from typing import Any, Literal
 from urllib.parse import quote
 
-from api.providers.sdk.descriptor import Condition, Template, TemplateSpec
+from api.providers.sdk.descriptor import (
+    Condition,
+    ProviderDescriptor,
+    ProxyTypeSpec,
+    Template,
+    TemplateSpec,
+)
 
 RenderMode = Literal["full", "proxy"]
 
@@ -51,10 +61,24 @@ class RenderContext:
     index: int | None = None
     port: int | None = None
     discovered_ip: str | None = None
+    slot_country: str | None = None
     secret_keys: frozenset[str] = frozenset()
 
     def lookup(self, path: str) -> Any:
-        """Resolve a dotted variable path; unknown paths resolve to ``None``."""
+        """Resolve a dotted variable path; unknown paths resolve to ``None``.
+
+        List values collapse to a scalar: ``None`` when empty, the element
+        when single, otherwise a comma-joined string.
+        """
+        value = self._lookup_raw(path)
+        if isinstance(value, list):
+            items = [str(v) for v in value if v is not None and str(v) != ""]
+            if not items:
+                return None
+            return items[0] if len(items) == 1 else ",".join(items)
+        return value
+
+    def _lookup_raw(self, path: str) -> Any:
         namespace, _, key = path.partition(".")
         if not key:
             scalars = {
@@ -97,6 +121,28 @@ class RenderContext:
             index=index if index is not None else self.index,
             port=port if port is not None else self.port,
             discovered_ip=discovered_ip if discovered_ip is not None else self.discovered_ip,
+            slot_country=self.slot_country,
+            secret_keys=self.secret_keys,
+        )
+
+    def with_country(self, key: str, country: str | None) -> RenderContext:
+        """Copy narrowed to one country: ``connector.<key>`` becomes ``country`` (or empty).
+
+        Used to provision one slot group per country from a connector whose
+        country field lists several, and to geo-target on-demand groups.
+        """
+        connector = dict(self.connector)
+        connector[key] = country if country is not None else ""
+        return RenderContext(
+            credential=self.credential,
+            connector=connector,
+            auth=self.auth,
+            item=self.item,
+            session_id=self.session_id,
+            index=self.index,
+            port=self.port,
+            discovered_ip=self.discovered_ip,
+            slot_country=country,
             secret_keys=self.secret_keys,
         )
 
@@ -110,6 +156,7 @@ class RenderContext:
             index=self.index,
             port=self.port,
             discovered_ip=self.discovered_ip,
+            slot_country=self.slot_country,
             secret_keys=self.secret_keys,
         )
 
@@ -123,6 +170,7 @@ class RenderContext:
             index=self.index,
             port=self.port,
             discovered_ip=self.discovered_ip,
+            slot_country=self.slot_country,
             secret_keys=self.secret_keys,
         )
 
@@ -211,9 +259,12 @@ class TemplateRenderer:
             return [self.render_json(v, ctx) for v in value]
         return value
 
-    def evaluate(self, condition: Condition | None, ctx: RenderContext) -> bool:
+    def evaluate(self, condition: Condition | list[Condition] | None, ctx: RenderContext) -> bool:
+        """Evaluate one condition, or all of a list (every one must hold)."""
         if condition is None:
             return True
+        if isinstance(condition, list):
+            return all(c.evaluate(ctx.lookup(c.field)) for c in condition)
         return condition.evaluate(ctx.lookup(condition.field))
 
     @staticmethod
@@ -227,6 +278,34 @@ class TemplateRenderer:
             for match in _PLACEHOLDER.finditer(text):
                 paths.add(match.group(1))
         return paths
+
+
+def country_field_key(descriptor: ProviderDescriptor, ptype: ProxyTypeSpec) -> str | None:
+    """Connector config key through which ``ptype`` geo-targets its upstream credentials.
+
+    Returns the key of a connector field of type ``country`` (or using the
+    ``countries`` preset) that the proxy type's username or password template
+    references, or None when the credentials carry no country. Templates that
+    depend on list items are excluded, since list-mode credentials come from
+    the vendor.
+
+    Proxy types with such a key are provisioned as one slot group per
+    country, and can take unlisted countries on demand from ``-cc-``
+    requests.
+    """
+    paths = TemplateRenderer.referenced_paths(ptype.username) | TemplateRenderer.referenced_paths(
+        ptype.password
+    )
+    if any(path.startswith("item.") for path in paths):
+        return None
+    for path in sorted(paths):
+        scope, _, key = path.partition(".")
+        if scope != "connector" or not key:
+            continue
+        field_spec = descriptor.find_field("connector", key)
+        if field_spec is not None and (field_spec.type == "country" or field_spec.options_preset == "countries"):
+            return key
+    return None
 
 
 def resolve_runtime_placeholders(text: str | None, values: dict[str, Any]) -> str | None:

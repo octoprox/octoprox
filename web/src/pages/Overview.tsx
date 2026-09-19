@@ -15,10 +15,12 @@ import { useAuth } from '../contexts/AuthContext'
 import { useTheme } from '../contexts/ThemeContext'
 import { useToast } from '../contexts/ToastContext'
 import { formatBytes } from '../utils/format'
+import { targetTotal, describeTarget } from '../utils/connectors'
 import { ProviderLogo } from '../components/ProviderLogo'
 import { Page } from '../components/layout/Page'
 import { Sparkline } from '../components/charts/Sparkline'
 import { ProjectPanel } from '../components/ProjectForm'
+import { ProjectLocations, LocationSummary } from '../components/ProjectLocations'
 import { Badge, Button, Card, CardHeader, KeyValue, Segmented } from '../components/ui'
 
 const TIME_RANGES = ['1h', '6h', '24h', '7d', '30d'] as const
@@ -132,6 +134,7 @@ export default function Overview() {
   const toast = useToast()
   const [range, setRange] = useState<TimeRange>('24h')
   const [routingOpen, setRoutingOpen] = useState(false)
+  const [locations, setLocations] = useState<LocationSummary | null>(null)
   const [projectPanelOpen, setProjectPanelOpen] = useState(false)
 
   const { data: metrics } = useQuery({
@@ -293,7 +296,7 @@ export default function Overview() {
         <Kpi label="Requests / min" value={scaling ? scaling.requests_per_minute.toFixed(1) : '-'} sub={scaling ? `${scaling.rate_per_proxy.toFixed(1)} per proxy` : undefined} compact={projectPanelOpen} />
       </Card>
 
-      <div className="grid grid-cols-1 xl:grid-cols-[minmax(0,2fr)_minmax(0,1fr)] gap-4 items-start">
+      <div className="grid grid-cols-1 xl:grid-cols-[minmax(0,2fr)_minmax(0,1fr)] gap-4 items-stretch">
         {/* Left: charts */}
         <div className="flex flex-col gap-4 min-w-0">
           <Card className="p-4">
@@ -303,7 +306,7 @@ export default function Overview() {
               className="mb-2"
             />
             {chartData.length === 0 ? (
-              <p className="text-fg-subtle text-sm text-center py-16">No data for this time range</p>
+              <p className="text-fg-subtle text-sm text-center h-[240px] flex items-center justify-center">No data for this time range</p>
             ) : (
               <ResponsiveContainer width="100%" height={240}>
                 <AreaChart data={chartData} margin={{ top: 8, right: 8, left: -12, bottom: 0 }}>
@@ -323,7 +326,7 @@ export default function Overview() {
             <Card className="p-3.5">
               <CardHeader title={<span className="text-[13px]">Latency</span>} action={<span className="text-xs text-fg-muted">avg {Math.round(pool?.avg_latency_ms ?? 0)} ms</span>} className="mb-1" />
               {chartData.length === 0 ? (
-                <p className="text-fg-subtle text-xs text-center py-8">No data</p>
+                <p className="text-fg-subtle text-xs text-center h-[110px] flex items-center justify-center">No data</p>
               ) : (
                 <ResponsiveContainer width="100%" height={110}>
                   <AreaChart data={chartData} margin={{ top: 6, right: 4, left: -20, bottom: 0 }}>
@@ -339,7 +342,7 @@ export default function Overview() {
             <Card className="p-3.5">
               <CardHeader title={<span className="text-[13px]">Traffic</span>} action={<ChartLegend items={[['Sent', C.sent], ['Received', C.received]]} small />} className="mb-1" />
               {chartData.length === 0 ? (
-                <p className="text-fg-subtle text-xs text-center py-8">No data</p>
+                <p className="text-fg-subtle text-xs text-center h-[110px] flex items-center justify-center">No data</p>
               ) : (
                 <ResponsiveContainer width="100%" height={110}>
                   <AreaChart data={chartData} margin={{ top: 6, right: 4, left: -8, bottom: 0 }}>
@@ -356,89 +359,106 @@ export default function Overview() {
           </div>
         </div>
 
-        {/* Right: connectors, routing, auto-scaling */}
-        <div className="flex flex-col gap-4 min-w-0">
-          <Card className="px-4 py-3">
-            <CardHeader
-              title="Connectors"
-              action={<button onClick={() => navigate(`${base}/connectors`)} className="text-xs text-primary hover:brightness-110">All {connectors.length} →</button>}
-              className="mb-1"
-            />
-            {connectors.length === 0 ? (
-              <p className="text-xs text-fg-muted py-3">No connectors yet. <button onClick={() => navigate(`${base}/connectors`)} className="text-primary">Add one →</button></p>
-            ) : (
-              <div className="-mx-1.5">
-                {connectors.map((c) => {
-                  const max = getConfiguredProxies(c.config, c.credential_type)
+        {/* Right: where the pool exits from, as tall as the charts */}
+        <Card className="p-4 flex flex-col min-w-0 min-h-[320px]">
+          <CardHeader
+            title="Locations"
+            action={locations && locations.located > 0 ? (
+              <span className="text-xs text-fg-muted tabular-nums">
+                {locations.countries} {locations.countries === 1 ? 'country' : 'countries'}
+                {locations.unknown > 0 && <> · {locations.unknown} unknown</>}
+              </span>
+            ) : undefined}
+            className="mb-2.5"
+          />
+          <div className="flex-1 min-h-0">
+            {selectedProjectId && <ProjectLocations projectId={selectedProjectId} onSummary={setLocations} />}
+          </div>
+        </Card>
+      </div>
+
+      {/* Connectors, routing, auto-scaling */}
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-4 items-start">
+        <Card className="px-4 py-3">
+          <CardHeader
+            title="Connectors"
+            action={<button onClick={() => navigate(`${base}/connectors`)} className="text-xs text-primary hover:brightness-110">All {connectors.length} →</button>}
+            className="mb-1"
+          />
+          {connectors.length === 0 ? (
+            <p className="text-xs text-fg-muted py-3">No connectors yet. <button onClick={() => navigate(`${base}/connectors`)} className="text-primary">Add one →</button></p>
+          ) : (
+            <div className="-mx-1.5">
+              {connectors.map((c) => {
+                const max = targetTotal(c)
+                return (
+                  <button
+                    key={c.id}
+                    onClick={() => navigate(`${base}/connectors?open=${c.id}`)}
+                    className="w-full flex items-center gap-2.5 h-[34px] px-1.5 rounded-md text-[12.5px] hover:bg-surface-raised transition-colors text-left"
+                  >
+                    <ProviderLogo type={c.credential_type} className="w-4 h-4 text-[16px]" />
+                    <span className={cnTrunc(!c.enabled)}>{c.name}</span>
+                    {c.last_error && <AlertTriangle className="w-3.5 h-3.5 text-danger flex-none" />}
+                    <span className="text-fg-muted tabular-nums flex-none" title={describeTarget(c)}>{c.proxy_count}{max != null && <span className="text-fg-subtle">/{max}</span>}</span>
+                    <span className={`w-2 h-2 rounded-full flex-none ${!c.enabled ? 'bg-fg-subtle' : c.last_error ? 'bg-danger' : 'bg-success'}`} />
+                  </button>
+                )
+              })}
+            </div>
+          )}
+        </Card>
+
+        <Card className="p-4">
+          <CardHeader
+            title="Routing"
+            action={canMutate && strategy ? (
+              <button onClick={() => setRoutingOpen((o) => !o)} className="text-xs text-primary hover:brightness-110">{routingOpen ? 'Done' : 'Change'}</button>
+            ) : undefined}
+            className="mb-2.5"
+          />
+          {!routingOpen ? (
+            <div className="flex items-center gap-2.5 flex-wrap">
+              <Badge color="blue" className="px-2.5 py-1 text-[13px] inline-flex items-center gap-1">
+                <Check className="w-3 h-3" /> {formatStrategy(strategy?.current_strategy ?? selectedProject?.routing_strategy ?? '')}
+              </Badge>
+              {strategy && <span className="text-xs text-fg-muted">{strategy.available_strategies.length - 1} other strategies available</span>}
+            </div>
+          ) : (
+            <div>
+              <div className="flex flex-wrap gap-1.5">
+                {strategy?.available_strategies.map((s) => {
+                  const active = s === strategy.current_strategy
                   return (
                     <button
-                      key={c.id}
-                      onClick={() => navigate(`${base}/connectors?open=${c.id}`)}
-                      className="w-full flex items-center gap-2.5 h-[34px] px-1.5 rounded-md text-[12.5px] hover:bg-surface-raised transition-colors text-left"
+                      key={s}
+                      onClick={() => !active && strategyMutation.mutate(s)}
+                      disabled={strategyMutation.isPending}
+                      className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[12.5px] font-medium border transition-colors ${active ? 'border-primary bg-primary-soft text-primary-soft-fg' : 'border-line text-fg-muted hover:border-line-strong hover:text-fg'}`}
                     >
-                      <ProviderLogo type={c.credential_type} className="w-4 h-4 text-[16px]" />
-                      <span className={cnTrunc(!c.enabled)}>{c.name}</span>
-                      {c.last_error && <AlertTriangle className="w-3.5 h-3.5 text-danger flex-none" />}
-                      <span className="text-fg-muted tabular-nums flex-none">{c.proxy_count}{max != null && <span className="text-fg-subtle">/{max}</span>}</span>
-                      <span className={`w-2 h-2 rounded-full flex-none ${!c.enabled ? 'bg-fg-subtle' : c.last_error ? 'bg-danger' : 'bg-success'}`} />
+                      {active && <Check className="w-3 h-3" />}{formatStrategy(s)}
                     </button>
                   )
                 })}
               </div>
-            )}
-          </Card>
-
-          <Card className="p-4">
-            <CardHeader
-              title="Routing"
-              action={canMutate && strategy ? (
-                <button onClick={() => setRoutingOpen((o) => !o)} className="text-xs text-primary hover:brightness-110">{routingOpen ? 'Done' : 'Change'}</button>
-              ) : undefined}
-              className="mb-2.5"
-            />
-            {!routingOpen ? (
-              <div className="flex items-center gap-2.5 flex-wrap">
-                <Badge color="blue" className="px-2.5 py-1 text-[13px] inline-flex items-center gap-1">
-                  <Check className="w-3 h-3" /> {formatStrategy(strategy?.current_strategy ?? selectedProject?.routing_strategy ?? '')}
-                </Badge>
-                {strategy && <span className="text-xs text-fg-muted">{strategy.available_strategies.length - 1} other strategies available</span>}
-              </div>
-            ) : (
-              <div>
-                <div className="flex flex-wrap gap-1.5">
-                  {strategy?.available_strategies.map((s) => {
-                    const active = s === strategy.current_strategy
-                    return (
-                      <button
-                        key={s}
-                        onClick={() => !active && strategyMutation.mutate(s)}
-                        disabled={strategyMutation.isPending}
-                        className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[12.5px] font-medium border transition-colors ${active ? 'border-primary bg-primary-soft text-primary-soft-fg' : 'border-line text-fg-muted hover:border-line-strong hover:text-fg'}`}
-                      >
-                        {active && <Check className="w-3 h-3" />}{formatStrategy(s)}
-                      </button>
-                    )
-                  })}
-                </div>
-                <p className="text-xs text-fg-muted mt-2">Changes take effect immediately for new requests.</p>
-              </div>
-            )}
-          </Card>
-
-          {scaling && (
-            <Card className="px-4 py-3">
-              <CardHeader title="Auto-scaling" action={<DemandBadge level={scaling.demand_level} />} className="mb-1" />
-              <KeyValue label="Instances" value={<>{scaling.current_instances} <span className="text-fg-subtle font-normal">/ {scaling.max_instances}</span></>} />
-              <div className="h-1.5 rounded-full bg-primary-soft overflow-hidden my-2">
-                <div className="h-full bg-primary rounded-full" style={{ width: `${scaling.max_instances > 0 ? Math.min(100, (scaling.current_instances / scaling.max_instances) * 100) : 0}%` }} />
-              </div>
-              <KeyValue label="Requests/min" value={scaling.requests_per_minute.toFixed(1)} />
-              <KeyValue label="Rate per proxy" value={scaling.rate_per_proxy.toFixed(1)} />
-              <KeyValue label="Draining" value={scaling.draining_instances} />
-              <KeyValue label="Terminating" value={scaling.terminating_instances} />
-            </Card>
+              <p className="text-xs text-fg-muted mt-2">Changes take effect immediately for new requests.</p>
+            </div>
           )}
-        </div>
+        </Card>
+
+        {scaling && (
+          <Card className="px-4 py-3">
+            <CardHeader title="Auto-scaling" action={<DemandBadge level={scaling.demand_level} />} className="mb-1" />
+            <KeyValue label="Instances" value={<>{scaling.current_instances} <span className="text-fg-subtle font-normal">/ {scaling.max_instances}</span></>} />
+            <div className="h-1.5 rounded-full bg-primary-soft overflow-hidden my-2">
+              <div className="h-full bg-primary rounded-full" style={{ width: `${scaling.max_instances > 0 ? Math.min(100, (scaling.current_instances / scaling.max_instances) * 100) : 0}%` }} />
+            </div>
+            <KeyValue label="Requests/min" value={scaling.requests_per_minute.toFixed(1)} />
+            <KeyValue label="Rate per proxy" value={scaling.rate_per_proxy.toFixed(1)} />
+            <KeyValue label="Draining" value={scaling.draining_instances} />
+            <KeyValue label="Terminating" value={scaling.terminating_instances} />
+          </Card>
+        )}
       </div>
     </Page>
   )
@@ -446,12 +466,6 @@ export default function Overview() {
 
 function cnTrunc(off: boolean) {
   return `flex-1 min-w-0 truncate ${off ? 'text-fg-subtle' : ''}`
-}
-
-function getConfiguredProxies(config: Record<string, unknown>, type: string | null): number | null {
-  if (!type || type === 'static_proxy_provider') return null
-  if (typeof config.num_proxies === 'number') return config.num_proxies
-  return typeof config.max_proxies === 'number' ? config.max_proxies : null
 }
 
 function Legend({ dot, n, label }: { dot: string; n: number; label: string }) {

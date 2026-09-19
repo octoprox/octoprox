@@ -129,7 +129,7 @@ proxy_types:
       parts:
         - text: "{credential.username}"
         - text: "cc-{connector.country_code|lower}"
-          when: { field: connector.country_code }
+          when: { field: connector.country_code }   # or a list: every condition must hold
         - text: "sid-{session_id}"
     password: "{credential.password}"
     tags: [acme, residential]
@@ -160,6 +160,7 @@ options:
 | Key | Description |
 |-----|-------------|
 | `key`, `label`, `type` | `type` is one of `text`, `password`, `number`, `select`, `boolean`, `textarea`, `url`, `country`. |
+| `help`, `details` | `help` is one short sentence shown under the control; `details` is a longer explanation shown behind an info icon next to the label. |
 | `required`, `secret`, `readonly`, `default`, `placeholder`, `help` | Form behaviour. Secret values are stored on the credential/connector but only substituted into proxy credentials at request time. `readonly` fields are shown but not editable - use them for values derived from another field via `fill` (Bright Data's proxy type follows the zone). |
 | `group` | Connector fields are grouped into tabs (`general` by default). |
 | `options`, `options_preset`, `options_from` | Static options, the built-in `countries` list, or a named options source. `options_from_when` switches to the remote source only when a condition holds and falls back to the static list otherwise (Bright Data lists only the countries an ISP zone has IPs in, but the full list for residential zones). `empty_label` names the "no value" choice of an optional dynamic select. |
@@ -179,10 +180,12 @@ Secret fields render as `{key}` runtime placeholders inside stored proxies; ever
 | Mode | What it does | Key settings |
 |------|--------------|--------------|
 | `session` | One gateway; each slot gets a fresh session id and the vendor rotates the exit IP. | `host`, `port`, `username`, `password`, `session_id` (`length`, `alphabet`, `prefix`) |
-| `port` | One exit IP per slot. `port_strategy: sequential` uses `port + index` (Oxylabs); `fixed` keeps one port and pins the IP with `{discovered_ip}` in the username (Bright Data). IPs come from `known_ips` (vendor API) when configured, otherwise from `discovery` (a request made *through* the proxy). | `port_strategy`, `discovery` (`url`, `ip_path`, retry limits), `known_ips` |
+| `port` | One exit IP per slot. `port_strategy: sequential` uses `port + index` (Oxylabs); `fixed` keeps one port and pins the IP with `{discovered_ip}` in the username (Bright Data). IPs come from `known_ips` (vendor API) when configured, otherwise from `discovery` (a request made *through* the proxy). `discovery.country_path` records the exit country the endpoint reports, which country routing uses. | `port_strategy`, `discovery` (`url`, `ip_path`, `country_path`, retry limits), `known_ips` |
 | `list` | The vendor API returns concrete `host:port` entries which Octoprox mirrors, including per-proxy credentials. | `list` (`call`, `items`, `host`, `port`, `username`, `password`, `protocol`, `country`, `identity`, `filter`) |
 
 `count_field` (default `connector.num_proxies`) names the variable holding the desired slot count; in list mode it is an optional cap. `proxy_type_field` selects the proxy type from a select field when a descriptor has more than one.
+
+**Countries.** A connector field of type `country` (or a select with `options_preset: countries`) holds a *list* of ISO codes; the form offers a multi-select and the API accepts one code, a list or a comma-separated string. `num_proxies` (the `count_field`) is always per country. When the proxy type's `username` or `password` template references the field, slots are provisioned as one group per listed country, each rendered with `{connector.<field>}` set to that country and tagged with `geo` in its metadata. With the field left empty the type provisions one ungeo-targeted group and, for `session` mode, creates a group per country on demand when clients request it with `-cc-<code>`. When the template does *not* reference the field but the type is `port` mode, the list becomes a discovery filter: ports are scanned (or known IPs picked) and only IPs whose reported country (`discovery.country_path`, `known_ips.country`) is listed are kept, `num_proxies` per country, stopping on the usual failure and duplicate limits or after `discovery.max_scan_ports` ports. In both cases the periodic refresh removes a proxy whose reported location leaves its allowed countries and the sync that follows replaces it. Templates render a list value as its single element, or comma-joined when it holds several.
 
 ### HTTP calls, auth flows, options and validation
 
