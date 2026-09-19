@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { type HTMLAttributes, type ReactNode } from 'react'
+import { createPortal } from 'react-dom'
 import { X } from 'lucide-react'
 import { cn } from '../../utils/cn'
 
@@ -12,8 +13,13 @@ interface ModalProps {
   overlayClassName?: string
 }
 
+/**
+ * Rendered into <body>: pages are container-query containers, and the layout
+ * containment that implies would otherwise anchor `fixed` to the page content
+ * instead of the viewport.
+ */
 export function Modal({ children, onClose, className, overlayClassName }: ModalProps) {
-  return (
+  return createPortal(
     <div
       className={cn(
         'fixed inset-0 bg-overlay/50 flex items-center justify-center z-50 p-4',
@@ -31,7 +37,8 @@ export function Modal({ children, onClose, className, overlayClassName }: ModalP
       >
         {children}
       </div>
-    </div>
+    </div>,
+    document.body
   )
 }
 

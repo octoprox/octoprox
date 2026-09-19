@@ -1,3 +1,19 @@
+import plugin from 'tailwindcss/plugin'
+
+/*
+ * Container query sizes, matching @tailwindcss/container-queries so the syntax
+ * is the familiar one. Inlined rather than pulled in as a dependency: a handful
+ * of variants is all we need.
+ *
+ * Pages dock a 600px Inspector beside their content, so viewport breakpoints
+ * say nothing useful about how much room a grid actually has. Anything that
+ * reflows inside a page should query its container, not the screen.
+ */
+const CONTAINER_SIZES = {
+  xs: '20rem', sm: '24rem', md: '28rem', lg: '32rem', xl: '36rem',
+  '2xl': '42rem', '3xl': '48rem', '4xl': '56rem', '5xl': '64rem', '6xl': '72rem',
+}
+
 /** @type {import('tailwindcss').Config} */
 export default {
   content: [
@@ -41,5 +57,12 @@ export default {
       },
     },
   },
-  plugins: [],
+  plugins: [
+    plugin(({ addUtilities, addVariant }) => {
+      addUtilities({ '.\\@container': { containerType: 'inline-size' } })
+      for (const [name, size] of Object.entries(CONTAINER_SIZES)) {
+        addVariant(`@${name}`, `@container (min-width: ${size})`)
+      }
+    }),
+  ],
 }

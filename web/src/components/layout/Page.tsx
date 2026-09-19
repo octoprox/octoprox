@@ -7,6 +7,11 @@ import { cn } from '../../utils/cn'
 /**
  * Standard page frame: scrolling content on the left, optional docked
  * Inspector on the right. The AppShell gives it a flex row to fill.
+ *
+ * The scroll area is a container-query container: a docked Inspector takes
+ * 600px out of it, so page content has to reflow off its own width rather than
+ * the viewport's. Use the `@sm:`/`@lg:`/`@4xl:` variants inside a page, not
+ * `sm:`/`lg:`/`xl:`.
  */
 interface PageProps {
   title: ReactNode
@@ -25,9 +30,9 @@ interface PageProps {
 export function Page({ title, subtitle, count, actions, toolbar, panel, children, contentClassName }: PageProps) {
   return (
     <div className="flex flex-1 min-h-0 min-w-0">
-      <div className="flex-1 min-w-0 overflow-y-auto">
-        <div className={cn('p-6 flex flex-col gap-4', contentClassName)}>
-          <header className="flex items-center justify-between gap-4 flex-wrap">
+      <div className="@container flex-1 min-w-0 overflow-y-auto">
+        <div className={cn('p-4 @2xl:p-6 flex flex-col gap-4', contentClassName)}>
+          <header className="flex items-center justify-between gap-x-4 gap-y-2 flex-wrap">
             <div className="flex items-center gap-3 min-w-0 flex-wrap">
               <div className="min-w-0">
                 <h1 className="text-xl font-semibold text-fg flex items-center gap-2">
@@ -38,7 +43,7 @@ export function Page({ title, subtitle, count, actions, toolbar, panel, children
               </div>
               {toolbar}
             </div>
-            {actions && <div className="flex items-center gap-2 flex-none">{actions}</div>}
+            {actions && <div className="flex items-center justify-end gap-2 flex-wrap">{actions}</div>}
           </header>
           {children}
         </div>

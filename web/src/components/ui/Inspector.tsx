@@ -102,7 +102,7 @@ export function KeyValue({ label, value, mono }: { label: ReactNode; value: Reac
   return (
     <div className="flex items-center justify-between gap-3 py-1.5 border-b border-line last:border-b-0 text-[13px]">
       <span className="text-fg-muted flex-none">{label}</span>
-      <span className={cn('font-medium text-fg text-right truncate tabular-nums', mono && 'font-mono text-xs')}>{value}</span>
+      <span className={cn('min-w-0 font-medium text-fg text-right truncate tabular-nums', mono && 'font-mono text-xs')}>{value}</span>
     </div>
   )
 }

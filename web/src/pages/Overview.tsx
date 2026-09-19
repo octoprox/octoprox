@@ -241,8 +241,8 @@ export default function Overview() {
       ) : null}
     >
       {/* Hero: success rate + pool health */}
-      <Card className="grid grid-cols-1 md:grid-cols-[240px_minmax(0,1fr)] overflow-hidden">
-        <div className="px-5 py-4 border-b md:border-b-0 md:border-r border-line flex flex-col justify-center gap-0.5 min-w-0">
+      <Card className="grid grid-cols-1 @xl:grid-cols-[240px_minmax(0,1fr)] overflow-hidden">
+        <div className="px-5 py-4 border-b @xl:border-b-0 @xl:border-r border-line flex flex-col justify-center gap-0.5 min-w-0">
           <div className="text-xs text-fg-muted">Success rate · {range}</div>
           <div className="text-[40px] font-semibold leading-[44px] tracking-tight tabular-nums">
             {successRate == null ? '-' : `${successRate.toFixed(1)}%`}
@@ -254,7 +254,7 @@ export default function Overview() {
         <div className="px-5 py-4 flex flex-col justify-center gap-2.5 min-w-0">
           <div className="flex items-center justify-between gap-3 flex-wrap">
             <div className="text-sm font-semibold">Pool health</div>
-            <div className="text-xs text-fg-muted tabular-nums truncate">
+            <div className="text-xs text-fg-muted tabular-nums min-w-0">
               <b className="text-fg font-semibold">{total}</b> proxies · avg latency <b className="text-fg font-semibold">{Math.round(pool?.avg_latency_ms ?? 0)} ms</b>
               {scaling && <> · <b className="text-fg font-semibold">{scaling.requests_per_minute.toFixed(0)}</b> req/min</>}
             </div>
@@ -287,18 +287,18 @@ export default function Overview() {
       </Card>
 
       {/* KPI row */}
-      <Card className="grid grid-cols-2 sm:grid-cols-3 xl:grid-cols-6 gap-px bg-line overflow-hidden [&>*]:bg-surface">
-        <Kpi label="Requests" value={compact(totals.requests)} spark={sparks.requests} color={C.requests} compact={projectPanelOpen} />
-        <Kpi label="Successes" value={compact(totals.successes)} spark={sparks.successes} color={C.successes} compact={projectPanelOpen} />
-        <Kpi label="Failures" value={compact(totals.failures)} spark={sparks.failures} color={C.failures} compact={projectPanelOpen} />
-        <Kpi label="Bytes sent" value={bytesShort(totals.bytesSent)} spark={sparks.sent} color={C.sent} compact={projectPanelOpen} />
-        <Kpi label="Bytes received" value={bytesShort(totals.bytesReceived)} spark={sparks.received} color={C.received} compact={projectPanelOpen} />
-        <Kpi label="Requests / min" value={scaling ? scaling.requests_per_minute.toFixed(1) : '-'} sub={scaling ? `${scaling.rate_per_proxy.toFixed(1)} per proxy` : undefined} compact={projectPanelOpen} />
+      <Card className="grid grid-cols-2 @lg:grid-cols-3 @5xl:grid-cols-6 gap-px bg-line overflow-hidden [&>*]:bg-surface">
+        <Kpi label="Requests" value={compact(totals.requests)} spark={sparks.requests} color={C.requests} />
+        <Kpi label="Successes" value={compact(totals.successes)} spark={sparks.successes} color={C.successes} />
+        <Kpi label="Failures" value={compact(totals.failures)} spark={sparks.failures} color={C.failures} />
+        <Kpi label="Bytes sent" value={bytesShort(totals.bytesSent)} spark={sparks.sent} color={C.sent} />
+        <Kpi label="Bytes received" value={bytesShort(totals.bytesReceived)} spark={sparks.received} color={C.received} />
+        <Kpi label="Requests / min" value={scaling ? scaling.requests_per_minute.toFixed(1) : '-'} sub={scaling ? `${scaling.rate_per_proxy.toFixed(1)} per proxy` : undefined} />
       </Card>
 
-      <div className="grid grid-cols-1 xl:grid-cols-[minmax(0,2fr)_minmax(0,1fr)] gap-4 items-stretch">
+      <div className="grid grid-cols-1 @4xl:grid-cols-[minmax(0,2fr)_minmax(0,1fr)] gap-4 items-stretch">
         {/* Left: charts */}
-        <div className="flex flex-col gap-4 min-w-0">
+        <div className="@container flex flex-col gap-4 min-w-0">
           <Card className="p-4">
             <CardHeader
               title={<>Requests over time <span className="text-fg-subtle font-normal">· {range}</span></>}
@@ -322,7 +322,7 @@ export default function Overview() {
             )}
           </Card>
 
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <div className="grid grid-cols-1 @lg:grid-cols-2 gap-4">
             <Card className="p-3.5">
               <CardHeader title={<span className="text-[13px]">Latency</span>} action={<span className="text-xs text-fg-muted">avg {Math.round(pool?.avg_latency_ms ?? 0)} ms</span>} className="mb-1" />
               {chartData.length === 0 ? (
@@ -378,7 +378,7 @@ export default function Overview() {
       </div>
 
       {/* Connectors, routing, auto-scaling */}
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-4 items-start">
+      <div className="grid grid-cols-1 @xl:grid-cols-2 @4xl:grid-cols-3 gap-4 items-start">
         <Card className="px-4 py-3">
           <CardHeader
             title="Connectors"
@@ -397,7 +397,7 @@ export default function Overview() {
                     onClick={() => navigate(`${base}/connectors?open=${c.id}`)}
                     className="w-full flex items-center gap-2.5 h-[34px] px-1.5 rounded-md text-[12.5px] hover:bg-surface-raised transition-colors text-left"
                   >
-                    <ProviderLogo type={c.credential_type} className="w-4 h-4 text-[16px]" />
+                    <ProviderLogo type={c.credential_type} className="w-4 h-4 text-[16px] flex-none" />
                     <span className={cnTrunc(!c.enabled)}>{c.name}</span>
                     {c.last_error && <AlertTriangle className="w-3.5 h-3.5 text-danger flex-none" />}
                     <span className="text-fg-muted tabular-nums flex-none" title={describeTarget(c)}>{c.proxy_count}{max != null && <span className="text-fg-subtle">/{max}</span>}</span>
@@ -490,16 +490,16 @@ function ChartLegend({ items, small }: { items: [string, string][]; small?: bool
   )
 }
 
-function Kpi({ label, value, sub, spark, color, compact }: { label: string; value: string; sub?: string; spark?: number[]; color?: string; compact?: boolean }) {
+function Kpi({ label, value, sub, spark, color }: { label: string; value: string; sub?: string; spark?: number[]; color?: string }) {
   return (
-    <div className={`${compact ? 'px-3 py-2.5' : 'px-4 py-3'} flex flex-col gap-1 min-w-0`}>
+    <div className="px-3 py-2.5 @lg:px-4 @lg:py-3 flex flex-col gap-1 min-w-0">
       <div className="text-xs text-fg-muted truncate">{label}</div>
       <div className="flex items-end justify-between gap-2">
         <div className="min-w-0">
-          <div className={`${compact ? 'text-[17px] leading-6' : 'text-[21px] leading-7'} font-semibold tabular-nums truncate`} title={value}>{value}</div>
+          <div className="text-[17px] leading-6 @lg:text-[21px] @lg:leading-7 font-semibold tabular-nums truncate" title={value}>{value}</div>
           {sub && <div className="text-[11px] text-fg-subtle truncate">{sub}</div>}
         </div>
-        {!compact && spark && spark.length > 1 && color && <Sparkline values={spark} color={color} width={48} height={24} />}
+        {spark && spark.length > 1 && color && <Sparkline values={spark} color={color} width={48} height={24} />}
       </div>
     </div>
   )
