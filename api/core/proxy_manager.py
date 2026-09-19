@@ -10,6 +10,7 @@ Emits proxy lifecycle signals (proxy_added, proxy_removed, proxy_status_changed)
 import asyncio
 import contextlib
 import json
+from collections.abc import Coroutine
 from typing import TYPE_CHECKING, Any
 
 import structlog
@@ -56,6 +57,7 @@ from api.core.stats import (
     empty_delta,
     merge_delta_into,
 )
+from api.core.system_snapshotter import SystemSnapshotter
 from api.db.redis import (
     INSTANCE_REGISTRY_KEY,
     METRIC_DELTAS_CHANNEL,
@@ -131,6 +133,9 @@ class ProxyManager:
             self, redis_client, settings.instance_id, self._provider_registry
         )
         self._rate_limiter = RateLimiter(redis_client)
+        self._system_snapshotter = SystemSnapshotter(
+            session_factory, redis_client, self, settings
+        )
         # Pending metric deltas accumulated since the last flush. The
         # per-request handler bumps local in-memory counters AND
         # appends here; ``_periodic_metric_flush_loop`` drains both
@@ -140,6 +145,14 @@ class ProxyManager:
         self._pending_project_deltas: dict[str, MetricDelta] = {}
         self._running = False
         self._tasks: list[asyncio.Task[None]] = []
+
+    def _spawn(self, name: str, coro: Coroutine[Any, Any, None]) -> None:
+        """Start a named background loop and keep its handle.
+
+        The name is what the admin system view lists as a running worker, so
+        it doubles as the loop's public identity - keep it stable.
+        """
+        self._tasks.append(asyncio.create_task(coro, name=name))
 
     async def start(self) -> None:
         """Start the proxy manager and background tasks."""
@@ -182,49 +195,45 @@ class ProxyManager:
         await self._hydrate_from_redis()
 
         # Start health checker
-        task = asyncio.create_task(self._health_checker.run())
-        self._tasks.append(task)
+        self._spawn("health_checker", self._health_checker.run())
 
         # Start metrics flusher
-        task = asyncio.create_task(self._metrics_flusher.run())
-        self._tasks.append(task)
+        self._spawn("metrics_flusher", self._metrics_flusher.run())
 
         # Start metrics compactor (compaction + retention)
-        task = asyncio.create_task(self._metrics_compactor.run())
-        self._tasks.append(task)
+        self._spawn("metrics_compactor", self._metrics_compactor.run())
 
         # Start auto-scaler
-        task = asyncio.create_task(self._auto_scaler.run())
-        self._tasks.append(task)
+        self._spawn("auto_scaler", self._auto_scaler.run())
 
         # Start provider syncer (handles all proxy provider types)
-        task = asyncio.create_task(self._provider_syncer.run())
-        self._tasks.append(task)
+        self._spawn("provider_syncer", self._provider_syncer.run())
+
+        # Snapshot install-wide gauges for the admin trend charts. A disabled
+        # snapshotter is not spawned at all, so it never shows up in the
+        # worker list as a loop that has stopped.
+        if self._system_snapshotter.enabled:
+            self._spawn("system_snapshotter", self._system_snapshotter.run())
 
         # Advertise this instance's presence so future phases can discover
         # peers (cross-instance event fanout, sharded health checks, leases).
-        task = asyncio.create_task(self._heartbeat_loop())
-        self._tasks.append(task)
+        self._spawn("heartbeat", self._heartbeat_loop())
 
         # Safety-net reload from Postgres in case cross-instance invalidation
         # events get dropped (Redis Pub/Sub is best-effort).
-        task = asyncio.create_task(self._periodic_full_reload_loop())
-        self._tasks.append(task)
+        self._spawn("full_reload", self._periodic_full_reload_loop())
 
         # Drain accumulated request-metric deltas to Redis (batched) and
         # announce them on Pub/Sub so peers update their in-memory view.
         # Keeps the hot path free of per-request Redis writes.
-        task = asyncio.create_task(self._periodic_metric_flush_loop())
-        self._tasks.append(task)
+        self._spawn("metric_flush", self._periodic_metric_flush_loop())
 
         # Receive peer instances' metric deltas and fold them into local
         # in-memory counters.
-        task = asyncio.create_task(self._metric_delta_subscriber_loop())
-        self._tasks.append(task)
+        self._spawn("metric_delta_subscriber", self._metric_delta_subscriber_loop())
 
         # Subscribe to cross-instance cache-invalidation events.
-        task = asyncio.create_task(self._cross_instance_subscriber_loop())
-        self._tasks.append(task)
+        self._spawn("cross_instance_subscriber", self._cross_instance_subscriber_loop())
 
     async def _cross_instance_subscriber_loop(self) -> None:
         """Listen on the EventBus distributed channel and reload entities.
@@ -1020,6 +1029,30 @@ class ProxyManager:
     @property
     def provider_store(self) -> ProviderStore:
         return self._provider_store
+
+    @property
+    def background_tasks(self) -> list[asyncio.Task[None]]:
+        """Handles for the long-running loops started by :meth:`start`."""
+        return list(self._tasks)
+
+    def cache_sizes(self) -> dict[str, int]:
+        """Entry counts of every in-memory cache this instance holds.
+
+        Postgres remains authoritative; these are what *this* process has
+        resident, so a gap against the database counts means a reload is
+        overdue (or a peer has written something we have not seen yet).
+        """
+        return {
+            "projects": len(self._projects),
+            "credentials": len(self._credentials),
+            "connectors": len(self._connectors),
+            "proxies": len(self._proxies),
+            "project_strategies": len(self._project_strategies),
+            "geo_provision_locks": len(self._geo_provision_locks),
+            "pending_proxy_deltas": len(self._pending_proxy_deltas),
+            "pending_project_deltas": len(self._pending_project_deltas),
+            "quarantined_proxies": self._rate_limiter.active_quarantine_count,
+        }
 
     @property
     def rate_limiter(self) -> RateLimiter:

@@ -1,0 +1,241 @@
+# Copyright 2026 Octoprox Authors
+# SPDX-License-Identifier: Apache-2.0
+
+"""Response models for the admin system statistics endpoint.
+
+The payload is deliberately split by *where the number comes from*, because
+the answers have different authority in a multi-instance deployment:
+
+* ``inventory`` / ``database`` - Postgres, the same for every instance.
+* ``redis`` / ``workers.leases`` / ``workers.instances`` - the shared
+  operational store, so also cluster-wide.
+* ``runtime`` / ``cache`` / ``workers.tasks`` - the process that served the
+  request, and nobody else.
+"""
+
+from datetime import datetime
+
+from pydantic import BaseModel, Field
+
+
+class RuntimeStats(BaseModel):
+    """Identity and configuration of the instance that answered the request."""
+
+    version: str
+    instance_id: str
+    role: str
+    environment: str
+    python_version: str
+    platform: str
+    pid: int
+    started_at: datetime | None = None
+    uptime_seconds: float = 0.0
+    api_port: int
+    proxy_port: int
+    log_level: str
+    health_check_interval: int
+    metrics_flush_interval: int
+    ip_refresh_interval: int
+
+
+class InventoryStats(BaseModel):
+    """Exact entity counts from Postgres, across every project."""
+
+    projects: int = 0
+    credentials: int = 0
+    connectors: int = 0
+    connectors_enabled: int = 0
+    connectors_failing: int = 0
+    proxies: int = 0
+    users: int = 0
+    users_active: int = 0
+    users_by_role: dict[str, int] = Field(default_factory=dict)
+    providers_total: int = 0
+    providers_builtin: int = 0
+    providers_custom: int = 0
+    custom_providers_enabled: int = 0
+    # Health status is operational state, so it comes from the live pool this
+    # instance holds rather than from Postgres.
+    proxies_by_status: dict[str, int] = Field(default_factory=dict)
+
+
+class ProjectUsage(BaseModel):
+    """Per-project share of the inventory."""
+
+    id: str
+    name: str
+    credentials: int
+    connectors: int
+    proxies: int
+
+
+class TableStats(BaseModel):
+    """Size of one Postgres table, including its indexes and TOAST data."""
+
+    name: str
+    # None until the table has been analysed at least once.
+    row_estimate: int | None
+    total_bytes: int
+    table_bytes: int
+    index_bytes: int
+
+
+class DatabaseStats(BaseModel):
+    """Postgres size and connection usage.
+
+    ``row_estimate`` on each table comes from the planner statistics
+    (``pg_class.reltuples``), which is why it is free to collect on tables
+    with millions of metric rows - and why it drifts until the next ANALYZE,
+    and is ``None`` on a table autovacuum has not reached yet.
+    """
+
+    name: str = ""
+    size_bytes: int = 0
+    tables: list[TableStats] = Field(default_factory=list)
+    backends: int | None = None
+    pool_size: int | None = None
+    pool_checked_out: int | None = None
+    error: str | None = None
+
+
+class RedisKeyGroup(BaseModel):
+    """Key count for one logical slice of the Redis keyspace."""
+
+    label: str
+    keys: int
+
+
+class RedisStats(BaseModel):
+    """Redis memory, throughput and keyspace composition."""
+
+    version: str = ""
+    uptime_seconds: int = 0
+    used_memory_bytes: int = 0
+    used_memory_peak_bytes: int = 0
+    used_memory_rss_bytes: int = 0
+    maxmemory_bytes: int = 0
+    connected_clients: int = 0
+    ops_per_sec: int = 0
+    keyspace_hits: int = 0
+    keyspace_misses: int = 0
+    total_keys: int = 0
+    groups: list[RedisKeyGroup] = Field(default_factory=list)
+    scanned_keys: int = 0
+    # True when the keyspace is larger than the scan budget, so ``groups``
+    # describes a sample rather than the whole keyspace.
+    truncated: bool = False
+    error: str | None = None
+
+
+class CacheStats(BaseModel):
+    """Entry counts of the in-memory caches held by this instance."""
+
+    projects: int = 0
+    credentials: int = 0
+    connectors: int = 0
+    proxies: int = 0
+    project_strategies: int = 0
+    geo_provision_locks: int = 0
+    pending_proxy_deltas: int = 0
+    pending_project_deltas: int = 0
+    quarantined_proxies: int = 0
+    tls_contexts: int = 0
+    provider_types: int = 0
+
+
+class WorkerTask(BaseModel):
+    """One background loop running in this process."""
+
+    name: str
+    description: str = ""
+    state: str  # running | done | cancelled | failed
+    error: str | None = None
+
+
+class LeaseInfo(BaseModel):
+    """A Redis lease, i.e. which instance is currently running a singleton job."""
+
+    name: str
+    kind: str
+    target: str | None = None
+    holder: str
+    held_by_self: bool
+    ttl_ms: int
+
+
+class InstanceInfo(BaseModel):
+    """A live Octoprox process advertising itself in the instance registry."""
+
+    instance_id: str
+    role: str
+    is_self: bool
+    ttl_seconds: int
+
+
+class WorkerStats(BaseModel):
+    """What is running: locally as tasks, cluster-wide as leases."""
+
+    tasks: list[WorkerTask] = Field(default_factory=list)
+    leases: list[LeaseInfo] = Field(default_factory=list)
+    instances: list[InstanceInfo] = Field(default_factory=list)
+    proxy_server_listening: bool = False
+    proxy_server_connections: int = 0
+    geo_lookup_enabled: bool = False
+    geo_lookups_in_flight: int = 0
+
+
+class SystemStats(BaseModel):
+    """Everything the admin system view renders."""
+
+    generated_at: datetime
+    runtime: RuntimeStats
+    inventory: InventoryStats
+    projects: list[ProjectUsage] = Field(default_factory=list)
+    database: DatabaseStats
+    redis: RedisStats
+    cache: CacheStats
+    workers: WorkerStats
+
+
+# --- trend history -------------------------------------------------------------------
+
+
+class SystemMetricsPoint(BaseModel):
+    """One gauge reading, raw or averaged over a bucket."""
+
+    timestamp: datetime
+    database_size_bytes: int
+    redis_memory_bytes: int
+    redis_keys: int
+    projects: int
+    credentials: int
+    connectors: int
+    connectors_enabled: int
+    users: int
+    proxies_total: int
+    proxies_healthy: int
+    proxies_unhealthy: int
+
+
+class TableGrowth(BaseModel):
+    """How much one table grew across the requested window."""
+
+    name: str
+    first_bytes: int
+    last_bytes: int
+    delta_bytes: int
+
+
+class SystemMetricsHistory(BaseModel):
+    """Gauge history for the admin trend charts.
+
+    ``bucket_seconds`` is null when points are raw snapshots and set when they
+    are averages over a window - the charts say which, so a flat line from
+    averaging is not mistaken for a flat line in the data.
+    """
+
+    range: str
+    bucket_seconds: int | None = None
+    interval_seconds: int
+    snapshots: list[SystemMetricsPoint] = Field(default_factory=list)
+    table_growth: list[TableGrowth] = Field(default_factory=list)

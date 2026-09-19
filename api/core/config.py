@@ -41,6 +41,10 @@ def _load_yaml_config(config_path: Path) -> dict[str, Any]:
         flat_config["db_application_name"] = db_cfg.get("application_name")
         if "metrics_flush_interval" in db_cfg:
             flat_config["metrics_flush_interval"] = db_cfg["metrics_flush_interval"]
+    if "system" in config_data:
+        system_cfg = config_data["system"] or {}
+        flat_config["system_metrics_interval"] = system_cfg.get("metrics_interval")
+        flat_config["system_metrics_retention_days"] = system_cfg.get("metrics_retention_days")
     if "proxy" in config_data:
         proxy_cfg = config_data["proxy"]
         flat_config["default_strategy"] = proxy_cfg.get("default_strategy")
@@ -189,6 +193,21 @@ class Settings(BaseSettings):
 
     # Metrics flush interval (seconds) - how often to flush Redis metrics to Postgres
     metrics_flush_interval: int = Field(default=60)
+
+    # Install-wide gauge snapshots behind the admin System trend charts.
+    # One row per interval for the whole install, so the volume is small and
+    # retention alone keeps it bounded (no compaction tiers).
+    system_metrics_interval: int = Field(
+        default=300,
+        description=(
+            "How often to snapshot install-wide system gauges, in seconds "
+            "(minimum 60; 0 disables snapshotting entirely)"
+        ),
+    )
+    system_metrics_retention_days: int = Field(
+        default=90,
+        description="How long to keep system metric snapshots, in days (0 keeps them forever)",
+    )
 
     # Logging
     log_level: str = Field(

@@ -18,6 +18,7 @@ import AppearanceSection from './pages/settings/AppearanceSection'
 import UsersSection from './pages/settings/UsersSection'
 import BackupSection from './pages/settings/BackupSection'
 import ProvidersSection from './pages/settings/ProvidersSection'
+import SystemSection from './pages/settings/SystemSection'
 import { ProjectProvider } from './contexts/ProjectContext'
 import { AuthProvider, AuthContextValue } from './contexts/AuthContext'
 import { ToastProvider } from './contexts/ToastContext'
@@ -123,6 +124,7 @@ function AuthenticatedApp() {
       <Route path="users" element={<RequireAdmin><UsersSection /></RequireAdmin>} />
       <Route path="backup" element={<RequireAdmin><BackupSection /></RequireAdmin>} />
       <Route path="providers" element={<RequireAdmin><ProvidersSection /></RequireAdmin>} />
+      <Route path="system" element={<RequireAdmin><SystemSection /></RequireAdmin>} />
     </>
   )
 

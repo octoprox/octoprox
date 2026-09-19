@@ -6,6 +6,8 @@
 from fastapi import APIRouter, Request
 from pydantic import BaseModel
 
+from api import __version__
+
 router = APIRouter()
 
 
@@ -24,7 +26,7 @@ async def health_check(request: Request) -> HealthResponse:
 
     return HealthResponse(
         status="healthy",
-        version="0.1.0",
+        version=__version__,
         proxy_count=len(proxy_manager.proxies),
         healthy_proxy_count=len(proxy_manager.healthy_proxies),
     )

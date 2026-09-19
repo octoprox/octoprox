@@ -65,6 +65,12 @@ class RateLimiter:
         # is_quarantined() synchronous.
         self._quarantine_expiry: dict[str, float] = {}
 
+    @property
+    def active_quarantine_count(self) -> int:
+        """How many proxies this instance currently holds in quarantine."""
+        now = time.monotonic()
+        return sum(1 for expiry in self._quarantine_expiry.values() if expiry > now)
+
     def is_quarantined(self, proxy_id: str) -> bool:
         """Check if a proxy is currently quarantined (sync, no I/O)."""
         expiry = self._quarantine_expiry.get(proxy_id)

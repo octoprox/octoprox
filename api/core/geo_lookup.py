@@ -78,6 +78,11 @@ class GeoLookup:
             await asyncio.gather(*tasks, return_exceptions=True)
         self._tasks.clear()
 
+    @property
+    def in_flight(self) -> int:
+        """Number of exit-location lookups running right now."""
+        return len(self._tasks)
+
     def wants_lookup(self, proxy: Proxy) -> bool:
         """Static-connector proxies with no country yet get a lookup; everything else is left alone."""
         if not self.enabled or self._proxy_manager is None:

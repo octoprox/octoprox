@@ -20,6 +20,12 @@ database:
   application_name: "octoprox-dev"
   metrics_flush_interval: 60
 
+system:
+  # Install-wide gauge snapshots behind the admin System trend charts.
+  # One row per interval for the whole install; retention alone bounds it.
+  metrics_interval: 300
+  metrics_retention_days: 90
+
 proxy:
   # Default routing strategy: round_robin, least_used, random, sticky, health_based
   default_strategy: round_robin
