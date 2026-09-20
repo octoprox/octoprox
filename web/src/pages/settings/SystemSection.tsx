@@ -239,21 +239,39 @@ const WORKER_STATE: Record<WorkerState, { icon: typeof CheckCircle2; className: 
 }
 
 function WorkersCard({ workers }: { workers: SystemWorkers }) {
-  const failed = workers.tasks.filter((t) => t.state !== 'running').length
+  // A per-resource worker (auto-scaler, provider sync) can hold several leases
+  // at once, one per connector, so count rather than flag.
+  const leasesHeld = new Map<string, number>()
+  for (const lease of workers.leases) {
+    if (lease.held_by_self) leasesHeld.set(lease.worker, (leasesHeld.get(lease.worker) ?? 0) + 1)
+  }
+  const stopped = workers.tasks.filter((t) => t.state !== 'running').length
+  // A loop that is still alive but failing every cycle looks fine from the
+  // task state alone; the run counters are what surface it.
+  const failing = workers.tasks.filter((t) => t.state === 'running' && t.consecutive_failures > 0).length
+
   return (
     <Card className="px-4 py-3">
       <CardHeader
         title="Background workers"
         action={
-          failed === 0
-            ? <Badge color="green">all running</Badge>
-            : <Badge color="red">{failed} not running</Badge>
+          stopped > 0
+            ? <Badge color="red">{stopped} not running</Badge>
+            : failing > 0
+              ? <Badge color="yellow">{failing} failing</Badge>
+              : <Badge color="green">all running</Badge>
         }
         className="mb-1.5"
       />
       <div className="-mx-1">
-        {workers.tasks.map((task) => <WorkerRow key={task.name} task={task} />)}
+        {workers.tasks.map((task) => (
+          <WorkerRow key={task.name} task={task} leasesHeld={leasesHeld.get(task.name) ?? 0} />
+        ))}
       </div>
+      <p className="text-[11px] text-fg-subtle mt-2">
+        Run counts are this instance's, since it started. Singleton workers only run
+        on the instance holding their lease - see Cluster.
+      </p>
       <div className="mt-2.5 pt-2.5 border-t border-line grid grid-cols-2 gap-x-4">
         <Fact
           label="Proxy listener"
@@ -270,23 +288,79 @@ function WorkersCard({ workers }: { workers: SystemWorkers }) {
   )
 }
 
-function WorkerRow({ task }: { task: SystemWorkerTask }) {
+function WorkerRow({ task, leasesHeld }: { task: SystemWorkerTask; leasesHeld: number }) {
   const state = WORKER_STATE[task.state] ?? WORKER_STATE.done
   const Icon = state.icon
+  // The exception that ended the loop outranks one it recovered from, and a
+  // recovered one still outranks the description while it keeps recurring.
+  const problem = task.state !== 'running'
+    ? task.error
+    : task.consecutive_failures > 0 ? task.last_error : null
+
   return (
     <div className="flex items-start gap-2.5 px-1 py-1.5 rounded-md hover:bg-surface-raised transition-colors">
       <Icon className={cn('w-3.5 h-3.5 mt-0.5 flex-none', state.className)} />
       <div className="min-w-0 flex-1">
-        <div className="text-[12.5px] font-medium">{formatWorkerName(task.name)}</div>
-        <div className="text-[11px] text-fg-subtle">{task.error ?? task.description}</div>
+        <div className="flex items-center gap-1.5 flex-wrap">
+          <span className="text-[12.5px] font-medium">{formatWorkerName(task.name)}</span>
+          {task.scope === 'singleton' && (
+            <Badge
+              color={leasesHeld > 0 ? 'green' : 'gray'}
+              className="px-1.5 py-0 text-[10px] font-normal"
+              title={leasesHeld > 0
+                ? `This instance holds the ${task.lease} lease, so it runs the job`
+                : `Another instance holds the ${task.lease} lease; this one stands by`}
+            >
+              {leasesHeld > 0
+                ? leasesHeld > 1 ? `singleton · ${leasesHeld} leases here` : 'singleton · runs here'
+                : 'singleton · standing by'}
+            </Badge>
+          )}
+        </div>
+        <div className={cn('text-[11px]', problem ? 'text-danger' : 'text-fg-subtle')}>
+          {problem ?? task.description}
+        </div>
+        <WorkerRuns task={task} />
       </div>
       <span className={cn('text-[11px] flex-none', state.className)}>{state.label}</span>
     </div>
   )
 }
 
+/** Cycle counters: what the loop has actually done, as opposed to whether it exists. */
+function WorkerRuns({ task }: { task: SystemWorkerTask }) {
+  if (task.runs === 0) {
+    return (
+      <div className="text-[11px] text-fg-subtle">
+        {task.scope === 'singleton' ? 'no runs on this instance' : 'no runs yet'}
+      </div>
+    )
+  }
+  return (
+    <div className="flex items-center gap-x-2 gap-y-0.5 flex-wrap text-[11px] text-fg-subtle tabular-nums">
+      <span>{task.runs.toLocaleString()} {task.runs === 1 ? 'run' : 'runs'}</span>
+      {task.failures > 0 && (
+        <span className="text-danger" title={task.last_error ?? undefined}>
+          {task.failures.toLocaleString()} failed
+          {task.consecutive_failures > 0 && ` (${task.consecutive_failures} in a row)`}
+        </span>
+      )}
+      {task.avg_duration_ms !== null && <span>{formatMs(task.avg_duration_ms)} avg</span>}
+      {task.max_duration_ms !== null && <span>{formatMs(task.max_duration_ms)} max</span>}
+      {task.last_run_at && <span>last {relativeTime(task.last_run_at)}</span>}
+    </div>
+  )
+}
+
 function formatWorkerName(name: string): string {
   return name.replace(/_/g, ' ').replace(/^./, (c) => c.toUpperCase())
+}
+
+function formatMs(ms: number): string {
+  if (ms < 1) return '<1ms'
+  if (ms < 1000) return `${Math.round(ms)}ms`
+  if (ms < 60_000) return `${(ms / 1000).toFixed(1)}s`
+  return `${Math.round(ms / 60_000)}m`
 }
 
 // --- cluster -------------------------------------------------------------------------
@@ -317,12 +391,12 @@ function ClusterCard({ workers, instanceId }: { workers: SystemWorkers; instance
 
       <div className="mt-2.5 pt-2.5 border-t border-line">
         <div className="text-[11px] text-fg-muted mb-1">
-          Singleton jobs, and which instance currently holds each lease
+          Singleton jobs: which instance's worker is running each one right now
         </div>
         {workers.leases.length === 0 ? (
           <p className="text-[12px] text-fg-subtle py-1">No leases held right now.</p>
         ) : (
-          <div className="flex flex-col gap-1">
+          <div className="flex flex-col gap-1.5">
             {workers.leases.map((lease) => <LeaseRow key={lease.name} lease={lease} instanceId={instanceId} />)}
           </div>
         )}
@@ -332,17 +406,30 @@ function ClusterCard({ workers, instanceId }: { workers: SystemWorkers; instance
 }
 
 function LeaseRow({ lease, instanceId }: { lease: SystemLease; instanceId: string }) {
+  const mine = lease.holder === instanceId
   return (
-    <div className="flex items-center gap-2 text-[12.5px]" title={`Held by ${lease.holder}`}>
-      <Clock className="w-3.5 h-3.5 text-fg-subtle flex-none" />
-      <span className="truncate">{lease.kind}</span>
-      {lease.target && <span className="font-mono text-[11px] text-fg-subtle truncate">{lease.target.slice(0, 8)}</span>}
-      <span className="flex-1" />
-      <span className="text-fg-subtle tabular-nums">{(lease.ttl_ms / 1000).toFixed(1)}s left</span>
-      <span className="font-mono text-[11px] text-fg-muted">
-        {lease.held_by_self ? 'this instance' : `${lease.holder.slice(0, 8)}…`}
-      </span>
-      <span className={cn('w-2 h-2 rounded-full flex-none', lease.holder === instanceId ? 'bg-success' : 'bg-fg-subtle')} />
+    <div className="flex items-start gap-2" title={`Held by ${lease.holder}`}>
+      <Clock className="w-3.5 h-3.5 mt-0.5 text-fg-subtle flex-none" />
+      <div className="min-w-0 flex-1">
+        <div className="flex items-center gap-2 text-[12.5px]">
+          <span className="truncate">{lease.kind}</span>
+          {lease.target && (
+            <span className="font-mono text-[11px] text-fg-subtle truncate">{lease.target.slice(0, 8)}</span>
+          )}
+          <span className="flex-1" />
+          <span className="text-[11px] text-fg-subtle tabular-nums flex-none">
+            {(lease.ttl_ms / 1000).toFixed(1)}s left
+          </span>
+          <span className={cn('w-2 h-2 rounded-full flex-none', mine ? 'bg-success' : 'bg-fg-subtle')} />
+        </div>
+        {/* Names the worker, so this row and the Background workers list line up. */}
+        <div className="text-[11px] text-fg-subtle truncate">
+          {formatWorkerName(lease.worker || lease.name)} on{' '}
+          {lease.held_by_self
+            ? 'this instance'
+            : <span className="font-mono">{lease.holder.slice(0, 8)}…</span>}
+        </div>
+      </div>
     </div>
   )
 }

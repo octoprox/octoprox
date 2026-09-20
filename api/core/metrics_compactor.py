@@ -15,7 +15,9 @@ import structlog
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from api.core import utc_now
+from api.core.job_stats import job_stats
 from api.core.leadership import Lease
+from api.core.workers import LeaseName, WorkerName
 from api.db.redis import RedisClient
 from api.db.repository import MetricsRepository, ProjectRepository
 
@@ -73,7 +75,7 @@ class MetricsCompactor:
         logger.info("Starting metrics compactor", interval=self._interval)
         lease = Lease(
             self._redis_client,
-            name="metrics_compactor",
+            name=LeaseName.METRICS_COMPACTOR,
             owner_id=self._instance_id,
         )
         try:
@@ -84,7 +86,8 @@ class MetricsCompactor:
                         continue
                     await asyncio.sleep(self._interval)
                     if lease.is_held and self._running:
-                        await self._compact_and_retain()
+                        with job_stats.track(WorkerName.METRICS_COMPACTOR):
+                            await self._compact_and_retain()
                 except asyncio.CancelledError:
                     logger.info("Metrics compactor stopped")
                     break

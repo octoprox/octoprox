@@ -147,6 +147,9 @@ class TestSystemStatsPayload:
         workers = authenticated_client.get(ENDPOINT).json()["workers"]
 
         by_name = {task["name"]: task for task in workers["tasks"]}
+        # Spelled out rather than taken from WorkerName: these names are the
+        # wire contract, so renaming a member should fail here, not pass
+        # silently because both sides moved together.
         expected = {
             "health_checker",
             "metrics_flusher",
@@ -155,13 +158,50 @@ class TestSystemStatsPayload:
             "provider_syncer",
             "heartbeat",
             "full_reload",
-            "metric_flush",
+            "metric_delta_publisher",
             "metric_delta_subscriber",
             "cross_instance_subscriber",
         }
         assert expected <= set(by_name)
         assert all(task["state"] == "running" for task in by_name.values())
+        # Every spawned loop is described; an undescribed one is a loop that was
+        # added without being added to WORKERS.
         assert all(task["description"] for task in by_name.values())
+
+    def test_workers_say_which_are_leader_elected(
+        self, authenticated_client: TestClient
+    ) -> None:
+        """Each singleton task names the lease that decides where it runs."""
+        workers = authenticated_client.get(ENDPOINT).json()["workers"]
+        by_name = {task["name"]: task for task in workers["tasks"]}
+
+        assert by_name["metrics_flusher"]["scope"] == "singleton"
+        assert by_name["metrics_flusher"]["lease"] == "metrics_flusher"
+        assert by_name["auto_scaler"]["lease"] == "autoscaler"
+        # Runs on every instance, so no lease to point at.
+        assert by_name["health_checker"]["scope"] == "instance"
+        assert by_name["health_checker"]["lease"] is None
+
+        # A lease and its worker resolve to each other, which is what lets the
+        # UI line the two lists up.
+        for lease in workers["leases"]:
+            assert by_name[lease["worker"]]["lease"] == lease["name"].partition(":")[0]
+
+    def test_workers_count_the_cycles_they_ran(
+        self, authenticated_client: TestClient
+    ) -> None:
+        """The heartbeat writes every 5s, so by now it has run and timed itself."""
+        workers = authenticated_client.get(ENDPOINT).json()["workers"]
+        heartbeat = next(t for t in workers["tasks"] if t["name"] == "heartbeat")
+
+        assert heartbeat["runs"] >= 1
+        assert heartbeat["failures"] == 0
+        assert heartbeat["consecutive_failures"] == 0
+        assert heartbeat["last_error"] is None
+        assert heartbeat["last_run_at"] is not None
+        assert heartbeat["last_duration_ms"] >= 0
+        assert heartbeat["avg_duration_ms"] >= 0
+        assert heartbeat["max_duration_ms"] >= heartbeat["avg_duration_ms"]
 
     def test_workers_report_this_instance_and_its_leases(
         self, authenticated_client: TestClient, test_settings: Any
@@ -179,7 +219,8 @@ class TestSystemStatsPayload:
         # either way, rather than on who won the race.
         leases = {lease["name"]: lease for lease in workers["leases"]}
         assert {"metrics_flusher", "metrics_compactor"} <= set(leases)
-        assert leases["metrics_flusher"]["kind"] == "Metrics flush"
+        assert leases["metrics_flusher"]["kind"] == "Metrics flush to Postgres"
+        assert leases["metrics_flusher"]["worker"] == "metrics_flusher"
         assert leases["metrics_flusher"]["target"] is None
         assert leases["metrics_flusher"]["ttl_ms"] > 0
         for lease in workers["leases"]:

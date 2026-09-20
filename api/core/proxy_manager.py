@@ -23,6 +23,7 @@ from api.core.domain_filter import is_domain_allowed
 from api.core.entity_index import ConnectorIndex, ProxyIndex
 from api.core.event_bus import EVENT_CHANNEL, RedisPubSubTransport, event_bus
 from api.core.health_checker import HealthChecker
+from api.core.job_stats import job_stats
 from api.core.leadership import Lease
 from api.core.metrics_compactor import MetricsCompactor
 from api.core.metrics_flusher import MetricsFlusher
@@ -58,6 +59,7 @@ from api.core.stats import (
     merge_delta_into,
 )
 from api.core.system_snapshotter import SystemSnapshotter
+from api.core.workers import WorkerName
 from api.db.redis import (
     INSTANCE_REGISTRY_KEY,
     METRIC_DELTAS_CHANNEL,
@@ -138,7 +140,7 @@ class ProxyManager:
         )
         # Pending metric deltas accumulated since the last flush. The
         # per-request handler bumps local in-memory counters AND
-        # appends here; ``_periodic_metric_flush_loop`` drains both
+        # appends here; ``_metric_delta_publisher_loop`` drains both
         # dicts in a single Redis pipeline and announces the same
         # deltas on Pub/Sub so peers can update without polling.
         self._pending_proxy_deltas: dict[str, MetricDelta] = {}
@@ -195,45 +197,47 @@ class ProxyManager:
         await self._hydrate_from_redis()
 
         # Start health checker
-        self._spawn("health_checker", self._health_checker.run())
+        self._spawn(WorkerName.HEALTH_CHECKER, self._health_checker.run())
 
         # Start metrics flusher
-        self._spawn("metrics_flusher", self._metrics_flusher.run())
+        self._spawn(WorkerName.METRICS_FLUSHER, self._metrics_flusher.run())
 
         # Start metrics compactor (compaction + retention)
-        self._spawn("metrics_compactor", self._metrics_compactor.run())
+        self._spawn(WorkerName.METRICS_COMPACTOR, self._metrics_compactor.run())
 
         # Start auto-scaler
-        self._spawn("auto_scaler", self._auto_scaler.run())
+        self._spawn(WorkerName.AUTO_SCALER, self._auto_scaler.run())
 
         # Start provider syncer (handles all proxy provider types)
-        self._spawn("provider_syncer", self._provider_syncer.run())
+        self._spawn(WorkerName.PROVIDER_SYNCER, self._provider_syncer.run())
 
         # Snapshot install-wide gauges for the admin trend charts. A disabled
         # snapshotter is not spawned at all, so it never shows up in the
         # worker list as a loop that has stopped.
         if self._system_snapshotter.enabled:
-            self._spawn("system_snapshotter", self._system_snapshotter.run())
+            self._spawn(WorkerName.SYSTEM_SNAPSHOTTER, self._system_snapshotter.run())
 
         # Advertise this instance's presence so future phases can discover
         # peers (cross-instance event fanout, sharded health checks, leases).
-        self._spawn("heartbeat", self._heartbeat_loop())
+        self._spawn(WorkerName.HEARTBEAT, self._heartbeat_loop())
 
         # Safety-net reload from Postgres in case cross-instance invalidation
         # events get dropped (Redis Pub/Sub is best-effort).
-        self._spawn("full_reload", self._periodic_full_reload_loop())
+        self._spawn(WorkerName.FULL_RELOAD, self._periodic_full_reload_loop())
 
         # Drain accumulated request-metric deltas to Redis (batched) and
         # announce them on Pub/Sub so peers update their in-memory view.
-        # Keeps the hot path free of per-request Redis writes.
-        self._spawn("metric_flush", self._periodic_metric_flush_loop())
+        # Keeps the hot path free of per-request Redis writes. Named for what
+        # it publishes, not "flush", so it cannot be read as the leader-elected
+        # ``metrics_flusher`` that writes Redis counters on to Postgres.
+        self._spawn(WorkerName.METRIC_DELTA_PUBLISHER, self._metric_delta_publisher_loop())
 
         # Receive peer instances' metric deltas and fold them into local
         # in-memory counters.
-        self._spawn("metric_delta_subscriber", self._metric_delta_subscriber_loop())
+        self._spawn(WorkerName.METRIC_DELTA_SUBSCRIBER, self._metric_delta_subscriber_loop())
 
         # Subscribe to cross-instance cache-invalidation events.
-        self._spawn("cross_instance_subscriber", self._cross_instance_subscriber_loop())
+        self._spawn(WorkerName.CROSS_INSTANCE_SUBSCRIBER, self._cross_instance_subscriber_loop())
 
     async def _cross_instance_subscriber_loop(self) -> None:
         """Listen on the EventBus distributed channel and reload entities.
@@ -289,7 +293,8 @@ class ProxyManager:
                             continue
                         op = payload.get("op")
                         try:
-                            await handler(entity_id, op)
+                            with job_stats.track(WorkerName.CROSS_INSTANCE_SUBSCRIBER):
+                                await handler(entity_id, op)
                         except Exception:
                             logger.warning(
                                 "Cross-instance reload handler failed",
@@ -383,7 +388,8 @@ class ProxyManager:
         try:
             while self._running:
                 try:
-                    await self._redis_client.client.set(key, payload, ex=ttl_seconds)
+                    with job_stats.track(WorkerName.HEARTBEAT):
+                        await self._redis_client.client.set(key, payload, ex=ttl_seconds)
                 except Exception:
                     logger.warning("Instance heartbeat write failed", exc_info=True)
                 await asyncio.sleep(interval_seconds)
@@ -779,7 +785,8 @@ class ProxyManager:
                 await asyncio.sleep(interval_seconds)
                 if not self._running:
                     break
-                await self.full_reload()
+                with job_stats.track(WorkerName.FULL_RELOAD):
+                    await self.full_reload()
             except asyncio.CancelledError:
                 break
             except Exception:
@@ -850,8 +857,12 @@ class ProxyManager:
                 exc_info=True,
             )
 
-    async def _periodic_metric_flush_loop(self, interval_seconds: float = 5.0) -> None:
-        """Periodically flush accumulated metric deltas.
+    async def _metric_delta_publisher_loop(self, interval_seconds: float = 5.0) -> None:
+        """Periodically move accumulated metric deltas into Redis.
+
+        This is the in-process-to-Redis half of the metrics pipeline and runs
+        on every instance. The Redis-to-Postgres half is ``MetricsFlusher``,
+        which is leader-elected and writes the history rows.
 
         Default cadence is 5s - fast enough that the UI feels live,
         slow enough that the Redis pipeline batches many requests
@@ -864,7 +875,8 @@ class ProxyManager:
                 await asyncio.sleep(interval_seconds)
                 if not self._running:
                     break
-                await self._flush_pending_metrics()
+                with job_stats.track(WorkerName.METRIC_DELTA_PUBLISHER):
+                    await self._flush_pending_metrics()
             except asyncio.CancelledError:
                 break
             except Exception:
@@ -900,10 +912,13 @@ class ProxyManager:
                             continue
                         if payload.get("instance_id") == my_id:
                             continue
-                        self._apply_peer_metric_deltas(
-                            payload.get("proxy_deltas") or {},
-                            payload.get("project_deltas") or {},
-                        )
+                        # A "run" for a subscriber is one peer message applied;
+                        # the loop itself just waits on the socket.
+                        with job_stats.track(WorkerName.METRIC_DELTA_SUBSCRIBER):
+                            self._apply_peer_metric_deltas(
+                                payload.get("proxy_deltas") or {},
+                                payload.get("project_deltas") or {},
+                            )
                 finally:
                     with contextlib.suppress(Exception):
                         await pubsub.unsubscribe(METRIC_DELTAS_CHANNEL)

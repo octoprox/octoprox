@@ -138,6 +138,7 @@ standby takes over on its next poll.
 |-------------------|--------------------|----------------------------------------------|
 | Metrics flusher   | Global             | Two writers would double-count Postgres rows |
 | Metrics compactor | Global             | Compaction races on the same source rows     |
+| System snapshotter| Global             | N instances would store N copies of one reading |
 | Autoscaler        | Per-connector      | Two scalers would double-provision cloud VMs |
 | Provider syncer   | Per-connector      | Two syncers would call provider APIs twice   |
 

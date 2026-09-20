@@ -572,7 +572,7 @@ Editors and viewers receive `403`.
 | `database` | Whole install | Database size, per-table size (indexes included), server connections and this instance's pool usage. |
 | `redis` | Whole install | Memory, throughput, hit rate and a breakdown of the keyspace by purpose. |
 | `cache` | This instance | Entry counts of every in-memory cache the process holds. |
-| `workers` | Mixed | `tasks` are this instance's background loops; `leases` and `instances` are cluster-wide. |
+| `workers` | Mixed | `tasks` are this instance's background loops and their run counters; `leases` and `instances` are cluster-wide. |
 
 **Scope matters behind a load balancer.** `runtime`, `cache` and
 `workers.tasks` describe only the instance that answered the request. With
@@ -611,9 +611,17 @@ keys it reports a sample and sets `"truncated": true`.
     "truncated": false
   },
   "workers": {
-    "tasks": [ { "name": "provider_syncer", "state": "running", "error": null } ],
+    "tasks": [
+      { "name": "metrics_flusher", "scope": "singleton", "lease": "metrics_flusher",
+        "state": "running", "error": null,
+        "runs": 412, "failures": 1, "consecutive_failures": 0,
+        "last_run_at": "2026-09-19T21:52:30.114221", "last_duration_ms": 84.2,
+        "avg_duration_ms": 61.9, "max_duration_ms": 512.7,
+        "last_error": "TimeoutError: ", "last_error_at": "2026-09-19T18:04:11.002913" }
+    ],
     "leases": [
-      { "name": "metrics_flusher", "kind": "Metrics flush", "target": null,
+      { "name": "metrics_flusher", "kind": "Metrics flush to Postgres",
+        "worker": "metrics_flusher", "target": null,
         "holder": "66eb615b-…", "held_by_self": true, "ttl_ms": 4027 }
     ],
     "instances": [ { "instance_id": "66eb615b-…", "role": "all", "is_self": true, "ttl_seconds": 9 } ]
@@ -621,10 +629,24 @@ keys it reports a sample and sets `"truncated": true`.
 }
 ```
 
-A `workers.tasks` entry whose `state` is not `running` means a background loop
-on that instance has stopped; `error` carries the exception that ended it.
-`leases` answers "which instance is doing the singleton work right now" -
-metrics flushing, compaction and system snapshots globally, auto-scaling and
+**Two kinds of worker health.** `state` and `error` describe the asyncio task:
+not `running` means the loop on that instance has stopped, and `error` carries
+the exception that ended it. The run counters describe the cycles *inside* the
+loop - one health-check sweep, one metrics flush, one peer message applied - so
+a loop that raises every cycle and recovers is still `running`, and only
+`consecutive_failures` and `last_error` say it is broken. Counters are
+per-process and reset with it; a cycle cancelled at shutdown is not counted.
+Granularity is the cycle, not the item: the auto-scaler handles each connector
+under its own `try`, so a cycle counts as a success even when one connector
+failed.
+
+**Which worker runs where.** `scope` is `singleton` for leader-elected loops
+and `instance` for ones every instance runs. A singleton's `lease` matches a
+`leases[].name` (for per-connector leases, the part before the `:`), and each
+lease names its `worker` in return - so "which instance is doing this job right
+now" (`leases`) and "how is it going on this instance" (`tasks`) line up. A
+standby's singleton worker is legitimately at `"runs": 0`. Leader-elected work
+is metrics flushing, compaction and system snapshots globally, auto-scaling and
 provider sync (discovery and IP refresh) per connector.
 
 ### System Trends

@@ -14,6 +14,7 @@ the answers have different authority in a multi-instance deployment:
 """
 
 from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
@@ -144,19 +145,51 @@ class CacheStats(BaseModel):
 
 
 class WorkerTask(BaseModel):
-    """One background loop running in this process."""
+    """One background loop running in this process.
+
+    Two different failure stories live here. ``state``/``error`` describe the
+    asyncio task: "running" means the loop still exists. The run counters
+    describe the work inside it: a loop that raises every cycle and swallows
+    the error is still "running", and only ``consecutive_failures`` says so.
+
+    ``scope`` is how the loop behaves across instances - ``"instance"`` runs
+    everywhere, ``"singleton"`` only on whoever holds ``lease``, which is the
+    name to match against ``WorkerStats.leases``. Counters are per-process and
+    reset with it, so a standby's singleton worker shows zero runs.
+    """
 
     name: str
     description: str = ""
+    scope: Literal["instance", "singleton"] = "instance"
+    # Lease name for a global singleton, lease name prefix for a per-resource
+    # one (``autoscaler`` -> ``autoscaler:<connector id>``). None when the
+    # worker runs on every instance.
+    lease: str | None = None
     state: str  # running | done | cancelled | failed
     error: str | None = None
+    runs: int = 0
+    failures: int = 0
+    consecutive_failures: int = 0
+    last_run_at: datetime | None = None
+    last_duration_ms: float | None = None
+    avg_duration_ms: float | None = None
+    max_duration_ms: float | None = None
+    # The last cycle error, which - unlike ``error`` - the loop recovered from.
+    last_error: str | None = None
+    last_error_at: datetime | None = None
 
 
 class LeaseInfo(BaseModel):
-    """A Redis lease, i.e. which instance is currently running a singleton job."""
+    """A Redis lease, i.e. which instance is currently running a singleton job.
+
+    ``worker`` names the background loop that takes this lease, so a lease row
+    and a ``WorkerStats.tasks`` row can be lined up: the lease says *where* the
+    job runs right now, the task says *how* it is going on this instance.
+    """
 
     name: str
     kind: str
+    worker: str = ""
     target: str | None = None
     holder: str
     held_by_self: bool

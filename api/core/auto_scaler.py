@@ -26,6 +26,7 @@ import structlog
 from api.core import utc_now
 from api.core.demand_tracker import DemandLevel
 from api.core.event_bus import event_bus
+from api.core.job_stats import job_stats
 from api.core.leadership import Lease
 from api.core.signals import (
     connector_error_updated,
@@ -39,6 +40,7 @@ from api.core.signals import (
     scale_down_requested,
     scale_up_requested,
 )
+from api.core.workers import LeaseName, WorkerName, resource_lease
 from api.db.redis import AUTOSCALER_LAST_ACTION_KEY, RedisClient
 from api.models.connector import CloudConnectorConfig, Connector
 from api.models.credential import CredentialType
@@ -127,7 +129,8 @@ class AutoScaler:
 
         while self._running:
             try:
-                await self._check_all_connectors()
+                with job_stats.track(WorkerName.AUTO_SCALER):
+                    await self._check_all_connectors()
                 await asyncio.sleep(CHECK_INTERVAL_SECONDS)
             except asyncio.CancelledError:
                 logger.info("Auto-scaler stopped")
@@ -305,7 +308,7 @@ class AutoScaler:
 
             lease = Lease(
                 self._redis_client,
-                name=f"autoscaler:{connector.id}",
+                name=resource_lease(LeaseName.AUTOSCALER, connector.id),
                 owner_id=self._instance_id,
             )
             if not await lease.try_acquire():

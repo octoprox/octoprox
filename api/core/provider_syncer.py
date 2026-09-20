@@ -20,6 +20,7 @@ import structlog
 
 from api.core.config import settings
 from api.core.event_bus import event_bus
+from api.core.job_stats import job_stats
 from api.core.leadership import Lease
 from api.core.signals import (
     provider_connector_sync_requested,
@@ -28,6 +29,7 @@ from api.core.signals import (
     proxy_removed,
     proxy_update_requested,
 )
+from api.core.workers import LeaseName, WorkerName, resource_lease
 from api.db.redis import RedisClient
 from api.models.connector import Connector
 from api.models.credential import Credential
@@ -126,7 +128,8 @@ class ProxyProviderSyncer:
 
         while self._running:
             try:
-                await self._refresh_all_provider_proxies()
+                with job_stats.track(WorkerName.PROVIDER_SYNCER):
+                    await self._refresh_all_provider_proxies()
                 await asyncio.sleep(settings.ip_refresh_interval)
             except asyncio.CancelledError:
                 logger.info("Provider syncer stopped")
@@ -188,7 +191,7 @@ class ProxyProviderSyncer:
         async with self._get_sync_lock(connector.id):
             lease = Lease(
                 self._redis_client,
-                name=f"provider_sync:{connector.id}",
+                name=resource_lease(LeaseName.PROVIDER_SYNC, connector.id),
                 owner_id=self._instance_id,
             )
             if not await lease.try_acquire():
@@ -295,7 +298,7 @@ class ProxyProviderSyncer:
         async with self._get_sync_lock(connector.id):
             lease = Lease(
                 self._redis_client,
-                name=f"provider_sync:{connector.id}",
+                name=resource_lease(LeaseName.PROVIDER_SYNC, connector.id),
                 owner_id=self._instance_id,
             )
             if not await lease.try_acquire():

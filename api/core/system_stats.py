@@ -35,6 +35,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from api import __version__
 from api.core import utc_now
 from api.core.config import Settings
+from api.core.job_stats import job_stats
+from api.core.workers import LEASE_KINDS, LEASE_WORKERS, worker_info
 from api.db.redis import INSTANCE_REGISTRY_SCAN, LEASE_SCAN, RedisClient, classify_key
 from api.models.system import (
     CacheStats,
@@ -68,29 +70,6 @@ REDIS_SCAN_BATCH = 1_000
 # Largest number of per-project rows returned; the UI shows the busiest ones.
 MAX_PROJECT_ROWS = 50
 
-# What each named background loop in ``ProxyManager`` actually does. Keys match
-# the names passed to ``ProxyManager._spawn``.
-TASK_DESCRIPTIONS: dict[str, str] = {
-    "health_checker": "Probes the proxies this instance owns and publishes their status",
-    "metrics_flusher": "Leader only: writes Redis metric counters into Postgres history",
-    "metrics_compactor": "Leader only: rolls up old metric rows and applies retention",
-    "auto_scaler": "Scales cloud connectors and rotates proxies to match demand",
-    "provider_syncer": "Discovery and IP refresh: reconciles each connector against its provider",
-    "heartbeat": "Advertises this instance so peers can shard work and find lease holders",
-    "full_reload": "Safety-net reload from Postgres in case an invalidation event was dropped",
-    "metric_flush": "Drains pending request deltas to Redis and announces them to peers",
-    "metric_delta_subscriber": "Folds peer instances' metric deltas into local counters",
-    "cross_instance_subscriber": "Applies entity changes published by other instances",
-}
-
-# Lease name prefix -> human label. Lease names are either bare (a global
-# singleton) or ``<kind>:<resource id>``; see api.core.leadership.
-LEASE_KINDS: dict[str, str] = {
-    "metrics_flusher": "Metrics flush",
-    "metrics_compactor": "Metrics compaction",
-    "autoscaler": "Auto-scaling",
-    "provider_sync": "Provider sync",
-}
 
 
 # --- runtime ------------------------------------------------------------------------
@@ -346,6 +325,7 @@ async def _collect_leases(redis_client: RedisClient, instance_id: str) -> list[L
             LeaseInfo(
                 name=name,
                 kind=LEASE_KINDS.get(kind, kind),
+                worker=LEASE_WORKERS.get(kind, ""),
                 target=target or None,
                 holder=str(holder),
                 held_by_self=str(holder) == instance_id,
@@ -417,22 +397,48 @@ def _task_state(task: asyncio.Task[Any]) -> tuple[str, str | None]:
 
 
 def collect_tasks(proxy_manager: ProxyManager | None) -> list[WorkerTask]:
-    """The background loops of this process and whether they are still alive."""
+    """The background loops of this process: alive, elected, and doing work.
+
+    ``state`` comes from the asyncio task, the counters from
+    :mod:`api.core.job_stats`. Both are needed: the task says the loop exists,
+    the counters say the cycles inside it are completing. A singleton worker
+    standing by without the lease is legitimately at zero runs - the lease
+    list says who does have it.
+    """
     if proxy_manager is None:
         return []
+    runs = job_stats.snapshot()
     tasks: list[WorkerTask] = []
     for task in proxy_manager.background_tasks:
         name = task.get_name()
         state, error = _task_state(task)
+        info = worker_info(name)
+        stats = runs.get(name)
         tasks.append(
             WorkerTask(
                 name=name,
-                description=TASK_DESCRIPTIONS.get(name, ""),
+                description=info.description if info else "",
+                scope=info.scope if info else "instance",
+                lease=info.lease if info else None,
                 state=state,
                 error=error,
+                runs=stats.runs if stats else 0,
+                failures=stats.failures if stats else 0,
+                consecutive_failures=stats.consecutive_failures if stats else 0,
+                last_run_at=stats.last_run_at if stats else None,
+                last_duration_ms=_round_ms(stats.last_duration_ms) if stats else None,
+                avg_duration_ms=_round_ms(stats.avg_duration_ms) if stats else None,
+                max_duration_ms=_round_ms(stats.max_duration_ms) if stats else None,
+                last_error=stats.last_error if stats else None,
+                last_error_at=stats.last_error_at if stats else None,
             )
         )
     return tasks
+
+
+def _round_ms(value: float | None) -> float | None:
+    """Sub-microsecond precision on a timing nobody reads that closely."""
+    return None if value is None else round(value, 3)
 
 
 async def collect_workers(

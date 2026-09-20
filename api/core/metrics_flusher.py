@@ -9,7 +9,9 @@ import structlog
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from api.core.config import Settings
+from api.core.job_stats import job_stats
 from api.core.leadership import Lease
+from api.core.workers import LeaseName, WorkerName
 from api.db.redis import RedisClient
 from api.db.repository import MetricsRepository
 
@@ -52,7 +54,7 @@ class MetricsFlusher:
         logger.info("Starting metrics flusher", interval=self._interval)
         lease = Lease(
             self._redis_client,
-            name="metrics_flusher",
+            name=LeaseName.METRICS_FLUSHER,
             owner_id=self._settings.instance_id,
         )
         try:
@@ -63,7 +65,8 @@ class MetricsFlusher:
                         continue
                     await asyncio.sleep(self._interval)
                     if lease.is_held and self._running:
-                        await self._flush_metrics()
+                        with job_stats.track(WorkerName.METRICS_FLUSHER):
+                            await self._flush_metrics()
                 except asyncio.CancelledError:
                     logger.info("Metrics flusher stopped")
                     break

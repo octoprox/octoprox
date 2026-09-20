@@ -25,8 +25,10 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from api.core import utc_now
 from api.core.config import Settings
+from api.core.job_stats import job_stats
 from api.core.leadership import Lease
 from api.core.system_stats import collect_database, collect_inventory, collect_redis
+from api.core.workers import LeaseName, WorkerName
 from api.db.redis import RedisClient
 from api.db.repository import SystemMetricsRepository
 
@@ -97,7 +99,7 @@ class SystemSnapshotter:
         )
         lease = Lease(
             self._redis_client,
-            name="system_snapshotter",
+            name=LeaseName.SYSTEM_SNAPSHOTTER,
             owner_id=self._settings.instance_id,
         )
         try:
@@ -109,7 +111,8 @@ class SystemSnapshotter:
                     # Snapshot first, then sleep: a fresh install gets its
                     # first point immediately instead of after one interval.
                     if lease.is_held:
-                        await self._snapshot_if_due()
+                        with job_stats.track(WorkerName.SYSTEM_SNAPSHOTTER):
+                            await self._snapshot_if_due()
                     await asyncio.sleep(self._interval)
                 except asyncio.CancelledError:
                     logger.info("System snapshotter stopped")

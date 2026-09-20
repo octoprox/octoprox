@@ -101,7 +101,8 @@ Endpoints exposed on the host (same for both cluster variants):
 All three instances share the same Postgres and Redis, generate distinct
 `OCTOPROX_INSTANCE_ID` values, advertise themselves via Redis heartbeat,
 and elect leaders for singleton background workers (metrics flusher,
-compactor) and per-connector workers (autoscaler, provider syncer). See
+compactor, system snapshotter) and per-connector workers (autoscaler,
+provider syncer). See
 [`docker-compose.cluster.yml`](docker-compose.cluster.yml),
 [`docker-compose.cluster.ghcr.yml`](docker-compose.cluster.ghcr.yml), and
 [`haproxy/haproxy.cfg`](haproxy/haproxy.cfg) for the wiring details.

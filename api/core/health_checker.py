@@ -26,7 +26,9 @@ from httpx_socks import AsyncProxyTransport  # type: ignore[import-untyped]
 from api.core import utc_now
 from api.core.config import settings
 from api.core.event_bus import event_bus
+from api.core.job_stats import job_stats
 from api.core.signals import health_check_completed
+from api.core.workers import WorkerName
 from api.db.redis import INSTANCE_REGISTRY_SCAN, RedisClient
 from api.models.connector import Connector
 from api.models.proxy import Proxy, ProxyProtocol, ProxyStatus
@@ -117,7 +119,8 @@ class HealthChecker:
 
         while True:
             try:
-                await self._check_all_proxies()
+                with job_stats.track(WorkerName.HEALTH_CHECKER):
+                    await self._check_all_proxies()
                 await asyncio.sleep(self._interval)
             except asyncio.CancelledError:
                 logger.info("Health checker stopped")

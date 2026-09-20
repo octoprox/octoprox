@@ -1104,16 +1104,37 @@ export interface SystemCache {
 
 export type WorkerState = 'running' | 'done' | 'cancelled' | 'failed'
 
+/** 'instance' runs on every instance; 'singleton' only on the lease holder. */
+export type WorkerScope = 'instance' | 'singleton'
+
 export interface SystemWorkerTask {
   name: string
   description: string
+  scope: WorkerScope
+  /** Lease this worker elects on, matching SystemLease.name (or its prefix). */
+  lease: string | null
+  /** State of the asyncio task itself - whether the loop still exists. */
   state: WorkerState
+  /** The exception that ended the loop, when state is not 'running'. */
   error: string | null
+  /** Counters for the cycles inside the loop, since this process started. */
+  runs: number
+  failures: number
+  consecutive_failures: number
+  last_run_at: string | null
+  last_duration_ms: number | null
+  avg_duration_ms: number | null
+  max_duration_ms: number | null
+  /** Last cycle error, which - unlike `error` - the loop recovered from. */
+  last_error: string | null
+  last_error_at: string | null
 }
 
 export interface SystemLease {
   name: string
   kind: string
+  /** Name of the background worker that takes this lease. */
+  worker: string
   target: string | null
   holder: string
   held_by_self: boolean
