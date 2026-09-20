@@ -10,7 +10,7 @@ from typing import Any
 
 import pytest
 
-from api.core.job_stats import MAX_ERROR_CHARS, get_job_stats, job_stats
+from api.core.job_stats import MAX_ERROR_CHARS, JobStats, get_job_stats, job_stats
 from api.core.proxy_manager import ProxyManager
 from api.core.system_stats import collect_tasks
 from api.core.workers import LEASE_KINDS, LEASE_WORKERS, WORKERS, WorkerName
@@ -87,6 +87,55 @@ class TestTrack:
         assert stats.avg_duration_ms == 20.0
         assert stats.max_duration_ms == 30.0
         assert stats.last_duration_ms == 10.0 or stats.last_duration_ms == 30.0
+
+    async def test_counts_cycles_that_outlast_their_cadence(self) -> None:
+        """Overruns are what "this job is quietly running late" looks like."""
+        job_stats.declare_interval("worker", 0.05)
+        job_stats.record("worker", 10.0)
+        job_stats.record("worker", 80.0)
+
+        stats = job_stats.get("worker")
+        assert stats is not None
+        assert stats.runs == 2
+        # Only the 80ms cycle exceeded the 50ms cadence, and it is not a
+        # failure - the work succeeded, it just delayed the next cycle.
+        assert stats.overruns == 1
+        assert stats.consecutive_overruns == 1
+        assert stats.failures == 0
+
+    async def test_a_cycle_back_within_cadence_clears_the_overrun_streak(self) -> None:
+        """One slow cycle must not mark a worker as behind for the rest of its life."""
+        job_stats.declare_interval("worker", 0.05)
+        job_stats.record("worker", 80.0)
+        assert (job_stats.get("worker") or JobStats("x")).consecutive_overruns == 1
+
+        for _ in range(5):
+            job_stats.record("worker", 10.0)
+
+        stats = job_stats.get("worker")
+        assert stats is not None
+        # Back on cadence now, but the blip stays on the lifetime record.
+        assert stats.consecutive_overruns == 0
+        assert stats.overruns == 1
+        assert stats.last_overrun_at is not None
+
+    async def test_a_worker_without_a_cadence_never_overruns(self) -> None:
+        """The pub/sub subscribers run on arrival, so there is nothing to miss."""
+        job_stats.record("worker", 10_000.0)
+
+        stats = job_stats.get("worker")
+        assert stats is not None
+        assert stats.interval_seconds is None
+        assert stats.overruns == 0
+        assert stats.consecutive_overruns == 0
+
+    async def test_cadence_is_reported_before_the_first_cycle(self) -> None:
+        """An hourly job should not look unknown for its first hour."""
+        job_stats.declare_interval("worker", 3600)
+
+        stats = job_stats.get("worker")
+        assert stats is not None
+        assert (stats.interval_seconds, stats.runs) == (3600, 0)
 
     async def test_long_errors_are_truncated(self) -> None:
         job_stats.record("worker", 1.0, "x" * 1000)

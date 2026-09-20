@@ -116,6 +116,7 @@ class HealthChecker:
     async def run(self) -> None:
         """Run the health check loop."""
         logger.info("Starting health checker", interval=self._interval)
+        job_stats.declare_interval(WorkerName.HEALTH_CHECKER, self._interval)
 
         while True:
             try:

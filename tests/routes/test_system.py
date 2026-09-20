@@ -203,6 +203,40 @@ class TestSystemStatsPayload:
         assert heartbeat["avg_duration_ms"] >= 0
         assert heartbeat["max_duration_ms"] >= heartbeat["avg_duration_ms"]
 
+    def test_workers_report_the_cadence_they_run_on(
+        self, authenticated_client: TestClient, test_settings: Any
+    ) -> None:
+        """Each loop declares the interval it actually sleeps on.
+
+        Note this is the cadence *in force*, not the configured one. The
+        health checker binds ``settings`` at import time and ``conftest``
+        patches only some modules, so here it runs on the shipped default
+        rather than the fixture's 3600 - which is the kind of gap reporting
+        the cadence is meant to expose.
+        """
+        from api.core import health_checker as health_checker_module
+
+        workers = authenticated_client.get(ENDPOINT).json()["workers"]
+        by_name = {task["name"]: task for task in workers["tasks"]}
+
+        # Constructed with the app's Settings, so it tracks the fixture.
+        assert by_name["metrics_flusher"]["interval_seconds"] == test_settings.metrics_flush_interval
+        # Fixed in the loops themselves.
+        assert by_name["heartbeat"]["interval_seconds"] == 5
+        assert by_name["full_reload"]["interval_seconds"] == 60
+        assert by_name["metric_delta_publisher"]["interval_seconds"] == 5
+        # Whatever its own module bound, which is the value it sleeps on.
+        assert (
+            by_name["health_checker"]["interval_seconds"]
+            == health_checker_module.settings.health_check_interval
+        )
+        # Event-driven: a peer message arrives or it does not, so there is no
+        # cadence to fall behind.
+        assert by_name["metric_delta_subscriber"]["interval_seconds"] is None
+        assert by_name["metric_delta_subscriber"]["overruns"] == 0
+        # Nothing in a healthy test run takes longer than its cadence.
+        assert by_name["heartbeat"]["overruns"] == 0
+
     def test_workers_report_this_instance_and_its_leases(
         self, authenticated_client: TestClient, test_settings: Any
     ) -> None:

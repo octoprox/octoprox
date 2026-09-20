@@ -125,6 +125,7 @@ class AutoScaler:
     async def run(self) -> None:
         """Run the auto-scaler loop."""
         logger.info("Starting auto-scaler", interval=CHECK_INTERVAL_SECONDS)
+        job_stats.declare_interval(WorkerName.AUTO_SCALER, CHECK_INTERVAL_SECONDS)
         self._running = True
 
         while self._running:

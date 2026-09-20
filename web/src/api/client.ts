@@ -1117,9 +1117,16 @@ export interface SystemWorkerTask {
   state: WorkerState
   /** The exception that ended the loop, when state is not 'running'. */
   error: string | null
+  /** Cadence the loop was started with; null for the event-driven subscribers. */
+  interval_seconds: number | null
   /** Counters for the cycles inside the loop, since this process started. */
   runs: number
   failures: number
+  /** Cycles that ran longer than interval_seconds, i.e. pushed the loop off cadence. */
+  overruns: number
+  /** Streak of those, cleared by the first cycle back inside the cadence: is it behind now? */
+  consecutive_overruns: number
+  last_overrun_at: string | null
   consecutive_failures: number
   last_run_at: string | null
   last_duration_ms: number | null

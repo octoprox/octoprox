@@ -613,8 +613,10 @@ keys it reports a sample and sets `"truncated": true`.
   "workers": {
     "tasks": [
       { "name": "metrics_flusher", "scope": "singleton", "lease": "metrics_flusher",
-        "state": "running", "error": null,
+        "state": "running", "error": null, "interval_seconds": 60,
         "runs": 412, "failures": 1, "consecutive_failures": 0,
+        "overruns": 3, "consecutive_overruns": 0,
+        "last_overrun_at": "2026-09-19T19:31:55.417002",
         "last_run_at": "2026-09-19T21:52:30.114221", "last_duration_ms": 84.2,
         "avg_duration_ms": 61.9, "max_duration_ms": 512.7,
         "last_error": "TimeoutError: ", "last_error_at": "2026-09-19T18:04:11.002913" }
@@ -639,6 +641,25 @@ per-process and reset with it; a cycle cancelled at shutdown is not counted.
 Granularity is the cycle, not the item: the auto-scaler handles each connector
 under its own `try`, so a cycle counts as a success even when one connector
 failed.
+
+**Cadence and overruns.** `interval_seconds` is the interval the loop was
+started with, declared by the loop itself so it is the value actually slept on
+rather than a config setting read elsewhere - worth knowing, because a worker
+whose module was configured differently from the rest of the process will say
+so here. It is `null` for the two pub/sub subscribers, which run when a peer
+message arrives and so have no cadence to miss. `overruns` counts cycles that
+took longer than that interval: a loop cannot start its next cycle until the
+current one returns, so those cycles pushed the worker off its cadence - the
+system snapshotter shows this as gaps in the trend charts, and the others as
+work simply happening less often than configured.
+
+`overruns` is a lifetime count, so read it with `consecutive_overruns`, which
+the first cycle back inside the cadence resets: that pair distinguishes "slow
+right now" from "hit one slow cycle during a restart and has been fine since",
+and `last_overrun_at` says when the most recent one was. `failures` /
+`consecutive_failures` work the same way. A climbing `consecutive_overruns`
+with `failures` at zero is the signature of a worker that needs a longer
+interval or less to do, rather than one that is broken.
 
 **Which worker runs where.** `scope` is `singleton` for leader-elected loops
 and `instance` for ones every instance runs. A singleton's `lease` matches a

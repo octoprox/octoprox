@@ -160,7 +160,12 @@ function Tile({ label, value, sub }: { label: string; value: number; sub?: strin
   return (
     <div className="px-3 py-2.5 @lg:px-4 @lg:py-3 min-w-0">
       <div className="text-xs text-fg-muted truncate">{label}</div>
-      <div className="text-[21px] leading-7 font-semibold tabular-nums">{value.toLocaleString()}</div>
+      <div
+        className="text-[21px] leading-7 font-semibold tabular-nums"
+        title={value.toLocaleString()}
+      >
+        {formatCount(value)}
+      </div>
       {sub && <div className="text-[11px] text-fg-subtle truncate" title={sub}>{sub}</div>}
     </div>
   )
@@ -196,7 +201,11 @@ function PoolCard({ inventory }: { inventory: SystemInventory }) {
     <Card className="px-4 py-3">
       <CardHeader
         title="Proxy pool"
-        action={<span className="text-xs text-fg-muted tabular-nums">{total.toLocaleString()} live</span>}
+        action={
+          <span className="text-xs text-fg-muted tabular-nums" title={total.toLocaleString()}>
+            {formatCount(total)} live
+          </span>
+        }
         className="mb-2.5"
       />
       {total === 0 ? (
@@ -249,6 +258,9 @@ function WorkersCard({ workers }: { workers: SystemWorkers }) {
   // A loop that is still alive but failing every cycle looks fine from the
   // task state alone; the run counters are what surface it.
   const failing = workers.tasks.filter((t) => t.state === 'running' && t.consecutive_failures > 0).length
+  // Behind *now*, not "was behind once" - a blip during startup should not
+  // colour the card for the rest of the process's life.
+  const behind = workers.tasks.filter((t) => t.state === 'running' && t.consecutive_overruns > 0).length
 
   return (
     <Card className="px-4 py-3">
@@ -259,7 +271,9 @@ function WorkersCard({ workers }: { workers: SystemWorkers }) {
             ? <Badge color="red">{stopped} not running</Badge>
             : failing > 0
               ? <Badge color="yellow">{failing} failing</Badge>
-              : <Badge color="green">all running</Badge>
+              : behind > 0
+                ? <Badge color="yellow">{behind} over cadence</Badge>
+                : <Badge color="green">all running</Badge>
         }
         className="mb-1.5"
       />
@@ -269,14 +283,15 @@ function WorkersCard({ workers }: { workers: SystemWorkers }) {
         ))}
       </div>
       <p className="text-[11px] text-fg-subtle mt-2">
-        Run counts are this instance's, since it started. Singleton workers only run
-        on the instance holding their lease - see Cluster.
+        Run counts are this instance's, since it started, and each worker is listed with
+        the cadence it was started on - a cycle slower than its cadence delays the next
+        one. Singleton workers only run on the instance holding their lease - see Cluster.
       </p>
       <div className="mt-2.5 pt-2.5 border-t border-line grid grid-cols-2 gap-x-4">
         <Fact
           label="Proxy listener"
           value={workers.proxy_server_listening
-            ? `${workers.proxy_server_connections.toLocaleString()} open connections`
+            ? `${formatCount(workers.proxy_server_connections)} open connections`
             : 'not listening'}
         />
         <Fact
@@ -329,24 +344,49 @@ function WorkerRow({ task, leasesHeld }: { task: SystemWorkerTask; leasesHeld: n
 
 /** Cycle counters: what the loop has actually done, as opposed to whether it exists. */
 function WorkerRuns({ task }: { task: SystemWorkerTask }) {
+  const cadence = task.interval_seconds !== null ? formatInterval(task.interval_seconds) : 'on each peer message'
   if (task.runs === 0) {
     return (
       <div className="text-[11px] text-fg-subtle">
-        {task.scope === 'singleton' ? 'no runs on this instance' : 'no runs yet'}
+        {cadence}, {task.scope === 'singleton' ? 'no runs on this instance' : 'no runs yet'}
       </div>
     )
   }
+  // Both counters below are coloured on the streak, not the lifetime total: a
+  // worker that hit one slow cycle hours ago and has been fine since is not a
+  // problem now, and saying otherwise trains people to ignore the colour.
+  const failingNow = task.consecutive_failures > 0
+  const behindNow = task.consecutive_overruns > 0
   return (
     <div className="flex items-center gap-x-2 gap-y-0.5 flex-wrap text-[11px] text-fg-subtle tabular-nums">
-      <span>{task.runs.toLocaleString()} {task.runs === 1 ? 'run' : 'runs'}</span>
+      <span>{cadence}</span>
+      <span title={`${task.runs.toLocaleString()} runs`}>
+        {formatCount(task.runs)} {task.runs === 1 ? 'run' : 'runs'}
+      </span>
       {task.failures > 0 && (
-        <span className="text-danger" title={task.last_error ?? undefined}>
-          {task.failures.toLocaleString()} failed
-          {task.consecutive_failures > 0 && ` (${task.consecutive_failures} in a row)`}
+        <span
+          className={cn(failingNow && 'text-danger')}
+          title={failingNow
+            ? `${task.failures.toLocaleString()} failed cycles. ${task.last_error ?? ''}`
+            : `${task.failures.toLocaleString()} failed cycles, last ${relativeTime(task.last_error_at)}, recovered since`}
+        >
+          {formatCount(task.failures)} failed
+          {failingNow && ` (${formatCount(task.consecutive_failures)} in a row)`}
         </span>
       )}
       {task.avg_duration_ms !== null && <span>{formatMs(task.avg_duration_ms)} avg</span>}
       {task.max_duration_ms !== null && <span>{formatMs(task.max_duration_ms)} max</span>}
+      {task.overruns > 0 && (
+        <span
+          className={cn(behindNow && 'text-warning')}
+          title={behindNow
+            ? `The last ${task.consecutive_overruns} cycles ran longer than the ${cadence.replace('every ', '')} cadence, so the next run starts late`
+            : `${task.overruns.toLocaleString()} cycles ran long, most recently ${relativeTime(task.last_overrun_at)}; back on cadence since`}
+        >
+          {formatCount(task.overruns)} over cadence
+          {behindNow && ` (${formatCount(task.consecutive_overruns)} in a row)`}
+        </span>
+      )}
       {task.last_run_at && <span>last {relativeTime(task.last_run_at)}</span>}
     </div>
   )
@@ -500,14 +540,18 @@ function RedisCard({ redis }: { redis: SystemRedis }) {
               value={formatBytes(redis.used_memory_bytes)}
               hint={`Peak ${formatBytes(redis.used_memory_peak_bytes)}, RSS ${formatBytes(redis.used_memory_rss_bytes)}`}
             />
-            <Fact label="Keys" value={redis.total_keys.toLocaleString()} />
-            <Fact label="Ops / sec" value={redis.ops_per_sec.toLocaleString()} />
+            <Fact label="Keys" value={formatCount(redis.total_keys)} hint={redis.total_keys.toLocaleString()} />
+            <Fact label="Ops / sec" value={formatCount(redis.ops_per_sec)} hint={redis.ops_per_sec.toLocaleString()} />
             <Fact label="Clients" value={redis.connected_clients} />
             <Fact label="Hit rate" value={hitRate == null ? '-' : `${hitRate.toFixed(1)}%`} />
             <Fact label="Uptime" value={formatDuration(redis.uptime_seconds)} />
           </div>
           <div className="text-[11px] text-fg-muted mb-1">
-            Keys by purpose{redis.truncated && <> · sampled from the first {redis.scanned_keys.toLocaleString()}</>}
+            Keys by purpose{redis.truncated && (
+              <span title={`${redis.scanned_keys.toLocaleString()} keys scanned`}>
+                {' '}· sampled from the first {formatCount(redis.scanned_keys)}
+              </span>
+            )}
           </div>
           {redis.groups.length === 0 ? (
             <p className="text-[12px] text-fg-subtle py-1">Keyspace is empty.</p>
@@ -517,7 +561,8 @@ function RedisCard({ redis }: { redis: SystemRedis }) {
                 key={group.label}
                 label={group.label}
                 fraction={group.keys / max}
-                value={group.keys.toLocaleString()}
+                value={formatCount(group.keys)}
+                hint={`${group.keys.toLocaleString()} keys`}
               />
             ))
           )}
@@ -539,18 +584,18 @@ function CacheCard({ cache }: { cache: SystemCache }) {
       <p className="text-[11px] text-fg-subtle mb-2">
         Held by this instance only. Entity counts should track the database; a lasting gap means a reload is overdue.
       </p>
-      <KeyValue label="Projects" value={cache.projects.toLocaleString()} />
-      <KeyValue label="Credentials" value={cache.credentials.toLocaleString()} />
-      <KeyValue label="Connectors" value={cache.connectors.toLocaleString()} />
-      <KeyValue label="Proxies" value={cache.proxies.toLocaleString()} />
-      <KeyValue label="Provider types" value={cache.provider_types.toLocaleString()} />
-      <KeyValue label="Per-project strategies" value={cache.project_strategies.toLocaleString()} />
-      <KeyValue label="Quarantined proxies" value={cache.quarantined_proxies.toLocaleString()} />
-      <KeyValue label="TLS contexts" value={cache.tls_contexts.toLocaleString()} />
-      <KeyValue label="Geo provisioning locks" value={cache.geo_provision_locks.toLocaleString()} />
+      <KeyValue label="Projects" value={formatCount(cache.projects)} />
+      <KeyValue label="Credentials" value={formatCount(cache.credentials)} />
+      <KeyValue label="Connectors" value={formatCount(cache.connectors)} />
+      <KeyValue label="Proxies" value={formatCount(cache.proxies)} />
+      <KeyValue label="Provider types" value={formatCount(cache.provider_types)} />
+      <KeyValue label="Per-project strategies" value={formatCount(cache.project_strategies)} />
+      <KeyValue label="Quarantined proxies" value={formatCount(cache.quarantined_proxies)} />
+      <KeyValue label="TLS contexts" value={formatCount(cache.tls_contexts)} />
+      <KeyValue label="Geo provisioning locks" value={formatCount(cache.geo_provision_locks)} />
       <KeyValue
         label="Metric deltas awaiting flush"
-        value={`${cache.pending_proxy_deltas.toLocaleString()} proxy · ${cache.pending_project_deltas.toLocaleString()} project`}
+        value={`${formatCount(cache.pending_proxy_deltas)} proxy · ${formatCount(cache.pending_project_deltas)} project`}
       />
     </Card>
   )
@@ -581,9 +626,11 @@ function ProjectsCard({ projects }: { projects: SystemProjectUsage[] }) {
               {projects.map((project) => (
                 <tr key={project.id} className="border-t border-line text-right tabular-nums">
                   <td className="text-left py-1.5 pr-3 max-w-[220px] truncate" title={project.name}>{project.name}</td>
-                  <td className="py-1.5 pl-3">{project.credentials}</td>
-                  <td className="py-1.5 pl-3">{project.connectors}</td>
-                  <td className="py-1.5 pl-3 font-medium">{project.proxies}</td>
+                  <td className="py-1.5 pl-3">{formatCount(project.credentials)}</td>
+                  <td className="py-1.5 pl-3">{formatCount(project.connectors)}</td>
+                  <td className="py-1.5 pl-3 font-medium" title={project.proxies.toLocaleString()}>
+                    {formatCount(project.proxies)}
+                  </td>
                 </tr>
               ))}
             </tbody>
@@ -732,12 +779,12 @@ function DeltaStrip({ points, range }: { points: TrendPoint[]; range: SystemHist
     },
     {
       label: 'Redis keys',
-      value: num(last.redis_keys).toLocaleString(),
+      value: formatCount(num(last.redis_keys)),
       delta: signedCount(num(last.redis_keys) - num(first.redis_keys)),
     },
     {
       label: 'Proxies',
-      value: num(last.proxies_total).toLocaleString(),
+      value: formatCount(num(last.proxies_total)),
       delta: signedCount(num(last.proxies_total) - num(first.proxies_total)),
     },
   ]
@@ -766,7 +813,7 @@ function signedBytes(delta: number): string {
 
 function signedCount(delta: number): string {
   if (delta === 0) return 'no change'
-  return `${delta > 0 ? '+' : '−'}${Math.abs(delta).toLocaleString()}`
+  return `${delta > 0 ? '+' : '−'}${formatCount(Math.abs(delta))}`
 }
 
 /**
@@ -989,6 +1036,20 @@ function BarRow({ label, fraction, value, hint }: { label: string; fraction: num
       <span className="w-[72px] @lg:w-[80px] flex-none text-right font-medium tabular-nums">{value}</span>
     </div>
   )
+}
+
+/*
+ * Counts here are unbounded: a worker on a long-lived instance reaches millions
+ * of runs, and the metric tables reach millions of rows. The rows they sit in
+ * are laid out for a handful of characters, so past BAND_FROM the exact digits
+ * stop being information and start being a layout problem. Exact below it,
+ * banded above; callers keep the exact figure in a title so nothing is lost.
+ */
+const BAND_FROM = 100_000
+const bandFormatter = new Intl.NumberFormat(undefined, { notation: 'compact', maximumFractionDigits: 1 })
+
+function formatCount(value: number): string {
+  return Math.abs(value) < BAND_FROM ? value.toLocaleString() : bandFormatter.format(value)
 }
 
 function formatDuration(seconds: number): string {

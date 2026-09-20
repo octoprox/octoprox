@@ -124,6 +124,7 @@ class ProxyProviderSyncer:
     async def run(self) -> None:
         """Run the provider syncer loop."""
         logger.info("Starting provider syncer", interval_hours=settings.ip_refresh_interval // 3600)
+        job_stats.declare_interval(WorkerName.PROVIDER_SYNCER, settings.ip_refresh_interval)
         self._running = True
 
         while self._running:

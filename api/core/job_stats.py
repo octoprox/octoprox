@@ -28,6 +28,8 @@ There is one registry per process, exposed via the ``@lru_cache``-d
     from api.core.job_stats import job_stats
     from api.core.workers import WorkerName
 
+    job_stats.declare_interval(WorkerName.HEALTH_CHECKER, self._interval)
+    ...
     with job_stats.track(WorkerName.HEALTH_CHECKER):
         await self._check_all_proxies()
 
@@ -59,8 +61,23 @@ class JobStats:
     """Run counters for one named worker, since this process started."""
 
     name: str
+    # The cadence the loop was started with, declared by the loop itself so it
+    # cannot drift from the value actually slept on. None for an event-driven
+    # loop (the pub/sub subscribers), which has no cadence to miss.
+    interval_seconds: float | None = None
     runs: int = 0
     failures: int = 0
+    # Cycles that took longer than the cadence. The loop cannot start the next
+    # one until this one returns, so its effective period has stretched: for
+    # the snapshotter that shows up as gaps in the trend charts, for the others
+    # as work happening less often than configured.
+    overruns: int = 0
+    # Reset by the first cycle that fits inside the cadence again, so this is
+    # "behind right now" while ``overruns`` keeps the lifetime record - one
+    # slow cycle during a restart should not flag a worker for the rest of its
+    # life, the same reason ``consecutive_failures`` exists.
+    consecutive_overruns: int = 0
+    last_overrun_at: datetime | None = None
     # Reset on the first success, so this is "is it broken right now" rather
     # than "has it ever been broken".
     consecutive_failures: int = 0
@@ -77,6 +94,10 @@ class JobStats:
     def avg_duration_ms(self) -> float | None:
         """Mean cycle duration, or None before the first cycle completes."""
         return self.total_duration_ms / self.runs if self.runs else None
+
+    @property
+    def interval_ms(self) -> float | None:
+        return self.interval_seconds * 1000.0 if self.interval_seconds else None
 
 
 class JobRun:
@@ -121,6 +142,17 @@ class JobStatsRegistry:
         """Time one cycle of ``name`` and count it, failure or not."""
         return JobRun(self, name)
 
+    def declare_interval(self, name: str, interval_seconds: float) -> None:
+        """Record the cadence ``name`` was started with.
+
+        Called by the loop itself, next to the sleep it describes, so the
+        reported cadence is the one in force rather than a config value read
+        somewhere else. Registering here also means a worker appears in the
+        system view with its cadence before its first cycle finishes - which
+        is the normal state of an hourly job, or of a singleton standing by.
+        """
+        self._stats.setdefault(name, JobStats(name=name)).interval_seconds = interval_seconds
+
     def record(self, name: str, duration_ms: float, error: str | None = None) -> None:
         """Record one finished cycle of ``name``."""
         stats = self._stats.setdefault(name, JobStats(name=name))
@@ -129,6 +161,15 @@ class JobStatsRegistry:
         stats.last_duration_ms = duration_ms
         stats.total_duration_ms += duration_ms
         stats.max_duration_ms = max(stats.max_duration_ms or 0.0, duration_ms)
+        interval_ms = stats.interval_ms
+        if interval_ms is None:
+            pass  # No cadence declared, so nothing to be late for.
+        elif duration_ms > interval_ms:
+            stats.overruns += 1
+            stats.consecutive_overruns += 1
+            stats.last_overrun_at = stats.last_run_at
+        else:
+            stats.consecutive_overruns = 0
         if error is None:
             stats.consecutive_failures = 0
         else:

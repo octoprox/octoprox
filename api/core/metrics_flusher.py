@@ -52,6 +52,7 @@ class MetricsFlusher:
         """Run the metrics flush loop while holding the global lease."""
         self._running = True
         logger.info("Starting metrics flusher", interval=self._interval)
+        job_stats.declare_interval(WorkerName.METRICS_FLUSHER, self._interval)
         lease = Lease(
             self._redis_client,
             name=LeaseName.METRICS_FLUSHER,

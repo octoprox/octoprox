@@ -73,6 +73,7 @@ class MetricsCompactor:
         """
         self._running = True
         logger.info("Starting metrics compactor", interval=self._interval)
+        job_stats.declare_interval(WorkerName.METRICS_COMPACTOR, self._interval)
         lease = Lease(
             self._redis_client,
             name=LeaseName.METRICS_COMPACTOR,

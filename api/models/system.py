@@ -167,8 +167,19 @@ class WorkerTask(BaseModel):
     lease: str | None = None
     state: str  # running | done | cancelled | failed
     error: str | None = None
+    # Cadence the loop was started with; null for the event-driven subscribers,
+    # which run when a peer message arrives rather than on a clock.
+    interval_seconds: float | None = None
     runs: int = 0
     failures: int = 0
+    # Cycles that took longer than ``interval_seconds``. A loop cannot start
+    # its next cycle until the current one returns, so these are cycles that
+    # pushed the worker off its configured cadence. ``overruns`` is the
+    # lifetime count; ``consecutive_overruns`` is the streak the last cycle
+    # back inside the cadence resets, i.e. whether the worker is behind *now*.
+    overruns: int = 0
+    consecutive_overruns: int = 0
+    last_overrun_at: datetime | None = None
     consecutive_failures: int = 0
     last_run_at: datetime | None = None
     last_duration_ms: float | None = None

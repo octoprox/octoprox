@@ -385,6 +385,7 @@ class ProxyManager:
         payload = self._settings.role
         ttl_seconds = 10
         interval_seconds = 5
+        job_stats.declare_interval(WorkerName.HEARTBEAT, interval_seconds)
         try:
             while self._running:
                 try:
@@ -780,6 +781,7 @@ class ProxyManager:
 
     async def _periodic_full_reload_loop(self, interval_seconds: int = 60) -> None:
         """Background safety-net: periodically re-sync the cache from Postgres."""
+        job_stats.declare_interval(WorkerName.FULL_RELOAD, interval_seconds)
         while self._running:
             try:
                 await asyncio.sleep(interval_seconds)
@@ -870,6 +872,7 @@ class ProxyManager:
         per-request Redis writes per second into one batched write
         every 5s carrying 50k aggregated increments.
         """
+        job_stats.declare_interval(WorkerName.METRIC_DELTA_PUBLISHER, interval_seconds)
         while self._running:
             try:
                 await asyncio.sleep(interval_seconds)

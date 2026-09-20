@@ -97,6 +97,7 @@ class SystemSnapshotter:
             interval=self._interval,
             retention_days=self._retention_days,
         )
+        job_stats.declare_interval(WorkerName.SYSTEM_SNAPSHOTTER, self._interval)
         lease = Lease(
             self._redis_client,
             name=LeaseName.SYSTEM_SNAPSHOTTER,
