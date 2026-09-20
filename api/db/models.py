@@ -180,8 +180,8 @@ class ProxyMetricsModel(Base):
     success_count: Mapped[int] = mapped_column(Integer, default=0)
     failure_count: Mapped[int] = mapped_column(Integer, default=0)
     avg_latency_ms: Mapped[float] = mapped_column(Float, default=0.0)
-    bytes_sent: Mapped[int] = mapped_column(Integer, default=0)
-    bytes_received: Mapped[int] = mapped_column(Integer, default=0)
+    bytes_sent: Mapped[int] = mapped_column(BigInteger, default=0)
+    bytes_received: Mapped[int] = mapped_column(BigInteger, default=0)
     status: Mapped[str] = mapped_column(String(20), default="unknown")
     granularity: Mapped[int] = mapped_column(Integer, default=60, nullable=False)
 
@@ -206,8 +206,8 @@ class ProjectMetricsModel(Base):
     success_count: Mapped[int] = mapped_column(Integer, default=0)
     failure_count: Mapped[int] = mapped_column(Integer, default=0)
     avg_latency_ms: Mapped[float] = mapped_column(Float, default=0.0)
-    bytes_sent: Mapped[int] = mapped_column(Integer, default=0)
-    bytes_received: Mapped[int] = mapped_column(Integer, default=0)
+    bytes_sent: Mapped[int] = mapped_column(BigInteger, default=0)
+    bytes_received: Mapped[int] = mapped_column(BigInteger, default=0)
     granularity: Mapped[int] = mapped_column(Integer, default=60, nullable=False)
 
 

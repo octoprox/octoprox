@@ -241,6 +241,51 @@ class TestCompactProjectMetrics:
             after_project["avg_latency_ms"] - before_project["avg_latency_ms"]
         ) < 0.01
 
+    async def test_compact_sums_bytes_past_the_int32_ceiling(
+        self,
+        metrics_repo: MetricsRepository,
+        project_repo: ProjectRepository,
+        credential_repo: CredentialRepository,
+        connector_repo: ConnectorRepository,
+        proxy_repo: ProxyRepository,
+        db_session: AsyncSession,
+    ) -> None:
+        """A bucket totalling over 2 GB must survive compaction.
+
+        Raw rows stay well under the int32 ceiling; the bucket that sums an
+        hour of them does not. The columns are BIGINT in Postgres, so this
+        only ever failed on the way in - the ORM declared them Integer, which
+        is what binds the parameter, and asyncpg refused the value before it
+        reached the database. Real traffic hit this at ~2.1 GB in one hour.
+        """
+        project, _ = await _create_full_chain(
+            project_repo, credential_repo, connector_repo, proxy_repo, db_session
+        )
+
+        base_time = utc_now() - timedelta(days=2)
+        per_row = 400_000_000  # 6 of these clear 2^31 without any one row doing so
+        for i in range(6):
+            await _insert_project_metrics(
+                db_session, project.id,
+                base_time + timedelta(minutes=i),
+                bytes_sent=per_row,
+                bytes_received=per_row,
+            )
+        await db_session.commit()
+        assert per_row < 2**31 - 1
+
+        await metrics_repo.compact_project_metrics(
+            project_id=project.id,
+            older_than=utc_now() - timedelta(hours=24),
+            source_granularity=60,
+            target_granularity=3600,
+        )
+        await db_session.commit()
+
+        totals = (await metrics_repo.get_cumulative_project_metrics())[project.id]
+        assert totals["bytes_sent"] == per_row * 6 > 2**31 - 1
+        assert totals["bytes_received"] == per_row * 6
+
     async def test_compact_does_not_touch_recent_data(
         self,
         metrics_repo: MetricsRepository,
