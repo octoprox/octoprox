@@ -411,12 +411,16 @@ const WORKER_STATE: Record<WorkerState, { icon: typeof CheckCircle2; className: 
 
 function WorkersCard({ view }: { view: InstanceView }) {
   const { workers, isSelf, instanceId } = view
-  // A per-resource worker (auto-scaler, provider sync) can hold several leases
-  // at once, one per connector, so count rather than flag. Matched on the
+  // Two counts per worker, because "no lease here" and "no lease anywhere"
+  // mean different things and only the pair can tell them apart. A
+  // per-resource worker (auto-scaler, provider sync) can hold several at once,
+  // one per connector, so both are counts rather than flags. Matched on the
   // holder rather than `held_by_self`, because the instance shown is not
   // necessarily the one that answered the request.
   const leasesHeld = new Map<string, number>()
+  const leasesAnywhere = new Map<string, number>()
   for (const lease of workers.leases) {
+    leasesAnywhere.set(lease.worker, (leasesAnywhere.get(lease.worker) ?? 0) + 1)
     if (lease.holder === instanceId) leasesHeld.set(lease.worker, (leasesHeld.get(lease.worker) ?? 0) + 1)
   }
   const stopped = workers.tasks.filter((t) => t.state !== 'running').length
@@ -444,7 +448,13 @@ function WorkersCard({ view }: { view: InstanceView }) {
       />
       <div className="-mx-1">
         {workers.tasks.map((task) => (
-          <WorkerRow key={task.name} task={task} leasesHeld={leasesHeld.get(task.name) ?? 0} isSelf={isSelf} />
+          <WorkerRow
+            key={task.name}
+            task={task}
+            leasesHeld={leasesHeld.get(task.name) ?? 0}
+            leasesAnywhere={leasesAnywhere.get(task.name) ?? 0}
+            isSelf={isSelf}
+          />
         ))}
       </div>
       <p className="text-[11px] text-fg-subtle mt-2">
@@ -469,7 +479,66 @@ function WorkersCard({ view }: { view: InstanceView }) {
   )
 }
 
-function WorkerRow({ task, leasesHeld, isSelf }: { task: SystemWorkerTask; leasesHeld: number; isSelf: boolean }) {
+/**
+ * Where an elected worker stands right now. Three states, not two: held here,
+ * held elsewhere, and held by nobody - which the previous two-state badge
+ * reported as "standing by", claiming a peer was running a job that nothing
+ * was running.
+ *
+ * Nobody holding it means opposite things for the two lease shapes. A global
+ * singleton is meant to be held continuously, so an unheld one is a failover
+ * gap that closes in seconds. A per-resource worker only holds a lease while
+ * it works on a connector, so no lease is its resting state between ticks -
+ * the run counters underneath, not this badge, say whether it is working.
+ */
+function LeaseBadge({ task, leasesHeld, leasesAnywhere, isSelf }: {
+  task: SystemWorkerTask
+  leasesHeld: number
+  leasesAnywhere: number
+  isSelf: boolean
+}) {
+  const here = isSelf ? 'This instance' : 'That instance'
+  const elsewhere = leasesAnywhere - leasesHeld
+
+  const { label, color, title } = task.lease_per_resource
+    ? {
+        color: leasesHeld > 0 ? 'green' as const : 'gray' as const,
+        label: leasesHeld > 0 ? `per connector · ${leasesHeld} here` : 'per connector',
+        title: leasesHeld > 0
+          ? `${here} is working on ${leasesHeld} connector(s) right now, holding one ${task.lease} lease for each.`
+          + (elsewhere > 0 ? ` Other instances hold ${elsewhere}.` : '')
+          : `Takes one ${task.lease} lease per connector, only while it works on that connector, so`
+            + ' between ticks no lease is held by anyone - that is idle, not standing by.'
+            + (elsewhere > 0 ? ` Other instances are working on ${elsewhere} right now.` : '')
+            + ' The run counts below say whether it is ticking.',
+      }
+    : leasesHeld > 0
+      ? {
+          color: 'green' as const,
+          label: 'singleton · runs here',
+          title: `${here} holds the ${task.lease} lease, so it runs the job.`,
+        }
+      : leasesAnywhere > 0
+        ? {
+            color: 'gray' as const,
+            label: 'singleton · standing by',
+            title: `Another instance holds the ${task.lease} lease; ${here.toLowerCase()} stands by, ready to take over within seconds if that one dies.`,
+          }
+        : {
+            color: 'gray' as const,
+            label: 'singleton · unclaimed',
+            title: `No instance holds the ${task.lease} lease right now. This is the gap between a holder dying and a peer claiming it, which lasts a few seconds.`,
+          }
+
+  return <Badge color={color} className="px-1.5 py-0 text-[10px] font-normal" title={title}>{label}</Badge>
+}
+
+function WorkerRow({ task, leasesHeld, leasesAnywhere, isSelf }: {
+  task: SystemWorkerTask
+  leasesHeld: number
+  leasesAnywhere: number
+  isSelf: boolean
+}) {
   const state = WORKER_STATE[task.state] ?? WORKER_STATE.done
   const Icon = state.icon
   // The exception that ended the loop outranks one it recovered from, and a
@@ -485,17 +554,12 @@ function WorkerRow({ task, leasesHeld, isSelf }: { task: SystemWorkerTask; lease
         <div className="flex items-center gap-1.5 flex-wrap">
           <span className="text-[12.5px] font-medium">{formatWorkerName(task.name)}</span>
           {task.scope === 'singleton' && (
-            <Badge
-              color={leasesHeld > 0 ? 'green' : 'gray'}
-              className="px-1.5 py-0 text-[10px] font-normal"
-              title={leasesHeld > 0
-                ? `${isSelf ? 'This' : 'That'} instance holds the ${task.lease} lease, so it runs the job`
-                : `Another instance holds the ${task.lease} lease; ${isSelf ? 'this' : 'that'} one stands by`}
-            >
-              {leasesHeld > 0
-                ? leasesHeld > 1 ? `singleton · ${leasesHeld} leases here` : 'singleton · runs here'
-                : 'singleton · standing by'}
-            </Badge>
+            <LeaseBadge
+              task={task}
+              leasesHeld={leasesHeld}
+              leasesAnywhere={leasesAnywhere}
+              isSelf={isSelf}
+            />
           )}
         </div>
         <div className={cn('text-[11px]', problem ? 'text-danger' : 'text-fg-subtle')}>

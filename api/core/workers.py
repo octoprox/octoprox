@@ -66,11 +66,21 @@ class WorkerInfo:
     ``lease`` is None for a loop every instance runs. Otherwise it is the
     lease this loop elects on - bare for a global singleton, or the prefix of
     ``<lease>:<resource id>`` for one elected per resource.
+
+    ``per_resource`` separates two very different lease lifetimes, because
+    reading one as the other is misleading. A global singleton holds its lease
+    continuously, so "who holds it" is a standing fact and an unheld lease is
+    a brief failover gap. A per-resource worker takes a lease per connector at
+    the top of the work and releases it in a ``finally`` a moment later, so no
+    lease exists between ticks - and several instances can hold different ones
+    at the same time. "Nobody holds it" is that worker's normal idle state,
+    not a fault and not evidence that a peer is running it.
     """
 
     description: str
     lease: LeaseName | None = None
     lease_label: str = ""
+    per_resource: bool = False
 
     @property
     def scope(self) -> Literal["instance", "singleton"]:
@@ -96,11 +106,13 @@ WORKERS: dict[WorkerName, WorkerInfo] = {
         "Scales cloud connectors and rotates proxies to match demand",
         lease=LeaseName.AUTOSCALER,
         lease_label="Auto-scaling",
+        per_resource=True,
     ),
     WorkerName.PROVIDER_SYNCER: WorkerInfo(
         "Discovery and IP refresh: reconciles each connector against its provider",
         lease=LeaseName.PROVIDER_SYNC,
         lease_label="Provider sync",
+        per_resource=True,
     ),
     WorkerName.SYSTEM_SNAPSHOTTER: WorkerInfo(
         "Records one install-wide gauge reading per interval for the trend "

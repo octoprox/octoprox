@@ -461,6 +461,7 @@ def collect_tasks(proxy_manager: ProxyManager | None) -> list[WorkerTask]:
                 description=info.description if info else "",
                 scope=info.scope if info else "instance",
                 lease=info.lease if info else None,
+                lease_per_resource=info.per_resource if info else False,
                 state=state,
                 error=error,
                 interval_seconds=stats.interval_seconds if stats else None,

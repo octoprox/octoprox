@@ -1113,6 +1113,13 @@ export interface SystemWorkerTask {
   scope: WorkerScope
   /** Lease this worker elects on, matching SystemLease.name (or its prefix). */
   lease: string | null
+  /**
+   * Whether that lease is taken per resource. A global singleton holds its
+   * lease continuously; a per-resource worker takes one per connector and
+   * releases it a moment later, so between ticks no lease exists at all -
+   * idle, not standing by, and several instances can hold different ones.
+   */
+  lease_per_resource: boolean
   /** State of the asyncio task itself - whether the loop still exists. */
   state: WorkerState
   /** The exception that ended the loop, when state is not 'running'. */

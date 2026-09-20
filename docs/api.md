@@ -702,6 +702,16 @@ standby's singleton worker is legitimately at `"runs": 0`. Leader-elected work
 is metrics flushing, compaction and system snapshots globally, auto-scaling and
 provider sync (discovery and IP refresh) per connector.
 
+**An absent lease means two different things**, which is what
+`lease_per_resource` is for. A global singleton (`false`) holds its lease
+continuously, so finding no holder in `leases` is a failover gap that closes
+within seconds. A per-resource worker (`true` - the auto-scaler and provider
+syncer) takes one lease per connector at the top of the work and releases it in
+a `finally` a moment later, so between ticks **no instance holds one**, and
+several instances can hold different ones at the same time. For those, an
+absent lease is the resting state, not a standby; whether the loop is actually
+working is answered by its run counters, not by `leases`.
+
 ### System Trends
 
 ```bash

@@ -196,6 +196,27 @@ class TestSystemStatsPayload:
         for lease in workers["leases"]:
             assert by_name[lease["worker"]]["lease"] == lease["name"].partition(":")[0]
 
+    def test_workers_say_which_leases_are_per_resource(
+        self, authenticated_client: TestClient
+    ) -> None:
+        """Two lease lifetimes that an absent lease cannot distinguish.
+
+        A global singleton holds its lease continuously, so no holder means a
+        failover gap. The auto-scaler and provider syncer take one per
+        connector and release it within the tick, so no holder is their resting
+        state - and reporting that as "a peer is running it" was wrong on every
+        instance at once, because it is true on none of them.
+        """
+        by_name = {t["name"]: t for t in authenticated_client.get(ENDPOINT).json()["workers"]["tasks"]}
+
+        assert by_name["auto_scaler"]["lease_per_resource"] is True
+        assert by_name["provider_syncer"]["lease_per_resource"] is True
+        assert by_name["metrics_flusher"]["lease_per_resource"] is False
+        assert by_name["metrics_compactor"]["lease_per_resource"] is False
+        # Meaningless without a lease, and false rather than absent so the
+        # field is safe to read on every task.
+        assert by_name["health_checker"]["lease_per_resource"] is False
+
     def test_workers_count_the_cycles_they_ran(
         self, authenticated_client: TestClient
     ) -> None:

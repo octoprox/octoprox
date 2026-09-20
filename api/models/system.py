@@ -167,6 +167,13 @@ class WorkerTask(BaseModel):
     # one (``autoscaler`` -> ``autoscaler:<connector id>``). None when the
     # worker runs on every instance.
     lease: str | None = None
+    # Whether that lease is taken per resource. A global singleton holds its
+    # lease continuously, so an absent lease means a failover gap. A
+    # per-resource worker takes one per connector and releases it a moment
+    # later, so between ticks no lease exists - which is idle, not standby,
+    # and several instances can hold different ones at once. Without this,
+    # "not in ``WorkerStats.leases``" reads the same for both.
+    lease_per_resource: bool = False
     state: str  # running | done | cancelled | failed
     error: str | None = None
     # Cadence the loop was started with; null for the event-driven subscribers,
