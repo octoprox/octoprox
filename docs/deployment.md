@@ -112,6 +112,14 @@ Every instance writes a Redis key `instance_registry:<instance_id>` with a
 its key; on hard kill, Redis expires it. The set of live keys is the
 membership snapshot used by everything below.
 
+The same beat writes `instance_stats:<instance_id>`, holding what only that
+process can see: its runtime, its in-memory cache sizes and its
+background-worker run counters. It costs nothing to collect - all three are
+in-memory reads - and it is what lets the admin **Settings → System** page
+show the workers of *every* instance, rather than only whichever one the load
+balancer routed the request to. Both keys are written in one pipeline and
+deleted together, so a peer never reports on an instance it thinks is gone.
+
 ### Cross-instance event bus
 
 Mutations on one instance reach the others over Redis Pub/Sub on the

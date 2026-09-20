@@ -24,6 +24,23 @@ STICKY_BINDING_KEY = "sticky:{project_id}:{session_id}"
 MITM_REQUESTS_KEY = "mitm:requests:{project_id}"
 INSTANCE_REGISTRY_KEY = "instance_registry:{instance_id}"
 INSTANCE_REGISTRY_SCAN = "instance_registry:*"
+# What one instance can see about itself and nobody else can: its runtime,
+# its in-memory caches and its background-worker counters. Published on the
+# same heartbeat as the registry key above so the admin system view can show
+# the workers of every instance, not just the one the load balancer picked.
+#
+# Deliberately a second key rather than a richer registry payload: the
+# registry value is a bare role string that peers on an older version still
+# read, and a rolling upgrade should not make them render a JSON blob as the
+# role. The scan globs stay disjoint because the prefixes differ.
+INSTANCE_STATS_KEY = "instance_stats:{instance_id}"
+INSTANCE_STATS_SCAN = "instance_stats:*"
+# TTL of both instance keys, and the interval on which they are rewritten.
+# The interval is half the TTL so one missed write does not declare an
+# instance dead. Reading code derives snapshot age from the remaining TTL,
+# which avoids comparing clocks across hosts.
+INSTANCE_TTL_SECONDS = 10
+INSTANCE_HEARTBEAT_INTERVAL = 5
 # Pub/sub channel used by ``ProxyManager`` to broadcast accumulated
 # metric deltas across instances so peers can update in-memory totals
 # without each having to read Redis on a polling cadence.
@@ -50,6 +67,7 @@ REDIS_KEY_GROUPS: tuple[tuple[str, str], ...] = (
     ("session:", "Sessions"),
     ("mitm:requests:", "MITM captures"),
     ("instance_registry:", "Instance heartbeats"),
+    ("instance_stats:", "Instance snapshots"),
     ("lease:", "Worker leases"),
     ("autoscaler:", "Auto-scaler state"),
 )

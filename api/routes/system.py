@@ -34,6 +34,10 @@ async def get_system_stats(request: Request, session: DbDep, _admin: RequireAdmi
     Postgres-derived sections describe the whole install; ``runtime``,
     ``cache`` and ``workers.tasks`` describe only the instance that served
     the request, which in a cluster is whichever one the load balancer picked.
+    The same three sections for every *other* instance arrive in
+    ``workers.instances[].snapshot``, published by each instance on its own
+    heartbeat - so this one endpoint covers the whole cluster without the
+    caller needing a route to a specific instance.
     """
     state = request.app.state
     return await collect_system_stats(

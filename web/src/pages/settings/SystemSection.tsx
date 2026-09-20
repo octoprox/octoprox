@@ -9,9 +9,9 @@ import {
   Network, RefreshCw, Server, TrendingUp,
 } from 'lucide-react'
 import {
-  fetchSystemStats, fetchSystemHistory, SystemCache, SystemDatabase, SystemInventory, SystemLease,
-  SystemMetricsHistory, SystemMetricsPoint, SystemProjectUsage, SystemRedis, SystemRuntime,
-  SystemWorkers, SystemWorkerTask, SystemHistoryRange, SYSTEM_HISTORY_RANGES, WorkerState,
+  fetchSystemStats, fetchSystemHistory, SystemCache, SystemDatabase, SystemInstance, SystemInventory,
+  SystemLease, SystemMetricsHistory, SystemMetricsPoint, SystemProjectUsage, SystemRedis, SystemRuntime,
+  SystemStats, SystemWorkers, SystemWorkerTask, SystemHistoryRange, SYSTEM_HISTORY_RANGES, WorkerState,
 } from '../../api/client'
 import { Page } from '../../components/layout/Page'
 import { useTheme } from '../../contexts/ThemeContext'
@@ -26,8 +26,9 @@ const REFRESH_MS = 30_000
  * in Postgres and Redis, and which background workers are alive.
  *
  * Postgres-derived numbers describe the whole install. Runtime, caches and the
- * task list describe only the instance that answered - which, behind a load
- * balancer, is whichever one the request landed on. The cards say so.
+ * task list describe a single process, and which one is a choice: the instance
+ * that answered the request, or any peer, from the snapshot that peer publishes
+ * on its own heartbeat. The cards say which, and how old the numbers are.
  */
 export default function SystemSection() {
   const { data, error, isLoading, isFetching, dataUpdatedAt, refetch } = useQuery({
@@ -36,12 +37,25 @@ export default function SystemSection() {
     refetchInterval: REFRESH_MS,
   })
 
+  // Null means "whichever instance answered", so a load balancer moving us to
+  // a different backend keeps showing a live view rather than pinning to an id
+  // that is now a peer.
+  const [selectedId, setSelectedId] = useState<string | null>(null)
+  const view = data ? instanceView(data, selectedId) : null
+
   return (
     <Page
       title="System"
       subtitle="Inventory, storage and background workers for this Octoprox install."
       actions={
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-3 flex-wrap justify-end">
+          {data && (
+            <InstancePicker
+              instances={data.workers.instances}
+              selectedId={selectedId ?? data.runtime.instance_id}
+              onSelect={setSelectedId}
+            />
+          )}
           {dataUpdatedAt > 0 && (
             <span className="text-xs text-fg-muted tabular-nums">
               Updated {relativeTime(new Date(dataUpdatedAt).toISOString())}
@@ -58,15 +72,26 @@ export default function SystemSection() {
         <p className="text-sm text-fg-muted py-8 text-center">{isLoading ? 'Loading…' : 'No data'}</p>
       ) : (
         <>
-          <RuntimeCard runtime={data.runtime} />
+          {view
+            ? <RuntimeCard view={view} />
+            : <NoInstanceViewNotice
+                instanceId={selectedId ?? ''}
+                stillAMember={data.workers.instances.some((i) => i.instance_id === selectedId)}
+                onBack={() => setSelectedId(null)}
+              />}
           <InventoryTiles inventory={data.inventory} />
           <TrendsSection />
 
           <div className="grid grid-cols-1 @4xl:grid-cols-[minmax(0,1fr)_minmax(0,1fr)] gap-4 items-start">
-            <WorkersCard workers={data.workers} />
+            {view ? <WorkersCard view={view} /> : <div />}
             <div className="flex flex-col gap-4 min-w-0">
               <PoolCard inventory={data.inventory} />
-              <ClusterCard workers={data.workers} instanceId={data.runtime.instance_id} />
+              <ClusterCard
+                workers={data.workers}
+                instanceId={data.runtime.instance_id}
+                selectedId={selectedId ?? data.runtime.instance_id}
+                onSelect={setSelectedId}
+              />
             </div>
           </div>
 
@@ -76,7 +101,7 @@ export default function SystemSection() {
           </div>
 
           <div className="grid grid-cols-1 @4xl:grid-cols-2 gap-4 items-start">
-            <CacheCard cache={data.cache} />
+            {view ? <CacheCard view={view} /> : <div />}
             <ProjectsCard projects={data.projects} />
           </div>
         </>
@@ -85,16 +110,153 @@ export default function SystemSection() {
   )
 }
 
+// --- instance selection ----------------------------------------------------------------
+
+/**
+ * The three sections that describe one process, resolved to the instance the
+ * admin picked.
+ *
+ * `ageSeconds` is null for the instance that served the request, whose numbers
+ * are collected live, and a few seconds for a peer, whose numbers come from its
+ * last heartbeat. Kept apart deliberately: a stale snapshot and a worker that
+ * has stopped counting look identical unless the page says which it is.
+ */
+interface InstanceView {
+  instanceId: string
+  isSelf: boolean
+  runtime: SystemRuntime
+  cache: SystemCache
+  workers: SystemWorkers
+  ageSeconds: number | null
+}
+
+/**
+ * Null when the chosen peer is in the registry but has published nothing
+ * readable, which normally means it runs a version older than snapshots -
+ * membership and snapshot are published together.
+ */
+function instanceView(data: SystemStats, selectedId: string | null): InstanceView | null {
+  if (selectedId === null || selectedId === data.runtime.instance_id) {
+    return {
+      instanceId: data.runtime.instance_id,
+      isSelf: true,
+      runtime: data.runtime,
+      cache: data.cache,
+      workers: data.workers,
+      ageSeconds: null,
+    }
+  }
+  const peer = data.workers.instances.find((i) => i.instance_id === selectedId)
+  if (!peer?.snapshot) return null
+  return {
+    instanceId: peer.instance_id,
+    isSelf: false,
+    runtime: peer.snapshot.runtime,
+    cache: peer.snapshot.cache,
+    // Leases and membership are cluster-wide, so they come from the response
+    // itself; only the per-process fields are swapped for the peer's.
+    workers: {
+      ...data.workers,
+      tasks: peer.snapshot.tasks,
+      proxy_server_listening: peer.snapshot.proxy_server_listening,
+      proxy_server_connections: peer.snapshot.proxy_server_connections,
+      geo_lookup_enabled: peer.snapshot.geo_lookup_enabled,
+      geo_lookups_in_flight: peer.snapshot.geo_lookups_in_flight,
+    },
+    ageSeconds: peer.age_seconds,
+  }
+}
+
+function InstancePicker({ instances, selectedId, onSelect }: {
+  instances: SystemInstance[]
+  selectedId: string
+  onSelect: (id: string | null) => void
+}) {
+  // Nothing to switch between on a single-instance install, which is most of
+  // them - the control appears only once a cluster exists.
+  if (instances.length < 2) return null
+  return (
+    <Segmented
+      size="sm"
+      value={selectedId}
+      onChange={(id) => onSelect(instances.find((i) => i.instance_id === id)?.is_self ? null : id)}
+      options={instances.map((i) => ({
+        value: i.instance_id,
+        label: i.is_self ? 'This instance' : shortId(i.instance_id),
+      }))}
+    />
+  )
+}
+
+/**
+ * Two ways a chosen instance can have nothing to show, which are worth telling
+ * apart: it left the cluster, or it is a member that publishes no snapshot.
+ * Neither switches the view back on its own - a card quietly becoming a
+ * different instance's is worse than a sentence saying what happened.
+ */
+function NoInstanceViewNotice({ instanceId, stillAMember, onBack }: {
+  instanceId: string
+  stillAMember: boolean
+  onBack: () => void
+}) {
+  return (
+    <Alert variant="info">
+      <div className="flex items-center gap-3 flex-wrap">
+        <span>
+          {stillAMember ? (
+            <>
+              Instance <span className="font-mono">{shortId(instanceId)}</span> is in the cluster but
+              has not published what it sees. Instances publish that alongside their membership, so
+              this one is most likely running a version older than instance snapshots.
+            </>
+          ) : (
+            <>
+              Instance <span className="font-mono">{shortId(instanceId)}</span> has left the cluster.
+              Its heartbeat stopped, so it is no longer reporting.
+            </>
+          )}
+        </span>
+        <Button variant="outline" size="sm" onClick={onBack}>Back to this instance</Button>
+      </div>
+    </Alert>
+  )
+}
+
+/**
+ * Instance ids are UUIDs unless the deployment sets OCTOPROX_INSTANCE_ID, so a
+ * long one is cut to the same prefix the rest of the page shows it by.
+ */
+function shortId(id: string): string {
+  return id.length > 14 ? `${id.slice(0, 8)}…` : id
+}
+
+/** How recent a peer's snapshot is, phrased for a heartbeat that runs every few seconds. */
+function snapshotAge(seconds: number | null): string {
+  if (seconds === null || seconds < 1) return 'just now'
+  return `${Math.round(seconds)}s ago`
+}
+
 // --- runtime -------------------------------------------------------------------------
 
-function RuntimeCard({ runtime }: { runtime: SystemRuntime }) {
+function RuntimeCard({ view }: { view: InstanceView }) {
+  const { runtime, isSelf, ageSeconds } = view
   return (
     <Card className="px-4 py-3">
-      <div className="flex items-center gap-2 mb-2.5">
+      <div className="flex items-center gap-2 mb-2.5 flex-wrap">
         <Server className="w-4 h-4 text-fg-muted" />
-        <h3 className="text-sm font-semibold">This instance</h3>
+        <h3 className="text-sm font-semibold">{isSelf ? 'This instance' : 'Peer instance'}</h3>
         <Badge color="gray" className="font-mono text-[11px]">{runtime.instance_id.slice(0, 8)}</Badge>
         <Badge color="blue">{runtime.role}</Badge>
+        {/* A peer reports on its own heartbeat, so say how old the reading is
+            rather than letting it pass for a live one. */}
+        {!isSelf && (
+          <Badge
+            color="gray"
+            title="Peers publish what they see every few seconds; this is their last publication."
+          >
+            as of {snapshotAge(ageSeconds)}
+          </Badge>
+        )}
         <span className="flex-1" />
         <span className="text-xs text-fg-muted">
           Octoprox <b className="text-fg font-semibold">{runtime.version}</b>
@@ -247,12 +409,15 @@ const WORKER_STATE: Record<WorkerState, { icon: typeof CheckCircle2; className: 
   done: { icon: CircleOff, className: 'text-warning', label: 'stopped' },
 }
 
-function WorkersCard({ workers }: { workers: SystemWorkers }) {
+function WorkersCard({ view }: { view: InstanceView }) {
+  const { workers, isSelf, instanceId } = view
   // A per-resource worker (auto-scaler, provider sync) can hold several leases
-  // at once, one per connector, so count rather than flag.
+  // at once, one per connector, so count rather than flag. Matched on the
+  // holder rather than `held_by_self`, because the instance shown is not
+  // necessarily the one that answered the request.
   const leasesHeld = new Map<string, number>()
   for (const lease of workers.leases) {
-    if (lease.held_by_self) leasesHeld.set(lease.worker, (leasesHeld.get(lease.worker) ?? 0) + 1)
+    if (lease.holder === instanceId) leasesHeld.set(lease.worker, (leasesHeld.get(lease.worker) ?? 0) + 1)
   }
   const stopped = workers.tasks.filter((t) => t.state !== 'running').length
   // A loop that is still alive but failing every cycle looks fine from the
@@ -265,7 +430,7 @@ function WorkersCard({ workers }: { workers: SystemWorkers }) {
   return (
     <Card className="px-4 py-3">
       <CardHeader
-        title="Background workers"
+        title={isSelf ? 'Background workers' : `Background workers on ${shortId(instanceId)}`}
         action={
           stopped > 0
             ? <Badge color="red">{stopped} not running</Badge>
@@ -279,13 +444,14 @@ function WorkersCard({ workers }: { workers: SystemWorkers }) {
       />
       <div className="-mx-1">
         {workers.tasks.map((task) => (
-          <WorkerRow key={task.name} task={task} leasesHeld={leasesHeld.get(task.name) ?? 0} />
+          <WorkerRow key={task.name} task={task} leasesHeld={leasesHeld.get(task.name) ?? 0} isSelf={isSelf} />
         ))}
       </div>
       <p className="text-[11px] text-fg-subtle mt-2">
-        Run counts are this instance's, since it started, and each worker is listed with
-        the cadence it was started on - a cycle slower than its cadence delays the next
-        one. Singleton workers only run on the instance holding their lease - see Cluster.
+        Run counts are {isSelf ? "this instance's" : "that instance's"}, since it started, and each
+        worker is listed with the cadence it was started on - a cycle slower than its cadence delays
+        the next one. Singleton workers only run on the instance holding their lease - see Cluster.
+        {!isSelf && ' These were published on that instance\'s own heartbeat, so they are a few seconds behind.'}
       </p>
       <div className="mt-2.5 pt-2.5 border-t border-line grid grid-cols-2 gap-x-4">
         <Fact
@@ -303,7 +469,7 @@ function WorkersCard({ workers }: { workers: SystemWorkers }) {
   )
 }
 
-function WorkerRow({ task, leasesHeld }: { task: SystemWorkerTask; leasesHeld: number }) {
+function WorkerRow({ task, leasesHeld, isSelf }: { task: SystemWorkerTask; leasesHeld: number; isSelf: boolean }) {
   const state = WORKER_STATE[task.state] ?? WORKER_STATE.done
   const Icon = state.icon
   // The exception that ended the loop outranks one it recovered from, and a
@@ -323,8 +489,8 @@ function WorkerRow({ task, leasesHeld }: { task: SystemWorkerTask; leasesHeld: n
               color={leasesHeld > 0 ? 'green' : 'gray'}
               className="px-1.5 py-0 text-[10px] font-normal"
               title={leasesHeld > 0
-                ? `This instance holds the ${task.lease} lease, so it runs the job`
-                : `Another instance holds the ${task.lease} lease; this one stands by`}
+                ? `${isSelf ? 'This' : 'That'} instance holds the ${task.lease} lease, so it runs the job`
+                : `Another instance holds the ${task.lease} lease; ${isSelf ? 'this' : 'that'} one stands by`}
             >
               {leasesHeld > 0
                 ? leasesHeld > 1 ? `singleton · ${leasesHeld} leases here` : 'singleton · runs here'
@@ -335,7 +501,7 @@ function WorkerRow({ task, leasesHeld }: { task: SystemWorkerTask; leasesHeld: n
         <div className={cn('text-[11px]', problem ? 'text-danger' : 'text-fg-subtle')}>
           {problem ?? task.description}
         </div>
-        <WorkerRuns task={task} />
+        <WorkerRuns task={task} isSelf={isSelf} />
       </div>
       <span className={cn('text-[11px] flex-none', state.className)}>{state.label}</span>
     </div>
@@ -343,14 +509,13 @@ function WorkerRow({ task, leasesHeld }: { task: SystemWorkerTask; leasesHeld: n
 }
 
 /** Cycle counters: what the loop has actually done, as opposed to whether it exists. */
-function WorkerRuns({ task }: { task: SystemWorkerTask }) {
+function WorkerRuns({ task, isSelf }: { task: SystemWorkerTask; isSelf: boolean }) {
   const cadence = task.interval_seconds !== null ? formatInterval(task.interval_seconds) : 'on each peer message'
   if (task.runs === 0) {
-    return (
-      <div className="text-[11px] text-fg-subtle">
-        {cadence}, {task.scope === 'singleton' ? 'no runs on this instance' : 'no runs yet'}
-      </div>
-    )
+    const scope = task.scope === 'singleton'
+      ? `no runs on ${isSelf ? 'this' : 'that'} instance`
+      : 'no runs yet'
+    return <div className="text-[11px] text-fg-subtle">{cadence}, {scope}</div>
   }
   // Both counters below are coloured on the streak, not the lifetime total: a
   // worker that hit one slow cycle hours ago and has been fine since is not a
@@ -436,7 +601,12 @@ function formatMs(ms: number): string {
 
 // --- cluster -------------------------------------------------------------------------
 
-function ClusterCard({ workers, instanceId }: { workers: SystemWorkers; instanceId: string }) {
+function ClusterCard({ workers, instanceId, selectedId, onSelect }: {
+  workers: SystemWorkers
+  instanceId: string
+  selectedId: string
+  onSelect: (id: string | null) => void
+}) {
   return (
     <Card className="px-4 py-3">
       <CardHeader
@@ -448,15 +618,29 @@ function ClusterCard({ workers, instanceId }: { workers: SystemWorkers; instance
         }
         className="mb-1.5"
       />
+      {/* The second way to switch instances, for when the list is longer than
+          the header control comfortably holds. */}
       <div className="flex flex-col gap-1">
         {workers.instances.map((instance) => (
-          <div key={instance.instance_id} className="flex items-center gap-2 text-[12.5px]">
+          <button
+            key={instance.instance_id}
+            type="button"
+            onClick={() => onSelect(instance.is_self ? null : instance.instance_id)}
+            aria-pressed={instance.instance_id === selectedId}
+            title={instance.snapshot
+              ? `Show what ${instance.instance_id} reports about itself`
+              : `${instance.instance_id} has not published what it sees yet`}
+            className={cn(
+              'flex items-center gap-2 text-[12.5px] w-full text-left px-1 -mx-1 py-0.5 rounded-md transition-colors',
+              instance.instance_id === selectedId ? 'bg-surface-raised' : 'hover:bg-surface-raised'
+            )}
+          >
             <Network className="w-3.5 h-3.5 text-fg-subtle flex-none" />
             <span className="font-mono text-[11.5px] truncate">{instance.instance_id}</span>
             {instance.is_self && <Badge color="blue" className="px-1.5 py-0 text-[10px]">this one</Badge>}
             <span className="flex-1" />
             <span className="text-fg-subtle">{instance.role}</span>
-          </div>
+          </button>
         ))}
       </div>
 
@@ -605,15 +789,19 @@ function RedisCard({ redis }: { redis: SystemRedis }) {
 
 // --- caches & projects ---------------------------------------------------------------
 
-function CacheCard({ cache }: { cache: SystemCache }) {
+function CacheCard({ view }: { view: InstanceView }) {
+  const { cache, isSelf, instanceId } = view
   return (
     <Card className="px-4 py-3">
       <div className="flex items-center gap-2 mb-1">
         <Cpu className="w-4 h-4 text-fg-muted" />
-        <h3 className="text-sm font-semibold">In-memory caches</h3>
+        <h3 className="text-sm font-semibold">
+          In-memory caches{!isSelf && ` on ${shortId(instanceId)}`}
+        </h3>
       </div>
       <p className="text-[11px] text-fg-subtle mb-2">
-        Held by this instance only. Entity counts should track the database; a lasting gap means a reload is overdue.
+        Held by {isSelf ? 'this' : 'that'} instance only. Entity counts should track the database;
+        a lasting gap means a reload is overdue.
       </p>
       <KeyValue label="Projects" value={formatCount(cache.projects)} />
       <KeyValue label="Credentials" value={formatCount(cache.credentials)} />

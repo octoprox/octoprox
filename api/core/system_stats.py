@@ -37,11 +37,19 @@ from api.core import utc_now
 from api.core.config import Settings
 from api.core.job_stats import job_stats
 from api.core.workers import LEASE_KINDS, LEASE_WORKERS, worker_info
-from api.db.redis import INSTANCE_REGISTRY_SCAN, LEASE_SCAN, RedisClient, classify_key
+from api.db.redis import (
+    INSTANCE_REGISTRY_SCAN,
+    INSTANCE_STATS_KEY,
+    INSTANCE_TTL_SECONDS,
+    LEASE_SCAN,
+    RedisClient,
+    classify_key,
+)
 from api.models.system import (
     CacheStats,
     DatabaseStats,
     InstanceInfo,
+    InstanceSnapshot,
     InventoryStats,
     LeaseInfo,
     ProjectUsage,
@@ -335,8 +343,29 @@ async def _collect_leases(redis_client: RedisClient, instance_id: str) -> list[L
     return sorted(leases, key=lambda lease: (lease.kind, lease.target or ""))
 
 
+def _parse_snapshot(raw: Any, instance_id: str) -> InstanceSnapshot | None:
+    """Decode a peer's published snapshot, tolerating anything unreadable.
+
+    A malformed or older-schema payload costs that one instance its card, not
+    the whole page - the same failure-tolerance the other collectors have.
+    """
+    if raw is None:
+        return None
+    try:
+        return InstanceSnapshot.model_validate_json(raw)
+    except Exception as exc:
+        logger.warning("Unreadable instance snapshot", peer=instance_id, error=str(exc))
+        return None
+
+
 async def _collect_instances(redis_client: RedisClient, instance_id: str) -> list[InstanceInfo]:
-    """Every Octoprox process currently advertising itself in the registry."""
+    """Every Octoprox process currently advertising itself, and what it reports.
+
+    Two keys per instance: the registry key that proves it is alive, and the
+    snapshot key holding what only that process can see. Both are read in one
+    pipeline, and the snapshot is optional - an instance running a version
+    that predates snapshots is still listed as a member.
+    """
     client = redis_client.client
     keys = [
         k if isinstance(k, str) else k.decode()
@@ -344,24 +373,36 @@ async def _collect_instances(redis_client: RedisClient, instance_id: str) -> lis
     ]
     if not keys:
         return []
+    idents = [key.partition(":")[2] for key in keys]
     pipe = client.pipeline()
-    for key in keys:
+    for key, ident in zip(keys, idents, strict=True):
         pipe.get(key)
         pipe.ttl(key)
+        pipe.get(INSTANCE_STATS_KEY.format(instance_id=ident))
+        pipe.ttl(INSTANCE_STATS_KEY.format(instance_id=ident))
     results = await pipe.execute()
 
     instances: list[InstanceInfo] = []
-    for i, key in enumerate(keys):
-        role, ttl = results[2 * i], results[2 * i + 1]
+    for i, ident in enumerate(idents):
+        role, ttl, raw_snapshot, snapshot_ttl = results[4 * i : 4 * i + 4]
         if role is None:
-            continue
-        ident = key.partition(":")[2]
+            continue  # expired between the scan and the read
+        snapshot = _parse_snapshot(raw_snapshot, ident)
         instances.append(
             InstanceInfo(
                 instance_id=ident,
                 role=str(role),
                 is_self=ident == instance_id,
                 ttl_seconds=max(0, int(ttl)),
+                snapshot=snapshot,
+                # How long ago it was written, read off the TTL it was written
+                # with. No clock comparison, so host skew cannot make a fresh
+                # snapshot look stale.
+                age_seconds=(
+                    None
+                    if snapshot is None
+                    else max(0.0, float(INSTANCE_TTL_SECONDS - max(0, int(snapshot_ttl))))
+                ),
             )
         )
     # This instance first, then stable by id so the list does not jump around.
@@ -469,6 +510,35 @@ async def collect_workers(
         tasks=collect_tasks(proxy_manager),
         leases=leases,
         instances=instances,
+        proxy_server_listening=proxy_server.is_listening if proxy_server else False,
+        proxy_server_connections=proxy_server.active_connections if proxy_server else 0,
+        geo_lookup_enabled=geo_lookup.enabled if geo_lookup else False,
+        geo_lookups_in_flight=geo_lookup.in_flight if geo_lookup else 0,
+    )
+
+
+def build_instance_snapshot(
+    settings: Settings,
+    started_at: datetime | None,
+    *,
+    proxy_manager: ProxyManager | None = None,
+    proxy_server: ProxyServer | None = None,
+    geo_lookup: GeoLookup | None = None,
+    cert_manager: TLSCertManager | None = None,
+) -> InstanceSnapshot:
+    """Assemble what this process publishes about itself on its heartbeat.
+
+    Exactly the sections of ``/system/stats`` that describe one process, so a
+    peer's card is built from the same collectors as the local one. Every
+    collector here reads in-memory state - no Postgres, no Redis - which is
+    what makes this cheap enough to run on a five-second loop.
+    """
+    return InstanceSnapshot(
+        runtime=collect_runtime(
+            settings, started_at, proxy_port=proxy_server.port if proxy_server else None
+        ),
+        cache=collect_cache(proxy_manager, cert_manager),
+        tasks=collect_tasks(proxy_manager),
         proxy_server_listening=proxy_server.is_listening if proxy_server else False,
         proxy_server_connections=proxy_server.active_connections if proxy_server else 0,
         geo_lookup_enabled=geo_lookup.enabled if geo_lookup else False,

@@ -10,7 +10,7 @@ Emits proxy lifecycle signals (proxy_added, proxy_removed, proxy_status_changed)
 import asyncio
 import contextlib
 import json
-from collections.abc import Coroutine
+from collections.abc import Callable, Coroutine
 from typing import TYPE_CHECKING, Any
 
 import structlog
@@ -61,7 +61,10 @@ from api.core.stats import (
 from api.core.system_snapshotter import SystemSnapshotter
 from api.core.workers import WorkerName
 from api.db.redis import (
+    INSTANCE_HEARTBEAT_INTERVAL,
     INSTANCE_REGISTRY_KEY,
+    INSTANCE_STATS_KEY,
+    INSTANCE_TTL_SECONDS,
     METRIC_DELTAS_CHANNEL,
     RedisClient,
 )
@@ -83,6 +86,7 @@ from api.providers.store import ProviderStore
 from api.strategies import get_strategy
 
 if TYPE_CHECKING:
+    from api.models.system import InstanceSnapshot
     from api.strategies.base import RoutingStrategy
 
 logger = structlog.get_logger()
@@ -147,6 +151,12 @@ class ProxyManager:
         self._pending_project_deltas: dict[str, MetricDelta] = {}
         self._running = False
         self._tasks: list[asyncio.Task[None]] = []
+        # Builds what this instance publishes about itself on the heartbeat.
+        # Set by the lifespan, because the snapshot spans components this
+        # manager does not own. Left None in tests and anywhere else the
+        # manager runs standalone, where the heartbeat then advertises
+        # membership alone - exactly as it did before snapshots existed.
+        self.snapshot_provider: Callable[[], InstanceSnapshot] | None = None
 
     def _spawn(self, name: str, coro: Coroutine[Any, Any, None]) -> None:
         """Start a named background loop and keep its handle.
@@ -368,41 +378,70 @@ class ProxyManager:
             await self._rate_limiter.remove_proxy(proxy_id)
             del self._proxies[proxy_id]
 
-    async def _heartbeat_loop(self) -> None:
-        """Write a TTL'd Redis key advertising this instance.
+    def _instance_snapshot_json(self) -> str | None:
+        """Serialise this instance's self-report, or None if it cannot be built.
 
-        Used as the live-membership source for:
+        Publishing is best-effort: a snapshot that fails to build must not cost
+        this instance its membership key, because peers shard health checks off
+        that key. So the failure is logged and the heartbeat carries on with
+        the registry write alone.
+        """
+        if self.snapshot_provider is None:
+            return None
+        try:
+            return self.snapshot_provider().model_dump_json()
+        except Exception:
+            logger.warning("Instance snapshot could not be built", exc_info=True)
+            return None
+
+    async def _heartbeat_loop(self) -> None:
+        """Write TTL'd Redis keys advertising this instance and what it sees.
+
+        The registry key is the live-membership source for:
 
         * The cross-instance subscriber to drop self-echoes by ``instance_id``.
         * The HealthChecker's HRW shard ownership.
         * Lease holder identification (the lease value is the instance_id).
 
+        Alongside it goes the snapshot key: the runtime, caches and worker
+        counters that only this process can see, so the admin system view can
+        show them for every instance rather than only for whichever one the
+        load balancer routed the request to. Both are written in one pipeline,
+        so a peer never reads a snapshot from an instance it thinks is gone.
+        Building the snapshot touches memory only - see
+        :func:`api.core.system_stats.build_instance_snapshot` - which is what
+        keeps it affordable at this cadence.
+
         Cleanup is double-belt:
 
-        * Redis TTL (10s) expires the key automatically if the process
+        * Redis TTL (10s) expires the keys automatically if the process
           dies hard (SIGKILL, OOM, network partition).
-        * The ``finally`` block deletes the key on graceful shutdown so
+        * The ``finally`` block deletes them on graceful shutdown so
           peers see the departure immediately rather than waiting 10s.
 
         Refresh interval (5s) is deliberately half the TTL so a single
         missed write does not declare us dead.
         """
         key = INSTANCE_REGISTRY_KEY.format(instance_id=self._settings.instance_id)
+        stats_key = INSTANCE_STATS_KEY.format(instance_id=self._settings.instance_id)
         payload = self._settings.role
-        ttl_seconds = 10
-        interval_seconds = 5
-        job_stats.declare_interval(WorkerName.HEARTBEAT, interval_seconds)
+        job_stats.declare_interval(WorkerName.HEARTBEAT, INSTANCE_HEARTBEAT_INTERVAL)
         try:
             while self._running:
                 try:
                     with job_stats.track(WorkerName.HEARTBEAT):
-                        await self._redis_client.client.set(key, payload, ex=ttl_seconds)
+                        snapshot = self._instance_snapshot_json()
+                        pipe = self._redis_client.client.pipeline()
+                        pipe.set(key, payload, ex=INSTANCE_TTL_SECONDS)
+                        if snapshot is not None:
+                            pipe.set(stats_key, snapshot, ex=INSTANCE_TTL_SECONDS)
+                        await pipe.execute()
                 except Exception:
                     logger.warning("Instance heartbeat write failed", exc_info=True)
-                await asyncio.sleep(interval_seconds)
+                await asyncio.sleep(INSTANCE_HEARTBEAT_INTERVAL)
         finally:
             with contextlib.suppress(Exception):
-                await self._redis_client.client.delete(key)
+                await self._redis_client.client.delete(key, stats_key)
 
     def _subscribe_to_signals(self) -> None:
         """Subscribe to signals from other components."""

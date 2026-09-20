@@ -3,9 +3,12 @@
 
 """Integration tests for the admin system statistics endpoints."""
 
+from collections.abc import Iterator
 from datetime import timedelta
 from typing import Any
 
+import pytest
+import redis
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 from starlette.testclient import TestClient
@@ -13,6 +16,12 @@ from starlette.testclient import TestClient
 from api.core import utc_now
 from api.core.config import Settings
 from api.db.models import SystemMetricsModel
+from api.db.redis import (
+    INSTANCE_REGISTRY_KEY,
+    INSTANCE_STATS_KEY,
+    INSTANCE_TTL_SECONDS,
+)
+from api.models.system import CacheStats, InstanceSnapshot, RuntimeStats, WorkerTask
 
 ENDPOINT = "/api/v1/system/stats"
 HISTORY = "/api/v1/system/stats/history"
@@ -356,6 +365,138 @@ class TestSystemHistory:
         assert growth["users"]["delta_bytes"] == 0
         # Biggest mover first.
         assert rows[0]["name"] == "proxies"
+
+
+PEER_ID = "peer-instance"
+
+
+def _peer_snapshot(instance_id: str) -> str:
+    """A snapshot as a peer would publish it, built from the models it uses."""
+    return InstanceSnapshot(
+        runtime=RuntimeStats(
+            version="9.9.9",
+            instance_id=instance_id,
+            role="proxy",
+            environment="production",
+            python_version="3.12.0",
+            platform="Linux aarch64",
+            pid=4242,
+            started_at=utc_now() - timedelta(hours=3),
+            uptime_seconds=10800.0,
+            api_port=8000,
+            proxy_port=8080,
+            log_level="WARNING",
+            health_check_interval=30,
+            metrics_flush_interval=60,
+            ip_refresh_interval=300,
+        ),
+        cache=CacheStats(projects=7, proxies=41),
+        tasks=[WorkerTask(name="health_checker", state="running", runs=12, idle_runs=2)],
+        proxy_server_listening=True,
+        proxy_server_connections=5,
+        geo_lookup_enabled=True,
+        geo_lookups_in_flight=1,
+    ).model_dump_json()
+
+
+@pytest.fixture
+def peer_writer(test_settings: Settings) -> Iterator[Any]:
+    """Publish instance keys as a peer process would, over a sync connection.
+
+    These tests drive the app through ``TestClient``, which runs it on its own
+    event loop - the same reason ``_seed_snapshots`` goes around the async
+    session factory.
+    """
+    client = redis.Redis.from_url(test_settings.redis_url, decode_responses=True)
+    written: list[str] = []
+
+    def write(instance_id: str, *, snapshot: str | None) -> None:
+        registry = INSTANCE_REGISTRY_KEY.format(instance_id=instance_id)
+        stats = INSTANCE_STATS_KEY.format(instance_id=instance_id)
+        client.set(registry, "proxy", ex=INSTANCE_TTL_SECONDS)
+        written.append(registry)
+        if snapshot is not None:
+            client.set(stats, snapshot, ex=INSTANCE_TTL_SECONDS)
+            written.append(stats)
+
+    try:
+        yield write
+    finally:
+        if written:
+            client.delete(*written)
+        client.close()
+
+
+class TestInstanceSnapshots:
+    """Per-instance worker data, which is what makes the cluster switcher work."""
+
+    def test_this_instance_publishes_a_snapshot_of_itself(
+        self, authenticated_client: TestClient, test_settings: Settings
+    ) -> None:
+        """Membership and snapshot are written together, so the first beat has both."""
+        workers = authenticated_client.get(ENDPOINT).json()["workers"]
+
+        me = next(i for i in workers["instances"] if i["instance_id"] == test_settings.instance_id)
+        assert me["is_self"] is True
+        assert me["snapshot"] is not None
+        assert me["snapshot"]["runtime"]["instance_id"] == test_settings.instance_id
+        # Published on a 5s heartbeat with a 10s TTL, so it can never read as
+        # older than the TTL - that is what the age is derived from.
+        assert 0 <= me["age_seconds"] <= INSTANCE_TTL_SECONDS
+        assert {t["name"] for t in me["snapshot"]["tasks"]} >= {"heartbeat", "health_checker"}
+
+    def test_a_peer_reports_its_own_workers_and_caches(
+        self, authenticated_client: TestClient, peer_writer: Any
+    ) -> None:
+        """The whole point: worker data for an instance that did not serve this request."""
+        peer_writer(PEER_ID, snapshot=_peer_snapshot(PEER_ID))
+
+        workers = authenticated_client.get(ENDPOINT).json()["workers"]
+
+        peer = next(i for i in workers["instances"] if i["instance_id"] == PEER_ID)
+        assert peer["is_self"] is False
+        assert peer["role"] == "proxy"
+        assert peer["snapshot"]["runtime"]["pid"] == 4242
+        assert peer["snapshot"]["runtime"]["log_level"] == "WARNING"
+        assert peer["snapshot"]["cache"]["proxies"] == 41
+        assert peer["snapshot"]["tasks"][0]["name"] == "health_checker"
+        assert peer["snapshot"]["tasks"][0]["runs"] == 12
+        assert peer["snapshot"]["proxy_server_connections"] == 5
+        assert 0 <= peer["age_seconds"] <= INSTANCE_TTL_SECONDS
+
+    def test_a_peer_without_a_snapshot_is_still_listed(
+        self, authenticated_client: TestClient, peer_writer: Any
+    ) -> None:
+        """An instance on a version predating snapshots stays in the cluster list."""
+        peer_writer(PEER_ID, snapshot=None)
+
+        workers = authenticated_client.get(ENDPOINT).json()["workers"]
+
+        peer = next(i for i in workers["instances"] if i["instance_id"] == PEER_ID)
+        assert peer["snapshot"] is None
+        assert peer["age_seconds"] is None
+        assert peer["ttl_seconds"] > 0
+
+    def test_an_unreadable_snapshot_costs_only_that_instance(
+        self, authenticated_client: TestClient, peer_writer: Any, test_settings: Settings
+    ) -> None:
+        """One corrupt payload must not take down the page for every instance."""
+        peer_writer(PEER_ID, snapshot="{not json at all")
+
+        resp = authenticated_client.get(ENDPOINT)
+
+        assert resp.status_code == 200
+        instances = {i["instance_id"]: i for i in resp.json()["workers"]["instances"]}
+        assert instances[PEER_ID]["snapshot"] is None
+        assert instances[test_settings.instance_id]["snapshot"] is not None
+
+    def test_snapshot_keys_are_accounted_for_in_the_keyspace(
+        self, authenticated_client: TestClient
+    ) -> None:
+        """Every key prefix Octoprox writes is named in the Redis breakdown."""
+        groups = authenticated_client.get(ENDPOINT).json()["redis"]["groups"]
+
+        assert any(group["label"] == "Instance snapshots" for group in groups)
 
 
 def _seed_snapshots(settings: Settings, rows: list[SystemMetricsModel]) -> None:

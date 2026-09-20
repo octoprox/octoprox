@@ -24,6 +24,7 @@ from api.core.mitm import MitmHandler
 from api.core.proxy_manager import ProxyManager
 from api.core.proxy_server import ProxyServer
 from api.core.seed import seed_admin_user
+from api.core.system_stats import build_instance_snapshot
 from api.core.tls_cert_manager import TLSCertManager
 from api.db.migrations import run_migrations
 from api.db.redis import get_redis_client
@@ -83,6 +84,22 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         settings=settings,
     )
     app.state.proxy_manager = proxy_manager
+
+    # Let the heartbeat publish what this instance sees, for the admin system
+    # view's per-instance cards. Wired here rather than inside ProxyManager
+    # because the snapshot spans components the manager does not own - the
+    # proxy server, the geo lookup, the CA context cache - and read off
+    # app.state rather than captured, because those components are built after
+    # the heartbeat has already started beating. Each is optional, so the first
+    # beat carries a partial snapshot rather than none at all.
+    proxy_manager.snapshot_provider = lambda: build_instance_snapshot(
+        settings,
+        app.state.started_at,
+        proxy_manager=proxy_manager,
+        proxy_server=getattr(app.state, "proxy_server", None),
+        geo_lookup=getattr(app.state, "geo_lookup", None),
+        cert_manager=getattr(app.state, "cert_manager", None),
+    )
 
     # Start background tasks (loads from DB, hydrates from Redis)
     await proxy_manager.start()

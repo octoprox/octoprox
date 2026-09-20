@@ -572,13 +572,32 @@ Editors and viewers receive `403`.
 | `database` | Whole install | Database size, per-table size (indexes included), server connections and this instance's pool usage. |
 | `redis` | Whole install | Memory, throughput, hit rate and a breakdown of the keyspace by purpose. |
 | `cache` | This instance | Entry counts of every in-memory cache the process holds. |
-| `workers` | Mixed | `tasks` are this instance's background loops and their run counters; `leases` and `instances` are cluster-wide. |
+| `workers` | Mixed | `tasks` are this instance's background loops and their run counters; `leases` and `instances` are cluster-wide, and each entry in `instances` carries that instance's own `snapshot`. |
 
 **Scope matters behind a load balancer.** `runtime`, `cache` and
 `workers.tasks` describe only the instance that answered the request. With
 several replicas, repeated calls may land on different instances and report
 different numbers - that is accurate, not a bug. Everything Postgres- or
 Redis-derived is the same from every instance.
+
+**Every instance, from any instance.** Because a load balancer gives no way to
+address a particular replica, each instance publishes those same three sections
+about *itself* on its heartbeat, and they come back under
+`workers.instances[].snapshot`:
+
+| Field | Notes |
+|-------|-------|
+| `snapshot.runtime` / `snapshot.cache` / `snapshot.tasks` | The same shape as the top-level `runtime`, `cache` and `workers.tasks`, for that instance. |
+| `snapshot.proxy_server_listening` / `proxy_server_connections` | That instance's proxy listener, as in the top-level `workers`. |
+| `snapshot.geo_lookup_enabled` / `geo_lookups_in_flight` | That instance's exit-location lookups. |
+| `age_seconds` | How long ago the snapshot was published - up to the 10s key TTL. Derived from the remaining TTL, so it does not depend on hosts agreeing on the time. `null` when there is no snapshot. |
+
+A snapshot is republished every 5 seconds, so it is a recent reading rather
+than a live one; the top-level sections remain live for the answering
+instance, which is also listed (with its own, slightly older, snapshot).
+`snapshot` is `null` for an instance running a version that predates
+snapshots - during a rolling upgrade, for example. The **Settings → System**
+page uses this to switch its per-instance cards between replicas.
 
 **Cost.** Entity counts are exact. Table row counts are planner estimates
 (`pg_class.reltuples`), so they stay cheap on metric tables with millions of

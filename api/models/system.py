@@ -10,7 +10,9 @@ the answers have different authority in a multi-instance deployment:
 * ``redis`` / ``workers.leases`` / ``workers.instances`` - the shared
   operational store, so also cluster-wide.
 * ``runtime`` / ``cache`` / ``workers.tasks`` - the process that served the
-  request, and nobody else.
+  request, and nobody else. Every *other* instance reports the same three
+  sections about itself in ``workers.instances[].snapshot``, published on its
+  heartbeat rather than collected live - see :class:`InstanceSnapshot`.
 """
 
 from datetime import datetime
@@ -213,13 +215,46 @@ class LeaseInfo(BaseModel):
     ttl_ms: int
 
 
+class InstanceSnapshot(BaseModel):
+    """What one instance publishes about itself on its heartbeat.
+
+    The three sections a peer cannot collect on another's behalf: the process
+    identity, the caches it holds in memory, and the counters of the loops it
+    runs. Republished every :data:`api.db.redis.INSTANCE_HEARTBEAT_INTERVAL`
+    seconds, so it is a recent reading rather than a live one - ``age_seconds``
+    on :class:`InstanceInfo` says how recent.
+    """
+
+    runtime: RuntimeStats
+    cache: CacheStats
+    tasks: list[WorkerTask] = Field(default_factory=list)
+    proxy_server_listening: bool = False
+    proxy_server_connections: int = 0
+    geo_lookup_enabled: bool = False
+    geo_lookups_in_flight: int = 0
+
+
 class InstanceInfo(BaseModel):
-    """A live Octoprox process advertising itself in the instance registry."""
+    """A live Octoprox process advertising itself in the instance registry.
+
+    ``snapshot`` is what that process last published about itself. Both keys
+    are written in one pipeline, so a live instance normally has one; it is
+    None when that instance runs a version predating snapshots, or could not
+    build one. ``age_seconds`` is derived from the snapshot key's remaining TTL
+    rather than from its timestamp, so it does not depend on two hosts agreeing
+    on the time.
+    """
 
     instance_id: str
     role: str
     is_self: bool
     ttl_seconds: int
+    # Present for this instance too, a few seconds behind the live ``runtime``
+    # / ``cache`` / ``workers.tasks`` sections of the same response. Kept
+    # uniform so a consumer reading the instance list does not have to
+    # special-case the one that answered; the UI prefers the live sections.
+    snapshot: InstanceSnapshot | None = None
+    age_seconds: float | None = None
 
 
 class WorkerStats(BaseModel):

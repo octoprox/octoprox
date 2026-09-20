@@ -1154,11 +1154,36 @@ export interface SystemLease {
   ttl_ms: number
 }
 
+/**
+ * The sections of a stats response that describe one process, as that process
+ * published them on its own heartbeat. Every instance reports these about
+ * itself, which is how the System page shows workers for an instance other
+ * than the one the load balancer routed the request to.
+ */
+export interface SystemInstanceSnapshot {
+  runtime: SystemRuntime
+  cache: SystemCache
+  tasks: SystemWorkerTask[]
+  proxy_server_listening: boolean
+  proxy_server_connections: number
+  geo_lookup_enabled: boolean
+  geo_lookups_in_flight: number
+}
+
 export interface SystemInstance {
   instance_id: string
   role: string
   is_self: boolean
   ttl_seconds: number
+  /**
+   * What that instance last published about itself. Published alongside its
+   * membership, so a live instance normally has one; null when it runs a
+   * version predating snapshots. Present for this instance too, a few seconds
+   * behind the live top-level sections of the same response.
+   */
+  snapshot: SystemInstanceSnapshot | null
+  /** Seconds since the snapshot was published; null when there is none. */
+  age_seconds: number | null
 }
 
 export interface SystemWorkers {
