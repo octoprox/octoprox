@@ -78,6 +78,54 @@ class TestTrack:
 
         assert job_stats.get("worker") is None
 
+    async def test_a_cycle_can_report_it_had_nothing_to_do(self) -> None:
+        """An idle tick proves the loop is alive without claiming it worked."""
+        with job_stats.track("worker") as run:
+            run.idle()
+
+        stats = job_stats.get("worker")
+        assert stats is not None
+        assert (stats.runs, stats.idle_runs, stats.working_runs) == (1, 1, 0)
+        assert stats.failures == 0
+        # The loop ticked, so it has a last run - it just has no timing, since
+        # the early return is not a measurement of the work it skipped.
+        assert stats.last_run_at is not None
+        assert stats.last_duration_ms is None
+        assert stats.avg_duration_ms is None
+        assert stats.max_duration_ms is None
+
+    async def test_idle_ticks_stay_out_of_the_timings(self) -> None:
+        """Otherwise a mostly-idle loop reports work it does as instant."""
+        job_stats.record("worker", 20.0)
+        for _ in range(99):
+            job_stats.record("worker", 0.01, idle=True)
+
+        stats = job_stats.get("worker")
+        assert stats is not None
+        assert (stats.runs, stats.idle_runs, stats.working_runs) == (100, 99, 1)
+        # 20ms, not the 0.2ms a mean over all 100 cycles would report.
+        assert stats.avg_duration_ms == 20.0
+        assert stats.max_duration_ms == 20.0
+
+    async def test_a_cycle_that_raised_is_never_idle(self) -> None:
+        """However early it gave up, it failed rather than found nothing."""
+        with pytest.raises(RuntimeError), job_stats.track("worker") as run:
+            run.idle()
+            raise RuntimeError("redis down")
+
+        stats = job_stats.get("worker")
+        assert stats is not None
+        assert (stats.runs, stats.idle_runs, stats.failures) == (1, 0, 1)
+
+    async def test_workers_without_an_idle_path_report_none(self) -> None:
+        """Loops that always have work keep runs and working_runs identical."""
+        job_stats.record("worker", 5.0)
+        job_stats.record("worker", 5.0)
+
+        stats = job_stats.get("worker")
+        assert stats is not None
+        assert (stats.idle_runs, stats.working_runs) == (0, 2)
+
     async def test_averages_over_cycles(self) -> None:
         job_stats.record("worker", 10.0)
         job_stats.record("worker", 30.0)
@@ -173,6 +221,7 @@ class TestCollectTasks:
         assert reported.scope == "singleton"
         assert reported.lease == "metrics_flusher"
         assert reported.runs == 1
+        assert reported.idle_runs == 0
         assert reported.avg_duration_ms == 12.0
 
     async def test_a_worker_that_has_not_run_reports_zeroes_not_nulls(self) -> None:
@@ -187,7 +236,7 @@ class TestCollectTasks:
         finally:
             task.cancel()
 
-        assert (reported.runs, reported.failures) == (0, 0)
+        assert (reported.runs, reported.idle_runs, reported.failures) == (0, 0, 0)
         assert reported.last_run_at is None
         assert reported.avg_duration_ms is None
 

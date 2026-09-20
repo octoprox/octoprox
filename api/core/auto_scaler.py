@@ -130,8 +130,9 @@ class AutoScaler:
 
         while self._running:
             try:
-                with job_stats.track(WorkerName.AUTO_SCALER):
-                    await self._check_all_connectors()
+                with job_stats.track(WorkerName.AUTO_SCALER) as run:
+                    if not await self._check_all_connectors():
+                        run.idle()
                 await asyncio.sleep(CHECK_INTERVAL_SECONDS)
             except asyncio.CancelledError:
                 logger.info("Auto-scaler stopped")
@@ -284,15 +285,21 @@ class AutoScaler:
         connector.last_error_at = None
         connector.consecutive_errors = 0
 
-    async def _check_all_connectors(self) -> None:
+    async def _check_all_connectors(self) -> bool:
         """Check scaling and rotation for all cloud connectors.
 
         Each connector is gated by `lease:autoscaler:<connector_id>` so
         two Octoprox instances cannot double-scale the same cloud account.
         Different connectors can be processed by different instances in
         parallel (each acquires its own lease).
+
+        Returns whether this cycle evaluated any connector at all. An install
+        with no cloud connectors, or an instance whose peers hold every
+        autoscaler lease, ticks without one - worth telling apart from a cycle
+        that looked and found nothing to change.
         """
         connectors = self._data_provider.connectors
+        evaluated = 0
 
         for connector in connectors:
             # Only process cloud connectors (AWS, GCP, Azure)
@@ -318,6 +325,7 @@ class AutoScaler:
                     connector_id=connector.id,
                 )
                 continue
+            evaluated += 1
             try:
                 # If connector is disabled, drain and terminate all its proxies
                 if not connector.enabled:
@@ -334,6 +342,8 @@ class AutoScaler:
                 )
             finally:
                 await lease.release()
+
+        return evaluated > 0
 
     async def _drain_disabled_connector(self, connector: Connector, credential: Any) -> None:
         """Drain and terminate all proxies for a disabled connector.

@@ -1121,6 +1121,12 @@ export interface SystemWorkerTask {
   interval_seconds: number | null
   /** Counters for the cycles inside the loop, since this process started. */
   runs: number
+  /**
+   * Runs that found nothing to do - an empty buffer, a shard owned by peers, a
+   * snapshot already covered. A subset of `runs`, so `runs - idle_runs` is the
+   * cycles that did something, and the durations describe those only.
+   */
+  idle_runs: number
   failures: number
   /** Cycles that ran longer than interval_seconds, i.e. pushed the loop off cadence. */
   overruns: number

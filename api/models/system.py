@@ -171,6 +171,12 @@ class WorkerTask(BaseModel):
     # which run when a peer message arrives rather than on a clock.
     interval_seconds: float | None = None
     runs: int = 0
+    # Runs that found nothing to do. A subset of ``runs``: subtract to get the
+    # cycles that did something. The split is what separates "the loop is
+    # alive" from "the loop is busy" - an install taking no traffic ticks the
+    # metric-delta publisher every 5s forever with an empty buffer to flush.
+    # Durations below describe the working cycles only.
+    idle_runs: int = 0
     failures: int = 0
     # Cycles that took longer than ``interval_seconds``. A loop cannot start
     # its next cycle until the current one returns, so these are cycles that

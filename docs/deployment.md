@@ -123,6 +123,15 @@ published drops its own echo so no infinite loops.
 Cross-instance signals: `project_changed`, `credential_changed`,
 `connector_changed`, `proxy_changed`, `proxy_quarantine_changed`.
 
+`op` is normally `added` / `updated` / `removed`. `proxy_changed` adds one
+more: `status`, published when a health check flips a proxy between healthy,
+degraded and unhealthy. Those fields live in Redis and never in the proxies
+table, so peers refresh them with a single Redis read instead of reloading the
+row from Postgres. Health flips are the most frequent event on the channel -
+on an idle install with a flapping pool they are the *only* traffic on it - and
+each one reaches every other instance, so the read they used to cost was
+multiplied by the cluster size.
+
 A 60-second full-reload from Postgres runs in the background as a
 safety net for any messages dropped by Redis Pub/Sub (which is
 fire-and-forget).

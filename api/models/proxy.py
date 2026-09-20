@@ -100,6 +100,19 @@ class Proxy(BaseModel):
             return 0.0
         return (self.success_count / self.request_count) * 100
 
+    def apply_status_snapshot(self, status_data: dict[str, Any]) -> None:
+        """Adopt the health fields from a Redis ``proxy:status:<id>`` hash.
+
+        Redis - not Postgres - is authoritative for these three: the health
+        checker writes them there on every probe and they are never persisted
+        to the proxies table. Anything that refreshes a cached proxy therefore
+        takes its status from here, and a peer's health flip needs no database
+        read at all.
+        """
+        self.status = status_data["status"]
+        self.last_check_latency_ms = status_data["latency_ms"]
+        self.consecutive_failures = status_data["consecutive_failures"]
+
     def merge_definition_from(self, other: "Proxy") -> None:
         """Adopt the Postgres-backed *definition* fields from ``other``.
 

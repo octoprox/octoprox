@@ -424,6 +424,7 @@ def collect_tasks(proxy_manager: ProxyManager | None) -> list[WorkerTask]:
                 error=error,
                 interval_seconds=stats.interval_seconds if stats else None,
                 runs=stats.runs if stats else 0,
+                idle_runs=stats.idle_runs if stats else 0,
                 failures=stats.failures if stats else 0,
                 overruns=stats.overruns if stats else 0,
                 consecutive_overruns=stats.consecutive_overruns if stats else 0,

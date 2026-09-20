@@ -338,6 +338,12 @@ class ProxyManager:
         if op == "removed":
             await self._evict_proxy_from_cache(proxy_id)
             return
+        # A health flip we already have the proxy for needs Redis, not
+        # Postgres. One we have never seen still needs its definition, so it
+        # falls through to the full reload.
+        if op == "status" and proxy_id in self._proxies:
+            await self.refresh_proxy_status(proxy_id)
+            return
         await self.reload_proxy(proxy_id)
 
     async def _apply_provider_change(self, provider_id: str, op: str | None) -> None:
@@ -628,10 +634,7 @@ class ProxyManager:
         # Hydrate proxy metrics
         for proxy_id, proxy in self._proxies.items():
             if proxy_id in statuses:
-                status_data = statuses[proxy_id]
-                proxy.status = status_data["status"]
-                proxy.last_check_latency_ms = status_data["latency_ms"]
-                proxy.consecutive_failures = status_data["consecutive_failures"]
+                proxy.apply_status_snapshot(statuses[proxy_id])
 
             # Combine Postgres (historical) + Redis (current window)
             pg = postgres_proxy_metrics.get(proxy_id, {})
@@ -794,8 +797,12 @@ class ProxyManager:
             except Exception:
                 logger.warning("Periodic full reload failed", exc_info=True)
 
-    async def _flush_pending_metrics(self) -> None:
+    async def _flush_pending_metrics(self) -> bool:
         """Drain accumulated metric deltas to Redis and announce to peers.
+
+        Returns True if there was a batch to flush, False if the buffers were
+        empty - which is every cycle on an instance taking no traffic, and what
+        the publisher loop reports as an idle run.
 
         Operation:
 
@@ -812,7 +819,7 @@ class ProxyManager:
            dropped messages.
         """
         if not self._pending_proxy_deltas and not self._pending_project_deltas:
-            return
+            return False
 
         proxy_deltas = self._pending_proxy_deltas
         project_deltas = self._pending_project_deltas
@@ -834,7 +841,9 @@ class ProxyManager:
                 merge_delta_into(
                     self._pending_project_deltas.setdefault(pid, empty_delta()), d
                 )
-            return
+            # Still a working cycle: there was a batch, and the retry carries
+            # it. Only an empty buffer counts as idle.
+            return True
 
         # Apply locally now that Redis is consistent. We use the same
         # code path peers will run when they receive the Pub/Sub
@@ -858,6 +867,7 @@ class ProxyManager:
                 "cluster will converge via the 60s safety reload)",
                 exc_info=True,
             )
+        return True
 
     async def _metric_delta_publisher_loop(self, interval_seconds: float = 5.0) -> None:
         """Periodically move accumulated metric deltas into Redis.
@@ -878,8 +888,9 @@ class ProxyManager:
                 await asyncio.sleep(interval_seconds)
                 if not self._running:
                     break
-                with job_stats.track(WorkerName.METRIC_DELTA_PUBLISHER):
-                    await self._flush_pending_metrics()
+                with job_stats.track(WorkerName.METRIC_DELTA_PUBLISHER) as run:
+                    if not await self._flush_pending_metrics():
+                        run.idle()
             except asyncio.CancelledError:
                 break
             except Exception:
@@ -994,6 +1005,26 @@ class ProxyManager:
         self._connectors[connector_id] = connector
         logger.debug("Reloaded connector", connector_id=connector_id)
 
+    async def refresh_proxy_status(self, proxy_id: str) -> None:
+        """Re-read one proxy's health fields from Redis into the cache.
+
+        The status-only half of :meth:`reload_proxy`, for the case where the
+        proxies row is known not to have changed - a peer's health check
+        flipping the proxy between healthy, degraded and unhealthy. Redis is
+        authoritative for those fields (see ``Proxy.apply_status_snapshot``),
+        so this costs one Redis read and no database round-trip.
+
+        A proxy this instance has not cached is ignored: it has no definition
+        to attach the status to, and the caller reloads it in full instead.
+        """
+        proxy = self._proxies.get(proxy_id)
+        if proxy is None:
+            return
+        status_data = await self._redis_client.get_proxy_status(proxy_id)
+        if status_data:
+            proxy.apply_status_snapshot(status_data)
+        logger.debug("Refreshed proxy status", proxy_id=proxy_id, status=proxy.status)
+
     async def reload_proxy(self, proxy_id: str) -> None:
         """Re-read a proxy from Postgres + Redis status into the cache.
 
@@ -1026,17 +1057,13 @@ class ProxyManager:
             # default), and converge upward via ``_hydrate_from_redis``
             # on the next periodic full reload.
             if status_data:
-                fresh.status = status_data["status"]
-                fresh.last_check_latency_ms = status_data["latency_ms"]
-                fresh.consecutive_failures = status_data["consecutive_failures"]
+                fresh.apply_status_snapshot(status_data)
             self._proxies[proxy_id] = fresh
         else:
             existing.merge_definition_from(fresh)
             self._proxies.reindex(proxy_id)
             if status_data:
-                existing.status = status_data["status"]
-                existing.last_check_latency_ms = status_data["latency_ms"]
-                existing.consecutive_failures = status_data["consecutive_failures"]
+                existing.apply_status_snapshot(status_data)
         logger.debug("Reloaded proxy", proxy_id=proxy_id)
 
     @property
@@ -1970,9 +1997,14 @@ class ProxyManager:
                     old_status=old_status,
                     new_status=status,
                 )
-                # Cross-instance: tell peers to re-hydrate this proxy.
+                # Cross-instance: tell peers to re-hydrate this proxy. The
+                # "status" op says the proxies *row* did not change, so peers
+                # refresh the three health fields from Redis and skip the
+                # Postgres read - this is by far the most frequent
+                # cross-instance event, and on a flapping pool the reads it
+                # used to cost were the bulk of the peers' database traffic.
                 await event_bus.publish(
-                    proxy_changed, self, entity_id=proxy_id, op="updated"
+                    proxy_changed, self, entity_id=proxy_id, op="status"
                 )
 
     # Demand tracking and scaling methods

@@ -120,8 +120,9 @@ class HealthChecker:
 
         while True:
             try:
-                with job_stats.track(WorkerName.HEALTH_CHECKER):
-                    await self._check_all_proxies()
+                with job_stats.track(WorkerName.HEALTH_CHECKER) as run:
+                    if not await self._check_all_proxies():
+                        run.idle()
                 await asyncio.sleep(self._interval)
             except asyncio.CancelledError:
                 logger.info("Health checker stopped")
@@ -153,7 +154,7 @@ class HealthChecker:
             )
         return sorted(ids)
 
-    async def _check_all_proxies(self) -> None:
+    async def _check_all_proxies(self) -> bool:
         """Check health of all proxies this instance owns under HRW.
 
         Skips proxies that are draining/terminating or belong to disabled
@@ -161,10 +162,14 @@ class HealthChecker:
         to this instance over the live peer set. Brief overlap during
         membership changes is harmless - Redis is last-writer-wins on the
         status snapshot.
+
+        Returns False when this tick had nothing to probe - an empty pool, or
+        a shard that landed entirely on peers - so the counters can tell a
+        sweep apart from a tick that skipped one.
         """
         proxies = self._proxy_data_provider.proxies
         if not proxies:
-            return
+            return False
 
         active_proxies = [
             p for p in proxies
@@ -173,7 +178,7 @@ class HealthChecker:
         ]
 
         if not active_proxies:
-            return
+            return False
 
         instances = await self._live_instances()
         if len(instances) == 1:
@@ -190,7 +195,7 @@ class HealthChecker:
                 instance_count=len(instances),
                 candidates=len(active_proxies),
             )
-            return
+            return False
 
         logger.debug(
             "Running health checks",
@@ -201,6 +206,7 @@ class HealthChecker:
 
         tasks = [self._check_proxy(proxy) for proxy in owned]
         await asyncio.gather(*tasks, return_exceptions=True)
+        return True
 
     def _get_proxy_mounts(
         self, proxy: Proxy

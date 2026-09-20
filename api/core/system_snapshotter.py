@@ -112,8 +112,9 @@ class SystemSnapshotter:
                     # Snapshot first, then sleep: a fresh install gets its
                     # first point immediately instead of after one interval.
                     if lease.is_held:
-                        with job_stats.track(WorkerName.SYSTEM_SNAPSHOTTER):
-                            await self._snapshot_if_due()
+                        with job_stats.track(WorkerName.SYSTEM_SNAPSHOTTER) as run:
+                            if not await self._snapshot_if_due():
+                                run.idle()
                     await asyncio.sleep(self._interval)
                 except asyncio.CancelledError:
                     logger.info("System snapshotter stopped")
@@ -124,8 +125,13 @@ class SystemSnapshotter:
         finally:
             await lease.release()
 
-    async def _snapshot_if_due(self) -> None:
-        """Write a snapshot unless a recent one already covers this tick."""
+    async def _snapshot_if_due(self) -> bool:
+        """Write a snapshot unless a recent one already covers this tick.
+
+        Returns False when a peer's row (or our own, after a lease handover)
+        already covers this interval, which is a tick that deliberately did
+        nothing rather than a snapshot that went missing.
+        """
         async with self._session_factory() as session:
             repo = SystemMetricsRepository(session)
             latest = await repo.get_latest_timestamp()
@@ -134,9 +140,10 @@ class SystemSnapshotter:
             age = (utc_now() - latest).total_seconds()
             if age < self._interval * _DUE_TOLERANCE:
                 logger.debug("System snapshot not due yet", age_seconds=round(age))
-                return
+                return False
 
         await self.take_snapshot()
+        return True
 
     async def take_snapshot(self) -> None:
         """Collect the gauges and store one row, then apply retention."""

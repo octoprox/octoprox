@@ -68,6 +68,44 @@ async def _wait_until(
     return await _check()
 
 
+async def _seed_proxy(manager: ProxyManager, host_prefix: str):
+    """Create a project/credential/connector/proxy through ``manager``.
+
+    Driven through the manager rather than the repositories so the normal
+    events fire and the proxy lands in its cache, which is the state a peer
+    event arrives into.
+    """
+    from api.models.connector import Connector
+    from api.models.credential import Credential, CredentialType
+    from api.models.proxy import Proxy, ProxyProtocol
+
+    project = Project(name=f"{host_prefix} project", username=host_prefix, password="p")
+    credential = Credential(
+        name=f"{host_prefix} cred",
+        type=CredentialType.STATIC_PROXY_PROVIDER,
+        project_id=project.id,
+        config={},
+    )
+    connector = Connector(
+        name=f"{host_prefix} conn",
+        credential_id=credential.id,
+        credential_type=CredentialType.STATIC_PROXY_PROVIDER,
+        project_id=project.id,
+        config={},
+    )
+    proxy = Proxy(
+        host=f"{host_prefix}.example.com",
+        port=8080,
+        protocol=ProxyProtocol.HTTP,
+        connector_id=connector.id,
+    )
+    await manager.add_project(project)
+    await manager.add_credential(credential)
+    await manager.add_connector(connector)
+    await manager.add_proxy(proxy)
+    return proxy
+
+
 class TestCrossInstanceProjectReload:
     """A peer instance's project_changed event should refresh our cache."""
 
@@ -207,6 +245,100 @@ class TestCrossInstanceProxyReload:
         assert await _wait_until(_ready)
         # Silence unused-import warnings on these models in some linters.
         _ = (ConnectorRepository, CredentialRepository)
+
+
+class TestCrossInstanceStatusOnlyEvents:
+    """A peer's health flip is applied from Redis, without touching Postgres.
+
+    ``update_proxy_status`` publishes ``proxy_changed`` with ``op="status"``
+    because the proxies row is untouched - only the Redis status hash moved.
+    Health flips are the most frequent cross-instance event on an otherwise
+    idle install, so making each peer read the database to apply one is the
+    difference between a Redis GET and a Postgres round-trip per flap.
+    """
+
+    async def test_status_op_skips_the_postgres_read(
+        self,
+        started_proxy_manager: ProxyManager,
+        db_session_factory: async_sessionmaker[AsyncSession],
+        redis_client: RedisClient,
+    ) -> None:
+        from api.db.repository import ProxyRepository
+        from api.models.proxy import ProxyStatus
+
+        proxy = await _seed_proxy(started_proxy_manager, "statusonly")
+
+        # Change the row in Postgres as well. Nothing should pick this up: it
+        # is the tell that the handler went to the database, and a status
+        # event promises it did not have to. Written through a copy because
+        # the manager caches the very object we were handed.
+        async with db_session_factory() as session:
+            await ProxyRepository(session).update(
+                proxy.model_copy(update={"host": "must-not-be-read.example.com"})
+            )
+            await session.commit()
+
+        await redis_client.set_proxy_status(
+            proxy.id, ProxyStatus.DEGRADED, latency_ms=42.0, consecutive_failures=1
+        )
+        await redis_client.client.publish(
+            EVENT_CHANNEL,
+            json.dumps(
+                {
+                    "signal": "proxy-changed",
+                    "instance_id": "peer-instance",
+                    "entity_id": proxy.id,
+                    "op": "status",
+                }
+            ),
+        )
+
+        cached = started_proxy_manager.get_proxy(proxy.id)
+        assert await _wait_until(
+            lambda: cached is not None and cached.status == ProxyStatus.DEGRADED
+        )
+        assert cached is not None
+        assert cached.last_check_latency_ms == 42.0
+        assert cached.consecutive_failures == 1
+        # The definition is whatever we had, not what Postgres now holds.
+        assert cached.host == "statusonly.example.com"
+
+    async def test_status_op_for_an_unknown_proxy_falls_back_to_a_full_reload(
+        self,
+        started_proxy_manager: ProxyManager,
+        redis_client: RedisClient,
+    ) -> None:
+        """A peer can flip a proxy this instance has never cached."""
+        from api.models.proxy import ProxyStatus
+
+        proxy = await _seed_proxy(started_proxy_manager, "uncached")
+        await redis_client.set_proxy_status(
+            proxy.id, ProxyStatus.UNHEALTHY, latency_ms=0.0, consecutive_failures=3
+        )
+        # Simulate an instance that has not seen this proxy yet - its own
+        # "added" event was dropped, say. There is no definition to patch, so
+        # the status path must not silently do nothing.
+        started_proxy_manager._proxies.pop(proxy.id)
+
+        await redis_client.client.publish(
+            EVENT_CHANNEL,
+            json.dumps(
+                {
+                    "signal": "proxy-changed",
+                    "instance_id": "peer-instance",
+                    "entity_id": proxy.id,
+                    "op": "status",
+                }
+            ),
+        )
+
+        async def _ready() -> bool:
+            cached = started_proxy_manager.get_proxy(proxy.id)
+            return cached is not None and cached.status == ProxyStatus.UNHEALTHY
+
+        assert await _wait_until(_ready)
+        cached = started_proxy_manager.get_proxy(proxy.id)
+        assert cached is not None and cached.host == "uncached.example.com"
 
 
 class TestReloadPreservesRuntimeState:

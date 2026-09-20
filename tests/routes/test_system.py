@@ -195,6 +195,8 @@ class TestSystemStatsPayload:
         heartbeat = next(t for t in workers["tasks"] if t["name"] == "heartbeat")
 
         assert heartbeat["runs"] >= 1
+        # Writing a key is never a no-op, so every heartbeat cycle did work.
+        assert heartbeat["idle_runs"] == 0
         assert heartbeat["failures"] == 0
         assert heartbeat["consecutive_failures"] == 0
         assert heartbeat["last_error"] is None
@@ -202,6 +204,11 @@ class TestSystemStatsPayload:
         assert heartbeat["last_duration_ms"] >= 0
         assert heartbeat["avg_duration_ms"] >= 0
         assert heartbeat["max_duration_ms"] >= heartbeat["avg_duration_ms"]
+
+        # Idle cycles are a subset of runs on every worker - the UI subtracts
+        # the two to show how many cycles had something to do.
+        for task in workers["tasks"]:
+            assert 0 <= task["idle_runs"] <= task["runs"]
 
     def test_workers_report_the_cadence_they_run_on(
         self, authenticated_client: TestClient, test_settings: Any

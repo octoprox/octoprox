@@ -614,7 +614,7 @@ keys it reports a sample and sets `"truncated": true`.
     "tasks": [
       { "name": "metrics_flusher", "scope": "singleton", "lease": "metrics_flusher",
         "state": "running", "error": null, "interval_seconds": 60,
-        "runs": 412, "failures": 1, "consecutive_failures": 0,
+        "runs": 412, "idle_runs": 0, "failures": 1, "consecutive_failures": 0,
         "overruns": 3, "consecutive_overruns": 0,
         "last_overrun_at": "2026-09-19T19:31:55.417002",
         "last_run_at": "2026-09-19T21:52:30.114221", "last_duration_ms": 84.2,
@@ -641,6 +641,19 @@ per-process and reset with it; a cycle cancelled at shutdown is not counted.
 Granularity is the cycle, not the item: the auto-scaler handles each connector
 under its own `try`, so a cycle counts as a success even when one connector
 failed.
+
+**Runs that had nothing to do.** `idle_runs` is the subset of `runs` where the
+loop ticked and returned early - the metric-delta publisher over an empty
+buffer, a health-check sweep whose shard landed entirely on peers, a system
+snapshot a peer already wrote, an auto-scaler cycle on an install with no cloud
+connectors. Subtract it from `runs` for the cycles that did something. The
+split matters because the two numbers answer different questions: an install
+taking no traffic ticks the metric-delta publisher 17k times a day without a
+single flush, and without `idle_runs` that reads as a busy worker. The
+durations describe the working cycles only - an early return is not a
+measurement of the work it skipped, and averaging it in would report a
+publisher that spends 20ms on every real flush as taking 0.1ms. A worker with
+no idle path (the heartbeat, the pub/sub subscribers) reports `0`.
 
 **Cadence and overruns.** `interval_seconds` is the interval the loop was
 started with, declared by the loop itself so it is the value actually slept on

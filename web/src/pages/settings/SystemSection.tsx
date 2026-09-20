@@ -357,6 +357,12 @@ function WorkerRuns({ task }: { task: SystemWorkerTask }) {
   // problem now, and saying otherwise trains people to ignore the colour.
   const failingNow = task.consecutive_failures > 0
   const behindNow = task.consecutive_overruns > 0
+  // Ticks that found nothing to do. Shown only where they happen, so the rows
+  // for loops that always have work stay as short as they were - and where
+  // they do happen, the run count alone is misleading: an idle install's delta
+  // publisher reaches five figures a day without a single flush. Neither
+  // number is a problem on its own, so this stays uncoloured.
+  const workingRuns = task.runs - task.idle_runs
   return (
     <div className="flex items-center gap-x-2 gap-y-0.5 flex-wrap text-[11px] text-fg-subtle tabular-nums">
       <span>{cadence}</span>
@@ -374,8 +380,25 @@ function WorkerRuns({ task }: { task: SystemWorkerTask }) {
           {failingNow && ` (${formatCount(task.consecutive_failures)} in a row)`}
         </span>
       )}
-      {task.avg_duration_ms !== null && <span>{formatMs(task.avg_duration_ms)} avg</span>}
-      {task.max_duration_ms !== null && <span>{formatMs(task.max_duration_ms)} max</span>}
+      {task.idle_runs > 0 && (
+        <span
+          title={workingRuns === 0
+            ? `All ${task.runs.toLocaleString()} cycles so far returned early with nothing to do. The loop is running; there has just been no work for it.`
+            : `${workingRuns.toLocaleString()} of ${task.runs.toLocaleString()} cycles had something to do. The other ${task.idle_runs.toLocaleString()} returned early, and are left out of the timings.`}
+        >
+          {workingRuns === 0 ? 'nothing to do yet' : `${formatCount(workingRuns)} with work`}
+        </span>
+      )}
+      {task.avg_duration_ms !== null && (
+        <span title={timingScope('avg', workingRuns, task.idle_runs)}>
+          {formatMs(task.avg_duration_ms)} avg
+        </span>
+      )}
+      {task.max_duration_ms !== null && (
+        <span title={timingScope('max', workingRuns, task.idle_runs)}>
+          {formatMs(task.max_duration_ms)} max
+        </span>
+      )}
       {task.overruns > 0 && (
         <span
           className={cn(behindNow && 'text-warning')}
@@ -390,6 +413,14 @@ function WorkerRuns({ task }: { task: SystemWorkerTask }) {
       {task.last_run_at && <span>last {relativeTime(task.last_run_at)}</span>}
     </div>
   )
+}
+
+/** Says which cycles a timing covers, for the loops where that is not all of them. */
+function timingScope(kind: 'avg' | 'max', workingRuns: number, idleRuns: number): string {
+  const label = kind === 'avg' ? 'Mean' : 'Longest'
+  return idleRuns === 0
+    ? `${label} cycle duration`
+    : `${label} duration of the ${workingRuns.toLocaleString()} ${workingRuns === 1 ? 'cycle' : 'cycles'} that did work - the idle ticks would only average it towards zero`
 }
 
 function formatWorkerName(name: string): string {

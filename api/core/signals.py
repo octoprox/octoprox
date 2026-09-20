@@ -163,6 +163,10 @@ provider_connector_sync_requested = signal("provider-connector-sync-requested")
 project_changed = signal("project-changed")
 credential_changed = signal("credential-changed")
 connector_changed = signal("connector-changed")
+# proxy_changed takes one extra op: "status", emitted by
+# ProxyManager.update_proxy_status when only the health fields moved. Receivers
+# refresh those from Redis instead of reloading the row from Postgres - health
+# flips are frequent enough that the difference is the peers' database load.
 proxy_changed = signal("proxy-changed")
 
 # Emitted by the providers routes after a custom provider descriptor is

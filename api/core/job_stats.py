@@ -21,6 +21,17 @@ Granularity is the cycle, not the item. A worker that handles each item under
 its own ``try`` (the auto-scaler, per connector) records a successful cycle
 even when individual items failed; its own logs carry those.
 
+A cycle that found nothing to do is still a cycle - it proves the loop is
+alive - but it is also counted separately as an *idle* one. Without that split
+the two questions the counters answer collapse into one number: an install
+taking no traffic shows the metric-delta publisher at 17k runs a day, every one
+of them an early return over an empty buffer. Loops with a no-op path say so
+themselves::
+
+    with job_stats.track(WorkerName.METRIC_DELTA_PUBLISHER) as run:
+        if not await self._flush_pending_metrics():
+            run.idle()
+
 There is one registry per process, exposed via the ``@lru_cache``-d
 :func:`get_job_stats` factory and the ``job_stats`` alias - same pattern as
 ``get_event_bus()`` / ``event_bus`` and ``get_settings()`` / ``settings``::
@@ -66,6 +77,11 @@ class JobStats:
     # loop (the pub/sub subscribers), which has no cadence to miss.
     interval_seconds: float | None = None
     runs: int = 0
+    # Cycles that ran but had nothing to do - the buffer was empty, this
+    # instance owned no proxies, the snapshot was not due yet. A subset of
+    # ``runs``, so ``runs`` keeps meaning "the loop ticked" and
+    # ``working_runs`` answers "and something came of it".
+    idle_runs: int = 0
     failures: int = 0
     # Cycles that took longer than the cadence. The loop cannot start the next
     # one until this one returns, so its effective period has stretched: for
@@ -91,9 +107,21 @@ class JobStats:
     total_duration_ms: float = 0.0
 
     @property
+    def working_runs(self) -> int:
+        """Cycles that had something to do."""
+        return self.runs - self.idle_runs
+
+    @property
     def avg_duration_ms(self) -> float | None:
-        """Mean cycle duration, or None before the first cycle completes."""
-        return self.total_duration_ms / self.runs if self.runs else None
+        """Mean duration of a cycle that did work, or None if none has.
+
+        Idle cycles are left out: the microsecond an early return takes is not
+        a measurement of the work, and averaging it in would report a publisher
+        that spends 20ms on every real flush as taking 0.1ms.
+        """
+        return (
+            self.total_duration_ms / self.working_runs if self.working_runs else None
+        )
 
     @property
     def interval_ms(self) -> float | None:
@@ -110,10 +138,20 @@ class JobRun:
         self._registry = registry
         self._name = name
         self._started = 0.0
+        self._idle = False
 
     def __enter__(self) -> JobRun:
         self._started = time.perf_counter()
         return self
+
+    def idle(self) -> None:
+        """Mark this cycle as having found nothing to do.
+
+        Call it from the loop body once it knows - typically right where the
+        work function reports an empty buffer. Cycles that raise are never
+        idle, however early they gave up.
+        """
+        self._idle = True
 
     def __exit__(
         self,
@@ -126,7 +164,9 @@ class JobRun:
             return False
         duration_ms = (time.perf_counter() - self._started) * 1000.0
         error = f"{type(exc).__name__}: {exc}" if exc is not None else None
-        self._registry.record(self._name, duration_ms, error)
+        self._registry.record(
+            self._name, duration_ms, error, idle=self._idle and exc is None
+        )
         # Never swallow: the caller's own ``except`` decides what happens to
         # the loop. Only the bookkeeping happens here.
         return False
@@ -153,14 +193,31 @@ class JobStatsRegistry:
         """
         self._stats.setdefault(name, JobStats(name=name)).interval_seconds = interval_seconds
 
-    def record(self, name: str, duration_ms: float, error: str | None = None) -> None:
-        """Record one finished cycle of ``name``."""
+    def record(
+        self,
+        name: str,
+        duration_ms: float,
+        error: str | None = None,
+        *,
+        idle: bool = False,
+    ) -> None:
+        """Record one finished cycle of ``name``.
+
+        ``idle`` marks a cycle that found nothing to do. It counts as a run
+        (the loop ticked) but stays out of the timings, which describe the
+        work rather than the early return that skipped it. The overrun check
+        still applies: a no-op that somehow outlasted the cadence is worth
+        knowing about, and a fast one clears the streak like any other.
+        """
         stats = self._stats.setdefault(name, JobStats(name=name))
         stats.runs += 1
         stats.last_run_at = utc_now()
-        stats.last_duration_ms = duration_ms
-        stats.total_duration_ms += duration_ms
-        stats.max_duration_ms = max(stats.max_duration_ms or 0.0, duration_ms)
+        if idle:
+            stats.idle_runs += 1
+        else:
+            stats.last_duration_ms = duration_ms
+            stats.total_duration_ms += duration_ms
+            stats.max_duration_ms = max(stats.max_duration_ms or 0.0, duration_ms)
         interval_ms = stats.interval_ms
         if interval_ms is None:
             pass  # No cadence declared, so nothing to be late for.
