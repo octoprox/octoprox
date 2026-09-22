@@ -137,7 +137,7 @@ class TestPreflightCache:
         checker = PreflightChecker(MagicMock(), redis_client)
         checker.start()
         try:
-            key = GEO_PREFLIGHT_KEY.format(project_id="p", proxy_id="x", session_id="-")
+            key = GEO_PREFLIGHT_KEY.format(project_id="p", proxy_id="x")
             verdict = PreflightVerdict(ok=True, expected="GB", observed="GB", ip="81.2.69.160", reason="match")
             await checker._store(key, verdict, ttl=600)
             assert await checker._cached(key) is not None

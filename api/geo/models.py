@@ -195,7 +195,8 @@ class Resolution(BaseModel):
         ]
 
 
-def _dedupe_sources(value: list[GeoSourceKind]) -> list[GeoSourceKind]:
+def dedupe_sources(value: list[GeoSourceKind]) -> list[GeoSourceKind]:
+    """Order-preserving dedupe of a source list; at least one source must remain."""
     seen: list[GeoSourceKind] = []
     for kind in value:
         if kind not in seen:
@@ -221,7 +222,7 @@ class SourcePolicy(BaseModel):
     @field_validator("sources")
     @classmethod
     def _sources(cls, value: list[GeoSourceKind]) -> list[GeoSourceKind]:
-        return _dedupe_sources(value)
+        return dedupe_sources(value)
 
 
 class GeoSettings(BaseModel):
@@ -257,7 +258,7 @@ class GeoSettings(BaseModel):
     @field_validator("default_sources")
     @classmethod
     def _sources(cls, value: list[GeoSourceKind]) -> list[GeoSourceKind]:
-        return _dedupe_sources(value)
+        return dedupe_sources(value)
 
     @property
     def default_policy(self) -> SourcePolicy:

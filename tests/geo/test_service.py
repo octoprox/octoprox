@@ -134,7 +134,8 @@ class TestApplyObservation:
         proxy = _proxy()
         assert geo_service.flag_preflight_mismatch(proxy, GB_IP, "US", "GB")
         assert proxy.metadata[META_LOCATION_CONFLICT] is True
-        assert proxy.metadata[META_VENDOR_COUNTRY] == "US" and proxy.display_host == GB_IP
+        # The checked country came from the request; it is not recorded as a vendor claim.
+        assert META_VENDOR_COUNTRY not in proxy.metadata and proxy.display_host == GB_IP
         assert proxy.metadata[META_LOCATION_CANDIDATES][-1] == {"source": "preflight", "origin": "endpoint", "country": "GB"}
         assert not geo_service.flag_preflight_mismatch(proxy, GB_IP, "US", "GB")
 

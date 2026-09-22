@@ -533,7 +533,7 @@ function LookupCard() {
             <span className="font-mono">{result.ip}</span>
             <span className="text-fg-muted">resolves to</span>
             {result.resolution.country ? <Badge color="blue">{result.resolution.country}</Badge> : <Badge color="gray">unknown</Badge>}
-            {result.resolution.source && <span className="text-xs text-fg-subtle">from {SOURCE_LABELS[result.resolution.source]}{result.resolution.origin && result.resolution.source === 'database' ? '' : ''}</span>}
+            {result.resolution.source && <span className="text-xs text-fg-subtle">from {SOURCE_LABELS[result.resolution.source]}</span>}
             {result.resolution.conflict && <Badge color="red">vendor claim contradicted</Badge>}
             {result.resolution.disagreement && <Badge color="yellow">sources disagree</Badge>}
             {result.databases_loaded === 0 && <span className="text-xs text-warning">No databases loaded.</span>}
