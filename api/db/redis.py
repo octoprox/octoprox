@@ -56,7 +56,7 @@ AUTOSCALER_LAST_ACTION_KEY = "autoscaler:last_action"
 # IP attribution: observations queued for the leader's flusher, and per-session
 # preflight verdicts.
 GEO_OBSERVATIONS_KEY = "geo:observations"
-GEO_PREFLIGHT_KEY = "geo:preflight:{project_id}:{proxy_id}:{session_id}"
+GEO_PREFLIGHT_KEY = "geo:preflight:{project_id}:{proxy_id}"  # one verdict per proxy, shared by its sessions
 
 # Logical grouping of the keyspace, used by the admin system view to report
 # what Redis memory is being spent on. Every prefix written above appears

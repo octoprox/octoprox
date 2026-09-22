@@ -118,7 +118,7 @@ class PreflightChecker:
         """
         if self._redis is None:
             return
-        key = GEO_PREFLIGHT_KEY.format(project_id=project_id, proxy_id=proxy_id, session_id="-")
+        key = GEO_PREFLIGHT_KEY.format(project_id=project_id, proxy_id=proxy_id)
         try:
             await self._redis.client.delete(key)
         except Exception as exc:
@@ -179,7 +179,7 @@ class PreflightChecker:
         if expected is None:
             return SKIP
 
-        key = GEO_PREFLIGHT_KEY.format(project_id=project.id, proxy_id=proxy.id, session_id="-")
+        key = GEO_PREFLIGHT_KEY.format(project_id=project.id, proxy_id=proxy.id)
         cached = await self._cached(key)
         if cached is not None:
             return cached

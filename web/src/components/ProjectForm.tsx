@@ -259,7 +259,7 @@ export function ProjectForm({ project, onSave, error, formId }: ProjectFormProps
             </div>
             <div>
               <Label className="text-xs">Vendor contradicted when</Label>
-              <RichSelect options={conflictOptions} value={formData.location_conflict_rule || 'inherit'} onChange={(v) => setFormData({ ...formData, location_conflict_rule: (v === 'inherit' ? '' : v) as ProjectCreate['location_conflict_rule'] })} />
+              <RichSelect options={conflictOptions} value={formData.location_conflict_rule || 'inherit'} onChange={(v) => setFormData({ ...formData, location_conflict_rule: (v === 'inherit' ? (project ? '' : null) : v) as ProjectCreate['location_conflict_rule'] })} />
             </div>
           </div>
           <div className="flex gap-2 p-3 rounded-lg border border-line bg-surface-raised/50 text-xs leading-relaxed text-fg-muted">

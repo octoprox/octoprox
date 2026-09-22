@@ -46,6 +46,8 @@ MAX_DOWNLOAD_BYTES = 512 * 1024 * 1024
 DOWNLOAD_TIMEOUT = 600.0
 
 Publisher = Callable[[str, str], Awaitable[None]]
+# Runs after a scheduled refresh stored a new file: the runtime re-attributes every proxy.
+AfterUpdate = Callable[[], Awaitable[None]]
 
 
 class DownloadError(Exception):
@@ -92,33 +94,58 @@ def _auth(record: GeoDatabaseRecord) -> tuple[httpx.Auth | None, dict[str, str]]
     return None, headers
 
 
+MAX_REDIRECTS = 5
+
+
 async def download(record: GeoDatabaseRecord, guard: EgressGuard) -> bytes:
-    """Fetch and unpack ``record.update_url``. Raises DownloadError."""
+    """Fetch and unpack ``record.update_url``. Raises DownloadError.
+
+    Vendors hand the file off to object storage with a redirect (MaxMind
+    answers 302 to R2), so redirects are followed here, by hand: every hop is
+    vetted by the egress guard like the first, connects to its own pinned
+    address with its own Host and SNI, and the vendor's credentials stay with
+    the vendor's host. Letting httpx follow would reuse the first hop's Host
+    and SNI against the storage host and skip the guard entirely.
+    """
     if not record.update_url:
         raise DownloadError("no update URL")
+    auth, vendor_headers = _auth(record)
+    origin_host = httpx.URL(record.update_url).host
+    url = record.update_url
     try:
-        target = await guard.resolve(record.update_url)
-    except EgressDeniedError as exc:
-        raise DownloadError(f"download blocked by egress policy: {exc}") from exc
-    auth, headers = _auth(record)
-    extensions: dict[str, Any] = {}
-    if target.url.host != target.hostname:
-        headers.setdefault("Host", target.hostname)
-        extensions["sni_hostname"] = target.hostname
-    try:
-        async with (
-            httpx.AsyncClient(timeout=DOWNLOAD_TIMEOUT, follow_redirects=True, auth=auth) as client,
-            client.stream("GET", target.url, headers=headers, extensions=extensions) as response,
-        ):
-            if response.status_code != 200:
-                raise DownloadError(f"vendor returned HTTP {response.status_code}")
-            chunks: list[bytes] = []
-            total = 0
-            async for chunk in response.aiter_bytes():
-                total += len(chunk)
-                if total > MAX_DOWNLOAD_BYTES:
-                    raise DownloadError("download exceeds the size limit")
-                chunks.append(chunk)
+        async with httpx.AsyncClient(timeout=DOWNLOAD_TIMEOUT, follow_redirects=False) as client:
+            for _ in range(MAX_REDIRECTS + 1):
+                try:
+                    target = await guard.resolve(url)
+                except EgressDeniedError as exc:
+                    raise DownloadError(f"download blocked by egress policy: {exc}") from exc
+                same_origin = httpx.URL(url).host == origin_host
+                headers = dict(vendor_headers) if same_origin else {}
+                extensions: dict[str, Any] = {}
+                if target.url.host != target.hostname:
+                    headers["Host"] = target.hostname
+                    extensions["sni_hostname"] = target.hostname
+                async with client.stream(
+                    "GET", target.url, headers=headers, extensions=extensions, auth=auth if same_origin else None
+                ) as response:
+                    if response.is_redirect:
+                        location = response.headers.get("location")
+                        if not location:
+                            raise DownloadError(f"vendor returned HTTP {response.status_code} without a location")
+                        url = str(httpx.URL(url).join(location))
+                        continue
+                    if response.status_code != 200:
+                        raise DownloadError(f"vendor returned HTTP {response.status_code}")
+                    chunks: list[bytes] = []
+                    total = 0
+                    async for chunk in response.aiter_bytes():
+                        total += len(chunk)
+                        if total > MAX_DOWNLOAD_BYTES:
+                            raise DownloadError("download exceeds the size limit")
+                        chunks.append(chunk)
+                    break
+            else:
+                raise DownloadError(f"more than {MAX_REDIRECTS} redirects")
     except httpx.HTTPError as exc:
         raise DownloadError(f"download failed: {exc}") from exc
     try:
@@ -149,6 +176,7 @@ class GeoDatabaseUpdater:
         store: GeoDatabaseStore,
         publish: Publisher,
         *,
+        after_update: AfterUpdate | None = None,
         interval: float = 3600.0,
         egress_policy: EgressPolicy | None = None,
     ) -> None:
@@ -157,6 +185,7 @@ class GeoDatabaseUpdater:
         self._instance_id = instance_id
         self._store = store
         self._publish = publish
+        self._after_update = after_update
         self._interval = interval
         self._guard = EgressGuard(egress_policy)
         self._running = False
@@ -241,6 +270,13 @@ class GeoDatabaseUpdater:
         logger.info(
             "IP database updated", database_id=record.id, name=record.name, build=str(record.build_epoch), bytes=len(data)
         )
+        if self._after_update is not None:
+            # A new build moves ranges; verdicts computed with the old one are
+            # stale until every proxy is re-judged, as the admin routes do.
+            try:
+                await self._after_update()
+            except Exception as exc:
+                logger.warning("Re-attribution after database update failed", database_id=record.id, error=str(exc))
         return record
 
     def stop(self) -> None:

@@ -87,8 +87,9 @@ export function ObservationsPanel({ projectId }: { projectId?: string }) {
       .flatMap((q) => q.data?.connectors ?? [])
       .sort((a, b) => a.name.localeCompare(b.name))
       .map((c) => ({ value: c.id, label: c.name })),
+    // Keyed on when each query last delivered data: the query objects change identity every render.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [connectorQueries.map((q) => q.data).join()],
+    [connectorQueries.map((q) => q.dataUpdatedAt).join()],
   )
 
   const columns: ColumnDef<IpObservation>[] = useMemo(() => [

@@ -277,7 +277,6 @@ class GeoService:
         before = self._snapshot(proxy)
         proxy.display_host = ip
         proxy.metadata[META_DISCOVERED_IP] = ip
-        proxy.metadata.setdefault(META_VENDOR_COUNTRY, expected)
         proxy.metadata[META_LOCATION_CONFLICT] = True
         proxy.metadata[META_LOCATION_CHECKED_AT] = utc_now().isoformat()
         if observed:

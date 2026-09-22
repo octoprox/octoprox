@@ -3,10 +3,20 @@
 
 """Tests for the database store (config-file databases) and the settings seed."""
 
+import hashlib
 from pathlib import Path
 
+import pytest
+
 from api.core.config import Settings
-from api.geo.models import GeoDatabaseSource, GeoSourceKind
+from api.db.geo_repository import GeoDatabaseRepository
+from api.geo.models import (
+    GeoDatabaseKind,
+    GeoDatabaseRecord,
+    GeoDatabaseSource,
+    GeoSourceKind,
+    GeoVendor,
+)
 from api.geo.settings import GeoSettingsStore, defaults_from_config
 from api.geo.store import GeoDatabaseStore, path_database_id
 from tests.geo.test_readers import IPINFO_RECORD, MAXMIND_RECORD, write_mmdb
@@ -47,6 +57,38 @@ class TestConfigDatabases:
         good = write_mmdb(tmp_path / "good.mmdb", "GeoLite2-Country", {"1.0.0.0/24": MAXMIND_RECORD})
         store = GeoDatabaseStore(None, tmp_path / "cache", [{"path": str(good), "enabled": False}])
         assert await store.sync_all() == 0
+
+    async def test_listing_failure_keeps_stored_databases_open(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A Postgres blip during a periodic reload must not blind attribution until the next one."""
+        good = write_mmdb(tmp_path / "GeoLite2-Country.mmdb", "GeoLite2-Country", {"81.2.69.0/24": MAXMIND_RECORD})
+        stored = GeoDatabaseRecord(
+            id="stored-1", name="stored", vendor=GeoVendor.MAXMIND, kind=GeoDatabaseKind.COUNTRY,
+            sha256=hashlib.sha256(good.read_bytes()).hexdigest(),
+        )
+        listing: list[str] = []
+
+        class Session:
+            async def __aenter__(self) -> "Session":
+                return self
+
+            async def __aexit__(self, *exc: object) -> None:
+                return None
+
+        async def get_all(self: object) -> list[GeoDatabaseRecord]:
+            listing.append("call")
+            if len(listing) > 1:
+                raise ConnectionError("postgres away")
+            return [stored]
+
+        monkeypatch.setattr(GeoDatabaseRepository, "get_all", get_all)
+        store = GeoDatabaseStore(lambda: Session(), tmp_path / "cache", [{"path": str(good)}])
+        await store.apply_record(stored, good.read_bytes())  # bytes cached locally, as after an upload
+        assert await store.sync_all() == 2  # listing works: config file + stored row
+        assert await store.sync_all() == 2  # listing raises: nothing is closed
+        assert store.is_loaded("stored-1")
+        assert store.lookup("81.2.69.160")
 
     async def test_resync_is_idempotent(self, tmp_path: Path) -> None:
         good = write_mmdb(tmp_path / "good.mmdb", "GeoLite2-Country", {"1.0.0.0/24": MAXMIND_RECORD})

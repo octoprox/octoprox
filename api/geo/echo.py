@@ -64,18 +64,31 @@ def client_ip(
     forwarded_for: str | None,
     trusted: list[ipaddress.IPv4Network | ipaddress.IPv6Network],
 ) -> str | None:
-    """The address to echo: the peer, or the first forwarded hop when the peer is a trusted balancer."""
+    """The address to echo: the peer, or the exit the trusted balancer saw.
+
+    ``X-Forwarded-For`` is appended to by every hop, so its rightmost entry
+    not belonging to a trusted network is the address that connected to the
+    balancer: the proxy's exit. Anything to the left was written by the proxy
+    itself, typically the address of whoever asked it (Octoprox's own), and
+    must not be trusted.
+    """
     if not peer or not is_ip(peer):
         return None
-    if forwarded_for and trusted:
-        try:
-            peer_address = ipaddress.ip_address(peer)
-        except ValueError:
-            return peer
-        if any(peer_address in network for network in trusted):
-            first = forwarded_for.split(",", 1)[0].strip()
-            if is_ip(first):
-                return first
+    if not forwarded_for or not trusted:
+        return peer
+    try:
+        peer_address = ipaddress.ip_address(peer)
+    except ValueError:
+        return peer
+    if not any(peer_address in network for network in trusted):
+        return peer
+    for hop in reversed(forwarded_for.split(",")):
+        candidate = hop.strip()
+        if not is_ip(candidate):
+            continue
+        if any(ipaddress.ip_address(candidate) in network for network in trusted):
+            continue
+        return candidate
     return peer
 
 

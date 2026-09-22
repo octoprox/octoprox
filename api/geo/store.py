@@ -149,15 +149,23 @@ class GeoDatabaseStore:
             records: dict[str, GeoDatabaseRecord] = {}
             for record in self._config_records():
                 records[record.id] = record
+            listed = self._session_factory is None
             if self._session_factory is not None:
                 try:
                     async with self._session_factory() as session:
                         for record in await GeoDatabaseRepository(session).get_all():
                             records[record.id] = record
+                    listed = True
                 except Exception as exc:
                     logger.warning("Could not list IP databases", error=str(exc))
             for database_id in list(self._entries):
-                if database_id not in records or not records[database_id].enabled:
+                if database_id in records:
+                    if not records[database_id].enabled:
+                        self._close(database_id)
+                elif listed or self._entries[database_id].record.source == GeoDatabaseSource.PATH:
+                    # Gone from the listing, or a config entry that was removed.
+                    # Without a listing the stored databases are kept as they
+                    # are: a Postgres blip must not blind attribution.
                     self._close(database_id)
             for record in records.values():
                 if record.enabled:

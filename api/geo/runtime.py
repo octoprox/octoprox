@@ -73,6 +73,7 @@ class GeoRuntime:
             settings.instance_id,
             self.database_store,
             self.publish_database_changed,
+            after_update=self._reattribute_after_update,
             interval=settings.geo_updater_interval,
             egress_policy=EgressPolicy(
                 allow_http=settings.provider_egress_allow_http,
@@ -106,6 +107,10 @@ class GeoRuntime:
     async def reload_settings(self, _entity_id: str, _op: str | None) -> None:
         """Cross-instance handler for ``geo_settings_changed``."""
         await self.geo_service.apply_settings_change()
+
+    async def _reattribute_after_update(self) -> None:
+        """A scheduled download stored a new build: re-judge every proxy with it, once, here on the leader."""
+        await self.proxy_attributor.reattribute_all()
 
     async def resync(self) -> None:
         """Reload hook: re-read settings and databases on the periodic full reload."""

@@ -11,7 +11,14 @@ from uuid import uuid4
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from api.core import utc_now
-from api.geo.models import ConflictRule, GeoSourceKind, LocationPolicy, PreflightMode, SourcePolicy
+from api.geo.models import (
+    ConflictRule,
+    GeoSourceKind,
+    LocationPolicy,
+    PreflightMode,
+    SourcePolicy,
+    dedupe_sources,
+)
 
 
 class MitmMode(str, Enum):
@@ -42,13 +49,7 @@ class MitmBrowser(str, Enum):
 
 def _normalize_sources(value: list[GeoSourceKind] | None) -> list[GeoSourceKind] | None:
     """Deduplicate in order; an empty list means "no override"."""
-    if not value:
-        return None
-    seen: list[GeoSourceKind] = []
-    for kind in value:
-        if kind not in seen:
-            seen.append(kind)
-    return seen
+    return dedupe_sources(value) if value else None
 
 
 class Project(BaseModel):
