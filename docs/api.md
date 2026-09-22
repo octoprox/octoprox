@@ -801,7 +801,7 @@ All endpoints live under `/api/v1/geo`. Reads need any authenticated user; write
 | PUT | `/geo/settings` | Replace the settings (body: the `settings` object). Applies to every instance |
 | GET | `/geo/databases` | Every database: stored rows plus config-file entries, with `loaded_here` and `load_error` |
 | POST | `/geo/databases` | Upload a file (`multipart/form-data`: `file`, optional `name`, `priority`, `enabled`). Validated before it is stored; proxies are re-attributed |
-| POST | `/geo/databases/from-url` | Register a vendor download URL (`name`, `update_url`, `update_interval_hours`, `update_auth`, `priority`) and download it now. `update_auth` takes `{username, password}` for basic auth or `{token}` / `{header, token}` |
+| POST | `/geo/databases/from-url` | Register a vendor download URL (`name`, `update_url` which may carry `{YYYY}` and `{MM}` placeholders filled per run, `update_interval_hours`, `update_auth`, `priority`) and download it now. `update_auth` takes `{username, password}` for basic auth or `{token}` / `{header, token}` |
 | POST | `/geo/databases/inspect` | Open an uploaded file and report its metadata without storing it |
 | PATCH | `/geo/databases/{id}` | Change `name`, `enabled`, `priority`, `update_url`, `update_interval_hours`, `update_auth` |
 | POST | `/geo/databases/{id}/refresh` | Download a scheduled database now |

@@ -21,7 +21,7 @@ import io
 import tarfile
 import tempfile
 from collections.abc import Awaitable, Callable
-from datetime import timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -97,8 +97,57 @@ def _auth(record: GeoDatabaseRecord) -> tuple[httpx.Auth | None, dict[str, str]]
 MAX_REDIRECTS = 5
 
 
+class NotFoundError(DownloadError):
+    """The vendor answered 404: the file at this URL does not exist (yet)."""
+
+
+# Placeholders an update URL may carry, filled in when the download runs.
+# DB-IP names its monthly files by month and offers no "latest" alias.
+URL_PLACEHOLDERS = ("{YYYY}", "{MM}")
+
+
+def expand_update_url(template: str, when: datetime) -> str:
+    """Fill ``{YYYY}`` and ``{MM}`` with the given month."""
+    return template.replace("{YYYY}", f"{when.year:04d}").replace("{MM}", f"{when.month:02d}")
+
+
+def candidate_urls(template: str, now: datetime | None = None) -> list[str]:
+    """The URLs to try, in order: this month's, then last month's while the vendor has not published yet.
+
+    A URL without placeholders is tried as it is, once.
+    """
+    if not any(p in template for p in URL_PLACEHOLDERS):
+        return [template]
+    now = now or utc_now()
+    first_of_month = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    previous = first_of_month - timedelta(days=1)
+    urls = [expand_update_url(template, now), expand_update_url(template, previous)]
+    return list(dict.fromkeys(urls))
+
+
 async def download(record: GeoDatabaseRecord, guard: EgressGuard) -> bytes:
     """Fetch and unpack ``record.update_url``. Raises DownloadError.
+
+    Date placeholders in the URL are filled for the current month; when that
+    file is not there yet the previous month's is fetched instead, so a
+    schedule firing on the first of the month does not fail until the next
+    interval. Any other error stops at the first URL.
+    """
+    if not record.update_url:
+        raise DownloadError("no update URL")
+    last_error: DownloadError | None = None
+    for url in candidate_urls(record.update_url):
+        try:
+            return await _download_url(url, record, guard)
+        except NotFoundError as exc:
+            last_error = exc
+            logger.info("IP database not published at this URL, trying the previous month", url=url)
+    assert last_error is not None
+    raise last_error
+
+
+async def _download_url(url: str, record: GeoDatabaseRecord, guard: EgressGuard) -> bytes:
+    """Fetch and unpack one concrete URL.
 
     Vendors hand the file off to object storage with a redirect (MaxMind
     answers 302 to R2), so redirects are followed here, by hand: every hop is
@@ -107,11 +156,9 @@ async def download(record: GeoDatabaseRecord, guard: EgressGuard) -> bytes:
     the vendor's host. Letting httpx follow would reuse the first hop's Host
     and SNI against the storage host and skip the guard entirely.
     """
-    if not record.update_url:
-        raise DownloadError("no update URL")
     auth, vendor_headers = _auth(record)
-    origin_host = httpx.URL(record.update_url).host
-    url = record.update_url
+    origin_host = httpx.URL(url).host
+    requested = url
     try:
         async with httpx.AsyncClient(timeout=DOWNLOAD_TIMEOUT, follow_redirects=False) as client:
             for _ in range(MAX_REDIRECTS + 1):
@@ -134,6 +181,8 @@ async def download(record: GeoDatabaseRecord, guard: EgressGuard) -> bytes:
                             raise DownloadError(f"vendor returned HTTP {response.status_code} without a location")
                         url = str(httpx.URL(url).join(location))
                         continue
+                    if response.status_code == 404:
+                        raise NotFoundError("vendor returned HTTP 404")
                     if response.status_code != 200:
                         raise DownloadError(f"vendor returned HTTP {response.status_code}")
                     chunks: list[bytes] = []
@@ -149,7 +198,7 @@ async def download(record: GeoDatabaseRecord, guard: EgressGuard) -> bytes:
     except httpx.HTTPError as exc:
         raise DownloadError(f"download failed: {exc}") from exc
     try:
-        return unpack(b"".join(chunks), record.update_url)
+        return unpack(b"".join(chunks), requested)
     except (tarfile.TarError, gzip.BadGzipFile, OSError) as exc:
         raise DownloadError(f"could not unpack download: {exc}") from exc
 

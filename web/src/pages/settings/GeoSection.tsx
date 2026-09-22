@@ -273,9 +273,9 @@ const URL_PRESETS: { label: string; url: string; hint: string; auth: 'basic' | '
   { label: 'MaxMind GeoLite2 City', url: 'https://download.maxmind.com/geoip/databases/GeoLite2-City/download?suffix=tar.gz', hint: 'Account ID as username, license key as password', auth: 'basic', interval: 24 },
   { label: 'MaxMind GeoLite2 Country', url: 'https://download.maxmind.com/geoip/databases/GeoLite2-Country/download?suffix=tar.gz', hint: 'Account ID as username, license key as password', auth: 'basic', interval: 24 },
   { label: 'MaxMind GeoLite2 ASN', url: 'https://download.maxmind.com/geoip/databases/GeoLite2-ASN/download?suffix=tar.gz', hint: 'Account ID as username, license key as password', auth: 'basic', interval: 24 },
-  { label: 'DB-IP Country Lite', url: 'https://download.db-ip.com/free/dbip-country-lite-YYYY-MM.mmdb.gz', hint: 'Replace YYYY-MM with the current month; no credentials', auth: 'none', interval: 720 },
+  { label: 'DB-IP Country Lite', url: 'https://download.db-ip.com/free/dbip-country-lite-{YYYY}-{MM}.mmdb.gz', hint: '{YYYY} and {MM} are filled in on each run, falling back to the previous month until DB-IP publishes the new file; no credentials', auth: 'none', interval: 720 },
   { label: 'IPinfo country + ASN', url: 'https://ipinfo.io/data/free/country_asn.mmdb?token=', hint: 'Append your IPinfo token to the URL', auth: 'none', interval: 24 },
-  { label: 'Custom URL', url: '', hint: 'Any HTTPS URL serving an mmdb, .mmdb.gz or .tar.gz containing one', auth: 'none', interval: 24 },
+  { label: 'Custom URL', url: '', hint: 'Any HTTPS URL serving an mmdb, .mmdb.gz or .tar.gz containing one. {YYYY} and {MM} are filled in on each run for vendors that name files by month.', auth: 'none', interval: 24 },
 ]
 
 function FromUrlCard({ onDone }: { onDone: () => void }) {
