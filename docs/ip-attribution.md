@@ -24,7 +24,7 @@ Four flows, drawn separately because they run at different times. The first is t
 
 ```mermaid
 flowchart TD
-    syncer["Provider syncer<br/>discovery response or vendor IP list"] -->|exit_ip_observed| attributor
+    syncer["Provider syncer<br/>discovery response or vendor IP list<br/>(vendor-operated URL: the country is the claim)"] -->|exit_ip_observed| attributor
     hc["Health checker<br/>check response that echoes the IP"] -->|exit_ip_observed| attributor
     added["Static proxy added without a country"] -->|proxy_added| echo1["One echo request through the proxy"] --> attributor
     attributor["ProxyAttributor<br/>policy = the project owning the connector"] --> resolve
@@ -32,10 +32,12 @@ flowchart TD
     resolve --> changed{"anything on the<br/>proxy changed?"}
     changed -->|yes| write["Write the proxy row<br/>publish proxy_changed to peers"]
     changed -->|no| nothing["nothing"]
+    resolve --> moved{"different IP than<br/>recorded on the proxy?"}
+    moved -->|yes| drop["publish exit_ip_changed<br/>preflight drops its cached verdict"]
     resolve --> obs["IpObservation, always"]
     obs --> buffer["In-memory buffer<br/>pushed every 5 s or when half full"]
     buffer --> redis[("Redis list<br/>geo:observations")]
-    redis -->|leader, every 30 s| flusher["ObservationFlusher"]
+    redis -->|leader, every 30 s| flusher["ObservationFlusher<br/>same proxy, IP and source within 15 s<br/>from two instances counts once"]
     flusher --> raw[("ip_observations<br/>raw, retention window")]
     flusher --> exits[("connector_exit_ips<br/>distinct exits, latest verdict,<br/>first/last seen, reuse")]
 ```
@@ -64,17 +66,17 @@ flowchart TD
     expected -->|some| cached{"verdict cached for<br/>(project, proxy)?"}
     cached -->|yes| reuse["reuse it<br/>preflight_session_ttl_seconds,<br/>dropped early if the exit moves"]
     cached -->|no| echo["Echo request through the proxy"]
-    echo -->|fails| fwd2["forward: an echo outage<br/>never blocks traffic"]
-    echo -->|ip| resolve["Resolve: databases + echo country<br/>(the expectation is left out)"]
-    resolve -->|"match, or unknown"| fwd3["forward; cache the verdict"]
-    resolve -->|mismatch| mismatch["record observation<br/>publish exit_location_mismatch"]
+    echo -->|fails| fwd2["forward: an echo outage<br/>never blocks traffic<br/>(failure cached 30 s)"]
+    echo -->|ip| resolve["Resolve: databases + echo country<br/>(the expectation is left out)<br/>record observation; cache the verdict"]
+    resolve -->|"match, or unknown"| fwd3["forward"]
+    resolve -->|mismatch| mode{"location_preflight"}
+    mode -->|report| fwd4["forward anyway;<br/>the proxy is left alone"]
+    mode -->|"retry, reject"| mismatch["publish exit_location_mismatch"]
     mismatch --> attributor["ProxyAttributor"]
     attributor -->|"vendor-session slot"| rotate["remove it; the syncer<br/>provisions a fresh session"]
     attributor -->|"fixed exit"| flag["set location_conflict;<br/>strict projects skip it from now on"]
-    mismatch --> mode{"location_preflight"}
-    mode -->|report| fwd4["forward anyway"]
-    mode -->|reject| r502["502 Exit location mismatch"]
-    mode -->|retry| allowed{"strategy allows moving<br/>this request?"}
+    mismatch -->|reject| r502["502 Exit location mismatch"]
+    mismatch -->|retry| allowed{"strategy allows moving<br/>this request?"}
     allowed -->|"no: sticky with a session"| r502b["502"]
     allowed -->|yes| reselect["select again, excluding failed proxies<br/>502 after preflight_max_attempts"]
     reselect --> echo
@@ -88,10 +90,10 @@ flowchart TD
     download["Scheduled vendor download"] --> row
     path["Path in the config file<br/>(no row, read in place)"] --> reopen
     row[("geo_databases row + bytes<br/>in Postgres")] -->|geo_database_changed| reopen
-    reopen["Every instance: fetch the bytes once per checksum<br/>into geo.cache_dir, memory-map, reopen"] --> reattr["Re-attribute every proxy with a known IP<br/>offline, rows written only where the answer moved"]
+    reopen["Every instance: fetch the bytes once per checksum<br/>into geo.cache_dir, memory-map, reopen"] --> reattr["The instance that made the change re-attributes<br/>every proxy with a known IP, offline;<br/>rows written only where the answer moved"]
 ```
 
-The periodic full reload re-reads the settings row and the database list as a safety net for dropped events; it hashes nothing unless a checksum or a file's size or mtime moved.
+The periodic full reload re-reads the settings row and the database list as a safety net for dropped events; it hashes nothing unless a checksum or a file's size or mtime moved. If the listing itself fails, the databases already open stay open until the next reload rather than being closed on a Postgres blip.
 
 ## How exit IPs are learned, per connector type
 
