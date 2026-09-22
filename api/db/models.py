@@ -15,6 +15,7 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Integer,
+    LargeBinary,
     String,
     Text,
     text,
@@ -74,6 +75,13 @@ class ProjectModel(Base):
 
     # Metrics settings
     metrics_retention_days: Mapped[int] = mapped_column(Integer, default=90)
+    # IP attribution: what a contradicted vendor location does to a proxy, and
+    # whether a session's exit is verified before its first request.
+    location_policy: Mapped[str] = mapped_column(String(10), nullable=False, default="off", server_default="off")
+    location_preflight: Mapped[str] = mapped_column(String(10), nullable=False, default="off", server_default="off")
+    # Null inherits the install default from geo_settings.
+    location_sources: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
+    location_conflict_rule: Mapped[str | None] = mapped_column(String(10), nullable=True)
 
     version: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
 
@@ -283,3 +291,141 @@ class ProviderAuditModel(Base):
     hosts_changed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     spec: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now, index=True)
+
+
+class GeoSettingsModel(Base):
+    """The install-wide IP attribution settings: exactly one row, id 1.
+
+    Typed columns rather than a settings blob, so the schema says what exists.
+    The config file's ``geo.defaults`` seeds a fresh install; an admin's save
+    writes this row and reaches every instance through ``geo_settings_changed``.
+    """
+
+    __tablename__ = "geo_settings"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
+    default_sources: Mapped[list[str]] = mapped_column(JSON, default=list)
+    default_conflict_rule: Mapped[str] = mapped_column(String(10), nullable=False, default="consensus")
+    echo_url: Mapped[str] = mapped_column(String(2048), nullable=False)
+    echo_ip_path: Mapped[str] = mapped_column(String(255), nullable=False, default="ip")
+    echo_country_path: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    echo_timeout_seconds: Mapped[float] = mapped_column(Float, nullable=False, default=15.0)
+    health_check_attribution: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    preflight_session_ttl_seconds: Mapped[int] = mapped_column(Integer, nullable=False, default=600)
+    preflight_max_attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=3)
+    observation_retention_days: Mapped[int] = mapped_column(Integer, nullable=False, default=7)
+    exit_ip_retention_days: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    updated_by: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now, onupdate=utc_now)
+
+
+class GeoDatabaseModel(Base):
+    """An IP database the install knows about. The file itself lives in ``geo_database_blobs``."""
+
+    __tablename__ = "geo_databases"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    vendor: Mapped[str] = mapped_column(String(20), nullable=False, default="other")
+    kind: Mapped[str] = mapped_column(String(20), nullable=False, default="unknown")
+    format: Mapped[str] = mapped_column(String(20), nullable=False, default="mmdb")
+    source: Mapped[str] = mapped_column(String(10), nullable=False, default="upload")
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    priority: Mapped[int] = mapped_column(Integer, nullable=False, default=100)
+    path: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+    sha256: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    size_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
+    database_type: Mapped[str] = mapped_column(String(255), nullable=False, default="")
+    build_epoch: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    record_count: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
+    ip_version: Mapped[int] = mapped_column(Integer, nullable=False, default=6)
+    languages: Mapped[list[str]] = mapped_column(JSON, default=list)
+    description: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    attribution: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    update_url: Mapped[str | None] = mapped_column(String(2048), nullable=True)
+    update_interval_hours: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    update_auth: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    last_update_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    last_update_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    uploaded_by: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now, onupdate=utc_now)
+
+
+class GeoDatabaseBlobModel(Base):
+    """The bytes of a stored database, kept apart so listing databases never reads them."""
+
+    __tablename__ = "geo_database_blobs"
+
+    database_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("geo_databases.id", ondelete="CASCADE"), primary_key=True
+    )
+    data: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+
+
+class IpObservationModel(Base):
+    """One sighting of an exit IP and what every source said about it.
+
+    No foreign keys on purpose: this is the short-lived raw history and it
+    must survive a proxy or connector being removed, so what a deleted
+    connector did stays traceable for the retention window. The two
+    aggregates below are keyed by connector and cascade with it instead.
+    """
+
+    __tablename__ = "ip_observations"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    observed_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, index=True)
+    proxy_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    connector_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    project_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    session_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    source: Mapped[str] = mapped_column(String(20), nullable=False)
+    ip: Mapped[str] = mapped_column(String(45), nullable=False)
+    claimed_country: Mapped[str | None] = mapped_column(String(2), nullable=True)
+    endpoint_country: Mapped[str | None] = mapped_column(String(2), nullable=True)
+    resolved_country: Mapped[str | None] = mapped_column(String(2), nullable=True)
+    resolved_source: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    conflict: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    disagreement: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    candidates: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
+    instance_id: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+
+
+class ConnectorExitIpModel(Base):
+    """Every distinct exit IP a connector has handed out, and how often.
+
+    One row per (connector, IP), upserted by the observation flusher. Unlike
+    the raw observations this is kept until ``exit_ip_retention_days`` after
+    the IP was last seen (forever by default), so "how many distinct exits
+    has this pool given us" survives the raw retention window. ``sightings``
+    counts how many times the IP was newly handed out, not minutes in use.
+    Rows go with their connector: the flusher drops sightings of connectors
+    deleted since they were made, so the cascade never fails a batch.
+    """
+
+    __tablename__ = "connector_exit_ips"
+
+    connector_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("connectors.id", ondelete="CASCADE"), primary_key=True
+    )
+    ip: Mapped[str] = mapped_column(String(45), primary_key=True)
+    first_seen: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    last_seen: Mapped[datetime] = mapped_column(DateTime, nullable=False, index=True)
+    sightings: Mapped[int] = mapped_column(BigInteger, nullable=False, default=1)
+    # The country attribution resolved the last time the IP was seen.
+    country: Mapped[str | None] = mapped_column(String(2), nullable=True)
+    # The rest of the latest observation: which proxy held the exit, how it
+    # was seen, what the vendor claimed and how the claim was judged. Kept
+    # here so the exit IPs view is one indexed table, not a join into millions
+    # of raw rows.
+    proxy_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    source: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    claimed_country: Mapped[str | None] = mapped_column(String(2), nullable=True)
+    resolved_source: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    conflict: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    disagreement: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+
+    # Provider accuracy groups a connector's exits by when they were last seen.
+    __table_args__ = (Index("ix_connector_exit_ips_connector_last_seen", "connector_id", "last_seen"),)

@@ -27,6 +27,7 @@ from api.core.config import settings
 from api.core.event_bus import event_bus
 from api.core.signals import request_completed, request_rejected
 from api.core.username_params import AuthResult, parse_username_params
+from api.geo.verifier import ExitVerifier
 from api.models.project import MitmMode, Project
 from api.models.proxy import Proxy, ProxyProtocol
 
@@ -47,9 +48,12 @@ class ProxyServer:
         self,
         proxy_manager: "ProxyManager",
         mitm_handler: "MitmHandler | None" = None,
+        exit_verifier: ExitVerifier | None = None,
     ) -> None:
         self._proxy_manager = proxy_manager
         self._mitm_handler = mitm_handler
+        # Exit verification before forwarding; None disables preflight entirely.
+        self._exit_verifier = exit_verifier
         self._server: asyncio.Server | None = None
         self._host = settings.host
         self._port = settings.proxy_port
@@ -207,6 +211,27 @@ class ProxyServer:
         if country:
             return f"No upstream proxy available for country {country} and this domain"
         return "No upstream proxy available for this domain"
+
+    async def _verify_exit(
+        self,
+        project: Project,
+        proxy: Proxy,
+        session_id: str | None,
+        country: str | None,
+        target_host: str | None,
+        client_writer: asyncio.StreamWriter,
+    ) -> Proxy | None:
+        """Hand the selected upstream to preflight; None when the request was refused."""
+        if self._exit_verifier is None:
+            return proxy
+        decision = await self._exit_verifier.verify(
+            project, proxy, session_id=session_id, country=country, target_host=target_host
+        )
+        if not decision.rejected:
+            return decision.proxy
+        await self._send_error(client_writer, 502, "Bad Gateway", decision.rejection or "Exit location mismatch")
+        await event_bus.publish(request_rejected, self, project_id=project.id, reason="preflight_mismatch")
+        return None
 
     async def _connect_via_proxy(
         self,
@@ -421,6 +446,11 @@ class ProxyServer:
                     self, project_id=project.id, reason="no_proxy_available"
                 )
             return
+
+        verified = await self._verify_exit(project, proxy, session_id, country, target_host, client_writer)
+        if verified is None:
+            return
+        proxy = verified
 
         start_time = time.monotonic()
         success = False
@@ -649,6 +679,13 @@ class ProxyServer:
                     self, project_id=project_id, reason="no_proxy_available"
                 )
             return
+
+        project = self._proxy_manager.get_project(project_id)
+        if project is not None:
+            verified = await self._verify_exit(project, proxy, session_id, country, parsed_host, client_writer)
+            if verified is None:
+                return
+            proxy = verified
 
         start_time = time.monotonic()
         success = False

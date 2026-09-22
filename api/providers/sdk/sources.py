@@ -37,6 +37,39 @@ def default_proxied_client_factory(proxy_url: str, timeout: float) -> httpx.Asyn
     return httpx.AsyncClient(proxy=proxy_url, timeout=timeout)
 
 
+def extract_ip_and_country(
+    response: httpx.Response,
+    ip_path: str,
+    country_path: str | None = None,
+    extractor: ValueExtractor | None = None,
+) -> tuple[str | None, str]:
+    """Pull ``(ip, country)`` out of an echo endpoint's response.
+
+    ``ip_path`` is a JMESPath into the JSON body, or ``"@text"`` for a plain
+    text body (httpbin-style ``origin`` values may list several addresses;
+    the first is the client). The country is ``""`` when absent.
+    """
+    values = extractor or ValueExtractor()
+    if ip_path == "@text":
+        text = response.text.strip()
+        return (_first_ip(text) or None), ""
+    try:
+        document = response.json()
+    except ValueError:
+        return None, ""
+    value = values.extract_str(ip_path, document)
+    ip = _first_ip(value) if value else None
+    country = ""
+    if country_path:
+        raw = values.extract_str(country_path, document)
+        country = raw.strip().upper() if raw else ""
+    return ip, country
+
+
+def _first_ip(value: str) -> str:
+    return value.split(",", 1)[0].strip()
+
+
 class IpDiscoverer:
     """Discovers the exit IP behind a proxy URL."""
 
@@ -81,20 +114,7 @@ class IpDiscoverer:
         return ip, country
 
     def _extract(self, response: httpx.Response) -> tuple[str | None, str]:
-        if self._spec.ip_path == "@text":
-            text = response.text.strip()
-            return (text or None), ""
-        try:
-            document = response.json()
-        except ValueError:
-            return None, ""
-        value = self._extractor.extract_str(self._spec.ip_path, document)
-        ip = value.strip() if value else None
-        country = ""
-        if self._spec.country_path:
-            raw = self._extractor.extract_str(self._spec.country_path, document)
-            country = raw.strip().upper() if raw else ""
-        return ip, country
+        return extract_ip_and_country(response, self._spec.ip_path, self._spec.country_path, self._extractor)
 
 
 @dataclass(frozen=True)

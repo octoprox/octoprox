@@ -18,22 +18,26 @@ from api import __version__
 from api.core import utc_now
 from api.core.auth import require_auth
 from api.core.config import settings
-from api.core.geo_lookup import GeoLookup
 from api.core.logging import setup_logging
 from api.core.mitm import MitmHandler
 from api.core.proxy_manager import ProxyManager
 from api.core.proxy_server import ProxyServer
 from api.core.seed import seed_admin_user
+from api.core.signals import geo_database_changed, geo_settings_changed
 from api.core.system_stats import build_instance_snapshot
 from api.core.tls_cert_manager import TLSCertManager
 from api.db.migrations import run_migrations
 from api.db.redis import get_redis_client
 from api.db.session import get_async_session_factory
+from api.geo.runtime import GeoRuntime
+from api.geo.verifier import ExitVerifier
 from api.routes import (
     auth,
     backup,
     connectors,
     credentials,
+    echo,
+    geo,
     health,
     metrics,
     mitm,
@@ -77,13 +81,30 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # Store redis client for cleanup
     app.state.redis_client = redis_client
 
-    # Initialize proxy manager with dependencies
+    # IP attribution: databases, settings, observation pipeline, preflight.
+    geo_runtime = GeoRuntime(settings, session_factory, redis_client)
+    app.state.geo_runtime = geo_runtime
+    await geo_runtime.start()
+
+    # Initialize proxy manager with dependencies. Attribution joins the
+    # cross-instance change feed and the periodic reload here, explicitly,
+    # rather than the manager knowing what it is wiring.
     proxy_manager = ProxyManager(
         session_factory=session_factory,
         redis_client=redis_client,
         settings=settings,
+        health_check_extraction_rules=geo_runtime.extraction_rules,
+        cross_instance_handlers={
+            geo_database_changed: geo_runtime.reload_database,
+            geo_settings_changed: geo_runtime.reload_settings,
+        },
+        reload_hooks=[geo_runtime.resync],
     )
     app.state.proxy_manager = proxy_manager
+
+    # The attributor writes attribution onto proxies as sightings arrive; the
+    # manager is its proxy store.
+    await geo_runtime.proxy_attributor.start(proxy_manager)
 
     # Let the heartbeat publish what this instance sees, for the admin system
     # view's per-instance cards. Wired here rather than inside ProxyManager
@@ -97,17 +118,12 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         app.state.started_at,
         proxy_manager=proxy_manager,
         proxy_server=getattr(app.state, "proxy_server", None),
-        geo_lookup=getattr(app.state, "geo_lookup", None),
         cert_manager=getattr(app.state, "cert_manager", None),
+        geo_runtime=geo_runtime,
     )
 
     # Start background tasks (loads from DB, hydrates from Redis)
     await proxy_manager.start()
-
-    # Look up the exit location of static proxies as they are added
-    geo_lookup = GeoLookup(settings)
-    app.state.geo_lookup = geo_lookup
-    await geo_lookup.start(proxy_manager)
 
     # Initialize TLS MITM certificate manager
     cert_manager = TLSCertManager(
@@ -119,7 +135,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     app.state.cert_manager = cert_manager
 
     # Start the HTTP proxy server
-    proxy_server = ProxyServer(proxy_manager, mitm_handler=mitm_handler)
+    # Preflight: the manager is the verifier's proxy selector.
+    exit_verifier = ExitVerifier(geo_runtime.preflight_checker, proxy_manager)
+    proxy_server = ProxyServer(proxy_manager, mitm_handler=mitm_handler, exit_verifier=exit_verifier)
     await proxy_server.start()
     app.state.proxy_server = proxy_server
 
@@ -128,8 +146,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # Cleanup
     logger.info("Shutting down Octoprox")
     await proxy_server.stop()
-    await geo_lookup.stop()
     await proxy_manager.stop()
+    await geo_runtime.stop()
     await redis_client.close()
 
 
@@ -154,6 +172,8 @@ def create_app() -> FastAPI:
     # Include routers
     # Health check (public)
     app.include_router(health.router, tags=["Health"])
+    # Echo endpoint (public by nature: the caller is a proxy exit)
+    app.include_router(echo.router, tags=["Echo"])
 
     # Protected routes - require auth when enabled
     auth_dependency = [Depends(require_auth)]
@@ -193,6 +213,9 @@ def create_app() -> FastAPI:
     )
     app.include_router(
         system.router, prefix="/api/v1", tags=["System"], dependencies=auth_dependency
+    )
+    app.include_router(
+        geo.router, prefix="/api/v1", tags=["IP attribution"], dependencies=auth_dependency
     )
 
     # Serve frontend static files in production (when web/dist exists)

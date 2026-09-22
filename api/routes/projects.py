@@ -57,6 +57,10 @@ def _project_to_response(
         tls_mitm_engine=project.tls_mitm_engine,
         tls_mitm_browser=project.tls_mitm_browser,
         metrics_retention_days=project.metrics_retention_days,
+        location_policy=project.location_policy,
+        location_preflight=project.location_preflight,
+        location_sources=project.location_sources,
+        location_conflict_rule=project.location_conflict_rule,
         created_at=project.created_at,
         updated_at=project.updated_at,
         credential_count=credential_count,
@@ -84,6 +88,10 @@ def _project_to_summary(
         tls_mitm_mode=project.tls_mitm_mode,
         tls_mitm_engine=project.tls_mitm_engine,
         tls_mitm_browser=project.tls_mitm_browser,
+        location_policy=project.location_policy,
+        location_preflight=project.location_preflight,
+        location_sources=project.location_sources,
+        location_conflict_rule=project.location_conflict_rule,
         credential_count=credential_count,
         connector_count=connector_count,
         proxy_count=proxy_count,
@@ -161,6 +169,10 @@ async def create_project(
         tls_mitm_engine=project_data.tls_mitm_engine,
         tls_mitm_browser=project_data.tls_mitm_browser,
         metrics_retention_days=project_data.metrics_retention_days,
+        location_policy=project_data.location_policy,
+        location_preflight=project_data.location_preflight,
+        location_sources=project_data.location_sources,
+        location_conflict_rule=project_data.location_conflict_rule,
     )
 
     await proxy_manager.add_project(project)
@@ -237,6 +249,14 @@ async def update_project(
         project.tls_mitm_browser = project_data.tls_mitm_browser
     if project_data.metrics_retention_days is not None:
         project.metrics_retention_days = project_data.metrics_retention_days
+    if project_data.location_policy is not None:
+        project.location_policy = project_data.location_policy
+    if project_data.location_preflight is not None:
+        project.location_preflight = project_data.location_preflight
+    if project_data.location_sources is not None:
+        project.location_sources = project_data.location_sources or None
+    if project_data.location_conflict_rule is not None:
+        project.location_conflict_rule = project_data.location_conflict_rule or None
 
     # Clear fields that don't apply to the current MITM mode and validate
     if project.tls_mitm_mode in (MitmMode.OFF, MitmMode.PLAIN):

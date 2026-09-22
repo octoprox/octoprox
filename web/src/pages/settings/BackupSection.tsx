@@ -28,10 +28,11 @@ function ExportCard() {
   const [passphrase, setPassphrase] = useState('')
   const [confirm, setConfirm] = useState('')
   const [includeMetrics, setIncludeMetrics] = useState(false)
+  const [includeDatabaseFiles, setIncludeDatabaseFiles] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
   const mutation = useMutation({
-    mutationFn: () => exportBackup(passphrase, includeMetrics),
+    mutationFn: () => exportBackup(passphrase, includeMetrics, includeDatabaseFiles),
     onSuccess: () => { setError(null); setPassphrase(''); setConfirm('') },
     onError: (err: any) => setError(err.message || 'Export failed'),
   })
@@ -65,7 +66,11 @@ function ExportCard() {
         </div>
         <label className="flex items-center gap-2 text-[13px] text-fg">
           <input type="checkbox" checked={includeMetrics} onChange={(e) => setIncludeMetrics(e.target.checked)} />
-          Include historical metrics (larger file)
+          Include history: metrics, exit IP observations and vendor accuracy (larger file)
+        </label>
+        <label className="flex items-center gap-2 text-[13px] text-fg">
+          <input type="checkbox" checked={includeDatabaseFiles} onChange={(e) => setIncludeDatabaseFiles(e.target.checked)} />
+          Include IP database files (tens of megabytes each; otherwise re-download or re-upload them after import)
         </label>
         <div className="flex justify-end mt-auto pt-1">
           <Button type="submit" size="sm" disabled={mutation.isPending}>{mutation.isPending ? 'Exporting…' : 'Export backup'}</Button>
@@ -118,7 +123,8 @@ function ImportCard() {
         {summary && (
           <Alert variant="success">
             <p>
-              Import complete: {summary.projects} projects, {summary.credentials} credentials, {summary.connectors} connectors, {summary.proxies} proxies, {summary.users} users, {summary.provider_descriptors ?? 0} custom providers restored.{' '}
+              Import complete: {summary.projects} projects, {summary.credentials} credentials, {summary.connectors} connectors, {summary.proxies} proxies, {summary.users} users, {summary.provider_descriptors ?? 0} custom providers, {summary.geo_databases ?? 0} IP databases ({summary.geo_database_blobs ?? 0} with files) restored.{' '}
+              {(summary.ip_observations ?? 0) > 0 && `${summary.ip_observations.toLocaleString()} exit IP observations restored. `}
               {summary.kept_current_user ? 'Your account was kept and you remain signed in.' : 'You will be signed out - please log in again.'}
             </p>
             {summary.user_conflicts.length > 0 && (

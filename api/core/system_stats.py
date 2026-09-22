@@ -63,10 +63,10 @@ from api.models.system import (
 )
 
 if TYPE_CHECKING:
-    from api.core.geo_lookup import GeoLookup
     from api.core.proxy_manager import ProxyManager
     from api.core.proxy_server import ProxyServer
     from api.core.tls_cert_manager import TLSCertManager
+    from api.geo.runtime import GeoRuntime
 
 logger = structlog.get_logger()
 
@@ -437,7 +437,7 @@ def _task_state(task: asyncio.Task[Any]) -> tuple[str, str | None]:
     return "done", None
 
 
-def collect_tasks(proxy_manager: ProxyManager | None) -> list[WorkerTask]:
+def collect_tasks(proxy_manager: ProxyManager | None, geo_runtime: GeoRuntime | None = None) -> list[WorkerTask]:
     """The background loops of this process: alive, elected, and doing work.
 
     ``state`` comes from the asyncio task, the counters from
@@ -446,11 +446,14 @@ def collect_tasks(proxy_manager: ProxyManager | None) -> list[WorkerTask]:
     standing by without the lease is legitimately at zero runs - the lease
     list says who does have it.
     """
-    if proxy_manager is None:
+    handles = list(proxy_manager.background_tasks) if proxy_manager is not None else []
+    if geo_runtime is not None:
+        handles.extend(geo_runtime.background_tasks)
+    if not handles:
         return []
     runs = job_stats.snapshot()
     tasks: list[WorkerTask] = []
-    for task in proxy_manager.background_tasks:
+    for task in handles:
         name = task.get_name()
         state, error = _task_state(task)
         info = worker_info(name)
@@ -491,9 +494,9 @@ def _round_ms(value: float | None) -> float | None:
 async def collect_workers(
     proxy_manager: ProxyManager | None,
     proxy_server: ProxyServer | None,
-    geo_lookup: GeoLookup | None,
     redis_client: RedisClient | None,
     instance_id: str,
+    geo_runtime: GeoRuntime | None = None,
 ) -> WorkerStats:
     """Local task health plus the cluster-wide lease and membership picture."""
     leases: list[LeaseInfo] = []
@@ -508,13 +511,15 @@ async def collect_workers(
             logger.warning("Worker lease/instance scan failed", error=str(exc))
 
     return WorkerStats(
-        tasks=collect_tasks(proxy_manager),
+        tasks=collect_tasks(proxy_manager, geo_runtime),
         leases=leases,
         instances=instances,
         proxy_server_listening=proxy_server.is_listening if proxy_server else False,
         proxy_server_connections=proxy_server.active_connections if proxy_server else 0,
-        geo_lookup_enabled=geo_lookup.enabled if geo_lookup else False,
-        geo_lookups_in_flight=geo_lookup.in_flight if geo_lookup else 0,
+        geo_lookup_enabled=geo_runtime.proxy_attributor.enabled if geo_runtime else False,
+        geo_lookups_in_flight=geo_runtime.proxy_attributor.in_flight if geo_runtime else 0,
+        geo_databases=[d.id for d in geo_runtime.database_store.loaded] if geo_runtime else [],
+        geo_pending_observations=geo_runtime.observation_recorder.pending if geo_runtime else 0,
     )
 
 
@@ -524,8 +529,8 @@ def build_instance_snapshot(
     *,
     proxy_manager: ProxyManager | None = None,
     proxy_server: ProxyServer | None = None,
-    geo_lookup: GeoLookup | None = None,
     cert_manager: TLSCertManager | None = None,
+    geo_runtime: GeoRuntime | None = None,
 ) -> InstanceSnapshot:
     """Assemble what this process publishes about itself on its heartbeat.
 
@@ -539,11 +544,13 @@ def build_instance_snapshot(
             settings, started_at, proxy_port=proxy_server.port if proxy_server else None
         ),
         cache=collect_cache(proxy_manager, cert_manager),
-        tasks=collect_tasks(proxy_manager),
+        tasks=collect_tasks(proxy_manager, geo_runtime),
         proxy_server_listening=proxy_server.is_listening if proxy_server else False,
         proxy_server_connections=proxy_server.active_connections if proxy_server else 0,
-        geo_lookup_enabled=geo_lookup.enabled if geo_lookup else False,
-        geo_lookups_in_flight=geo_lookup.in_flight if geo_lookup else 0,
+        geo_lookup_enabled=geo_runtime.proxy_attributor.enabled if geo_runtime else False,
+        geo_lookups_in_flight=geo_runtime.proxy_attributor.in_flight if geo_runtime else 0,
+        geo_databases=[d.id for d in geo_runtime.database_store.loaded] if geo_runtime else [],
+        geo_pending_observations=geo_runtime.observation_recorder.pending if geo_runtime else 0,
     )
 
 
@@ -556,10 +563,10 @@ async def collect_system_stats(
     *,
     proxy_manager: ProxyManager | None = None,
     proxy_server: ProxyServer | None = None,
-    geo_lookup: GeoLookup | None = None,
     cert_manager: TLSCertManager | None = None,
     redis_client: RedisClient | None = None,
     started_at: datetime | None = None,
+    geo_runtime: GeoRuntime | None = None,
 ) -> SystemStats:
     """Gather every section of the admin system view.
 
@@ -579,7 +586,7 @@ async def collect_system_stats(
     (inventory, projects, database), redis_stats, workers = await asyncio.gather(
         _postgres(),
         _redis(),
-        collect_workers(proxy_manager, proxy_server, geo_lookup, redis_client, settings.instance_id),
+        collect_workers(proxy_manager, proxy_server, redis_client, settings.instance_id, geo_runtime),
     )
 
     return SystemStats(

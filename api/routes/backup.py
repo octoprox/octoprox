@@ -47,12 +47,13 @@ async def export_backup(
 ) -> Response:
     """Export the full setup as a downloadable, passphrase-encrypted file."""
     schema_version = await get_schema_version(session)
-    payload = await export_payload(session, data.include_metrics)
+    payload = await export_payload(session, data.include_metrics, data.include_database_files)
     file_bytes = build_backup_file(
         payload,
         data.passphrase,
         schema_version=schema_version,
         include_metrics=data.include_metrics,
+        include_database_files=data.include_database_files,
     )
 
     filename = f"octoprox-backup-{utc_now().date().isoformat()}.opbak"
@@ -60,6 +61,7 @@ async def export_backup(
         "Backup exported",
         admin=_admin.username,
         include_metrics=data.include_metrics,
+        include_database_files=data.include_database_files,
         bytes=len(file_bytes),
     )
     return Response(
@@ -124,6 +126,10 @@ async def import_backup(
     #    live cache so the imported setup is immediately effective.
     proxy_manager = request.app.state.proxy_manager
     await proxy_manager.apply_imported_state(result.old_project_ids, result.old_proxy_ids)
+    # Attribution settings and database rows were replaced too: reload them and
+    # reopen whatever database files came with the backup. Peers catch up on
+    # their periodic reload.
+    await request.app.state.geo_runtime.geo_service.resync()
 
     logger.info(
         "Backup imported",

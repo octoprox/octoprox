@@ -10,7 +10,7 @@ Emits proxy lifecycle signals (proxy_added, proxy_removed, proxy_status_changed)
 import asyncio
 import contextlib
 import json
-from collections.abc import Callable, Coroutine
+from collections.abc import Awaitable, Callable, Coroutine, Mapping, Sequence
 from typing import TYPE_CHECKING, Any
 
 import structlog
@@ -22,7 +22,7 @@ from api.core.demand_tracker import DemandTracker
 from api.core.domain_filter import is_domain_allowed
 from api.core.entity_index import ConnectorIndex, ProxyIndex
 from api.core.event_bus import EVENT_CHANNEL, RedisPubSubTransport, event_bus
-from api.core.health_checker import HealthChecker
+from api.core.health_checker import HealthChecker, IpExtractionRules
 from api.core.job_stats import job_stats
 from api.core.leadership import Lease
 from api.core.metrics_compactor import MetricsCompactor
@@ -75,6 +75,7 @@ from api.db.repository import (
     ProjectRepository,
     ProxyRepository,
 )
+from api.geo.models import META_LOCATION_CONFLICT, LocationPolicy
 from api.models.connector import Connector, ProxyTarget
 from api.models.credential import Credential
 from api.models.project import Project
@@ -110,11 +111,28 @@ class ProxyManager:
         redis_client: RedisClient,
         settings: Settings,
         provider_registry: ProviderRegistry | None = None,
+        health_check_extraction_rules: IpExtractionRules | None = None,
+        cross_instance_handlers: Mapping[Any, Callable[[str, str | None], Awaitable[None]]] | None = None,
+        reload_hooks: Sequence[Callable[[], Awaitable[None]]] | None = None,
     ) -> None:
+        """
+        Args:
+            cross_instance_handlers: Extra signals to forward over Redis, each
+                with the ``handler(entity_id, op)`` this instance runs when a
+                peer publishes it. Other subsystems join the change feed here
+                without this class naming them.
+            reload_hooks: Run on every periodic full reload, after the
+                provider store re-syncs, for the same reason.
+        """
         self._session_factory = session_factory
         self._redis_client = redis_client
         self._settings = settings
         self._provider_registry = provider_registry or get_provider_registry()
+        self._cross_instance_extra_signals: list[Any] = list((cross_instance_handlers or {}).keys())
+        self._cross_instance_handlers: dict[str, Callable[[str, str | None], Awaitable[None]]] = {
+            signal.name: handler for signal, handler in (cross_instance_handlers or {}).items()
+        }
+        self._reload_hooks: list[Callable[[], Awaitable[None]]] = list(reload_hooks or [])
         self._provider_store = ProviderStore(self._provider_registry, session_factory)
 
         # In-memory cache (loaded from Postgres on start)
@@ -128,7 +146,9 @@ class ProxyManager:
         self._project_strategies: dict[str, RoutingStrategy] = {}
         # Default strategy for backward compatibility
         self._strategy: RoutingStrategy = get_strategy(settings.default_strategy)
-        self._health_checker = HealthChecker(self, redis_client, settings.instance_id)
+        self._health_checker = HealthChecker(
+            self, redis_client, settings.instance_id, extraction_rules=health_check_extraction_rules
+        )
         self._metrics_flusher = MetricsFlusher(session_factory, redis_client, settings)
         self._metrics_compactor = MetricsCompactor(
             session_factory, redis_client, settings.instance_id
@@ -193,6 +213,7 @@ class ProxyManager:
                 proxy_changed,
                 proxy_quarantine_changed,
                 provider_changed,
+                *self._cross_instance_extra_signals,
             ],
         )
 
@@ -275,6 +296,7 @@ class ProxyManager:
             proxy_changed.name: self._apply_proxy_change,
             proxy_quarantine_changed.name: self._apply_proxy_quarantine_change,
             provider_changed.name: self._apply_provider_change,
+            **self._cross_instance_handlers,
         }
         my_id = self._settings.instance_id
         while self._running:
@@ -714,6 +736,11 @@ class ProxyManager:
         the cache converges with the cross-instance source of truth.
         """
         await self._provider_store.sync_all()
+        for hook in self._reload_hooks:
+            try:
+                await hook()
+            except Exception:
+                logger.warning("Reload hook failed", exc_info=True)
         async with self._session_factory() as session:
             project_repo = ProjectRepository(session)
             credential_repo = CredentialRepository(session)
@@ -1657,8 +1684,14 @@ class ProxyManager:
         *,
         include_quarantined: bool,
     ) -> list[Proxy]:
-        """Healthy proxies a request may use, after domain and country filtering."""
+        """Healthy proxies a request may use, after domain and country filtering.
+
+        Under a ``strict`` location policy the project also refuses proxies
+        whose vendor-declared location is contradicted by attribution.
+        """
         wanted = country.strip().upper() if country else None
+        project = self._projects.get(project_id)
+        strict = project is not None and project.location_policy == LocationPolicy.STRICT
         connectors: dict[str, tuple[list[str], bool]] = {}
         for c in self._enabled_connectors(project_id, target_host):
             declared = c.countries
@@ -1672,6 +1705,8 @@ class ProxyManager:
             if p.status != ProxyStatus.HEALTHY:
                 continue
             if not include_quarantined and self._rate_limiter.is_quarantined(p.id):
+                continue
+            if strict and p.metadata.get(META_LOCATION_CONFLICT) is True:
                 continue
             declared, hide_geo_groups = entry
             proxy_country = p.country
@@ -1871,11 +1906,14 @@ class ProxyManager:
         session_id: str | None = None,
         target_host: str | None = None,
         country: str | None = None,
+        exclude: frozenset[str] | None = None,
     ) -> Proxy | None:
         """Select a proxy for a specific project using the project's routing strategy.
 
         Returns a proxy with resolved credentials (placeholders replaced with
-        actual values from the credential/connector chain).
+        actual values from the credential/connector chain). ``exclude`` drops
+        proxies by id before the strategy runs (preflight retry); a sticky
+        session bound to an excluded proxy is re-bound to the pick.
 
         When sticky_quarantine is enabled on a connector's rate limit config
         and the project uses sticky routing, a session whose assigned proxy is
@@ -1905,6 +1943,8 @@ class ProxyManager:
             wanted = country.strip().upper()
             if await self._provision_country_slots(project_id, target_host, wanted):
                 healthy_proxies = self.get_routable_proxies_for_project(project_id, target_host, wanted)
+        if exclude:
+            healthy_proxies = [p for p in healthy_proxies if p.id not in exclude]
         strategy = self._project_strategies.get(project_id, self._strategy)
 
         # The strategy handles whatever cross-instance state it needs
@@ -1924,6 +1964,10 @@ class ProxyManager:
         """Change the routing strategy for a project."""
         self._project_strategies[project_id] = get_strategy(strategy_name)
         logger.info("Changed project routing strategy", project_id=project_id, strategy=strategy_name)
+
+    def strategy_for_project(self, project_id: str) -> "RoutingStrategy":
+        """The routing strategy in force for a project: its own, else the install default."""
+        return self._project_strategies.get(project_id, self._strategy)
 
     def get_proxy(self, proxy_id: str) -> Proxy | None:
         """Get a proxy by ID."""
@@ -1954,14 +1998,22 @@ class ProxyManager:
 
     async def update_proxy(self, proxy: Proxy) -> None:
         """Update a proxy in the pool (persists to Postgres)."""
+        await self.update_proxies([proxy])
+
+    async def update_proxies(self, proxies: list[Proxy]) -> None:
+        """Update several proxies in one transaction, then announce each to peers."""
+        if not proxies:
+            return
         async with self._session_factory() as session:
             repo = ProxyRepository(session)
-            await repo.update(proxy)
+            for proxy in proxies:
+                await repo.update(proxy)
             await session.commit()
 
-        self._proxies[proxy.id] = proxy
-        logger.info("Updated proxy", proxy_id=proxy.id, host=proxy.host)
-        await event_bus.publish(proxy_changed, self, entity_id=proxy.id, op="updated")
+        for proxy in proxies:
+            self._proxies[proxy.id] = proxy
+            logger.info("Updated proxy", proxy_id=proxy.id, host=proxy.host)
+            await event_bus.publish(proxy_changed, self, entity_id=proxy.id, op="updated")
 
     async def remove_proxy(self, proxy_id: str) -> bool:
         """Remove a proxy from the pool (deletes from Postgres).

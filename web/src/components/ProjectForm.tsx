@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { useState } from 'react'
-import { Eye, EyeOff, Info, AlertTriangle, Shield } from 'lucide-react'
+import { Eye, EyeOff, Info, AlertTriangle, Shield, MapPin } from 'lucide-react'
 import { ProjectCreate, ProjectUpdate, ProjectSummary, downloadCaCertificate } from '../api/client'
 import { RichSelect, RichSelectOption } from './RichSelect'
 import { Button, Input, Select, Textarea, Label, Alert, Inspector, Tabs } from './ui'
@@ -50,7 +50,41 @@ const mitmModeInfo: Record<string, { color: string; icon: typeof Info; text: str
   },
 }
 
-type SettingsTab = 'general' | 'tls'
+type SettingsTab = 'general' | 'tls' | 'location'
+
+const locationPolicyOptions: RichSelectOption[] = [
+  { value: 'off', label: 'Ignore', description: 'Route on the resolved country; contradictions are only recorded' },
+  { value: 'warn', label: 'Warn', description: 'Flag contradicted proxies in the UI, keep routing to them' },
+  { value: 'strict', label: 'Strict', description: 'Contradicted proxies are not eligible for this project\'s requests' },
+]
+
+const preflightOptions: RichSelectOption[] = [
+  { value: 'off', label: 'Off', description: 'No check before forwarding' },
+  { value: 'report', label: 'Report', description: 'Verify the exit once per session, record the result, forward anyway' },
+  { value: 'retry', label: 'Retry', description: 'On a mismatch try other eligible proxies first; an already bound explicit session is rejected instead' },
+  { value: 'reject', label: 'Reject', description: 'Verify once per session; answer 502 when the exit is not where the client asked for' },
+]
+
+/** Named source orders, so the form stays a select rather than a drag list. */
+const sourcePresets: { value: string; label: string; description: string; sources: string[] | null }[] = [
+  { value: 'inherit', label: 'Install default', description: 'Follow Settings → IP attribution', sources: null },
+  { value: 'database', label: 'Databases only', description: 'Only local IP databases decide; vendor claims and echo answers are evidence, never the answer', sources: ['database'] },
+  { value: 'database,endpoint', label: 'Databases, then echo', description: 'Ignore vendor claims for routing. The echo endpoint can only decide when it reports a country; a plain IP echo never does.', sources: ['database', 'endpoint'] },
+  { value: 'database,vendor,endpoint', label: 'Databases, vendor, echo', description: 'Databases first, the vendor when they have no answer, the echo endpoint last and only if it reports a country', sources: ['database', 'vendor', 'endpoint'] },
+  { value: 'vendor,database,endpoint', label: 'Vendor first', description: 'Trust the vendor; databases fill the gaps and still flag contradictions', sources: ['vendor', 'database', 'endpoint'] },
+]
+
+const conflictOptions: RichSelectOption[] = [
+  { value: 'inherit', label: 'Install default', description: 'Follow Settings → IP attribution' },
+  { value: 'consensus', label: 'Consensus', description: 'Every independent source agrees with each other and disagrees with the vendor' },
+  { value: 'first', label: 'First', description: 'The top-ranked independent source disagrees with the vendor' },
+]
+
+function presetFor(sources: string[] | null | undefined): string {
+  if (!sources || sources.length === 0) return 'inherit'
+  const key = sources.join(',')
+  return sourcePresets.some((p) => p.value === key) ? key : 'custom'
+}
 
 interface ProjectFormProps {
   project?: ProjectSummary
@@ -76,6 +110,10 @@ export function ProjectForm({ project, onSave, error, formId }: ProjectFormProps
     tls_mitm_engine: project?.tls_mitm_engine ?? null,
     tls_mitm_browser: project?.tls_mitm_browser ?? null,
     metrics_retention_days: project?.metrics_retention_days ?? 90,
+    location_policy: project?.location_policy ?? 'off',
+    location_preflight: project?.location_preflight ?? 'off',
+    location_sources: project?.location_sources ?? undefined,
+    location_conflict_rule: project?.location_conflict_rule ?? undefined,
   })
   const [showPassword, setShowPassword] = useState(false)
   const [activeTab, setActiveTab] = useState<SettingsTab>('general')
@@ -104,7 +142,7 @@ export function ProjectForm({ project, onSave, error, formId }: ProjectFormProps
   return (
     <form id={formId} onSubmit={(e) => { e.preventDefault(); onSave(formData) }} className="space-y-4">
       <Tabs<SettingsTab>
-        tabs={[{ id: 'general', label: 'General' }, { id: 'tls', label: 'TLS Interception' }]}
+        tabs={[{ id: 'general', label: 'General' }, { id: 'tls', label: 'TLS Interception' }, { id: 'location', label: 'Location' }]}
         active={activeTab}
         onChange={setActiveTab}
       />
@@ -191,6 +229,45 @@ export function ProjectForm({ project, onSave, error, formId }: ProjectFormProps
               </button>
             </p>
           )}
+        </div>
+      )}
+
+      {activeTab === 'location' && (
+        <div className="space-y-3">
+          <div>
+            <Label className="text-xs">Contradicted vendor locations</Label>
+            <RichSelect options={locationPolicyOptions} value={formData.location_policy ?? 'off'} onChange={(v) => setFormData({ ...formData, location_policy: v as ProjectCreate['location_policy'] })} />
+          </div>
+          <div>
+            <Label className="text-xs">Preflight check</Label>
+            <RichSelect options={preflightOptions} value={formData.location_preflight ?? 'off'} onChange={(v) => setFormData({ ...formData, location_preflight: v as ProjectCreate['location_preflight'] })} />
+          </div>
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <Label className="text-xs">Which source decides</Label>
+              <RichSelect
+                options={[
+                  ...sourcePresets.map((p) => ({ value: p.value, label: p.label, description: p.description })),
+                  ...(presetFor(formData.location_sources) === 'custom' ? [{ value: 'custom', label: 'Custom', description: (formData.location_sources ?? []).join(', ') }] : []),
+                ]}
+                value={presetFor(formData.location_sources)}
+                onChange={(v) => {
+                  const preset = sourcePresets.find((p) => p.value === v)
+                  if (preset) setFormData({ ...formData, location_sources: (preset.sources ?? []) as ProjectCreate['location_sources'] })
+                }}
+              />
+            </div>
+            <div>
+              <Label className="text-xs">Vendor contradicted when</Label>
+              <RichSelect options={conflictOptions} value={formData.location_conflict_rule || 'inherit'} onChange={(v) => setFormData({ ...formData, location_conflict_rule: (v === 'inherit' ? '' : v) as ProjectCreate['location_conflict_rule'] })} />
+            </div>
+          </div>
+          <div className="flex gap-2 p-3 rounded-lg border border-line bg-surface-raised/50 text-xs leading-relaxed text-fg-muted">
+            <MapPin className="w-4 h-4 flex-shrink-0 mt-0.5" />
+            <span>
+              Attribution compares each exit IP against the local IP databases and the echo endpoint (Settings → IP attribution). A proxy whose vendor-declared country is contradicted is flagged; <strong>strict</strong> keeps it out of this project's routing. Preflight verifies a session's exit before its first request is forwarded, at the cost of one extra round trip per session; <strong>retry</strong> moves to another proxy on a mismatch and <strong>reject</strong> answers 502. A misplaced vendor session is rotated either way.
+            </span>
+          </div>
         </div>
       )}
     </form>

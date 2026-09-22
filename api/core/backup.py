@@ -5,8 +5,9 @@
 
 Produces / consumes a passphrase-encrypted, self-contained backup file
 covering every persistent entity (users, projects, credentials, connectors,
-proxies and - optionally - historical metrics). See
-:mod:`api.models.backup` for the file format.
+proxies, IP attribution settings and database rows, and - optionally -
+historical metrics with the attribution history, and the IP database files
+themselves). See :mod:`api.models.backup` for the file format.
 
 Security model: the payload is gzipped JSON encrypted with Fernet (AES-128-CBC
 + HMAC). The key is derived from the admin's passphrase via PBKDF2-HMAC-SHA256
@@ -28,15 +29,20 @@ import structlog
 from cryptography.fernet import Fernet, InvalidToken
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
-from sqlalchemy import DateTime, delete, inspect, select, text
+from sqlalchemy import DateTime, LargeBinary, delete, inspect, select, text
 from sqlalchemy.engine import Result
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.core import utc_now
 from api.db.base import Base
 from api.db.models import (
+    ConnectorExitIpModel,
     ConnectorModel,
     CredentialModel,
+    GeoDatabaseBlobModel,
+    GeoDatabaseModel,
+    GeoSettingsModel,
+    IpObservationModel,
     ProjectMetricsModel,
     ProjectModel,
     ProviderAuditModel,
@@ -67,6 +73,9 @@ class _EntitySpec:
     key: str
     model: type[Base]
     is_metric: bool = False
+    # IP database bytes: exported only when the admin asks, since a city
+    # database is around a hundred megabytes.
+    is_database_file: bool = False
     # Metrics use an auto-increment integer PK that is referenced by nothing;
     # preserving it would clash with the table's sequence on later inserts, so
     # we drop it on import and let the sequence assign fresh ids.
@@ -84,6 +93,14 @@ _ENTITY_SPECS: tuple[_EntitySpec, ...] = (
     _EntitySpec("project_metrics", ProjectMetricsModel, is_metric=True, preserve_id=False),
     _EntitySpec("provider_descriptors", ProviderDescriptorModel),
     _EntitySpec("provider_audit_log", ProviderAuditModel),
+    # IP attribution. Settings and database rows are configuration and always
+    # travel; the files are opt-in; the history rides the metrics flag. The
+    # exit aggregate references connectors, so it comes after them.
+    _EntitySpec("geo_settings", GeoSettingsModel),
+    _EntitySpec("geo_databases", GeoDatabaseModel),
+    _EntitySpec("geo_database_blobs", GeoDatabaseBlobModel, is_database_file=True),
+    _EntitySpec("ip_observations", IpObservationModel, is_metric=True, preserve_id=False),
+    _EntitySpec("connector_exit_ips", ConnectorExitIpModel, is_metric=True),
 )
 
 
@@ -138,6 +155,15 @@ def _datetime_attrs(model: type[Base]) -> set[str]:
     }
 
 
+def _binary_attrs(model: type[Base]) -> set[str]:
+    """Names of column attributes whose SQL type is LargeBinary (carried as base64)."""
+    return {
+        attr.key
+        for attr in inspect(model).column_attrs
+        if isinstance(attr.columns[0].type, LargeBinary)
+    }
+
+
 def _dump_row(instance: Base) -> dict[str, Any]:
     """Serialize an ORM instance to a JSON-safe dict of all its columns."""
     row: dict[str, Any] = {}
@@ -145,6 +171,8 @@ def _dump_row(instance: Base) -> dict[str, Any]:
         value = getattr(instance, name)
         if isinstance(value, datetime):
             value = value.isoformat()
+        elif isinstance(value, bytes | memoryview):
+            value = base64.b64encode(bytes(value)).decode("ascii")
         row[name] = value
     return row
 
@@ -157,6 +185,7 @@ def _build_model(spec: _EntitySpec, row: dict[str, Any]) -> Base:
     guarantees the column set matches.
     """
     dt_attrs = _datetime_attrs(spec.model)
+    bin_attrs = _binary_attrs(spec.model)
     valid = set(_column_attrs(spec.model))
     kwargs: dict[str, Any] = {}
     for name, value in row.items():
@@ -166,6 +195,8 @@ def _build_model(spec: _EntitySpec, row: dict[str, Any]) -> Base:
             continue
         if name in dt_attrs and isinstance(value, str):
             value = datetime.fromisoformat(value)
+        elif name in bin_attrs and isinstance(value, str):
+            value = base64.b64decode(value)
         kwargs[name] = value
     return spec.model(**kwargs)
 
@@ -196,11 +227,15 @@ def _app_version() -> str:
 # --------------------------------------------------------------------------- #
 
 
-async def export_payload(session: AsyncSession, include_metrics: bool) -> dict[str, Any]:
+async def export_payload(
+    session: AsyncSession, include_metrics: bool, include_database_files: bool = False
+) -> dict[str, Any]:
     """Read every entity from the DB into a serializable payload dict."""
     payload: dict[str, Any] = {}
     for spec in _ENTITY_SPECS:
-        if spec.is_metric and not include_metrics:
+        if (spec.is_metric and not include_metrics) or (
+            spec.is_database_file and not include_database_files
+        ):
             payload[spec.key] = []
             continue
         result: Result[Any] = await session.execute(select(spec.model))
@@ -214,6 +249,7 @@ def build_backup_file(
     *,
     schema_version: str,
     include_metrics: bool,
+    include_database_files: bool = False,
 ) -> bytes:
     """Encrypt a payload and wrap it in the JSON envelope, returning file bytes."""
     salt = os.urandom(16)
@@ -228,6 +264,7 @@ def build_backup_file(
         app_version=_app_version(),
         schema_version=schema_version,
         includes_metrics=include_metrics,
+        includes_database_files=include_database_files,
         kdf=BackupKdf(
             iterations=PBKDF2_ITERATIONS,
             salt=base64.b64encode(salt).decode("ascii"),
@@ -264,8 +301,7 @@ def check_compatibility(envelope: BackupEnvelope, current_schema_version: str) -
         raise BackupIncompatibleError("This file is not an Octoprox backup.")
     if envelope.format_version > BACKUP_FORMAT_VERSION:
         raise BackupIncompatibleError(
-            "Backup was created by a newer version of Octoprox; "
-            "upgrade this instance to import it."
+            "Backup was created by a newer version of Octoprox; upgrade this instance to import it."
         )
     if envelope.schema_version != current_schema_version:
         raise BackupIncompatibleError(
@@ -283,9 +319,7 @@ def decrypt_payload(envelope: BackupEnvelope, passphrase: str) -> BackupPayload:
         token = base64.b64decode(envelope.ciphertext)
         compressed = Fernet(key).decrypt(token)
     except (InvalidToken, ValueError) as exc:
-        raise BackupDecryptError(
-            "Incorrect passphrase or corrupt backup file."
-        ) from exc
+        raise BackupDecryptError("Incorrect passphrase or corrupt backup file.") from exc
     raw = gzip.decompress(compressed)
     return BackupPayload.model_validate(json.loads(raw))
 
@@ -299,9 +333,7 @@ class ImportResult:
     old_proxy_ids: list[str]
 
 
-def _resolve_user_conflicts(
-    rows: list[dict[str, Any]], kept: dict[str, Any]
-) -> list[UserConflict]:
+def _resolve_user_conflicts(rows: list[dict[str, Any]], kept: dict[str, Any]) -> list[UserConflict]:
     """Mutate imported user rows so none collide with the kept (current) user.
 
     Users are referenced by nothing else in the schema, so an imported user
@@ -377,20 +409,21 @@ async def replace_all(
         kept_row = _dump_row(kept_user)
 
     # Capture pre-wipe ids for downstream Redis cleanup.
-    old_project_ids = list(
-        (await session.execute(select(ProjectModel.id))).scalars().all()
-    )
-    old_proxy_ids = list(
-        (await session.execute(select(ProxyModel.id))).scalars().all()
-    )
+    old_project_ids = list((await session.execute(select(ProjectModel.id))).scalars().all())
+    old_proxy_ids = list((await session.execute(select(ProxyModel.id))).scalars().all())
 
     # Deleting projects cascades (DB-level ON DELETE CASCADE) to credentials,
     # connectors, proxies and both metrics tables. Users are independent.
     await session.execute(delete(ProjectModel))
     # Provider descriptors are global (not project-scoped) and their audit log
-    # has no FK, so both are wiped explicitly.
+    # has no FK, so both are wiped explicitly. Likewise the attribution
+    # settings row, the database rows (their blobs cascade) and the raw
+    # observations; the exit aggregate cascades with connectors.
     await session.execute(delete(ProviderAuditModel))
     await session.execute(delete(ProviderDescriptorModel))
+    await session.execute(delete(GeoSettingsModel))
+    await session.execute(delete(GeoDatabaseModel))
+    await session.execute(delete(IpObservationModel))
     if keep_user_id is not None:
         await session.execute(delete(UserModel).where(UserModel.id != keep_user_id))
     else:

@@ -102,5 +102,9 @@ class StickySessionStrategy(RoutingStrategy):
         if redis_client is not None and project_id is not None:
             await redis_client.set_sticky_binding(project_id, session_id, proxy.id)
 
+    def allows_exit_reselection(self, session_id: str | None) -> bool:
+        """A session under sticky routing was promised one exit; a misplaced exit fails it rather than moving it."""
+        return session_id is None
+
     def reset(self) -> None:
         self._session_map.clear()

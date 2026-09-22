@@ -46,9 +46,9 @@ proxy:
   # made through each new proxy to learn its IP and country for -cc- routing.
   geo_lookup:
     enabled: true
-    url: https://lumtest.com/myip.json
-    ip_path: ip
-    country_path: country
+    url: https://httpbin.org/ip
+    ip_path: origin
+    country_path: ""
     timeout_seconds: 15
 
   connection:

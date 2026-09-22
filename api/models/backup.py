@@ -32,6 +32,12 @@ ENTITY_KEYS = (
     "project_metrics",
     "provider_descriptors",
     "provider_audit_log",
+    # IP attribution: configuration always, database files and history optionally.
+    "geo_settings",
+    "geo_databases",
+    "geo_database_blobs",
+    "ip_observations",
+    "connector_exit_ips",
 )
 
 
@@ -52,6 +58,8 @@ class BackupEnvelope(BaseModel):
     app_version: str
     schema_version: str
     includes_metrics: bool
+    # IP database files (tens to hundreds of megabytes each) travel only on request.
+    includes_database_files: bool = False
     kdf: BackupKdf
     ciphertext: str  # base64 Fernet token of gzip(json(payload))
 
@@ -68,13 +76,21 @@ class BackupPayload(BaseModel):
     project_metrics: list[dict[str, Any]] = Field(default_factory=list)
     provider_descriptors: list[dict[str, Any]] = Field(default_factory=list)
     provider_audit_log: list[dict[str, Any]] = Field(default_factory=list)
+    geo_settings: list[dict[str, Any]] = Field(default_factory=list)
+    geo_databases: list[dict[str, Any]] = Field(default_factory=list)
+    geo_database_blobs: list[dict[str, Any]] = Field(default_factory=list)
+    ip_observations: list[dict[str, Any]] = Field(default_factory=list)
+    connector_exit_ips: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class ExportRequest(BaseModel):
     """Request body for the export endpoint."""
 
     passphrase: str = Field(min_length=8)
+    # History: proxy and project metrics, plus IP attribution observations and aggregates.
     include_metrics: bool = False
+    # The bytes of uploaded and downloaded IP databases. Their rows are always included.
+    include_database_files: bool = False
 
 
 class UserConflict(BaseModel):
@@ -104,5 +120,10 @@ class ImportSummary(BaseModel):
     project_metrics: int = 0
     provider_descriptors: int = 0
     provider_audit_log: int = 0
+    geo_settings: int = 0
+    geo_databases: int = 0
+    geo_database_blobs: int = 0
+    ip_observations: int = 0
+    connector_exit_ips: int = 0
     kept_current_user: bool = False
     user_conflicts: list[UserConflict] = Field(default_factory=list)

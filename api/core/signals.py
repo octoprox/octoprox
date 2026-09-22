@@ -183,3 +183,40 @@ provider_changed = signal("provider-changed")
 # Args: entity_id (proxy_id, str), op (Literal["quarantined", "released"])
 proxy_quarantine_changed = signal("proxy-quarantine-changed")
 
+
+# Emitted by the geo routes and the database updater after an IP database is
+# uploaded, changed, deleted or refreshed. Cross-instance: receivers re-read the
+# row (and fetch the new file when the checksum moved) into their GeoDatabaseStore.
+# Sender: geo route / GeoDatabaseUpdater
+# Args: entity_id (database id, str), op (Literal["added", "updated", "removed"])
+geo_database_changed = signal("geo-database-changed")
+
+# Emitted after the install-wide IP attribution settings row is written.
+# Cross-instance: receivers reload it from Postgres.
+# Sender: the geo settings route
+# Args: entity_id ("default"), op (Literal["updated"])
+geo_settings_changed = signal("geo-settings-changed")
+
+# Emitted in-process whenever a code path learns which IP a proxy exits from:
+# the provider syncer after discovery, the health checker after a check whose
+# response carried the caller's address. Local only; the ProxyAttributor
+# subscribes and writes the attribution onto the proxy.
+# Sender: ProxyProviderSyncer / HealthChecker
+# Args: proxy_id (str), ip (str), source (ObservationSource value, str), endpoint_country (str | None)
+exit_ip_observed = signal("exit-ip-observed")
+
+# Emitted in-process by the ProxyAttributor when a sighting shows a proxy
+# exiting from a different IP than the one recorded on it. Local only; the
+# PreflightChecker subscribes and forgets the verdict it cached for the proxy,
+# so the next request through it is verified against the new exit rather than
+# trusted for the rest of the session TTL.
+# Sender: ProxyAttributor
+# Args: proxy_id (str), project_id (str | None), old_ip (str), new_ip (str)
+exit_ip_changed = signal("exit-ip-changed")
+
+# Emitted by the ExitVerifier when preflight finds a proxy exiting somewhere
+# other than the country the request needed. Local only; the ProxyAttributor
+# rotates a vendor-session slot or flags a fixed exit as contradicted.
+# Sender: ExitVerifier
+# Args: proxy_id (str), project_id (str), expected (str), observed (str | None), ip (str | None)
+exit_location_mismatch = signal("exit-location-mismatch")

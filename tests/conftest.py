@@ -136,6 +136,11 @@ async def db_session(
         await conn.execute(text("TRUNCATE TABLE users CASCADE"))
         await conn.execute(text("TRUNCATE TABLE provider_audit_log CASCADE"))
         await conn.execute(text("TRUNCATE TABLE provider_descriptors CASCADE"))
+        await conn.execute(text("TRUNCATE TABLE ip_observations CASCADE"))
+        await conn.execute(text("TRUNCATE TABLE connector_exit_ips CASCADE"))
+        await conn.execute(text("TRUNCATE TABLE geo_database_blobs CASCADE"))
+        await conn.execute(text("TRUNCATE TABLE geo_databases CASCADE"))
+        await conn.execute(text("TRUNCATE TABLE geo_settings CASCADE"))
         await conn.commit()
 
 

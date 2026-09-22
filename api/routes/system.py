@@ -45,8 +45,8 @@ async def get_system_stats(request: Request, session: DbDep, _admin: RequireAdmi
         settings,
         proxy_manager=getattr(state, "proxy_manager", None),
         proxy_server=getattr(state, "proxy_server", None),
-        geo_lookup=getattr(state, "geo_lookup", None),
         cert_manager=getattr(state, "cert_manager", None),
+        geo_runtime=getattr(state, "geo_runtime", None),
         redis_client=getattr(state, "redis_client", None),
         started_at=getattr(state, "started_at", None),
     )

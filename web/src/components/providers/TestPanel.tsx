@@ -2,9 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { useEffect, useMemo, useState, type ReactNode } from 'react'
-import { useMutation } from '@tanstack/react-query'
+import { useMutation, useQuery } from '@tanstack/react-query'
 import { Play } from 'lucide-react'
-import { ProviderField, ProviderSummary, ProviderTestAction, ProviderTestResponse, testProvider } from '../../api/client'
+import { ProviderField, ProviderSummary, ProviderTestAction, ProviderTestResponse, fetchGeoSettings, testProvider } from '../../api/client'
 import { Alert, Badge, Button, Select } from '../ui'
 import { SchemaForm, FormValues, defaultValues, serializeValues } from '../SchemaForm'
 import { Field, Spec, TextField } from './editors'
@@ -122,7 +122,8 @@ export function TestPanel({ spec, presets, stored }: {
   const pseudoProvider = stored ?? ({ id: spec.id ?? 'draft', name: spec.name ?? 'Draft', egress_hosts: [], has_validation: !!spec.validation } as unknown as ProviderSummary)
   // Dynamic selects on a draft resolve against the in-editor descriptor (admin-only server-side).
   const draftSpec = stored ? undefined : spec
-  const healthcheckPlaceholder = proxyTypes.find((t: Spec) => t.healthcheck_url)?.healthcheck_url ?? 'https://httpbin.org/ip'
+  const { data: geoSettings } = useQuery({ queryKey: ['geo-settings'], queryFn: fetchGeoSettings, staleTime: 60_000 })
+  const healthcheckPlaceholder = proxyTypes.find((t: Spec) => t.healthcheck_url)?.healthcheck_url ?? geoSettings?.settings.echo_url ?? 'https://httpbin.org/ip'
 
   const mutation = useMutation({
     mutationFn: () => testProvider(spec.id ?? 'draft', {

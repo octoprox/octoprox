@@ -204,6 +204,23 @@ class TestDiscoveryCountry:
         to_add, _ = await provider.sync_proxies([])
         assert to_add[0].metadata["country"] == "GB"
         assert to_add[0].country == "GB"
+        # ip.oxylabs.io is the vendor's own service, so its country is the vendor's claim.
+        assert to_add[0].metadata["vendor_country"] == "GB"
+        assert "endpoint_country" not in to_add[0].metadata
+
+    async def test_third_party_discovery_country_is_evidence_not_claim(self, builtins: dict[str, ProviderDescriptor]) -> None:
+        descriptor = builtins["oxylabs"].model_copy(deep=True)
+        isp = next(t for t in descriptor.proxy_types if t.key == "isp")
+        assert isp.discovery is not None
+        isp.discovery.vendor_operated = False
+        vendor = MockVendor(api_handler=lambda r: json_response({}))
+        vendor.discovery_handler = lambda r: json_response({"ip": "1.1.1.1", "providers": {"maxmind": {"country": "gb"}}})
+        credential = make_credential("oxylabs", {"proxy_type": "isp", "username": "alice", "password": "pw"})
+        provider = DescriptorProvider(descriptor, make_connector("oxylabs", {"num_proxies": 1}), credential, vendor.runtime())
+        to_add, _ = await provider.sync_proxies([])
+        assert to_add[0].metadata["country"] == "GB"
+        assert to_add[0].metadata["endpoint_country"] == "GB"
+        assert "vendor_country" not in to_add[0].metadata
 
     async def test_decodo_discovery_records_country(self, builtins: dict[str, ProviderDescriptor]) -> None:
         vendor = MockVendor(api_handler=lambda r: json_response({}))
@@ -399,16 +416,40 @@ class TestRefreshReportsOnlyChanges:
         provider = DescriptorProvider(builtins["oxylabs"], make_connector("oxylabs", {"num_proxies": 10}), credential, vendor.runtime())
         proxies = [
             Proxy(id=f"p{p}", host="isp.oxylabs.io", port=p, connector_id="conn-1", status=ProxyStatus.HEALTHY,
-                  metadata={"discovered_ip": f"1.1.1.{p - 8000}", "country": "US"})
+                  metadata={"discovered_ip": f"1.1.1.{p - 8000}", "country": "US", "vendor_country": "US"})
             for p in range(8001, 8011)
         ]
-        proxies[3].metadata["country"] = "CA"  # stale location, as after a release that added country_path
+        proxies[3].metadata["vendor_country"] = "CA"  # the vendor's answer moved
+        # Attribution resolved a different country than the vendor claims; that
+        # is not a change in what the vendor says, so the refresh leaves it alone.
+        proxies[5].metadata["country"] = "CA"
+        # Predates the claim key: the claim is put on record once.
+        del proxies[7].metadata["vendor_country"]
 
         updated, to_remove = await provider.refresh_ips(proxies)
 
         assert len(vendor.discovery_requests) == 10  # every proxy probed
         assert to_remove == []
-        assert [p.id for p in updated] == ["p8004"] and updated[0].metadata["country"] == "US"
+        assert [p.id for p in updated] == ["p8004", "p8008"]
+        assert all(p.metadata["vendor_country"] == "US" for p in updated)
+        assert proxies[5].metadata["country"] == "CA"
+
+    async def test_refresh_relabels_country_recorded_as_evidence_before_the_flag(self, builtins: dict[str, ProviderDescriptor]) -> None:
+        """A proxy attributed before the descriptor said the URL is the vendor's carries the wrong key; one refresh fixes it."""
+        vendor = MockVendor(api_handler=lambda r: json_response({}))
+        vendor.discovery_handler = _geo_discovery_by_port({8001: ("1.1.1.1", "US"), 8002: ("1.1.1.2", "US")})(vendor)
+        credential = make_credential("oxylabs", {"proxy_type": "isp", "username": "alice", "password": "pw"})
+        provider = DescriptorProvider(builtins["oxylabs"], make_connector("oxylabs", {"num_proxies": 2}), credential, vendor.runtime())
+        proxies = [
+            Proxy(id="stale", host="isp.oxylabs.io", port=8001, connector_id="conn-1",
+                  metadata={"discovered_ip": "1.1.1.1", "country": "CA", "endpoint_country": "US"}),
+            Proxy(id="fine", host="isp.oxylabs.io", port=8002, connector_id="conn-1",
+                  metadata={"discovered_ip": "1.1.1.2", "country": "US", "vendor_country": "US"}),
+        ]
+        updated, to_remove = await provider.refresh_ips(proxies)
+        assert to_remove == [] and [p.id for p in updated] == ["stale"]
+        assert proxies[0].metadata["vendor_country"] == "US"
+        assert "endpoint_country" not in proxies[0].metadata
 
     async def test_failed_probe_leaves_proxy_untouched(self, builtins: dict[str, ProviderDescriptor]) -> None:
         vendor = MockVendor(api_handler=lambda r: json_response({}))

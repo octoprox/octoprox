@@ -4,7 +4,7 @@
 import { useState, useRef, useMemo, useCallback, useEffect } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { ColumnDef, VisibilityState } from '@tanstack/react-table'
-import { Plus, Trash2, Upload, Lock, ShieldOff, MapPin } from 'lucide-react'
+import { Plus, Trash2, Upload, Lock, ShieldOff, MapPin, AlertTriangle } from 'lucide-react'
 import {
   fetchProjectProxies, fetchProjectConnectors, createProjectProxy, updateProjectProxy, deleteProjectProxy,
   unquarantineProjectProxy, uploadProjectProxies, locateProjectProxy, Proxy, ProxyCreate, ProxyUpdate, ProxyUploadResponse, CredentialType,
@@ -123,9 +123,15 @@ export default function ProxiesPage() {
       header: 'Country',
       size: 90,
       meta: { filterVariant: 'select' as const },
-      cell: ({ getValue }) => {
+      cell: ({ row, getValue }) => {
         const code = getValue<string>()
-        return code ? <span className="font-mono text-xs font-medium">{code}</span> : <span className="text-fg-subtle">-</span>
+        if (!code) return <span className="text-fg-subtle">-</span>
+        return (
+          <span className="inline-flex items-center gap-1 font-mono text-xs font-medium" title={row.original.location_conflict ? `Vendor claimed ${row.original.vendor_country ?? '?'}; attribution says ${code}` : row.original.country_source ? `From ${row.original.country_source}` : undefined}>
+            {code}
+            {row.original.location_conflict && <AlertTriangle className="w-3 h-3 text-danger" />}
+          </span>
+        )
       },
     },
     {
@@ -439,8 +445,23 @@ function ProxyPanel({ proxy, connectorType, canMutate, onClose, onRelease, onDel
         </form>
       </InspectorSection>
 
+      <InspectorSection title="Location">
+        <KeyValue label="Country" value={proxy.country ? <span className="inline-flex items-center gap-1.5">{proxy.country}{proxy.country_source && <span className="text-fg-subtle font-sans text-xs">via {proxy.country_source}</span>}</span> : '-'} mono />
+        {proxy.vendor_country && <KeyValue label="Vendor claimed" value={proxy.vendor_country} mono />}
+        {proxy.location_conflict && (
+          <div className="flex gap-2 p-2.5 rounded-lg bg-danger-soft text-danger text-xs leading-relaxed">
+            <AlertTriangle className="w-3.5 h-3.5 flex-shrink-0 mt-0.5" />
+            <span>The vendor's declared location is contradicted by attribution. Projects with a strict location policy skip this proxy.</span>
+          </div>
+        )}
+        {proxy.location?.city || proxy.location?.region ? <KeyValue label="Place" value={[proxy.location.city, proxy.location.region].filter(Boolean).join(', ')} /> : null}
+        {proxy.location?.asn ? <KeyValue label="Network" value={`AS${proxy.location.asn}${proxy.location.organization ? ` ${proxy.location.organization}` : ''}`} /> : null}
+        {(proxy.location?.is_hosting || proxy.location?.is_vpn || proxy.location?.is_public_proxy || proxy.location?.is_tor || proxy.location?.is_residential_proxy) && (
+          <KeyValue label="Flags" value={[proxy.location.is_hosting && 'hosting', proxy.location.is_vpn && 'VPN', proxy.location.is_public_proxy && 'public proxy', proxy.location.is_tor && 'Tor', proxy.location.is_residential_proxy && 'residential proxy'].filter(Boolean).join(', ')} />
+        )}
+      </InspectorSection>
+
       <InspectorSection title="Details">
-        <KeyValue label="Country" value={proxy.country || '-'} mono />
         <KeyValue label="Upstream host" value={proxy.host} mono />
         <KeyValue label="Successes" value={proxy.success_count.toLocaleString()} />
         <KeyValue label="Added" value={formatDateTime(proxy.created_at)} />

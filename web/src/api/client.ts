@@ -121,9 +121,21 @@ export interface Project {
   tls_mitm_engine: string | null
   tls_mitm_browser: string | null
   metrics_retention_days: number
+  /** IP attribution: what a contradicted vendor location does to this project's proxies. */
+  location_policy: LocationPolicy
+  /** IP attribution: verify a session's exit before its first request. */
+  location_preflight: PreflightMode
+  /** Source precedence override; null inherits the install default. */
+  location_sources: GeoSourceKind[] | null
+  /** Conflict rule override; null inherits the install default. */
+  location_conflict_rule: ConflictRule | null
   created_at: string
   updated_at: string
 }
+
+export type LocationPolicy = 'off' | 'warn' | 'strict'
+export type PreflightMode = 'off' | 'report' | 'retry' | 'reject'
+export type ConflictRule = 'consensus' | 'first'
 
 export interface ProjectSummary extends Project {
   credential_count: number
@@ -151,6 +163,10 @@ export interface ProjectCreate {
   tls_mitm_engine?: string | null
   tls_mitm_browser?: string | null
   metrics_retention_days?: number
+  location_policy?: LocationPolicy
+  location_preflight?: PreflightMode
+  location_sources?: GeoSourceKind[] | null
+  location_conflict_rule?: ConflictRule | null
 }
 
 export interface ProjectUpdate {
@@ -167,6 +183,12 @@ export interface ProjectUpdate {
   tls_mitm_engine?: string | null
   tls_mitm_browser?: string | null
   metrics_retention_days?: number
+  location_policy?: LocationPolicy
+  location_preflight?: PreflightMode
+  /** An empty list clears the override. */
+  location_sources?: GeoSourceKind[] | null
+  /** An empty string clears the override. */
+  location_conflict_rule?: ConflictRule | '' | null
 }
 
 export interface Proxy {
@@ -191,9 +213,320 @@ export interface Proxy {
   quarantined: boolean
   quarantine_remaining_seconds: number
   country: string | null  // Exit country (ISO code) when discovered or provisioned per geo
+  /** Which source produced `country`: database, vendor, endpoint or manual. */
+  country_source: string | null
+  /** What the vendor claimed for this exit, when it made a claim. */
+  vendor_country: string | null
+  /** Attribution contradicts the vendor's claim (see the project's location policy). */
+  location_conflict: boolean
+  /** Full record from the IP databases, when any covers the exit IP. */
+  location: IpLocation | null
   tags: string[]
   created_at: string
 }
+
+// --- IP attribution -----------------------------------------------------------------
+
+export interface IpLocation {
+  country?: string | null
+  region?: string | null
+  city?: string | null
+  postal_code?: string | null
+  latitude?: number | null
+  longitude?: number | null
+  asn?: number | null
+  organization?: string | null
+  is_anonymous?: boolean | null
+  is_hosting?: boolean | null
+  is_vpn?: boolean | null
+  is_public_proxy?: boolean | null
+  is_tor?: boolean | null
+  is_residential_proxy?: boolean | null
+}
+
+export type GeoSourceKind = 'database' | 'vendor' | 'endpoint'
+
+export interface SourcePolicy {
+  sources: GeoSourceKind[]
+  conflict_rule: ConflictRule
+}
+
+/** Install-wide attribution settings (one typed row). Projects inherit the default_* judgement. */
+export interface GeoSettingsDoc {
+  default_sources: GeoSourceKind[]
+  default_conflict_rule: ConflictRule
+  echo_url: string
+  echo_ip_path: string
+  echo_country_path: string | null
+  echo_timeout_seconds: number
+  health_check_attribution: boolean
+  preflight_session_ttl_seconds: number
+  preflight_max_attempts: number
+  observation_retention_days: number
+  exit_ip_retention_days: number
+}
+
+export interface LoadedGeoDatabase {
+  id: string
+  name: string
+  vendor: string
+  kind: string
+  format: string
+  source: string
+  priority: number
+  path: string
+  size_bytes: number
+  database_type: string
+  build_epoch: string | null
+  record_count: number
+}
+
+export interface GeoSettings {
+  settings: GeoSettingsDoc
+  from_database: boolean
+  echo_enabled: boolean
+  echo_trusted_proxies: string[]
+  databases_loaded: LoadedGeoDatabase[]
+}
+
+export interface GeoDatabase {
+  id: string
+  name: string
+  vendor: string
+  kind: string
+  format: string
+  source: 'upload' | 'url' | 'path'
+  enabled: boolean
+  priority: number
+  path: string | null
+  sha256: string
+  size_bytes: number
+  database_type: string
+  build_epoch: string | null
+  record_count: number
+  ip_version: number
+  languages: string[]
+  description: string
+  attribution: string
+  update_url: string | null
+  update_interval_hours: number
+  update_auth: Record<string, unknown>
+  last_update_at: string | null
+  last_update_error: string | null
+  uploaded_by: string | null
+  version: number
+  created_at: string
+  updated_at: string
+  loaded_here: boolean
+  load_error: string | null
+  has_file: boolean
+}
+
+export interface GeoDatabaseUpdate {
+  name?: string
+  enabled?: boolean
+  priority?: number
+  update_url?: string | null
+  update_interval_hours?: number
+  update_auth?: Record<string, unknown>
+}
+
+export interface GeoDatabaseFromUrl {
+  name: string
+  update_url: string
+  update_interval_hours: number
+  update_auth: Record<string, unknown>
+  priority: number
+  enabled: boolean
+}
+
+export interface GeoLookupCandidate {
+  source: GeoSourceKind
+  origin: string
+  country: string | null
+  location: IpLocation | null
+}
+
+export interface GeoResolution {
+  country: string | null
+  source: GeoSourceKind | null
+  origin: string | null
+  conflict: boolean
+  disagreement: boolean
+  claimed_country: string | null
+  location: IpLocation | null
+}
+
+export interface GeoLookupResponse {
+  ip: string
+  resolution: GeoResolution
+  policy: SourcePolicy
+  candidates: GeoLookupCandidate[]
+  databases_loaded: number
+}
+
+export interface IpObservation {
+  id: number
+  observed_at: string
+  proxy_id: string | null
+  connector_id: string | null
+  connector_name: string | null
+  project_id: string | null
+  project_name: string | null
+  session_id: string | null
+  source: string
+  ip: string
+  claimed_country: string | null
+  endpoint_country: string | null
+  resolved_country: string | null
+  resolved_source: string | null
+  conflict: boolean
+  disagreement: boolean
+  candidates: { source: string; origin: string; country: string | null }[]
+  instance_id: string
+}
+
+/** A contradicted pair: what the vendor claimed, what attribution resolved, how many exits. */
+export interface ClaimBreakdown {
+  claimed_country: string | null
+  observed_country: string | null
+  exits: number
+}
+
+/** A connector's distinct exits in the window and how their vendor claims were judged, each exit once. */
+export interface ConnectorAccuracy {
+  connector_id: string
+  connector_name: string | null
+  project_id: string | null
+  exits: number
+  claimed: number
+  confirmed: number
+  contradicted: number
+  uncertain: number
+  accuracy: number | null
+  breakdown: ClaimBreakdown[]
+}
+
+export interface GeoAccuracyResponse {
+  since: string
+  connectors: ConnectorAccuracy[]
+}
+
+export interface ConnectorExits {
+  connector_id: string
+  connector_name: string | null
+  project_id: string | null
+  unique_total: number
+  unique_in_window: number
+  sightings: number
+  reused: number
+  max_sightings: number
+  last_seen: string | null
+}
+
+export interface GeoExitsResponse {
+  since: string
+  connectors: ConnectorExits[]
+}
+
+/** One distinct exit of a connector, with the state of its latest observation. */
+export interface ExitIp {
+  connector_id: string
+  connector_name: string | null
+  project_id: string | null
+  project_name: string | null
+  ip: string
+  first_seen: string
+  last_seen: string
+  sightings: number
+  country: string | null
+  proxy_id: string | null
+  source: string | null
+  claimed_country: string | null
+  resolved_source: string | null
+  conflict: boolean
+  disagreement: boolean
+}
+
+export interface ExitIpFilters {
+  project_id?: string
+  connector_id?: string
+  ip?: string
+  proxy_id?: string
+  country?: string
+  claimed_country?: string
+  verdict?: ObservationVerdict
+}
+
+export interface ExitIpsPage {
+  ips: ExitIp[]
+  total: number
+  limit: number
+  offset: number
+}
+
+export interface GeoStatus {
+  databases_loaded: number
+  databases_total: number
+  load_errors: Record<string, string>
+  policy_from_database: boolean
+  pending_observations: number
+  published_observations: number
+  dropped_observations: number
+  stored_observations: number
+  preflight_checks: number
+  preflight_rejections: number
+}
+
+export const fetchGeoSettings = async (): Promise<GeoSettings> => (await api.get('/geo/settings')).data
+export const updateGeoSettings = async (doc: GeoSettingsDoc): Promise<GeoSettings> => (await api.put('/geo/settings', doc)).data
+export const fetchGeoDatabases = async (): Promise<GeoDatabase[]> => (await api.get('/geo/databases')).data.databases
+export const uploadGeoDatabase = async (file: File, opts: { name?: string; priority?: number; enabled?: boolean } = {}): Promise<GeoDatabase> => {
+  const formData = new FormData()
+  formData.append('file', file)
+  if (opts.name) formData.append('name', opts.name)
+  if (opts.priority !== undefined) formData.append('priority', String(opts.priority))
+  if (opts.enabled !== undefined) formData.append('enabled', opts.enabled ? 'true' : 'false')
+  return (await api.post('/geo/databases', formData, { headers: { 'Content-Type': 'multipart/form-data' } })).data
+}
+export const addGeoDatabaseFromUrl = async (data: GeoDatabaseFromUrl): Promise<GeoDatabase> => (await api.post('/geo/databases/from-url', data)).data
+export const updateGeoDatabase = async (id: string, data: GeoDatabaseUpdate): Promise<GeoDatabase> => (await api.patch(`/geo/databases/${id}`, data)).data
+export const refreshGeoDatabase = async (id: string): Promise<GeoDatabase> => (await api.post(`/geo/databases/${id}/refresh`)).data
+export const deleteGeoDatabase = async (id: string): Promise<void> => { await api.delete(`/geo/databases/${id}`) }
+export const lookupGeoIp = async (ip: string, claimedCountry?: string, projectId?: string): Promise<GeoLookupResponse> =>
+  (await api.post('/geo/lookup', { ip, claimed_country: claimedCountry || null, project_id: projectId || null })).data
+export const reattributeProxies = async (connectorId?: string): Promise<{ scanned: number; updated: number }> =>
+  (await api.post('/geo/reattribute', { connector_id: connectorId ?? null })).data
+export type ObservationVerdict = 'contradicted' | 'uncertain' | 'confirmed' | 'no_claim'
+
+export interface ObservationFilters {
+  connector_id?: string
+  proxy_id?: string
+  project_id?: string
+  source?: string
+  ip?: string
+  claimed_country?: string
+  resolved_country?: string
+  verdict?: ObservationVerdict
+  conflicts_only?: boolean
+}
+
+export interface ObservationsPage {
+  observations: IpObservation[]
+  total: number
+  limit: number
+  offset: number
+}
+
+export const fetchGeoObservations = async (params: ObservationFilters & { limit?: number; offset?: number } = {}): Promise<ObservationsPage> =>
+  (await api.get('/geo/observations', { params })).data
+export const fetchGeoAccuracy = async (params: { project_id?: string; connector_id?: string; days?: number } = {}): Promise<GeoAccuracyResponse> =>
+  (await api.get('/geo/accuracy', { params })).data
+export const fetchGeoStatus = async (): Promise<GeoStatus> => (await api.get('/geo/status')).data
+export const fetchGeoExits = async (params: { project_id?: string; connector_id?: string; days?: number } = {}): Promise<GeoExitsResponse> =>
+  (await api.get('/geo/exits', { params })).data
+export const fetchGeoExitIps = async (params: ExitIpFilters & { limit?: number; offset?: number } = {}): Promise<ExitIpsPage> =>
+  (await api.get('/geo/exits/ips', { params })).data
 
 export interface ProxyListResponse {
   total: number
@@ -575,17 +908,23 @@ export interface ImportSummary {
   project_metrics: number
   provider_descriptors: number
   provider_audit_log: number
+  geo_settings: number
+  geo_databases: number
+  geo_database_blobs: number
+  ip_observations: number
+  connector_exit_ips: number
   kept_current_user: boolean
   user_conflicts: UserConflict[]
 }
 
 export const exportBackup = async (
   passphrase: string,
-  includeMetrics: boolean
+  includeMetrics: boolean,
+  includeDatabaseFiles: boolean
 ): Promise<void> => {
   const response = await api.post(
     '/backup/export',
-    { passphrase, include_metrics: includeMetrics },
+    { passphrase, include_metrics: includeMetrics, include_database_files: includeDatabaseFiles },
     { responseType: 'blob' }
   )
   // Derive the filename from the Content-Disposition header, falling back to a default.

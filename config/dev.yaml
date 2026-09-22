@@ -41,18 +41,35 @@ proxy:
     
 
   # Exit-location lookup for manually added (static) proxies: one request is
-  # made through each new proxy to learn its IP and country for -cc- routing.
+  # made through each new proxy to learn its IP for -cc- routing. This also
+  # seeds the IP attribution echo endpoint; point it at an Octoprox /echo in
+  # production.
   geo_lookup:
     enabled: true
-    url: https://lumtest.com/myip.json
-    ip_path: ip
-    country_path: country
+    url: https://httpbin.org/ip
+    ip_path: origin
+    country_path: ""
     timeout_seconds: 15
   # Connection settings
   connection:
     timeout_seconds: 30
     max_retries: 3
     retry_delay_seconds: 1
+
+# IP attribution (see docs/ip-attribution.md). The live policy is edited in the
+# admin panel; these settings describe this process and seed a fresh install.
+geo:
+  cache_dir: data/geo
+  # Operator-managed database files, e.g. from geoipupdate on a shared volume:
+  # databases:
+  #   - path: /etc/octoprox/GeoLite2-City.mmdb
+  #     priority: 10
+  echo:
+    enabled: true
+    trusted_proxies: []
+  observations:
+    publish_interval_seconds: 5
+    flush_interval_seconds: 30
 
 # Proxy provider SDK (see docs/providers.md)
 providers:

@@ -75,7 +75,7 @@ async def test_refresh_updates_credentials_in_place(builtins: dict[str, Provider
     vendor = MockVendor(api_handler=_api)
     proxies = [
         Proxy(id="a", host="1.1.1.1", port=8000, username="old", password="old", connector_id="conn-1", metadata={"list_identity": "a"}),
-        Proxy(id="c", host="3.3.3.3", port=8002, username="u3", password="p3", connector_id="conn-1", metadata={"list_identity": "c", "country": "DE"}),
+        Proxy(id="c", host="3.3.3.3", port=8002, username="u3", password="p3", connector_id="conn-1", metadata={"list_identity": "c", "country": "DE", "vendor_country": "DE"}),
         Proxy(id="gone", host="4.4.4.4", port=1, connector_id="conn-1", metadata={"list_identity": "nope"}),
     ]
     updated, to_remove = await _provider(builtins, vendor, {}).refresh_ips(proxies)

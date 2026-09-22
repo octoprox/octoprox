@@ -241,7 +241,7 @@ class TestProxyRequest:
         assert vendor.discovery_requests[0][0] == "http://u1:p1@1.1.1.1:80"
         assert outcome.result["proxy"] == {
             "host": "1.1.1.1", "port": 80, "protocol": "http", "username": "u1",
-            "metadata": {"provider": "webshare", "proxy_type": "proxies", "list_identity": "1", "country": "US"},
+            "metadata": {"provider": "webshare", "proxy_type": "proxies", "list_identity": "1", "country": "US", "vendor_country": "US"},
         }
 
     async def test_list_mode_surfaces_vendor_errors(self, builtins: dict[str, ProviderDescriptor]) -> None:

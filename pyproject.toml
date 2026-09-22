@@ -39,6 +39,7 @@ dependencies = [
     "bcrypt==5.0.0",
     "dpkt==1.9.8",
     "jmespath==1.1.0",
+    "maxminddb==3.2.0",
 ]
 
 [project.optional-dependencies]
@@ -51,10 +52,12 @@ dev = [
     "httpx==0.28.1",
     "testcontainers[postgres,redis]==4.14.1",
     "types-jmespath==1.1.0.20260724",
+    "mmdb_writer==0.2.7",
 ]
 
 [project.scripts]
 octoprox = "api.main:run"
+octoprox-echo = "api.echo_main:run"
 
 # Third-party provider plugins register here. Each entry point resolves to a
 # ProviderDescriptor, a descriptor dict, a YAML path, or a provider class with

@@ -7,6 +7,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { ColumnDef } from '@tanstack/react-table'
 import { Link2, Trash2, Plus, AlertTriangle } from 'lucide-react'
 import {
+  fetchGeoAccuracy, fetchGeoExits,
   fetchProjectConnectors, fetchProjectCredentials, fetchProjectCredential, fetchConnectorOptions,
   createProjectConnector, updateProjectConnector, deleteProjectConnector,
   Connector, CredentialType, ConnectorCreate, ConnectorUpdate, ConnectorOptions, ProviderField,
@@ -745,6 +746,8 @@ function ConnectorEditor({ connector, canMutate, onClose, onDelete, onSaved }: {
         <fieldset disabled={readOnly} className="min-h-[160px]">{renderTabContent()}</fieldset>
       </form>
 
+      {isEdit && connector && <ConnectorAccuracySection connectorId={connector.id} />}
+
       {isEdit && connector && (
         <InspectorSection title="Details">
           <KeyValue label="Proxies" value={<span title={describeTarget(connector)}>{connector.proxy_count}{targetTotal(connector) != null && <span className="text-fg-subtle font-normal"> / {targetTotal(connector)}</span>}</span>} />
@@ -793,3 +796,32 @@ function KeyValueTagsEditor({ value, onChange }: { value: string; onChange: (val
   )
 }
 
+
+
+/** Vendor location accuracy for one connector, from the attribution aggregates. */
+function ConnectorAccuracySection({ connectorId }: { connectorId: string }) {
+  const { data } = useQuery({
+    queryKey: ['geo-accuracy', 'connector', connectorId],
+    queryFn: () => fetchGeoAccuracy({ connector_id: connectorId, days: 30 }),
+    refetchInterval: 60_000,
+  })
+  const { data: exitsData } = useQuery({
+    queryKey: ['geo-exits', 'connector', connectorId],
+    queryFn: () => fetchGeoExits({ connector_id: connectorId, days: 30 }),
+    refetchInterval: 60_000,
+  })
+  const row = data?.connectors.find((c) => c.connector_id === connectorId)
+  const exits = exitsData?.connectors.find((c) => c.connector_id === connectorId)
+  if ((!row || row.claimed === 0) && !exits) return null
+  const pct = row?.accuracy == null ? null : Math.round(row.accuracy * 1000) / 10
+  const wrong = (row?.breakdown ?? []).filter((b) => b.claimed_country && b.observed_country && b.claimed_country !== b.observed_country).slice(0, 3)
+  return (
+    <InspectorSection title="Exit locations (30 days)">
+      {exits && <KeyValue label="Unique exit IPs" value={<span className="tabular-nums">{exits.unique_in_window.toLocaleString()}<span className="text-fg-subtle font-normal"> / {exits.unique_total.toLocaleString()} ever</span></span>} />}
+      {exits && exits.unique_total > 0 && <KeyValue label="Reused IPs" value={`${Math.round((exits.reused / exits.unique_total) * 1000) / 10}%`} />}
+      {row && row.claimed > 0 && <KeyValue label="Exits with a vendor claim" value={row.claimed.toLocaleString()} />}
+      {row && row.claimed > 0 && <KeyValue label="Confirmed" value={pct == null ? '-' : <span className={pct >= 95 ? 'text-success' : pct >= 80 ? 'text-warning' : 'text-danger'}>{pct}%</span>} />}
+      {wrong.length > 0 && <KeyValue label="Contradicted" value={<span className="text-xs">{wrong.map((b) => `${b.claimed_country} → ${b.observed_country} (${b.exits})`).join(', ')}</span>} />}
+    </InspectorSection>
+  )
+}

@@ -2,7 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { useState } from 'react'
+import { useQuery } from '@tanstack/react-query'
 import { Plus } from 'lucide-react'
+import { fetchGeoSettings } from '../../api/client'
 import { Badge } from '../ui'
 import { Checkbox, Collapsible, HttpCallEditor, KeyValueEditor, ListField, NumberField, SelectField, Spec, TemplateEditor, TextField, ValueSourceInput, fieldPathsOf, slugify } from './editors'
 
@@ -14,6 +16,8 @@ const MODES = [
 
 /** Edits `proxy_types`, `proxy_type_field` and `session_id`. */
 export function ProxyTypeEditor({ spec, onChange }: { spec: Spec; onChange: (patch: Spec) => void }) {
+  const { data: geoSettings } = useQuery({ queryKey: ['geo-settings'], queryFn: fetchGeoSettings, staleTime: 60_000 })
+  const echoUrl = geoSettings?.settings.echo_url
   const types: Spec[] = spec.proxy_types ?? []
   const [open, setOpen] = useState<number | null>(types.length ? null : 0)
   const authNames = Object.keys(spec.auth ?? {})
@@ -84,9 +88,16 @@ export function ProxyTypeEditor({ spec, onChange }: { spec: Spec; onChange: (pat
               <div className="grid grid-cols-2 gap-3">
                 <TextField label="IP discovery URL (requested through the proxy)" value={t.discovery?.url ?? 'https://httpbin.org/ip'} onChange={(v) => update(i, { discovery: { ...(t.discovery ?? {}), url: v } })} mono />
                 <TextField label="JMESPath to the IP (or @text)" value={t.discovery?.ip_path ?? 'origin'} onChange={(v) => update(i, { discovery: { ...(t.discovery ?? {}), ip_path: v } })} mono />
+                <TextField label="JMESPath to the country (optional)" value={t.discovery?.country_path ?? ''} onChange={(v) => update(i, { discovery: { ...(t.discovery ?? {}), country_path: v || null } })} mono placeholder="e.g. country.code" help="Recorded on the proxy and used by country routing. How IP attribution weighs it depends on who runs the URL, below." />
                 <NumberField label="Stop after N failed slots" value={t.discovery?.max_consecutive_failures ?? 3} onChange={(v) => update(i, { discovery: { ...(t.discovery ?? {}), max_consecutive_failures: v ?? 3 } })} min={1} />
                 <NumberField label={t.port_strategy === 'fixed' ? 'Retries per slot on duplicate IP' : 'Stop after N duplicate ports'} value={t.port_strategy === 'fixed' ? (t.discovery?.max_retries_per_slot ?? 3) : (t.discovery?.max_consecutive_duplicates ?? 3)} onChange={(v) => update(i, { discovery: { ...(t.discovery ?? {}), [t.port_strategy === 'fixed' ? 'max_retries_per_slot' : 'max_consecutive_duplicates']: v ?? 3 } })} min={1} />
               </div>
+              <Checkbox
+                label="The discovery URL is the vendor's own service"
+                checked={t.discovery?.vendor_operated ?? true}
+                onChange={(on) => update(i, { discovery: { ...(t.discovery ?? {}), vendor_operated: on } })}
+                help="Checked: the country it reports is the vendor's claim about the exit, and IP attribution judges it against the databases. Unchecked (a third-party echo): the country is independent evidence alongside the databases."
+              />
               <Checkbox label="The vendor API lists the account's exit IPs" checked={!!t.known_ips} onChange={(on) => update(i, { known_ips: on ? { call: { method: 'GET', url: '' }, items: '@', ip: 'ip' } : undefined })} help="Preferred over per-slot discovery when available; discovery remains the fallback." />
               {t.known_ips && (
                 <>
@@ -121,7 +132,7 @@ export function ProxyTypeEditor({ spec, onChange }: { spec: Spec; onChange: (pat
           <div className="grid grid-cols-2 gap-3">
             <TextField label="Slot count field" value={t.count_field ?? 'connector.num_proxies'} onChange={(v) => update(i, { count_field: v || 'connector.num_proxies' })} mono help={t.mode === 'list' ? 'Optional cap on how many listed proxies to mirror.' : 'Variable holding the number of proxies to create.'} />
             <ListField label="Tags" value={t.tags} onChange={(v) => update(i, { tags: v })} placeholder="vendor, residential" />
-            <TextField label="Healthcheck URL override" value={t.healthcheck_url ?? ''} onChange={(v) => update(i, { healthcheck_url: v || null })} mono className="col-span-2" placeholder="https://httpbin.org/ip" />
+            <TextField label="Healthcheck URL override" value={t.healthcheck_url ?? ''} onChange={(v) => update(i, { healthcheck_url: v || null })} mono className="col-span-2" placeholder={echoUrl ?? 'https://httpbin.org/ip'} help="Leave empty to check against the IP attribution echo endpoint, which also reports the exit IP." />
           </div>
           <KeyValueEditor label="Metadata (templates, shown in the proxy inspector)" value={t.metadata} onChange={(v) => update(i, { metadata: Object.keys(v).length ? v : undefined })} keyPlaceholder="country_code" valuePlaceholder="{connector.country_code}" />
         </Collapsible>

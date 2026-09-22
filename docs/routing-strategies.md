@@ -85,11 +85,14 @@ For every port-based type with countries listed, the periodic IP refresh re-read
 Octoprox narrows the project's healthy proxies before the routing strategy runs, so country routing composes with every strategy and with [domain filtering]({{ site.baseurl }}/domain-filtering):
 
 1. Connectors that list countries only serve the countries they list.
-2. A proxy with a known exit country must match exactly. The exit country is what the vendor reported (list-mode entries, known-IP APIs, or IP discovery for port-mode types such as Oxylabs ISP, Decodo ISP and Bright Data ISP) or, failing that, the country the slot was provisioned for.
+2. A proxy with a known exit country must match exactly. The exit country is what [IP attribution]({{ site.baseurl }}/ip-attribution) resolved for the proxy's exit IP from the local IP databases, the vendor's claim (list-mode entries, known-IP APIs, the country a slot was provisioned for) and the echo endpoint, in the order the attribution policy sets.
+   Under a project's `strict` location policy, a proxy whose vendor-declared country is contradicted by attribution is not eligible at all.
 3. A proxy with no known country is eligible only through its connector's list.
 4. A residential or mobile pool with **no** countries listed that has no slot group yet for the requested country creates one on the first request: `num_proxies` fresh sessions geo-targeted to that country, ready immediately. Later requests rotate across that group like any other, and the periodic sync keeps it alive. Pools that list countries are provisioned up front and never expand on demand.
 
 If nothing in the project serves the requested country, the request is rejected with `502 Bad Gateway`. Octoprox never silently falls back to another country.
+
+With the project's preflight check set to `reject`, a session whose exit turns out to be somewhere other than the requested country is also rejected with `502 Bad Gateway` (`Exit location mismatch`), after one echo request through the selected upstream.
 
 Requests **without** a `-cc-` suffix are unaffected: they may use any proxy in the project, except the on-demand country groups of *all countries* pools, which keep serving only the clients that asked for that country.
 

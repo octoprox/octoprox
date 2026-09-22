@@ -57,6 +57,8 @@
     .logo { height: 28px; width: 125px; display: block; }
     .logo-dark { display: none; }
     :root[data-theme="dark"] .logo-light { display: none; }
+    .mermaid { margin: 1.25rem 0; overflow-x: auto; }
+    .mermaid svg { max-width: 100%; height: auto; }
     :root[data-theme="dark"] .logo-dark { display: block; }
     header nav { display: flex; align-items: center; gap: 4px; }
     header nav a {
@@ -177,6 +179,7 @@
         <h4>Features</h4>
         <a href="{{ site.baseurl }}/routing-strategies" {% if page.nav_id == 'routing-strategies' %}class="active"{% endif %}>Routing Strategies</a>
         <a href="{{ site.baseurl }}/domain-filtering" {% if page.nav_id == 'domain-filtering' %}class="active"{% endif %}>Domain Filtering</a>
+        <a href="{{ site.baseurl }}/ip-attribution" {% if page.nav_id == 'ip-attribution' %}class="active"{% endif %}>IP Attribution</a>
         <a href="{{ site.baseurl }}/rate-limiting" {% if page.nav_id == 'rate-limiting' %}class="active"{% endif %}>Rate Limiting</a>
         <a href="{{ site.baseurl }}/tls-interception" {% if page.nav_id == 'tls-interception' %}class="active"{% endif %}>TLS Interception</a>
         <a href="{{ site.baseurl }}/metrics" {% if page.nav_id == 'metrics' %}class="active"{% endif %}>Metrics &amp; Request Counting</a>
@@ -209,6 +212,27 @@
   <script>
     function toggleSidebar() {
       document.getElementById('sidebar').classList.toggle('open');
+    }
+  </script>
+  <!-- Mermaid diagrams. A ```mermaid fence reaches the page in one of two shapes:
+       plain kramdown gives <pre><code class="language-mermaid">, and GitHub Pages
+       (kramdown + Rouge) gives <div class="language-mermaid highlighter-rouge">
+       <div class="highlight"><pre><code>. Both become diagrams, following the page
+       theme. GitHub's own file view renders the same fences natively. -->
+  <script type="module">
+    import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
+    var blocks = document.querySelectorAll('pre > code.language-mermaid, .language-mermaid pre > code');
+    if (blocks.length) {
+      blocks.forEach(function (code) {
+        var holder = document.createElement('div');
+        holder.className = 'mermaid';
+        holder.textContent = code.textContent;
+        var container = code.closest('div.language-mermaid') || code.parentElement;
+        container.replaceWith(holder);
+      });
+      var dark = document.documentElement.getAttribute('data-theme') === 'dark';
+      mermaid.initialize({ startOnLoad: false, theme: dark ? 'dark' : 'neutral', securityLevel: 'loose', flowchart: { htmlLabels: true, curve: 'basis' } });
+      mermaid.run({ querySelector: '.mermaid' });
     }
   </script>
 </body>
