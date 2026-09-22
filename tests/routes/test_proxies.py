@@ -190,9 +190,9 @@ class TestProxyEndpoints:
     ) -> None:
         from unittest.mock import AsyncMock
 
-        from api.core.geo_lookup import GeoLookup
+        from api.geo.attributor import ProxyAttributor
 
-        monkeypatch.setattr(GeoLookup, "locate", AsyncMock(return_value=("198.51.100.7", "NL")))
+        monkeypatch.setattr(ProxyAttributor, "locate", AsyncMock(return_value=("198.51.100.7", "NL")))
         project_id = created_project["id"]
         proxy_id = created_proxy["id"]
 
@@ -212,9 +212,9 @@ class TestProxyEndpoints:
     ) -> None:
         from unittest.mock import AsyncMock
 
-        from api.core.geo_lookup import GeoLookup
+        from api.geo.attributor import ProxyAttributor
 
-        monkeypatch.setattr(GeoLookup, "locate", AsyncMock(return_value=(None, "")))
+        monkeypatch.setattr(ProxyAttributor, "locate", AsyncMock(return_value=(None, "")))
         project_id = created_project["id"]
         response = authenticated_client.post(f"/api/v1/projects/{project_id}/proxies/{created_proxy['id']}/locate")
         assert response.status_code == 502

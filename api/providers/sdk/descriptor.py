@@ -110,7 +110,8 @@ class FieldSpec(BaseModel):
     required: bool = False
     secret: bool = False
     readonly: bool = Field(
-        default=False, description="Shown but not editable; typically filled from another field's option"
+        default=False,
+        description="Shown but not editable; typically filled from another field's option",
     )
     default: str | int | float | bool | None = None
     placeholder: str | None = None
@@ -129,7 +130,8 @@ class FieldSpec(BaseModel):
         description="Use options_from only when this holds; otherwise fall back to options/options_preset",
     )
     empty_label: str | None = Field(
-        default=None, description="Label of the 'no value' choice offered for optional dynamic selects"
+        default=None,
+        description="Label of the 'no value' choice offered for optional dynamic selects",
     )
     fill: dict[str, str] = Field(
         default_factory=dict,
@@ -170,12 +172,16 @@ class FieldSpec(BaseModel):
     def _validate_option_sources(self) -> FieldSpec:
         static_sources = [bool(self.options), self.options_preset is not None]
         if sum(static_sources) > 1:
-            raise ValueError(f"field '{self.key}': options and options_preset are mutually exclusive")
+            raise ValueError(
+                f"field '{self.key}': options and options_preset are mutually exclusive"
+            )
         if self.options_from is not None and any(static_sources) and self.options_from_when is None:
             raise ValueError(
                 f"field '{self.key}': combining options_from with static options requires options_from_when"
             )
-        if self.options_from_when is not None and (self.options_from is None or not any(static_sources)):
+        if self.options_from_when is not None and (
+            self.options_from is None or not any(static_sources)
+        ):
             raise ValueError(
                 f"field '{self.key}': options_from_when needs both options_from and a static fallback"
             )
@@ -189,7 +195,9 @@ class FieldSpec(BaseModel):
 
     @property
     def has_options(self) -> bool:
-        return bool(self.options) or self.options_preset is not None or self.options_from is not None
+        return (
+            bool(self.options) or self.options_preset is not None or self.options_from is not None
+        )
 
 
 class PaginationSpec(BaseModel):
@@ -331,7 +339,9 @@ class OptionsSourceSpec(BaseModel):
     enrich: list[EnrichSpec] = Field(default_factory=list)
     filter: str | None = Field(default=None, description="JMESPath predicate over the option")
     group_by_value: bool = Field(default=False, description="Collapse items with the same value")
-    count_key: str = Field(default="count", description="Extra holding the group size when grouping")
+    count_key: str = Field(
+        default="count", description="Extra holding the group size when grouping"
+    )
     cache_seconds: int = Field(default=300, ge=0)
 
 
@@ -347,7 +357,8 @@ class ValidationSpec(BaseModel):
     capture: dict[str, ValueSource] = Field(default_factory=dict)
     error_message: str = "Credential validation failed"
     when: Condition | None = Field(
-        default=None, description="Only validate when this condition holds (e.g. optional API key set)"
+        default=None,
+        description="Only validate when this condition holds (e.g. optional API key set)",
     )
 
 
@@ -392,20 +403,35 @@ class IpDiscoverySpec(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     url: str = "https://httpbin.org/ip"
-    ip_path: str = Field(default="origin", description="JMESPath into the JSON body; '@text' for raw text")
+    ip_path: str = Field(
+        default="origin", description="JMESPath into the JSON body; '@text' for raw text"
+    )
     country_path: str | None = Field(
         default=None,
         description="JMESPath to the exit country (ISO code) in the JSON body; recorded on the proxy when present",
     )
+    vendor_operated: bool = Field(
+        default=True,
+        description=(
+            "Whether the discovery URL is the vendor's own service. Its country is then the vendor's claim "
+            "about the exit, which IP attribution judges; a third-party echo's country is independent evidence"
+        ),
+    )
     timeout_seconds: float = Field(default=30.0, gt=0)
     max_retries_per_slot: int = Field(
-        default=3, ge=1, description="Fixed-port strategy: attempts per slot when the IP duplicates one we have"
+        default=3,
+        ge=1,
+        description="Fixed-port strategy: attempts per slot when the IP duplicates one we have",
     )
     max_consecutive_failures: int = Field(
-        default=3, ge=1, description="Stop provisioning after this many slots in a row fail to discover an IP"
+        default=3,
+        ge=1,
+        description="Stop provisioning after this many slots in a row fail to discover an IP",
     )
     max_consecutive_duplicates: int = Field(
-        default=3, ge=1, description="Sequential-port strategy: stop after this many ports in a row return known IPs"
+        default=3,
+        ge=1,
+        description="Sequential-port strategy: stop after this many ports in a row return known IPs",
     )
     max_scan_ports: int = Field(
         default=500,
@@ -413,7 +439,10 @@ class IpDiscoverySpec(BaseModel):
         description="Sequential-port strategy with a country filter: give up after scanning this many ports",
     )
     refresh_concurrency: int = Field(
-        default=8, ge=1, le=64, description="How many proxies the periodic IP refresh probes at once"
+        default=8,
+        ge=1,
+        le=64,
+        description="How many proxies the periodic IP refresh probes at once",
     )
 
     @field_validator("url")
@@ -495,7 +524,9 @@ class ProxyTypeSpec(BaseModel):
             if self.host is None or self.port is None:
                 raise ValueError(f"proxy type '{self.key}': {self.mode} mode needs host and port")
             if self.username is None:
-                raise ValueError(f"proxy type '{self.key}': {self.mode} mode needs a username template")
+                raise ValueError(
+                    f"proxy type '{self.key}': {self.mode} mode needs a username template"
+                )
             if self.source is not None:
                 raise ValueError(f"proxy type '{self.key}': list source only applies to list mode")
         if self.mode == "port" and self.discovery is None:
@@ -560,7 +591,10 @@ class ProviderDescriptor(BaseModel):
         return self
 
     def _check_unique_keys(self) -> None:
-        for scope, fields in (("credential", self.credential_fields), ("connector", self.connector_fields)):
+        for scope, fields in (
+            ("credential", self.credential_fields),
+            ("connector", self.connector_fields),
+        ):
             keys = [f.key for f in fields]
             duplicates = {k for k in keys if keys.count(k) > 1}
             if duplicates:
@@ -576,10 +610,15 @@ class ProviderDescriptor(BaseModel):
         if self.proxy_type_field is not None:
             scope, key = split_scoped_key(self.proxy_type_field)
             if self.find_field(scope, key) is None:
-                raise ValueError(f"proxy_type_field refers to unknown field '{self.proxy_type_field}'")
+                raise ValueError(
+                    f"proxy_type_field refers to unknown field '{self.proxy_type_field}'"
+                )
 
     def _check_named_references(self) -> None:
-        for scope, fields in (("credential", self.credential_fields), ("connector", self.connector_fields)):
+        for scope, fields in (
+            ("credential", self.credential_fields),
+            ("connector", self.connector_fields),
+        ):
             keys = {f.key for f in fields}
             for field in fields:
                 if field.options_from is not None and field.options_from not in self.options:
@@ -594,7 +633,9 @@ class ProviderDescriptor(BaseModel):
                         )
                 for target in field.fill:
                     if target not in keys:
-                        raise ValueError(f"field '{field.key}': fill targets unknown field '{target}'")
+                        raise ValueError(
+                            f"field '{field.key}': fill targets unknown field '{target}'"
+                        )
         for call in self.iter_calls():
             if call.auth is not None and call.auth not in self.auth:
                 raise ValueError(f"call to {call.url} references unknown auth flow '{call.auth}'")
@@ -613,7 +654,11 @@ class ProviderDescriptor(BaseModel):
         per listed country.
         """
         return next(
-            (f for f in self.connector_fields if f.type == "country" or f.options_preset == "countries"),
+            (
+                f
+                for f in self.connector_fields
+                if f.type == "country" or f.options_preset == "countries"
+            ),
             None,
         )
 

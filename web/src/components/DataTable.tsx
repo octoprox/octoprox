@@ -28,6 +28,8 @@ declare module '@tanstack/react-table' {
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
   interface ColumnMeta<TData extends unknown, TValue> {
     filterVariant?: 'text' | 'select' | 'range'
+    /** Fixed choices for a select filter; without them the choices are the values present in the loaded rows. */
+    filterOptions?: { value: string; label: string }[]
     /** Right-align numeric columns. */
     align?: 'left' | 'right'
   }
@@ -44,9 +46,28 @@ const rangeFilterFn: FilterFn<unknown> = (row, columnId, filterValue: [number | 
   return true
 }
 
+/** Paging driven by the server: `data` is one page and `total` is the size of the whole result. */
+export interface ManualPagination {
+  pageIndex: number
+  pageSize: number
+  total: number
+  onPageChange: (pageIndex: number) => void
+  onPageSizeChange: (pageSize: number) => void
+}
+
+/** Column filters owned by the caller, who applies them (typically on the server) instead of the table. */
+export interface ManualFiltering {
+  columnFilters: ColumnFiltersState
+  onColumnFiltersChange: (filters: ColumnFiltersState) => void
+}
+
 interface DataTableProps<TData, TValue> {
   columns: ColumnDef<TData, TValue>[]
   data: TData[]
+  /** When set, the table shows `data` as one page of `total` rows and asks for other pages instead of slicing. */
+  manualPagination?: ManualPagination
+  /** When set, the header filters report to the caller and the table does no filtering of its own. Implies enableColumnFilters. */
+  manualFiltering?: ManualFiltering
   defaultPageSize?: number
   emptyMessage?: string
   enableRowSelection?: boolean
@@ -68,6 +89,8 @@ interface DataTableProps<TData, TValue> {
 export function DataTable<TData, TValue>({
   columns,
   data,
+  manualPagination,
+  manualFiltering,
   defaultPageSize = 20,
   emptyMessage = 'No data available.',
   enableRowSelection = false,
@@ -83,8 +106,15 @@ export function DataTable<TData, TValue>({
 }: DataTableProps<TData, TValue>) {
   const [sorting, setSorting] = useState<SortingState>([])
   const [rowSelection, setRowSelection] = useState<RowSelectionState>({})
-  const [columnFilters, setColumnFilters] = useState<ColumnFiltersState>([])
+  const [ownColumnFilters, setOwnColumnFilters] = useState<ColumnFiltersState>([])
   const [expanded, setExpanded] = useState<ExpandedState>({})
+  const columnFilters = manualFiltering ? manualFiltering.columnFilters : ownColumnFilters
+  const setColumnFilters = (updater: ColumnFiltersState | ((old: ColumnFiltersState) => ColumnFiltersState)) => {
+    const next = typeof updater === 'function' ? updater(columnFilters) : updater
+    if (manualFiltering) manualFiltering.onColumnFiltersChange(next)
+    else setOwnColumnFilters(next)
+  }
+  const showColumnFilters = enableColumnFilters || !!manualFiltering
 
   const table = useReactTable({
     data,
@@ -105,12 +135,26 @@ export function DataTable<TData, TValue>({
     enableRowSelection,
     getRowId,
     autoResetPageIndex: false,
+    ...(manualFiltering ? { manualFiltering: true } : {}),
+    ...(manualPagination
+      ? {
+          manualPagination: true,
+          pageCount: Math.max(1, Math.ceil(manualPagination.total / manualPagination.pageSize)),
+          onPaginationChange: (updater) => {
+            const current = { pageIndex: manualPagination.pageIndex, pageSize: manualPagination.pageSize }
+            const next = typeof updater === 'function' ? updater(current) : updater
+            if (next.pageSize !== current.pageSize) manualPagination.onPageSizeChange(next.pageSize)
+            else if (next.pageIndex !== current.pageIndex) manualPagination.onPageChange(next.pageIndex)
+          },
+        }
+      : {}),
     state: {
       sorting,
       rowSelection,
       columnFilters,
       expanded,
       ...(columnVisibility ? { columnVisibility } : {}),
+      ...(manualPagination ? { pagination: { pageIndex: manualPagination.pageIndex, pageSize: manualPagination.pageSize } } : {}),
     },
     initialState: {
       pagination: {
@@ -135,7 +179,7 @@ export function DataTable<TData, TValue>({
   }, [rowSelection, onSelectionChange])
 
   const pageSize = table.getState().pagination.pageSize
-  const totalRows = table.getFilteredRowModel().rows.length
+  const totalRows = manualPagination ? manualPagination.total : table.getFilteredRowModel().rows.length
   const visibleColumnCount = table.getVisibleLeafColumns().length
 
   const handleRowClick = (e: React.MouseEvent, original: TData) => {
@@ -185,7 +229,7 @@ export function DataTable<TData, TValue>({
                 })
               )}
             </tr>
-            {enableColumnFilters && (
+            {showColumnFilters && (
               <tr className="bg-surface-raised/50 border-b border-line">
                 {table.getHeaderGroups().map((headerGroup) =>
                   headerGroup.headers.map((header) => (
@@ -266,11 +310,11 @@ export function DataTable<TData, TValue>({
               <>
                 <span className="whitespace-nowrap">
                   Showing {currentPageIndex * pageSize + 1}-{Math.min((currentPageIndex + 1) * pageSize, totalRows)} of {totalRows}
-                  {enableColumnFilters && columnFilters.length > 0 && (
+                  {showColumnFilters && columnFilters.length > 0 && (
                     <span className="text-fg-subtle"> (filtered)</span>
                   )}
                 </span>
-                {enableColumnFilters && columnFilters.length > 0 && (
+                {showColumnFilters && columnFilters.length > 0 && (
                   <button
                     onClick={() => setColumnFilters([])}
                     className="flex items-center gap-1 text-primary hover:brightness-110"
@@ -327,11 +371,19 @@ const filterInputClasses =
 
 function ColumnFilter<TData>({ column }: { column: Column<TData, unknown> }) {
   const filterVariant = column.columnDef.meta?.filterVariant
+  const fixedOptions = column.columnDef.meta?.filterOptions
   // Only faceted (select) filters need the unique-value model; asking other columns throws.
-  const facets = filterVariant === 'select' ? column.getFacetedUniqueValues() : null
-  const sortedUniqueValues = useMemo(
-    () => (facets ? Array.from(facets.keys()).filter((v) => v !== undefined && v !== null && v !== '').sort() : []),
-    [facets],
+  const facets = filterVariant === 'select' && !fixedOptions ? column.getFacetedUniqueValues() : null
+  const options = useMemo(
+    () =>
+      fixedOptions ??
+      (facets
+        ? Array.from(facets.keys())
+            .filter((v) => v !== undefined && v !== null && v !== '')
+            .sort()
+            .map((v) => ({ value: String(v), label: String(v) }))
+        : []),
+    [fixedOptions, facets],
   )
   if (!filterVariant) return null
 
@@ -365,9 +417,9 @@ function ColumnFilter<TData>({ column }: { column: Column<TData, unknown> }) {
         className={filterInputClasses}
       >
         <option value="">All</option>
-        {sortedUniqueValues.map((value) => (
-          <option key={String(value)} value={String(value)}>
-            {String(value)}
+        {options.map((o) => (
+          <option key={o.value} value={o.value}>
+            {o.label}
           </option>
         ))}
       </select>

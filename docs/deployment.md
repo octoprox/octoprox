@@ -195,6 +195,20 @@ Both 8000 and 8080 use the same HTTP `/health` probe (on port 8000) to
 decide whether a backend is fit. A container with a crashed API server
 gets pulled out of the proxy-traffic backend automatically.
 
+### Echo endpoint
+
+Every instance serves `GET /echo` on port 8000 for [IP attribution]({{ site.baseurl }}/ip-attribution):
+health checks, discovery and preflight request it *through* a proxy to learn
+the exit IP. The bundled HAProxy config adds `X-Forwarded-For` on the API
+frontend; set `geo.echo.trusted_proxies` to the HAProxy address range so the
+instances report the real client instead of the balancer.
+
+The request travels out through the vendor and back in from the public
+internet, so the echo URL in the attribution policy must be reachable from
+there. When the cluster sits on a private network, run the standalone echo
+service (`octoprox-echo`, same image, port 8090, no Postgres or Redis) on a
+public host and point the policy at it.
+
 ### Read-your-writes on the API
 
 Each instance serves reads from its in-memory copy of projects,

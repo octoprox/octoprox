@@ -212,6 +212,13 @@ class ProxyResponse(BaseModel):
     quarantined: bool = False
     quarantine_remaining_seconds: float = 0.0
     country: str | None = None  # Exit country (ISO code) when discovered or provisioned per geo
+    # IP attribution: which source produced ``country``, what the vendor
+    # claimed, whether attribution contradicts that claim, and the full
+    # location record from the databases (see docs/ip-attribution.md).
+    country_source: str | None = None
+    vendor_country: str | None = None
+    location_conflict: bool = False
+    location: dict[str, Any] | None = None
     tags: list[str]
     created_at: datetime
 

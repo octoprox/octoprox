@@ -115,7 +115,7 @@ export function RichSelect({
                   )}
                 </div>
                 {option.description && (
-                  <p className="text-xs text-fg-muted truncate mt-0.5">{option.description}</p>
+                  <p className="text-xs text-fg-muted mt-0.5 leading-snug">{option.description}</p>
                 )}
               </div>
               {option.value === value && (

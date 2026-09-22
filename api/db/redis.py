@@ -53,6 +53,10 @@ PROXY_REQUESTS_KEY = "proxy:requests:{proxy_id}"
 LEASE_KEY = "lease:{name}"
 # Cross-instance autoscaler cooldown state (hash, field=connector_id)
 AUTOSCALER_LAST_ACTION_KEY = "autoscaler:last_action"
+# IP attribution: observations queued for the leader's flusher, and per-session
+# preflight verdicts.
+GEO_OBSERVATIONS_KEY = "geo:observations"
+GEO_PREFLIGHT_KEY = "geo:preflight:{project_id}:{proxy_id}:{session_id}"
 
 # Logical grouping of the keyspace, used by the admin system view to report
 # what Redis memory is being spent on. Every prefix written above appears
@@ -70,6 +74,7 @@ REDIS_KEY_GROUPS: tuple[tuple[str, str], ...] = (
     ("instance_stats:", "Instance snapshots"),
     ("lease:", "Worker leases"),
     ("autoscaler:", "Auto-scaler state"),
+    ("geo:", "IP attribution"),
 )
 
 OTHER_KEY_GROUP = "Other"

@@ -21,6 +21,7 @@ services:
       - OCTOPROX_LOG_LEVEL=INFO
     volumes:
       - ca_data:/app/data/ca
+      - geo_data:/app/data/geo
     depends_on:
       redis:
         condition: service_healthy
@@ -68,4 +69,5 @@ volumes:
   postgres_data:
   redis_data:
   ca_data:
+  geo_data:
 

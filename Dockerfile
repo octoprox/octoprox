@@ -30,7 +30,7 @@ COPY --from=frontend-builder /app/web/dist ./web/dist
 
 # Create non-root user and data directories
 RUN useradd -m -u 1000 octoprox \
-    && mkdir -p /app/data/ca \
+    && mkdir -p /app/data/ca /app/data/geo \
     && chown -R octoprox:octoprox /app
 USER octoprox
 

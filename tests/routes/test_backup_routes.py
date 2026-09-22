@@ -5,20 +5,28 @@
 
 import json
 import uuid
+from pathlib import Path
 from typing import Any
 
 from starlette.testclient import TestClient
 
 from api.core.config import Settings
 from api.routes.auth import create_jwt
+from tests.geo.test_readers import MAXMIND_RECORD, write_mmdb
 
 PASSPHRASE = "migrate-me-please"
 
 
-def _export(client: TestClient, include_metrics: bool = False) -> bytes:
+def _export(
+    client: TestClient, include_metrics: bool = False, include_database_files: bool = False
+) -> bytes:
     resp = client.post(
         "/api/v1/backup/export",
-        json={"passphrase": PASSPHRASE, "include_metrics": include_metrics},
+        json={
+            "passphrase": PASSPHRASE,
+            "include_metrics": include_metrics,
+            "include_database_files": include_database_files,
+        },
     )
     assert resp.status_code == 200, resp.text
     assert resp.headers["content-disposition"].startswith("attachment")
@@ -136,6 +144,85 @@ class TestBackupRoundTrip:
         assert envelope["includes_metrics"] is True
         resp = _import(authenticated_client, file_bytes)
         assert resp.status_code == 200, resp.text
+
+    def test_attribution_settings_and_databases_round_trip(
+        self, authenticated_client: TestClient, created_project: dict[str, Any], tmp_path: Path
+    ) -> None:
+        """Geo settings and database rows always travel; the file bytes only on request.
+
+        A restore must leave attribution configured as it was, with the same
+        database record present and, when the bytes were included, readable
+        again without a re-upload. The envelope records which choice was made.
+        """
+        def put_retention(days: int) -> None:
+            body = authenticated_client.get("/api/v1/geo/settings").json()["settings"]
+            body["exit_ip_retention_days"] = days
+            assert authenticated_client.put("/api/v1/geo/settings", json=body).status_code == 200
+
+        put_retention(123)
+        path = write_mmdb(tmp_path / "GeoLite2-Country.mmdb", "GeoLite2-Country", {"81.2.69.0/24": MAXMIND_RECORD})
+        with path.open("rb") as handle:
+            resp = authenticated_client.post(
+                "/api/v1/geo/databases",
+                files={"file": (path.name, handle, "application/octet-stream")},
+                data={"name": "backup-round-trip"},
+            )
+        assert resp.status_code == 201, resp.text
+        db_id = resp.json()["id"]
+
+        # Other tests may leave URL-sourced records with no file; only rows with
+        # a file carry a blob.
+        listed_before = authenticated_client.get("/api/v1/geo/databases").json()["databases"]
+        with_file_before = sum(1 for d in listed_before if d["source"] != "path" and d["has_file"])
+
+        without = json.loads(_export(authenticated_client))
+        assert without["includes_database_files"] is False
+        with_files = json.loads(_export(authenticated_client, include_database_files=True))
+        assert with_files["includes_database_files"] is True
+
+        # Drift after the export, then restore and expect the exported state back.
+        put_retention(7)
+        assert authenticated_client.delete(f"/api/v1/geo/databases/{db_id}").status_code == 204
+        resp = _import(authenticated_client, json.dumps(with_files).encode("utf-8"))
+        assert resp.status_code == 200, resp.text
+        summary = resp.json()
+        assert summary["geo_settings"] == 1
+        assert summary["geo_databases"] >= 1
+        assert summary["geo_database_blobs"] == with_file_before
+
+        settings = authenticated_client.get("/api/v1/geo/settings").json()["settings"]
+        assert settings["exit_ip_retention_days"] == 123
+        listed = {d["id"]: d for d in authenticated_client.get("/api/v1/geo/databases").json()["databases"]}
+        assert db_id in listed
+        assert listed[db_id]["has_file"] is True
+        # The restored file is open again: the sample range resolves.
+        resp = authenticated_client.post("/api/v1/geo/lookup", json={"ip": "81.2.69.142"})
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["resolution"]["country"] == MAXMIND_RECORD["country"]["iso_code"]
+
+        authenticated_client.delete(f"/api/v1/geo/databases/{db_id}")
+
+    def test_import_without_database_files_keeps_rows_but_not_bytes(
+        self, authenticated_client: TestClient, created_project: dict[str, Any], tmp_path: Path
+    ) -> None:
+        path = write_mmdb(tmp_path / "GeoLite2-Country.mmdb", "GeoLite2-Country", {"81.2.69.0/24": MAXMIND_RECORD})
+        with path.open("rb") as handle:
+            resp = authenticated_client.post(
+                "/api/v1/geo/databases",
+                files={"file": (path.name, handle, "application/octet-stream")},
+                data={"name": "rows-only"},
+            )
+        assert resp.status_code == 201, resp.text
+        db_id = resp.json()["id"]
+        file_bytes = _export(authenticated_client)
+        resp = _import(authenticated_client, file_bytes)
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["geo_database_blobs"] == 0
+        listed = {d["id"]: d for d in authenticated_client.get("/api/v1/geo/databases").json()["databases"]}
+        assert db_id in listed
+        # The record survived, so the admin sees what to re-upload or refresh.
+        assert listed[db_id]["has_file"] is False
+        authenticated_client.delete(f"/api/v1/geo/databases/{db_id}")
 
 
 class TestImportErrors:

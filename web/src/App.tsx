@@ -13,12 +13,14 @@ import ProxiesPage from './pages/ProxiesPage'
 import ConnectorsPage from './pages/ConnectorsPage'
 import CredentialsPage from './pages/CredentialsPage'
 import InspectorPage from './pages/InspectorPage'
+import LocationsPage from './pages/LocationsPage'
 import AccountSection from './pages/settings/AccountSection'
 import AppearanceSection from './pages/settings/AppearanceSection'
 import UsersSection from './pages/settings/UsersSection'
 import BackupSection from './pages/settings/BackupSection'
 import ProvidersSection from './pages/settings/ProvidersSection'
 import SystemSection from './pages/settings/SystemSection'
+import GeoSection from './pages/settings/GeoSection'
 import { ProjectProvider } from './contexts/ProjectContext'
 import { AuthProvider, AuthContextValue } from './contexts/AuthContext'
 import { ToastProvider } from './contexts/ToastContext'
@@ -124,6 +126,7 @@ function AuthenticatedApp() {
       <Route path="users" element={<RequireAdmin><UsersSection /></RequireAdmin>} />
       <Route path="backup" element={<RequireAdmin><BackupSection /></RequireAdmin>} />
       <Route path="providers" element={<RequireAdmin><ProvidersSection /></RequireAdmin>} />
+      <Route path="geo" element={<RequireAdmin><GeoSection /></RequireAdmin>} />
       <Route path="system" element={<RequireAdmin><SystemSection /></RequireAdmin>} />
     </>
   )
@@ -153,6 +156,7 @@ function AuthenticatedApp() {
               <Route path="connectors" element={<ConnectorsPage />} />
               <Route path="credentials" element={<CredentialsPage />} />
               <Route path="mitm-inspector" element={<InspectorPage />} />
+              <Route path="locations" element={<LocationsPage />} />
               <Route path="settings">{settingsRoutes}</Route>
               <Route path="*" element={<Navigate to="overview" replace />} />
             </Route>

@@ -22,6 +22,7 @@ from api.db.models import (
     SystemMetricsModel,
     UserModel,
 )
+from api.geo.models import ConflictRule, GeoSourceKind, LocationPolicy, PreflightMode
 from api.models.connector import Connector
 from api.models.credential import Credential
 from api.models.project import MitmBrowser, MitmEngine, MitmMode, Project
@@ -75,6 +76,10 @@ class ProjectRepository:
             tls_mitm_engine=project.tls_mitm_engine,
             tls_mitm_browser=project.tls_mitm_browser,
             metrics_retention_days=project.metrics_retention_days,
+            location_policy=project.location_policy.value,
+            location_preflight=project.location_preflight.value,
+            location_sources=[k.value for k in project.location_sources] if project.location_sources else None,
+            location_conflict_rule=project.location_conflict_rule.value if project.location_conflict_rule else None,
             created_at=project.created_at,
             updated_at=project.updated_at,
         )
@@ -102,6 +107,14 @@ class ProjectRepository:
             model.tls_mitm_engine = project.tls_mitm_engine
             model.tls_mitm_browser = project.tls_mitm_browser
             model.metrics_retention_days = project.metrics_retention_days
+            model.location_policy = project.location_policy.value
+            model.location_preflight = project.location_preflight.value
+            model.location_sources = (
+                [k.value for k in project.location_sources] if project.location_sources else None
+            )
+            model.location_conflict_rule = (
+                project.location_conflict_rule.value if project.location_conflict_rule else None
+            )
             model.updated_at = utc_now()
             await self._session.flush()
         return project
@@ -146,6 +159,10 @@ class ProjectRepository:
             tls_mitm_engine=MitmEngine(model.tls_mitm_engine) if model.tls_mitm_engine else None,
             tls_mitm_browser=MitmBrowser(model.tls_mitm_browser) if model.tls_mitm_browser else None,
             metrics_retention_days=model.metrics_retention_days,
+            location_policy=LocationPolicy(model.location_policy or "off"),
+            location_preflight=PreflightMode(model.location_preflight or "off"),
+            location_sources=[GeoSourceKind(k) for k in model.location_sources] if model.location_sources else None,
+            location_conflict_rule=ConflictRule(model.location_conflict_rule) if model.location_conflict_rule else None,
             created_at=model.created_at,
             updated_at=model.updated_at,
         )
@@ -413,6 +430,7 @@ class ProxyRepository:
             model.protocol = proxy.protocol.value if isinstance(proxy.protocol, ProxyProtocol) else proxy.protocol
             model.username = proxy.username
             model.password = proxy.password
+            model.display_host = proxy.display_host
             model.tags = proxy.tags
             model.metadata_ = proxy.metadata
             model.updated_at = utc_now()

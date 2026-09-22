@@ -54,5 +54,14 @@ class RoutingStrategy(ABC):
         """
         ...
 
+    def allows_exit_reselection(self, session_id: str | None) -> bool:
+        """Whether a request may move to another proxy after its selection was found misplaced.
+
+        Preflight asks this before retrying with a different upstream. The
+        default says yes: stateless strategies promise nothing about which
+        proxy a request gets. A strategy that binds sessions overrides it.
+        """
+        return True
+
     def reset(self) -> None:  # noqa: B027
         """Reset any internal state. Override if needed."""

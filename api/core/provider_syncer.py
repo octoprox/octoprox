@@ -14,7 +14,7 @@ Supports any provider registered in the provider registry (e.g., Oxylabs, Bright
 from __future__ import annotations
 
 import asyncio
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import Any, Protocol
 
 import structlog
 
@@ -23,6 +23,7 @@ from api.core.event_bus import event_bus
 from api.core.job_stats import job_stats
 from api.core.leadership import Lease
 from api.core.signals import (
+    exit_ip_observed,
     provider_connector_sync_requested,
     proxy_add_requested,
     proxy_remove_requested,
@@ -31,13 +32,12 @@ from api.core.signals import (
 )
 from api.core.workers import LeaseName, WorkerName, resource_lease
 from api.db.redis import RedisClient
+from api.geo.models import META_ENDPOINT_COUNTRY
 from api.models.connector import Connector
 from api.models.credential import Credential
 from api.models.proxy import Proxy
 from api.providers.registry import ProviderRegistry, get_provider_registry
-
-if TYPE_CHECKING:
-    pass
+from api.providers.sdk.strategies import META_DISCOVERED_IP
 
 logger = structlog.get_logger()
 
@@ -107,6 +107,25 @@ class ProxyProviderSyncer:
     @property
     def registry(self) -> ProviderRegistry:
         return self._registry or get_provider_registry()
+
+    async def announce_exit_ip(self, proxy: Proxy) -> None:
+        """Tell attribution which exit IP a discovered proxy has, once the pool holds it.
+
+        The discovery endpoint's country, recorded by the strategy, travels
+        along as one more candidate. Attribution itself is someone else's job.
+        """
+        ip = proxy.metadata.get(META_DISCOVERED_IP)
+        if not isinstance(ip, str) or not ip:
+            return
+        endpoint_country = proxy.metadata.get(META_ENDPOINT_COUNTRY)
+        await event_bus.publish(
+            exit_ip_observed,
+            self,
+            proxy_id=proxy.id,
+            ip=ip,
+            source="discovery",
+            endpoint_country=endpoint_country if isinstance(endpoint_country, str) else None,
+        )
 
     def _is_syncable(self, credential: Credential) -> bool:
         return self.registry.is_syncable(credential.type)
@@ -213,6 +232,7 @@ class ProxyProviderSyncer:
 
                 for proxy in updated_proxies:
                     await event_bus.publish(proxy_update_requested, self, proxy=proxy)
+                    await self.announce_exit_ip(proxy)
                 for proxy_id in proxy_ids_to_remove:
                     await event_bus.publish(proxy_remove_requested, self, proxy_id=proxy_id)
 
@@ -224,6 +244,7 @@ class ProxyProviderSyncer:
                     proxies_to_add, more_to_remove = await provider.sync_proxies(remaining)
                     for proxy in proxies_to_add:
                         await event_bus.publish(proxy_add_requested, self, proxy=proxy)
+                        await self.announce_exit_ip(proxy)
                     for proxy_id in more_to_remove:
                         if proxy_id not in removed:
                             await event_bus.publish(proxy_remove_requested, self, proxy_id=proxy_id)
@@ -326,6 +347,7 @@ class ProxyProviderSyncer:
 
                 for proxy in proxies_to_add:
                     await event_bus.publish(proxy_add_requested, self, proxy=proxy)
+                    await self.announce_exit_ip(proxy)
                 for proxy_id in proxy_ids_to_remove:
                     await event_bus.publish(proxy_remove_requested, self, proxy_id=proxy_id)
 

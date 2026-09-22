@@ -17,7 +17,7 @@ import asyncio
 import hashlib
 import time
 from datetime import timedelta
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
 import httpx
 import structlog
@@ -27,11 +27,12 @@ from api.core import utc_now
 from api.core.config import settings
 from api.core.event_bus import event_bus
 from api.core.job_stats import job_stats
-from api.core.signals import health_check_completed
+from api.core.signals import exit_ip_observed, health_check_completed
 from api.core.workers import WorkerName
 from api.db.redis import INSTANCE_REGISTRY_SCAN, RedisClient
 from api.models.connector import Connector
 from api.models.proxy import Proxy, ProxyProtocol, ProxyStatus
+from api.providers.sdk.sources import extract_ip_and_country
 
 if TYPE_CHECKING:
     pass
@@ -40,6 +41,37 @@ logger = structlog.get_logger()
 
 # Default healthcheck URL
 DEFAULT_HEALTHCHECK_URL = "https://httpbin.org/ip"
+# Connector config keys: where in the health check response the exit IP (and
+# country) can be read. Set them when a connector uses a custom check URL that
+# echoes the caller's IP; leave them unset for URLs that do not (nothing is
+# extracted and the proxy's location is left alone).
+HEALTHCHECK_IP_PATH_KEY = "healthcheck_ip_path"
+HEALTHCHECK_COUNTRY_PATH_KEY = "healthcheck_country_path"
+
+
+def default_ip_paths(
+    url: str, connector_config: dict[str, Any] | None, *, include_default_url: bool = True
+) -> tuple[str, str | None] | None:
+    """``(ip_path, country_path)`` from the connector's config, else the httpbin default, else None."""
+    config = connector_config or {}
+    custom = config.get(HEALTHCHECK_IP_PATH_KEY)
+    if isinstance(custom, str) and custom.strip():
+        country = config.get(HEALTHCHECK_COUNTRY_PATH_KEY)
+        return custom.strip(), (country.strip() if isinstance(country, str) and country.strip() else None)
+    if include_default_url and url.rstrip("/") == DEFAULT_HEALTHCHECK_URL:
+        return "origin", None
+    return None
+
+
+class IpExtractionRules(Protocol):
+    """Where a check URL's response carries the caller's IP. IP attribution supplies one."""
+
+    @property
+    def default_check_url(self) -> str:
+        """URL checked when a connector names none; the echo endpoint, in practice."""
+        ...
+
+    def ip_paths(self, url: str, connector_config: dict[str, Any]) -> tuple[str, str | None] | None: ...
 
 def _hrw_owner(proxy_id: str, instances: list[str]) -> str:
     """Return the instance id that owns this proxy under rendezvous hashing.
@@ -96,6 +128,7 @@ class HealthChecker:
         proxy_data_provider: ProxyDataProvider,
         redis_client: RedisClient,
         instance_id: str,
+        extraction_rules: IpExtractionRules | None = None,
     ) -> None:
         """Initialize the health checker.
 
@@ -106,10 +139,15 @@ class HealthChecker:
                 discovery so HRW can shard ownership).
             instance_id: This process's identifier (matches the value
                 published to `instance_registry:<id>` by the heartbeat).
+            extraction_rules: Which check URLs echo the caller's IP and where; checks
+                that do report the exit IP they saw on ``exit_ip_observed``.
+                Without rules only the connector's own paths and the httpbin
+                default are known.
         """
         self._proxy_data_provider = proxy_data_provider
         self._redis_client = redis_client
         self._instance_id = instance_id
+        self._extraction_rules = extraction_rules
         self._interval = settings.health_check_interval
         self._timeout = settings.health_check_timeout
 
@@ -239,14 +277,41 @@ class HealthChecker:
             proxy: The proxy to get the healthcheck URL for.
 
         Returns:
-            The healthcheck URL to use (default: https://httpbin.org/ip)
+            The connector's own URL, else the extraction rules' default (the
+            attribution echo endpoint), else https://httpbin.org/ip.
         """
         connector = self._proxy_data_provider.get_connector(proxy.connector_id)
         if connector and connector.config:
             custom_url = connector.config.get("healthcheck_url")
             if isinstance(custom_url, str) and custom_url:
                 return custom_url
+        if self._extraction_rules is not None and self._extraction_rules.default_check_url:
+            return self._extraction_rules.default_check_url
         return DEFAULT_HEALTHCHECK_URL
+
+    def _ip_paths(self, proxy: Proxy, url: str) -> tuple[str, str | None] | None:
+        """``(ip_path, country_path)`` to read the exit IP from a check response, or None."""
+        connector = self._proxy_data_provider.get_connector(proxy.connector_id)
+        config = connector.config if connector and connector.config else {}
+        if self._extraction_rules is not None:
+            return self._extraction_rules.ip_paths(url, config)
+        return default_ip_paths(url, config)
+
+    def _observed_ip(self, proxy: Proxy, url: str, response: httpx.Response) -> tuple[str | None, str | None]:
+        paths = self._ip_paths(proxy, url)
+        if paths is None:
+            return None, None
+        try:
+            ip, country = extract_ip_and_country(response, paths[0], paths[1])
+        except Exception as exc:
+            logger.debug("Health check IP extraction failed", proxy_id=proxy.id, error=str(exc))
+            return None, None
+        if ip is None:
+            logger.debug(
+                "Health check response carried no IP at the configured path",
+                proxy_id=proxy.id, url=url, ip_path=paths[0],
+            )
+        return ip, (country or None)
 
     async def _check_proxy(self, proxy: Proxy) -> None:
         """Check health of a single proxy and emit signal with result."""
@@ -279,6 +344,15 @@ class HealthChecker:
                         latency_ms=latency_ms,
                         consecutive_failures=0,
                     )
+                    observed_ip, observed_country = self._observed_ip(proxy, healthcheck_url, response)
+                    if observed_ip:
+                        await event_bus.publish(exit_ip_observed,
+                            self,
+                            proxy_id=proxy.id,
+                            ip=observed_ip,
+                            source="health_check",
+                            endpoint_country=observed_country,
+                        )
                 else:
                     await self._handle_check_failure(
                         proxy, f"HTTP {response.status_code}"

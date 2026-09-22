@@ -24,7 +24,7 @@ from api.core.backup import (
     decrypt_payload,
     read_envelope,
 )
-from api.db.models import ProxyMetricsModel, ProxyModel
+from api.db.models import GeoDatabaseBlobModel, IpObservationModel, ProxyMetricsModel, ProxyModel
 
 PASSPHRASE = "correct horse battery"
 SCHEMA = "019_add_entity_version_columns"
@@ -39,6 +39,8 @@ def _sample_payload() -> dict:
         "proxies": [],
         "proxy_metrics": [],
         "project_metrics": [],
+        "geo_settings": [{"id": 1, "exit_ip_retention_days": 90}],
+        "geo_databases": [{"id": "db1", "vendor": "maxmind", "kind": "country"}],
     }
 
 
@@ -51,10 +53,23 @@ class TestCryptoRoundTrip:
         envelope = read_envelope(file_bytes)
         assert envelope.schema_version == SCHEMA
         assert envelope.includes_metrics is False
+        # Database files are opt-in; the flag defaults off and the payload
+        # still carries the attribution configuration rows.
+        assert envelope.includes_database_files is False
 
         out = decrypt_payload(envelope, PASSPHRASE)
         assert out.users == payload["users"]
         assert out.projects == payload["projects"]
+        assert out.geo_settings == payload["geo_settings"]
+        assert out.geo_databases == payload["geo_databases"]
+        assert out.geo_database_blobs == []
+
+    def test_database_files_flag_recorded_in_envelope(self) -> None:
+        file_bytes = build_backup_file(
+            _sample_payload(), PASSPHRASE, schema_version=SCHEMA,
+            include_metrics=False, include_database_files=True,
+        )
+        assert read_envelope(file_bytes).includes_database_files is True
 
     def test_wrong_passphrase_raises(self) -> None:
         file_bytes = build_backup_file(
@@ -135,6 +150,29 @@ class TestColumnSerialization:
         assert rebuilt.id is None
         assert rebuilt.proxy_id == "proxy-1"
         assert rebuilt.request_count == 5
+
+    def test_database_blob_round_trips_as_base64(self) -> None:
+        # An mmdb file is binary and not JSON-safe; it travels base64-encoded
+        # and comes back as the same bytes.
+        content = bytes(range(256)) * 3
+        blob = GeoDatabaseBlobModel(database_id="db1", data=content)
+        row = _dump_row(blob)
+        assert isinstance(row["data"], str)
+
+        spec = _EntitySpec("geo_database_blobs", GeoDatabaseBlobModel, is_database_file=True)
+        rebuilt = _build_model(spec, row)
+        assert rebuilt.data == content
+        assert rebuilt.database_id == "db1"
+
+    def test_observation_id_dropped_on_import(self) -> None:
+        spec = _EntitySpec("ip_observations", IpObservationModel, is_metric=True, preserve_id=False)
+        rebuilt = _build_model(
+            spec,
+            {"id": 42, "ip": "1.2.3.4", "source": "health_check", "observed_at": "2026-01-01T12:00:00"},
+        )
+        assert rebuilt.id is None
+        assert rebuilt.ip == "1.2.3.4"
+        assert rebuilt.observed_at == datetime(2026, 1, 1, 12, 0, 0)
 
 
 class TestUserConflictResolution:

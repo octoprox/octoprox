@@ -10,6 +10,14 @@ from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
 from pydantic import BaseModel
 
 from api.core.auth import RequireEditorDep
+from api.geo.models import (
+    META_COUNTRY_SOURCE,
+    META_LOCATION,
+    META_LOCATION_CONFLICT,
+    META_VENDOR_COUNTRY,
+    ObservationSource,
+)
+from api.geo.service import MANUAL_SOURCE
 from api.models.credential import CredentialType
 from api.models.proxy import Proxy, ProxyCreate, ProxyProtocol, ProxyResponse, ProxyUpdate
 from api.providers.sdk.strategies import META_COUNTRY
@@ -103,6 +111,10 @@ def _proxy_to_response(
         quarantined=quarantined,
         quarantine_remaining_seconds=round(quarantine_remaining_seconds, 1),
         country=proxy.country,
+        country_source=proxy.metadata.get(META_COUNTRY_SOURCE),
+        vendor_country=proxy.metadata.get(META_VENDOR_COUNTRY),
+        location_conflict=bool(proxy.metadata.get(META_LOCATION_CONFLICT)),
+        location=proxy.metadata.get(META_LOCATION) if isinstance(proxy.metadata.get(META_LOCATION), dict) else None,
         tags=proxy.tags,
         created_at=proxy.created_at,
     )
@@ -156,8 +168,8 @@ async def create_proxy(
     """Add a new proxy to the pool. Only allowed for STATIC_PROXY_PROVIDER connectors.
 
     Unless ``country`` is given, the exit IP and country are looked up
-    afterwards by the GeoLookup service, which reacts to the proxy_added
-    signal (``proxy.geo_lookup`` settings).
+    afterwards by the attributor, which reacts to the proxy_added signal
+    (``proxy.geo_lookup`` settings and the attribution echo endpoint).
     """
     proxy_manager = request.app.state.proxy_manager
 
@@ -190,6 +202,7 @@ async def create_proxy(
     metadata = dict(proxy_data.metadata)
     if proxy_data.country:
         metadata[META_COUNTRY] = proxy_data.country
+        metadata[META_COUNTRY_SOURCE] = MANUAL_SOURCE
     proxy = Proxy(
         host=proxy_data.host,
         port=proxy_data.port,
@@ -363,9 +376,13 @@ async def update_proxy(
         proxy.metadata = proxy_data.metadata
     if proxy_data.country is not None:
         if proxy_data.country:
+            # Set by hand: attribution keeps it as the routing country and
+            # verifies the exit against it instead of overwriting it.
             proxy.metadata[META_COUNTRY] = proxy_data.country
+            proxy.metadata[META_COUNTRY_SOURCE] = MANUAL_SOURCE
         else:
             proxy.metadata.pop(META_COUNTRY, None)
+            proxy.metadata.pop(META_COUNTRY_SOURCE, None)
 
     # Persist the update
     await proxy_manager.update_proxy(proxy)
@@ -409,11 +426,7 @@ async def locate_proxy(request: Request, proxy_id: str, _guard: RequireEditorDep
     if proxy is None:
         raise HTTPException(status_code=404, detail="Proxy not found")
 
-    geo_lookup = getattr(request.app.state, "geo_lookup", None)
-    if geo_lookup is None:
-        raise HTTPException(status_code=503, detail="Exit location lookup is not available")
-
-    updated = await geo_lookup.enrich(proxy_manager, proxy_id)
+    updated = await request.app.state.geo_runtime.proxy_attributor.enrich(proxy_id, source=ObservationSource.MANUAL)
     if updated is None:
         raise HTTPException(status_code=502, detail="Could not determine the exit location through this proxy")
 

@@ -37,6 +37,9 @@ class WorkerName(StrEnum):
     METRIC_DELTA_PUBLISHER = "metric_delta_publisher"
     METRIC_DELTA_SUBSCRIBER = "metric_delta_subscriber"
     CROSS_INSTANCE_SUBSCRIBER = "cross_instance_subscriber"
+    GEO_OBSERVATION_PUBLISHER = "geo_observation_publisher"
+    GEO_OBSERVATION_FLUSHER = "geo_observation_flusher"
+    GEO_DATABASE_UPDATER = "geo_database_updater"
 
 
 class LeaseName(StrEnum):
@@ -52,6 +55,8 @@ class LeaseName(StrEnum):
     SYSTEM_SNAPSHOTTER = "system_snapshotter"
     AUTOSCALER = "autoscaler"
     PROVIDER_SYNC = "provider_sync"
+    GEO_OBSERVATION_FLUSHER = "geo_observation_flusher"
+    GEO_DATABASE_UPDATER = "geo_database_updater"
 
 
 def resource_lease(name: LeaseName, resource_id: str) -> str:
@@ -136,6 +141,22 @@ WORKERS: dict[WorkerName, WorkerInfo] = {
     ),
     WorkerName.CROSS_INSTANCE_SUBSCRIBER: WorkerInfo(
         "Applies entity changes published by other instances",
+    ),
+    WorkerName.GEO_OBSERVATION_PUBLISHER: WorkerInfo(
+        "Moves this instance's buffered IP observations into the Redis queue every "
+        "few seconds, keeping attribution off the request path",
+    ),
+    WorkerName.GEO_OBSERVATION_FLUSHER: WorkerInfo(
+        "Drains the Redis observation queue into Postgres history and the "
+        "per-connector location accuracy aggregates, then applies retention",
+        lease=LeaseName.GEO_OBSERVATION_FLUSHER,
+        lease_label="IP observation flush",
+    ),
+    WorkerName.GEO_DATABASE_UPDATER: WorkerInfo(
+        "Downloads scheduled IP database updates from their vendors and "
+        "publishes the new file to every instance",
+        lease=LeaseName.GEO_DATABASE_UPDATER,
+        lease_label="IP database updates",
     ),
 }
 

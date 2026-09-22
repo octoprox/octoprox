@@ -107,10 +107,30 @@ tls_mitm:
 | `proxy.health_check.interval_seconds` | Interval between health checks | 60 |
 | `proxy.health_check.timeout_seconds` | Timeout for health check requests | 30 |
 | `proxy.geo_lookup.enabled` | Look up the exit IP and country of static proxies when they are added (one request through the proxy) | true |
-| `proxy.geo_lookup.url` | JSON endpoint requested through the proxy | https://lumtest.com/myip.json |
-| `proxy.geo_lookup.ip_path` | JMESPath to the IP in the response | ip |
-| `proxy.geo_lookup.country_path` | JMESPath to the ISO country code in the response | country |
+| `proxy.geo_lookup.url` | JSON endpoint requested through the proxy. Also seeds the IP attribution echo endpoint; point it at an Octoprox `/echo` in production. | https://httpbin.org/ip |
+| `proxy.geo_lookup.ip_path` | JMESPath to the IP in the response | origin |
+| `proxy.geo_lookup.country_path` | JMESPath to the ISO country code in the response; empty when the endpoint reports none | (empty) |
 | `proxy.geo_lookup.timeout_seconds` | Timeout for one lookup request | 15 |
+
+The `proxy.geo_lookup` endpoint seeds the echo endpoint of the [IP attribution]({{ site.baseurl }}/ip-attribution) policy on a fresh install; once an admin saves the policy in the UI, the policy's `echo_url` is what is used.
+
+### IP Attribution
+
+The install-wide settings (default source precedence and conflict rule, echo endpoint, preflight, retention) are edited in Settings → IP attribution and stored in the database; projects may override the source precedence and conflict rule. The config file describes this process and seeds a fresh install:
+
+| Option | Description | Default |
+|--------|-------------|---------|
+| `geo.cache_dir` | Where this instance caches IP database files fetched from Postgres | data/geo |
+| `geo.databases` | Operator-managed database files: list of `{path, name, priority, enabled}` entries loaded at startup | [] |
+| `geo.defaults` | Initial settings for a fresh install: `default_sources`, `default_conflict_rule`, `echo_url`, `echo_ip_path`, `echo_country_path`, `echo_timeout_seconds`, `health_check_attribution`, `preflight_session_ttl_seconds`, `preflight_max_attempts`, `observation_retention_days`, `exit_ip_retention_days` | built-in |
+| `geo.echo.enabled` | Serve the public `/echo` endpoint on this instance | true |
+| `geo.echo.trusted_proxies` | CIDRs of load balancers whose `X-Forwarded-For` the `/echo` endpoint trusts for the client IP | [] |
+| `geo.observations.publish_interval_seconds` | How often buffered IP observations are pushed to Redis | 5 |
+| `geo.observations.flush_interval_seconds` | How often the leader drains the Redis queue into Postgres | 30 |
+| `geo.observations.max_buffer` | Observations one instance keeps in memory before dropping the oldest | 5000 |
+| `geo.updater.check_interval_seconds` | How often the leader checks for scheduled database downloads | 3600 |
+
+Connector config keys read by the health checker: `healthcheck_url` (custom check URL; without it the attribution echo endpoint is checked), `healthcheck_ip_path` (JMESPath, or `@text`, of the exit IP in that URL's response; unset means the response carries no IP unless the URL is the echo or httpbin endpoint) and `healthcheck_country_path`.
 
 ## Database Configuration
 

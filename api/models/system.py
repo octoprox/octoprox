@@ -239,6 +239,9 @@ class InstanceSnapshot(BaseModel):
     proxy_server_connections: int = 0
     geo_lookup_enabled: bool = False
     geo_lookups_in_flight: int = 0
+    # IP databases this instance has open, by id, and observations not yet published.
+    geo_databases: list[str] = Field(default_factory=list)
+    geo_pending_observations: int = 0
 
 
 class InstanceInfo(BaseModel):
@@ -274,6 +277,8 @@ class WorkerStats(BaseModel):
     proxy_server_connections: int = 0
     geo_lookup_enabled: bool = False
     geo_lookups_in_flight: int = 0
+    geo_databases: list[str] = Field(default_factory=list)
+    geo_pending_observations: int = 0
 
 
 class SystemStats(BaseModel):

@@ -63,6 +63,23 @@ def _load_yaml_config(config_path: Path) -> dict[str, Any]:
             flat_config["geo_lookup_ip_path"] = geo_cfg.get("ip_path")
             flat_config["geo_lookup_country_path"] = geo_cfg.get("country_path")
             flat_config["geo_lookup_timeout_seconds"] = geo_cfg.get("timeout_seconds")
+    if "geo" in config_data:
+        geo_cfg = config_data["geo"] or {}
+        flat_config["geo_cache_dir"] = geo_cfg.get("cache_dir")
+        flat_config["geo_databases"] = geo_cfg.get("databases")
+        flat_config["geo_policy_defaults"] = geo_cfg.get("defaults")
+        if "echo" in geo_cfg:
+            echo_cfg = geo_cfg["echo"] or {}
+            flat_config["geo_echo_enabled"] = echo_cfg.get("enabled")
+            flat_config["geo_echo_trusted_proxies"] = echo_cfg.get("trusted_proxies")
+        if "observations" in geo_cfg:
+            obs_cfg = geo_cfg["observations"] or {}
+            flat_config["geo_observation_publish_interval"] = obs_cfg.get("publish_interval_seconds")
+            flat_config["geo_observation_flush_interval"] = obs_cfg.get("flush_interval_seconds")
+            flat_config["geo_observation_max_buffer"] = obs_cfg.get("max_buffer")
+        if "updater" in geo_cfg:
+            upd_cfg = geo_cfg["updater"] or {}
+            flat_config["geo_updater_interval"] = upd_cfg.get("check_interval_seconds")
     if "providers" in config_data:
         providers_cfg = config_data["providers"] or {}
         flat_config["providers_dir"] = providers_cfg.get("dir")
@@ -236,10 +253,48 @@ class Settings(BaseSettings):
     geo_lookup_enabled: bool = Field(
         default=True, description="Look up the exit IP and country of static proxies when they are added"
     )
-    geo_lookup_url: str = Field(default="https://lumtest.com/myip.json", description="JSON endpoint requested through the proxy")
-    geo_lookup_ip_path: str = Field(default="ip", description="JMESPath to the IP in the response")
-    geo_lookup_country_path: str = Field(default="country", description="JMESPath to the ISO country code in the response")
+    # httpbin answers every caller with the IP and nothing else, which is all
+    # attribution needs from an echo. Point this at an Octoprox /echo in
+    # production (Settings -> IP attribution).
+    geo_lookup_url: str = Field(default="https://httpbin.org/ip", description="JSON endpoint requested through the proxy")
+    geo_lookup_ip_path: str = Field(default="origin", description="JMESPath to the IP in the response")
+    geo_lookup_country_path: str = Field(default="", description="JMESPath to the ISO country code in the response (empty when the endpoint reports none)")
     geo_lookup_timeout_seconds: float = Field(default=15.0, description="Timeout for one lookup request")
+
+    # IP attribution (see docs/ip-attribution.md). The live settings row is
+    # edited in the admin panel; these are the parts that describe this process
+    # or seed a fresh install.
+    geo_cache_dir: str = Field(
+        default="data/geo",
+        description="Directory where this instance caches IP database files fetched from Postgres",
+    )
+    geo_databases: list[dict[str, Any]] = Field(
+        default_factory=list,
+        description="Operator-managed IP database files: list of {path, name?, priority?} entries loaded at startup",
+    )
+    geo_policy_defaults: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Initial attribution settings for a fresh install (fields of GeoSettings); the admin panel edits the live row",
+    )
+    geo_echo_enabled: bool = Field(
+        default=True, description="Serve the public /echo endpoint that reports the caller's IP and attribution"
+    )
+    geo_echo_trusted_proxies: list[str] = Field(
+        default_factory=list,
+        description="CIDRs of load balancers whose X-Forwarded-For the /echo endpoint trusts for the client IP",
+    )
+    geo_observation_publish_interval: float = Field(
+        default=5.0, description="How often buffered IP observations are pushed to the Redis queue, in seconds"
+    )
+    geo_observation_flush_interval: float = Field(
+        default=30.0, description="How often the leader drains the Redis observation queue into Postgres, in seconds"
+    )
+    geo_observation_max_buffer: int = Field(
+        default=5000, description="Observations one instance holds in memory before dropping the oldest"
+    )
+    geo_updater_interval: float = Field(
+        default=3600.0, description="How often the leader checks for scheduled IP database downloads, in seconds"
+    )
 
     # Provider SDK settings
     providers_dir: str | None = Field(

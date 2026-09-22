@@ -395,6 +395,10 @@ GET /api/v1/projects/{project_id}/proxies/{proxy_id}
 DELETE /api/v1/projects/{project_id}/proxies/{proxy_id}
 ```
 
+### Proxy location fields
+
+Every proxy response carries the outcome of [IP attribution]({{ site.baseurl }}/ip-attribution): `country` (what routing uses), `country_source` (`database`, `vendor`, `endpoint` or `manual`), `vendor_country` (what the vendor claimed), `location_conflict` (the claim is contradicted) and `location` (region, city, coordinates, ASN and anonymity flags from the databases, when any covers the IP). Setting `country` by hand pins it as `manual`: attribution then verifies the exit against it instead of overwriting it.
+
 ---
 
 ## Metrics
@@ -442,21 +446,25 @@ POST /api/v1/backup/export
 ```json
 {
   "passphrase": "correct horse battery staple",
-  "include_metrics": false
+  "include_metrics": false,
+  "include_database_files": false
 }
 ```
 
 | Field | Type | Notes |
 |-------|------|-------|
 | `passphrase` | string | Minimum 8 characters. Required again to import - it cannot be recovered. |
-| `include_metrics` | boolean | Include historical proxy/project metrics. Default `false` (smaller file). |
+| `include_metrics` | boolean | Include history: proxy/project metrics, exit IP observations and per-connector exit IPs. Default `false` (smaller file). |
+| `include_database_files` | boolean | Include the bytes of uploaded and downloaded IP databases. Default `false`; a city database is tens of megabytes. Their rows are always included, so without the files the restored instance lists them without a file, ready to re-upload or refresh. |
 
 **Response:** the backup file as `application/octet-stream` with a
 `Content-Disposition: attachment; filename="octoprox-backup-YYYY-MM-DD.opbak"`
 header.
 
 The file covers users (including password hashes), projects, credentials,
-connectors, proxies and, optionally, metrics.
+connectors, proxies, custom provider descriptors and their audit log, and the
+IP attribution settings and database records. Optionally it also carries the
+history (metrics and attribution observations) and the IP database files.
 
 ### Import Backup
 
@@ -474,8 +482,10 @@ Content-Type: multipart/form-data
 
 **Import replaces all existing data** on the instance. The wipe and restore run
 in a single transaction, so a failure leaves the existing data untouched.
-Afterwards the live proxy cache is rebuilt and stale Redis state for the
-replaced projects and proxies is purged.
+Afterwards the live proxy cache is rebuilt, stale Redis state for the
+replaced projects and proxies is purged, and IP attribution reloads its
+settings and reopens whatever database files the backup carried. Other
+instances pick the changes up on their periodic reload.
 
 With `keep_current_user=true` the calling admin's own account survives the
 wipe, so an admin importing a backup taken from another instance is not locked
@@ -500,6 +510,13 @@ again with credentials that are valid in the backup.
   "proxies": 14,
   "proxy_metrics": 0,
   "project_metrics": 0,
+  "provider_descriptors": 0,
+  "provider_audit_log": 0,
+  "geo_settings": 1,
+  "geo_databases": 2,
+  "geo_database_blobs": 0,
+  "ip_observations": 0,
+  "connector_exit_ips": 0,
   "kept_current_user": true,
   "user_conflicts": [
     {
@@ -771,6 +788,47 @@ like the ones `proxy_metrics` and `project_metrics` use.
   ]
 }
 ```
+
+---
+
+## IP Attribution
+
+All endpoints live under `/api/v1/geo`. Reads need any authenticated user; writes need an admin. See [IP Attribution]({{ site.baseurl }}/ip-attribution) for the concepts.
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| GET | `/geo/settings` | Install-wide settings (default source policy, echo endpoint, preflight, retention), whether an admin saved them, databases loaded on this instance |
+| PUT | `/geo/settings` | Replace the settings (body: the `settings` object). Applies to every instance |
+| GET | `/geo/databases` | Every database: stored rows plus config-file entries, with `loaded_here` and `load_error` |
+| POST | `/geo/databases` | Upload a file (`multipart/form-data`: `file`, optional `name`, `priority`, `enabled`). Validated before it is stored; proxies are re-attributed |
+| POST | `/geo/databases/from-url` | Register a vendor download URL (`name`, `update_url`, `update_interval_hours`, `update_auth`, `priority`) and download it now. `update_auth` takes `{username, password}` for basic auth or `{token}` / `{header, token}` |
+| POST | `/geo/databases/inspect` | Open an uploaded file and report its metadata without storing it |
+| PATCH | `/geo/databases/{id}` | Change `name`, `enabled`, `priority`, `update_url`, `update_interval_hours`, `update_auth` |
+| POST | `/geo/databases/{id}/refresh` | Download a scheduled database now |
+| DELETE | `/geo/databases/{id}` | Remove a stored database everywhere |
+| POST | `/geo/lookup` | `{ip, claimed_country?, project_id?}`: each database's answer and how the default policy, or the project's, resolves it |
+| POST | `/geo/reattribute` | `{connector_id?}`: re-run attribution offline for every proxy with a known exit IP; returns `{updated}` |
+| GET | `/geo/observations` | One page of observations, newest first, with `total` for paging. Filters apply on the server and mirror the table's columns: `connector_id`, `proxy_id`, `project_id`, `source`, `ip` (exact), `claimed_country`, `resolved_country`, `verdict` (`contradicted`, `uncertain`, `confirmed`, `no_claim`); paging with `limit` (max 1000) and `offset` |
+| GET | `/geo/accuracy` | Per connector, over the distinct exit IPs last seen in the window: `exits`, `claimed`, `confirmed`, `contradicted`, `uncertain`, `accuracy` (confirmed over claimed) and the contradicted pairs with exit counts (`project_id`, `connector_id`, `days`) |
+| GET | `/geo/exits` | Per connector: distinct exit IPs first seen in the window and ever, sightings, reuse (`project_id`, `connector_id`, `days`) |
+| GET | `/geo/exits/ips` | One page of distinct exit IPs, most recently seen first, each with first and last sighting, hand-out count and the latest observation's state (proxy, source, vendor claim, resolved country and source, verdict flags). Filters: `project_id`, `connector_id`, `ip`, `proxy_id`, `country`, `claimed_country`, `verdict`; paging with `limit` (max 1000) and `offset`; `total` in the response |
+| GET | `/geo/status` | Pipeline health: databases, buffered and stored observations, preflight counters |
+
+Projects carry `location_policy` (`off`, `warn`, `strict`), `location_preflight` (`off`, `report`, `retry`, `reject`), and the optional overrides `location_sources` (ordered list of `database`, `vendor`, `endpoint`) and `location_conflict_rule` (`consensus`, `first`) on create, update and in responses. On update an empty list or empty string clears an override so the project inherits the install default again.
+
+### Echo
+
+```bash
+GET /echo?nonce=<anything>
+```
+
+Public. Returns the caller's IP and, with a database loaded, its attribution:
+
+```json
+{"ip": "203.0.113.7", "country": "GB", "region": "England", "city": "London", "asn": 12345, "organization": "Example Ltd", "databases": ["<database id>"], "nonce": "…", "timestamp": "2026-09-21T12:00:00Z"}
+```
+
+Requested through a proxy it reports the proxy's exit. Behind a load balancer, list the balancer in `geo.echo.trusted_proxies` so the address comes from `X-Forwarded-For`.
 
 ---
 
