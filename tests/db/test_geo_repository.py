@@ -15,9 +15,14 @@ from api.db.geo_repository import (
     ObservationRepository,
 )
 from api.db.redis import GEO_OBSERVATIONS_KEY, RedisClient
-from api.db.repository import ConnectorRepository, CredentialRepository, ProjectRepository
+from api.db.repository import (
+    ConnectorRepository,
+    CredentialRepository,
+    ProjectRepository,
+)
 from api.geo.models import (
     ConflictRule,
+    ExitJudgement,
     GeoDatabaseRecord,
     GeoDatabaseSource,
     GeoSettings,
@@ -30,6 +35,7 @@ from api.geo.observations import ObservationFlusher, ObservationRecorder
 from api.models.connector import Connector
 from api.models.credential import Credential, CredentialType
 from api.models.project import Project
+from api.models.proxy import ProxyStatus
 
 
 async def _connectors(session: AsyncSession, *ids: str) -> None:
@@ -146,7 +152,6 @@ def _observation(**overrides: object) -> IpObservation:
         "claimed_country": "US",
         "resolved_country": "GB",
         "conflict": True,
-        "new_exit": True,
     }
     values.update(overrides)
     return IpObservation(**values)  # type: ignore[arg-type]
@@ -193,21 +198,34 @@ class TestObservations:
             _observation(ip="10.0.0.1", observed_at=day2, resolved_country="FR"),
             _observation(ip="10.0.0.3", observed_at=day2, resolved_country="GB"),
             _observation(connector_id="conn-2", ip="10.0.0.1", observed_at=day2),
-            # A later re-attribution of an existing exit: refreshes the state
-            # (claim now confirmed) without counting as a hand-out.
-            _observation(
-                ip="10.0.0.2",
-                observed_at=day2 + timedelta(hours=1),
-                new_exit=False,
-                source=ObservationSource.REATTRIBUTE,
-                claimed_country="GB",
-                resolved_country="GB",
-                conflict=False,
-                proxy_id="proxy-9",
-            ),
         ]
-        await repo.add_exit_ips(aggregate_exits(first))
-        await repo.add_exit_ips(aggregate_exits(second))
+        await repo.add_exit_ips(aggregate_exits([(o, True) for o in first]))
+        await repo.add_exit_ips(aggregate_exits([(o, True) for o in second]))
+        # A later re-attribution of an existing exit by its holder rewrites its
+        # verdict (claim now confirmed) and nothing else: no hand-out, no sighting time.
+        applied = await repo.apply_judgements(
+            [
+                ExitJudgement(
+                    proxy_id="proxy-1", connector_id="conn-1", ip="10.0.0.2",
+                    claimed_country="GB", resolved_country="GB", conflict=False,
+                ),
+                # An exit never sighted has no row to judge; nothing is created.
+                ExitJudgement(proxy_id="proxy-1", connector_id="conn-1", ip="10.0.0.42", claimed_country="GB"),
+                # Computed before the exit's last sighting (a late arrival or a stale
+                # read): the sighting saw the proxy's state later, so it stands.
+                ExitJudgement(
+                    proxy_id="proxy-1", connector_id="conn-1", ip="10.0.0.1",
+                    judged_at=day2 - timedelta(minutes=1), claimed_country="US", resolved_country="US", conflict=False,
+                ),
+                # Another slot of the connector sharing the exit, with its own claim: the
+                # row's verdict belongs to its holder, so this one is dropped.
+                ExitJudgement(
+                    proxy_id="proxy-9", connector_id="conn-1", ip="10.0.0.3",
+                    claimed_country="DE", resolved_country="GB", conflict=True,
+                ),
+            ]
+        )
+        assert applied == 1  # rows actually rewritten, not judgements submitted
         await db_session.commit()
 
         summary = {
@@ -226,16 +244,19 @@ class TestObservations:
         assert await repo.exit_summary(connector_ids=[]) == []
 
         rows, total = await repo.exit_ips(connector_ids=["conn-1"])
-        assert total == 3 and [r["ip"] for r in rows][0] == "10.0.0.2"  # newest state first
+        assert total == 3 and [r["ip"] for r in rows][-1] == "10.0.0.2"  # last seen day1; the judgement moved nothing
         by_ip = {r["ip"]: r for r in rows}
         reused = by_ip["10.0.0.1"]
         assert reused["sightings"] == 2 and reused["first_seen"] == day1 and reused["last_seen"] == day2
-        assert reused["country"] == "FR" and reused["conflict"] is True and reused["source"] == "discovery"
-        # The re-attribution moved the state but not the hand-out count.
+        assert reused["country"] == "FR" and reused["conflict"] is True and reused["source"] == "discovery"  # the older judgement was dropped
+        third = by_ip["10.0.0.3"]
+        assert third["claimed_country"] == "US" and third["source"] == "discovery"  # the non-holder's judgement was dropped
+        # The judgement rewrote the verdict but not the count or the sighting times.
         refreshed = by_ip["10.0.0.2"]
         assert refreshed["sightings"] == 1 and refreshed["source"] == "reattribute"
         assert refreshed["claimed_country"] == "GB" and refreshed["conflict"] is False
-        assert refreshed["proxy_id"] == "proxy-9" and refreshed["last_seen"] == day2 + timedelta(hours=1)
+        # The holder is the proxy whose sighting was most recent; a judgement does not change it.
+        assert refreshed["proxy_id"] == "proxy-1" and refreshed["last_seen"] == day1 and refreshed["first_seen"] == day1
 
         # Paging and the view's filters.
         page, total = await repo.exit_ips(connector_ids=["conn-1", "conn-2"], limit=2, offset=2)
@@ -245,7 +266,7 @@ class TestObservations:
         assert (await repo.exit_ips(verdict="contradicted"))[1] == 3
         assert (await repo.exit_ips(country="fr"))[1] == 1
         assert (await repo.exit_ips(ip="10.0.0.1"))[1] == 2
-        assert (await repo.exit_ips(proxy_id="proxy-9"))[1] == 1
+        assert (await repo.exit_ips(proxy_id="proxy-1"))[1] == 4 and (await repo.exit_ips(proxy_id="proxy-9"))[1] == 0  # both connectors' rows
 
         # Accuracy counts each exit once with its latest verdict: conn-1 has three
         # exits with a claim, one of which the re-attribution confirmed.
@@ -254,25 +275,23 @@ class TestObservations:
         assert (c1["exits"], c1["claimed"], c1["confirmed"], c1["contradicted"], c1["uncertain"]) == (3, 3, 1, 2, 0)
         assert c1["breakdown"] == [{"claimed_country": "US", "observed_country": "FR", "exits": 1}, {"claimed_country": "US", "observed_country": "GB", "exits": 1}] or \
             c1["breakdown"] == [{"claimed_country": "US", "observed_country": "GB", "exits": 1}, {"claimed_country": "US", "observed_country": "FR", "exits": 1}]
-        # The window is by last sighting: only the re-attributed exit is newer than day2.
-        windowed = {a["connector_id"]: a for a in await repo.exit_accuracy(since=day2 + timedelta(minutes=30))}
-        assert windowed["conn-1"]["exits"] == 1 and windowed["conn-1"]["confirmed"] == 1
-        assert "conn-2" not in windowed
+        # The window is by last sighting; the judged exit was last seen on day1 and drops out of a day2 window.
+        windowed = {a["connector_id"]: a for a in await repo.exit_accuracy(since=day2)}
+        assert windowed["conn-1"]["exits"] == 2 and windowed["conn-1"]["confirmed"] == 0
+        assert windowed["conn-2"]["exits"] == 1
         assert await repo.exit_accuracy(connector_ids=[]) == []
 
         # An older batch arriving late may add sightings but cannot roll the state back.
-        late = [_observation(ip="10.0.0.2", observed_at=day1, proxy_id="proxy-old")]
-        await repo.add_exit_ips(aggregate_exits(late))
+        late = [_observation(ip="10.0.0.2", observed_at=day1 - timedelta(hours=1), proxy_id="proxy-old")]
+        await repo.add_exit_ips(aggregate_exits([(o, True) for o in late]))
         await db_session.commit()
         (row,), _ = await repo.exit_ips(ip="10.0.0.2", connector_ids=["conn-1"])
-        assert row["sightings"] == 2 and row["proxy_id"] == "proxy-9" and row["first_seen"] == day1
+        assert row["sightings"] == 2 and row["proxy_id"] == "proxy-1" and row["first_seen"] == day1 - timedelta(hours=1)
 
-        # Retention goes by the last sighting of any kind: the re-attribution
-        # at 09:00 keeps 10.0.0.2, the 08:00 rows go.
-        assert await repo.delete_exit_ips_last_seen_before(datetime(2026, 9, 10)) == 0
-        assert await repo.delete_exit_ips_last_seen_before(datetime(2026, 9, 20, 9, 0)) == 3
+        # Retention goes by the last sighting; a judgement does not keep an exit alive.
+        assert await repo.delete_exit_ips_last_seen_before(datetime(2026, 9, 10)) == 1
         await db_session.commit()
-        assert (await repo.exit_ips(connector_ids=["conn-1"]))[1] == 1
+        assert (await repo.exit_ips(connector_ids=["conn-1"]))[1] == 2
 
         # Deleting the connector takes its aggregates with it.
         assert await ConnectorRepository(db_session).delete("conn-1")
@@ -355,6 +374,8 @@ class TestFlusher:
         db_session: AsyncSession,
     ) -> None:
         await _connectors(db_session, "conn-1")
+        # The flusher annotates the status hash the health checker owns; give proxy-1 one.
+        await redis_client.set_proxy_status("proxy-1", ProxyStatus.HEALTHY)
         repo = ObservationRepository(db_session)
         before = await repo.count()
         # Other test modules' apps publish to the same list; start from a clean queue.
@@ -374,11 +395,79 @@ class TestFlusher:
         assert await flusher.flush_once() == 3
         exits, _ = await ObservationRepository(db_session).exit_ips(connector_ids=["conn-1"])
         assert {e["ip"] for e in exits} >= {"81.2.69.160", "81.2.69.161"}
+        # The last counted exit went into the proxy's status hash, next to its health fields.
+        assert await redis_client.client.hget("proxy:status:proxy-1", "exit_ip") == "81.2.69.161"
+        status = await redis_client.get_proxy_status("proxy-1")
+        assert status is not None and status["status"] == ProxyStatus.HEALTHY
+
+        # The same exit reported again, by anyone, any time later: one raw row more, no hand-out.
+        recorder.record(_observation(ip="81.2.69.161", instance_id="another"))
+        await recorder.publish()
+        assert await flusher.flush_once() == 1
+        (row,), _ = await ObservationRepository(db_session).exit_ips(connector_ids=["conn-1"], ip="81.2.69.161")
+        assert row["sightings"] == 1
+        # A different exit for the same proxy is a hand-out and moves the recorded exit.
+        recorder.record(_observation(ip="81.2.69.170"))
+        await recorder.publish()
+        assert await flusher.flush_once() == 1
+        (row,), _ = await ObservationRepository(db_session).exit_ips(connector_ids=["conn-1"], ip="81.2.69.170")
+        assert row["sightings"] == 1
+        assert await redis_client.client.hget("proxy:status:proxy-1", "exit_ip") == "81.2.69.170"
+        # A judgement of that exit travels the same list: verdict rewritten, no log row, no sighting.
+        recorder.record(ExitJudgement(proxy_id="proxy-1", connector_id="conn-1", ip="81.2.69.170", claimed_country="US", resolved_country="GB", conflict=True))
+        recorder.record(ExitJudgement(proxy_id="proxy-x", connector_id="gone", ip="81.2.69.170"))  # deleted connector: skipped
+        await recorder.publish()
+        assert await flusher.flush_once() == 1  # one verdict rewritten; the skipped judgement is not work done
+        (row,), _ = await ObservationRepository(db_session).exit_ips(connector_ids=["conn-1"], ip="81.2.69.170")
+        assert row["sightings"] == 1 and row["conflict"] is True and row["source"] == "reattribute"
+        await redis_client.client.delete("proxy:status:proxy-1")
         assert await ObservationRepository(db_session).exit_ips(connector_ids=["gone"]) == ([], 0)
         assert await redis_client.client.llen(GEO_OBSERVATIONS_KEY) == 0
         assert await flusher.flush_once() == 0
 
-        assert await repo.count() == before + 3
+        assert await repo.count() == before + 5  # three sightings, then the repeat and the move
         accuracy = {a["connector_id"]: a for a in await repo.exit_accuracy(connector_ids=["conn-1"])}
         assert accuracy["conn-1"]["claimed"] >= 2
         assert await repo.exit_accuracy(connector_ids=["gone"]) == []
+
+    async def test_exit_on_record_is_not_counted_again_when_redis_knows_nothing(
+        self,
+        db_session_factory: async_sessionmaker[AsyncSession],
+        redis_client: RedisClient,
+        db_session: AsyncSession,
+    ) -> None:
+        """After an upgrade or a Redis loss the exit table, not a seed, says what was counted before."""
+        await _connectors(db_session, "conn-1")
+        await redis_client.client.delete(GEO_OBSERVATIONS_KEY)
+        await redis_client.client.delete("proxy:status:proxy-7", "proxy:status:proxy-8", "proxy:status:proxy-9")
+        for proxy_id in ("proxy-7", "proxy-8", "proxy-9"):
+            await redis_client.set_proxy_status(proxy_id, ProxyStatus.HEALTHY)
+        from api.geo.observations import aggregate_exits
+
+        repo = ObservationRepository(db_session)
+        # Two exits already on record from before: one held by proxy-7, one from before per-proxy state existed.
+        held = _observation(proxy_id="proxy-7", ip="10.0.0.7", observed_at=datetime(2026, 9, 1))
+        legacy = _observation(proxy_id=None, ip="10.0.0.8", observed_at=datetime(2026, 9, 1))
+        await repo.add_exit_ips(aggregate_exits([(held, True), (legacy, True)]))
+        await db_session.commit()
+
+        recorder = ObservationRecorder(redis_client)
+        recorder.record(_observation(proxy_id="proxy-7", ip="10.0.0.7", source=ObservationSource.HEALTH_CHECK))  # same holder
+        recorder.record(_observation(proxy_id="proxy-8", ip="10.0.0.8", source=ObservationSource.HEALTH_CHECK))  # legacy row
+        recorder.record(_observation(proxy_id="proxy-9", ip="10.0.0.7", source=ObservationSource.HEALTH_CHECK))  # another proxy: reuse
+        recorder.record(_observation(proxy_id="proxy-8", ip="10.0.0.80", source=ObservationSource.HEALTH_CHECK))  # brand new exit
+        # A sighting of a proxy removed before the flush (its status hash is gone): counted
+        # for the connector's history, but no bookkeeping is written back, or the hash would return.
+        recorder.record(_observation(proxy_id="proxy-gone", ip="10.0.0.99", source=ObservationSource.HEALTH_CHECK))
+        await recorder.publish()
+        flusher = ObservationFlusher(db_session_factory, redis_client, "inst", retention_days=lambda: 7)
+        assert await flusher.flush_once() == 5
+        assert not await redis_client.client.exists("proxy:status:proxy-gone")
+        rows = {r["ip"]: r for r in (await repo.exit_ips(connector_ids=["conn-1"]))[0]}
+        assert rows["10.0.0.7"]["sightings"] == 2  # held before by proxy-7 (1), handed to proxy-9 (+1)
+        assert rows["10.0.0.8"]["sightings"] == 1  # legacy row, holder unknown: not counted again
+        assert rows["10.0.0.80"]["sightings"] == 1
+        # From here on Redis knows, and the table is not consulted for these proxies.
+        assert await redis_client.client.hget("proxy:status:proxy-7", "exit_ip") == "10.0.0.7"
+        assert await redis_client.client.hget("proxy:status:proxy-8", "exit_ip") == "10.0.0.80"
+        await redis_client.client.delete("proxy:status:proxy-7", "proxy:status:proxy-8", "proxy:status:proxy-9")

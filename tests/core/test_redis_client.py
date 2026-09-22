@@ -40,6 +40,19 @@ class TestRedisClient:
         status = await redis_client.get_proxy_status("non-existent")
         assert status is None
 
+    async def test_exit_ip_is_written_only_into_an_existing_status_hash(self, redis_client: RedisClient) -> None:
+        """The observation flusher annotates the hash the health checker owns; it never creates one."""
+        await redis_client.delete_proxy_status("no-hash")
+        await redis_client.set_proxy_status("has-hash", ProxyStatus.HEALTHY)
+        try:
+            assert await redis_client.set_proxy_exit_ips({"no-hash": "203.0.113.9", "has-hash": "203.0.113.10"}) == 1
+            assert not await redis_client.client.exists("proxy:status:no-hash")
+            assert await redis_client.get_proxy_exit_ips(["has-hash", "no-hash"]) == {"has-hash": "203.0.113.10", "no-hash": None}
+            status = await redis_client.get_proxy_status("has-hash")
+            assert status is not None and status["status"] == ProxyStatus.HEALTHY
+        finally:
+            await redis_client.delete_proxy_status("has-hash")
+
     async def test_get_all_proxy_statuses(self, redis_client: RedisClient) -> None:
         """Test getting all proxy statuses."""
         # Set multiple statuses

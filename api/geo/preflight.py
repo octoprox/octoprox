@@ -42,7 +42,7 @@ from api.geo.models import (
 from api.geo.service import MANUAL_SOURCE, GeoService
 from api.models.project import Project
 from api.models.proxy import Proxy
-from api.providers.sdk.strategies import META_COUNTRY, META_DISCOVERED_IP
+from api.providers.sdk.strategies import META_COUNTRY
 
 logger = structlog.get_logger()
 
@@ -232,9 +232,6 @@ class PreflightChecker:
                 resolved_source=resolution.source,
                 conflict=not ok,
                 disagreement=resolution.disagreement,
-                # A session exit the health checker has not seen yet is a hand-out
-                # in its own right; re-verifying the exit it already knows is not.
-                new_exit=proxy.metadata.get(META_DISCOVERED_IP) != ip,
                 candidates=resolution.compact_candidates(),
                 instance_id=self._geo_service._settings.instance_id,
             )

@@ -11,8 +11,9 @@ Three stages, mirroring the request-metrics pipeline:
 2. The recorder's publisher loop (every instance) pushes the buffer to one
    Redis list in a single ``RPUSH`` every few seconds.
 3. :class:`ObservationFlusher` (leader only) pops batches off the list,
-   bulk-inserts the raw rows, upserts the per-connector daily aggregates the
-   accuracy view reads, and applies retention to the raw rows.
+   bulk-inserts the raw rows, decides which sightings are hand-outs, upserts
+   the per-connector exit table the accuracy and exit views read, and applies
+   retention.
 
 Losing Redis loses at most a few seconds of observations. Nothing on the
 request path waits for a database.
@@ -35,7 +36,7 @@ from api.core.leadership import Lease
 from api.core.workers import LeaseName, WorkerName
 from api.db.geo_repository import ExitSighting, ObservationRepository
 from api.db.redis import GEO_OBSERVATIONS_KEY, RedisClient
-from api.geo.models import IpObservation, ObservationSource
+from api.geo.models import ExitJudgement, IpObservation
 from api.geo.store import SessionFactory
 
 logger = structlog.get_logger()
@@ -50,11 +51,11 @@ _RETENTION_EVERY = timedelta(hours=1)
 
 
 class ObservationRecorder:
-    """Per-instance buffer of observations and the loop that publishes it to Redis."""
+    """Per-instance buffer of observations and judgements, and the loop that publishes it to Redis."""
 
     def __init__(self, redis_client: RedisClient | None, *, max_buffer: int = 5000, interval: float = 5.0) -> None:
         self._redis = redis_client
-        self._buffer: list[IpObservation] = []
+        self._buffer: list[IpObservation | ExitJudgement] = []
         self._max_buffer = max_buffer
         self._interval = interval
         self._running = False
@@ -66,8 +67,8 @@ class ObservationRecorder:
     def pending(self) -> int:
         return len(self._buffer)
 
-    def record(self, observation: IpObservation) -> None:
-        """Append one observation. Never blocks; drops the oldest when the buffer is full.
+    def record(self, observation: IpObservation | ExitJudgement) -> None:
+        """Append one observation or judgement. Never blocks; drops the oldest when the buffer is full.
 
         A burst that fills half the buffer triggers a push right away rather
         than waiting for the next tick, so only an unreachable Redis can drop.
@@ -123,25 +124,52 @@ class ObservationRecorder:
         self._running = False
 
 
-# Two instances briefly owning the same proxy under rendezvous hashing (a
-# membership change, a restart) both check it and both report the same exit.
-# Sightings of one proxy, one IP and one source this close together are one
-# event for the aggregates; the raw rows keep both for the record.
-DUPLICATE_WINDOW = timedelta(seconds=15)
+def decide_hand_outs(
+    observations: list[IpObservation],
+    previous: dict[str, str | None],
+    on_record: dict[tuple[str, str], str | None] | None = None,
+) -> tuple[list[tuple[IpObservation, bool]], dict[str, str]]:
+    """Mark which sightings are hand-outs: the proxy's exit differs from the last one counted.
 
+    ``previous`` is the last counted exit per proxy (from the proxy status
+    hash). Sightings are walked in time order and each updates the running
+    exit, so two instances reporting the same IP for a proxy, however far
+    apart, yield one hand-out: the second sees the first's IP already
+    recorded.
 
-def dedupe_sightings(observations: list[IpObservation]) -> list[IpObservation]:
-    """Drop repeats of the same (proxy, ip, source) that fall within DUPLICATE_WINDOW of the kept one."""
-    kept: list[IpObservation] = []
-    last_seen: dict[tuple[str | None, str, ObservationSource], IpObservation] = {}
+    ``on_record`` is the exit table's answer for proxies Redis knows nothing
+    about (after an upgrade or a Redis loss): the proxy that last held each
+    (connector, ip). An exit already on record with this proxy as its holder,
+    or with no holder recorded at all, is treated as counted before. That
+    errs on purpose: a proxy that left an exit and came back to it while
+    Redis knew nothing goes uncounted once, because the alternative is
+    counting every existing exit again on every upgrade. Sightings without a
+    proxy are never hand-outs; the count means hand-outs to a proxy. Returns
+    the marked sightings and the exit to record for every proxy seen.
+    """
+    known: dict[str, str | None] = dict(previous)
+    marked: list[tuple[IpObservation, bool]] = []
     for o in sorted(observations, key=lambda o: o.observed_at):
-        key = (o.proxy_id, o.ip, o.source)
-        previous = last_seen.get(key)
-        if previous is not None and o.observed_at - previous.observed_at <= DUPLICATE_WINDOW:
+        if not o.proxy_id:
+            marked.append((o, False))
             continue
-        last_seen[key] = o
-        kept.append(o)
-    return kept
+        if known.get(o.proxy_id) is not None:
+            hand_out = known[o.proxy_id] != o.ip
+        else:
+            # Nothing counted for this proxy yet: consult what the exit table has.
+            key = (o.connector_id or "", o.ip)
+            if on_record is None or key not in on_record:
+                hand_out = True  # never seen this exit for this connector
+            else:
+                holder = on_record[key]
+                hand_out = holder is not None and holder != o.proxy_id  # someone else held it: reuse
+        known[o.proxy_id] = o.ip
+        marked.append((o, hand_out))
+    latest: dict[str, str] = {}
+    for proxy_id, ip in known.items():
+        if ip is not None and previous.get(proxy_id) != ip:
+            latest[proxy_id] = ip
+    return marked, latest
 
 
 def _latest_state(sighting: ExitSighting, o: IpObservation) -> None:
@@ -155,28 +183,27 @@ def _latest_state(sighting: ExitSighting, o: IpObservation) -> None:
     sighting.disagreement = o.disagreement
 
 
-def aggregate_exits(observations: list[IpObservation]) -> dict[tuple[str, str], ExitSighting]:
+def aggregate_exits(sightings: list[tuple[IpObservation, bool]]) -> dict[tuple[str, str], ExitSighting]:
     """Fold a batch into one ExitSighting per (connector, IP).
 
-    Every observation refreshes the exit's latest state (who held it, what
-    was claimed, how it was judged), but only sightings flagged ``new_exit``
-    count as hand-outs. Re-attribution, Detect on an unchanged proxy and
-    preflight verify an exit the proxy already had; they update the state and
-    leave the count alone.
+    Each item is an observation and whether :func:`decide_hand_outs` judged
+    it a hand-out. Every observation refreshes the exit's latest state (who
+    held it, what was claimed, how it was judged); only hand-outs move the
+    count.
     """
     exits: dict[tuple[str, str], ExitSighting] = {}
-    for o in observations:
+    for o, hand_out in sightings:
         if not o.connector_id:
             continue
         key = (o.connector_id, o.ip)
         current = exits.get(key)
         if current is None:
             current = exits[key] = ExitSighting(
-                first_seen=o.observed_at, last_seen=o.observed_at, count=1 if o.new_exit else 0
+                first_seen=o.observed_at, last_seen=o.observed_at, count=1 if hand_out else 0
             )
             _latest_state(current, o)
             continue
-        if o.new_exit:
+        if hand_out:
             current.count += 1
         if o.observed_at < current.first_seen:
             current.first_seen = o.observed_at
@@ -185,17 +212,29 @@ def aggregate_exits(observations: list[IpObservation]) -> dict[tuple[str, str], 
     return exits
 
 
-def decode_batch(raw: list[Any]) -> list[IpObservation]:
-    """Parse popped Redis payloads, dropping anything that is not an observation."""
-    parsed: list[IpObservation] = []
+def decode_batch(raw: list[Any]) -> tuple[list[IpObservation], list[ExitJudgement]]:
+    """Parse popped Redis payloads into sightings and judgements, dropping anything malformed.
+
+    During a rolling upgrade the list can hold payloads from the other
+    version: an old instance's re-attribution rows and a new instance's
+    judgements are unreadable to the other side and are dropped here. Only
+    verdict rewrites are lost, never sightings, and the next re-attribution
+    restores them.
+    """
+    observations: list[IpObservation] = []
+    judgements: list[ExitJudgement] = []
     for item in raw:
         if isinstance(item, bytes):
             item = item.decode("utf-8", errors="replace")
         try:
-            parsed.append(IpObservation(**json.loads(item)))
+            data = json.loads(item)
+            if isinstance(data, dict) and data.get("kind") == "judgement":
+                judgements.append(ExitJudgement(**data))
+            else:
+                observations.append(IpObservation(**data))
         except (TypeError, ValueError, ValidationError):
             logger.debug("Skipping malformed IP observation")
-    return parsed
+    return observations, judgements
 
 
 class ObservationFlusher:
@@ -262,21 +301,48 @@ class ObservationFlusher:
             return 0
         if not isinstance(raw, list):
             raw = [raw]
-        observations = decode_batch(raw)
-        if not observations:
+        observations, judgements = decode_batch(raw)
+        if not observations and not judgements:
             return 0
         async with self._session_factory() as session:
             repo = ObservationRepository(session)
-            written = await repo.insert_many(observations)
+            written = await repo.insert_many(observations) if observations else 0
             # The aggregates cascade with their connector; a connector deleted
             # between sighting and flush must not fail the whole batch.
-            live = await repo.existing_connector_ids({o.connector_id for o in observations if o.connector_id})
-            aggregable = dedupe_sightings([o for o in observations if o.connector_id in live])
-            await repo.add_exit_ips(aggregate_exits(aggregable))
+            live = await repo.existing_connector_ids(
+                {o.connector_id for o in observations if o.connector_id}
+                | {j.connector_id for j in judgements if j.connector_id}
+            )
+            tracked = [o for o in observations if o.connector_id in live]
+            # Hand-outs are decided here, once, against each proxy's last counted
+            # exit: every instance's sightings pass through this leader in order.
+            previous = await self._redis.get_proxy_exit_ips(o.proxy_id for o in tracked if o.proxy_id)
+            # Redis knows nothing about a proxy after an upgrade or a Redis
+            # loss; the exit table, which only this flusher writes, then says
+            # whether the exit was counted before.
+            unknown = {
+                (o.connector_id, o.ip)
+                for o in tracked
+                if o.proxy_id and o.connector_id and previous.get(o.proxy_id) is None
+            }
+            on_record = await repo.exit_holders(unknown)
+            sightings, latest_exits = decide_hand_outs(tracked, previous, on_record)
+            await repo.add_exit_ips(aggregate_exits(sightings))
+            # Re-judgements rewrite verdicts on exits already on record: no log
+            # row, no hand-out, no movement of first or last seen.
+            judged = await repo.apply_judgements([j for j in judgements if j.connector_id in live])
             await session.commit()
-        logger.info("IP observations flushed", count=written)
+        try:
+            # Written only into status hashes that exist: a proxy removed between
+            # sighting and flush has had its hash deleted and must stay deleted.
+            await self._redis.set_proxy_exit_ips(latest_exits)
+        except Exception as exc:
+            # The counts are committed; at worst the next sighting of these
+            # exits is counted once more. Logged rather than failing the batch.
+            logger.warning("Could not record last counted exits", error=str(exc))
+        logger.info("IP observations flushed", count=written, judged=judged)
         await self._maybe_retain()
-        return written
+        return written + judged
 
     async def _maybe_retain(self) -> None:
         if utc_now() - self._last_retention < _RETENTION_EVERY:

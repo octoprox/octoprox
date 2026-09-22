@@ -15,12 +15,12 @@ from api.core.config import Settings
 from api.core.event_bus import event_bus
 from api.core.signals import exit_ip_changed
 from api.db.redis import GEO_PREFLIGHT_KEY, RedisClient
-from api.geo.models import IpObservation, ObservationSource, PreflightMode
+from api.geo.models import ExitJudgement, IpObservation, ObservationSource, PreflightMode
 from api.geo.observations import (
     ObservationRecorder,
     aggregate_exits,
+    decide_hand_outs,
     decode_batch,
-    dedupe_sightings,
 )
 from api.geo.preflight import PreflightChecker, PreflightVerdict
 from api.geo.service import GeoService
@@ -171,39 +171,60 @@ class TestAggregate:
     def test_exits_fold_per_connector_and_ip(self) -> None:
         early = datetime(2026, 9, 21, 10, 0, 0)
         late = datetime(2026, 9, 21, 12, 0, 0)
-        observations = [
-            IpObservation(observed_at=late, connector_id="c1", source=ObservationSource.HEALTH_CHECK, ip="1.1.1.1", resolved_country="GB", new_exit=True),
-            IpObservation(observed_at=early, connector_id="c1", source=ObservationSource.DISCOVERY, ip="1.1.1.1", resolved_country="DE", new_exit=True),
-            IpObservation(observed_at=early, connector_id="c1", source=ObservationSource.DISCOVERY, ip="1.1.1.2", new_exit=True),
-            IpObservation(observed_at=early, connector_id=None, source=ObservationSource.MANUAL, ip="1.1.1.3", new_exit=True),
-            # Re-judging an exit the proxy already had is not a hand-out, but it
-            # is the exit's latest state.
-            IpObservation(observed_at=late, connector_id="c1", source=ObservationSource.REATTRIBUTE, ip="1.1.1.9", claimed_country="US", resolved_country="US"),
-            IpObservation(observed_at=late, connector_id="c1", source=ObservationSource.PREFLIGHT, ip="1.1.1.1", proxy_id="p1"),
+        sightings = [
+            (IpObservation(observed_at=late, connector_id="c1", source=ObservationSource.HEALTH_CHECK, ip="1.1.1.1", resolved_country="GB"), True),
+            (IpObservation(observed_at=early, connector_id="c1", source=ObservationSource.DISCOVERY, ip="1.1.1.1", resolved_country="DE"), True),
+            (IpObservation(observed_at=early, connector_id="c1", source=ObservationSource.DISCOVERY, ip="1.1.1.2"), True),
+            (IpObservation(observed_at=early, connector_id=None, source=ObservationSource.MANUAL, ip="1.1.1.3"), True),
+            # Preflight re-verifying an exit the proxy already had: latest state, no hand-out.
+            (IpObservation(observed_at=late, connector_id="c1", source=ObservationSource.PREFLIGHT, ip="1.1.1.1", proxy_id="p1"), False),
         ]
-        exits = aggregate_exits(observations)
-        assert set(exits) == {("c1", "1.1.1.1"), ("c1", "1.1.1.2"), ("c1", "1.1.1.9")}
+        exits = aggregate_exits(sightings)
+        assert set(exits) == {("c1", "1.1.1.1"), ("c1", "1.1.1.2")}
         first = exits[("c1", "1.1.1.1")]
         assert first.count == 2 and first.first_seen == early and first.last_seen == late and first.country == "GB"
         assert first.source == "preflight" and first.proxy_id == "p1"  # newest observation wins the state
         assert exits[("c1", "1.1.1.2")].count == 1 and exits[("c1", "1.1.1.2")].country is None
-        rejudged = exits[("c1", "1.1.1.9")]
-        assert rejudged.count == 0 and rejudged.source == "reattribute" and rejudged.claimed_country == "US"
 
-    def test_dedupe_same_sighting_from_two_instances(self) -> None:
+    def test_hand_outs_are_decided_against_the_last_counted_exit(self) -> None:
+        """Two instances reporting the same exit, however far apart, are one hand-out; a change is one more."""
         t = datetime(2026, 9, 22, 9, 29, 9)
-        a = IpObservation(observed_at=t, proxy_id="p1", connector_id="c1", source=ObservationSource.HEALTH_CHECK, ip="1.1.1.1", instance_id="octoprox-2", new_exit=True)
-        b = IpObservation(observed_at=t + timedelta(milliseconds=8), proxy_id="p1", connector_id="c1", source=ObservationSource.HEALTH_CHECK, ip="1.1.1.1", instance_id="octoprox-3", new_exit=True)
-        later = IpObservation(observed_at=t + timedelta(minutes=5), proxy_id="p1", connector_id="c1", source=ObservationSource.HEALTH_CHECK, ip="1.1.1.1", new_exit=True)
-        other_proxy = IpObservation(observed_at=t, proxy_id="p2", connector_id="c1", source=ObservationSource.HEALTH_CHECK, ip="1.1.1.1", new_exit=True)
-        other_source = IpObservation(observed_at=t, proxy_id="p1", connector_id="c1", source=ObservationSource.DISCOVERY, ip="1.1.1.1", new_exit=True)
-        kept = dedupe_sightings([b, later, a, other_proxy, other_source])
-        assert b not in kept and {id(o) for o in kept} == {id(a), id(later), id(other_proxy), id(other_source)}
-        # The exits aggregate sees one hand-out to p1 at t, one later, and one to p2.
-        assert aggregate_exits(kept)[("c1", "1.1.1.1")].count == 4  # a, later, other_proxy, other_source
-        assert aggregate_exits(dedupe_sightings([a, b]))[("c1", "1.1.1.1")].count == 1
+        hc = ObservationSource.HEALTH_CHECK
+        a = IpObservation(observed_at=t, proxy_id="p1", connector_id="c1", source=ObservationSource.DISCOVERY, ip="1.1.1.1", instance_id="octoprox-2")
+        b = IpObservation(observed_at=t + timedelta(seconds=50), proxy_id="p1", connector_id="c1", source=hc, ip="1.1.1.1", instance_id="octoprox-3")
+        moved = IpObservation(observed_at=t + timedelta(minutes=5), proxy_id="p1", connector_id="c1", source=hc, ip="2.2.2.2")
+        back = IpObservation(observed_at=t + timedelta(minutes=9), proxy_id="p1", connector_id="c1", source=hc, ip="1.1.1.1")
+        fresh = IpObservation(observed_at=t, proxy_id="p2", connector_id="c1", source=hc, ip="1.1.1.1")
+        known = IpObservation(observed_at=t, proxy_id="p4", connector_id="c1", source=hc, ip="4.4.4.4")
 
-    def test_decode_batch_skips_garbage(self) -> None:
+        marked, latest = decide_hand_outs([back, b, moved, a, fresh, known], previous={"p4": "4.4.4.4"})
+        by_obs = {id(o): hand_out for o, hand_out in marked}
+        assert by_obs[id(a)] is True and by_obs[id(b)] is False  # the same exit, from another instance, later
+        assert by_obs[id(moved)] is True and by_obs[id(back)] is True  # a real change, and a real change back
+        assert by_obs[id(fresh)] is True  # never counted before
+        assert by_obs[id(known)] is False  # already the last counted exit
+        # A sighting with no proxy cannot be a hand-out to one.
+        orphan = IpObservation(observed_at=t, connector_id="c1", source=hc, ip="9.9.9.9")
+        assert decide_hand_outs([orphan], previous={})[0][0][1] is False
+        # What to record: every proxy whose exit is new or moved, nothing for the unchanged one.
+        assert latest == {"p1": "1.1.1.1", "p2": "1.1.1.1"}
+
+        exits = aggregate_exits(marked)
+        assert exits[("c1", "1.1.1.1")].count == 3  # a, back, fresh
+        assert exits[("c1", "2.2.2.2")].count == 1
+
+        # Redis knows nothing (upgrade, Redis loss): the exit table decides.
+        legacy = IpObservation(observed_at=t, proxy_id="p5", connector_id="c1", source=hc, ip="5.5.5.5")
+        on_record = {("c1", "1.1.1.1"): "p1", ("c1", "5.5.5.5"): None}
+        cold, _ = decide_hand_outs([a, fresh, legacy], previous={}, on_record=on_record)
+        cold_by_obs = {id(o): hand_out for o, hand_out in cold}
+        assert cold_by_obs[id(a)] is False  # p1 already holds 1.1.1.1 on record
+        assert cold_by_obs[id(fresh)] is True  # p2 taking an IP p1 held is a hand-out
+        assert cold_by_obs[id(legacy)] is False  # a row from before per-proxy state: counted before
+
+    def test_decode_batch_splits_sightings_from_judgements_and_skips_garbage(self) -> None:
         good = IpObservation(source=ObservationSource.MANUAL, ip="1.1.1.1").model_dump_json()
-        parsed = decode_batch([good.encode(), b"not json", json.dumps({"ip": "x"}).encode()])
-        assert len(parsed) == 1 and parsed[0].ip == "1.1.1.1"
+        judgement = ExitJudgement(proxy_id="p1", connector_id="c1", ip="1.1.1.1", conflict=True).model_dump_json()
+        observations, judgements = decode_batch([good.encode(), judgement.encode(), b"not json", json.dumps({"ip": "x"}).encode()])
+        assert len(observations) == 1 and observations[0].ip == "1.1.1.1"
+        assert len(judgements) == 1 and judgements[0].proxy_id == "p1" and judgements[0].conflict is True

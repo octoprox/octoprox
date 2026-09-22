@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from enum import StrEnum
-from typing import Any
+from typing import Any, Literal
 from uuid import uuid4
 
 from pydantic import BaseModel, Field, field_validator
@@ -97,7 +97,6 @@ class ObservationSource(StrEnum):
     GEO_LOOKUP = "geo_lookup"  # exit-location lookup of a static proxy
     HEALTH_CHECK = "health_check"
     PREFLIGHT = "preflight"
-    REATTRIBUTE = "reattribute"  # offline re-run after a database change
     MANUAL = "manual"  # the locate button
 
 
@@ -326,11 +325,34 @@ class IpObservation(BaseModel):
     disagreement: bool = False
     candidates: list[dict[str, Any]] = Field(default_factory=list)
     instance_id: str = ""
-    # The proxy was handed this IP: it differs from the IP recorded on the
-    # proxy, or the proxy had never been attributed. Re-attribution, Detect on
-    # an unchanged proxy and preflight verify an exit rather than receive one,
-    # so they leave this False and do not count as hand-outs.
-    new_exit: bool = False
+
+
+# What an exit row's ``source`` says when its verdict last came from a re-judgement.
+JUDGEMENT_SOURCE = "reattribute"
+
+
+class ExitJudgement(BaseModel):
+    """A re-judgement of an exit already on record, after the evidence changed.
+
+    Produced by re-attribution: no request was made and nothing was sighted,
+    the IP already on the proxy was resolved again against the current
+    databases. It travels the same Redis list as observations and the flusher
+    applies it to the exit row's claim, resolution and verdict only. It is not
+    a log row, does not count as a hand-out and does not move first or last
+    seen.
+    """
+
+    kind: Literal["judgement"] = "judgement"
+    judged_at: datetime = Field(default_factory=utc_now)
+    proxy_id: str
+    connector_id: str | None = None
+    ip: str
+    claimed_country: str | None = None
+    resolved_country: str | None = None
+    resolved_source: GeoSourceKind | None = None
+    conflict: bool = False
+    disagreement: bool = False
+    instance_id: str = ""
 
 
 class LoadedDatabase(BaseModel):

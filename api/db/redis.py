@@ -3,6 +3,7 @@
 
 """Redis client for operational data storage."""
 
+from collections.abc import Iterable
 from functools import lru_cache
 from typing import Any
 
@@ -17,6 +18,19 @@ logger = structlog.get_logger()
 # Redis key prefixes. Keep all key formats in this module so the global
 # layout is auditable from one place.
 PROXY_STATUS_KEY = "proxy:status:{proxy_id}"
+# Field of the status hash holding the exit IP the observation flusher last
+# counted as a hand-out for the proxy. Runtime bookkeeping like the health
+# fields: refreshed as sightings arrive, gone with the hash when the proxy is.
+# Only ever written into an existing hash, so the flusher cannot bring back
+# the hash of a removed proxy.
+PROXY_EXIT_IP_FIELD = "exit_ip"
+_SET_FIELD_IF_KEY_EXISTS = """
+if redis.call('EXISTS', KEYS[1]) == 1 then
+    redis.call('HSET', KEYS[1], ARGV[1], ARGV[2])
+    return 1
+end
+return 0
+"""
 PROXY_METRICS_KEY = "proxy:metrics:{proxy_id}"
 PROJECT_METRICS_KEY = "project:metrics:{project_id}"
 SESSION_KEY = "session:{session_id}"
@@ -145,7 +159,10 @@ class RedisClient:
         """Get proxy health status from Redis."""
         key = PROXY_STATUS_KEY.format(proxy_id=proxy_id)
         data = await self.client.hgetall(key)  # type: ignore[misc]
-        if not data:
+        # The observation flusher keeps its ``exit_ip`` field in this hash; a
+        # hash holding only that (a proxy not yet health-checked, or one whose
+        # sighting was flushed after its removal) carries no status.
+        if not data or "status" not in data:
             return None
         return {
             "status": ProxyStatus(data["status"]),
@@ -163,6 +180,39 @@ class RedisClient:
             if status:
                 statuses[proxy_id] = status
         return statuses
+
+    async def get_proxy_exit_ips(self, proxy_ids: Iterable[str]) -> dict[str, str | None]:
+        """The last counted exit IP per proxy, None where none is recorded. One round trip."""
+        ids = list(dict.fromkeys(proxy_ids))
+        if not ids:
+            return {}
+        pipe = self.client.pipeline()
+        for proxy_id in ids:
+            pipe.hget(PROXY_STATUS_KEY.format(proxy_id=proxy_id), PROXY_EXIT_IP_FIELD)
+        values = await pipe.execute()
+        result: dict[str, str | None] = {}
+        for proxy_id, value in zip(ids, values, strict=True):
+            if isinstance(value, bytes):
+                value = value.decode()
+            result[proxy_id] = value if isinstance(value, str) and value else None
+        return result
+
+    async def set_proxy_exit_ips(self, exits: dict[str, str]) -> int:
+        """Record the exit IP last counted for each proxy whose status hash exists. One round trip.
+
+        The check and the write are one atomic script per proxy, so a hash
+        deleted by a proxy removal is never recreated, not even in the gap
+        between looking and writing. A proxy the health checker has not
+        written yet is skipped too; the flusher's exit-table fallback covers
+        its sightings until then. Returns how many were written.
+        """
+        if not exits:
+            return 0
+        pipe = self.client.pipeline()
+        for proxy_id, ip in exits.items():
+            pipe.eval(_SET_FIELD_IF_KEY_EXISTS, 1, PROXY_STATUS_KEY.format(proxy_id=proxy_id), PROXY_EXIT_IP_FIELD, ip)
+        results = await pipe.execute()
+        return sum(1 for r in results if r)
 
     async def delete_proxy_status(self, proxy_id: str) -> None:
         """Delete proxy status from Redis."""

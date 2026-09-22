@@ -24,8 +24,7 @@ export const TIPS = {
       <b>health check</b>: the health check response echoed the exit IP.<br />
       <b>geo lookup</b>: a manually added proxy was located when it was added.<br />
       <b>manual</b>: the Detect button.<br />
-      <b>preflight</b>: a request was verified before being forwarded.<br />
-      <b>reattribute</b>: an offline re-run after a database changed.
+      <b>preflight</b>: a request was verified before being forwarded.
     </>
   ),
   vendorSaid: 'The country the vendor promised: from its proxy list, the geo target of the slot, or a country pinned by hand. Empty when nothing was promised.',
@@ -45,5 +44,5 @@ export const TIPS = {
   reused: 'Share of the connector\'s distinct exit IPs that were handed out more than once. High for pools that recycle a small set of exits.',
   whereWrong: 'The most frequent contradicted pairs: what the vendor claimed, then what attribution resolved, with the count.',
   sightings: 'How many times the connector handed this IP to a proxy. Re-checks of an exit a proxy already had (re-attribution, preflight, unchanged health checks) do not count.',
-  latestState: 'The claim, resolution and verdict of the most recent observation of this exit, whatever its source. The observation log holds every earlier one.',
+  latestState: 'The claim, resolution and verdict of the most recent observation of this exit, whatever its source. "via reattribute" means the verdict was recomputed offline after a database changed, with no new sighting. The observation log holds every sighting.',
 }

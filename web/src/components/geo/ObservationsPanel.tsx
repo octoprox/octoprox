@@ -18,7 +18,7 @@ function verdictOf(o: IpObservation): ObservationVerdict {
   return o.claimed_country ? 'confirmed' : 'no_claim'
 }
 
-const SOURCE_OPTIONS = ['discovery', 'health_check', 'geo_lookup', 'manual', 'preflight', 'reattribute'].map((s) => ({ value: s, label: s.replace('_', ' ') }))
+const SOURCE_OPTIONS = ['discovery', 'health_check', 'geo_lookup', 'manual', 'preflight'].map((s) => ({ value: s, label: s.replace('_', ' ') }))
 const VERDICT_OPTIONS: { value: ObservationVerdict; label: string }[] = [
   { value: 'contradicted', label: 'contradicted' },
   { value: 'uncertain', label: 'uncertain' },

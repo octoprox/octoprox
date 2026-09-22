@@ -16,6 +16,7 @@ from api.geo.attributor import ProxyAttributor
 from api.geo.models import (
     META_LOCATION_CONFLICT,
     META_VENDOR_COUNTRY,
+    ExitJudgement,
     GeoSourceKind,
     ObservationSource,
     SourcePolicy,
@@ -436,8 +437,12 @@ class TestReattribute:
         )
         attributor = await _attributor(geo_service, store)
         try:
+            geo_service.observation_recorder._buffer.clear()
             scanned, changed = await attributor.reattribute_all()
             assert scanned >= 4 and changed == 4
+            # Re-attribution records a judgement per proxy scanned and no sighting.
+            recorded = geo_service.observation_recorder._buffer
+            assert len(recorded) == scanned and all(isinstance(r, ExitJudgement) for r in recorded)
             assert endpoint_only.country == "NL"
             store.update_proxies.assert_awaited_once()
             assert {p.id for p in store.update_proxies.await_args.args[0]} == {

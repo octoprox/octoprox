@@ -286,8 +286,9 @@ class ProxyAttributor:
         """Re-run attribution for every proxy with a known exit IP, without any request.
 
         Used after a database is added, refreshed or removed. Returns how many
-        proxies were re-attributed and how many of them changed as a result;
-        every one records an observation, changed or not.
+        proxies were re-attributed and how many of them changed as a result.
+        Each records a judgement for its exit, changed or not; none records a
+        sighting, since nothing was observed.
         """
         if self._proxy_store is None:
             return 0, 0
@@ -301,13 +302,11 @@ class ProxyAttributor:
                 continue
             scanned += 1
             endpoint_country = proxy.metadata.get(META_ENDPOINT_COUNTRY)
-            _, did_change = self._geo_service.apply_observation(
+            _, did_change = self._geo_service.rejudge(
                 proxy,
                 ip,
                 policy=self.policy_for(proxy.connector_id),
-                source=ObservationSource.REATTRIBUTE,
                 endpoint_country=endpoint_country if isinstance(endpoint_country, str) else None,
-                project_id=self.project_id_for(proxy.connector_id),
             )
             if did_change:
                 changed.append(proxy)

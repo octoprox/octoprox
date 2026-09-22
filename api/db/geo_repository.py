@@ -7,9 +7,25 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any
+from typing import Any, cast
 
-from sqlalchemy import and_, case, delete, func, select, text
+from sqlalchemy import (
+    Boolean,
+    DateTime,
+    String,
+    Table,
+    and_,
+    case,
+    column,
+    delete,
+    func,
+    or_,
+    select,
+    text,
+    tuple_,
+    update,
+    values,
+)
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -23,6 +39,8 @@ from api.db.models import (
     IpObservationModel,
 )
 from api.geo.models import (
+    JUDGEMENT_SOURCE,
+    ExitJudgement,
     GeoDatabaseFormat,
     GeoDatabaseKind,
     GeoDatabaseRecord,
@@ -499,6 +517,89 @@ class ObservationRepository:
             },
         )
         await self._session.execute(statement)
+
+    async def apply_judgements(self, judgements: list[ExitJudgement]) -> int:
+        """Rewrite the latest verdict of exits already on record.
+
+        Rows are not created: a judgement concerns an exit the proxy already
+        holds, and an exit never sighted has no row to judge. Sightings, first
+        and last seen and the holding proxy are untouched: a judgement is not
+        a sighting, and the holder is what the flusher consults to tell a
+        counted exit from a new one. The claim moves with the verdict, since
+        the verdict is only meaningful against the claim it was judged with;
+        the exit's ``source`` becomes the judgement marker so the view can say
+        the verdict was recomputed.
+
+        Two guards keep a judgement from overwriting state it did not judge.
+        It applies only to the row whose holder is the judged proxy (or a
+        legacy row with no holder): two slots of one connector can share an
+        exit with different claims, and the row's verdict belongs to the
+        holder's claim. And a judgement older than the row's last sighting
+        is dropped: that sighting saw the proxy's state after the judgement
+        read it. Returns how many rows were actually rewritten.
+        """
+        data = [
+            (
+                j.connector_id,
+                j.ip,
+                j.proxy_id,
+                j.judged_at,
+                j.claimed_country,
+                j.resolved_country,
+                j.resolved_source.value if j.resolved_source else None,
+                j.conflict,
+                j.disagreement,
+            )
+            for j in sorted(judgements, key=lambda j: j.judged_at)
+            if j.connector_id
+        ]
+        if not data:
+            return 0
+        judged = values(
+            column("connector_id", String),
+            column("ip", String),
+            column("proxy_id", String),
+            column("judged_at", DateTime),
+            column("claimed_country", String),
+            column("country", String),
+            column("resolved_source", String),
+            column("conflict", Boolean),
+            column("disagreement", Boolean),
+            name="judged",
+        ).data(data)
+        table = cast("Table", ConnectorExitIpModel.__table__)
+        statement = (
+            update(table)
+            .where(
+                table.c.connector_id == judged.c.connector_id,
+                table.c.ip == judged.c.ip,
+                table.c.last_seen <= judged.c.judged_at,
+                or_(table.c.proxy_id.is_(None), table.c.proxy_id == judged.c.proxy_id),
+            )
+            .values(
+                source=JUDGEMENT_SOURCE,
+                claimed_country=judged.c.claimed_country,
+                country=func.coalesce(judged.c.country, table.c.country),
+                resolved_source=judged.c.resolved_source,
+                conflict=judged.c.conflict,
+                disagreement=judged.c.disagreement,
+            )
+        )
+        result = await self._session.execute(statement)
+        return int(result.rowcount or 0)  # type: ignore[attr-defined]
+
+    async def exit_holders(self, keys: set[tuple[str, str]]) -> dict[tuple[str, str], str | None]:
+        """For each (connector, ip) already on record, the proxy that last held it (None if unknown).
+
+        The flusher asks this only for proxies whose last counted exit Redis
+        does not know, to tell an exit counted before an upgrade or a Redis
+        loss from a genuinely new one.
+        """
+        if not keys:
+            return {}
+        m = ConnectorExitIpModel
+        query = select(m.connector_id, m.ip, m.proxy_id).where(tuple_(m.connector_id, m.ip).in_(list(keys)))
+        return {(row.connector_id, row.ip): row.proxy_id for row in (await self._session.execute(query)).all()}
 
     async def exit_summary(
         self, *, connector_ids: list[str] | None = None, since: datetime | None = None

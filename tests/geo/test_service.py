@@ -14,6 +14,7 @@ from api.geo.models import (
     META_LOCATION_CANDIDATES,
     META_LOCATION_CONFLICT,
     META_VENDOR_COUNTRY,
+    ExitJudgement,
     GeoSourceKind,
     ObservationSource,
     SourcePolicy,
@@ -106,10 +107,6 @@ class TestApplyObservation:
         _, second = geo_service.apply_observation(proxy, GB_IP, source=ObservationSource.HEALTH_CHECK)
         assert first and not second
         assert geo_service.observation_recorder.pending == 2  # observations are always recorded
-        # Only the first was a hand-out; the second re-judged the same exit.
-        assert [o.new_exit for o in geo_service.observation_recorder._buffer] == [True, False]
-        geo_service.apply_observation(proxy, UNKNOWN_IP, source=ObservationSource.HEALTH_CHECK)
-        assert geo_service.observation_recorder._buffer[-1].new_exit is True
 
     async def test_policy_excluding_databases(self, geo_service: GeoService) -> None:
         geo_service.settings_store._settings = geo_service.settings.model_copy(
@@ -129,6 +126,15 @@ class TestApplyObservation:
         other = _proxy(**{META_GEO: "US"})
         resolution2, _ = geo_service.apply_observation(other, GB_IP, source=ObservationSource.DISCOVERY)
         assert resolution2.country == "GB" and resolution2.source == GeoSourceKind.DATABASE
+
+    async def test_rejudge_records_a_judgement_not_a_sighting(self, geo_service: GeoService) -> None:
+        proxy = _proxy(**{META_GEO: "US"})
+        resolution, changed = geo_service.rejudge(proxy, GB_IP)
+        assert changed and resolution.conflict and proxy.metadata[META_LOCATION_CONFLICT] is True
+        recorded = geo_service.observation_recorder._buffer[-1]
+        assert isinstance(recorded, ExitJudgement)
+        assert recorded.proxy_id == proxy.id and recorded.ip == GB_IP
+        assert recorded.claimed_country == "US" and recorded.resolved_country == "GB" and recorded.conflict is True
 
     async def test_flag_preflight_mismatch(self, geo_service: GeoService) -> None:
         proxy = _proxy()
