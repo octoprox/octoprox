@@ -40,6 +40,29 @@ logger = structlog.get_logger()
 # Buffer size for tunneling
 BUFFER_SIZE = 65536
 
+# Headers scoped to a single hop and therefore never relayed (RFC 9110
+# section 7.6.1 and section 11.7, plus the legacy Proxy-Connection). The
+# request set matters most: Proxy-Authorization carries the client's
+# Octoprox project credential, and relaying it leaks that credential to
+# the upstream vendor (or, over SOCKS, straight to the origin). For HTTP
+# upstreams it also lands as a second Proxy-Authorization header behind
+# the one we add for the vendor. Bright Data tolerates the duplicate;
+# Oxylabs' HAProxy edge rejects the request with a stock 400 Bad request.
+#
+# Transfer-Encoding and Trailer are hop-by-hop by the letter of the spec
+# but we relay message bodies byte for byte, so they stay.
+HOP_BY_HOP_REQUEST_HEADERS = frozenset({
+    "connection", "keep-alive", "te", "upgrade",
+    "proxy-authorization", "proxy-connection",
+})
+HOP_BY_HOP_RESPONSE_HEADERS = frozenset({
+    "connection", "keep-alive", "upgrade",
+    "proxy-authenticate", "proxy-connection",
+})
+# Names a peer may list in its Connection header that we refuse to drop
+# regardless, because they frame the message rather than the hop.
+BODY_FRAMING_HEADERS = frozenset({"content-length", "transfer-encoding", "trailer", "host"})
+
 
 class ProxyServer:
     """HTTP Proxy Server that forwards requests through managed upstream proxies."""
@@ -374,6 +397,23 @@ class ProxyServer:
                 key, value = line_str.split(":", 1)
                 headers[key.strip().lower()] = value.strip()
         return headers
+
+    @staticmethod
+    def _end_to_end_headers(
+        headers: dict[str, str], hop_by_hop: frozenset[str]
+    ) -> dict[str, str]:
+        """Drop the headers that were addressed to the adjacent hop.
+
+        Removes ``hop_by_hop`` plus every name the peer's own Connection
+        header lists (RFC 9110 section 7.6.1), except body-framing names.
+        Keys are expected lower-cased, as ``_read_headers`` produces them.
+        """
+        drop = set(hop_by_hop)
+        for token in headers.get("connection", "").split(","):
+            name = token.strip().lower()
+            if name and name not in BODY_FRAMING_HEADERS:
+                drop.add(name)
+        return {k: v for k, v in headers.items() if k not in drop}
 
     async def _send_error(
         self, writer: asyncio.StreamWriter, status: int, message: str, body: str = ""
@@ -732,7 +772,12 @@ class ProxyServer:
                 upstream_writer.write(auth_header)
                 bytes_sent += len(auth_header)
 
-            for key, value in headers.items():
+            relayed = self._end_to_end_headers(headers, HOP_BY_HOP_REQUEST_HEADERS)
+            # We serve one exchange per connection, so say so: an upstream
+            # that honours it will close after the body instead of waiting
+            # for a second request that never comes.
+            relayed["connection"] = "close"
+            for key, value in relayed.items():
                 header_line = f"{key}: {value}\r\n".encode()
                 upstream_writer.write(header_line)
                 bytes_sent += len(header_line)
@@ -764,18 +809,33 @@ class ProxyServer:
 
             client_writer.write(response_line)
 
-            # Read and forward response headers
+            # Read response headers, then relay the end-to-end ones with the
+            # vendor's original spelling. Hop-by-hop names (Connection,
+            # Keep-Alive, Proxy-Authenticate...) describe the upstream leg
+            # and are replaced by our own Connection: close.
             response_headers: dict[str, str] = {}
+            raw_lines: list[tuple[str | None, bytes]] = []
             while True:
                 line = await upstream_reader.readline()
                 bytes_received += len(line)
-                client_writer.write(line)
                 if line in (b"\r\n", b"\n", b""):
                     break
                 line_str = line.decode("utf-8", errors="replace").strip()
                 if ":" in line_str:
                     key, value = line_str.split(":", 1)
-                    response_headers[key.strip().lower()] = value.strip()
+                    name = key.strip().lower()
+                    response_headers[name] = value.strip()
+                    raw_lines.append((name, line))
+                else:
+                    raw_lines.append((None, line))
+
+            relayed_names = set(
+                self._end_to_end_headers(response_headers, HOP_BY_HOP_RESPONSE_HEADERS)
+            )
+            for relayed_name, line in raw_lines:
+                if relayed_name is None or relayed_name in relayed_names:
+                    client_writer.write(line)
+            client_writer.write(b"Connection: close\r\n\r\n")
 
             await client_writer.drain()
 
