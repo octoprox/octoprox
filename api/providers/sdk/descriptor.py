@@ -37,6 +37,11 @@ FIELD_KEY_PATTERN = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 FieldType = Literal["text", "password", "number", "select", "boolean", "textarea", "url", "country"]
 ProxyMode = Literal["session", "port", "list"]
 PortStrategy = Literal["sequential", "fixed"]
+# Values of a session type's ``session_mode_field``: a provisioned pool of
+# sessions, or one gateway row rendered per request.
+SESSION_MODE_POOL = "pool"
+SESSION_MODE_DYNAMIC = "dynamic"
+DEFAULT_EXIT_SAMPLE_PERCENT = 5
 
 
 def check_port_range(port: int) -> int:
@@ -518,6 +523,20 @@ class ProxyTypeSpec(BaseModel):
     count_field: str = Field(
         default="connector.num_proxies",
         description="Variable holding the desired slot count (list mode: optional cap)",
+    )
+    session_mode_field: str = Field(
+        default="connector.session_mode",
+        description=(
+            "Session mode only: variable choosing between a provisioned pool of sessions ('pool', the "
+            "default) and 'dynamic', one gateway row whose session id and country are rendered per request"
+        ),
+    )
+    exit_sample_field: str = Field(
+        default="connector.exit_sample_percent",
+        description=(
+            "Dynamic sessions only: variable holding the percentage (0-100) of requests without a client "
+            "session that preflight echoes to observe their exit; default 5 when unset"
+        ),
     )
     healthcheck_url: str | None = None
 

@@ -30,7 +30,12 @@ from api.models.credential import CredentialType
 from api.models.project import Project
 from api.models.proxy import Proxy, ProxyProtocol
 from api.providers.sdk.sources import IpDiscoverer
-from api.providers.sdk.strategies import META_DISCOVERED_IP, META_GEO, META_SESSION_ID
+from api.providers.sdk.strategies import (
+    META_DISCOVERED_IP,
+    META_DYNAMIC_SESSIONS,
+    META_GEO,
+    META_SESSION_ID,
+)
 from tests.geo.test_readers import MAXMIND_RECORD, write_mmdb
 
 GB_IP = "81.2.69.160"
@@ -327,6 +332,32 @@ class TestObservations:
         finally:
             await attributor.stop()
 
+    async def test_dynamic_gateway_is_recorded_but_never_written(self, geo_service: GeoService) -> None:
+        store = FakeStore()
+        gateway = store.add(_proxy(connector_id="oxy", metadata={META_DYNAMIC_SESSIONS: "true", META_SESSION_ID: "probe"}))
+        attributor = await _attributor(geo_service, store)
+        changes: list[dict[str, object]] = []
+
+        async def on_change(sender: object, **kwargs: object) -> None:
+            changes.append(kwargs)
+
+        exit_ip_changed.connect(on_change)
+        try:
+            before = geo_service.observation_recorder.pending
+            await attributor.observe(gateway.id, GB_IP, source=ObservationSource.MANUAL)
+            await attributor.observe(gateway.id, ECHO_IP, source=ObservationSource.MANUAL, endpoint_country="DE")
+            assert geo_service.observation_recorder.pending == before + 2
+            sighting = geo_service.observation_recorder._buffer[-1]
+            assert sighting.connector_id == "oxy" and sighting.project_id == "p" and sighting.session_id == "probe"
+            assert sighting.resolved_country == "DE"
+        finally:
+            exit_ip_changed.disconnect(on_change)
+            await attributor.stop()
+        assert gateway.country is None and META_DISCOVERED_IP not in gateway.metadata
+        assert META_LOCATION_CONFLICT not in gateway.metadata
+        store.update_proxy.assert_not_awaited()
+        assert changes == []
+
     async def test_garbage_ip_and_unknown_proxy_are_ignored(self, geo_service: GeoService) -> None:
         store = FakeStore()
         attributor = await _attributor(geo_service, store)
@@ -390,6 +421,20 @@ class TestMismatch:
             await attributor.stop()
         store.remove_proxy.assert_awaited_once_with(proxy.id)
         store.update_proxy.assert_not_awaited()
+
+    async def test_dynamic_gateway_is_left_alone(self, geo_service: GeoService) -> None:
+        store = FakeStore()
+        gateway = store.add(_proxy(connector_id="oxy", metadata={META_DYNAMIC_SESSIONS: "true", META_SESSION_ID: "probe"}))
+        attributor = await _attributor(geo_service, store)
+        try:
+            await exit_location_mismatch.send_async(
+                None, proxy_id=gateway.id, project_id="p", expected="GB", observed="US", ip=ECHO_IP
+            )
+        finally:
+            await attributor.stop()
+        store.remove_proxy.assert_not_awaited()
+        store.update_proxy.assert_not_awaited()
+        assert META_LOCATION_CONFLICT not in gateway.metadata
 
     async def test_unknown_proxy_is_ignored(self, geo_service: GeoService) -> None:
         store = FakeStore()

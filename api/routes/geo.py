@@ -34,12 +34,14 @@ from api.geo.models import (
     IpLocation,
     LoadedDatabase,
     LocationCandidate,
+    PreflightMode,
     Resolution,
     SourcePolicy,
     normalize_country,
 )
 from api.geo.readers import GeoDatabaseError, inspect_file, is_ip
 from api.geo.updater import DownloadError, validate_bytes
+from api.models.connector import Connector
 
 if TYPE_CHECKING:
     from api.core.proxy_manager import ProxyManager
@@ -142,6 +144,33 @@ class ClaimBreakdown(BaseModel):
     exits: int
 
 
+class ExitCoverage(BaseModel):
+    """How much of a dynamic-sessions connector's traffic these numbers can see.
+
+    Absent for connectors whose exits health checks observe. For a dynamic
+    connector only preflight sees exits: every client session once, and
+    session-less requests at ``sampled_percent``. Below 100 the distinct-exit
+    and reuse figures for session-less traffic are undercounts, not
+    estimates; with preflight off the project sees the health probe alone.
+    """
+
+    dynamic: bool = True
+    preflight_on: bool
+    sampled_percent: int
+
+
+def _exit_coverage(manager: ProxyManager, connector: Connector | None) -> ExitCoverage | None:
+    if connector is None:
+        return None
+    target = manager.get_connector_target(connector)
+    if target is None or not target.dynamic:
+        return None
+    project = manager.get_project(connector.project_id)
+    preflight_on = project is not None and project.location_preflight != PreflightMode.OFF
+    percent = (target.exit_sample_percent or 0) if preflight_on else 0
+    return ExitCoverage(preflight_on=preflight_on, sampled_percent=percent)
+
+
 class ConnectorAccuracy(BaseModel):
     """How a connector's distinct exits, seen in the window, judge the vendor's claims.
 
@@ -152,6 +181,7 @@ class ConnectorAccuracy(BaseModel):
     connector_id: str
     connector_name: str | None = None
     project_id: str | None = None
+    coverage: ExitCoverage | None = None
     exits: int
     claimed: int  # exits the vendor made a claim for
     confirmed: int
@@ -170,6 +200,7 @@ class ConnectorExits(BaseModel):
     connector_id: str
     connector_name: str | None = None
     project_id: str | None = None
+    coverage: ExitCoverage | None = None
     unique_total: int
     unique_in_window: int
     sightings: int
@@ -700,6 +731,7 @@ async def accuracy(
             ConnectorAccuracy(
                 connector_name=connector.name if connector else None,
                 project_id=connector.project_id if connector else None,
+                coverage=_exit_coverage(manager, connector),
                 accuracy=round(row["confirmed"] / row["claimed"], 4) if row["claimed"] else None,
                 **row,
             )
@@ -734,6 +766,7 @@ async def exits(
             ConnectorExits(
                 connector_name=connector.name if connector else None,
                 project_id=connector.project_id if connector else None,
+                coverage=_exit_coverage(manager, connector),
                 **row,
             )
         )

@@ -111,11 +111,17 @@ curl -X POST http://localhost:8000/api/v1/projects/{project_id}/connectors \
 
 | Field | Required | Description | Default |
 |-------|----------|-------------|---------|
-| `num_proxies` | No | Number of proxy slots to create (1-1000) | `1` |
-| `country_code` | No | 2-letter country code for geo-targeting (session-based only) | `null` (all countries) |
+| `session_mode` | No | `pool` provisions `num_proxies` sessions; `dynamic` mints a vendor session per request (session-based only) | `pool` |
+| `num_proxies` | No | Number of proxy slots to create (1-1000); ignored when `session_mode` is `dynamic` | `1` |
+| `exit_sample_percent` | No | `dynamic` only: share (0-100) of requests without a client session that preflight echoes to record their exit | `5` |
+| `country_code` | No | 2-letter country code for geo-targeting (session-based only); with `dynamic`, an allow-list for `-cc-` | `null` (all countries) |
 | `session_duration_minutes` | No | Session duration in minutes (1-30, session-based only) | `10` |
 
 > **Note:** `country_code` and `session_duration_minutes` only apply to session-based proxy types (residential, mobile) and are encoded in the proxy username as `cc-XX` and `sesstime-N`. They are ignored for port-based types.
+
+### Dynamic sessions
+
+With `"session_mode": "dynamic"` a residential or mobile connector keeps a single gateway proxy and builds the Oxylabs username per request: a client `-sessid-` value always maps to the same `sessid-...`, a request without one gets a fresh session and Oxylabs rotates the exit, and `-cc-` fills `cc-XX`. There is no limit on concurrent sessions on the Octoprox side. See [Dynamic sessions]({{ site.baseurl }}/providers#descriptor-reference) in the providers guide for how attribution and health checks behave.
 
 ## Proxy Type Endpoints
 

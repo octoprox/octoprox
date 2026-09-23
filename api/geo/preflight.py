@@ -15,6 +15,14 @@ rotate it for a location nobody asked for. The verdict is
 cached in Redis per (project, proxy) for the settings' session TTL, so a
 session pays one extra round trip and the rest of its requests pay nothing.
 
+A dynamic-sessions gateway row is different: its exit belongs to the vendor
+session rendered for the request, so the verdict is cached per (project,
+proxy, vendor session) when the client named a session, and a request
+without one is echoed only when sampled (the connector's ``exit_sample_percent``),
+uncached, with nothing to verify unless it asked for a country. Those
+sightings exist for provider accuracy and unique exits: nothing but an echo
+ever sees where a dynamic request went.
+
 This module only produces verdicts. What a mismatch does (forward anyway, try
 another proxy, reject) is the proxy server's call, and what it does to the
 proxy (flag a fixed exit, rotate a vendor session) is the proxy manager's.
@@ -26,6 +34,7 @@ endpoint is an operations problem, not evidence about the proxy.
 from __future__ import annotations
 
 import json
+import random
 from typing import NamedTuple
 
 import structlog
@@ -42,7 +51,13 @@ from api.geo.models import (
 from api.geo.service import MANUAL_SOURCE, GeoService
 from api.models.project import Project
 from api.models.proxy import Proxy
-from api.providers.sdk.strategies import META_COUNTRY
+from api.providers.sdk.descriptor import DEFAULT_EXIT_SAMPLE_PERCENT
+from api.providers.sdk.strategies import (
+    META_COUNTRY,
+    META_EXIT_SAMPLE_PERCENT,
+    META_SESSION_ID,
+    is_dynamic_gateway,
+)
 
 logger = structlog.get_logger()
 
@@ -150,10 +165,30 @@ class PreflightChecker:
 
     @classmethod
     def applies(cls, project: Project, requested_country: str | None, proxy: Proxy) -> bool:
-        """Whether this request needs a preflight at all."""
+        """Whether this request needs a preflight at all.
+
+        A dynamic row always applies once preflight is on: even with nothing
+        to verify its requests are sampled for attribution (``check`` decides).
+        """
         if project.location_preflight == PreflightMode.OFF:
             return False
+        if is_dynamic_gateway(proxy):
+            return True
         return cls.expected_country(requested_country, proxy) is not None
+
+    @staticmethod
+    def _sample_rotating(proxy: Proxy) -> bool:
+        """Whether this session-less request is one the connector wants echoed.
+
+        The percentage travels on the rendered proxy (``render_request``), so the
+        checker needs no connector lookup on the request path.
+        """
+        raw = proxy.metadata.get(META_EXIT_SAMPLE_PERCENT, DEFAULT_EXIT_SAMPLE_PERCENT)
+        try:
+            percent = int(raw)
+        except (TypeError, ValueError):
+            percent = DEFAULT_EXIT_SAMPLE_PERCENT
+        return percent >= 100 or (percent > 0 and random.random() * 100 < percent)
 
     async def check(
         self,
@@ -176,11 +211,30 @@ class PreflightChecker:
         exit mid-session costs at most one health check interval of trust.
         """
         expected = self.expected_country(requested_country, proxy)
-        if expected is None:
+        dynamic = is_dynamic_gateway(proxy)
+        if expected is None and not dynamic:
             return SKIP
 
-        key = GEO_PREFLIGHT_KEY.format(project_id=project.id, proxy_id=proxy.id)
-        cached = await self._cached(key)
+        # Dynamic rows: the rendered proxy names the vendor session when the
+        # client did (see DescriptorProvider.render_request); a rotating
+        # request has none, shares nothing with the next one, and is sampled.
+        vendor_session = proxy.metadata.get(META_SESSION_ID) if dynamic else None
+        rotating = dynamic and not vendor_session
+        # Sampling only thins observation. When a country was asked or promised
+        # and the project chose a hard mode, every request is verified: reject
+        # and retry are guarantees, and a sampled guarantee is none.
+        guaranteed = expected is not None and project.location_preflight in (PreflightMode.RETRY, PreflightMode.REJECT)
+        if rotating and not guaranteed and not self._sample_rotating(proxy):
+            return SKIP
+
+        key: str | None = GEO_PREFLIGHT_KEY.format(project_id=project.id, proxy_id=proxy.id)
+        if vendor_session:
+            # The same client session may ask for another country next time; the
+            # vendor then routes it elsewhere, so the verdict is per country too.
+            key = f"{key}:{vendor_session}:{expected or '-'}"
+        elif rotating:
+            key = None
+        cached = await self._cached(key) if key else None
         if cached is not None:
             return cached
 
@@ -194,7 +248,8 @@ class PreflightChecker:
                 ok=True, expected=expected, observed=None, ip=None, reason="echo request failed"
             )
             # Short cache so a broken echo endpoint does not add a timeout to every request.
-            await self._store(key, verdict, ttl=30)
+            if key:
+                await self._store(key, verdict, ttl=30)
             return verdict
 
         # The expected country is what is being verified, so it must not take
@@ -205,10 +260,11 @@ class PreflightChecker:
             endpoint_country=endpoint_country,
         )
         observed = resolution.country
-        ok = observed is None or observed == expected
-        reason = (
-            "match" if ok and observed else ("location unknown" if observed is None else "mismatch")
-        )
+        ok = expected is None or observed is None or observed == expected
+        if expected is None:
+            reason = "observed"  # a sampled rotating request: nothing was asked, the exit is recorded
+        else:
+            reason = "match" if ok and observed else ("location unknown" if observed is None else "mismatch")
         verdict = PreflightVerdict(
             ok=ok,
             expected=expected,
@@ -223,7 +279,7 @@ class PreflightChecker:
                 proxy_id=proxy.id,
                 connector_id=proxy.connector_id,
                 project_id=project.id,
-                session_id=session_id,
+                session_id=vendor_session or session_id,
                 source=ObservationSource.PREFLIGHT,
                 ip=ip,
                 claimed_country=expected,
@@ -247,9 +303,10 @@ class PreflightChecker:
                 ip=ip,
                 mode=project.location_preflight.value,
             )
-        await self._store(
-            key, verdict, ttl=self._geo_service.settings.preflight_session_ttl_seconds
-        )
+        if key:
+            await self._store(
+                key, verdict, ttl=self._geo_service.settings.preflight_session_ttl_seconds
+            )
         return verdict
 
     async def _cached(self, key: str) -> PreflightVerdict | None:

@@ -284,8 +284,8 @@ def country_field_key(descriptor: ProviderDescriptor, ptype: ProxyTypeSpec) -> s
     """Connector config key through which ``ptype`` geo-targets its upstream credentials.
 
     Returns the key of a connector field of type ``country`` (or using the
-    ``countries`` preset) that the proxy type's username or password template
-    references, or None when the credentials carry no country. Templates that
+    ``countries`` preset) that the proxy type's username, password, host or
+    port template references, or None when none of them carries a country. Templates that
     depend on list items are excluded, since list-mode credentials come from
     the vendor.
 
@@ -296,6 +296,8 @@ def country_field_key(descriptor: ProviderDescriptor, ptype: ProxyTypeSpec) -> s
     paths = TemplateRenderer.referenced_paths(ptype.username) | TemplateRenderer.referenced_paths(
         ptype.password
     )
+    # Regional gateways encode the country in the host (or port) rather than the credentials.
+    paths |= TemplateRenderer.referenced_paths(ptype.host) | TemplateRenderer.referenced_paths(ptype.port_template)
     if any(path.startswith("item.") for path in paths):
         return None
     for path in sorted(paths):

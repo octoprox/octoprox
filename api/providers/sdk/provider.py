@@ -5,13 +5,20 @@
 
 from __future__ import annotations
 
+import hashlib
+import random
 from dataclasses import dataclass
 
 from api.models.connector import Connector, ProxyTarget, normalize_country_list
 from api.models.credential import Credential
 from api.models.proxy import Proxy
 from api.providers.base import ProxyProvider
-from api.providers.sdk.descriptor import ProviderDescriptor, ProxyTypeSpec
+from api.providers.sdk.descriptor import (
+    DEFAULT_EXIT_SAMPLE_PERCENT,
+    SESSION_MODE_DYNAMIC,
+    ProviderDescriptor,
+    ProxyTypeSpec,
+)
 from api.providers.sdk.egress import EgressGuard, EgressPolicy
 from api.providers.sdk.extract import ValueExtractor
 from api.providers.sdk.http import ClientFactory, HttpCallExecutor
@@ -23,14 +30,32 @@ from api.providers.sdk.sources import (
     ProxiedClientFactory,
 )
 from api.providers.sdk.strategies import (
+    META_EXIT_SAMPLE_PERCENT,
     META_GEO,
+    META_SESSION_ID,
+    DynamicSessionStrategy,
     ListModeStrategy,
     PortModeStrategy,
     ProxyBuilder,
     SessionModeStrategy,
     SyncStrategy,
+    is_dynamic_gateway,
 )
 from api.providers.sdk.templating import RenderContext, TemplateRenderer, country_field_key
+
+
+def _stable_choice(seed: str, options: list[str]) -> str:
+    """The option a seed maps to: the same on every instance, and stable when the list is edited.
+
+    Highest-random-weight selection. Adding an option moves only the seeds
+    that score highest on it; removing one moves only the seeds that were
+    on it. List order does not matter.
+    """
+
+    def score(option: str) -> bytes:
+        return hashlib.blake2b(f"{seed}|{option}".encode(), digest_size=8).digest()
+
+    return max(options, key=score)
 
 
 @dataclass(frozen=True)
@@ -93,6 +118,15 @@ class DescriptorProvider(ProxyProvider):
         self._filter_countries: list[str] | None = (
             self.countries if self._country_key is None and self._country_field_key and self._ptype.mode == "port" else None
         ) or None
+        # Dynamic sessions: one gateway row, credentials rendered per request.
+        # Only session types can do it; the connector field chooses.
+        self._dynamic = (
+            self._ptype.mode == "session"
+            and str(self._ctx.lookup(self._ptype.session_mode_field) or "") == SESSION_MODE_DYNAMIC
+        )
+        self._session_ids = SessionIdGenerator(descriptor.session_id)
+        self._builder = ProxyBuilder(descriptor, self._ptype, connector.id, TemplateRenderer())
+        self._extractor = ValueExtractor()
         self._strategy = self._build_strategy(self._ctx)
 
     @property
@@ -124,21 +158,89 @@ class DescriptorProvider(ProxyProvider):
         """Countries discovery is restricted to, for types that cannot geo-target their credentials."""
         return self._filter_countries
 
+    @property
+    def is_dynamic(self) -> bool:
+        """Dynamic sessions: no slots, one gateway row rendered per request."""
+        return self._dynamic
+
+    @property
+    def exit_sample_percent(self) -> int:
+        """Share (0-100) of session-less requests preflight echoes to see their exit; dynamic only."""
+        raw = self._ctx.lookup(self._ptype.exit_sample_field)
+        if raw is None or raw == "":
+            return DEFAULT_EXIT_SAMPLE_PERCENT
+        try:
+            return max(0, min(100, int(float(raw))))
+        except (TypeError, ValueError):
+            return DEFAULT_EXIT_SAMPLE_PERCENT
+
     def accepts_request_country(self) -> bool:
         """Whether unlisted countries can be provisioned on demand from ``-cc-`` requests.
 
         True for session-based geo-targeting types whose connector lists no
         countries ("All countries"): a fresh slot group is created for each
-        country clients ask for, without any vendor round trip.
+        country clients ask for, without any vendor round trip. Dynamic
+        connectors never provision: the country is rendered into the request.
         """
+        if self._dynamic:
+            return False
         return self._country_key is not None and self._ptype.mode == "session" and not self.countries
 
+    def render_request(self, proxy: Proxy, *, sessid: str | None, country: str | None, scope: str) -> Proxy:
+        """The gateway row as one request should use it.
+
+        Returns a copy of ``proxy`` whose credentials carry the vendor session
+        for this request and the country it asked for. ``sessid`` is the
+        client's ``-sessid-`` value: the same value always derives the same
+        vendor session id (``scope`` keeps projects apart), so the client keeps
+        its exit across requests and instances. Without one a fresh id is
+        minted and the vendor rotates. ``country`` is the ``-cc-`` code; with
+        none, a connector listing countries gets one of them (fixed per client
+        session, random per rotating request) and an unrestricted connector
+        renders no country at all. Host and port templates are re-rendered
+        too. Secrets stay runtime placeholders for the proxy manager to fill in.
+        """
+        seed = f"{scope}:{sessid}" if sessid else None
+        session_id = self._session_ids.derive(seed) if seed else self._session_ids.generate()
+        ctx = self._ctx
+        code: str | None = None
+        if self._country_key is not None:
+            wanted = country.strip().upper() if country else None
+            allowed = self.countries
+            if wanted and (not allowed or wanted in allowed):
+                code = wanted
+            elif not wanted and allowed:
+                # A client session keeps one country, or the vendor would move
+                # its exit between requests despite the unchanged session id.
+                code = _stable_choice(seed, allowed) if seed else random.choice(allowed)
+            ctx = ctx.with_country(self._country_key, code)
+        ctx = ctx.with_slot(session_id=session_id)
+        rendered = proxy.model_copy(deep=True)
+        self._builder.rerender(rendered, ctx)
+        self._builder.rerender_endpoint(rendered, ctx)
+        rendered.metadata[META_EXIT_SAMPLE_PERCENT] = self.exit_sample_percent
+        if seed:
+            rendered.metadata[META_SESSION_ID] = session_id
+        else:
+            # A rotating request: nothing about this session outlives it.
+            rendered.metadata.pop(META_SESSION_ID, None)
+        if code:
+            rendered.metadata[META_GEO] = code
+        else:
+            rendered.metadata.pop(META_GEO, None)
+        return rendered
+
     def _build_strategy(self, ctx: RenderContext) -> SyncStrategy:
-        renderer = TemplateRenderer()
-        extractor = ValueExtractor()
-        builder = ProxyBuilder(self._descriptor, self._ptype, self.connector.id, renderer)
+        builder = self._builder
+        extractor = self._extractor
         if self._ptype.mode == "session":
-            return SessionModeStrategy(builder, ctx, SessionIdGenerator(self._descriptor.session_id))
+            if self._dynamic:
+                # The gateway row carries no country: the connector's list is an
+                # allow-list applied per request, never baked into the stored row.
+                if self._country_key is not None:
+                    ctx = ctx.with_country(self._country_key, None)
+                return DynamicSessionStrategy(builder, ctx, self._session_ids)
+            return SessionModeStrategy(builder, ctx, self._session_ids)
         executor = self._runtime.executor(self._descriptor)
         if self._ptype.mode == "port":
             assert self._ptype.discovery is not None
@@ -156,7 +258,7 @@ class DescriptorProvider(ProxyProvider):
 
     def _strategy_for(self, country: str | None) -> SyncStrategy:
         """Strategy rendering one country's slot group (``None`` = the ungeo-targeted group)."""
-        if self._country_key is None or country is None:
+        if self._country_key is None or country is None or self._dynamic:
             return self._strategy
         return self._build_strategy(self._ctx.with_country(self._country_key, country))
 
@@ -205,6 +307,10 @@ class DescriptorProvider(ProxyProvider):
         if self._ptype.mode == "list":
             # The vendor list decides; num_proxies is at most a cap.
             return ProxyTarget()
+        if self._dynamic:
+            return ProxyTarget(
+                total=1, countries=list(self.countries), dynamic=True, exit_sample_percent=self.exit_sample_percent
+            )
         if self._country_key is not None:
             targets = self._target_countries(existing_proxies)
             configured = self.countries
@@ -230,7 +336,7 @@ class DescriptorProvider(ProxyProvider):
 
     async def provision_country(self, existing_proxies: list[Proxy], country: str) -> list[Proxy]:
         """Create the slot group for ``country`` (up to the configured count). Returns proxies to add."""
-        if self._country_key is None:
+        if self._country_key is None or self._dynamic:
             return []
         code = country.strip().upper()
         targets = self._target_countries(existing_proxies)
@@ -252,8 +358,15 @@ class DescriptorProvider(ProxyProvider):
         return self._ptype.mode == "port" and bool(self.countries)
 
     async def sync_proxies(self, existing_proxies: list[Proxy]) -> tuple[list[Proxy], list[str]]:
-        if self._country_key is None:
+        if self._dynamic:
             return await self._strategy.sync(existing_proxies)
+        # A connector switched back from dynamic sessions: its gateway row is
+        # not a slot and must go, or it would stay routable for every country.
+        stale = [p.id for p in existing_proxies if is_dynamic_gateway(p)]
+        existing_proxies = [p for p in existing_proxies if not is_dynamic_gateway(p)]
+        if self._country_key is None:
+            added, removed = await self._strategy.sync(existing_proxies)
+            return added, removed + stale
         targets = self._target_countries(existing_proxies)
         groups = self._group(existing_proxies, targets)
         to_add: list[Proxy] = []
@@ -265,10 +378,10 @@ class DescriptorProvider(ProxyProvider):
         for country, proxies in groups.items():
             if country not in targets:
                 to_remove.extend(p.id for p in proxies)
-        return to_add, to_remove
+        return to_add, to_remove + stale
 
     async def refresh_ips(self, proxies: list[Proxy]) -> tuple[list[Proxy], list[str]]:
-        if self._country_key is None:
+        if self._country_key is None or self._dynamic:
             return await self._strategy.refresh(proxies)
         targets = self._target_countries(proxies)
         groups = self._group(proxies, targets)

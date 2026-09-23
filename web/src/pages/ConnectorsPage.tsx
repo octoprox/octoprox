@@ -23,7 +23,8 @@ import { NewCredentialPanel, TypePicker, TypeCard } from '../components/Credenti
 import { ProviderLogo } from '../components/ProviderLogo'
 import { SchemaForm, MultiCountryPicker, defaultValues, serializeValues, splitCountries } from '../components/SchemaForm'
 import { relativeTime, formatDateTime, formatDate } from '../utils/format'
-import { targetTotal, describeTarget } from '../utils/connectors'
+import { targetTotal, describeTarget, isDynamic } from '../utils/connectors'
+import { coverageLabel } from '../components/geo/ProviderAccuracyPanel'
 import { RichSelect, RichSelectOption } from '../components/RichSelect'
 import { Button, Input, Label, Badge, Alert, ChipInput, Inspector, Tabs, ConfirmDialog, KeyValue, InspectorSection, InfoTip } from '../components/ui'
 
@@ -142,6 +143,14 @@ export default function ConnectorsPage() {
       cell: ({ row }) => {
         const max = targetTotal(row.original)
         const n = row.original.proxy_count
+        if (isDynamic(row.original)) {
+          return (
+            <span className="inline-flex items-center gap-2.5" title={describeTarget(row.original)}>
+              <span className="tabular-nums font-medium">{n}</span>
+              <span className="text-fg-subtle text-xs">dynamic</span>
+            </span>
+          )
+        }
         return (
           <span className="inline-flex items-center gap-2.5" title={describeTarget(row.original)}>
             <span className="tabular-nums font-medium">{n}{max != null && <span className="text-fg-subtle font-normal"> / {max}</span>}</span>
@@ -750,7 +759,7 @@ function ConnectorEditor({ connector, canMutate, onClose, onDelete, onSaved }: {
 
       {isEdit && connector && (
         <InspectorSection title="Details">
-          <KeyValue label="Proxies" value={<span title={describeTarget(connector)}>{connector.proxy_count}{targetTotal(connector) != null && <span className="text-fg-subtle font-normal"> / {targetTotal(connector)}</span>}</span>} />
+          <KeyValue label="Proxies" value={<span title={describeTarget(connector)}>{connector.proxy_count}{isDynamic(connector) ? <span className="text-fg-subtle font-normal"> · dynamic sessions</span> : targetTotal(connector) != null && <span className="text-fg-subtle font-normal"> / {targetTotal(connector)}</span>}</span>} />
           {connector.target?.per_country != null && connector.target.countries.length > 0 && (
             <KeyValue label="Per country" value={<span title={connector.target.countries.join(', ')}>{connector.target.per_country} × {connector.target.countries.length}{connector.target.on_demand.length > 0 && <span className="text-fg-subtle font-normal"> ({connector.target.on_demand.length} on demand)</span>}</span>} />
           )}
@@ -817,7 +826,7 @@ function ConnectorAccuracySection({ connectorId }: { connectorId: string }) {
   const wrong = (row?.breakdown ?? []).filter((b) => b.claimed_country && b.observed_country && b.claimed_country !== b.observed_country).slice(0, 3)
   return (
     <InspectorSection title="Exit locations (30 days)">
-      {exits && <KeyValue label="Unique exit IPs" value={<span className="tabular-nums">{exits.unique_in_window.toLocaleString()}<span className="text-fg-subtle font-normal"> / {exits.unique_total.toLocaleString()} ever</span></span>} />}
+      {exits && <KeyValue label="Unique exit IPs" value={<span className="tabular-nums" title={coverageLabel(exits.coverage)?.title}>{exits.unique_in_window.toLocaleString()}<span className="text-fg-subtle font-normal"> / {exits.unique_total.toLocaleString()} ever</span>{coverageLabel(exits.coverage) && <span className="ml-1.5 text-[10px] uppercase tracking-wide text-warning">{coverageLabel(exits.coverage)?.text}</span>}</span>} />}
       {exits && exits.unique_total > 0 && <KeyValue label="Reused IPs" value={`${Math.round((exits.reused / exits.unique_total) * 1000) / 10}%`} />}
       {row && row.claimed > 0 && <KeyValue label="Exits with a vendor claim" value={row.claimed.toLocaleString()} />}
       {row && row.claimed > 0 && <KeyValue label="Confirmed" value={pct == null ? '-' : <span className={pct >= 95 ? 'text-success' : pct >= 80 ? 'text-warning' : 'text-danger'}>{pct}%</span>} />}

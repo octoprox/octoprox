@@ -395,8 +395,13 @@ class TestUsingACustomProvider:
             json={"name": "oxy-us", "credential_id": credential.json()["id"], "config": {"num_proxies": 2, "country_code": "US", "session_duration_minutes": 10}},
         )
         assert connector.status_code == 201, connector.text
-        assert connector.json()["config"] == {"num_proxies": 2, "country_code": ["US"], "session_duration_minutes": 10}
-        assert connector.json()["target"] == {"total": 2, "per_country": 2, "countries": ["US"], "on_demand": []}
+        assert connector.json()["config"] == {
+            "num_proxies": 2, "session_mode": "pool", "country_code": ["US"], "session_duration_minutes": 10
+        }
+        assert connector.json()["target"] == {
+            "total": 2, "per_country": 2, "countries": ["US"], "on_demand": [], "dynamic": False,
+            "exit_sample_percent": None,
+        }
         bad = authenticated_client.post(
             f"/api/v1/projects/{project_id}/connectors",
             json={"name": "oxy-bad", "credential_id": credential.json()["id"], "config": {"num_proxies": 0}},

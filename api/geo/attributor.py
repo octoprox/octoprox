@@ -42,7 +42,7 @@ from api.models.connector import Connector
 from api.models.credential import CredentialType
 from api.models.project import Project
 from api.models.proxy import Proxy
-from api.providers.sdk.strategies import META_DISCOVERED_IP, META_SESSION_ID
+from api.providers.sdk.strategies import META_DISCOVERED_IP, META_SESSION_ID, is_dynamic_gateway
 
 logger = structlog.get_logger()
 
@@ -151,6 +151,20 @@ class ProxyAttributor:
         proxy = self._proxy_store.get_proxy(proxy_id)
         if proxy is None:
             return None
+        if is_dynamic_gateway(proxy):
+            # A dynamic-sessions gateway is not probed, so this is a sighting of
+            # one vendor session's exit (Detect, or a plugin): record it for
+            # accuracy and unique exits and write nothing on the row.
+            self._geo_service.record_sighting(
+                proxy,
+                ip,
+                source=source,
+                policy=self.policy_for(proxy.connector_id),
+                endpoint_country=endpoint_country,
+                project_id=self.project_id_for(proxy.connector_id),
+                session_id=proxy.metadata.get(META_SESSION_ID),
+            )
+            return proxy
         previous = proxy.metadata.get(META_DISCOVERED_IP)
         if source == ObservationSource.HEALTH_CHECK and previous == ip and META_LOCATION_CONFLICT in proxy.metadata:
             return proxy
@@ -267,11 +281,18 @@ class ProxyAttributor:
         ip: str | None = None,
         **_: object,
     ) -> None:
-        """A vendor-session slot is rotated; a fixed exit is flagged as contradicted."""
+        """A vendor-session slot is rotated; a fixed exit is flagged as contradicted.
+
+        A dynamic-sessions gateway is neither: the misplaced session was this
+        request's alone and the next request mints another, so the row stays.
+        """
         if self._proxy_store is None:
             return
         proxy = self._proxy_store.get_proxy(proxy_id)
         if proxy is None:
+            return
+        if is_dynamic_gateway(proxy):
+            logger.debug("Misplaced dynamic session", proxy_id=proxy_id, expected=expected, observed=observed, ip=ip)
             return
         if proxy.metadata.get(META_SESSION_ID):
             logger.info("Rotating misplaced vendor session", proxy_id=proxy_id, expected=expected, observed=observed, ip=ip)

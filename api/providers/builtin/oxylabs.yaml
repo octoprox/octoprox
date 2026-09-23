@@ -35,6 +35,35 @@ credential_fields:
     required: true
 
 connector_fields:
+  - key: session_mode
+    label: Sessions
+    type: select
+    default: pool
+    options:
+      - { value: pool, label: Fixed pool }
+      - { value: dynamic, label: Dynamic (unlimited) }
+    help: Fixed pool provisions "Number of proxies" sessions; dynamic creates a vendor session per request.
+    details: >-
+      Dynamic keeps one gateway proxy and renders the vendor credentials per request: a client -sessid-
+      always maps to the same vendor session, a request without one gets a fresh session and the vendor
+      rotates the exit, and -cc- picks the country per request. "Number of proxies" does not apply and the
+      listed countries become an allow-list. The gateway is not health-checked and counts as healthy.
+    show_when: { field: credential.proxy_type, in: [residential, mobile] }
+  - key: exit_sample_percent
+    label: Exit sampling (%)
+    type: number
+    default: 5
+    min: 0
+    max: 100
+    help: Share of requests without a client session whose exit is checked before forwarding.
+    details: >-
+      Only preflight can see where a dynamic request went, by an echo request through the same vendor
+      session before the real one. Requests with a -sessid- are checked once per session; this is the
+      share of requests without one that are checked. Below 100 the unique-exit figures for that traffic
+      are undercounts; 100 counts every exit at one echo per request. Applies under preflight "report", and
+      to requests that name no country; under "reject" and "retry" every request that names a country is
+      checked regardless.
+    show_when: { field: connector.session_mode, equals: dynamic }
   - key: num_proxies
     label: Number of proxies
     type: number
@@ -47,6 +76,7 @@ connector_fields:
       Residential and mobile pools with no country also get this many sessions per country that clients
       request with -cc-, created the first time it is requested. ISP and datacenter keep this many ports
       per listed country.
+    show_when: { field: connector.session_mode, equals: dynamic, negate: true }
   - key: country_code
     label: Countries
     type: select

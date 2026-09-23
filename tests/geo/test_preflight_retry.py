@@ -131,6 +131,29 @@ class TestVerify:
         decision = await ExitVerifier(checker, selector).verify(_project(PreflightMode.RETRY), _proxy("us"), session_id=None, country="GB", target_host="x")
         assert not decision.rejected and decision.proxy is not None and decision.proxy.id == "gb"
 
+    async def test_rotating_dynamic_request_retries_by_rerendering(self, checker: PreflightChecker, mismatches: Mismatches) -> None:
+        """A session-less request on a dynamic gateway is retried on the same row: a re-selection mints a new vendor session."""
+        gateway = _proxy("us")  # the echo sees this session in the US
+        gateway.id = "gw"
+        gateway.metadata.update({"dynamic_sessions": "true", "exit_sample_percent": 100})
+        rerendered = _proxy("gb")
+        rerendered.id = "gw"
+        rerendered.metadata.update({"dynamic_sessions": "true", "exit_sample_percent": 100})
+        selector = _selector("sticky", picks=[rerendered])
+        decision = await ExitVerifier(checker, selector).verify(
+            _project(PreflightMode.RETRY), gateway, session_id="10.0.0.7", country="GB", target_host="x", sessid=None
+        )
+        assert not decision.rejected and decision.proxy is not None and decision.proxy.host == "gb"
+        assert selector.select_proxy_for_project.await_args.kwargs["exclude"] == frozenset()
+        assert selector.select_proxy_for_project.await_args.kwargs["sessid"] is None
+        # With an explicit client session the row is excluded like any other under a movable strategy.
+        selector = _selector(picks=[_proxy("gb")])
+        decision = await ExitVerifier(checker, selector).verify(
+            _project(PreflightMode.RETRY), gateway, session_id="order-1", country="GB", target_host="x", sessid="order-1"
+        )
+        assert not decision.rejected
+        assert selector.select_proxy_for_project.await_args.kwargs["exclude"] == frozenset({"gw"})
+
     async def test_report_forwards_without_a_mismatch_signal(self, checker: PreflightChecker, mismatches: Mismatches) -> None:
         decision = await ExitVerifier(checker, _selector()).verify(_project(PreflightMode.REPORT), _proxy("us"), session_id=None, country="GB", target_host="x")
         assert not decision.rejected and decision.proxy is not None and decision.proxy.id == "us"

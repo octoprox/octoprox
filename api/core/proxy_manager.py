@@ -80,9 +80,9 @@ from api.models.connector import Connector, ProxyTarget
 from api.models.credential import Credential
 from api.models.project import Project
 from api.models.proxy import Proxy, ProxyStatus
-from api.providers.registry import ProviderRegistry, get_provider_registry
+from api.providers.registry import ProviderRegistry, ProviderType, get_provider_registry
 from api.providers.sdk.provider import DescriptorProvider
-from api.providers.sdk.strategies import META_GEO
+from api.providers.sdk.strategies import META_GEO, is_dynamic_gateway
 from api.providers.store import ProviderStore
 from api.strategies import get_strategy
 
@@ -142,6 +142,8 @@ class ProxyManager:
         self._connectors: ConnectorIndex = ConnectorIndex()
         # One lock per (connector, country) so a burst of -cc- requests provisions a group once
         self._geo_provision_locks: dict[tuple[str, str], asyncio.Lock] = {}
+        # Descriptor providers by connector id, keyed on object identity (see _descriptor_provider).
+        self._provider_cache: dict[str, tuple[Connector, Credential, ProviderType, DescriptorProvider]] = {}
         # Per-project strategies (project_id -> strategy)
         self._project_strategies: dict[str, RoutingStrategy] = {}
         # Default strategy for backward compatibility
@@ -1638,21 +1640,42 @@ class ProxyManager:
     #   - a proxy with no known country is eligible only through its
     #     connector's list;
     #   - descriptor pools whose credentials carry a country and list none
-    #     ("All countries") get a slot group for the country on demand.
+    #     ("All countries") get a slot group for the country on demand;
+    #   - a dynamic-sessions gateway row serves any country its connector
+    #     allows (every country when it lists none): the code is rendered
+    #     into the vendor credentials per request, so nothing is provisioned.
     # Without a requested country every proxy is eligible, except on-demand
     # geo groups of "All countries" pools, which keep serving only the
     # clients that asked for that country.
 
     def _descriptor_provider(self, connector: Connector) -> DescriptorProvider | None:
-        """A DescriptorProvider for the connector, or None for code-implemented types."""
+        """A DescriptorProvider for the connector, or None for code-implemented types.
+
+        Cached per connector and reused while the connector, credential and
+        provider type objects are the very ones the cache saw: every reload
+        and update replaces those objects, so a config change misses the cache
+        and rebuilds. This runs on the request path (country eligibility and
+        dynamic-session rendering), where rebuilding a provider each time
+        would be pure allocation.
+        """
         credential = self._credentials.get(connector.credential_id)
         if credential is None:
             return None
-        try:
-            provider = self._provider_registry.create_provider(connector, credential)
-        except ValueError:
+        ptype = self._provider_registry.get(credential.type)
+        if ptype is None or ptype.factory is None:
             return None
-        return provider if isinstance(provider, DescriptorProvider) else None
+        cached = self._provider_cache.get(connector.id)
+        if cached is not None and cached[0] is connector and cached[1] is credential and cached[2] is ptype:
+            return cached[3]
+        try:
+            provider = ptype.factory(connector, credential)
+        except ValueError:
+            self._provider_cache.pop(connector.id, None)
+            return None
+        if not isinstance(provider, DescriptorProvider):
+            return None
+        self._provider_cache[connector.id] = (connector, credential, ptype, provider)
+        return provider
 
     def get_connector_target(self, connector: Connector) -> ProxyTarget | None:
         """Intended pool size for a connector, or None when it has no target of its own.
@@ -1709,6 +1732,10 @@ class ProxyManager:
             if strict and p.metadata.get(META_LOCATION_CONFLICT) is True:
                 continue
             declared, hide_geo_groups = entry
+            if is_dynamic_gateway(p):
+                # The connector-level allow-list was applied above; the row itself has no country.
+                eligible.append(p)
+                continue
             proxy_country = p.country
             if wanted:
                 if proxy_country is not None:
@@ -1907,6 +1934,7 @@ class ProxyManager:
         target_host: str | None = None,
         country: str | None = None,
         exclude: frozenset[str] | None = None,
+        sessid: str | None = None,
     ) -> Proxy | None:
         """Select a proxy for a specific project using the project's routing strategy.
 
@@ -1914,6 +1942,13 @@ class ProxyManager:
         actual values from the credential/connector chain). ``exclude`` drops
         proxies by id before the strategy runs (preflight retry); a sticky
         session bound to an excluded proxy is re-bound to the pick.
+
+        ``session_id`` is the routing key (the client's ``-sessid-`` or, for
+        sticky routing, its address); ``sessid`` is only the explicit
+        ``-sessid-`` value. A dynamic-sessions gateway row derives the vendor
+        session from ``sessid`` and renders the requested country into its
+        credentials before they are resolved; with no ``sessid`` every request
+        gets a fresh vendor session.
 
         When sticky_quarantine is enabled on a connector's rate limit config
         and the project uses sticky routing, a session whose assigned proxy is
@@ -1958,7 +1993,20 @@ class ProxyManager:
         )
         if selected is None:
             return None
+        if is_dynamic_gateway(selected):
+            selected = self._render_dynamic_request(selected, project_id, sessid, country)
         return self.resolve_proxy_credentials(selected)
+
+    def _render_dynamic_request(
+        self, proxy: Proxy, project_id: str, sessid: str | None, country: str | None
+    ) -> Proxy:
+        """Credentials for one request through a dynamic-sessions gateway row."""
+        connector = self._connectors.get(proxy.connector_id)
+        provider = self._descriptor_provider(connector) if connector is not None else None
+        if provider is None or not provider.is_dynamic:
+            # The row says dynamic but the connector no longer does (mid-sync): use it as stored.
+            return proxy
+        return provider.render_request(proxy, sessid=sessid, country=country, scope=project_id)
 
     def set_project_strategy(self, project_id: str, strategy_name: str) -> None:
         """Change the routing strategy for a project."""
