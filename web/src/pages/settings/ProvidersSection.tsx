@@ -161,7 +161,7 @@ export default function ProvidersSection() {
             columns={columns}
             data={providers}
             getRowId={(row) => row.id}
-            onRowClick={(row) => setPanel(row.editable ? { kind: 'edit', id: row.id } : { kind: 'view', id: row.id })}
+            onRowClick={(row) => setPanel({ kind: 'view', id: row.id })}
             activeRowId={panel && 'id' in panel ? panel.id : null}
             columnVisibility={panel ? { hosts: false, usage: false, actions: false } : {}}
           />
