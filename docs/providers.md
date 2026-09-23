@@ -171,7 +171,7 @@ options:
 
 ### Templates
 
-Templates appear in hosts, usernames, passwords, metadata and every HTTP call. Placeholders: `{credential.<key>}`, `{connector.<key>}`, `{session_id}`, `{index}`, `{port}`, `{discovered_ip}`, `{auth.token}`, `{item.<key>}`. Filters: `|lower`, `|upper`, `|urlencode`, `|or:fallback`. A composed template (`separator` + `parts`) drops parts whose `when` condition is false and any part that renders empty.
+Templates appear in hosts, ports, usernames, passwords, metadata and every HTTP call. Placeholders: `{credential.<key>}`, `{connector.<key>}`, `{session_id}`, `{index}`, `{port}`, `{discovered_ip}`, `{auth.token}`, `{item.<key>}`. Filters: `|lower`, `|upper`, `|urlencode`, `|or:fallback`. A composed template (`separator` + `parts`) drops parts whose `when` condition is false and any part that renders empty.
 
 Secret fields render as `{key}` runtime placeholders inside stored proxies; everything else is baked in.
 
@@ -182,6 +182,8 @@ Secret fields render as `{key}` runtime placeholders inside stored proxies; ever
 | `session` | One gateway; each slot gets a fresh session id and the vendor rotates the exit IP. | `host`, `port`, `username`, `password`, `session_id` (`length`, `alphabet`, `prefix`) |
 | `port` | One exit IP per slot. `port_strategy: sequential` uses `port + index` (Oxylabs); `fixed` keeps one port and pins the IP with `{discovered_ip}` in the username (Bright Data). IPs come from `known_ips` (vendor API) when configured, otherwise from `discovery` (a request made *through* the proxy). `discovery.country_path` records the exit country the endpoint reports, which country routing uses; `discovery.vendor_operated` (default `true`) says the URL is the vendor's own service, so that country is the vendor's claim for IP attribution to judge, while `false` marks a third-party echo whose country counts as independent evidence. The periodic refresh re-probes `refresh_concurrency` proxies at a time (default 8) and writes back only the ones that changed. | `port_strategy`, `discovery` (`url`, `ip_path`, `country_path`, `vendor_operated`, `refresh_concurrency`, retry limits), `known_ips` |
 | `list` | The vendor API returns concrete `host:port` entries which Octoprox mirrors, including per-proxy credentials. | `list` (`call`, `items`, `host`, `port`, `username`, `password`, `protocol`, `country`, `identity`, `filter`) |
+
+`host` and `port` are templates too, so a connector field can override the vendor default: `host: "{connector.gateway_host|or:proxy.geonode.io}"`, `port: "{connector.gateway_port|or:10000}"`. A port template must render to a number between 1 and 65535, and in `port` mode it is the first port of the sequence.
 
 `count_field` (default `connector.num_proxies`) names the variable holding the desired slot count; in list mode it is an optional cap. `proxy_type_field` selects the proxy type from a select field when a descriptor has more than one.
 

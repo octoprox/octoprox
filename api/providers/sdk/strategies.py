@@ -19,7 +19,7 @@ import structlog
 from api.geo.models import META_ENDPOINT_COUNTRY, META_VENDOR_COUNTRY
 from api.models.proxy import Proxy, ProxyStatus
 from api.providers.base import _sort_proxies_healthy_first
-from api.providers.sdk.descriptor import ProviderDescriptor, ProxyTypeSpec
+from api.providers.sdk.descriptor import ProviderDescriptor, ProxyTypeSpec, check_port_range
 from api.providers.sdk.session_ids import SessionIdGenerator
 from api.providers.sdk.sources import IpDiscoverer, KnownIpsSource, ListedProxy, ListSource
 from api.providers.sdk.templating import (
@@ -65,12 +65,28 @@ class ProxyBuilder:
     def ptype(self) -> ProxyTypeSpec:
         return self._ptype
 
+    def port(self, ctx: RenderContext) -> int:
+        """Gateway port for ``ctx``: the literal port, or the rendered port template."""
+        spec = self._ptype.port
+        if spec is None:
+            return 0
+        if isinstance(spec, int):
+            return spec
+        text = self._renderer.render_string(spec, ctx).strip()
+        try:
+            number = int(text)
+        except ValueError as exc:
+            raise ValueError(
+                f"proxy type '{self._ptype.key}': port template '{spec}' rendered to '{text}', not a number"
+            ) from exc
+        return check_port_range(number)
+
     def build(self, ctx: RenderContext, *, port: int | None = None, status: ProxyStatus) -> Proxy:
         """Create a proxy for a gateway-style (session/port) type."""
         host = self._renderer.render(self._ptype.host, ctx, "proxy")
         proxy = Proxy(
             host=host,
-            port=port if port is not None else int(self._ptype.port or 0),
+            port=port if port is not None else self.port(ctx),
             protocol=self._ptype.protocol,
             username=self._renderer.render(self._ptype.username, ctx, "proxy") or None,
             password=self._renderer.render(self._ptype.password, ctx, "proxy") or None,
@@ -237,7 +253,7 @@ class PortModeStrategy(SyncStrategy):
         self._discoverer = discoverer
         self._known_ips = known_ips
         self._spec = builder.ptype
-        self._base_port = int(self._spec.port or 0)
+        self._base_port = builder.port(ctx)
         self._countries: list[str] = [
             c.strip().upper() for c in (countries or []) if c and c.strip()
         ]

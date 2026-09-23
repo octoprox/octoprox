@@ -37,6 +37,13 @@ FIELD_KEY_PATTERN = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 FieldType = Literal["text", "password", "number", "select", "boolean", "textarea", "url", "country"]
 ProxyMode = Literal["session", "port", "list"]
 PortStrategy = Literal["sequential", "fixed"]
+
+
+def check_port_range(port: int) -> int:
+    """Return ``port`` if it is a valid TCP port, else raise ``ValueError``."""
+    if not 1 <= port <= 65535:
+        raise ValueError(f"port {port} is out of range (1-65535)")
+    return port
 FieldScope = Literal["credential", "connector"]
 
 # Namespaces a template may reference. ``credential``/``connector`` come from
@@ -493,7 +500,10 @@ class ProxyTypeSpec(BaseModel):
     label: str
     mode: ProxyMode
     host: Template | None = None
-    port: int | None = Field(default=None, ge=1, le=65535)
+    port: int | str | None = Field(
+        default=None,
+        description="Gateway port: a number, or a template that renders to one ('{connector.port|or:9000}')",
+    )
     protocol: ProxyProtocol = ProxyProtocol.HTTP
     username: Template | None = None
     password: Template | None = None
@@ -517,6 +527,28 @@ class ProxyTypeSpec(BaseModel):
         if not FIELD_KEY_PATTERN.match(value):
             raise ValueError(f"proxy type key '{value}' must be snake_case")
         return value
+
+    @field_validator("port")
+    @classmethod
+    def _validate_port(cls, value: int | str | None) -> int | str | None:
+        """A literal port is range-checked; a string is a template or a number spelled out."""
+        if value is None:
+            return None
+        if isinstance(value, int):
+            return check_port_range(value)
+        text = value.strip()
+        if "{" in text:
+            return text
+        try:
+            number = int(text)
+        except ValueError as exc:
+            raise ValueError(f"port '{value}' must be a number or a template such as '{{connector.port}}'") from exc
+        return check_port_range(number)
+
+    @property
+    def port_template(self) -> str | None:
+        """The port as a template string when it is one, else None."""
+        return self.port if isinstance(self.port, str) else None
 
     @model_validator(mode="after")
     def _validate_mode(self) -> ProxyTypeSpec:

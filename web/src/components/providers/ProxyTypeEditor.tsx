@@ -69,7 +69,7 @@ export function ProxyTypeEditor({ spec, onChange }: { spec: Spec; onChange: (pat
             <>
               <div className="grid grid-cols-[1fr_120px_120px] gap-3">
                 <TextField label="Gateway host" value={typeof t.host === 'string' ? t.host : ''} onChange={(v) => update(i, { host: v })} mono placeholder="pr.oxylabs.io" help="May be a template, e.g. {connector.entry_node|or:geo.iproyal.com}" />
-                <NumberField label={t.mode === 'port' && t.port_strategy !== 'fixed' ? 'First port' : 'Port'} value={t.port} onChange={(v) => update(i, { port: v })} min={1} />
+                <TextField label={t.mode === 'port' && t.port_strategy !== 'fixed' ? 'First port' : 'Port'} value={t.port == null ? '' : String(t.port)} onChange={(v) => update(i, { port: v.trim() === '' ? undefined : /^\d+$/.test(v.trim()) ? Number(v.trim()) : v })} mono placeholder="7777" help="A number or a template, e.g. {connector.gateway_port|or:7777}" />
                 <SelectField label="Protocol" value={t.protocol ?? 'http'} onChange={(v) => update(i, { protocol: v || 'http' })} options={['http', 'https', 'socks5', 'socks4'].map((p) => ({ value: p, label: p }))} />
               </div>
               <TemplateEditor label="Username template" value={t.username} onChange={(v) => update(i, { username: v })} fieldPaths={fieldPaths} />

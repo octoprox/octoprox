@@ -420,7 +420,9 @@ class DescriptorTester:
             missing = missing_connector_values(self._descriptor, [ptype.source.call], connector_config)
         else:
             missing = missing_template_values(
-                self._descriptor, [ptype.host, ptype.username, ptype.password], connector_config
+                self._descriptor,
+                [ptype.host, ptype.port_template, ptype.username, ptype.password],
+                connector_config,
             )
         if missing:
             return DiscoveryOutcome(ok=False, message=f"Missing connector values: {', '.join(missing)}")
