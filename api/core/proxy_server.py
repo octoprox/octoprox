@@ -157,6 +157,7 @@ class ProxyServer:
         session_id: str | None = None,
         target_host: str | None = None,
         country: str | None = None,
+        sessid: str | None = None,
     ) -> Proxy | None:
         """Select an upstream proxy from the authenticated project's pool.
 
@@ -171,12 +172,15 @@ class ProxyServer:
                 whose domain routing config allows this host.
             country: If provided, only consider proxies that serve this
                 country (from the -cc- username suffix).
+            sessid: The explicit -sessid- value, if the client sent one.
+                Unlike session_id it never falls back to the client address;
+                dynamic-sessions connectors derive the vendor session from it.
 
         Returns:
             Selected proxy or None if no healthy proxies available.
         """
         return await self._proxy_manager.select_proxy_for_project(
-            project_id, session_id, target_host, country
+            project_id, session_id, target_host, country, sessid=sessid
         )
 
     def _authenticate_project(self, headers: dict[str, str]) -> AuthResult | None:
@@ -243,12 +247,13 @@ class ProxyServer:
         country: str | None,
         target_host: str | None,
         client_writer: asyncio.StreamWriter,
+        sessid: str | None = None,
     ) -> Proxy | None:
         """Hand the selected upstream to preflight; None when the request was refused."""
         if self._exit_verifier is None:
             return proxy
         decision = await self._exit_verifier.verify(
-            project, proxy, session_id=session_id, country=country, target_host=target_host
+            project, proxy, session_id=session_id, country=country, target_host=target_host, sessid=sessid
         )
         if not decision.rejected:
             return decision.proxy
@@ -465,7 +470,8 @@ class ProxyServer:
 
         # Select upstream proxy scoped to the authenticated project
         proxy = await self._get_upstream_proxy(
-            project_id=project.id, session_id=session_id, target_host=target_host, country=country
+            project_id=project.id, session_id=session_id, target_host=target_host, country=country,
+            sessid=sessid,
         )
         if not proxy:
             if self._proxy_manager.are_all_proxies_quarantined(
@@ -487,7 +493,9 @@ class ProxyServer:
                 )
             return
 
-        verified = await self._verify_exit(project, proxy, session_id, country, target_host, client_writer)
+        verified = await self._verify_exit(
+            project, proxy, session_id, country, target_host, client_writer, sessid=sessid
+        )
         if verified is None:
             return
         proxy = verified
@@ -698,7 +706,8 @@ class ProxyServer:
 
         # Select upstream proxy scoped to the authenticated project
         proxy = await self._get_upstream_proxy(
-            project_id=project_id, session_id=session_id, target_host=parsed_host, country=country
+            project_id=project_id, session_id=session_id, target_host=parsed_host, country=country,
+            sessid=sessid,
         )
         if not proxy:
             if self._proxy_manager.are_all_proxies_quarantined(
@@ -722,7 +731,9 @@ class ProxyServer:
 
         project = self._proxy_manager.get_project(project_id)
         if project is not None:
-            verified = await self._verify_exit(project, proxy, session_id, country, parsed_host, client_writer)
+            verified = await self._verify_exit(
+                project, proxy, session_id, country, parsed_host, client_writer, sessid=sessid
+            )
             if verified is None:
                 return
             proxy = verified

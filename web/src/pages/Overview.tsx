@@ -15,7 +15,7 @@ import { useAuth } from '../contexts/AuthContext'
 import { useTheme } from '../contexts/ThemeContext'
 import { useToast } from '../contexts/ToastContext'
 import { formatBytes } from '../utils/format'
-import { targetTotal, describeTarget } from '../utils/connectors'
+import { targetTotal, describeTarget, isDynamic } from '../utils/connectors'
 import { ProviderLogo } from '../components/ProviderLogo'
 import { Page } from '../components/layout/Page'
 import { Sparkline } from '../components/charts/Sparkline'
@@ -400,7 +400,7 @@ export default function Overview() {
                     <ProviderLogo type={c.credential_type} className="w-4 h-4 text-[16px] flex-none" />
                     <span className={cnTrunc(!c.enabled)}>{c.name}</span>
                     {c.last_error && <AlertTriangle className="w-3.5 h-3.5 text-danger flex-none" />}
-                    <span className="text-fg-muted tabular-nums flex-none" title={describeTarget(c)}>{c.proxy_count}{max != null && <span className="text-fg-subtle">/{max}</span>}</span>
+                    <span className="text-fg-muted tabular-nums flex-none" title={describeTarget(c)}>{c.proxy_count}{isDynamic(c) ? <span className="text-fg-subtle"> dyn</span> : max != null && <span className="text-fg-subtle">/{max}</span>}</span>
                     <span className={`w-2 h-2 rounded-full flex-none ${!c.enabled ? 'bg-fg-subtle' : c.last_error ? 'bg-danger' : 'bg-success'}`} />
                   </button>
                 )

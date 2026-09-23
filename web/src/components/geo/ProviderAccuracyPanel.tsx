@@ -5,7 +5,7 @@ import { useMemo, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { ColumnDef } from '@tanstack/react-table'
 import { CheckCircle2 } from 'lucide-react'
-import { fetchGeoAccuracy, fetchGeoExits, fetchProjects, ConnectorAccuracy, ConnectorExits } from '../../api/client'
+import { fetchGeoAccuracy, fetchGeoExits, fetchProjects, ConnectorAccuracy, ConnectorExits, ExitCoverage } from '../../api/client'
 import { DataTable } from '../DataTable'
 import { EmptyState } from '../layout/Page'
 import { Card, Segmented, Select } from '../ui'
@@ -13,6 +13,18 @@ import { cn } from '../../utils/cn'
 import { HeaderWithTip, TIPS } from './columns'
 
 type AccuracyRow = ConnectorAccuracy & { exit_stats?: ConnectorExits; project_name?: string | null }
+
+/** Short label for a dynamic-sessions connector whose session-less traffic is not fully observed. */
+export function coverageLabel(coverage: ExitCoverage | null | undefined): { text: string; title: string } | null {
+  if (!coverage || !coverage.dynamic || coverage.sampled_percent >= 100) return null
+  if (!coverage.preflight_on) {
+    return { text: 'preflight off', title: 'Dynamic sessions with preflight off: exits are not observed. Turn preflight on for the project to see them.' }
+  }
+  return {
+    text: `sampled ${coverage.sampled_percent}%`,
+    title: `Dynamic sessions: every client session is observed once; requests without a session are echoed for ${coverage.sampled_percent}% of requests. Distinct-exit and reuse figures for session-less traffic are undercounts.`,
+  }
+}
 
 // The same ranges as the graph pages; claim statistics are daily, so nothing below a day.
 const RANGES = [
@@ -61,7 +73,7 @@ export function ProviderAccuracyPanel({ projectId }: { projectId?: string }) {
         merged.push({
           connector_id: e.connector_id, connector_name: e.connector_name, project_id: e.project_id,
           project_name: e.project_id ? projectNames.get(e.project_id) ?? null : null,
-          exits: e.unique_in_window, claimed: 0, confirmed: 0, contradicted: 0, uncertain: 0, accuracy: null, breakdown: [], exit_stats: e,
+          exits: e.unique_in_window, claimed: 0, confirmed: 0, contradicted: 0, uncertain: 0, accuracy: null, breakdown: [], coverage: e.coverage, exit_stats: e,
         })
       }
     }
@@ -104,12 +116,18 @@ export function ProviderAccuracyPanel({ projectId }: { projectId?: string }) {
     },
     {
       id: 'unique', header: () => <HeaderWithTip label="Unique exits" tip={TIPS.uniqueExits} />, size: 160, meta: { align: 'right' as const },
-      cell: ({ row }) => row.original.exit_stats ? (
-        <span className="tabular-nums" title={`${row.original.exit_stats.unique_in_window.toLocaleString()} first seen in the window, ${row.original.exit_stats.unique_total.toLocaleString()} ever`}>
-          {row.original.exit_stats.unique_in_window.toLocaleString()}
-          <span className="text-fg-subtle"> / {row.original.exit_stats.unique_total.toLocaleString()}</span>
-        </span>
-      ) : <span className="text-fg-subtle">-</span>,
+      cell: ({ row }) => {
+        const e = row.original.exit_stats
+        if (!e) return <span className="text-fg-subtle">-</span>
+        const coverage = coverageLabel(e.coverage ?? row.original.coverage)
+        return (
+          <span className="tabular-nums" title={`${e.unique_in_window.toLocaleString()} first seen in the window, ${e.unique_total.toLocaleString()} ever${coverage ? `. ${coverage.title}` : ''}`}>
+            {e.unique_in_window.toLocaleString()}
+            <span className="text-fg-subtle"> / {e.unique_total.toLocaleString()}</span>
+            {coverage && <span className="ml-1.5 text-[10px] uppercase tracking-wide text-warning">{coverage.text}</span>}
+          </span>
+        )
+      },
     },
     {
       id: 'reuse', header: () => <HeaderWithTip label="Reused" tip={TIPS.reused} />, size: 120, meta: { align: 'right' as const },

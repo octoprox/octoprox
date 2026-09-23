@@ -202,24 +202,71 @@ class GeoService:
         """
         resolution, changed = self._attribute(proxy, ip, policy=policy, endpoint_country=endpoint_country)
         self.record(
-            IpObservation(
-                proxy_id=proxy.id,
-                connector_id=proxy.connector_id,
-                project_id=project_id,
-                source=source,
-                ip=ip,
-                claimed_country=resolution.claimed_country,
-                endpoint_country=normalize_country(endpoint_country),
-                resolved_country=resolution.country,
-                resolved_source=resolution.source,
-                conflict=resolution.conflict,
-                disagreement=resolution.disagreement,
-                candidates=resolution.compact_candidates(),
-                instance_id=self._settings.instance_id,
-            )
+            self._observation(proxy, ip, resolution, source=source, project_id=project_id, endpoint_country=endpoint_country)
         )
         self._log_conflict(proxy, ip, resolution, source.value)
         return resolution, changed
+
+    def _observation(
+        self,
+        proxy: Proxy,
+        ip: str,
+        resolution: Resolution,
+        *,
+        source: ObservationSource,
+        project_id: str | None,
+        endpoint_country: str | None,
+        session_id: str | None = None,
+    ) -> IpObservation:
+        """The sighting record for ``ip`` behind ``proxy`` as ``resolution`` judged it."""
+        return IpObservation(
+            proxy_id=proxy.id,
+            connector_id=proxy.connector_id,
+            project_id=project_id,
+            session_id=session_id,
+            source=source,
+            ip=ip,
+            claimed_country=resolution.claimed_country,
+            endpoint_country=normalize_country(endpoint_country),
+            resolved_country=resolution.country,
+            resolved_source=resolution.source,
+            conflict=resolution.conflict,
+            disagreement=resolution.disagreement,
+            candidates=resolution.compact_candidates(),
+            instance_id=self._settings.instance_id,
+        )
+
+    def record_sighting(
+        self,
+        proxy: Proxy,
+        ip: str,
+        *,
+        source: ObservationSource,
+        policy: SourcePolicy | None = None,
+        endpoint_country: str | None = None,
+        project_id: str | None = None,
+        session_id: str | None = None,
+    ) -> Resolution:
+        """Resolve ``ip`` seen behind ``proxy`` and record the sighting without touching the row.
+
+        For a dynamic-sessions gateway row: the exit belongs to one vendor
+        session, not to the row, so the row's country, location and conflict
+        flag are left alone while accuracy and unique exits still learn of it.
+        """
+        resolution = self.resolve_ip(
+            ip,
+            policy=policy,
+            claimed_country=self.claimed_country_of(proxy),
+            endpoint_country=endpoint_country,
+        )
+        self.record(
+            self._observation(
+                proxy, ip, resolution, source=source, project_id=project_id,
+                endpoint_country=endpoint_country, session_id=session_id,
+            )
+        )
+        self._log_conflict(proxy, ip, resolution, source.value)
+        return resolution
 
     def rejudge(
         self,

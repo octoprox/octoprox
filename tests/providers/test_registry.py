@@ -57,7 +57,9 @@ def test_descriptor_validation_and_provider_creation(registry: ProviderRegistry)
     with pytest.raises(ConfigValidationError):
         registry.validate_credential_config("oxylabs", {"proxy_type": "residential"})
     connector_config = registry.validate_connector_config("oxylabs", {"num_proxies": "2", "country_code": "us", "session_duration_minutes": "5"}, config)
-    assert connector_config == {"num_proxies": 2, "country_code": ["US"], "session_duration_minutes": 5}
+    assert connector_config == {
+        "num_proxies": 2, "session_mode": "pool", "country_code": ["US"], "session_duration_minutes": 5
+    }
     # Hidden session fields are dropped for port-based types; countries stay (they filter discovery).
     isp = registry.validate_connector_config(
         "oxylabs", {"num_proxies": 2, "country_code": "US", "session_duration_minutes": 5}, {"proxy_type": "isp"}

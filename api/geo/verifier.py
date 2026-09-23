@@ -25,6 +25,7 @@ from api.geo.models import PreflightMode
 from api.geo.preflight import PreflightChecker
 from api.models.project import Project
 from api.models.proxy import Proxy
+from api.providers.sdk.strategies import is_dynamic_gateway
 from api.strategies.base import RoutingStrategy
 
 logger = structlog.get_logger()
@@ -40,6 +41,7 @@ class ProxySelector(Protocol):
         target_host: str | None = None,
         country: str | None = None,
         exclude: frozenset[str] | None = None,
+        sessid: str | None = None,
     ) -> Proxy | None: ...
 
     def strategy_for_project(self, project_id: str) -> RoutingStrategy: ...
@@ -72,8 +74,13 @@ class ExitVerifier:
         session_id: str | None,
         country: str | None,
         target_host: str | None,
+        sessid: str | None = None,
     ) -> ExitDecision:
         """Return the proxy to forward through, or a rejection.
+
+        ``sessid`` is the client's explicit ``-sessid-`` value, handed back to
+        the selector on a retry so a dynamic-sessions row keeps the same
+        vendor session.
 
         Anything but a confirmed mismatch lets the request through: an echo
         outage must never become a traffic outage.
@@ -81,9 +88,13 @@ class ExitVerifier:
         if not PreflightChecker.applies(project, country, proxy):
             return ExitDecision(proxy)
         mode = project.location_preflight
-        can_retry = mode == PreflightMode.RETRY and self._proxy_selector.strategy_for_project(
-            project.id
-        ).allows_exit_reselection(session_id)
+        # A session-less request on a dynamic gateway retries by re-rendering:
+        # selecting the same row again mints a fresh vendor session, so the
+        # row is not excluded and the strategy's promise about rows holds.
+        rerender = is_dynamic_gateway(proxy) and not sessid
+        can_retry = mode == PreflightMode.RETRY and (
+            rerender or self._proxy_selector.strategy_for_project(project.id).allows_exit_reselection(session_id)
+        )
         excluded: set[str] = set()
         attempts = 0
         while True:
@@ -105,9 +116,10 @@ class ExitVerifier:
                 ip=verdict.ip,
             )
             if can_retry and attempts < self._preflight_checker.max_attempts:
-                excluded.add(proxy.id)
+                if not (is_dynamic_gateway(proxy) and not sessid):
+                    excluded.add(proxy.id)
                 replacement = await self._proxy_selector.select_proxy_for_project(
-                    project.id, session_id, target_host, country, exclude=frozenset(excluded)
+                    project.id, session_id, target_host, country, exclude=frozenset(excluded), sessid=sessid
                 )
                 if replacement is not None:
                     logger.info(

@@ -42,6 +42,17 @@ META_COUNTRY = "country"  # exit country routing reads; upper-case ISO code (see
 # API, or its own discovery endpoint), META_ENDPOINT_COUNTRY what a
 # third-party discovery endpoint reported. Both from api.geo.models.
 META_GEO = "geo"  # country the slot was provisioned for (per-country slot groups)
+# "true" on the single gateway row of a dynamic-sessions connector: its session
+# id and country are rendered per request, not provisioned per slot.
+META_DYNAMIC_SESSIONS = "dynamic_sessions"
+
+
+def is_dynamic_gateway(proxy: Proxy) -> bool:
+    """Whether ``proxy`` is the gateway row of a dynamic-sessions connector."""
+    return proxy.metadata.get(META_DYNAMIC_SESSIONS) == "true"
+# On a request rendered for a dynamic gateway: the connector's percentage of
+# session-less requests preflight may echo to observe the exit.
+META_EXIT_SAMPLE_PERCENT = "exit_sample_percent"
 META_LIST_IDENTITY = "list_identity"
 META_PROVIDER = "provider"
 
@@ -133,6 +144,15 @@ class ProxyBuilder:
         proxy.username = self._renderer.render(self._ptype.username, ctx, "proxy") or None
         proxy.password = self._renderer.render(self._ptype.password, ctx, "proxy") or None
 
+    def rerender_endpoint(self, proxy: Proxy, ctx: RenderContext) -> None:
+        """Re-render host and port too, for a session type whose gateway templates depend on the request.
+
+        Not for port mode: there the slot's port is ``base + index``, which the
+        port template alone does not know.
+        """
+        proxy.host = self._renderer.render(self._ptype.host, ctx, "proxy")
+        proxy.port = self.port(ctx)
+
     def metadata(self, ctx: RenderContext) -> dict[str, Any]:
         metadata: dict[str, Any] = {
             META_PROVIDER: self._descriptor.id,
@@ -220,6 +240,49 @@ class SessionModeStrategy(SyncStrategy):
             ordered = _sort_proxies_healthy_first(existing)
             return [], [p.id for p in ordered[target:]]
         return [], []
+
+    async def refresh(self, proxies: list[Proxy]) -> SyncResult:
+        return [], []
+
+
+class DynamicSessionStrategy(SyncStrategy):
+    """One gateway row; the session id and country are rendered per request.
+
+    The row exists so routing, metrics and rate limiting keep a proxy to
+    attach to. It is never health-checked (no single exit speaks for a
+    rotating pool) and is always healthy. Its stored credentials carry a
+    random session id only so the row is a complete, valid proxy for the
+    Detect button and the provider test; ``DescriptorProvider.render_request``
+    replaces them for client traffic. Nothing about the row depends on a
+    country, so the connector's country list is an allow-list applied at
+    routing.
+    """
+
+    def __init__(
+        self, builder: ProxyBuilder, ctx: RenderContext, session_ids: SessionIdGenerator
+    ) -> None:
+        self._builder = builder
+        self._ctx = ctx
+        self._session_ids = session_ids
+
+    def is_session_based(self) -> bool:
+        return True
+
+    def build_gateway(self) -> Proxy:
+        proxy = self._builder.build(
+            self._ctx.with_slot(session_id=self._session_ids.generate()),
+            status=ProxyStatus.HEALTHY,
+        )
+        proxy.metadata[META_DYNAMIC_SESSIONS] = "true"
+        return proxy
+
+    async def sync(self, existing: list[Proxy]) -> SyncResult:
+        gateways = [p for p in existing if is_dynamic_gateway(p)]
+        if gateways:
+            keep = _sort_proxies_healthy_first(gateways)[0]
+            return [], [p.id for p in existing if p.id != keep.id]
+        # Switching a pool connector to dynamic: every slot row goes, one gateway row arrives.
+        return [self.build_gateway()], [p.id for p in existing]
 
     async def refresh(self, proxies: list[Proxy]) -> SyncResult:
         return [], []

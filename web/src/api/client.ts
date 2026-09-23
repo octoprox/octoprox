@@ -405,6 +405,7 @@ export interface ConnectorAccuracy {
   uncertain: number
   accuracy: number | null
   breakdown: ClaimBreakdown[]
+  coverage: ExitCoverage | null
 }
 
 export interface GeoAccuracyResponse {
@@ -412,10 +413,21 @@ export interface GeoAccuracyResponse {
   connectors: ConnectorAccuracy[]
 }
 
+/**
+ * Present only for dynamic-sessions connectors, whose exits nothing but preflight sees.
+ * Below 100% the unique-exit and reuse figures for session-less traffic are undercounts.
+ */
+export interface ExitCoverage {
+  dynamic: boolean
+  preflight_on: boolean
+  sampled_percent: number
+}
+
 export interface ConnectorExits {
   connector_id: string
   connector_name: string | null
   project_id: string | null
+  coverage: ExitCoverage | null
   unique_total: number
   unique_in_window: number
   sightings: number
@@ -759,6 +771,10 @@ export interface ProxyTarget {
   per_country: number | null
   countries: string[]
   on_demand: string[]
+  /** Dynamic sessions: one gateway row, a vendor session per request; countries is the allow-list. */
+  dynamic: boolean
+  /** Dynamic sessions: share of session-less requests preflight echoes to observe their exit. */
+  exit_sample_percent: number | null
 }
 
 export interface Connector {

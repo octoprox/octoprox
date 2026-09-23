@@ -47,7 +47,9 @@ def test_legacy_ids_and_config_keys_are_preserved(builtins: dict[str, ProviderDe
     """Existing Oxylabs/BrightData rows are adopted without a data migration."""
     oxylabs = builtins["oxylabs"]
     assert {f.key for f in oxylabs.credential_fields} == {"proxy_type", "username", "password"}
-    assert {f.key for f in oxylabs.connector_fields} == {"num_proxies", "country_code", "session_duration_minutes"}
+    assert {f.key for f in oxylabs.connector_fields} == {
+        "num_proxies", "session_mode", "exit_sample_percent", "country_code", "session_duration_minutes"
+    }
     assert {t.key for t in oxylabs.proxy_types} == {
         "residential", "mobile", "isp", "dedicated_isp", "datacenter", "datacenter_dedicated"
     }
@@ -55,7 +57,8 @@ def test_legacy_ids_and_config_keys_are_preserved(builtins: dict[str, ProviderDe
     assert {f.key for f in brightdata.credential_fields} == {"token"}
     assert brightdata.validation is not None and set(brightdata.validation.capture) == {"customer_id"}
     assert {f.key for f in brightdata.connector_fields} == {
-        "zone_name", "zone_password", "proxy_type", "num_proxies", "country_code", "healthcheck_url"
+        "zone_name", "zone_password", "proxy_type", "num_proxies", "session_mode", "exit_sample_percent",
+        "country_code", "healthcheck_url",
     }
 
 

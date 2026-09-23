@@ -386,7 +386,7 @@ class TestObservationsAndStatus:
         accuracy = authenticated_client.get("/api/v1/geo/accuracy?days=7").json()
         assert isinstance(accuracy["connectors"], list) and accuracy["since"]
         for row in accuracy["connectors"]:
-            assert set(row) >= {"exits", "claimed", "confirmed", "contradicted", "uncertain", "accuracy", "breakdown"}
+            assert set(row) >= {"exits", "claimed", "confirmed", "contradicted", "uncertain", "accuracy", "breakdown", "coverage"}
         status = authenticated_client.get("/api/v1/geo/status").json()
         assert status["databases_total"] >= status["databases_loaded"]
         assert status["preflight_checks"] == 0 and status["stored_observations"] >= 0

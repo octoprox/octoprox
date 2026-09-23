@@ -124,6 +124,84 @@ class TestPreflight:
         verdict = await checker.check(_project(PreflightMode.REJECT), _proxy(), session_id=None, requested_country=None)
         assert verdict.ok and verdict.reason == "not applicable" and checker.checks == 0
 
+    def test_dynamic_rows_always_apply(self) -> None:
+        gateway = _proxy(dynamic_sessions="true")
+        assert PreflightChecker.applies(_project(PreflightMode.REPORT), None, gateway)
+        assert not PreflightChecker.applies(_project(PreflightMode.OFF), "GB", gateway)
+
+    async def test_dynamic_session_is_verified_and_cached_per_vendor_session(self, geo_service: GeoService) -> None:
+        checker = _checker(geo_service, {"ip": GB_IP, "country": "GB"})
+        stored: dict[str, str] = {}
+
+        async def store(key: str, verdict: PreflightVerdict, ttl: int) -> None:
+            stored[key] = verdict.to_json()
+
+        async def cached(key: str) -> PreflightVerdict | None:
+            raw = stored.get(key)
+            return PreflightVerdict.from_json(raw) if raw else None
+
+        checker._store = store  # type: ignore[method-assign]
+        checker._cached = cached  # type: ignore[method-assign]
+        rendered = _proxy(dynamic_sessions="true", session_id="abc123", geo="GB")
+        verdict = await checker.check(_project(PreflightMode.REJECT), rendered, session_id="order-1", requested_country="gb")
+        assert verdict.ok and verdict.reason == "match" and checker.checks == 1
+        assert list(stored) == [GEO_PREFLIGHT_KEY.format(project_id="proj", proxy_id=rendered.id) + ":abc123:GB"]
+        assert geo_service.observation_recorder._buffer[-1].session_id == "abc123"
+        # Same vendor session again: served from the cache.
+        again = await checker.check(_project(PreflightMode.REJECT), rendered, session_id="order-1", requested_country="gb")
+        assert again.ok and checker.checks == 1
+        # The same client session asking for another country is verified again, not served the GB verdict.
+        moved = _proxy(dynamic_sessions="true", session_id="abc123", geo="US")
+        moved.id = rendered.id
+        mismatch = await checker.check(_project(PreflightMode.REJECT), moved, session_id="order-1", requested_country="us")
+        assert not mismatch.ok and mismatch.expected == "US" and checker.checks == 2
+        assert GEO_PREFLIGHT_KEY.format(project_id="proj", proxy_id=rendered.id) + ":abc123:US" in stored
+        # Another session on the same gateway row is its own verification.
+        other = _proxy(dynamic_sessions="true", session_id="zzz999", geo="US")
+        other.id = rendered.id
+        mismatch = await checker.check(_project(PreflightMode.REJECT), other, session_id="order-2", requested_country="us")
+        assert not mismatch.ok and checker.checks == 3
+
+    async def test_rotating_request_is_sampled_and_uncached(self, geo_service: GeoService) -> None:
+        checker = _checker(geo_service, {"ip": GB_IP, "country": "GB"})
+        # No session_id: the request minted its own vendor session. The connector's sampling share rides along.
+        skipped = await checker.check(
+            _project(PreflightMode.REJECT), _proxy(dynamic_sessions="true", exit_sample_percent=0),
+            session_id="1.2.3.4", requested_country=None,
+        )
+        assert skipped.reason == "not applicable" and checker.checks == 0
+        rotating = _proxy(dynamic_sessions="true", exit_sample_percent=100)
+        stored: list[str] = []
+
+        async def store(key: str, verdict: PreflightVerdict, ttl: int) -> None:
+            stored.append(key)
+
+        checker._store = store  # type: ignore[method-assign]
+        observed = await checker.check(_project(PreflightMode.REJECT), rotating, session_id="1.2.3.4", requested_country=None)
+        assert observed.ok and observed.reason == "observed" and observed.observed == "GB" and checker.checks == 1
+        assert stored == []  # nothing else will ever use this vendor session
+        sighting = geo_service.observation_recorder._buffer[-1]
+        assert sighting.claimed_country is None and sighting.resolved_country == "GB" and not sighting.conflict
+        # A sampled rotating request that named a country is still judged.
+        targeted = _proxy(dynamic_sessions="true", geo="US", exit_sample_percent=100)
+        judged = await checker.check(_project(PreflightMode.REJECT), targeted, session_id=None, requested_country="US")
+        assert not judged.ok and judged.reason == "mismatch" and checker.rejections == 1
+
+    async def test_hard_modes_verify_every_targeted_rotating_request(self, geo_service: GeoService) -> None:
+        """Sampling thins observation; it never thins a reject or retry guarantee."""
+        checker = _checker(geo_service, {"ip": GB_IP, "country": "GB"})
+        unsampled = _proxy(dynamic_sessions="true", exit_sample_percent=0)
+        for mode in (PreflightMode.REJECT, PreflightMode.RETRY):
+            verdict = await checker.check(_project(mode), unsampled, session_id=None, requested_country="US")
+            assert not verdict.ok and verdict.reason == "mismatch"
+        assert checker.checks == 2
+        # A promised country (allow-list pick rendered into the request) counts as expected too.
+        promised = _proxy(dynamic_sessions="true", geo="US", exit_sample_percent=0)
+        assert not (await checker.check(_project(PreflightMode.REJECT), promised, session_id=None, requested_country=None)).ok
+        # Report mode only observes, so the percentage applies even when a country was asked.
+        report = await checker.check(_project(PreflightMode.REPORT), unsampled, session_id=None, requested_country="US")
+        assert report.reason == "not applicable" and checker.checks == 3
+
     def test_verdict_roundtrip(self) -> None:
         verdict = PreflightVerdict(ok=False, expected="US", observed="GB", ip=GB_IP, reason="mismatch", endpoint_country="GB")
         parsed = PreflightVerdict.from_json(verdict.to_json())

@@ -13,7 +13,7 @@ from api.core.config import Settings
 from api.core.proxy_manager import ProxyManager
 from api.core.proxy_server import ProxyServer
 from api.db.redis import RedisClient
-from api.models.connector import Connector, normalize_country_list
+from api.models.connector import Connector, ProxyTarget, normalize_country_list
 from api.models.credential import Credential, CredentialType
 from api.models.project import Project
 from api.models.proxy import Proxy, ProxyProtocol, ProxyStatus
@@ -331,3 +331,60 @@ class TestDatabaseBackedCountryRouting:
         assert proxy_manager.get_routable_proxies_for_project(project.id, country="DE") == []
         selected = await proxy_manager.select_proxy_for_project(project.id, target_host="allowed.com", country="us")
         assert selected is not None and selected.id == px_us.id
+
+
+class TestDynamicSessions:
+    """A dynamic-sessions connector: one gateway row, credentials rendered per request."""
+
+    @pytest.fixture
+    def manager(self) -> ProxyManager:
+        manager = _in_memory_manager()
+        manager._projects["project-1"] = Project(id="project-1", name="P", username="p", password="pw")
+        manager._credentials["cred-oxy"] = Credential(
+            id="cred-oxy", name="Oxylabs", type="oxylabs", project_id="project-1",
+            config={"proxy_type": "residential", "username": "alice", "password": "s3cret"},
+        )
+        manager._connectors["conn-dyn"] = Connector(
+            id="conn-dyn", name="Oxy dynamic", credential_id="cred-oxy", credential_type="oxylabs",
+            project_id="project-1", config={"session_mode": "dynamic", "session_duration_minutes": 10},
+        )
+        manager._proxies["gw"] = _healthy(Proxy(
+            id="gw", host="pr.oxylabs.io", port=7777, protocol=ProxyProtocol.HTTP,
+            username="customer-alice-sessid-probe0probe0-sesstime-10", password="{password}",
+            connector_id="conn-dyn",
+            metadata={"provider": "oxylabs", "proxy_type": "residential", "session_id": "probe0probe0", "dynamic_sessions": "true"},
+        ))
+        return manager
+
+    def test_gateway_serves_any_country(self, manager: ProxyManager) -> None:
+        assert [p.id for p in manager.get_routable_proxies_for_project("project-1")] == ["gw"]
+        assert [p.id for p in manager.get_routable_proxies_for_project("project-1", country="DE")] == ["gw"]
+        assert not manager._accepts_request_country(manager._connectors["conn-dyn"])
+        assert manager.get_connector_target(manager._connectors["conn-dyn"]) == ProxyTarget(
+            total=1, dynamic=True, exit_sample_percent=5
+        )
+
+    def test_allow_list_filters_at_the_connector(self, manager: ProxyManager) -> None:
+        manager._connectors["conn-dyn"].config["country_code"] = ["US", "DE"]
+        assert [p.id for p in manager.get_routable_proxies_for_project("project-1", country="de")] == ["gw"]
+        assert manager.get_routable_proxies_for_project("project-1", country="FR") == []
+        assert [p.id for p in manager.get_routable_proxies_for_project("project-1")] == ["gw"]
+
+    async def test_explicit_session_is_derived_and_stable(self, manager: ProxyManager) -> None:
+        first = await manager.select_proxy_for_project("project-1", "order-1", sessid="order-1", country="de")
+        second = await manager.select_proxy_for_project("project-1", "order-1", sessid="order-1", country="de")
+        assert first is not None and second is not None
+        assert first.id == "gw" and first.username == second.username
+        assert first.username.startswith("customer-alice-cc-DE-sessid-") and first.username.endswith("-sesstime-10")
+        assert "order-1" not in first.username
+        assert first.password == "s3cret"  # resolved after rendering
+        assert first.metadata["session_id"] in first.username and first.metadata["geo"] == "DE"
+        assert manager._proxies["gw"].username == "customer-alice-sessid-probe0probe0-sesstime-10"  # stored row untouched
+
+    async def test_client_ip_fallback_does_not_pin_a_vendor_session(self, manager: ProxyManager) -> None:
+        # session_id carries the client address for sticky routing; sessid is None, so the vendor rotates.
+        first = await manager.select_proxy_for_project("project-1", "10.0.0.7", sessid=None)
+        second = await manager.select_proxy_for_project("project-1", "10.0.0.7", sessid=None)
+        assert first is not None and second is not None
+        assert first.username != second.username
+        assert "session_id" not in first.metadata and "-cc-" not in first.username

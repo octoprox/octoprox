@@ -429,6 +429,8 @@ class ProxyTarget(BaseModel):
     per_country: int | None = None
     countries: list[str] = Field(default_factory=list)
     on_demand: list[str] = Field(default_factory=list)
+    dynamic: bool = False
+    exit_sample_percent: int | None = None
 
 
 class ConnectorResponse(BaseModel):

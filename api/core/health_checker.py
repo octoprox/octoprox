@@ -33,6 +33,7 @@ from api.db.redis import INSTANCE_REGISTRY_SCAN, RedisClient
 from api.models.connector import Connector
 from api.models.proxy import Proxy, ProxyProtocol, ProxyStatus
 from api.providers.sdk.sources import extract_ip_and_country
+from api.providers.sdk.strategies import is_dynamic_gateway
 
 if TYPE_CHECKING:
     pass
@@ -315,6 +316,19 @@ class HealthChecker:
 
     async def _check_proxy(self, proxy: Proxy) -> None:
         """Check health of a single proxy and emit signal with result."""
+        if is_dynamic_gateway(proxy):
+            # A dynamic-sessions gateway mints a vendor session per request, so
+            # no single exit speaks for it: a probe would judge one random exit
+            # and cost vendor traffic. The row stands for the connector and is
+            # always routable; a broken credential surfaces on client requests.
+            await event_bus.publish(health_check_completed,
+                self,
+                proxy_id=proxy.id,
+                status=ProxyStatus.HEALTHY,
+                latency_ms=0.0,
+                consecutive_failures=0,
+            )
+            return
         start_time = time.monotonic()
         healthcheck_url = self._get_healthcheck_url(proxy)
 

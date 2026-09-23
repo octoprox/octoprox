@@ -117,9 +117,13 @@ curl -X POST http://localhost:8000/api/v1/projects/{project_id}/connectors \
 | `zone_name` | Yes | Name of the BrightData zone to use | - |
 | `zone_password` | Yes | Password for the zone (auto-populated from API) | - |
 | `proxy_type` | Yes | Type of proxy (derived from zone) | - |
-| `num_proxies` | No | Number of proxy slots to create (1-1000) | `1` |
-| `country_code` | No | 2-letter country code for geo-targeting | `null` (all countries) |
+| `session_mode` | No | `pool` provisions `num_proxies` sessions; `dynamic` mints a vendor session per request (residential and mobile zones) | `pool` |
+| `num_proxies` | No | Number of proxy slots to create (1-1000); ignored when `session_mode` is `dynamic` | `1` |
+| `exit_sample_percent` | No | `dynamic` only: share (0-100) of requests without a client session that preflight echoes to record their exit | `5` |
+| `country_code` | No | 2-letter country code for geo-targeting; with `dynamic`, an allow-list for `-cc-` | `null` (all countries) |
 | `healthcheck_url` | No | Custom URL for proxy health checks | `https://httpbin.org/ip` |
+
+With `"session_mode": "dynamic"` a residential or mobile zone connector keeps one gateway proxy and renders `-session-...` and `-country-xx` per request: a client `-sessid-` always maps to the same Bright Data session, a request without one gets a fresh session, and `-cc-` picks the country. See [Dynamic sessions]({{ site.baseurl }}/providers#descriptor-reference) in the providers guide.
 
 ## Troubleshooting
 
