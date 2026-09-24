@@ -40,12 +40,27 @@ class TestConnectorCountries:
         assert self._connector(config={"country_code": "de"}).countries == ["DE"]
         assert self._connector(config={"country_code": ["US", "de"]}).countries == ["US", "DE"]
 
+    def test_uk_is_an_alias_of_gb(self) -> None:
+        # Vendors, the IP databases and the map all say GB; a UK allow-list must still match -cc-gb.
+        assert self._connector(config={"country_code": "uk"}).countries == ["GB"]
+        assert normalize_country_list(["uk", "GB"]) == ["GB"]
+
     def test_normalize_country_list(self) -> None:
         assert normalize_country_list("us, gb,,US") == ["US", "GB"]
         assert normalize_country_list(["de"]) == ["DE"]
         assert normalize_country_list(None) == []
         with pytest.raises(ValueError):
             normalize_country_list(["USA"])
+
+
+class TestManualProxyCountry:
+    def test_uk_is_an_alias_of_gb(self) -> None:
+        from api.models.proxy import ProxyCreate, ProxyUpdate
+
+        assert ProxyCreate(host="h", port=1, connector_id="c1", country="uk").country == "GB"
+        assert ProxyUpdate(country="UK").country == "GB"
+        # An empty string still means "clear".
+        assert ProxyUpdate(country="").country == ""
 
 
 class TestProxyCountry:

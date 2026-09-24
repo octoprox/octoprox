@@ -1,6 +1,9 @@
 // Copyright 2026 Octoprox Authors
 // SPDX-License-Identifier: Apache-2.0
 
+/** Pick the singular or plural word for a count: plural(2, 'proxy', 'proxies'). */
+export const plural = (n: number, one: string, many: string) => (n === 1 ? one : many)
+
 /**
  * Format bytes as human-readable string (e.g., "1.5 MB")
  */

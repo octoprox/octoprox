@@ -54,7 +54,7 @@ A single project can hold connectors that exit from different countries. Instead
 
 **Format:** `<username>-cc-<iso_code>`
 
-The code is a two-letter ISO 3166-1 alpha-2 country code and is case-insensitive.
+The code is a two-letter ISO 3166-1 alpha-2 country code and is case-insensitive. `uk` is accepted as an alias of `gb`, the ISO code for the United Kingdom, wherever a country is entered: in this suffix, in a connector's country settings and on a manually added proxy.
 
 **Examples:**
 
@@ -101,6 +101,6 @@ Requests **without** a `-cc-` suffix are unaffected: they may use any proxy in t
 
 - With the `sticky` strategy, a session that switches country is re-bound to a proxy in the new country.
 - Country groups created on demand are not removed automatically. Delete unused ones from the Proxies page, or list the countries you need on the connector so the sync manages them.
-- The Proxies page shows each proxy's country when it is known, and the Overview page shows a world map of where the project's proxies exit from, with healthy and total counts per country.
+- The Proxies page shows each proxy's country when it is known, and the Overview page shows a world map of where the project's proxies exit from, with healthy and total counts per country. A dynamic-sessions connector has no exit of its own to plot, since the vendor picks one per request, so the map tints the countries its allow-list names, or the whole world when it names none.
 
 > **Note:** The string `-cc-` is a reserved delimiter and should not appear in your project username or in session IDs.

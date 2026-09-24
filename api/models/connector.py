@@ -34,11 +34,17 @@ from api.models.credential import CredentialType
 
 # --- Typed Config Models for Validation ---
 
+# Common non-ISO spellings accepted anywhere a country code is entered, mapped
+# to the ISO 3166-1 alpha-2 code the vendors, the IP databases and the map use.
+# A connector allow-list saying UK would otherwise never match a -cc-gb request.
+COUNTRY_ALIASES: dict[str, str] = {"UK": "GB"}
+
+
 def normalize_country_code(value: str | None) -> str | None:
     """Normalise a country code to upper-case ISO 3166-1 alpha-2, or None if blank.
 
-    Raises ValueError for values that cannot be a country code (anything
-    other than two ASCII letters).
+    Applies ``COUNTRY_ALIASES`` (UK becomes GB). Raises ValueError for values
+    that cannot be a country code (anything other than two ASCII letters).
     """
     if value is None:
         return None
@@ -47,7 +53,7 @@ def normalize_country_code(value: str | None) -> str | None:
         return None
     if len(code) != 2 or not code.isascii() or not code.isalpha():
         raise ValueError(f'country must be a two-letter ISO 3166-1 alpha-2 code, got {value!r}')
-    return code
+    return COUNTRY_ALIASES.get(code, code)
 
 
 def normalize_country_list(value: Any) -> list[str]:

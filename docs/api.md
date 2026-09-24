@@ -240,7 +240,7 @@ No restrictions (default):
 
 #### Countries (config)
 
-Connectors declare the countries their proxies exit from inside `config`, so clients can pick them with a `-cc-<code>` suffix on the proxy username (see [Country Routing]({{ site.baseurl }}/routing-strategies#country-routing)). Codes are ISO 3166-1 alpha-2 and are normalised to upper case; an empty list is dropped.
+Connectors declare the countries their proxies exit from inside `config`, so clients can pick them with a `-cc-<code>` suffix on the proxy username (see [Country Routing]({{ site.baseurl }}/routing-strategies#country-routing)). Codes are ISO 3166-1 alpha-2 and are normalised to upper case, with `UK` stored as `GB`; an empty list is dropped.
 
 - Static and cloud connectors: `config.countries`, a list of codes.
 - Provider connectors: the provider's country field (`config.country_code` for the built-in descriptors). It accepts one code, a list, or a comma-separated string and is always returned as a list. Listing several countries provisions `num_proxies` slots per country.

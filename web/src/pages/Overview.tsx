@@ -14,7 +14,7 @@ import { useProject } from '../contexts/ProjectContext'
 import { useAuth } from '../contexts/AuthContext'
 import { useTheme } from '../contexts/ThemeContext'
 import { useToast } from '../contexts/ToastContext'
-import { formatBytes } from '../utils/format'
+import { formatBytes, plural } from '../utils/format'
 import { targetTotal, describeTarget, isDynamic } from '../utils/connectors'
 import { ProviderLogo } from '../components/ProviderLogo'
 import { Page } from '../components/layout/Page'
@@ -363,9 +363,10 @@ export default function Overview() {
         <Card className="p-4 flex flex-col min-w-0 min-h-[320px]">
           <CardHeader
             title="Locations"
-            action={locations && locations.located > 0 ? (
+            action={locations && (locations.anyCountry || locations.countries > 0) ? (
               <span className="text-xs text-fg-muted tabular-nums">
-                {locations.countries} {locations.countries === 1 ? 'country' : 'countries'}
+                {locations.countries > 0 && <>{locations.countries} {plural(locations.countries, 'country', 'countries')}</>}
+                {locations.anyCountry && (locations.countries > 0 ? <> · any on request</> : <>Any country</>)}
                 {locations.unknown > 0 && <> · {locations.unknown} unknown</>}
               </span>
             ) : undefined}

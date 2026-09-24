@@ -11,6 +11,7 @@ from uuid import uuid4
 from pydantic import BaseModel, Field, field_validator
 
 from api.core import utc_now
+from api.models.connector import normalize_country_code
 
 
 class ProxyProtocol(str, Enum):
@@ -139,18 +140,6 @@ class Proxy(BaseModel):
         self.updated_at = other.updated_at
 
 
-def _normalize_optional_country(value: str | None) -> str | None:
-    """Upper-case ISO code, ``""`` to clear, or None when not provided."""
-    if value is None:
-        return None
-    code = value.strip().upper()
-    if code == "":
-        return ""
-    if len(code) != 2 or not code.isascii() or not code.isalpha():
-        raise ValueError("country must be a two-letter ISO 3166-1 alpha-2 code")
-    return code
-
-
 class ProxyCreate(BaseModel):
     """Schema for creating a new proxy."""
     host: str
@@ -167,8 +156,7 @@ class ProxyCreate(BaseModel):
     @field_validator("country")
     @classmethod
     def _country(cls, value: str | None) -> str | None:
-        code = _normalize_optional_country(value)
-        return code or None
+        return normalize_country_code(value)
 
 
 class ProxyUpdate(BaseModel):
@@ -186,7 +174,10 @@ class ProxyUpdate(BaseModel):
     @field_validator("country")
     @classmethod
     def _country(cls, value: str | None) -> str | None:
-        return _normalize_optional_country(value)
+        # An empty string clears the country; None leaves it untouched.
+        if value is not None and value.strip() == "":
+            return ""
+        return normalize_country_code(value)
 
 
 class ProxyResponse(BaseModel):

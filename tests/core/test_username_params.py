@@ -73,6 +73,12 @@ class TestParseUsernameParams:
     def test_country_is_upper_cased(self) -> None:
         assert parse_username_params("myuser-cc-Gb").country == "GB"
 
+    def test_uk_is_an_alias_of_gb(self) -> None:
+        assert parse_username_params("myuser-cc-uk").country == "GB"
+
+    def test_malformed_country_is_kept_as_typed(self) -> None:
+        assert parse_username_params("myuser-cc-usa").country == "USA"
+
     def test_sessid_then_country(self) -> None:
         assert parse_username_params("myuser-sessid-abc-cc-gb") == UsernameParams("myuser", "abc", "GB")
 

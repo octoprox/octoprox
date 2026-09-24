@@ -18,6 +18,7 @@ Examples:
 
 from typing import NamedTuple
 
+from api.models.connector import normalize_country_code
 from api.models.project import Project
 
 SESSID_SEPARATOR = "-sessid-"
@@ -55,7 +56,8 @@ def parse_username_params(raw_username: str) -> UsernameParams:
     extends up to the next delimiter. A delimiter at position 0 (empty
     username) disables parsing and the raw string is returned unchanged.
     Empty values are treated as absent. Country codes are normalised to
-    upper case.
+    upper case, with UK accepted as an alias of GB; a value that cannot be
+    a country code is kept as typed (upper-cased) and will match no connector.
 
     Examples:
         'myuser' -> ('myuser', None, None)
@@ -87,7 +89,10 @@ def parse_username_params(raw_username: str) -> UsernameParams:
 
     country = values["country"]
     if country is not None:
-        country = country.strip().upper() or None
+        try:
+            country = normalize_country_code(country)
+        except ValueError:
+            country = country.strip().upper() or None
 
     return UsernameParams(username, values["sessid"], country)
 
