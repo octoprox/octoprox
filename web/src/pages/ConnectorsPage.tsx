@@ -12,7 +12,9 @@ import {
   createProjectConnector, updateProjectConnector, deleteProjectConnector,
   Connector, CredentialType, ConnectorCreate, ConnectorUpdate, ConnectorOptions, ProviderField,
   RoutingConfig, RateLimitConfig, Credential, CredentialDetail,
+  connectorWeight, DEFAULT_ROUTING_WEIGHT, MAX_ROUTING_WEIGHT, fetchProjectTrafficSplit, ConnectorTrafficShare,
 } from '../api/client'
+import { TrafficSplitPanel, formatShare } from '../components/TrafficSplit'
 import { useProject } from '../contexts/ProjectContext'
 import { useAuth } from '../contexts/AuthContext'
 import { useToast } from '../contexts/ToastContext'
@@ -101,6 +103,7 @@ export default function ConnectorsPage() {
     mutationFn: (id: string) => deleteProjectConnector(selectedProjectId!, id),
     onSuccess: (_r, id) => {
       queryClient.invalidateQueries({ queryKey: ['connectors', selectedProjectId] })
+      queryClient.invalidateQueries({ queryKey: ['traffic-split', selectedProjectId] })
       queryClient.invalidateQueries({ queryKey: ['proxies', selectedProjectId] })
       queryClient.invalidateQueries({ queryKey: ['project', selectedProjectId] })
       if (panel?.kind === 'edit' && panel.id === id) setPanel(null)
@@ -111,6 +114,17 @@ export default function ConnectorsPage() {
   })
 
   const connectors = connectorsData?.connectors ?? []
+  // Same query the Traffic split panel uses (shared cache), so the Weight column shows the panel's numbers.
+  const { data: trafficSplit } = useQuery({
+    queryKey: ['traffic-split', selectedProjectId, '1h'],
+    queryFn: () => fetchProjectTrafficSplit(selectedProjectId!, '1h'),
+    enabled: !!selectedProjectId && connectors.length > 1,
+    refetchInterval: 15000,
+  })
+  const shares = useMemo(() => {
+    if (!trafficSplit) return null
+    return new Map<string, ConnectorTrafficShare>(trafficSplit.connectors.map((c) => [c.connector_id, c]))
+  }, [trafficSplit])
   const openConnector = panel?.kind === 'edit' ? connectors.find((c) => c.id === panel.id) ?? null : null
 
   const columns: ColumnDef<Connector>[] = useMemo(() => [
@@ -164,6 +178,29 @@ export default function ConnectorsPage() {
       },
     },
     {
+      id: 'weight',
+      accessorFn: (row: Connector) => connectorWeight(row.routing_config),
+      header: 'Weight',
+      size: 120,
+      cell: ({ row }) => {
+        const weight = connectorWeight(row.original.routing_config)
+        const share = shares?.get(row.original.id)
+        const title = share == null
+          ? undefined
+          : share.excluded_reason === 'disabled'
+            ? 'Disabled: takes no traffic'
+            : share.excluded_reason === 'no_eligible_proxies'
+              ? 'No healthy proxy right now: takes no traffic'
+              : `About ${formatShare(share.expected_share)} of untargeted requests at the current weights and health`
+        return (
+          <span className="inline-flex items-center gap-2" title={title}>
+            <span className="tabular-nums font-medium">{weight}</span>
+            {share != null && <span className="text-fg-subtle text-xs tabular-nums">{share.excluded_reason ? '-' : formatShare(share.expected_share)}</span>}
+          </span>
+        )
+      },
+    },
+    {
       id: 'status',
       accessorFn: (row: Connector) => (row.last_error ? 'Error' : row.enabled ? 'Enabled' : 'Disabled'),
       header: 'Status',
@@ -199,7 +236,7 @@ export default function ConnectorsPage() {
         </div>
       ),
     }] as ColumnDef<Connector>[] : []),
-  ], [canMutate, labelFor])
+  ], [canMutate, labelFor, shares])
 
   let panelNode: React.ReactNode = null
   if (panel?.kind === 'edit' && openConnector) {
@@ -207,6 +244,7 @@ export default function ConnectorsPage() {
       <ConnectorEditor
         key={openConnector.id}
         connector={openConnector}
+        siblings={connectors}
         canMutate={canMutate}
         onClose={() => setPanel(null)}
         onDelete={() => setPendingDelete(openConnector)}
@@ -217,6 +255,7 @@ export default function ConnectorsPage() {
     panelNode = (
       <ConnectorEditor
         key="new"
+        siblings={connectors}
         canMutate={canMutate}
         onClose={() => setPanel(null)}
         onSaved={(c) => { setPanel(null); toast.show(`Connector "${c.name}" created`) }}
@@ -245,6 +284,9 @@ export default function ConnectorsPage() {
         />
       ) : (
         <>
+          {connectors.length > 1 && selectedProjectId && (
+            <TrafficSplitPanel projectId={selectedProjectId} onOpenConnector={(id) => setPanel({ kind: 'edit', id })} className="mb-4" />
+          )}
           <DataTable
             columns={columns}
             data={connectors}
@@ -282,8 +324,10 @@ export default function ConnectorsPage() {
 // Editor: create (type → configure) or edit, with nested credential creation.
 // Stays mounted across the nested step so the form is not lost.
 
-function ConnectorEditor({ connector, canMutate, onClose, onDelete, onSaved }: {
+function ConnectorEditor({ connector, siblings, canMutate, onClose, onDelete, onSaved }: {
   connector?: Connector
+  /** The project's connectors, used to preview this one's share of traffic. */
+  siblings: Connector[]
   canMutate: boolean
   onClose: () => void
   onDelete?: () => void
@@ -315,6 +359,7 @@ function ConnectorEditor({ connector, canMutate, onClose, onDelete, onSaved }: {
       enabled: connector.enabled,
     }
   })
+  const [weightText, setWeightText] = useState<string>(() => String(connectorWeight(connector?.routing_config)))
   const [activeTab, setActiveTab] = useState<ConfigTab>(() => {
     if (connector?.credential_type === 'static_proxy_provider') return 'general'
     if (connector?.credential_type && !CLOUD_TYPES.has(connector.credential_type)) return 'general'
@@ -351,6 +396,7 @@ function ConnectorEditor({ connector, canMutate, onClose, onDelete, onSaved }: {
 
   const invalidate = () => {
     queryClient.invalidateQueries({ queryKey: ['connectors', selectedProjectId] })
+    queryClient.invalidateQueries({ queryKey: ['traffic-split', selectedProjectId] })
     queryClient.invalidateQueries({ queryKey: ['project', selectedProjectId] })
   }
   const createMutation = useMutation({
@@ -439,15 +485,29 @@ function ConnectorEditor({ connector, canMutate, onClose, onDelete, onSaved }: {
     if (rc.domain_blacklist && rc.domain_blacklist.length > 0) return rc.domain_blacklist
     return []
   }
+  const weightPart = (): Pick<RoutingConfig, 'weight'> => (formData.routing_config.weight != null ? { weight: formData.routing_config.weight } : {})
   const handleRoutingModeChange = (mode: DomainFilterMode) => {
-    if (mode === 'none') { setFormData({ ...formData, routing_config: {} }); return }
+    if (mode === 'none') { setFormData({ ...formData, routing_config: { ...weightPart() } }); return }
     const domains = getRoutingDomainsArray()
-    setFormData({ ...formData, routing_config: mode === 'whitelist' ? { domain_whitelist: domains } : { domain_blacklist: domains } })
+    setFormData({ ...formData, routing_config: { ...weightPart(), ...(mode === 'whitelist' ? { domain_whitelist: domains } : { domain_blacklist: domains }) } })
   }
   const setRoutingDomains = (domains: string[]) => {
     const mode = getRoutingMode()
-    setFormData({ ...formData, routing_config: mode === 'whitelist' ? { domain_whitelist: domains } : { domain_blacklist: domains } })
+    setFormData({ ...formData, routing_config: { ...weightPart(), ...(mode === 'whitelist' ? { domain_whitelist: domains } : { domain_blacklist: domains }) } })
   }
+  const weight = connectorWeight(formData.routing_config)
+  // The field holds what is typed (so clearing it does not snap back to 1 mid-edit); the config gets the normalised number.
+  const setWeight = (raw: string) => {
+    setWeightText(raw)
+    const { weight: _drop, ...rest } = formData.routing_config
+    const n = Math.floor(Number(raw))
+    if (raw.trim() === '' || !Number.isFinite(n) || n === DEFAULT_ROUTING_WEIGHT) { setFormData({ ...formData, routing_config: rest }); return }
+    setFormData({ ...formData, routing_config: { ...rest, weight: Math.min(Math.max(n, 1), MAX_ROUTING_WEIGHT) } })
+  }
+  const settleWeight = () => setWeightText(String(weight))
+  // Preview: this connector at the edited weight against the siblings' saved weights.
+  const otherWeight = siblings.filter((c) => c.id !== connector?.id && c.enabled).reduce((a, c) => a + connectorWeight(c.routing_config), 0)
+  const previewShare = formData.enabled ? (weight / (weight + otherWeight)) * 100 : null
   const addRoutingDomain = (input: string) => {
     const newDomains = input.split(/[\n,]+/).map((d) => d.trim().toLowerCase()).filter((d) => d)
     if (newDomains.length === 0) return
@@ -459,6 +519,24 @@ function ConnectorEditor({ connector, canMutate, onClose, onDelete, onSaved }: {
 
   const renderRoutingTab = () => (
     <div className="space-y-4">
+      <div>
+        <Label className="text-xs">
+          <span className="inline-flex items-center gap-1.5">
+            <span>Weight</span>
+            <InfoTip label="About weight">
+              Relative share of the project's traffic against its other connectors, 1 to {MAX_ROUTING_WEIGHT}. Weights 1 and 3 split requests 25/75. The share does not depend on how many proxies the connector holds, so a dynamic connector with one gateway row and a pool of fifty slots split evenly at equal weights. Connectors that cannot serve a request (disabled, no healthy proxy, filtered domain or country) are skipped and the rest share by the same ratios.
+            </InfoTip>
+          </span>
+        </Label>
+        <div className="flex items-center gap-3 mt-1">
+          <Input type="number" min={1} max={MAX_ROUTING_WEIGHT} step={1} value={weightText} onChange={(e) => setWeight(e.target.value)} onBlur={settleWeight} disabled={readOnly} className="w-24 px-3 py-1.5 text-sm" />
+          <span className="text-xs text-fg-muted">
+            {previewShare == null && 'Disabled connectors take no traffic.'}
+            {previewShare != null && otherWeight === 0 && (siblings.filter((c) => c.id !== connector?.id).length === 0 ? 'The only connector in this project; weight matters once a second one is added.' : 'The only enabled connector; it takes every request until another one is enabled.')}
+            {previewShare != null && otherWeight > 0 && <>About <b className="font-semibold text-fg">{formatShare(previewShare)}</b> of untargeted requests at the other connectors' current weights ({weight} of {weight + otherWeight}).</>}
+          </span>
+        </div>
+      </div>
       <div>
         <Label className="text-xs">Domain filter mode</Label>
         <div className="flex gap-1.5 mt-1 flex-wrap">

@@ -200,6 +200,19 @@ Content-Type: application/json
 }
 ```
 
+#### Routing weight (routing_config.weight)
+
+`routing_config.weight` is the connector's relative share of the project's traffic against the other connectors that can serve a request: an integer from 1 to 100, default 1. Weights 1 and 3 split requests 25/75. The share does not depend on how many proxies the connector holds. The default is not stored, so a connector at weight 1 shows no `weight` key. See [Connector weights]({{ site.baseurl }}/routing-strategies#connector-weights).
+
+```json
+{
+  "routing_config": {
+    "weight": 3,
+    "domain_blacklist": ["blocked.com"]
+  }
+}
+```
+
 #### Domain Filtering (routing_config)
 
 Connectors support optional domain-based filtering to control which target domains their proxies serve. The `routing_config` field accepts:
@@ -419,6 +432,58 @@ GET /api/v1/projects/{project_id}/metrics
   "avg_latency_ms": 145.2
 }
 ```
+
+### Traffic Split
+
+How the project's traffic divides between its connectors under the current [weights]({{ site.baseurl }}/routing-strategies#connector-weights), expected and observed.
+
+```bash
+GET /api/v1/projects/{project_id}/metrics/traffic-split?range=1h
+```
+
+`range` is one of `1h` (default), `6h`, `24h`, `7d`, `30d` and bounds the observed counts.
+
+**Response:**
+```json
+{
+  "strategy": "round_robin",
+  "range": "1h",
+  "total_weight": 4,
+  "observed_requests": 1200,
+  "connectors": [
+    {
+      "connector_id": "…",
+      "name": "Oxylabs residential",
+      "credential_type": "oxylabs",
+      "enabled": true,
+      "weight": 3,
+      "dynamic": true,
+      "total_proxies": 1,
+      "eligible_proxies": 1,
+      "expected_share": 75.0,
+      "excluded_reason": null,
+      "observed_requests": 880,
+      "observed_share": 73.33
+    },
+    {
+      "connector_id": "…",
+      "name": "DC pool",
+      "credential_type": "static_proxy_provider",
+      "enabled": true,
+      "weight": 1,
+      "dynamic": false,
+      "total_proxies": 20,
+      "eligible_proxies": 18,
+      "expected_share": 25.0,
+      "excluded_reason": null,
+      "observed_requests": 320,
+      "observed_share": 26.67
+    }
+  ]
+}
+```
+
+`expected_share` (0-100) is what an untargeted request sees right now: every enabled connector with at least one eligible proxy takes `weight / total_weight`. A connector taking nothing has `excluded_reason` set to `disabled` or `no_eligible_proxies`. `observed_share` is the connector's part of the requests flushed in the window, `null` when there were none.
 
 ### Prometheus Metrics
 

@@ -76,7 +76,7 @@ from api.db.repository import (
     ProxyRepository,
 )
 from api.geo.models import META_LOCATION_CONFLICT, LocationPolicy
-from api.models.connector import Connector, ProxyTarget
+from api.models.connector import DEFAULT_ROUTING_WEIGHT, Connector, ProxyTarget
 from api.models.credential import Credential
 from api.models.project import Project
 from api.models.proxy import Proxy, ProxyStatus
@@ -84,7 +84,7 @@ from api.providers.registry import ProviderRegistry, ProviderType, get_provider_
 from api.providers.sdk.provider import DescriptorProvider
 from api.providers.sdk.strategies import META_GEO, is_dynamic_gateway
 from api.providers.store import ProviderStore
-from api.strategies import get_strategy
+from api.strategies import ProxyGroup, get_strategy
 
 if TYPE_CHECKING:
     from api.models.system import InstanceSnapshot
@@ -365,6 +365,7 @@ class ProxyManager:
     async def _apply_connector_change(self, connector_id: str, op: str | None) -> None:
         if op == "removed":
             self._connectors.pop(connector_id, None)
+            self._forget_connector_routing_state(connector_id)
             return
         await self.reload_connector(connector_id)
 
@@ -780,6 +781,7 @@ class ProxyManager:
         for cid in list(self._connectors.keys()):
             if cid not in connectors:
                 self._connectors.pop(cid, None)
+                self._forget_connector_routing_state(cid)
         self._connectors.update(connectors)
 
         # Proxies - patch in place to keep request counters, status, and
@@ -1068,6 +1070,7 @@ class ProxyManager:
             connector = await ConnectorRepository(session).get_by_id(connector_id)
         if connector is None:
             self._connectors.pop(connector_id, None)
+            self._forget_connector_routing_state(connector_id)
             logger.info("Reload removed connector from cache", connector_id=connector_id)
             return
         self._connectors[connector_id] = connector
@@ -1281,6 +1284,7 @@ class ProxyManager:
         # Remove associated connectors and proxies from cache
         for cid in connector_ids_to_remove:
             del self._connectors[cid]
+            self._forget_connector_routing_state(cid)
 
         self._proxies.remove_groups(connector_ids_to_remove)
 
@@ -1559,6 +1563,7 @@ class ProxyManager:
 
         # Remove from cache
         del self._connectors[connector_id]
+        self._forget_connector_routing_state(connector_id)
         # Also remove associated proxies from cache
         self._proxies.remove_groups([connector_id])
         logger.info("Removed connector", connector_id=connector_id)
@@ -1982,11 +1987,12 @@ class ProxyManager:
             healthy_proxies = [p for p in healthy_proxies if p.id not in exclude]
         strategy = self._project_strategies.get(project_id, self._strategy)
 
-        # The strategy handles whatever cross-instance state it needs
-        # (sticky reads/writes its Redis binding inside select; others
-        # ignore the redis_client/project_id kwargs).
-        selected = await strategy.select(
-            healthy_proxies,
+        # Two steps: the connector by routing weight, then the proxy inside
+        # it by the strategy. The strategy handles whatever cross-instance
+        # state it needs (sticky reads/writes its Redis binding inside
+        # select; others ignore the redis_client/project_id kwargs).
+        selected = await strategy.select_weighted(
+            self.group_by_connector(healthy_proxies),
             session_id,
             redis_client=self._redis_client,
             project_id=project_id,
@@ -1996,6 +2002,30 @@ class ProxyManager:
         if is_dynamic_gateway(selected):
             selected = self._render_dynamic_request(selected, project_id, sessid, country)
         return self.resolve_proxy_credentials(selected)
+
+    def group_by_connector(self, proxies: list[Proxy]) -> list[ProxyGroup]:
+        """Eligible proxies grouped per connector, each group carrying the connector's routing weight.
+
+        Groups keep the order in which their connectors first appear; a
+        connector no longer known (mid-removal) gets the default weight.
+        """
+        groups: dict[str, ProxyGroup] = {}
+        for proxy in proxies:
+            group = groups.get(proxy.connector_id)
+            if group is None:
+                connector = self._connectors.get(proxy.connector_id)
+                weight = connector.weight if connector is not None else DEFAULT_ROUTING_WEIGHT
+                load = sum(p.request_count for p in self._proxies.for_connector(proxy.connector_id))
+                group = ProxyGroup(key=proxy.connector_id, weight=weight, load=load)
+                groups[proxy.connector_id] = group
+            group.proxies.append(proxy)
+        return list(groups.values())
+
+    def _forget_connector_routing_state(self, connector_id: str) -> None:
+        """Drop per-connector strategy state (round robin cursors) for a removed connector."""
+        self._strategy.forget_group(connector_id)
+        for strategy in self._project_strategies.values():
+            strategy.forget_group(connector_id)
 
     def _render_dynamic_request(
         self, proxy: Proxy, project_id: str, sessid: str | None, country: str | None

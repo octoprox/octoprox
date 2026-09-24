@@ -7,7 +7,7 @@ from datetime import datetime
 from typing import Any
 from uuid import uuid4
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
 
 from api.core import utc_now
 from api.models.cloud_options import (
@@ -210,17 +210,29 @@ class AzureConnectorConfig(CloudConnectorConfig):
         return AZURE_UBUNTU_IMAGE_X86.copy()
 
 
+DEFAULT_ROUTING_WEIGHT = 1
+MAX_ROUTING_WEIGHT = 100
+
+
 class RoutingConfig(BaseModel):
-    """Routing configuration for domain-based filtering.
+    """Routing configuration: domain filtering and the connector's traffic weight.
 
     Controls which target domains can be routed through a connector's proxies.
     Whitelist and blacklist are mutually exclusive (at most one can be non-empty).
 
     Domain matching is hierarchical: entering 'bing.com' matches 'bing.com'
     and all subdomains (www.bing.com, images.bing.com, etc.).
+
+    ``weight`` is the connector's relative share of the project's traffic
+    against the other connectors that can serve a request. It is a ratio,
+    not a percentage: weights 1 and 3 split requests 25/75. The share does
+    not depend on how many proxies the connector holds, so a dynamic
+    sessions gateway with one row and a pool with fifty slots split evenly
+    at equal weights.
     """
     domain_whitelist: list[str] = Field(default_factory=list)
     domain_blacklist: list[str] = Field(default_factory=list)
+    weight: int = Field(default=DEFAULT_ROUTING_WEIGHT, ge=1, le=MAX_ROUTING_WEIGHT)
 
     @model_validator(mode='after')
     def validate_mutual_exclusivity(self) -> 'RoutingConfig':
@@ -267,6 +279,9 @@ def validate_routing_config(config: dict[str, Any]) -> dict[str, Any]:
     """
     validated = RoutingConfig(**config)
     result = validated.model_dump(exclude_none=True)
+    if result.get("weight") == DEFAULT_ROUTING_WEIGHT:
+        # The default weight is implied; store only explicit choices.
+        del result["weight"]
     # Remove empty lists to keep config clean
     return {k: v for k, v in result.items() if v}
 
@@ -368,6 +383,20 @@ class Connector(BaseModel):
         if not self.routing_config:
             return RoutingConfig()
         return RoutingConfig(**self.routing_config)
+
+    @property
+    def weight(self) -> int:
+        """Relative share of project traffic against the project's other connectors (default 1).
+
+        Parsed by ``RoutingConfig`` like every other routing key; a stored
+        value the model rejects (hand-edited JSON) routes at the default.
+        """
+        if not self.routing_config:
+            return DEFAULT_ROUTING_WEIGHT
+        try:
+            return RoutingConfig(**self.routing_config).weight
+        except ValidationError:
+            return DEFAULT_ROUTING_WEIGHT
 
     @property
     def countries(self) -> list[str]:

@@ -3,7 +3,7 @@
 
 """Routing strategies for proxy selection."""
 
-from api.strategies.base import RoutingStrategy
+from api.strategies.base import ProxyGroup, RoutingStrategy
 from api.strategies.health_based import HealthBasedStrategy
 from api.strategies.least_used import LeastUsedStrategy
 from api.strategies.random import RandomStrategy
@@ -11,6 +11,7 @@ from api.strategies.round_robin import RoundRobinStrategy
 from api.strategies.sticky import StickySessionStrategy
 
 __all__ = [
+    "ProxyGroup",
     "RoutingStrategy",
     "RoundRobinStrategy",
     "LeastUsedStrategy",

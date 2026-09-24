@@ -109,3 +109,41 @@ class TestValidateRoutingConfig:
         result = validate_routing_config({"domain_whitelist": ["", "  "]})
         assert result == {}
 
+
+
+class TestRoutingWeight:
+    """The connector's relative traffic share."""
+
+    def test_defaults_to_one(self) -> None:
+        assert RoutingConfig().weight == 1
+
+    def test_accepts_range(self) -> None:
+        assert RoutingConfig(weight=1).weight == 1
+        assert RoutingConfig(weight=100).weight == 100
+
+    def test_rejects_zero_and_out_of_range(self) -> None:
+        with pytest.raises(ValidationError):
+            RoutingConfig(weight=0)
+        with pytest.raises(ValidationError):
+            RoutingConfig(weight=101)
+        with pytest.raises(ValidationError):
+            RoutingConfig(weight=-3)
+
+    def test_default_weight_is_not_stored(self) -> None:
+        assert validate_routing_config({"weight": 1}) == {}
+        assert validate_routing_config({"weight": 1, "domain_blacklist": ["x.com"]}) == {"domain_blacklist": ["x.com"]}
+
+    def test_explicit_weight_is_stored_with_domains(self) -> None:
+        assert validate_routing_config({"weight": 3}) == {"weight": 3}
+        assert validate_routing_config({"weight": "7", "domain_whitelist": ["a.com"]}) == {"weight": 7, "domain_whitelist": ["a.com"]}
+
+    def test_connector_weight_property(self) -> None:
+        from api.models.connector import Connector
+
+        base = {"name": "c", "credential_id": "k", "credential_type": "static_proxy_provider", "project_id": "p"}
+        assert Connector(**base).weight == 1
+        assert Connector(**base, routing_config={"weight": 4}).weight == 4
+        # Junk left in the JSON by hand edits is what the API would reject: route at the default.
+        assert Connector(**base, routing_config={"weight": "x"}).weight == 1
+        assert Connector(**base, routing_config={"weight": 500}).weight == 1
+        assert Connector(**base, routing_config={"weight": 0}).weight == 1

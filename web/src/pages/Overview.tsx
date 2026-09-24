@@ -21,6 +21,7 @@ import { Page } from '../components/layout/Page'
 import { Sparkline } from '../components/charts/Sparkline'
 import { ProjectPanel } from '../components/ProjectForm'
 import { ProjectLocations, LocationSummary } from '../components/ProjectLocations'
+import { TrafficSplitPanel } from '../components/TrafficSplit'
 import { Badge, Button, Card, CardHeader, KeyValue, Segmented } from '../components/ui'
 
 const TIME_RANGES = ['1h', '6h', '24h', '7d', '30d'] as const
@@ -378,8 +379,12 @@ export default function Overview() {
         </Card>
       </div>
 
-      {/* Connectors, routing, auto-scaling */}
+      {/* Connectors, routing, traffic split, auto-scaling. Two stacks so the
+          short cards sit under each other instead of hanging off the tallest
+          card in the row; at three columns the second stack dissolves into
+          separate cells. */}
       <div className="grid grid-cols-1 @xl:grid-cols-2 @4xl:grid-cols-3 gap-4 items-start">
+        <div className="flex flex-col gap-4">
         <Card className="px-4 py-3">
           <CardHeader
             title="Connectors"
@@ -410,6 +415,22 @@ export default function Overview() {
           )}
         </Card>
 
+        {scaling && (
+          <Card className="px-4 py-3">
+            <CardHeader title="Auto-scaling" action={<DemandBadge level={scaling.demand_level} />} className="mb-1" />
+            <KeyValue label="Instances" value={<>{scaling.current_instances} <span className="text-fg-subtle font-normal">/ {scaling.max_instances}</span></>} />
+            <div className="h-1.5 rounded-full bg-primary-soft overflow-hidden my-2">
+              <div className="h-full bg-primary rounded-full" style={{ width: `${scaling.max_instances > 0 ? Math.min(100, (scaling.current_instances / scaling.max_instances) * 100) : 0}%` }} />
+            </div>
+            <KeyValue label="Requests/min" value={scaling.requests_per_minute.toFixed(1)} />
+            <KeyValue label="Rate per proxy" value={scaling.rate_per_proxy.toFixed(1)} />
+            <KeyValue label="Draining" value={scaling.draining_instances} />
+            <KeyValue label="Terminating" value={scaling.terminating_instances} />
+          </Card>
+        )}
+        </div>
+
+        <div className="flex flex-col gap-4 @4xl:contents">
         <Card className="p-4">
           <CardHeader
             title="Routing"
@@ -447,19 +468,10 @@ export default function Overview() {
           )}
         </Card>
 
-        {scaling && (
-          <Card className="px-4 py-3">
-            <CardHeader title="Auto-scaling" action={<DemandBadge level={scaling.demand_level} />} className="mb-1" />
-            <KeyValue label="Instances" value={<>{scaling.current_instances} <span className="text-fg-subtle font-normal">/ {scaling.max_instances}</span></>} />
-            <div className="h-1.5 rounded-full bg-primary-soft overflow-hidden my-2">
-              <div className="h-full bg-primary rounded-full" style={{ width: `${scaling.max_instances > 0 ? Math.min(100, (scaling.current_instances / scaling.max_instances) * 100) : 0}%` }} />
-            </div>
-            <KeyValue label="Requests/min" value={scaling.requests_per_minute.toFixed(1)} />
-            <KeyValue label="Rate per proxy" value={scaling.rate_per_proxy.toFixed(1)} />
-            <KeyValue label="Draining" value={scaling.draining_instances} />
-            <KeyValue label="Terminating" value={scaling.terminating_instances} />
-          </Card>
+        {connectors.length > 1 && selectedProjectId && (
+          <TrafficSplitPanel projectId={selectedProjectId} onOpenConnector={(id) => navigate(`${base}/connectors?open=${id}`)} />
         )}
+        </div>
       </div>
     </Page>
   )
