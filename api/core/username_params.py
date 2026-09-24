@@ -87,12 +87,13 @@ def parse_username_params(raw_username: str) -> UsernameParams:
         value = raw_username[start:end]
         values[_PARAM_SEPARATORS[separator]] = value if value else None
 
-    country = values["country"]
-    if country is not None:
+    raw_country = values["country"]
+    country: str | None = None
+    if raw_country is not None:
         try:
-            country = normalize_country_code(country)
+            country = normalize_country_code(raw_country)
         except ValueError:
-            country = country.strip().upper() or None
+            country = raw_country.strip().upper() or None
 
     return UsernameParams(username, values["sessid"], country)
 
