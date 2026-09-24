@@ -755,6 +755,17 @@ export interface CredentialUpdate {
 export interface RoutingConfig {
   domain_whitelist?: string[]
   domain_blacklist?: string[]
+  /** Relative share of the project's traffic against its other connectors; omitted means 1. */
+  weight?: number
+}
+
+export const DEFAULT_ROUTING_WEIGHT = 1
+export const MAX_ROUTING_WEIGHT = 100
+
+/** A connector's routing weight: the stored value when valid, else the default, matching the server. */
+export const connectorWeight = (rc: RoutingConfig | undefined): number => {
+  const w = rc?.weight
+  return typeof w === 'number' && Number.isInteger(w) && w >= 1 && w <= MAX_ROUTING_WEIGHT ? w : DEFAULT_ROUTING_WEIGHT
 }
 
 export interface RateLimitConfig {
@@ -1064,6 +1075,38 @@ export interface MetricsHistoryResponse {
 
 export const fetchProjectMetricsHistory = async (projectId: string, range: string): Promise<MetricsHistoryResponse> => {
   const response = await api.get(`/projects/${projectId}/metrics/history`, { params: { range } })
+  return response.data
+}
+
+export type TrafficSplitRange = '1h' | '6h' | '24h' | '7d' | '30d'
+
+export interface ConnectorTrafficShare {
+  connector_id: string
+  name: string
+  credential_type: CredentialType
+  enabled: boolean
+  weight: number
+  dynamic: boolean
+  total_proxies: number
+  eligible_proxies: number
+  /** Share of untargeted requests this connector takes right now, 0-100. */
+  expected_share: number
+  excluded_reason: 'disabled' | 'no_eligible_proxies' | null
+  observed_requests: number
+  /** Share of the window's requests that went through this connector, 0-100; null when nothing was observed. */
+  observed_share: number | null
+}
+
+export interface TrafficSplitResponse {
+  strategy: string
+  range: TrafficSplitRange
+  total_weight: number
+  observed_requests: number
+  connectors: ConnectorTrafficShare[]
+}
+
+export const fetchProjectTrafficSplit = async (projectId: string, range: TrafficSplitRange = '1h'): Promise<TrafficSplitResponse> => {
+  const response = await api.get(`/projects/${projectId}/metrics/traffic-split`, { params: { range } })
   return response.data
 }
 

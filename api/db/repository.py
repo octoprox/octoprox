@@ -579,6 +579,32 @@ class MetricsRepository:
             for m in models
         ]
 
+    async def get_connector_request_counts_since(
+        self, connector_ids: list[str], since: datetime
+    ) -> dict[str, int]:
+        """Requests each connector's proxies handled since ``since``, from the flushed snapshots.
+
+        Snapshots hold per-interval deltas at whatever granularity compaction
+        left them, so summing every row in the window is the request total.
+        Connectors without rows in the window are absent from the result.
+        """
+        if not connector_ids:
+            return {}
+        query = (
+            select(
+                ProxyModel.connector_id,
+                func.sum(ProxyMetricsModel.request_count).label("total_requests"),
+            )
+            .join(ProxyModel, ProxyModel.id == ProxyMetricsModel.proxy_id)
+            .where(
+                ProxyModel.connector_id.in_(connector_ids),
+                ProxyMetricsModel.timestamp >= since,
+            )
+            .group_by(ProxyModel.connector_id)
+        )
+        result = await self._session.execute(query)
+        return {row.connector_id: int(row.total_requests or 0) for row in result.all()}
+
     async def get_cumulative_metrics_for_all_proxies(self) -> dict[str, dict[str, Any]]:
         """Get cumulative metrics (sum of all snapshots) for each proxy.
 

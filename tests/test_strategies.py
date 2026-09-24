@@ -3,9 +3,13 @@
 
 """Tests for routing strategies."""
 
+import random
+from collections import Counter
+
 import pytest
 
 from api.models.proxy import Proxy, ProxyStatus
+from api.strategies.base import ProxyGroup
 from api.strategies.health_based import HealthBasedStrategy
 from api.strategies.least_used import LeastUsedStrategy
 from api.strategies.random import RandomStrategy
@@ -301,3 +305,137 @@ class TestHealthBasedStrategy:
         bad_score = strategy._calculate_score(bad_proxy)
 
         assert good_score > bad_score
+
+
+def _group(key: str, weight: int, count: int, requests: int = 0, load: int | None = None) -> ProxyGroup:
+    return ProxyGroup(
+        key=key,
+        weight=weight,
+        proxies=[
+            Proxy(id=f"{key}-{i}", host=f"{key}{i}", port=1, connector_id=key, request_count=requests, status=ProxyStatus.HEALTHY)
+            for i in range(count)
+        ],
+        load=requests * count if load is None else load,
+    )
+
+
+class TestWeightedSelection:
+    """Two-step selection: the connector by weight, then the proxy inside it."""
+
+    async def test_empty_groups_return_none(self):
+        for strategy in (RandomStrategy(), RoundRobinStrategy(), LeastUsedStrategy(), StickySessionStrategy(), HealthBasedStrategy()):
+            assert await strategy.select_weighted([]) is None
+            assert await strategy.select_weighted([ProxyGroup(key="a", weight=5)]) is None
+
+    async def test_single_group_behaves_like_flat_select(self):
+        strategy = RoundRobinStrategy()
+        group = _group("a", 7, 3)
+        picks = [(await strategy.select_weighted([group])).id for _ in range(4)]
+        assert picks == ["a-0", "a-1", "a-2", "a-0"]
+
+    async def test_groups_without_proxies_take_no_share(self):
+        strategy = RandomStrategy()
+        groups = [_group("a", 1, 0), _group("b", 1, 2)]
+        for _ in range(20):
+            assert (await strategy.select_weighted(groups)).connector_id == "b"
+
+    async def test_random_follows_weights(self):
+        random.seed(7)
+        strategy = RandomStrategy()
+        groups = [_group("a", 1, 10), _group("b", 3, 1)]
+        counts = Counter([(await strategy.select_weighted(groups)).connector_id for _ in range(4000)])
+        assert 0.70 < counts["b"] / 4000 < 0.80
+
+    async def test_round_robin_interleaves_by_weight(self):
+        strategy = RoundRobinStrategy()
+        groups = [_group("a", 3, 2), _group("b", 1, 1)]
+        picks = [(await strategy.select_weighted(groups)).id for _ in range(8)]
+        assert [p.split("-")[0] for p in picks].count("a") == 6
+        assert [p.split("-")[0] for p in picks][:4].count("b") == 1
+        # Inside "a" the two proxies alternate regardless of the "b" picks in between.
+        a_picks = [p for p in picks if p.startswith("a")]
+        assert a_picks == ["a-0", "a-1", "a-0", "a-1", "a-0", "a-1"]
+
+    async def test_round_robin_keeps_credit_of_a_briefly_absent_group(self):
+        strategy = RoundRobinStrategy()
+        a, b = _group("a", 3, 1), _group("b", 1, 1)
+        # Smooth WRR at 3:1 runs A A B A: two picks in, B is owed the third.
+        for _ in range(2):
+            assert (await strategy.select_weighted([a, b])).connector_id == "a"
+        # B drops out for one call (quarantined); its credit is not forgotten.
+        assert (await strategy.select_weighted([a])).connector_id == "a"
+        assert (await strategy.select_weighted([a, b])).connector_id == "b"
+
+    async def test_round_robin_forget_group_drops_state(self):
+        strategy = RoundRobinStrategy()
+        await strategy.select_weighted([_group("a", 1, 2), _group("b", 1, 1)])
+        strategy.forget_group("a")
+        assert "a" not in strategy._current
+        assert "a" not in strategy._indices
+        assert "b" in strategy._current
+
+    async def test_least_used_treats_weight_as_capacity(self):
+        strategy = LeastUsedStrategy()
+        # "a" has served 9 requests at weight 3 (3 per unit); "b" 4 at weight 1 (4 per unit).
+        groups = [_group("a", 3, 3, requests=3), _group("b", 1, 1, requests=4)]
+        assert (await strategy.select_weighted(groups)).connector_id == "a"
+        groups = [_group("a", 3, 3, requests=5), _group("b", 1, 1, requests=4)]
+        assert (await strategy.select_weighted(groups)).connector_id == "b"
+
+    async def test_least_used_counts_the_whole_connector_not_the_eligible_slice(self):
+        strategy = LeastUsedStrategy()
+        # "a" is a busy 50-row connector of which 5 rows serve this request; "b" is one idle row.
+        busy = _group("a", 1, 5, requests=200, load=10_000)
+        idle = _group("b", 1, 1, requests=5000, load=5000)
+        assert (await strategy.select_weighted([busy, idle])).connector_id == "b"
+
+    async def test_sticky_same_session_same_connector(self):
+        strategy = StickySessionStrategy()
+        groups = [_group("a", 1, 3), _group("b", 3, 3)]
+        first = await strategy.select_weighted(groups, session_id="s-1")
+        strategy.reset()
+        again = await strategy.select_weighted(groups, session_id="s-1")
+        assert first.id == again.id
+
+    async def test_sticky_places_new_sessions_by_weight(self):
+        strategy = StickySessionStrategy()
+        groups = [_group("a", 1, 1), _group("b", 3, 1)]
+        counts = Counter([strategy.pick_group(groups, f"session-{i}").key for i in range(4000)])
+        assert 0.70 < counts["b"] / 4000 < 0.80
+
+    async def test_sticky_weight_change_moves_only_a_slice(self):
+        strategy = StickySessionStrategy()
+        before = {i: strategy.pick_group([_group("a", 1, 1), _group("b", 1, 1)], f"s-{i}").key for i in range(2000)}
+        after = {i: strategy.pick_group([_group("a", 1, 1), _group("b", 2, 1)], f"s-{i}").key for i in range(2000)}
+        moved = sum(1 for i in before if before[i] != after[i])
+        # a: 50% -> 33%; only sessions leaving "a" move, and none leave "b".
+        assert all(after[i] == "b" for i in before if before[i] != after[i])
+        assert 0.10 < moved / 2000 < 0.25
+
+    async def test_sticky_keeps_existing_binding_over_weights(self):
+        strategy = StickySessionStrategy()
+        a, b = _group("a", 1, 1), _group("b", 1, 1)
+        bound = await strategy.select_weighted([a, b], session_id="s-1")
+        other = b if bound.connector_id == "a" else a
+        heavy = ProxyGroup(key=other.key, weight=100, proxies=other.proxies)
+        light = ProxyGroup(key=bound.connector_id, weight=1, proxies=(a if bound.connector_id == "a" else b).proxies)
+        assert (await strategy.select_weighted([light, heavy], session_id="s-1")).id == bound.id
+
+    async def test_sticky_without_session_uses_weights(self):
+        random.seed(3)
+        strategy = StickySessionStrategy()
+        groups = [_group("a", 1, 2), _group("b", 3, 2)]
+        counts = Counter([(await strategy.select_weighted(groups)).connector_id for _ in range(4000)])
+        assert 0.70 < counts["b"] / 4000 < 0.80
+
+    async def test_health_based_ignores_health_when_picking_connector(self):
+        random.seed(11)
+        strategy = HealthBasedStrategy()
+        sick = _group("a", 3, 1)
+        for p in sick.proxies:
+            p.request_count, p.success_count, p.avg_latency_ms = 100, 10, 900
+        well = _group("b", 1, 1)
+        for p in well.proxies:
+            p.request_count, p.success_count, p.avg_latency_ms = 100, 100, 50
+        counts = Counter([(await strategy.select_weighted([sick, well])).connector_id for _ in range(4000)])
+        assert 0.70 < counts["a"] / 4000 < 0.80

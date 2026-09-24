@@ -12,6 +12,7 @@ from pydantic import BaseModel
 from api.core import utc_now
 from api.db.repository import MetricsRepository
 from api.models.proxy import ProxyStatus
+from api.providers.sdk.strategies import is_dynamic_gateway
 
 router = APIRouter(prefix="/projects/{project_id}/metrics")
 
@@ -200,6 +201,35 @@ class MetricsHistoryResponse(BaseModel):
     snapshots: list[MetricsSnapshot]
 
 
+class ConnectorTrafficShare(BaseModel):
+    """One connector's slice of a project's traffic under the current weights."""
+    connector_id: str
+    name: str
+    credential_type: str
+    enabled: bool
+    weight: int
+    dynamic: bool
+    total_proxies: int
+    eligible_proxies: int
+    # Share of untargeted requests this connector takes right now, 0-100.
+    # Zero when the connector is disabled or has no eligible proxy.
+    expected_share: float
+    # Why the connector takes nothing, when it does: "disabled" or "no_eligible_proxies".
+    excluded_reason: str | None = None
+    observed_requests: int
+    # Share of the project's requests in the window that went through this connector, 0-100.
+    observed_share: float | None = None
+
+
+class TrafficSplitResponse(BaseModel):
+    """How a project's traffic divides between its connectors, expected and observed."""
+    strategy: str
+    range: str
+    total_weight: int
+    observed_requests: int
+    connectors: list[ConnectorTrafficShare]
+
+
 # (delta, limit for raw queries, bucket_seconds for aggregated queries)
 # Raw ranges return individual snapshots; aggregated ranges group into time buckets.
 RANGE_CONFIG: dict[str, tuple[timedelta, int, int | None]] = {
@@ -302,3 +332,78 @@ async def prometheus_metrics(request: Request, project_id: str) -> str:
 
     return "\n".join(lines)
 
+
+@router.get("/traffic-split", response_model=TrafficSplitResponse)
+async def get_traffic_split(
+    request: Request,
+    project_id: str,
+    range: Literal["1h", "6h", "24h", "7d", "30d"] = Query("1h", alias="range"),
+) -> TrafficSplitResponse:
+    """Expected and observed share of traffic per connector.
+
+    The expected share is what an untargeted request (no ``-cc-``, no
+    domain restriction in play) would see right now: each enabled connector
+    with at least one eligible proxy takes ``weight / sum of weights``.
+    Requests that carry a country or hit a filtered domain narrow the set
+    and the remaining connectors split the traffic by the same ratios.
+
+    The observed share sums the flushed per-proxy request counts in the
+    window per connector. Proxies removed since then take their history
+    with them, so the two can disagree right after a rotation.
+    """
+    proxy_manager = request.app.state.proxy_manager
+
+    project = proxy_manager.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    connectors = proxy_manager.get_connectors_for_project(project_id)
+    eligible_groups = {
+        g.key: g for g in proxy_manager.group_by_connector(
+            proxy_manager.get_routable_proxies_for_project(project_id)
+        )
+    }
+    total_weight = sum(g.weight for g in eligible_groups.values())
+
+    delta, _limit, _bucket = RANGE_CONFIG[range]
+    async with proxy_manager._session_factory() as session:
+        counts = await MetricsRepository(session).get_connector_request_counts_since(
+            [c.id for c in connectors], utc_now() - delta
+        )
+    observed_total = sum(counts.values())
+
+    shares: list[ConnectorTrafficShare] = []
+    for connector in sorted(connectors, key=lambda c: c.name.lower()):
+        rows = proxy_manager.get_active_proxies_for_connector(connector.id)
+        group = eligible_groups.get(connector.id)
+        eligible = len(group.proxies) if group else 0
+        if not connector.enabled:
+            reason: str | None = "disabled"
+        elif group is None:
+            reason = "no_eligible_proxies"
+        else:
+            reason = None
+        expected = (group.weight / total_weight * 100) if group and total_weight else 0.0
+        observed = counts.get(connector.id, 0)
+        shares.append(ConnectorTrafficShare(
+            connector_id=connector.id,
+            name=connector.name,
+            credential_type=connector.credential_type,
+            enabled=connector.enabled,
+            weight=connector.weight,
+            dynamic=any(is_dynamic_gateway(p) for p in rows),
+            total_proxies=len(rows),
+            eligible_proxies=eligible,
+            expected_share=round(expected, 2),
+            excluded_reason=reason,
+            observed_requests=observed,
+            observed_share=round(observed / observed_total * 100, 2) if observed_total else None,
+        ))
+
+    return TrafficSplitResponse(
+        strategy=proxy_manager.strategy_for_project(project_id).name,
+        range=range,
+        total_weight=total_weight,
+        observed_requests=observed_total,
+        connectors=shares,
+    )

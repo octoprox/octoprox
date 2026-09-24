@@ -18,6 +18,48 @@ Octoprox supports multiple routing strategies for distributing requests across p
 | `sticky` | Routes requests from the same client to the same proxy |
 | `health_based` | Prioritizes proxies with better health scores and lower latency |
 
+Every strategy picks in two steps when a project has more than one connector: first a **connector**, by its [weight](#connector-weights), then a proxy inside that connector, by the strategy. A project with a single connector skips the first step.
+
+## Connector weights
+
+Each connector has a **Weight** on its Routing tab (API: `routing_config.weight`, an integer from 1 to 100, default 1). It is the connector's share of the project's traffic relative to the other connectors that can serve the request. Weights are ratios, not percentages: 1 and 3 split requests 25/75, and 2 and 6 do the same.
+
+The share does **not** depend on how many proxies a connector holds. Before weights, a strategy saw one flat list of proxies, so a pool of ten sessions took ten times the traffic of a connector with one row. That made a [dynamic sessions]({{ site.baseurl }}/providers#descriptor-reference) connector, which has exactly one gateway row but unlimited exits, almost invisible next to any pool. With weights, one gateway row and a fifty-slot pool split evenly at equal weights, and you move the split by changing one number.
+
+### How a request is placed
+
+1. The project's connectors are narrowed to those that can serve the request: enabled, at least one healthy and non-quarantined proxy, target domain allowed by the connector's [domain filter]({{ site.baseurl }}/domain-filtering), and the requested country served (see [country routing](#country-routing)).
+2. One of them is picked in proportion to weight. A connector that dropped out in step 1 takes no share, and the remaining connectors split its traffic by their own ratios: with weights 1, 1 and 2, the connector at 2 takes 50%, but if a 1 has no healthy proxy it takes 67%.
+3. The project's strategy picks a proxy inside that connector as it always did.
+
+How the strategy performs step 2:
+
+| Strategy | Connector pick | Then, inside the connector |
+|----------|----------------|----------------------------|
+| `random` | Weighted random draw | Random proxy |
+| `round_robin` | Smooth weighted round robin: weights 3 and 1 give the fixed order A A B A, three A for every B, spread out rather than clumped | Proxies cycled in order; each connector keeps its own position |
+| `least_used` | Lowest requests divided by weight, so weight reads as relative capacity | Proxy with the fewest requests |
+| `sticky` | The session id is hashed onto a connector, weighted, so a session always lands on the same connector | The usual sticky binding |
+| `health_based` | Weighted random draw; weight is not adjusted for health | Healthiest proxies preferred |
+
+Under `sticky`, a session already bound to a proxy keeps it while that proxy is eligible, whatever the weights say. Weight changes steer new sessions only, and raising one weight moves a proportional slice of new sessions rather than reshuffling them all.
+
+### Examples
+
+**One pool plus a dynamic residential connector.** A datacenter pool with 20 IPs at weight 1 and an Oxylabs residential connector with dynamic sessions at weight 1: half the requests go to the pool (each IP sees 2.5% of the total), half to Oxylabs, each opening a fresh vendor session or reusing the client's. Set Oxylabs to 3 and it takes 75%.
+
+**Two residential vendors.** Bright Data at weight 7 and Decodo at weight 3, both dynamic: 70/30, regardless of their slot counts. Under `sticky`, a given `-sessid-` always reaches the same vendor, so the vendor session stays stable.
+
+**Cheap first, expensive as a slice.** ISP proxies at weight 8, a residential pool at 1 and a dynamic mobile connector at 1: 80/10/10. A request with `-cc-de` for a country the ISP connector has no IPs in skips it, and the other two split that request 50/50.
+
+**Two pools of different sizes.** Pools of 10 and 30 slots at the default weight split 50/50. Before weights they split 25/75 by row count; set weights 1 and 3 to keep that.
+
+### Seeing the split
+
+The **Traffic split** panel on the Overview and Connectors pages shows, for each connector, its weight, the expected share of untargeted requests under the current weights and health, and the observed share over the selected window, with a sentence explaining the current setup. Connectors that take no traffic say why (disabled, no healthy proxy). The connector list shows the weight and expected share next to each connector, and the Weight field in the connector editor previews the share while you type. The same numbers are available from `GET /api/v1/projects/{project_id}/metrics/traffic-split`, see the [API reference]({{ site.baseurl }}/api#traffic-split).
+
+Requests that carry a country or hit a filtered domain see a narrower set of connectors, so the observed split can differ from the expected one. Observed counts come from the flushed per-proxy metrics; a proxy that was removed takes its history with it.
+
 ## Session IDs
 
 When using the `sticky` routing strategy, you can control session affinity by embedding a session ID in the proxy authentication username. This allows you to group requests under a specific session, ensuring they are all routed to the same upstream proxy.

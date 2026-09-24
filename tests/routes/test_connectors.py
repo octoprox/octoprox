@@ -444,3 +444,45 @@ class TestConnectorRoleAccess:
         )
         assert response.status_code == 403
 
+
+
+class TestConnectorWeight:
+    """routing_config.weight through the API."""
+
+    def _create(self, client: TestClient, project: dict[str, Any], credential: dict[str, Any], base: dict[str, Any], routing: dict[str, Any]):
+        data = base.copy()
+        data["credential_id"] = credential["id"]
+        data["routing_config"] = routing
+        return client.post(f"/api/v1/projects/{project['id']}/connectors", json=data)
+
+    def test_create_with_weight(
+        self, authenticated_client: TestClient, created_project: dict[str, Any], created_credential: dict[str, Any], sample_connector_data: dict[str, Any],
+    ) -> None:
+        response = self._create(authenticated_client, created_project, created_credential, sample_connector_data, {"weight": 3, "domain_blacklist": ["blocked.com"]})
+        assert response.status_code == 201
+        assert response.json()["routing_config"] == {"weight": 3, "domain_blacklist": ["blocked.com"]}
+
+    def test_default_weight_is_omitted(
+        self, authenticated_client: TestClient, created_project: dict[str, Any], created_credential: dict[str, Any], sample_connector_data: dict[str, Any],
+    ) -> None:
+        response = self._create(authenticated_client, created_project, created_credential, sample_connector_data, {"weight": 1})
+        assert response.status_code == 201
+        assert response.json()["routing_config"] == {}
+
+    def test_invalid_weight_rejected(
+        self, authenticated_client: TestClient, created_project: dict[str, Any], created_credential: dict[str, Any], sample_connector_data: dict[str, Any],
+    ) -> None:
+        for weight in (0, 101, "heavy"):
+            response = self._create(authenticated_client, created_project, created_credential, sample_connector_data, {"weight": weight})
+            assert response.status_code == 422, weight
+
+    def test_update_weight(
+        self, authenticated_client: TestClient, created_project: dict[str, Any], created_connector: dict[str, Any],
+    ) -> None:
+        url = f"/api/v1/projects/{created_project['id']}/connectors/{created_connector['id']}"
+        response = authenticated_client.patch(url, json={"routing_config": {"weight": 5}})
+        assert response.status_code == 200
+        assert response.json()["routing_config"] == {"weight": 5}
+        response = authenticated_client.patch(url, json={"routing_config": {}})
+        assert response.status_code == 200
+        assert response.json()["routing_config"] == {}

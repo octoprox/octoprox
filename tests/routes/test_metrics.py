@@ -94,3 +94,40 @@ class TestMetricsEndpoints:
 
         assert response.status_code == 404
 
+
+
+class TestTrafficSplit:
+    """GET /metrics/traffic-split."""
+
+    def test_project_not_found(self, authenticated_client: TestClient) -> None:
+        response = authenticated_client.get("/api/v1/projects/nope/metrics/traffic-split")
+        assert response.status_code == 404
+
+    def test_empty_project(self, authenticated_client: TestClient, created_project: dict[str, Any]) -> None:
+        response = authenticated_client.get(f"/api/v1/projects/{created_project['id']}/metrics/traffic-split")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["connectors"] == []
+        assert data["total_weight"] == 0
+        assert data["observed_requests"] == 0
+        assert data["range"] == "1h"
+
+    def test_connector_without_proxies_is_excluded(
+        self, authenticated_client: TestClient, created_project: dict[str, Any], created_connector: dict[str, Any],
+    ) -> None:
+        response = authenticated_client.get(f"/api/v1/projects/{created_project['id']}/metrics/traffic-split", params={"range": "24h"})
+        assert response.status_code == 200
+        data = response.json()
+        assert data["range"] == "24h"
+        assert len(data["connectors"]) == 1
+        share = data["connectors"][0]
+        assert share["connector_id"] == created_connector["id"]
+        assert share["weight"] == 1
+        assert share["eligible_proxies"] == 0
+        assert share["expected_share"] == 0
+        assert share["excluded_reason"] == "no_eligible_proxies"
+        assert share["observed_share"] is None
+
+    def test_rejects_unknown_range(self, authenticated_client: TestClient, created_project: dict[str, Any]) -> None:
+        response = authenticated_client.get(f"/api/v1/projects/{created_project['id']}/metrics/traffic-split", params={"range": "2h"})
+        assert response.status_code == 422
