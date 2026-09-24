@@ -19,6 +19,7 @@ Configuration is loaded from YAML files in the `config/` directory based on the 
 | `OCTOPROX_ENV` | Environment (development/production) | development |
 | `OCTOPROX_REDIS_URL` | Redis connection URL | redis://localhost:6379/0 |
 | `OCTOPROX_LOG_LEVEL` | Logging level | INFO |
+| `OCTOPROX_LOG_FORMAT` | Log output format: `console` or `json` | console |
 | `OCTOPROX_AUTH_USERNAME` | Initial admin username (used to seed admin on first startup) | admin |
 | `OCTOPROX_AUTH_PASSWORD` | Initial admin password (required) | (empty) |
 | `OCTOPROX_JWT_SECRET` | Secret key for JWT token signing | change-me-in-production |
@@ -131,6 +132,31 @@ The install-wide settings (default source precedence and conflict rule, echo end
 | `geo.updater.check_interval_seconds` | How often the leader checks for scheduled database downloads | 3600 |
 
 Connector config keys read by the health checker: `healthcheck_url` (custom check URL; without it the attribution echo endpoint is checked), `healthcheck_ip_path` (JMESPath, or `@text`, of the exit IP in that URL's response; unset means the response carries no IP unless the URL is the echo or httpbin endpoint) and `healthcheck_country_path`.
+
+## Logging
+
+```yaml
+logging:
+  level: INFO
+  format: json
+```
+
+| Option | Description | Default |
+|--------|-------------|---------|
+| `logging.level` | Minimum level to emit: DEBUG, INFO, WARNING, ERROR, CRITICAL | INFO |
+| `logging.format` | `console` for human-readable output, `json` for one JSON object per line | console |
+
+Application, uvicorn and SQLAlchemy log lines all render through the same formatter, so a log shipper sees one shape. Use `json` in production and `console` in development.
+
+Every line carries an `instance` field holding `OCTOPROX_INSTANCE_ID`, so the output of several replicas can be collected in one place and still be told apart. Set a stable, human-readable value per replica as the cluster compose file does; the default is a random UUID per boot.
+
+### Request IDs
+
+Every API request gets a request ID. The API accepts one from the caller in the `X-Request-ID` header (up to 128 characters of letters, digits, `.`, `_`, `:` and `-`) and generates one otherwise. The ID used is always returned in the `X-Request-ID` response header, including on error responses.
+
+While a request is being handled, every log line carries `request_id`, and once the bearer token is verified, `user_id` and `username` as well. A user report of a failed action can therefore be matched to the server logs by the ID shown in the response, and log lines can be filtered to one person without any per-call-site plumbing.
+
+The web UI sends its own ID on every call, so browser-side failures are traceable the same way.
 
 ## Database Configuration
 

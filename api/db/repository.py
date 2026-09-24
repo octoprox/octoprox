@@ -6,7 +6,7 @@
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import delete, func, select, text
+from sqlalchemy import delete, func, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.core import utc_now
@@ -1151,6 +1151,7 @@ class UserRepository:
             invite_token=user.invite_token,
             invite_token_expires_at=user.invite_token_expires_at,
             theme_preference=user.theme_preference,
+            last_login_at=user.last_login_at,
             created_at=user.created_at,
             updated_at=user.updated_at,
         )
@@ -1177,6 +1178,22 @@ class UserRepository:
             await self._session.flush()
         return user
 
+    async def touch_last_login(self, user_id: str) -> datetime:
+        """Stamp ``last_login_at`` for a user who just obtained a token.
+
+        A targeted UPDATE rather than a full ``update()`` so a login never
+        rewrites the profile. ``updated_at`` tracks edits and has an
+        ``onupdate`` hook, so it is pinned to its current value to keep the
+        hook from firing.
+        """
+        now = utc_now()
+        await self._session.execute(
+            update(UserModel)
+            .where(UserModel.id == user_id)
+            .values(last_login_at=now, updated_at=UserModel.updated_at)
+        )
+        return now
+
     async def delete(self, user_id: str) -> bool:
         """Delete a user."""
         result = await self._session.execute(
@@ -1196,6 +1213,7 @@ class UserRepository:
             invite_token=model.invite_token,
             invite_token_expires_at=model.invite_token_expires_at,
             theme_preference=model.theme_preference,
+            last_login_at=model.last_login_at,
             created_at=model.created_at,
             updated_at=model.updated_at,
         )

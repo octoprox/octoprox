@@ -32,14 +32,40 @@ export const auth = {
   },
 }
 
-// Add auth token to requests
+// Request IDs: sent on every call and echoed back by the API in the same
+// header, so a failure shown in the UI can be matched to the server logs.
+export const REQUEST_ID_HEADER = 'X-Request-ID'
+
+function newRequestId(): string {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return crypto.randomUUID().replace(/-/g, '')
+  }
+  // Insecure contexts (plain http on a non-localhost host) lack randomUUID.
+  let id = ''
+  while (id.length < 32) id += Math.random().toString(16).slice(2)
+  return id.slice(0, 32)
+}
+
+// Add auth token and request ID to requests
 api.interceptors.request.use((config) => {
   const token = auth.getToken()
   if (token) {
     config.headers.Authorization = `Bearer ${token}`
   }
+  if (!config.headers[REQUEST_ID_HEADER]) {
+    config.headers[REQUEST_ID_HEADER] = newRequestId()
+  }
   return config
 })
+
+/** Request ID of a failed call, for support and log lookup. */
+export function requestIdOf(error: unknown): string | null {
+  if (!axios.isAxiosError(error)) return null
+  const fromResponse = error.response?.headers?.[REQUEST_ID_HEADER.toLowerCase()]
+  if (typeof fromResponse === 'string' && fromResponse) return fromResponse
+  const fromRequest = error.config?.headers?.[REQUEST_ID_HEADER]
+  return typeof fromRequest === 'string' && fromRequest ? fromRequest : null
+}
 
 // Handle API errors
 api.interceptors.response.use(
@@ -65,6 +91,14 @@ api.interceptors.response.use(
       } else {
         error.message = JSON.stringify(apiDetail)
       }
+    }
+    // Server-side failures are the ones worth reporting: put the request ID
+    // in the message every error surface already shows, so the person can
+    // quote it and the server logs for that request can be found.
+    const status = error.response?.status
+    if (typeof status === 'number' && status >= 500) {
+      const requestId = requestIdOf(error)
+      if (requestId) error.message = `${error.message} (request ${requestId})`
     }
     return Promise.reject(error)
   }
@@ -1316,6 +1350,7 @@ export interface UserAccount {
   is_active: boolean
   has_password: boolean
   theme_preference: string
+  last_login_at: string | null
   created_at: string
   updated_at: string
 }

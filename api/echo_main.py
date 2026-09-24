@@ -19,6 +19,7 @@ Environment:
 from __future__ import annotations
 
 import os
+import uuid
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 
@@ -79,7 +80,12 @@ app = create_echo_app()
 
 def run() -> None:
     """Run the standalone echo service with uvicorn."""
-    setup_logging(os.getenv("OCTOPROX_LOG_LEVEL", "INFO"))
+    setup_logging(
+        os.getenv("OCTOPROX_LOG_LEVEL", "INFO"),
+        os.getenv("OCTOPROX_LOG_FORMAT", "console"),
+        # Same default as Settings.instance_id: a fresh ID per boot.
+        os.getenv("OCTOPROX_INSTANCE_ID") or str(uuid.uuid4()),
+    )
     uvicorn.run(
         "api.echo_main:app",
         host=os.getenv("OCTOPROX_ECHO_HOST", "0.0.0.0"),

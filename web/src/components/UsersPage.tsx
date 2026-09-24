@@ -10,7 +10,7 @@ import { DataTable } from './DataTable'
 import { Page } from './layout/Page'
 import { RichSelect, RichSelectOption } from './RichSelect'
 import { useAuth } from '../contexts/AuthContext'
-import { formatDate, formatDateTime } from '../utils/format'
+import { formatDate, formatDateTime, relativeTime } from '../utils/format'
 import { useToast } from '../contexts/ToastContext'
 import {
   fetchUsers, createUser, inviteUser, reinviteUser, updateUser, deleteUser,
@@ -96,6 +96,17 @@ export default function UsersPage() {
         : <Badge color={row.original.is_active ? 'green' : 'gray'}>{row.original.is_active ? 'Active' : 'Disabled'}</Badge>,
     },
     {
+      accessorKey: 'last_login_at',
+      header: 'Last login',
+      size: 120,
+      cell: ({ getValue }) => {
+        const v = getValue<string | null>()
+        return v
+          ? <span className="text-fg-muted" title={formatDateTime(v)}>{relativeTime(v)}</span>
+          : <span className="text-fg-subtle">never</span>
+      },
+    },
+    {
       accessorKey: 'created_at',
       header: 'Created',
       size: 120,
@@ -176,7 +187,7 @@ export default function UsersPage() {
           getRowId={(row) => row.id}
           onRowClick={(row) => { setInviteUrl(null); setPanel({ kind: 'edit', id: row.id }) }}
           activeRowId={panel?.kind === 'edit' ? panel.id : null}
-          columnVisibility={panel ? { created_at: false, actions: false } : {}}
+          columnVisibility={panel ? { last_login_at: false, created_at: false, actions: false } : {}}
         />
       )}
       {pendingDelete && (
@@ -310,6 +321,7 @@ function UserPanel({ user, isSelf, inviteUrl, onClose, onDelete, onReinvite, onS
       {user && (
         <InspectorSection title="Details">
           <KeyValue label="Theme" value={user.theme_preference || 'default'} />
+          <KeyValue label="Last login" value={user.last_login_at ? formatDateTime(user.last_login_at) : 'never'} />
           <KeyValue label="Created" value={formatDateTime(user.created_at)} />
           <KeyValue label="Updated" value={formatDateTime(user.updated_at)} />
         </InspectorSection>

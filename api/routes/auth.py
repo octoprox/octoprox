@@ -101,6 +101,7 @@ async def login(login_req: LoginRequest, session: DbDep) -> LoginResponse:
         secret=settings.jwt_secret,
         expiry_hours=settings.jwt_expiry_hours,
     )
+    await repo.touch_last_login(user.id)
 
     logger.info("User logged in", username=user.username, role=user.role.value)
 
@@ -154,6 +155,7 @@ async def set_password(data: SetPasswordRequest, session: DbDep) -> LoginRespons
     user.invite_token = None
     user.invite_token_expires_at = None
     await repo.update(user)
+    await repo.touch_last_login(user.id)
 
     token = create_jwt(
         payload={

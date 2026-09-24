@@ -58,6 +58,15 @@ GET /api/v1/auth/status
 
 ---
 
+
+### Request IDs
+
+Every response carries an `X-Request-ID` header. Send your own value in the same request header (up to 128 characters of letters, digits, `.`, `_`, `:` and `-`) to have it used and echoed back; otherwise one is generated. Quote the ID when reporting a failed call, as it appears on every server log line written while handling that request.
+
+```bash
+curl -i -H "X-Request-ID: deploy-42-step-3" http://localhost:8000/api/v1/projects
+```
+
 ## Projects
 
 Projects provide multi-tenancy support. Each project has its own credentials, connectors, and proxy pools.

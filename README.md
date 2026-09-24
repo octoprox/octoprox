@@ -357,6 +357,7 @@ Configuration is loaded from YAML files in the `config/` directory based on the 
 | `OCTOPROX_ENV` | Environment (development/production) | development |
 | `OCTOPROX_REDIS_URL` | Redis connection URL | redis://localhost:6379/0 |
 | `OCTOPROX_LOG_LEVEL` | Logging level | INFO |
+| `OCTOPROX_LOG_FORMAT` | Log output format: `console` or `json` | console |
 | `OCTOPROX_AUTH_USERNAME` | Initial admin username (used to seed admin on first startup) | admin |
 | `OCTOPROX_AUTH_PASSWORD` | Initial admin password (required) | (empty) |
 | `OCTOPROX_JWT_SECRET` | Secret key for JWT token signing | change-me-in-production |

@@ -51,6 +51,7 @@ def _to_response(user: User) -> UserResponse:
         is_active=user.is_active,
         has_password=user.password_hash is not None,
         theme_preference=user.theme_preference,
+        last_login_at=user.last_login_at,
         created_at=user.created_at,
         updated_at=user.updated_at,
     )

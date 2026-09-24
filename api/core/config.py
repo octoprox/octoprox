@@ -10,8 +10,10 @@ from pathlib import Path
 from typing import Any, Literal
 
 import yaml  # type: ignore[import-untyped]
-from pydantic import Field
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, PydanticBaseSettingsSource
+
+from api.core.logging import LOG_FORMATS
 
 
 def _load_yaml_config(config_path: Path) -> dict[str, Any]:
@@ -28,7 +30,9 @@ def _load_yaml_config(config_path: Path) -> dict[str, Any]:
     if "server" in config_data:
         flat_config.update(config_data["server"])
     if "logging" in config_data:
-        flat_config["log_level"] = config_data["logging"].get("level")
+        logging_cfg = config_data["logging"] or {}
+        flat_config["log_level"] = logging_cfg.get("level")
+        flat_config["log_format"] = logging_cfg.get("format")
     if "redis" in config_data:
         flat_config["redis_url"] = config_data["redis"].get("url")
     if "database" in config_data:
@@ -231,6 +235,18 @@ class Settings(BaseSettings):
         default="INFO",
         description="Logging level (DEBUG, INFO, WARNING, ERROR, CRITICAL)"
     )
+    log_format: str = Field(
+        default="console",
+        description="Log output format: console (human-readable) or json (one object per line)",
+    )
+
+    @field_validator("log_format")
+    @classmethod
+    def _check_log_format(cls, v: str) -> str:
+        v = v.lower()
+        if v not in LOG_FORMATS:
+            raise ValueError(f"log_format must be one of: {', '.join(LOG_FORMATS)}")
+        return v
 
     @property
     def debug(self) -> bool:

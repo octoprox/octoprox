@@ -22,6 +22,7 @@ from api.core.logging import setup_logging
 from api.core.mitm import MitmHandler
 from api.core.proxy_manager import ProxyManager
 from api.core.proxy_server import ProxyServer
+from api.core.request_context import REQUEST_ID_HEADER, RequestContextMiddleware
 from api.core.seed import seed_admin_user
 from api.core.signals import geo_database_changed, geo_settings_changed
 from api.core.system_stats import build_instance_snapshot
@@ -49,7 +50,7 @@ from api.routes import (
 )
 
 # Configure logging before getting the logger
-setup_logging(settings.log_level)
+setup_logging(settings.log_level, settings.log_format, settings.instance_id)
 logger = structlog.get_logger()
 
 
@@ -160,14 +161,19 @@ def create_app() -> FastAPI:
         lifespan=lifespan,
     )
 
-    # Configure CORS
+    # Configure CORS. X-Request-ID is exposed so a cross-origin web UI (the
+    # Vite dev server) can read the ID off error responses.
     app.add_middleware(
         CORSMiddleware,
         allow_origins=settings.cors_origins,
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
+        expose_headers=[REQUEST_ID_HEADER],
     )
+    # Added after CORS so it wraps it: every response, preflight included,
+    # carries a request ID and every log line during the request has it bound.
+    app.add_middleware(RequestContextMiddleware)
 
     # Include routers
     # Health check (public)

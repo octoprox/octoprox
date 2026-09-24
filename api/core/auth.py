@@ -6,6 +6,7 @@
 from dataclasses import dataclass
 from typing import Annotated
 
+import structlog
 from fastapi import Depends, HTTPException, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
@@ -55,11 +56,15 @@ async def get_current_user(
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-    return CurrentUser(
+    user = CurrentUser(
         id=payload.get("user_id", ""),
         username=payload.get("sub", ""),
         role=UserRole(payload.get("role", "viewer")),
     )
+    # From here on every log line for this request names the actor. The
+    # request middleware clears these at the end of the request.
+    structlog.contextvars.bind_contextvars(user_id=user.id, username=user.username)
+    return user
 
 
 # Type alias for the current user dependency

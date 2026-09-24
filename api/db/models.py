@@ -46,6 +46,8 @@ class UserModel(Base):
     theme_preference: Mapped[str] = mapped_column(
         String(32), nullable=False, default="light", server_default="light"
     )
+    # Set whenever a token is issued (login or invite acceptance). Null until then.
+    last_login_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now, onupdate=utc_now)
 
