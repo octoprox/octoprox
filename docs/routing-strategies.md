@@ -86,7 +86,7 @@ Proxy-Authorization: Basic base64(my-project-sessid-abc456:password)
 - If the upstream proxy assigned to a session becomes unhealthy (e.g., IP rotation), a new proxy is automatically assigned on the next request.
 - Without a session ID, the sticky strategy falls back to using the client IP address, which is the default behavior.
 - This feature only takes effect when the project's routing strategy is set to `sticky`. Other strategies ignore the session ID.
-- Connectors running a residential or mobile product with **dynamic sessions** also forward the session to the vendor: the `-sessid-` value is hashed into the vendor's session id, so the same value keeps the same exit IP across requests and instances, and a request without `-sessid-` gets a fresh vendor session every time. This applies under every routing strategy, not only `sticky`. See [Dynamic sessions]({{ site.baseurl }}/providers#descriptor-reference).
+- Connectors running a residential or mobile product with **dynamic sessions** also forward the session to the vendor: the `-sessid-` value is hashed into the vendor's session id, so the same value keeps the same exit IP across requests and instances, and a request without `-sessid-` gets a fresh vendor session every time. The country is part of that hash: `-sessid-order-1-cc-de` and `-sessid-order-1-cc-us` are two vendor sessions with two exits, each kept for as long as the client reuses it, since a vendor does not move a session it has already placed to another country. This applies under every routing strategy, not only `sticky`. See [Dynamic sessions]({{ site.baseurl }}/providers#descriptor-reference).
 
 > **Note:** The string `-sessid-` is a reserved delimiter and should not appear in your project username.
 

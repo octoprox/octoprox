@@ -826,11 +826,19 @@ class TestProxyManager:
         assert result is None
 
         # are_all_proxies_quarantined should also detect this
-        assert proxy_manager.are_all_proxies_quarantined(project.id, session_id="session-1") is True
+        assert await proxy_manager.are_all_proxies_quarantined(project.id, session_id="session-1") is True
 
         # A different session should still get a proxy (the non-quarantined one)
         result = await proxy_manager.select_proxy_for_project(project.id, session_id="session-2")
         assert result is not None
+
+        # An instance that only knows the binding through Redis (a peer bound
+        # it, or this one dropped its local copy) holds the session just the same.
+        proxy_manager.strategy_for_project(project.id).reset()
+        assert await proxy_manager.select_proxy_for_project(project.id, session_id="session-1") is None
+        assert await proxy_manager.are_all_proxies_quarantined(project.id, session_id="session-1") is True
+        # The Redis hit was remembered locally.
+        assert proxy_manager.strategy_for_project(project.id).bound_proxy_id("session-1") == assigned_id
 
     async def test_sticky_quarantine_disabled_allows_fallback(self, proxy_manager: ProxyManager) -> None:
         """When sticky_quarantine is False (default), a quarantined proxy should be replaced."""

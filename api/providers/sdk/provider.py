@@ -197,11 +197,14 @@ class DescriptorProvider(ProxyProvider):
         minted and the vendor rotates. ``country`` is the ``-cc-`` code; with
         none, a connector listing countries gets one of them (fixed per client
         session, random per rotating request) and an unrestricted connector
-        renders no country at all. Host and port templates are re-rendered
-        too. Secrets stay runtime placeholders for the proxy manager to fill in.
+        renders no country at all. The country is part of the derivation: a
+        client session holds one vendor session per country it asks for, so
+        switching ``-cc-`` moves to another exit instead of asking the vendor
+        to relocate a session it has already placed, and coming back finds
+        the earlier exit again. Host and port templates are re-rendered too.
+        Secrets stay runtime placeholders for the proxy manager to fill in.
         """
         seed = f"{scope}:{sessid}" if sessid else None
-        session_id = self._session_ids.derive(seed) if seed else self._session_ids.generate()
         ctx = self._ctx
         code: str | None = None
         if self._country_key is not None:
@@ -214,6 +217,9 @@ class DescriptorProvider(ProxyProvider):
                 # its exit between requests despite the unchanged session id.
                 code = _stable_choice(seed, allowed) if seed else random.choice(allowed)
             ctx = ctx.with_country(self._country_key, code)
+        if seed and code:
+            seed = f"{seed}:{code}"
+        session_id = self._session_ids.derive(seed) if seed else self._session_ids.generate()
         ctx = ctx.with_slot(session_id=session_id)
         rendered = proxy.model_copy(deep=True)
         self._builder.rerender(rendered, ctx)

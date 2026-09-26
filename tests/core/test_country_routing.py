@@ -134,10 +134,10 @@ class TestEligibilityRules:
         assert self._ids(manager, "FR") == {"px-fr"}
         assert self._ids(manager, "de") == {"px-de"}
 
-    def test_unlabelled_proxy_on_unlisted_connector_never_matches(self, manager: ProxyManager) -> None:
+    async def test_unlabelled_proxy_on_unlisted_connector_never_matches(self, manager: ProxyManager) -> None:
         assert "px-unknown" not in self._ids(manager, "FR")
         assert self._ids(manager, "JP") == set()
-        assert not manager.are_all_proxies_quarantined("project-1", country="JP")
+        assert not await manager.are_all_proxies_quarantined("project-1", country="JP")
 
     def test_vendor_mismatch_serves_neither_country(self, manager: ProxyManager) -> None:
         # Declared US, discovered in CA: the reported country rules it out for US,

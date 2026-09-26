@@ -153,6 +153,23 @@ class TestRenderRequest:
         untargeted = provider.render_request(gateway, sessid="s", country=None, scope="p")
         assert "-cc-" not in (untargeted.username or "") and META_GEO not in untargeted.metadata
 
+    async def test_client_session_holds_one_vendor_session_per_country(self, builtins: dict[str, ProviderDescriptor], runtime: SdkRuntime, gateway: Proxy) -> None:
+        provider = _oxylabs(builtins, runtime)
+        de = provider.render_request(gateway, sessid="order-1", country="de", scope="p")
+        us = provider.render_request(gateway, sessid="order-1", country="us", scope="p")
+        plain = provider.render_request(gateway, sessid="order-1", country=None, scope="p")
+        sessions = {r.metadata[META_SESSION_ID] for r in (de, us, plain)}
+        assert len(sessions) == 3  # the vendor is never asked to move a placed session to another country
+        again = provider.render_request(gateway, sessid="order-1", country="DE", scope="p")
+        assert again.username == de.username  # coming back finds the same session and exit
+
+    async def test_explicit_country_meets_the_allow_list_pick(self, builtins: dict[str, ProviderDescriptor], runtime: SdkRuntime) -> None:
+        provider = _oxylabs(builtins, runtime, country_code=["US", "DE"])
+        gateway = (await provider.sync_proxies([]))[0][0]
+        picked = provider.render_request(gateway, sessid="order-2", country=None, scope="p")
+        explicit = provider.render_request(gateway, sessid="order-2", country=picked.metadata[META_GEO], scope="p")
+        assert explicit.username == picked.username
+
     async def test_allow_list_picks_a_listed_country_when_none_requested(self, builtins: dict[str, ProviderDescriptor], runtime: SdkRuntime, gateway: Proxy) -> None:
         provider = _oxylabs(builtins, runtime, country_code=["US", "DE"])
         seen = {provider.render_request(gateway, sessid=None, country=None, scope="p").metadata[META_GEO] for _ in range(40)}

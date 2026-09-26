@@ -158,6 +158,74 @@ class TestStickySessionStrategy:
         assert result1 in sample_proxies
         assert result2 in sample_proxies
 
+    async def test_binding_expires_after_ttl_without_requests(self, sample_proxies: list[Proxy]):
+        now = [1000.0]
+        strategy = StickySessionStrategy(ttl_seconds=300, clock=lambda: now[0])
+        first = await strategy.select(sample_proxies, session_id="s")
+        assert strategy.bound_proxy_id("s") == first.id
+        now[0] += 299
+        assert strategy.bound_proxy_id("s") == first.id
+        now[0] += 2
+        assert strategy.bound_proxy_id("s") is None
+        assert "s" not in strategy._session_map
+
+    async def test_requests_keep_a_binding_alive(self, sample_proxies: list[Proxy]):
+        now = [0.0]
+        strategy = StickySessionStrategy(ttl_seconds=300, clock=lambda: now[0])
+        first = await strategy.select(sample_proxies, session_id="s")
+        for _ in range(5):
+            now[0] += 200
+            assert (await strategy.select(sample_proxies, session_id="s")).id == first.id
+        # Ten minutes have passed; each request pushed the expiry out.
+        assert strategy.bound_proxy_id("s") == first.id
+
+    async def test_abandoned_sessions_are_swept(self, sample_proxies: list[Proxy]):
+        from api.strategies import sticky as sticky_module
+
+        now = [0.0]
+        strategy = StickySessionStrategy(ttl_seconds=10, clock=lambda: now[0])
+        for i in range(sticky_module._SWEEP_EVERY - 1):
+            await strategy.select(sample_proxies, session_id=f"old-{i}")
+        now[0] += 11
+        assert len(strategy._session_map) == sticky_module._SWEEP_EVERY - 1
+        await strategy.select(sample_proxies, session_id="new")
+        assert set(strategy._session_map) == {"new"}
+
+    async def test_entries_warmed_from_redis_count_toward_the_sweep(self, sample_proxies: list[Proxy]):
+        from unittest.mock import AsyncMock
+
+        from api.strategies import sticky as sticky_module
+
+        now = [0.0]
+        strategy = StickySessionStrategy(ttl_seconds=10, clock=lambda: now[0])
+        redis = AsyncMock()
+        redis.get_sticky_binding.return_value = sample_proxies[0].id
+        # This instance never binds anything itself: every session arrives already bound by a peer.
+        for i in range(sticky_module._SWEEP_EVERY - 1):
+            await strategy.select(sample_proxies, session_id=f"old-{i}", redis_client=redis, project_id="p")
+        now[0] += 11
+        await strategy.select(sample_proxies, session_id="new", redis_client=redis, project_id="p")
+        assert set(strategy._session_map) == {"new"}
+
+    async def test_active_session_refreshes_its_redis_binding_every_half_ttl(self, sample_proxies: list[Proxy]):
+        from unittest.mock import AsyncMock
+
+        now = [0.0]
+        strategy = StickySessionStrategy(ttl_seconds=300, clock=lambda: now[0])
+        redis = AsyncMock()
+        redis.get_sticky_binding.return_value = None
+        first = await strategy.select(sample_proxies, session_id="s", redis_client=redis, project_id="p")
+        assert redis.set_sticky_binding.await_count == 1
+        for _ in range(10):
+            now[0] += 10
+            await strategy.select(sample_proxies, session_id="s", redis_client=redis, project_id="p")
+        # 100 seconds in: still within the first half TTL, nothing rewritten.
+        assert redis.set_sticky_binding.await_count == 1
+        now[0] += 60
+        await strategy.select(sample_proxies, session_id="s", redis_client=redis, project_id="p")
+        assert redis.set_sticky_binding.await_count == 2
+        redis.set_sticky_binding.assert_awaited_with("p", "s", first.id, ttl_seconds=300)
+
     async def test_reset_clears_session_map(self, sample_proxies: list[Proxy]):
         strategy = StickySessionStrategy()
         session_id = "user-session-123"

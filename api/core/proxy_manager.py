@@ -85,7 +85,7 @@ from api.providers.registry import ProviderRegistry, ProviderType, get_provider_
 from api.providers.sdk.provider import DescriptorProvider
 from api.providers.sdk.strategies import META_GEO, is_dynamic_gateway
 from api.providers.store import ProviderStore
-from api.strategies import ProxyGroup, get_strategy
+from api.strategies import ProxyGroup, StickySessionStrategy, get_strategy
 
 if TYPE_CHECKING:
     from api.models.system import InstanceSnapshot
@@ -2030,21 +2030,27 @@ class ProxyManager:
         """
         return self._eligible_proxies(project_id, target_host, country, include_quarantined=False)
 
-    def _is_sticky_quarantine_blocked(
+    async def _is_sticky_quarantine_blocked(
         self, project_id: str, session_id: str | None
     ) -> bool:
-        """Check if a sticky session's cached proxy is quarantined and sticky_quarantine is on.
+        """Check if a sticky session's bound proxy is quarantined and sticky_quarantine is on.
 
         Returns True when the session should be blocked (429) rather than
-        falling back to another proxy.
+        falling back to another proxy. The binding is read locally first and
+        from Redis when this instance has none: a session bound on a peer, or
+        one this instance has not seen for a binding lifetime, is held just
+        the same. A Redis hit is remembered locally so the next check is free.
         """
         if session_id is None:
             return False
         strategy = self._project_strategies.get(project_id, self._strategy)
-        if strategy.name != "sticky":
+        if not isinstance(strategy, StickySessionStrategy):
             return False
-        session_map: dict[str, str] = getattr(strategy, "_session_map", {})
-        cached_proxy_id = session_map.get(session_id)
+        cached_proxy_id = strategy.bound_proxy_id(session_id)
+        from_redis = False
+        if cached_proxy_id is None and self._redis_client is not None:
+            cached_proxy_id = await self._redis_client.get_sticky_binding(project_id, session_id)
+            from_redis = True
         if not cached_proxy_id or not self._rate_limiter.is_quarantined(cached_proxy_id):
             return False
         cached_proxy = self._proxies.get(cached_proxy_id)
@@ -2054,9 +2060,12 @@ class ProxyManager:
         if not connector:
             return False
         rl_config = connector.parsed_rate_limit_config
-        return rl_config is not None and rl_config.sticky_quarantine
+        blocked = rl_config is not None and rl_config.sticky_quarantine
+        if blocked and from_redis:
+            strategy.remember(session_id, cached_proxy_id)
+        return blocked
 
-    def are_all_proxies_quarantined(
+    async def are_all_proxies_quarantined(
         self,
         project_id: str,
         target_host: str | None = None,
@@ -2069,7 +2078,7 @@ class ProxyManager:
         when sticky_quarantine blocked a specific session's quarantined proxy.
         Used to distinguish 'no proxies exist' (502) from quarantine (429).
         """
-        if self._is_sticky_quarantine_blocked(project_id, session_id):
+        if await self._is_sticky_quarantine_blocked(project_id, session_id):
             return True
 
         healthy = self._eligible_proxies(project_id, target_host, country, include_quarantined=True)
@@ -2154,7 +2163,7 @@ class ProxyManager:
                 country (see get_routable_proxies_for_project). "All countries"
                 provider pools get a slot group for it on first use.
         """
-        if self._is_sticky_quarantine_blocked(project_id, session_id):
+        if await self._is_sticky_quarantine_blocked(project_id, session_id):
             return None
 
         healthy_proxies = self.get_routable_proxies_for_project(project_id, target_host, country)

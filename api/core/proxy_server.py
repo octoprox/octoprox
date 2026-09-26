@@ -266,7 +266,7 @@ class ProxyServer:
         status was chosen. Anything else is a 502: nothing is configured
         for this request.
         """
-        if self._proxy_manager.are_all_proxies_quarantined(
+        if await self._proxy_manager.are_all_proxies_quarantined(
             project_id, target_host, session_id, country
         ):
             await self._send_error(
