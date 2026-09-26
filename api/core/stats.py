@@ -3,9 +3,8 @@
 
 """Metric batches for proxies, projects and connectors."""
 
+from dataclasses import dataclass, fields
 from typing import Any, Protocol
-
-from pydantic import BaseModel, ValidationError
 
 
 class HasStats(Protocol):
@@ -35,12 +34,19 @@ class HasStats(Protocol):
 # ---------------------------------------------------------------------------
 
 
-class MetricDelta(BaseModel):
+@dataclass(slots=True)
+class MetricDelta:
     """A batch of requests' contribution to one entity's metrics, in additive form.
 
     Latency is carried as a sum, not an average: sums combine across
     batches and sources without losing the weighted-average math, and the
     average is derived when something displays it.
+
+    A slotted dataclass rather than a pydantic model on purpose: every
+    completed request and every progress report mutates three of these in
+    place, and a pydantic field assignment costs about a microsecond
+    against a few nanoseconds for a slot. The wire form is handled by
+    ``to_dict`` and ``from_dict`` instead.
     """
 
     request_count: int = 0
@@ -129,24 +135,44 @@ class MetricDelta(BaseModel):
             total_latency = target.avg_latency_ms * old_count + self.latency_sum_ms
             target.avg_latency_ms = total_latency / target.request_count
 
+    def to_dict(self) -> dict[str, Any]:
+        """The wire form: field name to additive value."""
+        return {f.name: getattr(self, f.name) for f in fields(self)}
+
+    @classmethod
+    def from_dict(cls, raw: Any) -> "MetricDelta":
+        """A delta from its wire form. Missing fields read as zero; wrong types raise.
+
+        Raises TypeError for a non-mapping and ValueError for a value that is
+        not a number, so a peer on a version with fewer fields still applies
+        cleanly while garbage does not.
+        """
+        if not isinstance(raw, dict):
+            raise TypeError(f"metric delta must be a mapping, got {type(raw).__name__}")
+        delta = cls()
+        for f in fields(cls):
+            if f.name not in raw:
+                continue
+            value = raw[f.name]
+            if isinstance(value, bool) or not isinstance(value, int | float | str):
+                raise ValueError(f"{f.name} must be a number, got {value!r}")
+            setattr(delta, f.name, float(value) if f.type is float else int(value))
+        return delta
+
     @staticmethod
     def dump_many(deltas: dict[str, "MetricDelta"]) -> dict[str, dict[str, Any]]:
         """The wire form of a per-entity batch, for the pub/sub payload."""
-        return {entity_id: delta.model_dump() for entity_id, delta in deltas.items()}
+        return {entity_id: delta.to_dict() for entity_id, delta in deltas.items()}
 
     @classmethod
     def parse_many(cls, raw: Any) -> dict[str, "MetricDelta"]:
-        """Per-entity deltas from a pub/sub payload; entries that do not parse are dropped.
-
-        Missing fields read as zero, so a peer on a version with fewer fields
-        still applies cleanly.
-        """
+        """Per-entity deltas from a pub/sub payload; entries that do not parse are dropped."""
         if not isinstance(raw, dict):
             return {}
         parsed: dict[str, MetricDelta] = {}
-        for entity_id, fields in raw.items():
+        for entity_id, entry in raw.items():
             try:
-                parsed[str(entity_id)] = cls.model_validate(fields)
-            except ValidationError:
+                parsed[str(entity_id)] = cls.from_dict(entry)
+            except (TypeError, ValueError):
                 continue
         return parsed

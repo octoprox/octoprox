@@ -543,8 +543,15 @@ class TrafficLimiter:
 
     async def hydrate_blocked_from_redis(self, connector_ids: list[str]) -> None:
         """Restore the block state peers (or this instance, before a restart) raised."""
+        if not connector_ids:
+            return
+        blocked = await self._redis_client.get_connector_traffic_blocked_many(connector_ids)
         for connector_id in connector_ids:
-            await self.refresh_blocked_for(connector_id)
+            until = blocked.get(connector_id)
+            if until is None:
+                self._blocked.pop(connector_id, None)
+            else:
+                self._blocked[connector_id] = until
 
     async def refresh_blocked_for(self, connector_id: str) -> None:
         """Re-read one connector's block key; the cross-instance handler."""

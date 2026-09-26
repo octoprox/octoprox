@@ -6,7 +6,7 @@
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import delete, func, or_, select, text, update
+from sqlalchemy import delete, exists, func, insert, literal, or_, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.core import utc_now
@@ -554,9 +554,11 @@ class MetricsRepository:
         status: str,
         bytes_sent: int = 0,
         bytes_received: int = 0,
-    ) -> None:
-        """Save a metrics snapshot to the database."""
-        model = ProxyMetricsModel(
+    ) -> bool:
+        """Save a metrics snapshot for a proxy; False when the proxy no longer exists."""
+        return await self._insert_snapshot(
+            ProxyMetricsModel,
+            ProxyModel.id == proxy_id,
             proxy_id=proxy_id,
             timestamp=utc_now(),
             request_count=request_count,
@@ -567,8 +569,24 @@ class MetricsRepository:
             bytes_received=bytes_received,
             status=status,
         )
-        self._session.add(model)
-        await self._session.flush()
+
+    async def _insert_snapshot(self, model: "_MetricsModel", parent_exists: Any, **values: Any) -> bool:
+        """Insert one metrics row only if its parent row still exists.
+
+        A Redis hash can outlive its proxy, project or connector: a peer
+        flushes the last bytes of a transfer after the row is gone. A plain
+        INSERT would violate the foreign key and abort the whole flush, so
+        the row is inserted through ``INSERT ... SELECT ... WHERE EXISTS``:
+        one statement, no separate lookup, and the caller learns from the
+        row count whether the snapshot was kept.
+        """
+        table = model.__table__
+        columns = list(values)
+        source = select(
+            *[literal(value, type_=table.c[name].type).label(name) for name, value in values.items()]
+        ).where(exists().where(parent_exists))
+        result = await self._session.execute(insert(model).from_select(columns, source))
+        return bool(result.rowcount)  # type: ignore[attr-defined]
 
     async def get_metrics_history(
         self,
@@ -611,9 +629,11 @@ class MetricsRepository:
         avg_latency_ms: float,
         bytes_sent: int = 0,
         bytes_received: int = 0,
-    ) -> None:
-        """Save a connector-level metrics snapshot; survives the connector's proxies."""
-        model = ConnectorMetricsModel(
+    ) -> bool:
+        """Save a connector-level snapshot; False when the connector no longer exists."""
+        return await self._insert_snapshot(
+            ConnectorMetricsModel,
+            ConnectorModel.id == connector_id,
             connector_id=connector_id,
             timestamp=utc_now(),
             request_count=request_count,
@@ -623,8 +643,6 @@ class MetricsRepository:
             bytes_sent=bytes_sent,
             bytes_received=bytes_received,
         )
-        self._session.add(model)
-        await self._session.flush()
 
     async def get_connector_totals_since(
         self, since_by_connector: dict[str, datetime]
@@ -824,12 +842,14 @@ class MetricsRepository:
         avg_latency_ms: float,
         bytes_sent: int = 0,
         bytes_received: int = 0,
-    ) -> None:
-        """Save a project-level metrics snapshot to the database.
+    ) -> bool:
+        """Save a project-level snapshot; False when the project no longer exists.
 
         These metrics persist across proxy rotation.
         """
-        model = ProjectMetricsModel(
+        return await self._insert_snapshot(
+            ProjectMetricsModel,
+            ProjectModel.id == project_id,
             project_id=project_id,
             timestamp=utc_now(),
             request_count=request_count,
@@ -839,8 +859,6 @@ class MetricsRepository:
             bytes_sent=bytes_sent,
             bytes_received=bytes_received,
         )
-        self._session.add(model)
-        await self._session.flush()
 
     async def get_project_metrics_history(
         self,
