@@ -155,7 +155,7 @@ class TestConnectorMetrics:
         db_session: AsyncSession,
     ) -> None:
         _project, connector = await _connector(project_repo, credential_repo, connector_repo, db_session)
-        old = utc_now() - timedelta(days=2)
+        old = utc_now().replace(minute=0, second=0, microsecond=0) - timedelta(days=2)
         for i in range(6):
             await _insert(db_session, connector.id, old + timedelta(minutes=i), sent=7, received=11)
         await db_session.commit()
