@@ -81,9 +81,10 @@ class MetricsFlusher:
         # Get all metrics from Redis
         all_proxy_metrics = await self._redis_client.get_all_proxy_metrics()
         all_project_metrics = await self._redis_client.get_all_project_metrics()
+        all_connector_metrics = await self._redis_client.get_all_connector_metrics()
         all_statuses = await self._redis_client.get_all_proxy_statuses()
 
-        if not all_proxy_metrics and not all_project_metrics:
+        if not all_proxy_metrics and not all_project_metrics and not all_connector_metrics:
             logger.debug("No metrics to flush")
             return
 
@@ -91,6 +92,7 @@ class MetricsFlusher:
             "Flushing metrics to Postgres",
             proxy_count=len(all_proxy_metrics),
             project_count=len(all_project_metrics),
+            connector_count=len(all_connector_metrics),
         )
 
         async with self._session_factory() as session:
@@ -105,12 +107,12 @@ class MetricsFlusher:
 
                 await repo.save_metrics_snapshot(
                     proxy_id=proxy_id,
-                    request_count=metrics["request_count"],
-                    success_count=metrics["success_count"],
-                    failure_count=metrics["failure_count"],
-                    avg_latency_ms=metrics["avg_latency_ms"],
-                    bytes_sent=metrics.get("bytes_sent", 0),
-                    bytes_received=metrics.get("bytes_received", 0),
+                    request_count=metrics.request_count,
+                    success_count=metrics.success_count,
+                    failure_count=metrics.failure_count,
+                    avg_latency_ms=metrics.avg_latency_ms,
+                    bytes_sent=metrics.bytes_sent,
+                    bytes_received=metrics.bytes_received,
                     status=status,
                 )
 
@@ -121,16 +123,29 @@ class MetricsFlusher:
             for project_id, metrics in all_project_metrics.items():
                 await repo.save_project_metrics_snapshot(
                     project_id=project_id,
-                    request_count=metrics["request_count"],
-                    success_count=metrics["success_count"],
-                    failure_count=metrics["failure_count"],
-                    avg_latency_ms=metrics["avg_latency_ms"],
-                    bytes_sent=metrics.get("bytes_sent", 0),
-                    bytes_received=metrics.get("bytes_received", 0),
+                    request_count=metrics.request_count,
+                    success_count=metrics.success_count,
+                    failure_count=metrics.failure_count,
+                    avg_latency_ms=metrics.avg_latency_ms,
+                    bytes_sent=metrics.bytes_sent,
+                    bytes_received=metrics.bytes_received,
                 )
 
                 # Reset Redis metrics after successful flush
                 await self._redis_client.reset_project_metrics(project_id)
+
+            # Flush connector metrics
+            for connector_id, metrics in all_connector_metrics.items():
+                await repo.save_connector_metrics_snapshot(
+                    connector_id=connector_id,
+                    request_count=metrics.request_count,
+                    success_count=metrics.success_count,
+                    failure_count=metrics.failure_count,
+                    avg_latency_ms=metrics.avg_latency_ms,
+                    bytes_sent=metrics.bytes_sent,
+                    bytes_received=metrics.bytes_received,
+                )
+                await self._redis_client.reset_connector_metrics(connector_id)
 
             await session.commit()
 
@@ -138,6 +153,7 @@ class MetricsFlusher:
             "Metrics flush complete",
             proxy_count=len(all_proxy_metrics),
             project_count=len(all_project_metrics),
+            connector_count=len(all_connector_metrics),
         )
 
     def stop(self) -> None:

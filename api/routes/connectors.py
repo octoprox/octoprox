@@ -4,15 +4,18 @@
 """Connector management endpoints."""
 
 import asyncio
-from typing import Any
+from collections.abc import Callable
+from typing import Any, Literal
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, ValidationError
 from sqlalchemy.exc import IntegrityError
 
+from api.core import utc_now
 from api.core.auth import RequireEditorDep
 from api.core.event_bus import event_bus
 from api.core.signals import provider_connector_sync_requested
+from api.db.repository import MetricsRepository
 from api.models.connector import (
     Connector,
     ConnectorCreate,
@@ -20,13 +23,16 @@ from api.models.connector import (
     ConnectorResponse,
     ConnectorUpdate,
     ProxyTarget,
+    TrafficUsage,
     validate_rate_limit_config,
     validate_routing_config,
+    validate_traffic_config,
 )
 from api.models.credential import Credential
 from api.providers.registry import ProviderRegistry, UnknownProviderError, get_provider_registry
 from api.providers.sdk.validation import ConfigValidationError
 from api.routes.common import unique_name_violation
+from api.routes.metrics import RANGE_CONFIG, MetricsHistoryResponse, MetricsSnapshot
 
 router = APIRouter(prefix="/projects/{project_id}/connectors")
 
@@ -35,6 +41,29 @@ class ConnectorListResponse(BaseModel):
     """Response for listing connectors."""
     total: int
     connectors: list[ConnectorResponse]
+
+
+def _validate_sub_config(
+    validate: Callable[[dict[str, Any]], dict[str, Any]], config: dict[str, Any]
+) -> dict[str, Any]:
+    """Run one of the connector's JSON config validators, mapping errors to 422."""
+    try:
+        return validate(config)
+    except (ValidationError, ValueError) as e:
+        detail = str(e)
+        if hasattr(e, 'errors'):
+            messages = [err.get('msg', str(err)) for err in e.errors()]
+            detail = "; ".join(messages)
+        raise HTTPException(status_code=422, detail=detail) from None
+
+
+def _traffic_usage(proxy_manager: Any, connector: Connector) -> TrafficUsage | None:
+    """The connector's traffic usage as this instance sees it."""
+    try:
+        usage: TrafficUsage = proxy_manager.traffic_usage(connector)
+    except Exception:  # a mocked manager in tests, or a connector mid-removal
+        return None
+    return usage
 
 
 def _validate_connector_config(
@@ -61,6 +90,7 @@ def _connector_to_response(
     credential_type: str | None = None,
     proxy_count: int = 0,
     target: ProxyTarget | None = None,
+    traffic_usage: TrafficUsage | None = None,
 ) -> ConnectorResponse:
     """Convert a Connector to ConnectorResponse."""
     return ConnectorResponse(
@@ -73,6 +103,9 @@ def _connector_to_response(
         config=connector.config,
         routing_config=connector.routing_config,
         rate_limit_config=connector.rate_limit_config,
+        traffic_config=connector.traffic_config,
+        traffic_reset_at=connector.traffic_reset_at,
+        traffic_usage=traffic_usage,
         enabled=connector.enabled,
         proxy_count=proxy_count,
         target=target,
@@ -96,15 +129,23 @@ async def list_connectors(request: Request, project_id: str) -> ConnectorListRes
     connectors = proxy_manager.get_connectors_for_project(project_id)
     responses = []
     for connector in connectors:
-        credential = proxy_manager.get_credential(connector.credential_id)
-        credential_name = credential.name if credential else None
-        credential_type = credential.type if credential else None
-        proxy_count = len(proxy_manager.get_proxies_for_connector(connector.id))
-        responses.append(_connector_to_response(connector, credential_name, credential_type, proxy_count, proxy_manager.get_connector_target(connector)))
+        responses.append(_describe(proxy_manager, connector))
 
     return ConnectorListResponse(
         total=len(connectors),
         connectors=responses,
+    )
+
+
+def _describe(proxy_manager: Any, connector: Connector) -> ConnectorResponse:
+    """The full API view of a connector: credential, pool, target and traffic."""
+    credential = proxy_manager.get_credential(connector.credential_id)
+    credential_name = credential.name if credential else None
+    credential_type = credential.type if credential else None
+    proxy_count = len(proxy_manager.get_proxies_for_connector(connector.id))
+    return _connector_to_response(
+        connector, credential_name, credential_type, proxy_count,
+        proxy_manager.get_connector_target(connector), _traffic_usage(proxy_manager, connector),
     )
 
 
@@ -136,26 +177,17 @@ async def create_connector(
     # Validate routing config if provided
     validated_routing_config: dict[str, Any] = {}
     if connector_data.routing_config:
-        try:
-            validated_routing_config = validate_routing_config(connector_data.routing_config)
-        except (ValidationError, ValueError) as e:
-            detail = str(e)
-            if hasattr(e, 'errors'):
-                messages = [err.get('msg', str(err)) for err in e.errors()]
-                detail = "; ".join(messages)
-            raise HTTPException(status_code=422, detail=detail) from None
+        validated_routing_config = _validate_sub_config(validate_routing_config, connector_data.routing_config)
 
     # Validate rate limit config if provided
     validated_rate_limit_config: dict[str, Any] = {}
     if connector_data.rate_limit_config:
-        try:
-            validated_rate_limit_config = validate_rate_limit_config(connector_data.rate_limit_config)
-        except (ValidationError, ValueError) as e:
-            detail = str(e)
-            if hasattr(e, 'errors'):
-                messages = [err.get('msg', str(err)) for err in e.errors()]
-                detail = "; ".join(messages)
-            raise HTTPException(status_code=422, detail=detail) from None
+        validated_rate_limit_config = _validate_sub_config(validate_rate_limit_config, connector_data.rate_limit_config)
+
+    # Validate traffic config if provided
+    validated_traffic_config: dict[str, Any] = {}
+    if connector_data.traffic_config:
+        validated_traffic_config = _validate_sub_config(validate_traffic_config, connector_data.traffic_config)
 
     connector = Connector(
         name=connector_data.name,
@@ -165,6 +197,7 @@ async def create_connector(
         config=validated_config,
         routing_config=validated_routing_config,
         rate_limit_config=validated_rate_limit_config,
+        traffic_config=validated_traffic_config,
         enabled=connector_data.enabled,
     )
 
@@ -181,7 +214,11 @@ async def create_connector(
         )
 
     # New connector has 0 proxies initially (provider syncer will add them)
-    return _connector_to_response(connector, credential.name, credential.type, proxy_count=0, target=proxy_manager.get_connector_target(connector))
+    return _connector_to_response(
+        connector, credential.name, credential.type, proxy_count=0,
+        target=proxy_manager.get_connector_target(connector),
+        traffic_usage=_traffic_usage(proxy_manager, connector),
+    )
 
 
 @router.get("/{connector_id}", response_model=ConnectorResponse)
@@ -193,11 +230,55 @@ async def get_connector(request: Request, connector_id: str) -> ConnectorRespons
     if connector is None:
         raise HTTPException(status_code=404, detail="Connector not found")
 
-    credential = proxy_manager.get_credential(connector.credential_id)
-    credential_name = credential.name if credential else None
-    credential_type = credential.type if credential else None
-    proxy_count = len(proxy_manager.get_proxies_for_connector(connector.id))
-    return _connector_to_response(connector, credential_name, credential_type, proxy_count, proxy_manager.get_connector_target(connector))
+    return _describe(proxy_manager, connector)
+
+
+@router.get("/{connector_id}/metrics/history", response_model=MetricsHistoryResponse)
+async def get_connector_metrics_history(
+    request: Request,
+    connector_id: str,
+    range: Literal["1h", "6h", "24h", "7d", "30d"] = Query("24h", alias="range"),
+) -> MetricsHistoryResponse:
+    """Historical metrics snapshots for one connector, from its own history.
+
+    Unlike per-proxy history these survive the connector's proxies being
+    rotated or re-synced, so a period's traffic can be charted in full.
+    """
+    proxy_manager = request.app.state.proxy_manager
+    connector = proxy_manager.get_connector(connector_id)
+    if connector is None:
+        raise HTTPException(status_code=404, detail="Connector not found")
+
+    delta, limit, bucket_seconds = RANGE_CONFIG[range]
+    since = utc_now() - delta
+    async with proxy_manager._session_factory() as session:
+        repo = MetricsRepository(session)
+        if bucket_seconds:
+            rows = await repo.get_connector_metrics_history_aggregated(
+                connector_id=connector_id, since=since, bucket_seconds=bucket_seconds
+            )
+        else:
+            rows = await repo.get_connector_metrics_history(
+                connector_id=connector_id, since=since, limit=limit, granularity=60
+            )
+    return MetricsHistoryResponse(snapshots=[MetricsSnapshot(**row) for row in reversed(rows)])
+
+
+@router.post("/{connector_id}/traffic/reset", response_model=ConnectorResponse)
+async def reset_connector_traffic(
+    request: Request, connector_id: str, _guard: RequireEditorDep
+) -> ConnectorResponse:
+    """Start the connector's traffic usage over from now.
+
+    For a vendor top-up or a plan change mid-period. History is untouched:
+    the current period simply counts from this moment, and a block raised
+    by the limit is lifted.
+    """
+    proxy_manager = request.app.state.proxy_manager
+    connector = await proxy_manager.reset_connector_traffic(connector_id)
+    if connector is None:
+        raise HTTPException(status_code=404, detail="Connector not found")
+    return _describe(proxy_manager, connector)
 
 
 @router.patch("/{connector_id}", response_model=ConnectorResponse)
@@ -237,24 +318,21 @@ async def update_connector(
             )
         else:
             connector.config = connector_data.config
+    # Validate each JSON config before touching the cached object, so a
+    # rejected write leaves the connector as it was.
+    new_routing = new_rate_limit = new_traffic = None
     if connector_data.routing_config is not None:
-        try:
-            connector.routing_config = validate_routing_config(connector_data.routing_config)
-        except (ValidationError, ValueError) as e:
-            detail = str(e)
-            if hasattr(e, 'errors'):
-                messages = [err.get('msg', str(err)) for err in e.errors()]
-                detail = "; ".join(messages)
-            raise HTTPException(status_code=422, detail=detail) from None
+        new_routing = _validate_sub_config(validate_routing_config, connector_data.routing_config)
     if connector_data.rate_limit_config is not None:
-        try:
-            connector.rate_limit_config = validate_rate_limit_config(connector_data.rate_limit_config)
-        except (ValidationError, ValueError) as e:
-            detail = str(e)
-            if hasattr(e, 'errors'):
-                messages = [err.get('msg', str(err)) for err in e.errors()]
-                detail = "; ".join(messages)
-            raise HTTPException(status_code=422, detail=detail) from None
+        new_rate_limit = _validate_sub_config(validate_rate_limit_config, connector_data.rate_limit_config)
+    if connector_data.traffic_config is not None:
+        new_traffic = _validate_sub_config(validate_traffic_config, connector_data.traffic_config)
+    if new_routing is not None:
+        connector.routing_config = new_routing
+    if new_rate_limit is not None:
+        connector.rate_limit_config = new_rate_limit
+    if new_traffic is not None:
+        connector.traffic_config = new_traffic
     if connector_data.enabled is not None:
         connector.enabled = connector_data.enabled
 
@@ -273,10 +351,7 @@ async def update_connector(
             event_bus.publish(provider_connector_sync_requested, None, connector=connector)
         )
 
-    credential_name = credential.name if credential else None
-    credential_type = credential.type if credential else None
-    proxy_count = len(proxy_manager.get_proxies_for_connector(connector.id))
-    return _connector_to_response(connector, credential_name, credential_type, proxy_count, proxy_manager.get_connector_target(connector))
+    return _describe(proxy_manager, connector)
 
 
 @router.delete("/{connector_id}", status_code=204)

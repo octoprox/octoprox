@@ -19,7 +19,7 @@ import gzip
 import json
 import os
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as pkg_version
@@ -37,6 +37,7 @@ from api.core import utc_now
 from api.db.base import Base
 from api.db.models import (
     ConnectorExitIpModel,
+    ConnectorMetricsModel,
     ConnectorModel,
     CredentialModel,
     GeoDatabaseBlobModel,
@@ -91,6 +92,7 @@ _ENTITY_SPECS: tuple[_EntitySpec, ...] = (
     _EntitySpec("proxies", ProxyModel),
     _EntitySpec("proxy_metrics", ProxyMetricsModel, is_metric=True, preserve_id=False),
     _EntitySpec("project_metrics", ProjectMetricsModel, is_metric=True, preserve_id=False),
+    _EntitySpec("connector_metrics", ConnectorMetricsModel, is_metric=True, preserve_id=False),
     _EntitySpec("provider_descriptors", ProviderDescriptorModel),
     _EntitySpec("provider_audit_log", ProviderAuditModel),
     # IP attribution. Settings and database rows are configuration and always
@@ -331,6 +333,7 @@ class ImportResult:
     summary: ImportSummary
     old_project_ids: list[str]
     old_proxy_ids: list[str]
+    old_connector_ids: list[str] = field(default_factory=list)
 
 
 def _resolve_user_conflicts(rows: list[dict[str, Any]], kept: dict[str, Any]) -> list[UserConflict]:
@@ -411,6 +414,7 @@ async def replace_all(
     # Capture pre-wipe ids for downstream Redis cleanup.
     old_project_ids = list((await session.execute(select(ProjectModel.id))).scalars().all())
     old_proxy_ids = list((await session.execute(select(ProxyModel.id))).scalars().all())
+    old_connector_ids = list((await session.execute(select(ConnectorModel.id))).scalars().all())
 
     # Deleting projects cascades (DB-level ON DELETE CASCADE) to credentials,
     # connectors, proxies and both metrics tables. Users are independent.
@@ -458,4 +462,5 @@ async def replace_all(
         ),
         old_project_ids=old_project_ids,
         old_proxy_ids=old_proxy_ids,
+        old_connector_ids=old_connector_ids,
     )

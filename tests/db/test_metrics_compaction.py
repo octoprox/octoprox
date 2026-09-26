@@ -231,14 +231,14 @@ class TestCompactProjectMetrics:
         after = await metrics_repo.get_cumulative_project_metrics()
         after_project = after[project.id]
 
-        assert after_project["request_count"] == before_project["request_count"]
-        assert after_project["success_count"] == before_project["success_count"]
-        assert after_project["failure_count"] == before_project["failure_count"]
-        assert after_project["bytes_sent"] == before_project["bytes_sent"]
-        assert after_project["bytes_received"] == before_project["bytes_received"]
+        assert after_project.request_count == before_project.request_count
+        assert after_project.success_count == before_project.success_count
+        assert after_project.failure_count == before_project.failure_count
+        assert after_project.bytes_sent == before_project.bytes_sent
+        assert after_project.bytes_received == before_project.bytes_received
         # Weighted avg latency should also match
         assert abs(
-            after_project["avg_latency_ms"] - before_project["avg_latency_ms"]
+            after_project.avg_latency_ms - before_project.avg_latency_ms
         ) < 0.01
 
     async def test_compact_sums_bytes_past_the_int32_ceiling(
@@ -283,8 +283,8 @@ class TestCompactProjectMetrics:
         await db_session.commit()
 
         totals = (await metrics_repo.get_cumulative_project_metrics())[project.id]
-        assert totals["bytes_sent"] == per_row * 6 > 2**31 - 1
-        assert totals["bytes_received"] == per_row * 6
+        assert totals.bytes_sent == per_row * 6 > 2**31 - 1
+        assert totals.bytes_received == per_row * 6
 
     async def test_compact_does_not_touch_recent_data(
         self,
@@ -400,9 +400,9 @@ class TestCompactProxyMetrics:
         # Totals preserved
         after = await metrics_repo.get_cumulative_metrics_for_all_proxies()
         after_proxy = after[proxy.id]
-        assert after_proxy["request_count"] == before_proxy["request_count"]
-        assert after_proxy["success_count"] == before_proxy["success_count"]
-        assert after_proxy["bytes_sent"] == before_proxy["bytes_sent"]
+        assert after_proxy.request_count == before_proxy.request_count
+        assert after_proxy.success_count == before_proxy.success_count
+        assert after_proxy.bytes_sent == before_proxy.bytes_sent
 
         # Check the compacted row has the latest status
         history = await metrics_repo.get_metrics_history(proxy.id)

@@ -25,6 +25,7 @@ from api.core.proxy_server import (
     HOP_BY_HOP_RESPONSE_HEADERS,
     ProxyServer,
 )
+from api.core.traffic_limiter import TrafficMeter
 from api.models.proxy import Proxy, ProxyProtocol
 
 CLIENT_TOKEN = base64.b64encode(b"ivan-sessid-abcd-cc-us:ivan").decode()
@@ -110,9 +111,23 @@ class _ClientWriter:
         return self.buffer.split(b"\r\n\r\n", 1)[1]
 
 
+class _NoLimit:
+    """A limiter that never interrupts and swallows progress, for a metered server."""
+
+    def is_interrupted(self, connector_id: str) -> bool:
+        return False
+
+    def limit_status_for(self, connector_id: str) -> int:
+        return 509
+
+    def progress(self, *args: object) -> None:
+        pass
+
+
 def _server(proxy: Proxy) -> ProxyServer:
     manager = MagicMock()
     manager.get_project.return_value = None  # skips exit verification
+    manager.traffic_meter = lambda p, project_id: TrafficMeter(_NoLimit(), p.id, project_id, p.connector_id)  # type: ignore[arg-type]
     server = ProxyServer(manager)
     server._get_upstream_proxy = AsyncMock(return_value=proxy)  # type: ignore[method-assign]
     return server

@@ -138,6 +138,8 @@ class ConnectorModel(Base):
     last_error_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     consecutive_errors: Mapped[int] = mapped_column(Integer, default=0)
     routing_config: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    traffic_config: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    traffic_reset_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     rate_limit_config: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     version: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
@@ -221,10 +223,40 @@ class ProjectMetricsModel(Base):
     granularity: Mapped[int] = mapped_column(Integer, default=60, nullable=False)
 
 
+class ConnectorMetricsModel(Base):
+    """Historical per-connector metrics (flushed from Redis).
+
+    The connector is the unit vendors bill and limits apply to, and its
+    proxies come and go (cloud rotation, provider re-sync) taking their
+    proxy_metrics rows with them. These rows survive that, so traffic usage
+    over a billing period and the observed traffic split stay complete.
+    Same shape and compaction tiers as the other two metrics tables.
+    """
+
+    __tablename__ = "connector_metrics"
+    __table_args__ = (
+        Index("ix_connector_metrics_connector_granularity_ts", "connector_id", "granularity", "timestamp"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    connector_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("connectors.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    timestamp: Mapped[datetime] = mapped_column(DateTime, default=utc_now, index=True)
+
+    request_count: Mapped[int] = mapped_column(Integer, default=0)
+    success_count: Mapped[int] = mapped_column(Integer, default=0)
+    failure_count: Mapped[int] = mapped_column(Integer, default=0)
+    avg_latency_ms: Mapped[float] = mapped_column(Float, default=0.0)
+    bytes_sent: Mapped[int] = mapped_column(BigInteger, default=0)
+    bytes_received: Mapped[int] = mapped_column(BigInteger, default=0)
+    granularity: Mapped[int] = mapped_column(Integer, default=60, nullable=False)
+
+
 class SystemMetricsModel(Base):
     """Periodic install-wide gauge readings, for the admin trend charts.
 
-    Distinct from the other two metrics tables in three ways, all consequences
+    Distinct from the per-entity metrics tables in three ways, all consequences
     of these being gauges rather than counters:
 
     * One row per snapshot for the whole install, not per entity - so the

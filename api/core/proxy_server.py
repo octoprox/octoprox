@@ -18,6 +18,7 @@ Emits request_completed signals instead of directly calling ProxyManager.
 import asyncio
 import base64
 import time
+from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 import structlog
@@ -26,6 +27,7 @@ from python_socks.async_.asyncio import Proxy as SocksProxy
 from api.core.config import settings
 from api.core.event_bus import event_bus
 from api.core.signals import request_completed, request_rejected
+from api.core.traffic_limiter import TrafficMeter
 from api.core.username_params import AuthResult, parse_username_params
 from api.geo.verifier import ExitVerifier
 from api.models.project import MitmMode, Project
@@ -39,6 +41,14 @@ logger = structlog.get_logger()
 
 # Buffer size for tunneling
 BUFFER_SIZE = 65536
+
+# Reason phrases for the statuses a traffic limit can answer with.
+TRAFFIC_LIMIT_REASONS = {429: "Too Many Requests", 509: "Bandwidth Limit Exceeded"}
+# RFC 9209 Proxy-Status header: the same signal whichever status is configured.
+TRAFFIC_LIMIT_PROXY_STATUS = 'Proxy-Status: octoprox; error=bandwidth_limit_exceeded'
+
+# What a tunnel direction calls per chunk; False means stop the transfer.
+_ByteCounter = Callable[[int], bool] | None
 
 # Headers scoped to a single hop and therefore never relayed (RFC 9110
 # section 7.6.1 and section 11.7, plus the legacy Proxy-Connection). The
@@ -239,6 +249,52 @@ class ProxyServer:
             return f"No upstream proxy available for country {country} and this domain"
         return "No upstream proxy available for this domain"
 
+    async def _reject_no_proxy(
+        self,
+        client_writer: asyncio.StreamWriter,
+        project_id: str,
+        target_host: str | None,
+        session_id: str | None,
+        country: str | None,
+    ) -> None:
+        """Answer a request no proxy could serve, saying why.
+
+        Quarantine (every proxy resting) is a 429 to retry later. A traffic
+        limit (every connector that could serve the request is over its
+        period's bytes) is the connector's configured status, 509 by
+        default, with a Proxy-Status header naming the error whichever
+        status was chosen. Anything else is a 502: nothing is configured
+        for this request.
+        """
+        if self._proxy_manager.are_all_proxies_quarantined(
+            project_id, target_host, session_id, country
+        ):
+            await self._send_error(
+                client_writer, 429, "Too Many Requests",
+                "All proxies are temporarily rate-limited. Retry later.",
+            )
+            await event_bus.publish(request_rejected,
+                self, project_id=project_id, reason="all_proxies_quarantined"
+            )
+            return
+        limit_status = self._proxy_manager.traffic_limit_status(project_id, target_host, country)
+        if limit_status is not None:
+            await self._send_error(
+                client_writer, limit_status, TRAFFIC_LIMIT_REASONS.get(limit_status, "Bandwidth Limit Exceeded"),
+                "Every connector that could serve this request has reached its traffic limit.",
+                extra_headers=[TRAFFIC_LIMIT_PROXY_STATUS],
+            )
+            await event_bus.publish(request_rejected,
+                self, project_id=project_id, reason="traffic_limit_exceeded"
+            )
+            return
+        await self._send_error(
+            client_writer, 502, "Bad Gateway", self._no_proxy_message(country)
+        )
+        await event_bus.publish(request_rejected,
+            self, project_id=project_id, reason="no_proxy_available"
+        )
+
     async def _verify_exit(
         self,
         project: Project,
@@ -421,7 +477,12 @@ class ProxyServer:
         return {k: v for k, v in headers.items() if k not in drop}
 
     async def _send_error(
-        self, writer: asyncio.StreamWriter, status: int, message: str, body: str = ""
+        self,
+        writer: asyncio.StreamWriter,
+        status: int,
+        message: str,
+        body: str = "",
+        extra_headers: list[str] | None = None,
     ) -> None:
         """Send an HTTP error response. Silently ignores closed connections."""
         try:
@@ -435,6 +496,8 @@ class ProxyServer:
             ]
             if status == 407:
                 headers.append('Proxy-Authenticate: Basic realm="Proxy"')
+            if extra_headers:
+                headers.extend(extra_headers)
             response = "\r\n".join(headers) + "\r\n\r\n"
 
             writer.write(response.encode())
@@ -474,23 +537,7 @@ class ProxyServer:
             sessid=sessid,
         )
         if not proxy:
-            if self._proxy_manager.are_all_proxies_quarantined(
-                project.id, target_host, session_id, country
-            ):
-                await self._send_error(
-                    client_writer, 429, "Too Many Requests",
-                    "All proxies are temporarily rate-limited. Retry later.",
-                )
-                await event_bus.publish(request_rejected,
-                    self, project_id=project.id, reason="all_proxies_quarantined"
-                )
-            else:
-                await self._send_error(
-                    client_writer, 502, "Bad Gateway", self._no_proxy_message(country)
-                )
-                await event_bus.publish(request_rejected,
-                    self, project_id=project.id, reason="no_proxy_available"
-                )
+            await self._reject_no_proxy(client_writer, project.id, target_host, session_id, country)
             return
 
         verified = await self._verify_exit(
@@ -504,8 +551,9 @@ class ProxyServer:
         success = False
         client_disconnected = False
         latency_ms = 0.0
-        bytes_sent = 0
-        bytes_received = 0
+        # Counts the tunnel's bytes as they flow; the completion event below
+        # carries only what the meter has not reported yet.
+        meter = self._proxy_manager.traffic_meter(proxy, project.id)
         upstream_writer: asyncio.StreamWriter | None = None
 
         # Check if MITM is enabled for this project
@@ -530,19 +578,21 @@ class ProxyServer:
 
             if use_mitm:
                 # MITM handler takes ownership of upstream connection
-                bytes_sent, bytes_received = await self._mitm_handler.handle(  # type: ignore[union-attr]
+                await self._mitm_handler.handle(  # type: ignore[union-attr]
                     client_reader, client_writer, target_host, target_port,
                     proxy, project,
                     upstream_reader=upstream_reader,
                     upstream_writer=upstream_writer,
+                    meter=meter,
                 )
                 upstream_writer = None  # MitmHandler/relay owns it now
             else:
-                bytes_sent, bytes_received = await self._tunnel(
+                await self._tunnel(
                     client_reader,
                     client_writer,
                     upstream_reader,
                     upstream_writer,
+                    meter=meter,
                 )
 
         except TimeoutError:
@@ -576,6 +626,7 @@ class ProxyServer:
                 upstream_writer.close()
                 await upstream_writer.wait_closed()
             if proxy and not client_disconnected:
+                bytes_sent, bytes_received = meter.finish()
                 await event_bus.publish(request_completed,
                     self,
                     proxy_id=proxy.id,
@@ -585,6 +636,10 @@ class ProxyServer:
                     bytes_sent=bytes_sent,
                     bytes_received=bytes_received,
                 )
+            else:
+                # Nothing will report the remainder; hand it over now so the
+                # bytes are not lost with the meter.
+                meter.report()
 
     async def _tunnel(
         self,
@@ -592,6 +647,7 @@ class ProxyServer:
         client_writer: asyncio.StreamWriter,
         upstream_reader: asyncio.StreamReader,
         upstream_writer: asyncio.StreamWriter,
+        meter: TrafficMeter | None = None,
     ) -> tuple[int, int]:
         """Bidirectional tunnel between client and upstream.
 
@@ -599,24 +655,26 @@ class ProxyServer:
         - The reader returns EOF (remote closed their write side)
         - A write fails (remote closed their read side or connection lost)
         - An OS-level error occurs
+        - The meter says stop (the connector's traffic limit, interrupt action)
 
         We wait for both directions to complete naturally, which correctly
         handles half-closed connections (e.g., client sends request, closes
-        write side, but still reads the response).
+        write side, but still reads the response). A direction stopped by
+        the meter takes the other one down with it: the tunnel is being
+        cut, not half-closed.
 
         Returns:
             Tuple of (bytes_sent, bytes_received) where bytes_sent is data
             sent to upstream (from client) and bytes_received is data
-            received from upstream (to client).
+            received from upstream (to client). With a meter these are the
+            same numbers the meter holds.
         """
-        bytes_sent = 0
-        bytes_received = 0
-
         async def forward(
             reader: asyncio.StreamReader,
             writer: asyncio.StreamWriter,
-        ) -> int:
-            """Forward data and return total bytes transferred."""
+            count: _ByteCounter,
+        ) -> tuple[int, bool]:
+            """Forward data; return (bytes transferred, stopped by the meter)."""
             total_bytes = 0
             try:
                 while True:
@@ -626,19 +684,29 @@ class ProxyServer:
                     total_bytes += len(data)
                     writer.write(data)
                     await writer.drain()
+                    if count is not None and not count(len(data)):
+                        return total_bytes, True
             except (ConnectionResetError, BrokenPipeError, OSError):
                 # Connection closed or errored - exit gracefully
                 pass
-            return total_bytes
+            return total_bytes, False
 
-        task1 = asyncio.create_task(forward(client_reader, upstream_writer))
-        task2 = asyncio.create_task(forward(upstream_reader, client_writer))
+        count_sent: _ByteCounter = meter.add_sent if meter is not None else None
+        count_received: _ByteCounter = meter.add_received if meter is not None else None
+        task1 = asyncio.create_task(forward(client_reader, upstream_writer, count_sent))
+        task2 = asyncio.create_task(forward(upstream_reader, client_writer, count_received))
+        tasks: set[asyncio.Task[tuple[int, bool]]] = {task1, task2}
 
         try:
-            # Wait for both directions to complete
-            results = await asyncio.gather(task1, task2)
-            bytes_sent = results[0]  # client -> upstream
-            bytes_received = results[1]  # upstream -> client
+            pending = set(tasks)
+            while pending:
+                done, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
+                if any(t.result()[1] for t in done) and pending:
+                    # Cut: the other direction must not wait for a natural end.
+                    for t in pending:
+                        t.cancel()
+                    await asyncio.gather(*pending, return_exceptions=True)
+                    pending = set()
         except asyncio.CancelledError:
             # If we're cancelled from outside, cancel both tasks
             task1.cancel()
@@ -647,6 +715,11 @@ class ProxyServer:
             await asyncio.gather(task1, task2, return_exceptions=True)
             raise
 
+        bytes_sent = task1.result()[0] if not task1.cancelled() else 0
+        bytes_received = task2.result()[0] if not task2.cancelled() else 0
+        if meter is not None:
+            # A cancelled direction never returned its count; the meter did.
+            bytes_sent, bytes_received = meter.sent, meter.received
         return bytes_sent, bytes_received
 
 
@@ -710,23 +783,7 @@ class ProxyServer:
             sessid=sessid,
         )
         if not proxy:
-            if self._proxy_manager.are_all_proxies_quarantined(
-                project_id, parsed_host, session_id, country
-            ):
-                await self._send_error(
-                    client_writer, 429, "Too Many Requests",
-                    "All proxies are temporarily rate-limited. Retry later.",
-                )
-                await event_bus.publish(request_rejected,
-                    self, project_id=project_id, reason="all_proxies_quarantined"
-                )
-            else:
-                await self._send_error(
-                    client_writer, 502, "Bad Gateway", self._no_proxy_message(country)
-                )
-                await event_bus.publish(request_rejected,
-                    self, project_id=project_id, reason="no_proxy_available"
-                )
+            await self._reject_no_proxy(client_writer, project_id, parsed_host, session_id, country)
             return
 
         project = self._proxy_manager.get_project(project_id)
@@ -741,8 +798,7 @@ class ProxyServer:
         start_time = time.monotonic()
         success = False
         latency_ms = 0.0
-        bytes_sent = 0
-        bytes_received = 0
+        meter = self._proxy_manager.traffic_meter(proxy, project_id)
         upstream_writer: asyncio.StreamWriter | None = None
 
         # Check if this is a SOCKS proxy
@@ -771,7 +827,7 @@ class ProxyServer:
 
             request_line_bytes = request_line.encode()
             upstream_writer.write(request_line_bytes)
-            bytes_sent += len(request_line_bytes)
+            meter.add_sent(len(request_line_bytes))
 
             # Forward headers, adding proxy auth for HTTP proxies only
             # (SOCKS auth is handled during tunnel establishment)
@@ -781,7 +837,7 @@ class ProxyServer:
                 ).decode()
                 auth_header = f"Proxy-Authorization: Basic {credentials}\r\n".encode()
                 upstream_writer.write(auth_header)
-                bytes_sent += len(auth_header)
+                meter.add_sent(len(auth_header))
 
             relayed = self._end_to_end_headers(headers, HOP_BY_HOP_REQUEST_HEADERS)
             # We serve one exchange per connection, so say so: an upstream
@@ -791,19 +847,26 @@ class ProxyServer:
             for key, value in relayed.items():
                 header_line = f"{key}: {value}\r\n".encode()
                 upstream_writer.write(header_line)
-                bytes_sent += len(header_line)
+                meter.add_sent(len(header_line))
             upstream_writer.write(b"\r\n")
-            bytes_sent += 2
+            meter.add_sent(2)
 
-            # Forward request body if present
+            # Forward request body if present, in chunks so a large upload is
+            # metered as it goes rather than buffered whole.
             content_length = int(headers.get("content-length", 0))
-            if content_length > 0:
-                body = await asyncio.wait_for(
-                    client_reader.readexactly(content_length),
+            remaining = content_length
+            while remaining > 0:
+                chunk = await asyncio.wait_for(
+                    client_reader.read(min(BUFFER_SIZE, remaining)),
                     timeout=self._timeout,
                 )
-                upstream_writer.write(body)
-                bytes_sent += len(body)
+                if not chunk:
+                    raise ConnectionError("Client closed the connection mid-body")
+                remaining -= len(chunk)
+                upstream_writer.write(chunk)
+                await upstream_writer.drain()
+                if not meter.add_sent(len(chunk)):
+                    return
 
             await upstream_writer.drain()
 
@@ -812,7 +875,7 @@ class ProxyServer:
                 upstream_reader.readline(),
                 timeout=self._timeout,
             )
-            bytes_received += len(response_line)
+            meter.add_received(len(response_line))
 
             # Measure latency up to first response (connection establishment)
             latency_ms = (time.monotonic() - start_time) * 1000
@@ -828,7 +891,7 @@ class ProxyServer:
             raw_lines: list[tuple[str | None, bytes]] = []
             while True:
                 line = await upstream_reader.readline()
-                bytes_received += len(line)
+                meter.add_received(len(line))
                 if line in (b"\r\n", b"\n", b""):
                     break
                 line_str = line.decode("utf-8", errors="replace").strip()
@@ -855,13 +918,20 @@ class ProxyServer:
             transfer_encoding = response_headers.get("transfer-encoding", "")
 
             if transfer_encoding.lower() == "chunked":
-                chunked_bytes = await self._forward_chunked(upstream_reader, client_writer)
-                bytes_received += chunked_bytes
+                await self._forward_chunked(upstream_reader, client_writer, meter)
             elif resp_content_length:
-                body = await upstream_reader.readexactly(int(resp_content_length))
-                bytes_received += len(body)
-                client_writer.write(body)
-                await client_writer.drain()
+                remaining = int(resp_content_length)
+                while remaining > 0:
+                    chunk = await upstream_reader.read(min(BUFFER_SIZE, remaining))
+                    if not chunk:
+                        break
+                    remaining -= len(chunk)
+                    client_writer.write(chunk)
+                    await client_writer.drain()
+                    if not meter.add_received(len(chunk)):
+                        # Interrupted by the connector's traffic limit: the
+                        # client sees a truncated body and a closed connection.
+                        break
 
         except TimeoutError:
             latency_ms = (time.monotonic() - start_time) * 1000
@@ -886,6 +956,7 @@ class ProxyServer:
                 upstream_writer.close()
                 await upstream_writer.wait_closed()
             if proxy:
+                bytes_sent, bytes_received = meter.finish()
                 await event_bus.publish(request_completed,
                     self,
                     proxy_id=proxy.id,
@@ -900,14 +971,26 @@ class ProxyServer:
         self,
         reader: asyncio.StreamReader,
         writer: asyncio.StreamWriter,
+        meter: TrafficMeter | None = None,
     ) -> int:
-        """Forward chunked transfer encoding and return total bytes read."""
+        """Forward chunked transfer encoding and return total bytes read.
+
+        Stops early, leaving the body incomplete, when the meter says the
+        connector's traffic limit cut the transfer.
+        """
         total_bytes = 0
+
+        def count(n: int) -> bool:
+            nonlocal total_bytes
+            total_bytes += n
+            return meter.add_received(n) if meter is not None else True
+
         while True:
             # Read chunk size line
             size_line = await reader.readline()
-            total_bytes += len(size_line)
             writer.write(size_line)
+            if not count(len(size_line)):
+                break
 
             size_str = size_line.decode("utf-8", errors="replace").strip()
             chunk_size = int(size_str.split(";")[0], 16)
@@ -915,14 +998,16 @@ class ProxyServer:
             if chunk_size == 0:
                 # Final chunk - read trailing CRLF
                 trailing = await reader.readline()
-                total_bytes += len(trailing)
                 writer.write(trailing)
+                count(len(trailing))
                 break
 
             # Read chunk data + CRLF
             chunk_data = await reader.readexactly(chunk_size + 2)
-            total_bytes += len(chunk_data)
             writer.write(chunk_data)
+            await writer.drain()
+            if not count(len(chunk_data)):
+                break
 
         await writer.drain()
         return total_bytes

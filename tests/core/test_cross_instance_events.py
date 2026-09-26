@@ -739,8 +739,8 @@ class TestCrossInstanceMetricDeltas:
 
         # Pending delta carries the accumulated batch - no Redis write yet.
         pending = started_proxy_manager._pending_proxy_deltas[proxy.id]
-        assert pending["request_count"] == 4
-        assert pending["success_count"] == 4
+        assert pending.request_count == 4
+        assert pending.success_count == 4
         from api.db.redis import PROXY_METRICS_KEY
         ttl_or_data = await redis_client.client.hgetall(PROXY_METRICS_KEY.format(proxy_id=proxy.id))
         # Redis untouched on the hot path. Whatever's there came from

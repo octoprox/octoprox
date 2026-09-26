@@ -141,7 +141,9 @@ class CacheStats(BaseModel):
     geo_provision_locks: int = 0
     pending_proxy_deltas: int = 0
     pending_project_deltas: int = 0
+    pending_connector_deltas: int = 0
     quarantined_proxies: int = 0
+    traffic_blocked_connectors: int = 0
     tls_contexts: int = 0
     provider_types: int = 0
 

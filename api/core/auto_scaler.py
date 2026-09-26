@@ -75,6 +75,10 @@ class AutoScalerDataProvider(Protocol):
         """Get active (non-terminating) proxies for a connector."""
         ...
 
+    def is_traffic_blocked(self, connector_id: str) -> bool:
+        """Whether the connector takes no requests because its traffic limit was reached."""
+        ...
+
 logger = structlog.get_logger()
 
 # How often to check scaling and rotation (seconds)
@@ -394,6 +398,13 @@ class AutoScaler:
 
         # Check if we should skip scaling due to recent errors
         if self._should_skip_scaling(connector):
+            return
+
+        # A connector over its traffic limit takes no requests, and the
+        # rejections it causes count as demand: scaling it up would pay for
+        # instances that carry nothing. Rotation and scale-down still run.
+        if self._data_provider.is_traffic_blocked(connector.id):
+            logger.debug("Skipping scaling: connector over its traffic limit", connector_id=connector.id)
             return
 
         # Check scaling cooldown (only for demand-based scaling)

@@ -151,12 +151,26 @@ class MetricsCompactor:
             async with self._session_factory() as session:
                 repo = MetricsRepository(session)
                 proxy_ids = await repo.get_proxy_ids_for_project(project_id)
+                connector_ids = await repo.get_connector_ids_for_project(project_id)
 
             for proxy_id in proxy_ids:
                 async with self._session_factory() as session:
                     repo = MetricsRepository(session)
                     count = await repo.compact_proxy_metrics(
                         proxy_id=proxy_id,
+                        older_than=cutoff,
+                        source_granularity=source_gran,
+                        target_granularity=target_gran,
+                    )
+                    await session.commit()
+                    total += count
+
+            # Compact connector metrics for all connectors in this project
+            for connector_id in connector_ids:
+                async with self._session_factory() as session:
+                    repo = MetricsRepository(session)
+                    count = await repo.compact_connector_metrics(
+                        connector_id=connector_id,
                         older_than=cutoff,
                         source_granularity=source_gran,
                         target_granularity=target_gran,
@@ -189,6 +203,9 @@ class MetricsCompactor:
                 project_id, cutoff
             )
             total += await repo.delete_proxy_metrics_for_project_older_than(
+                project_id, cutoff
+            )
+            total += await repo.delete_connector_metrics_for_project_older_than(
                 project_id, cutoff
             )
             await session.commit()

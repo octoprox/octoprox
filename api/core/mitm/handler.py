@@ -24,6 +24,7 @@ from api.core.tls_cert_manager import TLSCertManager, pop_client_hello
 
 if TYPE_CHECKING:
     from api.core.mitm.base import MitmRelay
+    from api.core.traffic_limiter import TrafficMeter
     from api.db.redis import RedisClient
     from api.models.project import Project
     from api.models.proxy import Proxy
@@ -131,12 +132,18 @@ class MitmHandler:
         project: "Project",
         upstream_reader: asyncio.StreamReader | None = None,
         upstream_writer: asyncio.StreamWriter | None = None,
+        meter: "TrafficMeter | None" = None,
     ) -> tuple[int, int]:
         """Run MITM interception on the client connection.
 
         Upgrades the client connection to TLS, then uses h11 to parse
         HTTP/1.1 requests and serialize responses, relaying them via
         the appropriate strategy based on project settings.
+
+        With a ``meter``, every request and response is counted as it is
+        relayed, and once the connector's traffic limit cuts the connection
+        the next request is answered with the limit status instead of being
+        relayed, then the connection closes.
 
         Returns:
             Tuple of (bytes_sent, bytes_received).
@@ -226,8 +233,24 @@ class MitmHandler:
                 # Read a complete request using h11 (Request + optional Data + EndOfMessage)
                 request_event, body, read_bytes = await _read_request(conn, client_reader)
                 bytes_sent += read_bytes
+                if meter is not None:
+                    meter.add_sent(read_bytes)
 
                 if request_event is None:
+                    break
+
+                if meter is not None and not meter.allowed:
+                    status = meter.limit_status
+                    written = _send_via_h11(
+                        conn, client_writer, status,
+                        [("Proxy-Status", "octoprox; error=bandwidth_limit_exceeded"),
+                         ("Content-Type", "text/plain; charset=utf-8")],
+                        b"The connector serving this connection has reached its traffic limit.",
+                    )
+                    with contextlib.suppress(ConnectionResetError, BrokenPipeError, OSError):
+                        await client_writer.drain()
+                    bytes_received += written
+                    meter.add_received(written)
                     break
 
                 # Extract request details from h11 event
@@ -271,6 +294,8 @@ class MitmHandler:
                     with contextlib.suppress(ConnectionResetError, BrokenPipeError, OSError):
                         await client_writer.drain()
                     bytes_received += written
+                    if meter is not None:
+                        meter.add_received(written)
                     break
 
                 # Filter response headers: drop transfer-encoding/content-length
@@ -293,6 +318,8 @@ class MitmHandler:
                     )
                     await client_writer.drain()
                     bytes_received += written
+                    if meter is not None:
+                        meter.add_received(written)
                 except (ConnectionResetError, BrokenPipeError, OSError):
                     break
 

@@ -183,6 +183,15 @@ provider_changed = signal("provider-changed")
 # Args: entity_id (proxy_id, str), op (Literal["quarantined", "released"])
 proxy_quarantine_changed = signal("proxy-quarantine-changed")
 
+# Emitted by TrafficLimiter when a connector reaches its traffic limit and
+# stops taking requests, or is released (period rollover, raised limit, manual
+# reset). Cross-instance: receivers re-read the block key from Redis so the
+# connector drops out of selection everywhere within a subscriber tick, and
+# running transfers on peers are cut when the action is interrupt.
+# Sender: TrafficLimiter
+# Args: entity_id (connector_id, str), op (Literal["blocked", "released"])
+connector_traffic_changed = signal("connector-traffic-changed")
+
 
 # Emitted by the geo routes and the database updater after an IP database is
 # uploaded, changed, deleted or refreshed. Cross-instance: receivers re-read the

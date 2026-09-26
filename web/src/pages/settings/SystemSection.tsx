@@ -874,11 +874,12 @@ function CacheCard({ view }: { view: InstanceView }) {
       <KeyValue label="Provider types" value={formatCount(cache.provider_types)} />
       <KeyValue label="Per-project strategies" value={formatCount(cache.project_strategies)} />
       <KeyValue label="Quarantined proxies" value={formatCount(cache.quarantined_proxies)} />
+      <KeyValue label="Connectors over traffic limit" value={formatCount(cache.traffic_blocked_connectors ?? 0)} />
       <KeyValue label="TLS contexts" value={formatCount(cache.tls_contexts)} />
       <KeyValue label="Geo provisioning locks" value={formatCount(cache.geo_provision_locks)} />
       <KeyValue
         label="Metric deltas awaiting flush"
-        value={`${formatCount(cache.pending_proxy_deltas)} proxy · ${formatCount(cache.pending_project_deltas)} project`}
+        value={`${formatCount(cache.pending_proxy_deltas)} proxy · ${formatCount(cache.pending_project_deltas)} project · ${formatCount(cache.pending_connector_deltas ?? 0)} connector`}
       />
     </Card>
   )

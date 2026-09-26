@@ -4,7 +4,8 @@
 """Connector model definitions."""
 
 from datetime import datetime
-from typing import Any
+from enum import Enum
+from typing import Any, Literal
 from uuid import uuid4
 
 from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
@@ -272,6 +273,124 @@ class RateLimitConfig(BaseModel):
         return self
 
 
+class TrafficPeriod(str, Enum):
+    """How often a connector's traffic usage starts over."""
+    DAY = "day"
+    WEEK = "week"
+    MONTH = "month"
+
+
+class TrafficLimitAction(str, Enum):
+    """What happens when a connector's traffic reaches its limit.
+
+    ``alert`` keeps routing and only flags the connector. ``block`` stops
+    handing the connector new requests and lets running transfers finish.
+    ``interrupt`` also cuts the transfers that are still running.
+    """
+    ALERT = "alert"
+    BLOCK = "block"
+    INTERRUPT = "interrupt"
+
+
+# Status sent to a client when every connector that could serve its request is
+# over its traffic limit. 509 Bandwidth Limit Exceeded cannot be mistaken for
+# the rate limiter's 429 or for a misconfiguration; 429 is offered for clients
+# hard-wired to it.
+DEFAULT_TRAFFIC_LIMIT_STATUS = 509
+TRAFFIC_LIMIT_STATUSES: tuple[int, ...] = (429, 509)
+# Vendors bill decimal gigabytes. The UI enters limits and prices in these.
+BYTES_PER_GB = 1_000_000_000
+
+
+class TrafficConfig(BaseModel):
+    """Traffic accounting, limit and pricing for one connector.
+
+    Bytes through the connector's proxies, both directions, are summed over
+    the current period: a calendar day, a week starting on ``reset_day``
+    (1 = Monday) or a month starting on ``reset_day`` of the month. The
+    period matches the vendor's billing cycle; ``reset_day`` is capped at 28
+    so every month has it.
+
+    ``limit_bytes`` is optional: without it the connector is only metered
+    and priced. With it, crossing ``warn_percent`` of the limit flags the
+    connector and reaching the limit applies ``action``. ``limit_status`` is
+    what clients get when no connector is left to serve them.
+
+    ``price_per_gb`` turns usage into spend at display time; it is never
+    stored with the metrics, so past periods are priced at the current rate.
+    """
+    limit_bytes: int | None = Field(default=None, ge=1)
+    period: TrafficPeriod = TrafficPeriod.MONTH
+    reset_day: int = Field(default=1, ge=1, le=28)
+    action: TrafficLimitAction = TrafficLimitAction.ALERT
+    warn_percent: int = Field(default=80, ge=1, le=100)
+    limit_status: int = DEFAULT_TRAFFIC_LIMIT_STATUS
+    price_per_gb: float | None = Field(default=None, ge=0)
+    currency: str = "USD"
+
+    @field_validator("limit_status")
+    @classmethod
+    def _validate_status(cls, value: int) -> int:
+        if value not in TRAFFIC_LIMIT_STATUSES:
+            allowed = ", ".join(str(s) for s in TRAFFIC_LIMIT_STATUSES)
+            raise ValueError(f"limit_status must be one of {allowed}")
+        return value
+
+    @field_validator("currency", mode="before")
+    @classmethod
+    def _validate_currency(cls, value: Any) -> str:
+        code = str(value or "").strip().upper()
+        if len(code) != 3 or not code.isascii() or not code.isalpha():
+            raise ValueError("currency must be a three-letter ISO 4217 code")
+        return code
+
+    @model_validator(mode="after")
+    def _validate_reset_day(self) -> "TrafficConfig":
+        if self.period == TrafficPeriod.WEEK and self.reset_day > 7:
+            raise ValueError("reset_day must be 1 (Monday) to 7 (Sunday) for a weekly period")
+        return self
+
+    @property
+    def limit_enabled(self) -> bool:
+        """Whether the connector has a limit to enforce, not just metering."""
+        return self.limit_bytes is not None
+
+    @property
+    def warn_bytes(self) -> int | None:
+        """Usage at which the connector is flagged as approaching its limit."""
+        if self.limit_bytes is None:
+            return None
+        return self.limit_bytes * self.warn_percent // 100
+
+    def cost_of(self, total_bytes: int) -> float | None:
+        """Spend for ``total_bytes`` at the configured price, or None when unpriced."""
+        if self.price_per_gb is None:
+            return None
+        return round(total_bytes / BYTES_PER_GB * self.price_per_gb, 4)
+
+
+class TrafficUsage(BaseModel):
+    """A connector's traffic in the current period, against its limit and price."""
+    period: TrafficPeriod
+    period_start: datetime
+    period_end: datetime
+    bytes_sent: int
+    bytes_received: int
+    total_bytes: int
+    limit_bytes: int | None = None
+    # total_bytes as a share of the limit, 0-100 and beyond; None without a limit.
+    percent: float | None = None
+    action: TrafficLimitAction
+    status: Literal["ok", "warning", "exceeded"]
+    # True while the connector takes no new requests because of its limit.
+    blocked: bool
+    price_per_gb: float | None = None
+    currency: str
+    cost: float | None = None
+    # Usage counts from here when it is inside the period (a manual reset).
+    reset_at: datetime | None = None
+
+
 def validate_routing_config(config: dict[str, Any]) -> dict[str, Any]:
     """Validate routing config and return validated dict.
 
@@ -295,6 +414,23 @@ def validate_rate_limit_config(config: dict[str, Any]) -> dict[str, Any]:
         return {}
     validated = RateLimitConfig(**config)
     return validated.model_dump()
+
+
+def validate_traffic_config(config: dict[str, Any]) -> dict[str, Any]:
+    """Validate traffic config and return the dict to store.
+
+    Only explicit choices are kept: a key at its default value is dropped, so
+    a connector left at the defaults stores ``{}`` like every other config.
+    """
+    if not config:
+        return {}
+    validated = TrafficConfig(**config)
+    defaults = TrafficConfig().model_dump(mode="json")
+    return {
+        key: value
+        for key, value in validated.model_dump(mode="json").items()
+        if value is not None and value != defaults.get(key)
+    }
 
 
 _CODE_CONNECTOR_MODELS: dict[str, type[BaseModel]] = {
@@ -356,6 +492,9 @@ class Connector(BaseModel):
     config: dict[str, Any] = Field(default_factory=dict)
     routing_config: dict[str, Any] = Field(default_factory=dict)
     rate_limit_config: dict[str, Any] = Field(default_factory=dict)
+    traffic_config: dict[str, Any] = Field(default_factory=dict)
+    # Usage in the current period counts from here when set inside it (manual reset).
+    traffic_reset_at: datetime | None = None
     enabled: bool = True
     pending_deletion: bool = False  # Set when connector is marked for async deletion
 
@@ -428,6 +567,19 @@ class Connector(BaseModel):
             return None
         return RateLimitConfig(**self.rate_limit_config)
 
+    @property
+    def parsed_traffic_config(self) -> TrafficConfig:
+        """The typed traffic config; every connector has one, at the defaults when unset.
+
+        A stored value the model rejects (hand-edited JSON) reads as the defaults.
+        """
+        if not self.traffic_config:
+            return TrafficConfig()
+        try:
+            return TrafficConfig(**self.traffic_config)
+        except ValidationError:
+            return TrafficConfig()
+
 
 class ConnectorCreate(BaseModel):
     """Schema for creating a new connector."""
@@ -436,6 +588,7 @@ class ConnectorCreate(BaseModel):
     config: dict[str, Any] = Field(default_factory=dict)
     routing_config: dict[str, Any] = Field(default_factory=dict)
     rate_limit_config: dict[str, Any] = Field(default_factory=dict)
+    traffic_config: dict[str, Any] = Field(default_factory=dict)
     enabled: bool = True
     # Note: config validation happens in the route after fetching credential type
 
@@ -447,6 +600,7 @@ class ConnectorUpdate(BaseModel):
     config: dict[str, Any] | None = None
     routing_config: dict[str, Any] | None = None
     rate_limit_config: dict[str, Any] | None = None
+    traffic_config: dict[str, Any] | None = None
     enabled: bool | None = None
 
 
@@ -479,6 +633,11 @@ class ConnectorResponse(BaseModel):
     config: dict[str, Any]
     routing_config: dict[str, Any] = Field(default_factory=dict)
     rate_limit_config: dict[str, Any] = Field(default_factory=dict)
+    traffic_config: dict[str, Any] = Field(default_factory=dict)
+    traffic_reset_at: datetime | None = None
+    # Traffic in the current period against the limit and price; None only
+    # when the serving instance has no usage yet for the connector.
+    traffic_usage: TrafficUsage | None = None
     enabled: bool
     proxy_count: int
     # Intended pool size and how it is derived (None when there is no target)
