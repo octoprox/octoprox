@@ -14,14 +14,15 @@ import { useProject } from '../contexts/ProjectContext'
 import { useAuth } from '../contexts/AuthContext'
 import { useTheme } from '../contexts/ThemeContext'
 import { useToast } from '../contexts/ToastContext'
-import { formatBytes, plural } from '../utils/format'
+import { formatBytes, formatMoney, plural } from '../utils/format'
 import { targetTotal, describeTarget, isDynamic } from '../utils/connectors'
 import { ProviderLogo } from '../components/ProviderLogo'
 import { Page } from '../components/layout/Page'
 import { Sparkline } from '../components/charts/Sparkline'
 import { ProjectPanel } from '../components/ProjectForm'
 import { ProjectLocations, LocationSummary } from '../components/ProjectLocations'
-import { TrafficSplitPanel } from '../components/TrafficSplit'
+import { TrafficSplitPanel, totalSpend } from '../components/TrafficSplit'
+import { PERIOD_LABEL, TrafficUsageBar, describeUsage } from '../components/ConnectorTraffic'
 import { Badge, Button, Card, CardHeader, KeyValue, Segmented } from '../components/ui'
 
 const TIME_RANGES = ['1h', '6h', '24h', '7d', '30d'] as const
@@ -216,6 +217,14 @@ export default function Overview() {
 
   const connectors = connectorsData?.connectors ?? []
   const base = `/projects/${selectedProjectId}`
+  // Spend this period across the connectors that carry a price, when they agree on a currency.
+  const spend = useMemo(() => {
+    const usages = connectors.map((c) => c.traffic_usage).filter((u): u is NonNullable<typeof u> => !!u && u.cost != null)
+    const total = totalSpend(usages.map((u) => ({ cost: u.cost, currency: u.currency })))
+    if (!total) return null
+    const periods = new Set(usages.map((u) => u.period))
+    return { ...total, label: periods.size === 1 ? PERIOD_LABEL[usages[0].period] : 'this period', overLimit: connectors.filter((c) => c.traffic_usage?.blocked).length }
+  }, [connectors])
 
   return (
     <Page
@@ -288,13 +297,14 @@ export default function Overview() {
       </Card>
 
       {/* KPI row */}
-      <Card className="grid grid-cols-2 @lg:grid-cols-3 @5xl:grid-cols-6 gap-px bg-line overflow-hidden [&>*]:bg-surface">
+      <Card className={`grid grid-cols-2 @lg:grid-cols-3 ${spend ? '@5xl:grid-cols-7' : '@5xl:grid-cols-6'} gap-px bg-line overflow-hidden [&>*]:bg-surface`}>
         <Kpi label="Requests" value={compact(totals.requests)} spark={sparks.requests} color={C.requests} />
         <Kpi label="Successes" value={compact(totals.successes)} spark={sparks.successes} color={C.successes} />
         <Kpi label="Failures" value={compact(totals.failures)} spark={sparks.failures} color={C.failures} />
         <Kpi label="Bytes sent" value={bytesShort(totals.bytesSent)} spark={sparks.sent} color={C.sent} />
         <Kpi label="Bytes received" value={bytesShort(totals.bytesReceived)} spark={sparks.received} color={C.received} />
         <Kpi label="Requests / min" value={scaling ? scaling.requests_per_minute.toFixed(1) : '-'} sub={scaling ? `${scaling.rate_per_proxy.toFixed(1)} per proxy` : undefined} />
+        {spend && <Kpi label={`Spend ${spend.label}`} value={formatMoney(spend.amount, spend.currency)} sub={spend.overLimit > 0 ? `${spend.overLimit} ${plural(spend.overLimit, 'connector', 'connectors')} over limit` : 'at current rates'} />}
       </Card>
 
       <div className="grid grid-cols-1 @4xl:grid-cols-[minmax(0,2fr)_minmax(0,1fr)] gap-4 items-stretch">
@@ -406,8 +416,9 @@ export default function Overview() {
                     <ProviderLogo type={c.credential_type} className="w-4 h-4 text-[16px] flex-none" />
                     <span className={cnTrunc(!c.enabled)}>{c.name}</span>
                     {c.last_error && <AlertTriangle className="w-3.5 h-3.5 text-danger flex-none" />}
+                    {c.traffic_usage && c.traffic_usage.limit_bytes != null && <TrafficUsageBar usage={c.traffic_usage} compact className="text-xs text-fg-muted flex-none" />}
                     <span className="text-fg-muted tabular-nums flex-none" title={describeTarget(c)}>{c.proxy_count}{isDynamic(c) ? <span className="text-fg-subtle"> dyn</span> : max != null && <span className="text-fg-subtle">/{max}</span>}</span>
-                    <span className={`w-2 h-2 rounded-full flex-none ${!c.enabled ? 'bg-fg-subtle' : c.last_error ? 'bg-danger' : 'bg-success'}`} />
+                    <span className={`w-2 h-2 rounded-full flex-none ${!c.enabled ? 'bg-fg-subtle' : c.last_error ? 'bg-danger' : c.traffic_usage?.blocked ? 'bg-orange-500' : 'bg-success'}`} title={c.traffic_usage?.blocked ? describeUsage(c.traffic_usage) : undefined} />
                   </button>
                 )
               })}

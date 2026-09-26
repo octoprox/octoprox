@@ -214,11 +214,17 @@ class ConnectorTrafficShare(BaseModel):
     # Share of untargeted requests this connector takes right now, 0-100.
     # Zero when the connector is disabled or has no eligible proxy.
     expected_share: float
-    # Why the connector takes nothing, when it does: "disabled" or "no_eligible_proxies".
+    # Why the connector takes nothing, when it does: "disabled", "traffic_limit"
+    # (blocked by its traffic limit) or "no_eligible_proxies".
     excluded_reason: str | None = None
     observed_requests: int
     # Share of the project's requests in the window that went through this connector, 0-100.
     observed_share: float | None = None
+    # Bytes, both directions, the connector carried in the window, and what
+    # they cost at its price per GB (None when the connector is unpriced).
+    observed_bytes: int = 0
+    cost: float | None = None
+    currency: str | None = None
 
 
 class TrafficSplitResponse(BaseModel):
@@ -227,6 +233,7 @@ class TrafficSplitResponse(BaseModel):
     range: str
     total_weight: int
     observed_requests: int
+    observed_bytes: int = 0
     connectors: list[ConnectorTrafficShare]
 
 
@@ -330,7 +337,58 @@ async def prometheus_metrics(request: Request, project_id: str) -> str:
         f"octoprox_bytes_received_total{label_str} {project.bytes_received}",
     ]
 
+    # Per-connector traffic this period, against the limit and the price.
+    connectors = sorted(proxy_manager.get_connectors_for_project(project_id), key=lambda c: c.name.lower())
+    usage_lines: list[str] = []
+    limit_lines: list[str] = []
+    cost_lines: list[str] = []
+    blocked_lines: list[str] = []
+    for connector in connectors:
+        usage = proxy_manager.traffic_usage(connector)
+        labels = f'{{project="{project_id}",connector="{connector.id}",name="{_label_value(connector.name)}"}}'
+        usage_lines.append(f"octoprox_connector_traffic_bytes{labels} {usage.total_bytes}")
+        if usage.limit_bytes is not None:
+            limit_lines.append(f"octoprox_connector_traffic_limit_bytes{labels} {usage.limit_bytes}")
+        if usage.cost is not None:
+            cost_lines.append(
+                f'octoprox_connector_traffic_cost{{project="{project_id}",connector="{connector.id}",'
+                f'name="{_label_value(connector.name)}",currency="{usage.currency}"}} {usage.cost}'
+            )
+        blocked_lines.append(f"octoprox_connector_traffic_blocked{labels} {1 if usage.blocked else 0}")
+    if connectors:
+        lines += [
+            "",
+            "# HELP octoprox_connector_traffic_bytes Bytes through the connector in its current traffic period",
+            "# TYPE octoprox_connector_traffic_bytes gauge",
+            *usage_lines,
+        ]
+        if limit_lines:
+            lines += [
+                "",
+                "# HELP octoprox_connector_traffic_limit_bytes The connector's traffic limit for the period",
+                "# TYPE octoprox_connector_traffic_limit_bytes gauge",
+                *limit_lines,
+            ]
+        if cost_lines:
+            lines += [
+                "",
+                "# HELP octoprox_connector_traffic_cost Spend in the current period at the connector's price per GB",
+                "# TYPE octoprox_connector_traffic_cost gauge",
+                *cost_lines,
+            ]
+        lines += [
+            "",
+            "# HELP octoprox_connector_traffic_blocked 1 while the connector takes no requests because of its traffic limit",
+            "# TYPE octoprox_connector_traffic_blocked gauge",
+            *blocked_lines,
+        ]
+
     return "\n".join(lines)
+
+
+def _label_value(value: str) -> str:
+    """Escape a string for a Prometheus label value."""
+    return value.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
 
 
 @router.get("/traffic-split", response_model=TrafficSplitResponse)
@@ -347,9 +405,9 @@ async def get_traffic_split(
     Requests that carry a country or hit a filtered domain narrow the set
     and the remaining connectors split the traffic by the same ratios.
 
-    The observed share sums the flushed per-proxy request counts in the
-    window per connector. Proxies removed since then take their history
-    with them, so the two can disagree right after a rotation.
+    The observed share sums the flushed connector-level metrics in the
+    window, which outlive the connector's proxies, so a rotation does not
+    make the numbers disagree.
     """
     proxy_manager = request.app.state.proxy_manager
 
@@ -366,11 +424,13 @@ async def get_traffic_split(
     total_weight = sum(g.weight for g in eligible_groups.values())
 
     delta, _limit, _bucket = RANGE_CONFIG[range]
+    since = utc_now() - delta
     async with proxy_manager._session_factory() as session:
-        counts = await MetricsRepository(session).get_connector_request_counts_since(
-            [c.id for c in connectors], utc_now() - delta
+        totals = await MetricsRepository(session).get_connector_totals_since(
+            {c.id: since for c in connectors}
         )
-    observed_total = sum(counts.values())
+    observed_total = sum(t["request_count"] for t in totals.values())
+    observed_bytes_total = sum(t["bytes_sent"] + t["bytes_received"] for t in totals.values())
 
     shares: list[ConnectorTrafficShare] = []
     for connector in sorted(connectors, key=lambda c: c.name.lower()):
@@ -379,12 +439,17 @@ async def get_traffic_split(
         eligible = len(group.proxies) if group else 0
         if not connector.enabled:
             reason: str | None = "disabled"
+        elif proxy_manager.is_traffic_blocked(connector.id):
+            reason = "traffic_limit"
         elif group is None:
             reason = "no_eligible_proxies"
         else:
             reason = None
         expected = (group.weight / total_weight * 100) if group and total_weight else 0.0
-        observed = counts.get(connector.id, 0)
+        observed = totals.get(connector.id, {})
+        requests = int(observed.get("request_count", 0))
+        observed_bytes = int(observed.get("bytes_sent", 0)) + int(observed.get("bytes_received", 0))
+        traffic_config = connector.parsed_traffic_config
         shares.append(ConnectorTrafficShare(
             connector_id=connector.id,
             name=connector.name,
@@ -396,8 +461,11 @@ async def get_traffic_split(
             eligible_proxies=eligible,
             expected_share=round(expected, 2),
             excluded_reason=reason,
-            observed_requests=observed,
-            observed_share=round(observed / observed_total * 100, 2) if observed_total else None,
+            observed_requests=requests,
+            observed_share=round(requests / observed_total * 100, 2) if observed_total else None,
+            observed_bytes=observed_bytes,
+            cost=traffic_config.cost_of(observed_bytes),
+            currency=traffic_config.currency if traffic_config.price_per_gb is not None else None,
         ))
 
     return TrafficSplitResponse(
@@ -405,5 +473,6 @@ async def get_traffic_split(
         range=range,
         total_weight=total_weight,
         observed_requests=observed_total,
+        observed_bytes=observed_bytes_total,
         connectors=shares,
     )

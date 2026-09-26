@@ -125,7 +125,9 @@ async def import_backup(
     # 4. Purge stale Redis state for the replaced entities and rebuild the
     #    live cache so the imported setup is immediately effective.
     proxy_manager = request.app.state.proxy_manager
-    await proxy_manager.apply_imported_state(result.old_project_ids, result.old_proxy_ids)
+    await proxy_manager.apply_imported_state(
+        result.old_project_ids, result.old_proxy_ids, result.old_connector_ids
+    )
     # Attribution settings and database rows were replaced too: reload them and
     # reopen whatever database files came with the backup. Peers catch up on
     # their periodic reload.

@@ -1,20 +1,11 @@
 # Copyright 2026 Octoprox Authors
 # SPDX-License-Identifier: Apache-2.0
 
-"""Stats calculation helpers for proxies and projects."""
+"""Metric batches for proxies, projects and connectors."""
 
-from typing import Any, Protocol, TypedDict
+from typing import Any, Protocol
 
-
-class MetricsDict(TypedDict, total=False):
-    """Type for metrics dictionaries from Redis/Postgres."""
-
-    request_count: int
-    success_count: int
-    failure_count: int
-    avg_latency_ms: float
-    bytes_sent: int
-    bytes_received: int
+from pydantic import BaseModel, ValidationError
 
 
 class HasStats(Protocol):
@@ -28,178 +19,134 @@ class HasStats(Protocol):
     bytes_received: int
 
 
-def combine_metrics(
-    postgres_metrics: dict[str, Any],
-    redis_metrics: dict[str, Any],
-) -> MetricsDict:
-    """Combine metrics from Postgres (historical) and Redis (current window).
-
-    Computes weighted average for latency based on request counts.
-
-    Args:
-        postgres_metrics: Historical metrics from Postgres.
-        redis_metrics: Current window metrics from Redis.
-
-    Returns:
-        Combined metrics dictionary.
-    """
-    pg_requests = postgres_metrics.get("request_count", 0)
-    rd_requests = redis_metrics.get("request_count", 0)
-    total_requests = pg_requests + rd_requests
-
-    pg_latency = postgres_metrics.get("avg_latency_ms", 0)
-    rd_latency = redis_metrics.get("avg_latency_ms", 0)
-
-    if total_requests > 0:
-        avg_latency = (pg_latency * pg_requests + rd_latency * rd_requests) / total_requests
-    else:
-        avg_latency = 0.0
-
-    return MetricsDict(
-        request_count=total_requests,
-        success_count=postgres_metrics.get("success_count", 0) + redis_metrics.get("success_count", 0),
-        failure_count=postgres_metrics.get("failure_count", 0) + redis_metrics.get("failure_count", 0),
-        avg_latency_ms=avg_latency,
-        bytes_sent=postgres_metrics.get("bytes_sent", 0) + redis_metrics.get("bytes_sent", 0),
-        bytes_received=postgres_metrics.get("bytes_received", 0) + redis_metrics.get("bytes_received", 0),
-    )
-
-
-def apply_metrics(target: HasStats, metrics: MetricsDict) -> None:
-    """Apply combined metrics to a target object.
-
-    Args:
-        target: Object with stats fields (Proxy or Project).
-        metrics: Combined metrics to apply.
-    """
-    target.request_count = metrics.get("request_count", 0)
-    target.success_count = metrics.get("success_count", 0)
-    target.failure_count = metrics.get("failure_count", 0)
-    target.avg_latency_ms = metrics.get("avg_latency_ms", 0.0)
-    target.bytes_sent = metrics.get("bytes_sent", 0)
-    target.bytes_received = metrics.get("bytes_received", 0)
-
-
-def increment_stats(
-    target: HasStats,
-    success: bool,
-    latency_ms: float,
-    bytes_sent: int = 0,
-    bytes_received: int = 0,
-) -> None:
-    """Increment stats on a target object after a request.
-
-    Updates request/success/failure counts, computes running average latency,
-    and adds to byte counters.
-
-    Args:
-        target: Object with stats fields (Proxy or Project).
-        success: Whether the request was successful.
-        latency_ms: Request latency in milliseconds.
-        bytes_sent: Bytes sent in the request.
-        bytes_received: Bytes received in the response.
-    """
-    old_count = target.request_count
-    target.request_count += 1
-
-    if success:
-        target.success_count += 1
-    else:
-        target.failure_count += 1
-
-    # Compute proper weighted average: new_avg = (old_avg * old_count + new_value) / new_count
-    if old_count == 0:
-        target.avg_latency_ms = latency_ms
-    else:
-        target.avg_latency_ms = (target.avg_latency_ms * old_count + latency_ms) / target.request_count
-
-    target.bytes_sent += bytes_sent
-    target.bytes_received += bytes_received
-
-
 # ---------------------------------------------------------------------------
-# Delta accumulators used by the periodic-flush metric pipeline.
+# One additive shape for every batch of metrics.
 #
 # Each instance keeps a per-entity dict of pending deltas accumulated by
 # per-request handlers. Every few seconds the flush loop drains them into
 # Redis (one batched ``HINCRBY`` pipeline) and announces the same deltas on
 # pub/sub so peers can update their in-memory view without a Redis read.
+# The Redis window and the Postgres history totals come back in the same
+# shape, so hydrating an entity is a sum followed by ``set_on``.
 #
-# The wire format is deliberately additive ints / floats - easy to apply
-# anywhere via ``apply_delta`` or merge back into the pending dict via
-# ``merge_delta_into`` on failure.
+# The wire format is the model's fields as additive ints / floats, so a
+# delta can be applied anywhere and merged back into the pending dict when
+# a flush fails.
 # ---------------------------------------------------------------------------
 
 
-# A metric delta is a plain dict of the same fields as ``MetricsDict``
-# plus ``latency_sum_ms`` (running sum, so it can be combined across
-# many requests without losing the weighted-average math). It's typed
-# loosely on purpose: the JSON round-trip through Pub/Sub strips
-# stricter types anyway.
-MetricDelta = dict[str, Any]
+class MetricDelta(BaseModel):
+    """A batch of requests' contribution to one entity's metrics, in additive form.
 
-
-def empty_delta() -> MetricDelta:
-    """Construct a zero delta."""
-    return {
-        "request_count": 0,
-        "success_count": 0,
-        "failure_count": 0,
-        "latency_sum_ms": 0.0,
-        "bytes_sent": 0,
-        "bytes_received": 0,
-    }
-
-
-def accumulate_delta(
-    delta: MetricDelta,
-    success: bool,
-    latency_ms: float,
-    bytes_sent: int = 0,
-    bytes_received: int = 0,
-) -> None:
-    """Fold a single request's contribution into the running delta."""
-    delta["request_count"] += 1
-    if success:
-        delta["success_count"] += 1
-    else:
-        delta["failure_count"] += 1
-    delta["latency_sum_ms"] += latency_ms
-    delta["bytes_sent"] += bytes_sent
-    delta["bytes_received"] += bytes_received
-
-
-def merge_delta_into(dst: MetricDelta, src: MetricDelta) -> None:
-    """Add ``src`` into ``dst`` field-by-field (used when retrying a failed flush)."""
-    dst["request_count"] += src.get("request_count", 0)
-    dst["success_count"] += src.get("success_count", 0)
-    dst["failure_count"] += src.get("failure_count", 0)
-    dst["latency_sum_ms"] += src.get("latency_sum_ms", 0.0)
-    dst["bytes_sent"] += src.get("bytes_sent", 0)
-    dst["bytes_received"] += src.get("bytes_received", 0)
-
-
-def apply_delta(target: HasStats, delta: MetricDelta) -> None:
-    """Apply a peer instance's delta to a local in-memory stats target.
-
-    The weighted-average latency update is the same math as
-    ``increment_stats``, just for a batch of N requests at once:
-
-        new_avg = (old_avg * old_count + delta_latency_sum) / new_total_count
+    Latency is carried as a sum, not an average: sums combine across
+    batches and sources without losing the weighted-average math, and the
+    average is derived when something displays it.
     """
-    count = int(delta.get("request_count", 0))
-    if count == 0:
-        return
-    old_count = target.request_count
-    target.request_count = old_count + count
-    target.success_count += int(delta.get("success_count", 0))
-    target.failure_count += int(delta.get("failure_count", 0))
-    target.bytes_sent += int(delta.get("bytes_sent", 0))
-    target.bytes_received += int(delta.get("bytes_received", 0))
-    latency_sum = float(delta.get("latency_sum_ms", 0.0))
-    if old_count == 0:
-        target.avg_latency_ms = latency_sum / count
-    else:
-        total_latency = target.avg_latency_ms * old_count + latency_sum
-        target.avg_latency_ms = total_latency / target.request_count
 
+    request_count: int = 0
+    success_count: int = 0
+    failure_count: int = 0
+    latency_sum_ms: float = 0.0
+    bytes_sent: int = 0
+    bytes_received: int = 0
+
+    def add_request(
+        self,
+        success: bool,
+        latency_ms: float,
+        bytes_sent: int = 0,
+        bytes_received: int = 0,
+    ) -> None:
+        """Fold a single completed request into the delta."""
+        self.request_count += 1
+        if success:
+            self.success_count += 1
+        else:
+            self.failure_count += 1
+        self.latency_sum_ms += latency_ms
+        self.add_bytes(bytes_sent, bytes_received)
+
+    def add_bytes(self, bytes_sent: int, bytes_received: int) -> None:
+        """Fold bytes into the delta without counting a request.
+
+        A completed request folds its remainder through ``add_request``; a
+        transfer still running reports its progress here (see ``TrafficMeter``).
+        """
+        self.bytes_sent += bytes_sent
+        self.bytes_received += bytes_received
+
+    @property
+    def avg_latency_ms(self) -> float:
+        """Mean latency of the requests in the batch, 0 when there are none."""
+        return self.latency_sum_ms / self.request_count if self.request_count else 0.0
+
+    @classmethod
+    def summed(cls, *batches: "MetricDelta | None") -> "MetricDelta":
+        """One delta holding the sum of ``batches``; None entries are skipped."""
+        total = cls()
+        for batch in batches:
+            if batch is not None:
+                total.merge(batch)
+        return total
+
+    def merge(self, other: "MetricDelta") -> None:
+        """Add ``other`` into this delta field by field (used when retrying a failed flush)."""
+        self.request_count += other.request_count
+        self.success_count += other.success_count
+        self.failure_count += other.failure_count
+        self.latency_sum_ms += other.latency_sum_ms
+        self.bytes_sent += other.bytes_sent
+        self.bytes_received += other.bytes_received
+
+    def set_on(self, target: HasStats) -> None:
+        """Make the target's counters equal this batch (hydration from the sources of truth)."""
+        target.request_count = self.request_count
+        target.success_count = self.success_count
+        target.failure_count = self.failure_count
+        target.avg_latency_ms = self.avg_latency_ms
+        target.bytes_sent = self.bytes_sent
+        target.bytes_received = self.bytes_received
+
+    def apply_to(self, target: HasStats) -> None:
+        """Add the delta to an in-memory stats target.
+
+        The target keeps an average, so the update is weighted by counts:
+
+            new_avg = (old_avg * old_count + delta_latency_sum) / new_total_count
+        """
+        target.bytes_sent += self.bytes_sent
+        target.bytes_received += self.bytes_received
+        if self.request_count == 0:
+            # Progress of transfers still running: bytes only, no request yet.
+            return
+        old_count = target.request_count
+        target.request_count = old_count + self.request_count
+        target.success_count += self.success_count
+        target.failure_count += self.failure_count
+        if old_count == 0:
+            target.avg_latency_ms = self.latency_sum_ms / self.request_count
+        else:
+            total_latency = target.avg_latency_ms * old_count + self.latency_sum_ms
+            target.avg_latency_ms = total_latency / target.request_count
+
+    @staticmethod
+    def dump_many(deltas: dict[str, "MetricDelta"]) -> dict[str, dict[str, Any]]:
+        """The wire form of a per-entity batch, for the pub/sub payload."""
+        return {entity_id: delta.model_dump() for entity_id, delta in deltas.items()}
+
+    @classmethod
+    def parse_many(cls, raw: Any) -> dict[str, "MetricDelta"]:
+        """Per-entity deltas from a pub/sub payload; entries that do not parse are dropped.
+
+        Missing fields read as zero, so a peer on a version with fewer fields
+        still applies cleanly.
+        """
+        if not isinstance(raw, dict):
+            return {}
+        parsed: dict[str, MetricDelta] = {}
+        for entity_id, fields in raw.items():
+            try:
+                parsed[str(entity_id)] = cls.model_validate(fields)
+            except ValidationError:
+                continue
+        return parsed

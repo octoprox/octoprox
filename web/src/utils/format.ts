@@ -16,6 +16,28 @@ export function formatBytes(bytes: number): string {
 }
 
 /**
+ * Format bytes the way vendors bill them: decimal units (1 GB = 1,000,000,000 bytes).
+ * Use for traffic limits, usage against a limit and anything priced per GB, so the
+ * number on screen matches the number on the invoice.
+ */
+export function formatBytesDecimal(bytes: number, digits = 2): string {
+  if (bytes === 0) return '0 B'
+  const k = 1000
+  const sizes = ['B', 'KB', 'MB', 'GB', 'TB', 'PB']
+  const i = Math.min(sizes.length - 1, Math.floor(Math.log(Math.abs(bytes)) / Math.log(k)))
+  return `${parseFloat((bytes / Math.pow(k, i)).toFixed(digits))} ${sizes[i]}`
+}
+
+/** Money in the viewer's locale for an ISO 4217 code; falls back to "12.34 XYZ" for codes Intl rejects. */
+export function formatMoney(amount: number, currency: string): string {
+  try {
+    return new Intl.NumberFormat(undefined, { style: 'currency', currency, maximumFractionDigits: amount < 10 ? 2 : 0 }).format(amount)
+  } catch {
+    return `${amount.toFixed(2)} ${currency}`
+  }
+}
+
+/**
  * The API serialises timestamps as naive UTC ("2026-05-19T20:10:52.001790",
  * no zone suffix). `new Date()` would read that as local time, shifting every
  * date by the viewer's UTC offset. Treat zone-less strings as UTC.

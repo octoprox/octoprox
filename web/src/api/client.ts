@@ -810,6 +810,60 @@ export interface RateLimitConfig {
   sticky_quarantine?: boolean
 }
 
+export type TrafficPeriod = 'day' | 'week' | 'month'
+export type TrafficLimitAction = 'alert' | 'block' | 'interrupt'
+export type TrafficLimitStatus = 429 | 509
+
+/**
+ * Traffic accounting, limit and pricing for a connector. Only explicit choices are
+ * stored; a missing key means the default in TRAFFIC_DEFAULTS.
+ */
+export interface TrafficConfig {
+  /** Bytes per period before the action applies; omitted means metering only. */
+  limit_bytes?: number
+  period?: TrafficPeriod
+  /** Day of month (1-28) for monthly periods, weekday (1 = Monday) for weekly ones. */
+  reset_day?: number
+  action?: TrafficLimitAction
+  warn_percent?: number
+  limit_status?: TrafficLimitStatus
+  price_per_gb?: number
+  currency?: string
+}
+
+export const TRAFFIC_DEFAULTS: Required<Omit<TrafficConfig, 'limit_bytes' | 'price_per_gb'>> = {
+  period: 'month',
+  reset_day: 1,
+  action: 'alert',
+  warn_percent: 80,
+  limit_status: 509,
+  currency: 'USD',
+}
+
+/** Vendors bill decimal gigabytes; limits and prices are entered in these. */
+export const BYTES_PER_GB = 1_000_000_000
+
+export interface TrafficUsage {
+  period: TrafficPeriod
+  period_start: string
+  period_end: string
+  bytes_sent: number
+  bytes_received: number
+  total_bytes: number
+  limit_bytes: number | null
+  /** total_bytes as a share of the limit, 0-100 and beyond; null without a limit. */
+  percent: number | null
+  action: TrafficLimitAction
+  status: 'ok' | 'warning' | 'exceeded'
+  /** True while the connector takes no new requests because of its limit. */
+  blocked: boolean
+  price_per_gb: number | null
+  currency: string
+  cost: number | null
+  /** Usage counts from here when set: a manual reset inside the period. */
+  reset_at: string | null
+}
+
 /** Intended pool size of a connector and how it is derived; total is null when there is no target. */
 export interface ProxyTarget {
   total: number | null
@@ -832,6 +886,9 @@ export interface Connector {
   config: Record<string, unknown>
   routing_config: RoutingConfig
   rate_limit_config: RateLimitConfig
+  traffic_config: TrafficConfig
+  traffic_reset_at: string | null
+  traffic_usage: TrafficUsage | null
   enabled: boolean
   proxy_count: number
   target: ProxyTarget | null
@@ -854,6 +911,7 @@ export interface ConnectorCreate {
   config?: Record<string, unknown>
   routing_config?: RoutingConfig
   rate_limit_config?: RateLimitConfig
+  traffic_config?: TrafficConfig
   enabled?: boolean
 }
 
@@ -863,6 +921,7 @@ export interface ConnectorUpdate {
   config?: Record<string, unknown>
   routing_config?: RoutingConfig
   rate_limit_config?: RateLimitConfig
+  traffic_config?: TrafficConfig
   enabled?: boolean
 }
 
@@ -1125,10 +1184,14 @@ export interface ConnectorTrafficShare {
   eligible_proxies: number
   /** Share of untargeted requests this connector takes right now, 0-100. */
   expected_share: number
-  excluded_reason: 'disabled' | 'no_eligible_proxies' | null
+  excluded_reason: 'disabled' | 'traffic_limit' | 'no_eligible_proxies' | null
   observed_requests: number
   /** Share of the window's requests that went through this connector, 0-100; null when nothing was observed. */
   observed_share: number | null
+  /** Bytes both ways in the window, and their cost at the connector's price (null when unpriced). */
+  observed_bytes: number
+  cost: number | null
+  currency: string | null
 }
 
 export interface TrafficSplitResponse {
@@ -1136,6 +1199,7 @@ export interface TrafficSplitResponse {
   range: TrafficSplitRange
   total_weight: number
   observed_requests: number
+  observed_bytes: number
   connectors: ConnectorTrafficShare[]
 }
 
@@ -1192,6 +1256,18 @@ export const updateProjectConnector = async (projectId: string, connectorId: str
 
 export const deleteProjectConnector = async (projectId: string, connectorId: string): Promise<void> => {
   await api.delete(`/projects/${projectId}/connectors/${connectorId}`)
+}
+
+/** Start the connector's traffic usage over from now; returns the updated connector. */
+export const resetConnectorTraffic = async (projectId: string, connectorId: string): Promise<Connector> => {
+  const response = await api.post(`/projects/${projectId}/connectors/${connectorId}/traffic/reset`)
+  return response.data
+}
+
+/** The connector's own metrics history, which survives its proxies being rotated. */
+export const fetchConnectorMetricsHistory = async (projectId: string, connectorId: string, range: string): Promise<MetricsHistoryResponse> => {
+  const response = await api.get(`/projects/${projectId}/connectors/${connectorId}/metrics/history`, { params: { range } })
+  return response.data
 }
 
 // Connector options (regions, instance types, etc.)
@@ -1530,7 +1606,9 @@ export interface SystemCache {
   geo_provision_locks: number
   pending_proxy_deltas: number
   pending_project_deltas: number
+  pending_connector_deltas?: number
   quarantined_proxies: number
+  traffic_blocked_connectors?: number
   tls_contexts: number
   provider_types: number
 }

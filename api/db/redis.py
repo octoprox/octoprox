@@ -3,6 +3,7 @@
 
 """Redis client for operational data storage."""
 
+import time
 from collections.abc import Iterable
 from functools import lru_cache
 from typing import Any
@@ -11,6 +12,7 @@ import redis.asyncio as redis
 import structlog
 
 from api.core import utc_now
+from api.core.stats import MetricDelta
 from api.models.proxy import ProxyStatus
 
 logger = structlog.get_logger()
@@ -33,6 +35,12 @@ return 0
 """
 PROXY_METRICS_KEY = "proxy:metrics:{proxy_id}"
 PROJECT_METRICS_KEY = "project:metrics:{project_id}"
+CONNECTOR_METRICS_KEY = "connector:metrics:{connector_id}"
+# Set while a connector takes no requests because its traffic limit was
+# reached (api.core.traffic_limiter). The value is the epoch second the
+# current period ends, which is also the key's expiry: a block never
+# outlives the period it was raised in.
+CONNECTOR_TRAFFIC_BLOCKED_KEY = "connector:traffic_blocked:{connector_id}"
 SESSION_KEY = "session:{session_id}"
 STICKY_BINDING_KEY = "sticky:{project_id}:{session_id}"
 MITM_REQUESTS_KEY = "mitm:requests:{project_id}"
@@ -81,6 +89,8 @@ REDIS_KEY_GROUPS: tuple[tuple[str, str], ...] = (
     ("proxy:quarantine:", "Quarantine"),
     ("proxy:requests:", "Rate-limit windows"),
     ("project:metrics:", "Project metrics"),
+    ("connector:metrics:", "Connector metrics"),
+    ("connector:traffic_blocked:", "Traffic limits"),
     ("sticky:", "Sticky bindings"),
     ("session:", "Sessions"),
     ("mitm:requests:", "MITM captures"),
@@ -248,8 +258,9 @@ class RedisClient:
 
     async def flush_metric_deltas(
         self,
-        proxy_deltas: dict[str, dict[str, Any]],
-        project_deltas: dict[str, dict[str, Any]],
+        proxy_deltas: dict[str, MetricDelta],
+        project_deltas: dict[str, MetricDelta],
+        connector_deltas: dict[str, MetricDelta] | None = None,
     ) -> None:
         """Apply batched per-entity metric deltas in a single pipeline.
 
@@ -259,7 +270,8 @@ class RedisClient:
         periodic flush loop in ``ProxyManager`` so the hot path no
         longer pays a Redis round-trip per request.
         """
-        if not proxy_deltas and not project_deltas:
+        connector_deltas = connector_deltas or {}
+        if not proxy_deltas and not project_deltas and not connector_deltas:
             return
         now = utc_now().isoformat()
         pipe = self.client.pipeline()
@@ -269,51 +281,39 @@ class RedisClient:
         for project_id, d in project_deltas.items():
             key = PROJECT_METRICS_KEY.format(project_id=project_id)
             self._pipeline_metric_delta(pipe, key, d, now)
+        for connector_id, d in connector_deltas.items():
+            key = CONNECTOR_METRICS_KEY.format(connector_id=connector_id)
+            self._pipeline_metric_delta(pipe, key, d, now)
         await pipe.execute()
 
     @staticmethod
     def _pipeline_metric_delta(
-        pipe: Any, key: str, delta: dict[str, Any], now_iso: str
+        pipe: Any, key: str, delta: MetricDelta, now_iso: str
     ) -> None:
         """Queue HINCRBY/HINCRBYFLOAT ops for one entity onto a Redis pipeline.
 
         Zero-valued fields are skipped so we don't emit no-op writes.
         """
-        if delta.get("request_count"):
-            pipe.hincrby(key, "request_count", delta["request_count"])
-        if delta.get("success_count"):
-            pipe.hincrby(key, "success_count", delta["success_count"])
-        if delta.get("failure_count"):
-            pipe.hincrby(key, "failure_count", delta["failure_count"])
-        if delta.get("latency_sum_ms"):
-            pipe.hincrbyfloat(key, "latency_sum_ms", delta["latency_sum_ms"])
-        if delta.get("bytes_sent"):
-            pipe.hincrby(key, "bytes_sent", delta["bytes_sent"])
-        if delta.get("bytes_received"):
-            pipe.hincrby(key, "bytes_received", delta["bytes_received"])
+        if delta.request_count:
+            pipe.hincrby(key, "request_count", delta.request_count)
+        if delta.success_count:
+            pipe.hincrby(key, "success_count", delta.success_count)
+        if delta.failure_count:
+            pipe.hincrby(key, "failure_count", delta.failure_count)
+        if delta.latency_sum_ms:
+            pipe.hincrbyfloat(key, "latency_sum_ms", delta.latency_sum_ms)
+        if delta.bytes_sent:
+            pipe.hincrby(key, "bytes_sent", delta.bytes_sent)
+        if delta.bytes_received:
+            pipe.hincrby(key, "bytes_received", delta.bytes_received)
         pipe.hset(key, "updated_at", now_iso)
 
-    async def get_proxy_metrics(self, proxy_id: str) -> dict[str, Any] | None:
+    async def get_proxy_metrics(self, proxy_id: str) -> MetricDelta | None:
         """Get proxy metrics from Redis."""
         key = PROXY_METRICS_KEY.format(proxy_id=proxy_id)
-        data = await self.client.hgetall(key)  # type: ignore[misc]
-        if not data:
-            return None
-        request_count = int(data.get("request_count", 0))
-        latency_sum = float(data.get("latency_sum_ms", 0))
-        avg_latency = latency_sum / request_count if request_count > 0 else 0.0
-        return {
-            "request_count": request_count,
-            "success_count": int(data.get("success_count", 0)),
-            "failure_count": int(data.get("failure_count", 0)),
-            "latency_sum_ms": latency_sum,
-            "avg_latency_ms": avg_latency,
-            "bytes_sent": int(data.get("bytes_sent", 0)),
-            "bytes_received": int(data.get("bytes_received", 0)),
-            "updated_at": data.get("updated_at"),
-        }
+        return self._read_metrics_hash(await self.client.hgetall(key))  # type: ignore[misc]
 
-    async def get_all_proxy_metrics(self) -> dict[str, dict[str, Any]]:
+    async def get_all_proxy_metrics(self) -> dict[str, MetricDelta]:
         """Get all proxy metrics from Redis."""
         metrics = {}
         async for key in self.client.scan_iter(match="proxy:metrics:*"):
@@ -359,27 +359,12 @@ class RedisClient:
         pipe.hset(key, "updated_at", utc_now().isoformat())
         await pipe.execute()
 
-    async def get_project_metrics(self, project_id: str) -> dict[str, Any] | None:
+    async def get_project_metrics(self, project_id: str) -> MetricDelta | None:
         """Get project-level metrics from Redis."""
         key = PROJECT_METRICS_KEY.format(project_id=project_id)
-        data = await self.client.hgetall(key)  # type: ignore[misc]
-        if not data:
-            return None
-        request_count = int(data.get("request_count", 0))
-        latency_sum = float(data.get("latency_sum_ms", 0))
-        avg_latency = latency_sum / request_count if request_count > 0 else 0.0
-        return {
-            "request_count": request_count,
-            "success_count": int(data.get("success_count", 0)),
-            "failure_count": int(data.get("failure_count", 0)),
-            "latency_sum_ms": latency_sum,
-            "avg_latency_ms": avg_latency,
-            "bytes_sent": int(data.get("bytes_sent", 0)),
-            "bytes_received": int(data.get("bytes_received", 0)),
-            "updated_at": data.get("updated_at"),
-        }
+        return self._read_metrics_hash(await self.client.hgetall(key))  # type: ignore[misc]
 
-    async def get_all_project_metrics(self) -> dict[str, dict[str, Any]]:
+    async def get_all_project_metrics(self) -> dict[str, MetricDelta]:
         """Get all project-level metrics from Redis."""
         metrics = {}
         async for key in self.client.scan_iter(match="project:metrics:*"):
@@ -392,6 +377,66 @@ class RedisClient:
     async def reset_project_metrics(self, project_id: str) -> None:
         """Reset project metrics after flushing to Postgres."""
         key = PROJECT_METRICS_KEY.format(project_id=project_id)
+        await self.client.delete(key)
+
+    # Connector metrics operations: the same hash layout as proxies and
+    # projects, one per connector, drained by the leader into connector_metrics.
+    async def get_connector_metrics(self, connector_id: str) -> MetricDelta | None:
+        """Get connector-level metrics from Redis."""
+        key = CONNECTOR_METRICS_KEY.format(connector_id=connector_id)
+        return self._read_metrics_hash(await self.client.hgetall(key))  # type: ignore[misc]
+
+    async def get_all_connector_metrics(self) -> dict[str, MetricDelta]:
+        """Get all connector-level metrics from Redis."""
+        metrics = {}
+        async for key in self.client.scan_iter(match="connector:metrics:*"):
+            connector_id = key.split(":")[-1]
+            m = await self.get_connector_metrics(connector_id)
+            if m:
+                metrics[connector_id] = m
+        return metrics
+
+    async def reset_connector_metrics(self, connector_id: str) -> None:
+        """Reset connector metrics after flushing to Postgres, or when the connector goes."""
+        key = CONNECTOR_METRICS_KEY.format(connector_id=connector_id)
+        await self.client.delete(key)
+
+    @staticmethod
+    def _read_metrics_hash(data: dict[str, Any]) -> MetricDelta | None:
+        """Decode one metrics hash into the additive batch shape, None for an absent key."""
+        if not data:
+            return None
+        return MetricDelta(
+            request_count=int(data.get("request_count", 0)),
+            success_count=int(data.get("success_count", 0)),
+            failure_count=int(data.get("failure_count", 0)),
+            latency_sum_ms=float(data.get("latency_sum_ms", 0)),
+            bytes_sent=int(data.get("bytes_sent", 0)),
+            bytes_received=int(data.get("bytes_received", 0)),
+        )
+
+    # Traffic limit block state (api.core.traffic_limiter)
+    async def set_connector_traffic_blocked(self, connector_id: str, until_epoch: float) -> None:
+        """Mark a connector blocked until ``until_epoch`` (seconds), expiring with the period."""
+        key = CONNECTOR_TRAFFIC_BLOCKED_KEY.format(connector_id=connector_id)
+        ttl = max(1, int(until_epoch - time.time()) + 1)
+        await self.client.set(key, repr(until_epoch), ex=ttl)
+
+    async def get_connector_traffic_blocked(self, connector_id: str) -> float | None:
+        """The epoch second a connector's block ends, or None when it is not blocked."""
+        key = CONNECTOR_TRAFFIC_BLOCKED_KEY.format(connector_id=connector_id)
+        value = await self.client.get(key)
+        if value is None:
+            return None
+        try:
+            until = float(value)
+        except (TypeError, ValueError):
+            return None
+        return until if until > time.time() else None
+
+    async def clear_connector_traffic_blocked(self, connector_id: str) -> None:
+        """Lift a connector's traffic block."""
+        key = CONNECTOR_TRAFFIC_BLOCKED_KEY.format(connector_id=connector_id)
         await self.client.delete(key)
 
     # Session operations (for sticky routing)

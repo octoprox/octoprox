@@ -4,6 +4,7 @@
 import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { ConnectorTrafficShare, TrafficSplitRange, TrafficSplitResponse, fetchProjectTrafficSplit } from '../api/client'
+import { formatBytesDecimal, formatMoney } from '../utils/format'
 import { ProviderLogo } from './ProviderLogo'
 import { Card, CardHeader, InfoTip, Segmented } from './ui'
 
@@ -41,6 +42,7 @@ export function strategyExplanation(strategy: string): string {
 /** One sentence per connector describing its slice of untargeted traffic under the current setup. */
 export function describeShare(c: ConnectorTrafficShare, split: TrafficSplitResponse): string {
   if (c.excluded_reason === 'disabled') return `${c.name} is disabled and takes no traffic.`
+  if (c.excluded_reason === 'traffic_limit') return `${c.name} is over its traffic limit and takes no traffic until its period resets or the limit is raised; the others share its weight.`
   if (c.excluded_reason === 'no_eligible_proxies') return `${c.name} has no healthy proxy right now, so its weight does not count and the others share its traffic.`
   const active = split.connectors.filter((x) => !x.excluded_reason)
   if (active.length === 1) return `${c.name} is the only connector with healthy proxies and takes every request.`
@@ -105,9 +107,21 @@ export function TrafficSplitPanel({ projectId, variant = 'card', onOpenConnector
   )
 }
 
+/** Spend across connectors when they all price in one currency; null when unpriced or mixed. */
+export function totalSpend(connectors: { cost: number | null; currency: string | null }[]): { amount: number; currency: string } | null {
+  const priced = connectors.filter((c) => c.cost != null && c.currency)
+  if (priced.length === 0) return null
+  const currency = priced[0].currency as string
+  if (priced.some((c) => c.currency !== currency)) return null
+  return { amount: priced.reduce((a, c) => a + (c.cost ?? 0), 0), currency }
+}
+
 function TrafficSplitBody({ split, onOpenConnector }: { split: TrafficSplitResponse; onOpenConnector?: (id: string) => void }) {
   const active = split.connectors.filter((c) => !c.excluded_reason)
   if (split.connectors.length === 0) return <p className="text-xs text-fg-muted py-3">No connectors yet.</p>
+  const priced = split.connectors.some((c) => c.cost != null)
+  const spend = totalSpend(split.connectors)
+  const cols = priced ? 'grid-cols-[auto_1fr_auto_auto_auto_auto]' : 'grid-cols-[auto_1fr_auto_auto_auto]'
 
   return (
     <div className="space-y-3">
@@ -126,12 +140,13 @@ function TrafficSplitBody({ split, onOpenConnector }: { split: TrafficSplitRespo
 
       {/* Per connector rows: weight, expected, observed */}
       <div className="-mx-1.5">
-        <div className="grid grid-cols-[auto_1fr_auto_auto_auto] gap-x-3 px-1.5 text-[11px] text-fg-subtle">
+        <div className={`grid ${cols} gap-x-3 px-1.5 text-[11px] text-fg-subtle`}>
           <span />
           <span>Connector</span>
           <span className="text-right">Weight</span>
           <span className="text-right">Expected</span>
           <span className="text-right">Observed</span>
+          {priced && <span className="text-right">Spend</span>}
         </div>
         {split.connectors.map((c, i) => {
           const off = !!c.excluded_reason
@@ -140,7 +155,7 @@ function TrafficSplitBody({ split, onOpenConnector }: { split: TrafficSplitRespo
             <Row
               key={c.connector_id}
               {...(onOpenConnector ? { type: 'button' as const, onClick: () => onOpenConnector(c.connector_id) } : {})}
-              className={`w-full grid grid-cols-[auto_1fr_auto_auto_auto] items-center gap-x-3 h-[32px] px-1.5 rounded-md text-[12.5px] text-left ${onOpenConnector ? 'hover:bg-surface-raised transition-colors' : ''}`}
+              className={`w-full grid ${cols} items-center gap-x-3 h-[32px] px-1.5 rounded-md text-[12.5px] text-left ${onOpenConnector ? 'hover:bg-surface-raised transition-colors' : ''}`}
               title={describeShare(c, split)}
             >
               <span className={`w-2 h-2 rounded-full ${off ? 'bg-fg-subtle' : swatch(i)}`} />
@@ -149,16 +164,22 @@ function TrafficSplitBody({ split, onOpenConnector }: { split: TrafficSplitRespo
                 <span className="truncate">{c.name}</span>
                 {c.dynamic && <span className="text-fg-subtle text-[11px] flex-none">dynamic</span>}
                 {c.excluded_reason === 'disabled' && <span className="text-fg-subtle text-[11px] flex-none">disabled</span>}
+                {c.excluded_reason === 'traffic_limit' && <span className="text-orange-500 text-[11px] flex-none">over traffic limit</span>}
                 {c.excluded_reason === 'no_eligible_proxies' && <span className="text-warning text-[11px] flex-none">no healthy proxy</span>}
               </span>
               <span className="tabular-nums text-fg-muted text-right">{c.weight}</span>
               <span className={`tabular-nums text-right font-medium ${off ? 'text-fg-subtle' : ''}`}>{formatShare(c.expected_share)}</span>
-              <span className="tabular-nums text-right text-fg-muted inline-flex items-center justify-end gap-2 w-[76px]">
+              <span className="tabular-nums text-right text-fg-muted inline-flex items-center justify-end gap-2 w-[76px]" title={`${formatBytesDecimal(c.observed_bytes)} over ${split.range}`}>
                 <span className="w-8 h-1 rounded-full bg-primary-soft overflow-hidden inline-block">
                   <span className={`block h-full rounded-full ${swatch(i)}`} style={{ width: `${Math.min(100, c.observed_share ?? 0)}%` }} />
                 </span>
                 {formatShare(c.observed_share)}
               </span>
+              {priced && (
+                <span className="tabular-nums text-right text-fg-muted w-[68px]">
+                  {c.cost != null && c.currency ? formatMoney(c.cost, c.currency) : '-'}
+                </span>
+              )}
             </Row>
           )
         })}
@@ -167,7 +188,7 @@ function TrafficSplitBody({ split, onOpenConnector }: { split: TrafficSplitRespo
       <p className="text-xs text-fg-muted">
         {strategyExplanation(split.strategy)}
         {split.observed_requests === 0 && ' No requests in this window yet.'}
-        {split.observed_requests > 0 && ` Observed over ${split.range}: ${split.observed_requests.toLocaleString()} requests. Requests with a country or a filtered domain see a narrower set of connectors, so the observed split can differ from the expected one.`}
+        {split.observed_requests > 0 && ` Observed over ${split.range}: ${split.observed_requests.toLocaleString()} requests, ${formatBytesDecimal(split.observed_bytes)}${spend ? `, ${formatMoney(spend.amount, spend.currency)} at the current rates` : ''}. Requests with a country or a filtered domain see a narrower set of connectors, so the observed split can differ from the expected one.`}
       </p>
     </div>
   )

@@ -88,15 +88,15 @@ class TestRedisClient:
         metrics = await redis_client.get_proxy_metrics(proxy_id)
 
         assert metrics is not None
-        assert metrics["request_count"] == 3
-        assert metrics["success_count"] == 2
-        assert metrics["failure_count"] == 1
-        assert metrics["latency_sum_ms"] == 350.0
+        assert metrics.request_count == 3
+        assert metrics.success_count == 2
+        assert metrics.failure_count == 1
+        assert metrics.latency_sum_ms == 350.0
         # Average should be 350/3 ≈ 116.67
-        assert abs(metrics["avg_latency_ms"] - 116.67) < 1
+        assert abs(metrics.avg_latency_ms - 116.67) < 1
         # Check bytes tracking
-        assert metrics["bytes_sent"] == 3500
-        assert metrics["bytes_received"] == 15000
+        assert metrics.bytes_sent == 3500
+        assert metrics.bytes_received == 15000
 
     async def test_get_proxy_metrics_not_found(self, redis_client: RedisClient) -> None:
         """Test getting metrics for non-existent proxy."""
@@ -208,15 +208,15 @@ class TestRedisClient:
         metrics = await redis_client.get_project_metrics(project_id)
 
         assert metrics is not None
-        assert metrics["request_count"] == 3
-        assert metrics["success_count"] == 2
-        assert metrics["failure_count"] == 1
-        assert metrics["latency_sum_ms"] == 350.0
+        assert metrics.request_count == 3
+        assert metrics.success_count == 2
+        assert metrics.failure_count == 1
+        assert metrics.latency_sum_ms == 350.0
         # Average should be 350/3 ≈ 116.67
-        assert abs(metrics["avg_latency_ms"] - 116.67) < 1
+        assert abs(metrics.avg_latency_ms - 116.67) < 1
         # Check bytes tracking
-        assert metrics["bytes_sent"] == 3500
-        assert metrics["bytes_received"] == 15000
+        assert metrics.bytes_sent == 3500
+        assert metrics.bytes_received == 15000
 
     async def test_get_project_metrics_not_found(self, redis_client: RedisClient) -> None:
         """Test getting metrics for non-existent project."""

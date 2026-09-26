@@ -6,11 +6,13 @@
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import delete, func, select, text, update
+from sqlalchemy import delete, func, or_, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.core import utc_now
+from api.core.stats import MetricDelta
 from api.db.models import (
+    ConnectorMetricsModel,
     ConnectorModel,
     CredentialModel,
     ProjectMetricsModel,
@@ -298,6 +300,8 @@ class ConnectorRepository:
             config=connector.config,
             routing_config=connector.routing_config,
             rate_limit_config=connector.rate_limit_config,
+            traffic_config=connector.traffic_config,
+            traffic_reset_at=connector.traffic_reset_at,
             enabled=connector.enabled,
             pending_deletion=connector.pending_deletion,
             last_error=connector.last_error,
@@ -322,6 +326,8 @@ class ConnectorRepository:
             model.config = connector.config
             model.routing_config = connector.routing_config
             model.rate_limit_config = connector.rate_limit_config
+            model.traffic_config = connector.traffic_config
+            model.traffic_reset_at = connector.traffic_reset_at
             model.enabled = connector.enabled
             model.pending_deletion = connector.pending_deletion
             model.last_error = connector.last_error
@@ -356,6 +362,8 @@ class ConnectorRepository:
             config=model.config,
             routing_config=model.routing_config or {},
             rate_limit_config=model.rate_limit_config or {},
+            traffic_config=model.traffic_config or {},
+            traffic_reset_at=model.traffic_reset_at,
             enabled=model.enabled,
             pending_deletion=model.pending_deletion,
             last_error=model.last_error,
@@ -469,6 +477,18 @@ class ProxyRepository:
         )
 
 
+def _totals_from_row(row: Any) -> MetricDelta:
+    """The additive batch shape from a cumulative-totals row (see the queries above)."""
+    return MetricDelta(
+        request_count=int(row.total_requests or 0),
+        success_count=int(row.total_successes or 0),
+        failure_count=int(row.total_failures or 0),
+        latency_sum_ms=float(row.weighted_latency_sum or 0),
+        bytes_sent=int(row.total_bytes_sent or 0),
+        bytes_received=int(row.total_bytes_received or 0),
+    )
+
+
 def _strip_tz(dt: datetime) -> datetime:
     """Strip timezone info from a datetime for naive-datetime DB columns.
 
@@ -478,8 +498,11 @@ def _strip_tz(dt: datetime) -> datetime:
     return dt.replace(tzinfo=None) if dt.tzinfo else dt
 
 
+_MetricsModel = type[ProjectMetricsModel] | type[ProxyMetricsModel] | type[ConnectorMetricsModel]
+
+
 def _bucket_expressions(
-    model: type[ProjectMetricsModel] | type[ProxyMetricsModel] | type[SystemMetricsModel],
+    model: _MetricsModel | type[SystemMetricsModel],
     bucket_seconds: int,
 ) -> tuple[Any, Any]:
     """Build bucket-epoch and bucket-timestamp expressions for time bucketing.
@@ -494,9 +517,7 @@ def _bucket_expressions(
     return bucket_epoch, bucket_ts
 
 
-def _metrics_aggregate_columns(
-    model: type[ProjectMetricsModel] | type[ProxyMetricsModel],
-) -> list[Any]:
+def _metrics_aggregate_columns(model: _MetricsModel) -> list[Any]:
     """Return the standard aggregate SELECT columns for a metrics model.
 
     Columns: request_count, success_count, failure_count, avg_latency_ms
@@ -579,41 +600,202 @@ class MetricsRepository:
             for m in models
         ]
 
-    async def get_connector_request_counts_since(
-        self, connector_ids: list[str], since: datetime
-    ) -> dict[str, int]:
-        """Requests each connector's proxies handled since ``since``, from the flushed snapshots.
+    # Connector-level metrics methods
 
-        Snapshots hold per-interval deltas at whatever granularity compaction
-        left them, so summing every row in the window is the request total.
-        Connectors without rows in the window are absent from the result.
+    async def save_connector_metrics_snapshot(
+        self,
+        connector_id: str,
+        request_count: int,
+        success_count: int,
+        failure_count: int,
+        avg_latency_ms: float,
+        bytes_sent: int = 0,
+        bytes_received: int = 0,
+    ) -> None:
+        """Save a connector-level metrics snapshot; survives the connector's proxies."""
+        model = ConnectorMetricsModel(
+            connector_id=connector_id,
+            timestamp=utc_now(),
+            request_count=request_count,
+            success_count=success_count,
+            failure_count=failure_count,
+            avg_latency_ms=avg_latency_ms,
+            bytes_sent=bytes_sent,
+            bytes_received=bytes_received,
+        )
+        self._session.add(model)
+        await self._session.flush()
+
+    async def get_connector_totals_since(
+        self, since_by_connector: dict[str, datetime]
+    ) -> dict[str, dict[str, int]]:
+        """Requests and bytes per connector since each connector's own ``since``.
+
+        Rows hold per-interval deltas at whatever granularity compaction left
+        them, so summing every row in the window is the total. Connectors
+        without rows in their window are absent from the result. Used for the
+        traffic split (one ``since`` for all) and for usage in the current
+        traffic period (a period start per connector).
         """
-        if not connector_ids:
+        if not since_by_connector:
             return {}
+        windows = [
+            (ConnectorMetricsModel.connector_id == connector_id)
+            & (ConnectorMetricsModel.timestamp >= since)
+            for connector_id, since in since_by_connector.items()
+        ]
         query = (
             select(
-                ProxyModel.connector_id,
-                func.sum(ProxyMetricsModel.request_count).label("total_requests"),
+                ConnectorMetricsModel.connector_id,
+                func.sum(ConnectorMetricsModel.request_count).label("total_requests"),
+                func.sum(ConnectorMetricsModel.bytes_sent).label("total_bytes_sent"),
+                func.sum(ConnectorMetricsModel.bytes_received).label("total_bytes_received"),
             )
-            .join(ProxyModel, ProxyModel.id == ProxyMetricsModel.proxy_id)
-            .where(
-                ProxyModel.connector_id.in_(connector_ids),
-                ProxyMetricsModel.timestamp >= since,
-            )
-            .group_by(ProxyModel.connector_id)
+            .where(or_(*windows))
+            .group_by(ConnectorMetricsModel.connector_id)
         )
         result = await self._session.execute(query)
-        return {row.connector_id: int(row.total_requests or 0) for row in result.all()}
+        return {
+            row.connector_id: {
+                "request_count": int(row.total_requests or 0),
+                "bytes_sent": int(row.total_bytes_sent or 0),
+                "bytes_received": int(row.total_bytes_received or 0),
+            }
+            for row in result.all()
+        }
 
-    async def get_cumulative_metrics_for_all_proxies(self) -> dict[str, dict[str, Any]]:
-        """Get cumulative metrics (sum of all snapshots) for each proxy.
+    async def get_connector_metrics_history(
+        self,
+        connector_id: str,
+        since: datetime | None = None,
+        limit: int = 100,
+        granularity: int = 60,
+    ) -> list[dict[str, Any]]:
+        """Historical metrics for a connector at a specific granularity, newest first."""
+        query = select(ConnectorMetricsModel).where(
+            ConnectorMetricsModel.connector_id == connector_id,
+            ConnectorMetricsModel.granularity == granularity,
+        )
+        if since:
+            query = query.where(ConnectorMetricsModel.timestamp >= since)
+        query = query.order_by(ConnectorMetricsModel.timestamp.desc()).limit(limit)
+        result = await self._session.execute(query)
+        return [
+            {
+                "timestamp": m.timestamp,
+                "request_count": m.request_count,
+                "success_count": m.success_count,
+                "failure_count": m.failure_count,
+                "avg_latency_ms": m.avg_latency_ms,
+                "bytes_sent": m.bytes_sent,
+                "bytes_received": m.bytes_received,
+            }
+            for m in result.scalars().all()
+        ]
 
-        Returns a dict mapping proxy_id to its total metrics across all snapshots.
-        Used to restore metrics on startup - these totals should be combined with
-        the current Redis window.
+    async def get_connector_metrics_history_aggregated(
+        self,
+        connector_id: str,
+        since: datetime,
+        bucket_seconds: int,
+    ) -> list[dict[str, Any]]:
+        """Connector history in fixed buckets, newest first (see the project variant)."""
+        bucket_epoch, bucket_ts = _bucket_expressions(ConnectorMetricsModel, bucket_seconds)
+        agg_cols = _metrics_aggregate_columns(ConnectorMetricsModel)
+        query = (
+            select(bucket_ts, *agg_cols)
+            .where(ConnectorMetricsModel.connector_id == connector_id)
+            .where(ConnectorMetricsModel.timestamp >= since)
+            .where(ConnectorMetricsModel.granularity <= bucket_seconds)
+            .group_by(bucket_epoch)
+            .order_by(bucket_epoch.desc())
+        )
+        result = await self._session.execute(query)
+        return [
+            {
+                "timestamp": row.bucket_ts,
+                "request_count": row.request_count,
+                "success_count": row.success_count,
+                "failure_count": row.failure_count,
+                "avg_latency_ms": float(row.avg_latency_ms or 0),
+                "bytes_sent": row.bytes_sent,
+                "bytes_received": row.bytes_received,
+            }
+            for row in result.all()
+        ]
+
+    async def compact_connector_metrics(
+        self,
+        connector_id: str,
+        older_than: datetime,
+        source_granularity: int,
+        target_granularity: int,
+    ) -> int:
+        """Compact connector metrics from source to target granularity.
+
+        Same as compact_project_metrics for the connector_metrics table.
+        Returns the number of source rows deleted.
         """
-        # Sum counts and compute weighted average for latency
-        # weighted_avg = sum(avg_latency * request_count) / sum(request_count)
+        bucket_epoch, bucket_ts = _bucket_expressions(ConnectorMetricsModel, target_granularity)
+        agg_cols = _metrics_aggregate_columns(ConnectorMetricsModel)
+        base_filter = [
+            ConnectorMetricsModel.connector_id == connector_id,
+            ConnectorMetricsModel.granularity == source_granularity,
+            ConnectorMetricsModel.timestamp < older_than,
+        ]
+        query = select(bucket_ts, *agg_cols).where(*base_filter).group_by(bucket_epoch)
+        result = await self._session.execute(query)
+        buckets = result.all()
+        if not buckets:
+            return 0
+        for row in buckets:
+            self._session.add(ConnectorMetricsModel(
+                connector_id=connector_id,
+                timestamp=_strip_tz(row.bucket_ts),
+                request_count=row.request_count,
+                success_count=row.success_count,
+                failure_count=row.failure_count,
+                avg_latency_ms=float(row.avg_latency_ms or 0),
+                bytes_sent=row.bytes_sent,
+                bytes_received=row.bytes_received,
+                granularity=target_granularity,
+            ))
+        del_result = await self._session.execute(delete(ConnectorMetricsModel).where(*base_filter))
+        await self._session.flush()
+        return int(del_result.rowcount or 0)  # type: ignore[attr-defined]
+
+    async def delete_connector_metrics_for_project_older_than(
+        self,
+        project_id: str,
+        older_than: datetime,
+    ) -> int:
+        """Delete connector metrics of a project's connectors older than the timestamp."""
+        connector_ids_subquery = (
+            select(ConnectorModel.id)
+            .where(ConnectorModel.project_id == project_id)
+            .scalar_subquery()
+        )
+        stmt = (
+            delete(ConnectorMetricsModel)
+            .where(ConnectorMetricsModel.connector_id.in_(connector_ids_subquery))
+            .where(ConnectorMetricsModel.timestamp < older_than)
+        )
+        result = await self._session.execute(stmt)
+        return int(result.rowcount or 0)  # type: ignore[attr-defined]
+
+    async def get_connector_ids_for_project(self, project_id: str) -> list[str]:
+        """All connector IDs belonging to a project."""
+        result = await self._session.execute(
+            select(ConnectorModel.id).where(ConnectorModel.project_id == project_id)
+        )
+        return [row[0] for row in result.all()]
+
+    async def get_cumulative_metrics_for_all_proxies(self) -> dict[str, MetricDelta]:
+        """Each proxy's totals across all its snapshots, keyed by proxy id.
+
+        Used to restore metrics on startup, summed with the current Redis
+        window. Latency comes back as the weighted sum so the batches add.
+        """
         query = (
             select(
                 ProxyMetricsModel.proxy_id,
@@ -628,26 +810,8 @@ class MetricsRepository:
             )
             .group_by(ProxyMetricsModel.proxy_id)
         )
-
         result = await self._session.execute(query)
-        rows = result.all()
-
-        metrics = {}
-        for row in rows:
-            total_requests = int(row.total_requests or 0)
-            weighted_latency_sum = float(row.weighted_latency_sum or 0)
-            avg_latency = weighted_latency_sum / total_requests if total_requests > 0 else 0.0
-
-            metrics[row.proxy_id] = {
-                "request_count": total_requests,
-                "success_count": int(row.total_successes or 0),
-                "failure_count": int(row.total_failures or 0),
-                "avg_latency_ms": float(avg_latency),
-                "bytes_sent": int(row.total_bytes_sent or 0),
-                "bytes_received": int(row.total_bytes_received or 0),
-            }
-
-        return metrics
+        return {row.proxy_id: _totals_from_row(row) for row in result.all()}
 
     # Project-level metrics methods
 
@@ -749,15 +913,8 @@ class MetricsRepository:
             for row in rows
         ]
 
-    async def get_cumulative_project_metrics(self) -> dict[str, dict[str, Any]]:
-        """Get cumulative metrics (sum of all snapshots) for each project.
-
-        Returns a dict mapping project_id to its total metrics across all snapshots.
-        Used to restore metrics on startup - these totals should be combined with
-        the current Redis window.
-        """
-        # Sum counts and compute weighted average for latency
-        # weighted_avg = sum(avg_latency * request_count) / sum(request_count)
+    async def get_cumulative_project_metrics(self) -> dict[str, MetricDelta]:
+        """Each project's totals across all its snapshots, keyed by project id (see the proxy variant)."""
         query = (
             select(
                 ProjectMetricsModel.project_id,
@@ -772,27 +929,8 @@ class MetricsRepository:
             )
             .group_by(ProjectMetricsModel.project_id)
         )
-
         result = await self._session.execute(query)
-        rows = result.all()
-
-        metrics = {}
-        for row in rows:
-            total_requests = int(row.total_requests or 0)
-            weighted_latency_sum = float(row.weighted_latency_sum or 0)
-            avg_latency = weighted_latency_sum / total_requests if total_requests > 0 else 0.0
-
-            metrics[row.project_id] = {
-                "request_count": total_requests,
-                "success_count": int(row.total_successes or 0),
-                "failure_count": int(row.total_failures or 0),
-                "avg_latency_ms": float(avg_latency),
-                "latency_sum_ms": float(weighted_latency_sum),
-                "bytes_sent": int(row.total_bytes_sent or 0),
-                "bytes_received": int(row.total_bytes_received or 0),
-            }
-
-        return metrics
+        return {row.project_id: _totals_from_row(row) for row in result.all()}
 
     # Compaction and retention methods
 

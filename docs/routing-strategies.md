@@ -58,7 +58,7 @@ Under `sticky`, a session already bound to a proxy keeps it while that proxy is 
 
 The **Traffic split** panel on the Overview and Connectors pages shows, for each connector, its weight, the expected share of untargeted requests under the current weights and health, and the observed share over the selected window, with a sentence explaining the current setup. Connectors that take no traffic say why (disabled, no healthy proxy). The connector list shows the weight and expected share next to each connector, and the Weight field in the connector editor previews the share while you type. The same numbers are available from `GET /api/v1/projects/{project_id}/metrics/traffic-split`, see the [API reference]({{ site.baseurl }}/api#traffic-split).
 
-Requests that carry a country or hit a filtered domain see a narrower set of connectors, so the observed split can differ from the expected one. Observed counts come from the flushed per-proxy metrics; a proxy that was removed takes its history with it.
+Requests that carry a country or hit a filtered domain see a narrower set of connectors, so the observed split can differ from the expected one. Observed counts come from the connector's own metrics history, so they survive proxy rotation. A connector blocked by its [traffic limit]({{ site.baseurl }}/traffic-limits) is listed as *over traffic limit* and its weight is shared by the others, like a disabled connector's; with a price per GB the panel also shows what each connector's traffic in the window cost.
 
 ## Session IDs
 

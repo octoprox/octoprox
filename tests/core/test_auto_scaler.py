@@ -25,6 +25,7 @@ def mock_data_provider() -> MagicMock:
     provider.get_credential = MagicMock(return_value=None)
     provider.get_active_proxies_for_connector = MagicMock(return_value=[])
     provider.get_proxies_for_connector = MagicMock(return_value=[])
+    provider.is_traffic_blocked = MagicMock(return_value=False)
     provider.demand_tracker = MagicMock()
     provider.demand_tracker.get_demand_level = AsyncMock(return_value=DemandLevel.LOW)
     provider.demand_tracker.has_recent_activity = AsyncMock(return_value=True)

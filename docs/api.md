@@ -311,6 +311,82 @@ Disabled (default):
 }
 ```
 
+#### Traffic Limits (traffic_config)
+
+Connectors meter the bytes through their proxies per billing period and can cap them. `traffic_config` holds the period, the limit, what happens at the limit and the price per GB; see the [Traffic Limits & Billing]({{ site.baseurl }}/traffic-limits) guide. Only explicit choices are stored, a key at its default is dropped.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `limit_bytes` | integer | none | Bytes per period before `action` applies; omit to meter only |
+| `period` | `day`, `week`, `month` | `month` | How often usage starts over (UTC) |
+| `reset_day` | integer | `1` | Day of month (1-28) for `month`, weekday (1 = Monday) for `week` |
+| `action` | `alert`, `block`, `interrupt` | `alert` | Flag only, stop new requests, or also cut running transfers |
+| `warn_percent` | integer | `80` | Share of the limit at which the connector is flagged |
+| `limit_status` | `509` or `429` | `509` | Status when every eligible connector is over its limit |
+| `price_per_gb` | number | none | Price per decimal GB (1 GB = 1,000,000,000 bytes) |
+| `currency` | string | `USD` | ISO 4217 code |
+
+**Example:**
+```json
+{
+  "traffic_config": {
+    "limit_bytes": 500000000000,
+    "period": "month",
+    "reset_day": 15,
+    "action": "block",
+    "price_per_gb": 8
+  }
+}
+```
+
+Every connector response carries `traffic_usage`, the usage in the current period as the serving instance sees it:
+
+```json
+{
+  "traffic_usage": {
+    "period": "month",
+    "period_start": "2026-09-15T00:00:00",
+    "period_end": "2026-10-15T00:00:00",
+    "bytes_sent": 12000000000,
+    "bytes_received": 230000000000,
+    "total_bytes": 242000000000,
+    "limit_bytes": 500000000000,
+    "percent": 48.4,
+    "action": "block",
+    "status": "ok",
+    "blocked": false,
+    "price_per_gb": 8.0,
+    "currency": "USD",
+    "cost": 1936.0,
+    "reset_at": null
+  }
+}
+```
+
+`status` is `ok`, `warning` (past `warn_percent`) or `exceeded`. `blocked` is true while the connector takes no new requests. `percent` and `cost` are `null` without a limit or a price. `reset_at` is set when usage was reset by hand inside the period; `traffic_reset_at` on the connector holds the same timestamp.
+
+Clients whose request finds every eligible connector over its limit get the configured status (509 by default) with a `Proxy-Status: octoprox; error=bandwidth_limit_exceeded` header.
+
+#### Reset Traffic Usage
+
+Start the connector's usage over from now (editor role). History is kept; the count against the limit restarts and a block is lifted:
+
+```bash
+POST /api/v1/projects/{project_id}/connectors/{connector_id}/traffic/reset
+```
+
+Returns the updated connector.
+
+#### Connector Metrics History
+
+The connector's own metrics history, which survives its proxies being rotated or re-synced:
+
+```bash
+GET /api/v1/projects/{project_id}/connectors/{connector_id}/metrics/history?range=24h
+```
+
+Same `range` values and response shape as [project metrics history](#metrics).
+
 #### Unquarantine Proxy
 
 Forcefully remove a proxy from quarantine:
@@ -472,7 +548,10 @@ GET /api/v1/projects/{project_id}/metrics/traffic-split?range=1h
       "expected_share": 75.0,
       "excluded_reason": null,
       "observed_requests": 880,
-      "observed_share": 73.33
+      "observed_share": 73.33,
+      "observed_bytes": 18400000000,
+      "cost": 147.2,
+      "currency": "USD"
     },
     {
       "connector_id": "…",
@@ -486,13 +565,16 @@ GET /api/v1/projects/{project_id}/metrics/traffic-split?range=1h
       "expected_share": 25.0,
       "excluded_reason": null,
       "observed_requests": 320,
-      "observed_share": 26.67
+      "observed_share": 26.67,
+      "observed_bytes": 6100000000,
+      "cost": null,
+      "currency": null
     }
   ]
 }
 ```
 
-`expected_share` (0-100) is what an untargeted request sees right now: every enabled connector with at least one eligible proxy takes `weight / total_weight`. A connector taking nothing has `excluded_reason` set to `disabled` or `no_eligible_proxies`. `observed_share` is the connector's part of the requests flushed in the window, `null` when there were none.
+`expected_share` (0-100) is what an untargeted request sees right now: every enabled connector with at least one eligible proxy takes `weight / total_weight`. A connector taking nothing has `excluded_reason` set to `disabled`, `traffic_limit` (blocked by its [traffic limit]({{ site.baseurl }}/traffic-limits)) or `no_eligible_proxies`. `observed_share` is the connector's part of the requests in the window, `null` when there were none; `observed_bytes` is its traffic in the window and `cost` what that traffic costs at the connector's price per GB (`null` when unpriced). The observed figures come from the connector's own metrics history, so they survive proxy rotation. The response also carries `observed_bytes` for the whole project.
 
 ### Prometheus Metrics
 
@@ -501,6 +583,15 @@ Export metrics in Prometheus format:
 ```bash
 GET /api/v1/projects/{project_id}/metrics/prometheus
 ```
+
+Besides the project gauges and counters, each connector's traffic this period is exported with `project`, `connector` and `name` labels:
+
+| Metric | Type | Description |
+|--------|------|-------------|
+| `octoprox_connector_traffic_bytes` | gauge | Bytes through the connector in its current traffic period |
+| `octoprox_connector_traffic_limit_bytes` | gauge | The period's limit, for connectors that have one |
+| `octoprox_connector_traffic_cost` | gauge | Spend at the connector's price per GB, with a `currency` label |
+| `octoprox_connector_traffic_blocked` | gauge | 1 while the connector takes no requests because of its limit |
 
 ---
 

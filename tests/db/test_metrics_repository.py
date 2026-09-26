@@ -192,12 +192,12 @@ class TestMetricsRepository:
         assert len(cumulative) == 2
         assert proxy1.id in cumulative
         assert proxy2.id in cumulative
-        assert cumulative[proxy1.id]["request_count"] == 10
-        assert cumulative[proxy2.id]["request_count"] == 20
-        assert cumulative[proxy1.id]["bytes_sent"] == 5000
-        assert cumulative[proxy1.id]["bytes_received"] == 25000
-        assert cumulative[proxy2.id]["bytes_sent"] == 10000
-        assert cumulative[proxy2.id]["bytes_received"] == 50000
+        assert cumulative[proxy1.id].request_count == 10
+        assert cumulative[proxy2.id].request_count == 20
+        assert cumulative[proxy1.id].bytes_sent == 5000
+        assert cumulative[proxy1.id].bytes_received == 25000
+        assert cumulative[proxy2.id].bytes_sent == 10000
+        assert cumulative[proxy2.id].bytes_received == 50000
 
     async def test_get_metrics_history_empty(
         self,
@@ -365,12 +365,12 @@ class TestMetricsRepository:
         assert len(cumulative) == 2
         assert project1.id in cumulative
         assert project2.id in cumulative
-        assert cumulative[project1.id]["request_count"] == 100
-        assert cumulative[project2.id]["request_count"] == 200
-        assert cumulative[project1.id]["bytes_sent"] == 50000
-        assert cumulative[project1.id]["bytes_received"] == 250000
-        assert cumulative[project2.id]["bytes_sent"] == 100000
-        assert cumulative[project2.id]["bytes_received"] == 500000
+        assert cumulative[project1.id].request_count == 100
+        assert cumulative[project2.id].request_count == 200
+        assert cumulative[project1.id].bytes_sent == 50000
+        assert cumulative[project1.id].bytes_received == 250000
+        assert cumulative[project2.id].bytes_sent == 100000
+        assert cumulative[project2.id].bytes_received == 500000
 
     async def test_get_project_metrics_history_empty(
         self,

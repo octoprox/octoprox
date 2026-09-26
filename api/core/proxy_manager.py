@@ -11,11 +11,13 @@ import asyncio
 import contextlib
 import json
 from collections.abc import Awaitable, Callable, Coroutine, Mapping, Sequence
+from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
 import structlog
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from api.core import utc_now
 from api.core.auto_scaler import AutoScaler
 from api.core.config import Settings
 from api.core.demand_tracker import DemandTracker
@@ -49,16 +51,9 @@ from api.core.signals import (
     proxy_update_requested,
     request_completed,
 )
-from api.core.stats import (
-    MetricDelta,
-    accumulate_delta,
-    apply_delta,
-    apply_metrics,
-    combine_metrics,
-    empty_delta,
-    merge_delta_into,
-)
+from api.core.stats import MetricDelta
 from api.core.system_snapshotter import SystemSnapshotter
+from api.core.traffic_limiter import TrafficLimiter, TrafficMeter
 from api.core.workers import WorkerName
 from api.db.redis import (
     INSTANCE_HEARTBEAT_INTERVAL,
@@ -76,7 +71,13 @@ from api.db.repository import (
     ProxyRepository,
 )
 from api.geo.models import META_LOCATION_CONFLICT, LocationPolicy
-from api.models.connector import DEFAULT_ROUTING_WEIGHT, Connector, ProxyTarget
+from api.models.connector import (
+    DEFAULT_ROUTING_WEIGHT,
+    DEFAULT_TRAFFIC_LIMIT_STATUS,
+    Connector,
+    ProxyTarget,
+    TrafficUsage,
+)
 from api.models.credential import Credential
 from api.models.project import Project
 from api.models.proxy import Proxy, ProxyStatus
@@ -161,16 +162,26 @@ class ProxyManager:
             self, redis_client, settings.instance_id, self._provider_registry
         )
         self._rate_limiter = RateLimiter(redis_client)
+        # Per-connector traffic usage and limits. Reads connectors from this
+        # cache, folds transfer progress into the pending deltas below, and
+        # loads period totals from history through the manager's session.
+        self._traffic_limiter = TrafficLimiter(
+            redis_client,
+            get_connector=lambda connector_id: self._connectors.get(connector_id),
+            sink=self._record_traffic_progress,
+            loader=self._load_connector_traffic_totals,
+        )
         self._system_snapshotter = SystemSnapshotter(
             session_factory, redis_client, self, settings
         )
         # Pending metric deltas accumulated since the last flush. The
         # per-request handler bumps local in-memory counters AND
-        # appends here; ``_metric_delta_publisher_loop`` drains both
+        # appends here; ``_metric_delta_publisher_loop`` drains the
         # dicts in a single Redis pipeline and announces the same
         # deltas on Pub/Sub so peers can update without polling.
         self._pending_proxy_deltas: dict[str, MetricDelta] = {}
         self._pending_project_deltas: dict[str, MetricDelta] = {}
+        self._pending_connector_deltas: dict[str, MetricDelta] = {}
         self._running = False
         self._tasks: list[asyncio.Task[None]] = []
         # Builds what this instance publishes about itself on the heartbeat.
@@ -200,6 +211,7 @@ class ProxyManager:
         # local so signals.py is not pulled in for tests that don't need it.
         from api.core.signals import (
             connector_changed,
+            connector_traffic_changed,
             credential_changed,
             project_changed,
             provider_changed,
@@ -214,6 +226,7 @@ class ProxyManager:
                 connector_changed,
                 proxy_changed,
                 proxy_quarantine_changed,
+                connector_traffic_changed,
                 provider_changed,
                 *self._cross_instance_extra_signals,
             ],
@@ -284,6 +297,7 @@ class ProxyManager:
         """
         from api.core.signals import (
             connector_changed,
+            connector_traffic_changed,
             credential_changed,
             project_changed,
             provider_changed,
@@ -297,6 +311,7 @@ class ProxyManager:
             connector_changed.name: self._apply_connector_change,
             proxy_changed.name: self._apply_proxy_change,
             proxy_quarantine_changed.name: self._apply_proxy_quarantine_change,
+            connector_traffic_changed.name: self._apply_connector_traffic_change,
             provider_changed.name: self._apply_provider_change,
             **self._cross_instance_handlers,
         }
@@ -366,8 +381,15 @@ class ProxyManager:
         if op == "removed":
             self._connectors.pop(connector_id, None)
             self._forget_connector_routing_state(connector_id)
+            self._traffic_limiter.forget_local(connector_id)
             return
         await self.reload_connector(connector_id)
+
+    async def _apply_connector_traffic_change(self, connector_id: str, op: str | None) -> None:
+        # A peer blocked or released the connector; the Redis key it wrote is
+        # authoritative, this instance just mirrors it so selection (and any
+        # running transfer under the interrupt action) reacts now.
+        await self._traffic_limiter.refresh_blocked_for(connector_id)
 
     async def _apply_proxy_change(self, proxy_id: str, op: str | None) -> None:
         if op == "removed":
@@ -601,13 +623,20 @@ class ProxyManager:
         """
         proxy = self._proxies.get(proxy_id)
         if proxy:
-            accumulate_delta(
-                self._pending_proxy_deltas.setdefault(proxy_id, empty_delta()),
+            self._pending_proxy_deltas.setdefault(proxy_id, MetricDelta()).add_request(
                 success, latency_ms, bytes_sent, bytes_received,
             )
 
             connector = self._connectors.get(proxy.connector_id)
             if connector:
+                self._pending_connector_deltas.setdefault(connector.id, MetricDelta()).add_request(
+                    success, latency_ms, bytes_sent, bytes_received,
+                )
+                # Bytes reported while the transfer ran are already counted;
+                # these are the remainder (see TrafficMeter.finish).
+                if self._traffic_limiter.record(connector.id, bytes_sent, bytes_received):
+                    await self._traffic_limiter.evaluate(connector.id)
+
                 rl_config = connector.parsed_rate_limit_config
                 if rl_config:
                     await self._rate_limiter.record_request(
@@ -621,10 +650,41 @@ class ProxyManager:
 
         project = self._projects.get(project_id)
         if project:
-            accumulate_delta(
-                self._pending_project_deltas.setdefault(project_id, empty_delta()),
+            self._pending_project_deltas.setdefault(project_id, MetricDelta()).add_request(
                 success, latency_ms, bytes_sent, bytes_received,
             )
+
+    def _record_traffic_progress(
+        self, proxy_id: str, project_id: str, connector_id: str, bytes_sent: int, bytes_received: int
+    ) -> None:
+        """A running transfer reports bytes so far: bytes only, the request is counted at its end."""
+        if proxy_id in self._proxies:
+            self._pending_proxy_deltas.setdefault(proxy_id, MetricDelta()).add_bytes(bytes_sent, bytes_received)
+        if connector_id in self._connectors:
+            self._pending_connector_deltas.setdefault(connector_id, MetricDelta()).add_bytes(bytes_sent, bytes_received)
+        if project_id in self._projects:
+            self._pending_project_deltas.setdefault(project_id, MetricDelta()).add_bytes(bytes_sent, bytes_received)
+
+    def traffic_meter(self, proxy: Proxy, project_id: str) -> TrafficMeter:
+        """A meter for one transfer through ``proxy``; the server feeds it as bytes flow."""
+        return self._traffic_limiter.meter(proxy.id, project_id, proxy.connector_id)
+
+    async def _load_connector_traffic_totals(
+        self, since_by_connector: dict[str, datetime]
+    ) -> dict[str, tuple[int, int]]:
+        """Bytes per connector since its window start: flushed history plus the Redis window."""
+        async with self._session_factory() as session:
+            rows = await MetricsRepository(session).get_connector_totals_since(since_by_connector)
+        window = await self._redis_client.get_all_connector_metrics()
+        totals: dict[str, tuple[int, int]] = {}
+        for connector_id in since_by_connector:
+            history = rows.get(connector_id, {})
+            current = window.get(connector_id) or MetricDelta()
+            totals[connector_id] = (
+                int(history.get("bytes_sent", 0)) + current.bytes_sent,
+                int(history.get("bytes_received", 0)) + current.bytes_received,
+            )
+        return totals
 
     async def stop(self) -> None:
         """Stop the proxy manager and cleanup."""
@@ -700,21 +760,26 @@ class ProxyManager:
             if proxy_id in statuses:
                 proxy.apply_status_snapshot(statuses[proxy_id])
 
-            # Combine Postgres (historical) + Redis (current window)
-            pg = postgres_proxy_metrics.get(proxy_id, {})
-            rd = redis_proxy_metrics.get(proxy_id, {})
-            apply_metrics(proxy, combine_metrics(pg, rd))
+            # Postgres (historical) + Redis (current window)
+            MetricDelta.summed(
+                postgres_proxy_metrics.get(proxy_id), redis_proxy_metrics.get(proxy_id)
+            ).set_on(proxy)
 
         # Hydrate project metrics directly on Project objects
         # Combines Postgres (historical) + Redis (current window)
         redis_project_metrics = await self._redis_client.get_all_project_metrics()
         for project_id, project in self._projects.items():
-            pg = postgres_project_metrics.get(project_id, {})
-            rd = redis_project_metrics.get(project_id, {})
-            apply_metrics(project, combine_metrics(pg, rd))
+            MetricDelta.summed(
+                postgres_project_metrics.get(project_id), redis_project_metrics.get(project_id)
+            ).set_on(project)
 
         # Restore quarantine state from Redis
         await self._rate_limiter.hydrate_from_redis(list(self._proxies.keys()))
+
+        # Traffic usage this period per connector, and the blocks in force.
+        connector_ids = list(self._connectors.keys())
+        await self._traffic_limiter.hydrate_blocked_from_redis(connector_ids)
+        await self._traffic_limiter.refresh(connector_ids)
 
         logger.info(
             "Hydrated operational data",
@@ -782,6 +847,7 @@ class ProxyManager:
             if cid not in connectors:
                 self._connectors.pop(cid, None)
                 self._forget_connector_routing_state(cid)
+                self._traffic_limiter.forget_local(cid)
         self._connectors.update(connectors)
 
         # Proxies - patch in place to keep request counters, status, and
@@ -821,7 +887,10 @@ class ProxyManager:
         )
 
     async def apply_imported_state(
-        self, old_project_ids: list[str], old_proxy_ids: list[str]
+        self,
+        old_project_ids: list[str],
+        old_proxy_ids: list[str],
+        old_connector_ids: list[str] | None = None,
     ) -> None:
         """Reconcile in-memory + Redis state after a backup import replaced the DB.
 
@@ -840,10 +909,15 @@ class ProxyManager:
             await self._redis_client.clear_mitm_requests(project_id)
         await self._rate_limiter.remove_proxies(old_proxy_ids)
 
+        for connector_id in old_connector_ids or []:
+            await self._redis_client.reset_connector_metrics(connector_id)
+            await self._traffic_limiter.forget(connector_id)
+
         # Discard pending deltas keyed by now-deleted ids so the next flush
         # does not resurrect stale metrics in Redis.
         self._pending_proxy_deltas.clear()
         self._pending_project_deltas.clear()
+        self._pending_connector_deltas.clear()
 
         await self.full_reload()
         logger.info(
@@ -888,29 +962,35 @@ class ProxyManager:
            best-effort; the 60s ``full_reload`` is the safety net for
            dropped messages.
         """
-        if not self._pending_proxy_deltas and not self._pending_project_deltas:
+        if (
+            not self._pending_proxy_deltas
+            and not self._pending_project_deltas
+            and not self._pending_connector_deltas
+        ):
             return False
 
         proxy_deltas = self._pending_proxy_deltas
         project_deltas = self._pending_project_deltas
+        connector_deltas = self._pending_connector_deltas
         self._pending_proxy_deltas = {}
         self._pending_project_deltas = {}
+        self._pending_connector_deltas = {}
 
         try:
-            await self._redis_client.flush_metric_deltas(proxy_deltas, project_deltas)
+            await self._redis_client.flush_metric_deltas(
+                proxy_deltas, project_deltas, connector_deltas
+            )
         except Exception:
             logger.warning(
                 "Failed to flush metric deltas; merging back into pending",
                 exc_info=True,
             )
             for pid, d in proxy_deltas.items():
-                merge_delta_into(
-                    self._pending_proxy_deltas.setdefault(pid, empty_delta()), d
-                )
+                self._pending_proxy_deltas.setdefault(pid, MetricDelta()).merge(d)
             for pid, d in project_deltas.items():
-                merge_delta_into(
-                    self._pending_project_deltas.setdefault(pid, empty_delta()), d
-                )
+                self._pending_project_deltas.setdefault(pid, MetricDelta()).merge(d)
+            for cid, d in connector_deltas.items():
+                self._pending_connector_deltas.setdefault(cid, MetricDelta()).merge(d)
             # Still a working cycle: there was a batch, and the retry carries
             # it. Only an empty buffer counts as idle.
             return True
@@ -921,13 +1001,17 @@ class ProxyManager:
         # at the same logical moment instead of the local one leading
         # peers between request handling and propagation.
         self._apply_peer_metric_deltas(proxy_deltas, project_deltas)
+        # Our own connector bytes were counted as they happened; they only
+        # change column, from unflushed to known.
+        self._traffic_limiter.mark_flushed(connector_deltas)
 
         try:
             payload = json.dumps(
                 {
                     "instance_id": self._settings.instance_id,
-                    "proxy_deltas": proxy_deltas,
-                    "project_deltas": project_deltas,
+                    "proxy_deltas": MetricDelta.dump_many(proxy_deltas),
+                    "project_deltas": MetricDelta.dump_many(project_deltas),
+                    "connector_deltas": MetricDelta.dump_many(connector_deltas),
                 }
             )
             await self._redis_client.client.publish(METRIC_DELTAS_CHANNEL, payload)
@@ -970,9 +1054,8 @@ class ProxyManager:
         """Listen for peer instances' metric deltas and apply them to in-memory.
 
         Drops self-echoes by ``instance_id``. The applied delta updates
-        in-memory ``Proxy`` / ``Project`` counters using the same
-        weighted-average math as ``increment_stats`` - see
-        ``stats.apply_delta``. Reconnects on transient Redis failures
+        in-memory ``Proxy`` / ``Project`` counters with count-weighted
+        latency, see ``MetricDelta.apply_to``. Reconnects on transient Redis failures
         so a brief blip doesn't silently mute cross-instance updates.
         """
         my_id = self._settings.instance_id
@@ -1000,8 +1083,11 @@ class ProxyManager:
                         # the loop itself just waits on the socket.
                         with job_stats.track(WorkerName.METRIC_DELTA_SUBSCRIBER):
                             self._apply_peer_metric_deltas(
-                                payload.get("proxy_deltas") or {},
-                                payload.get("project_deltas") or {},
+                                MetricDelta.parse_many(payload.get("proxy_deltas")),
+                                MetricDelta.parse_many(payload.get("project_deltas")),
+                            )
+                            await self._traffic_limiter.apply_peer(
+                                MetricDelta.parse_many(payload.get("connector_deltas"))
                             )
                 finally:
                     with contextlib.suppress(Exception):
@@ -1015,18 +1101,18 @@ class ProxyManager:
 
     def _apply_peer_metric_deltas(
         self,
-        proxy_deltas: dict[str, dict[str, Any]],
-        project_deltas: dict[str, dict[str, Any]],
+        proxy_deltas: dict[str, MetricDelta],
+        project_deltas: dict[str, MetricDelta],
     ) -> None:
         """Fold peer deltas into local in-memory counters."""
         for proxy_id, delta in proxy_deltas.items():
             proxy = self._proxies.get(proxy_id)
             if proxy is not None:
-                apply_delta(proxy, delta)
+                delta.apply_to(proxy)
         for project_id, delta in project_deltas.items():
             project = self._projects.get(project_id)
             if project is not None:
-                apply_delta(project, delta)
+                delta.apply_to(project)
 
     async def reload_project(self, project_id: str) -> None:
         """Re-read a project from Postgres into the cache.
@@ -1167,13 +1253,28 @@ class ProxyManager:
             "geo_provision_locks": len(self._geo_provision_locks),
             "pending_proxy_deltas": len(self._pending_proxy_deltas),
             "pending_project_deltas": len(self._pending_project_deltas),
+            "pending_connector_deltas": len(self._pending_connector_deltas),
             "quarantined_proxies": self._rate_limiter.active_quarantine_count,
+            "traffic_blocked_connectors": self._traffic_limiter.blocked_count,
         }
 
     @property
     def rate_limiter(self) -> RateLimiter:
         """Get the rate limiter instance."""
         return self._rate_limiter
+
+    @property
+    def traffic_limiter(self) -> TrafficLimiter:
+        """Per-connector traffic usage and limits."""
+        return self._traffic_limiter
+
+    def is_traffic_blocked(self, connector_id: str) -> bool:
+        """Whether the connector takes no new requests because its traffic limit was reached."""
+        return self._traffic_limiter.is_blocked(connector_id)
+
+    def traffic_usage(self, connector: Connector) -> TrafficUsage:
+        """The connector's traffic this period against its limit and price."""
+        return self._traffic_limiter.usage(connector)
 
     @property
     def proxies(self) -> list[Proxy]:
@@ -1477,8 +1578,26 @@ class ProxyManager:
             self._rate_limiter.clear_connector_proxies(proxy_ids)
 
         self._connectors[connector.id] = connector
+        # If the window or the limit moved, recount from history and re-apply,
+        # which lifts a block the new settings no longer justify. The limiter
+        # decides, because the route may have edited the cached object in place.
+        await self._traffic_limiter.sync_config(connector)
         logger.info("Updated connector", connector_id=connector.id, name=connector.name)
         await event_bus.publish(connector_changed, self, entity_id=connector.id, op="updated")
+
+    async def reset_connector_traffic(self, connector_id: str) -> Connector | None:
+        """Start the connector's usage over from now; history is kept, only the count restarts."""
+        connector = self._connectors.get(connector_id)
+        if connector is None:
+            return None
+        connector.traffic_reset_at = utc_now()
+        await self.update_connector(connector)
+        logger.info(
+            "Connector traffic usage reset",
+            connector_id=connector_id,
+            name=connector.name,
+        )
+        return connector
 
     async def update_connector_error(
         self,
@@ -1561,6 +1680,12 @@ class ProxyManager:
         # Clean up rate limiter state (in-memory + Redis quarantine keys)
         await self._rate_limiter.remove_proxies(proxy_ids_to_remove)
 
+        # The connector's own metrics hash would otherwise be flushed against
+        # a row that no longer exists; its block key and usage go with it.
+        await self._redis_client.reset_connector_metrics(connector_id)
+        self._pending_connector_deltas.pop(connector_id, None)
+        await self._traffic_limiter.forget(connector_id)
+
         # Remove from cache
         del self._connectors[connector_id]
         self._forget_connector_routing_state(connector_id)
@@ -1615,8 +1740,18 @@ class ProxyManager:
         # Non-cloud connector: remove directly
         return await self.remove_connector(connector_id)
 
-    def _enabled_connectors(self, project_id: str, target_host: str | None = None) -> list[Connector]:
+    def _enabled_connectors(
+        self,
+        project_id: str,
+        target_host: str | None = None,
+        *,
+        include_traffic_blocked: bool = False,
+    ) -> list[Connector]:
         """Enabled connectors of a project that may serve ``target_host``.
+
+        A connector blocked by its traffic limit is left out unless
+        ``include_traffic_blocked`` asks for it (to tell "over limit" from
+        "nothing configured" when a request finds no proxy).
 
         Args:
             project_id: The project to get connectors for.
@@ -1625,7 +1760,9 @@ class ProxyManager:
         """
         return [
             c for c in self._connectors.for_project(project_id)
-            if c.enabled and (not target_host or is_domain_allowed(target_host, c.parsed_routing_config))
+            if c.enabled
+            and (not target_host or is_domain_allowed(target_host, c.parsed_routing_config))
+            and (include_traffic_blocked or not self._traffic_limiter.is_blocked(c.id))
         ]
 
     def _get_enabled_connector_ids(
@@ -1711,6 +1848,7 @@ class ProxyManager:
         country: str | None,
         *,
         include_quarantined: bool,
+        include_traffic_blocked: bool = False,
     ) -> list[Proxy]:
         """Healthy proxies a request may use, after domain and country filtering.
 
@@ -1721,7 +1859,9 @@ class ProxyManager:
         project = self._projects.get(project_id)
         strict = project is not None and project.location_policy == LocationPolicy.STRICT
         connectors: dict[str, tuple[list[str], bool]] = {}
-        for c in self._enabled_connectors(project_id, target_host):
+        for c in self._enabled_connectors(
+            project_id, target_host, include_traffic_blocked=include_traffic_blocked
+        ):
             declared = c.countries
             if wanted and declared and wanted not in declared:
                 continue
@@ -1924,6 +2064,33 @@ class ProxyManager:
         if not healthy:
             return False
         return all(self._rate_limiter.is_quarantined(p.id) for p in healthy)
+
+    def traffic_limit_status(
+        self,
+        project_id: str,
+        target_host: str | None = None,
+        country: str | None = None,
+    ) -> int | None:
+        """The status to answer with when only traffic-blocked connectors could serve the request.
+
+        None when some connector is still eligible, or when none would be
+        even without the blocks (that is a 502, not a limit). With several
+        blocked connectors disagreeing on their status, 509 wins: it is the
+        one that cannot be mistaken for anything else.
+        """
+        if self._eligible_proxies(project_id, target_host, country, include_quarantined=True):
+            return None
+        held_back = self._eligible_proxies(
+            project_id, target_host, country, include_quarantined=True, include_traffic_blocked=True
+        )
+        statuses: set[int] = set()
+        for proxy in held_back:
+            connector = self._connectors.get(proxy.connector_id)
+            if connector is not None and self._traffic_limiter.is_blocked(connector.id):
+                statuses.add(self._traffic_limiter.config_for(connector).limit_status)
+        if not statuses:
+            return None
+        return statuses.pop() if len(statuses) == 1 else DEFAULT_TRAFFIC_LIMIT_STATUS
 
     def get_quarantined_count_for_project(self, project_id: str) -> int:
         """Get the number of quarantined proxies for a project."""

@@ -10,6 +10,8 @@ nav_id: rate-limiting
 
 Connectors support optional per-proxy rate limiting via the `rate_limit_config` field. When enabled, Octoprox tracks the number of requests each proxy handles within a sliding time window. If a proxy exceeds the configured limit, it is placed into **quarantine** for a randomized duration and excluded from proxy selection until the quarantine expires.
 
+Rate limiting is about request pace per proxy. To cap the **bytes** a connector carries per billing period, and to price them, see [Traffic Limits & Billing]({{ site.baseurl }}/traffic-limits).
+
 ## How It Works
 
 1. Each request through a proxy is recorded in a sliding time window.

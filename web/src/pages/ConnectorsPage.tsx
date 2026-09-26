@@ -11,10 +11,12 @@ import {
   fetchProjectConnectors, fetchProjectCredentials, fetchProjectCredential, fetchConnectorOptions,
   createProjectConnector, updateProjectConnector, deleteProjectConnector,
   Connector, CredentialType, ConnectorCreate, ConnectorUpdate, ConnectorOptions, ProviderField,
-  RoutingConfig, RateLimitConfig, Credential, CredentialDetail,
+  RoutingConfig, RateLimitConfig, TrafficConfig, TrafficPeriod, TrafficLimitAction, TrafficLimitStatus, TRAFFIC_DEFAULTS, BYTES_PER_GB,
+  Credential, CredentialDetail,
   connectorWeight, DEFAULT_ROUTING_WEIGHT, MAX_ROUTING_WEIGHT, fetchProjectTrafficSplit, ConnectorTrafficShare,
 } from '../api/client'
 import { TrafficSplitPanel, formatShare } from '../components/TrafficSplit'
+import { ACTION_LABEL, ConnectorTrafficSection, TrafficStatusBadge, TrafficUsageBar } from '../components/ConnectorTraffic'
 import { useProject } from '../contexts/ProjectContext'
 import { useAuth } from '../contexts/AuthContext'
 import { useToast } from '../contexts/ToastContext'
@@ -24,11 +26,11 @@ import { Page, EmptyState } from '../components/layout/Page'
 import { NewCredentialPanel, TypePicker, TypeCard } from '../components/CredentialForm'
 import { ProviderLogo } from '../components/ProviderLogo'
 import { SchemaForm, MultiCountryPicker, defaultValues, serializeValues, splitCountries } from '../components/SchemaForm'
-import { relativeTime, formatDateTime, formatDate } from '../utils/format'
+import { relativeTime, formatDateTime, formatDate, formatBytesDecimal, formatMoney } from '../utils/format'
 import { targetTotal, describeTarget, isDynamic } from '../utils/connectors'
 import { coverageLabel } from '../components/geo/ProviderAccuracyPanel'
 import { RichSelect, RichSelectOption } from '../components/RichSelect'
-import { Button, Input, Label, Badge, Alert, ChipInput, Inspector, Tabs, ConfirmDialog, KeyValue, InspectorSection, InfoTip } from '../components/ui'
+import { Button, Input, Label, Badge, Alert, ChipInput, Inspector, Tabs, Segmented, Select, ConfirmDialog, KeyValue, InspectorSection, InfoTip } from '../components/ui'
 
 type DomainFilterMode = 'none' | 'whitelist' | 'blacklist'
 type ConfigTab = string
@@ -39,10 +41,19 @@ interface ConnectorFormData {
   config: Record<string, string>
   routing_config: RoutingConfig
   rate_limit_config: RateLimitConfig
+  traffic_config: TrafficConfig
   enabled: boolean
 }
 
-const EMPTY_FORM: ConnectorFormData = { name: '', credential_id: '', config: {}, routing_config: {}, rate_limit_config: {}, enabled: true }
+const EMPTY_FORM: ConnectorFormData = { name: '', credential_id: '', config: {}, routing_config: {}, rate_limit_config: {}, traffic_config: {}, enabled: true }
+
+const WEEKDAYS = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']
+const DEFAULT_LIMIT_GB = 100
+const ACTION_HELP: Record<TrafficLimitAction, string> = {
+  alert: 'Keeps routing. The connector is flagged in the lists, the Overview and the logs, and the Prometheus gauge moves.',
+  block: 'Stops handing the connector new requests; the other connectors share its weight. Transfers already running finish.',
+  interrupt: 'Stops new requests and closes the transfers still running on the connector, wherever they are.',
+}
 
 // ---------------------------------------------------------------------------
 // Helpers shared by the table and the editor
@@ -201,18 +212,26 @@ export default function ConnectorsPage() {
       },
     },
     {
+      id: 'traffic',
+      accessorFn: (row: Connector) => row.traffic_usage?.total_bytes ?? 0,
+      header: 'Traffic',
+      size: 190,
+      cell: ({ row }) => (row.original.traffic_usage ? <TrafficUsageBar usage={row.original.traffic_usage} compact /> : <span className="text-fg-subtle">-</span>),
+    },
+    {
       id: 'status',
-      accessorFn: (row: Connector) => (row.last_error ? 'Error' : row.enabled ? 'Enabled' : 'Disabled'),
+      accessorFn: (row: Connector) => (row.last_error ? 'Error' : row.traffic_usage?.blocked ? 'Over limit' : row.enabled ? 'Enabled' : 'Disabled'),
       header: 'Status',
-      size: 170,
+      size: 190,
       meta: { filterVariant: 'select' as const },
       cell: ({ row }) => (
-        <span className="inline-flex items-center gap-1.5">
+        <span className="inline-flex items-center gap-1.5 flex-wrap">
           {row.original.last_error && (
             <Badge color="red" className="inline-flex items-center gap-1" title={row.original.last_error}>
               <AlertTriangle className="w-3 h-3" /> Error
             </Badge>
           )}
+          {row.original.traffic_usage && <TrafficStatusBadge usage={row.original.traffic_usage} />}
           <Badge color={row.original.enabled ? 'green' : 'gray'}>{row.original.enabled ? 'Enabled' : 'Disabled'}</Badge>
         </span>
       ),
@@ -293,7 +312,7 @@ export default function ConnectorsPage() {
             getRowId={(row) => row.id}
             onRowClick={(row) => setPanel({ kind: 'edit', id: row.id })}
             activeRowId={panel?.kind === 'edit' ? panel.id : null}
-            columnVisibility={panel ? { updated_at: false, actions: false } : {}}
+            columnVisibility={panel ? { updated_at: false, actions: false, traffic: false } : {}}
           />
           {errored.map((c) => (
             <Alert key={c.id} className="flex items-start gap-2.5 text-[12.5px]">
@@ -356,6 +375,7 @@ function ConnectorEditor({ connector, siblings, canMutate, onClose, onDelete, on
       config: configForForm,
       routing_config: connector.routing_config || {},
       rate_limit_config: connector.rate_limit_config || {},
+      traffic_config: connector.traffic_config || {},
       enabled: connector.enabled,
     }
   })
@@ -441,9 +461,9 @@ function ConnectorEditor({ connector, siblings, canMutate, onClose, onDelete, on
     if (!formData.credential_id) { setError('Select or create a credential first.'); return }
     const preparedConfig = isDescriptor ? serializeValues(descriptorFields, formData.config, schemaScopes) : prepareConfigForSubmit(formData.config)
     if (isEdit) {
-      updateMutation.mutate({ name: formData.name, credential_id: formData.credential_id, enabled: formData.enabled, config: preparedConfig, routing_config: formData.routing_config, rate_limit_config: formData.rate_limit_config })
+      updateMutation.mutate({ name: formData.name, credential_id: formData.credential_id, enabled: formData.enabled, config: preparedConfig, routing_config: formData.routing_config, rate_limit_config: formData.rate_limit_config, traffic_config: formData.traffic_config })
     } else {
-      createMutation.mutate({ name: formData.name, credential_id: formData.credential_id, config: preparedConfig, routing_config: formData.routing_config, rate_limit_config: formData.rate_limit_config, enabled: formData.enabled })
+      createMutation.mutate({ name: formData.name, credential_id: formData.credential_id, config: preparedConfig, routing_config: formData.routing_config, rate_limit_config: formData.rate_limit_config, traffic_config: formData.traffic_config, enabled: formData.enabled })
     }
   }
 
@@ -621,8 +641,152 @@ function ConnectorEditor({ connector, siblings, canMutate, onClose, onDelete, on
     </div>
   )
 
+  // --- Traffic tab: period, limit, action at the limit, price per GB
+  const tc = formData.traffic_config
+  const period: TrafficPeriod = tc.period ?? TRAFFIC_DEFAULTS.period
+  const resetDay = tc.reset_day ?? TRAFFIC_DEFAULTS.reset_day
+  const action: TrafficLimitAction = tc.action ?? TRAFFIC_DEFAULTS.action
+  const warnPercent = tc.warn_percent ?? TRAFFIC_DEFAULTS.warn_percent
+  const limitStatus: TrafficLimitStatus = tc.limit_status ?? TRAFFIC_DEFAULTS.limit_status
+  const currency = tc.currency ?? TRAFFIC_DEFAULTS.currency
+  const setTraffic = (patch: Partial<TrafficConfig>) => {
+    const next: TrafficConfig = { ...formData.traffic_config, ...patch }
+    // Drop keys back at their default (or cleared) so the stored config only holds explicit choices.
+    for (const key of Object.keys(next) as (keyof TrafficConfig)[]) {
+      const v = next[key]
+      if (v === undefined || v === null || (key in TRAFFIC_DEFAULTS && v === TRAFFIC_DEFAULTS[key as keyof typeof TRAFFIC_DEFAULTS])) delete next[key]
+    }
+    setFormData({ ...formData, traffic_config: next })
+  }
+  const setPeriod = (p: TrafficPeriod) => setTraffic({ period: p, reset_day: p === 'week' && resetDay > 7 ? 1 : resetDay })
+  const [limitText, setLimitText] = useState<string>(() => (connector?.traffic_config?.limit_bytes ? String(connector.traffic_config.limit_bytes / BYTES_PER_GB) : ''))
+  const setLimitGb = (raw: string) => {
+    setLimitText(raw)
+    const n = Number(raw)
+    if (raw.trim() === '' || !Number.isFinite(n) || n <= 0) { setTraffic({ limit_bytes: undefined }); return }
+    setTraffic({ limit_bytes: Math.round(n * BYTES_PER_GB) })
+  }
+  const [priceText, setPriceText] = useState<string>(() => (connector?.traffic_config?.price_per_gb != null ? String(connector.traffic_config.price_per_gb) : ''))
+  const setPrice = (raw: string) => {
+    setPriceText(raw)
+    const n = Number(raw)
+    if (raw.trim() === '' || !Number.isFinite(n) || n < 0) { setTraffic({ price_per_gb: undefined }); return }
+    setTraffic({ price_per_gb: n })
+  }
+  const usage = connector?.traffic_usage ?? null
+  const limitEnabled = tc.limit_bytes != null
+
+  const renderTrafficTab = () => (
+    <div className="space-y-4">
+      <div className="grid grid-cols-2 gap-3">
+        <div>
+          <Label className="text-xs">
+            <span className="inline-flex items-center gap-1.5">
+              <span>Period</span>
+              <InfoTip label="About the period">
+                Usage and spend count from the start of the period and reset at its end. Match your vendor's billing cycle: a monthly plan renewing on the 15th is a monthly period with reset day 15. Periods are in UTC.
+              </InfoTip>
+            </span>
+          </Label>
+          <Segmented options={[{ value: 'day', label: 'Daily' }, { value: 'week', label: 'Weekly' }, { value: 'month', label: 'Monthly' }] as { value: TrafficPeriod; label: string }[]} value={period} onChange={setPeriod} size="sm" className="mt-1" />
+        </div>
+        {period !== 'day' && (
+          <div>
+            <Label className="text-xs">{period === 'month' ? 'Reset day of month' : 'Week starts on'}</Label>
+            {period === 'month' ? (
+              <Input type="number" min={1} max={28} step={1} value={resetDay} onChange={(e) => setTraffic({ reset_day: Math.min(28, Math.max(1, Math.floor(Number(e.target.value)) || 1)) })} className="px-3 py-1.5 text-sm w-24" disabled={readOnly} />
+            ) : (
+              <Select value={resetDay} onChange={(e) => setTraffic({ reset_day: Number(e.target.value) })} className="px-3 py-1.5 text-sm" disabled={readOnly}>
+                {WEEKDAYS.map((d, i) => <option key={d} value={i + 1}>{d}</option>)}
+              </Select>
+            )}
+          </div>
+        )}
+      </div>
+
+      <div className="border-t border-line pt-3 space-y-3">
+        <div className="flex items-center justify-between">
+          <Label className="text-xs mb-0">
+            <span className="inline-flex items-center gap-1.5">
+              <span>Traffic limit</span>
+              <InfoTip label="About the limit">
+                Bytes through this connector's proxies in the period, both directions, counted while transfers run. Enter decimal gigabytes as vendors bill them (1 GB = 1,000,000,000 bytes). Octoprox meters what passes through it; TLS overhead and how the vendor counts headers make the vendor's meter differ slightly, so set the limit a little under the plan.
+              </InfoTip>
+            </span>
+          </Label>
+          <Toggle checked={limitEnabled} onChange={(on) => { if (on) { setLimitText(String(DEFAULT_LIMIT_GB)); setTraffic({ limit_bytes: DEFAULT_LIMIT_GB * BYTES_PER_GB }) } else { setLimitText(''); setTraffic({ limit_bytes: undefined }) } }} />
+        </div>
+        {limitEnabled ? (
+          <>
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <Label className="text-xs">Limit (GB per {period === 'day' ? 'day' : period === 'week' ? 'week' : 'month'})</Label>
+                <Input type="number" min={0.001} step="any" value={limitText} onChange={(e) => setLimitGb(e.target.value)} className="px-3 py-1.5 text-sm" disabled={readOnly} />
+                {tc.limit_bytes != null && <p className="text-xs text-fg-subtle mt-1 tabular-nums">{tc.limit_bytes.toLocaleString()} bytes</p>}
+              </div>
+              <div>
+                <Label className="text-xs">Warn at (% of limit)</Label>
+                <Input type="number" min={1} max={100} step={1} value={warnPercent} onChange={(e) => setTraffic({ warn_percent: Math.min(100, Math.max(1, Math.floor(Number(e.target.value)) || 1)) })} className="px-3 py-1.5 text-sm" disabled={readOnly} />
+                {tc.limit_bytes != null && <p className="text-xs text-fg-subtle mt-1">Flagged at {formatBytesDecimal(Math.floor(tc.limit_bytes * warnPercent / 100))}</p>}
+              </div>
+            </div>
+            <div>
+              <Label className="text-xs">At the limit</Label>
+              <Segmented options={(['alert', 'block', 'interrupt'] as TrafficLimitAction[]).map((a) => ({ value: a, label: ACTION_LABEL[a] }))} value={action} onChange={(a) => setTraffic({ action: a })} size="sm" className="mt-1" />
+              <p className="text-xs text-fg-muted mt-1.5">{ACTION_HELP[action]}</p>
+            </div>
+            {action !== 'alert' && (
+              <div>
+                <Label className="text-xs">
+                  <span className="inline-flex items-center gap-1.5">
+                    <span>Status for clients</span>
+                    <InfoTip label="About the status">
+                      Sent when every connector that could serve a request is over its limit. 509 Bandwidth Limit Exceeded cannot be mistaken for the rate limiter's 429 or for a misconfiguration; pick 429 only for clients hard-wired to it. Either way the response carries a Proxy-Status header naming the error. Vendors do not agree here: Oxylabs answers 407, Bright Data 502, Decodo 429.
+                    </InfoTip>
+                  </span>
+                </Label>
+                <Segmented options={[{ value: '509', label: '509 Bandwidth Limit Exceeded' }, { value: '429', label: '429 Too Many Requests' }]} value={String(limitStatus)} onChange={(v) => setTraffic({ limit_status: Number(v) as TrafficLimitStatus })} size="sm" className="mt-1" />
+              </div>
+            )}
+            {usage && usage.limit_bytes != null && (
+              <p className="text-xs text-fg-muted">Used so far: <b className="font-semibold text-fg">{formatBytesDecimal(usage.total_bytes)}</b> of the saved limit ({Math.round(usage.percent ?? 0)}%).</p>
+            )}
+          </>
+        ) : (
+          <p className="text-xs text-fg-muted">No limit. Usage is still metered per period{usage ? <>: <b className="font-semibold text-fg">{formatBytesDecimal(usage.total_bytes)}</b> so far</> : ''}.</p>
+        )}
+      </div>
+
+      <div className="border-t border-line pt-3 space-y-3">
+        <Label className="text-xs">
+          <span className="inline-flex items-center gap-1.5">
+            <span>Billing</span>
+            <InfoTip label="About billing">
+              What you pay the vendor per decimal gigabyte. Usage is priced at display time, so past periods show the current rate. Cloud connectors can carry their egress price here.
+            </InfoTip>
+          </span>
+        </Label>
+        <div className="grid grid-cols-2 gap-3">
+          <div>
+            <Label className="text-xs">Price per GB</Label>
+            <Input type="number" min={0} step="any" value={priceText} onChange={(e) => setPrice(e.target.value)} placeholder="e.g. 8" className="px-3 py-1.5 text-sm" disabled={readOnly} />
+          </div>
+          <div>
+            <Label className="text-xs">Currency</Label>
+            <Input type="text" maxLength={3} value={currency} onChange={(e) => setTraffic({ currency: e.target.value.toUpperCase() })} className="px-3 py-1.5 text-sm uppercase w-24" disabled={readOnly} />
+          </div>
+        </div>
+        <p className="text-xs text-fg-muted">
+          {tc.price_per_gb != null
+            ? <>{tc.limit_bytes != null && <>A full period costs <b className="font-semibold text-fg">{formatMoney(tc.limit_bytes / BYTES_PER_GB * tc.price_per_gb, currency)}</b>. </>}{usage && <>Spend so far {formatMoney(usage.total_bytes / BYTES_PER_GB * tc.price_per_gb, currency)}.</>}</>
+            : 'Set a price to see spend next to usage on the connector list, the Overview and the traffic split.'}
+        </p>
+      </div>
+    </div>
+  )
+
   // --- Provider-specific tabs and fields
-  const toInstanceTypeOptions = (opts: ConnectorOptions['aws_instance_types'] | undefined): RichSelectOption[] =>
+  const toInstanceTypeOptions =(opts: ConnectorOptions['aws_instance_types'] | undefined): RichSelectOption[] =>
     (opts || []).map((opt) => ({ value: opt.code, label: opt.code, description: opt.description, badge: opt.architecture }))
   const toRegionOptions = (opts: ConnectorOptions['aws_regions'] | undefined): RichSelectOption[] =>
     (opts || []).map((opt) => ({ value: opt.code, label: opt.name, description: opt.code }))
@@ -640,7 +804,7 @@ function ConnectorEditor({ connector, siblings, canMutate, onClose, onDelete, on
   }
 
   const tabsFor = (t: CredentialType): { id: ConfigTab; label: string }[] => {
-    const common = [{ id: 'routing', label: 'Routing' }, { id: 'rate_limiting', label: 'Rate limiting' }]
+    const common = [{ id: 'routing', label: 'Routing' }, { id: 'rate_limiting', label: 'Rate limiting' }, { id: 'traffic', label: 'Traffic' }]
     if (t === 'static_proxy_provider') return [{ id: 'general', label: 'General' }, ...common]
     if (isDescriptor) {
       const groups: string[] = []
@@ -765,6 +929,7 @@ function ConnectorEditor({ connector, siblings, canMutate, onClose, onDelete, on
   const renderTabContent = () => {
     if (activeTab === 'routing') return renderRoutingTab()
     if (activeTab === 'rate_limiting') return renderRateLimitingTab()
+    if (activeTab === 'traffic') return renderTrafficTab()
     if (type === 'static_proxy_provider' && activeTab === 'general') return renderStaticGeneral()
     if (isDescriptor) return renderDescriptorGroup(activeTab)
     if (activeTab === 'advanced') return renderAdvanced()
@@ -832,6 +997,8 @@ function ConnectorEditor({ connector, siblings, canMutate, onClose, onDelete, on
         <Tabs<ConfigTab> tabs={tabsFor(type)} active={activeTab} onChange={setActiveTab} size="sm" />
         <fieldset disabled={readOnly} className="min-h-[160px]">{renderTabContent()}</fieldset>
       </form>
+
+      {isEdit && connector && selectedProjectId && <ConnectorTrafficSection connector={connector} projectId={selectedProjectId} canMutate={canMutate} />}
 
       {isEdit && connector && <ConnectorAccuracySection connectorId={connector.id} />}
 
