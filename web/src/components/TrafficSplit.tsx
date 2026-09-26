@@ -121,13 +121,13 @@ function TrafficSplitBody({ split, onOpenConnector }: { split: TrafficSplitRespo
   if (split.connectors.length === 0) return <p className="text-xs text-fg-muted py-3">No connectors yet.</p>
   const priced = split.connectors.some((c) => c.cost != null)
   const spend = totalSpend(split.connectors)
-  const cols = priced ? 'grid-cols-[auto_1fr_auto_auto_auto_auto]' : 'grid-cols-[auto_1fr_auto_auto_auto]'
+  const cols = priced ? 'grid-cols-[auto_minmax(0,1fr)_auto_auto_auto_auto]' : 'grid-cols-[auto_minmax(0,1fr)_auto_auto_auto]'
 
   return (
     <div className="space-y-3">
       {/* Expected split as one stacked bar */}
       <div>
-        <div className="flex items-center justify-between text-[11px] text-fg-subtle mb-1">
+        <div className="flex items-center justify-between flex-wrap gap-x-3 text-[11px] text-fg-subtle mb-1">
           <span>Expected, untargeted requests</span>
           <span>{active.length} of {split.connectors.length} connectors eligible</span>
         </div>
@@ -138,7 +138,7 @@ function TrafficSplitBody({ split, onOpenConnector }: { split: TrafficSplitRespo
         </div>
       </div>
 
-      {/* Per connector rows: weight, expected, observed */}
+      {/* Per connector rows: weight, expected, observed, spend */}
       <div className="-mx-1.5">
         <div className={`grid ${cols} gap-x-3 px-1.5 text-[11px] text-fg-subtle`}>
           <span />
@@ -159,7 +159,7 @@ function TrafficSplitBody({ split, onOpenConnector }: { split: TrafficSplitRespo
               title={describeShare(c, split)}
             >
               <span className={`w-2 h-2 rounded-full ${off ? 'bg-fg-subtle' : swatch(i)}`} />
-              <span className={`inline-flex items-center gap-2 min-w-0 ${off ? 'text-fg-subtle' : ''}`}>
+              <span className={`flex items-center gap-2 min-w-0 ${off ? 'text-fg-subtle' : ''}`}>
                 <ProviderLogo type={c.credential_type} className="w-4 h-4 text-[16px] flex-none" />
                 <span className="truncate">{c.name}</span>
                 {c.dynamic && <span className="text-fg-subtle text-[11px] flex-none">dynamic</span>}
@@ -169,14 +169,14 @@ function TrafficSplitBody({ split, onOpenConnector }: { split: TrafficSplitRespo
               </span>
               <span className="tabular-nums text-fg-muted text-right">{c.weight}</span>
               <span className={`tabular-nums text-right font-medium ${off ? 'text-fg-subtle' : ''}`}>{formatShare(c.expected_share)}</span>
-              <span className="tabular-nums text-right text-fg-muted inline-flex items-center justify-end gap-2 w-[76px]" title={`${formatBytesDecimal(c.observed_bytes)} over ${split.range}`}>
-                <span className="w-8 h-1 rounded-full bg-primary-soft overflow-hidden inline-block">
+              <span className="tabular-nums text-right text-fg-muted inline-flex items-center justify-end gap-2 min-w-[76px] whitespace-nowrap" title={`${formatBytesDecimal(c.observed_bytes)} over ${split.range}`}>
+                <span className="w-8 h-1 rounded-full bg-primary-soft overflow-hidden inline-block flex-none">
                   <span className={`block h-full rounded-full ${swatch(i)}`} style={{ width: `${Math.min(100, c.observed_share ?? 0)}%` }} />
                 </span>
                 {formatShare(c.observed_share)}
               </span>
               {priced && (
-                <span className="tabular-nums text-right text-fg-muted w-[68px]">
+                <span className="tabular-nums text-right text-fg-muted min-w-[64px] whitespace-nowrap">
                   {c.cost != null && c.currency ? formatMoney(c.cost, c.currency) : '-'}
                 </span>
               )}
