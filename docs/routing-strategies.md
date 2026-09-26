@@ -15,7 +15,7 @@ Octoprox supports multiple routing strategies for distributing requests across p
 | `round_robin` | Distributes requests evenly across all healthy proxies in order |
 | `least_used` | Routes to the proxy with the fewest active connections |
 | `random` | Randomly selects a healthy proxy for each request |
-| `sticky` | Routes requests from the same client to the same proxy |
+| `sticky` | Routes requests carrying the same `-sessid-` to the same proxy; requests without one are routed like `random` |
 | `health_based` | Prioritizes proxies with better health scores and lower latency |
 
 Every strategy picks in two steps when a project has more than one connector: first a **connector**, by its [weight](#connector-weights), then a proxy inside that connector, by the strategy. A project with a single connector skips the first step.
@@ -69,7 +69,7 @@ When using the `sticky` routing strategy, you can control session affinity by em
 **Examples:**
 
 ```
-# Without session ID - uses client IP for session affinity
+# Without session ID - no affinity, each request is routed like random
 Proxy-Authorization: Basic base64(myuser:password)
 
 # With session ID - uses "order-123" for session affinity
@@ -82,9 +82,9 @@ Proxy-Authorization: Basic base64(my-project-sessid-abc456:password)
 **Behavior:**
 
 - The `-sessid-` delimiter separates the real username from the session ID. The password remains unchanged.
-- When a session ID is provided, it replaces the client IP as the session identifier for the sticky strategy.
+- The session ID is the only key the sticky strategy uses. The client's address is never one: behind a NAT or a load balancer it is shared by every client, and a session should exist only when a client asked for one.
 - If the upstream proxy assigned to a session becomes unhealthy (e.g., IP rotation), a new proxy is automatically assigned on the next request.
-- Without a session ID, the sticky strategy falls back to using the client IP address, which is the default behavior.
+- Without a session ID, the sticky strategy picks a connector by weight and a proxy inside it at random for each request, exactly like `random`.
 - This feature only takes effect when the project's routing strategy is set to `sticky`. Other strategies ignore the session ID.
 - Connectors running a residential or mobile product with **dynamic sessions** also forward the session to the vendor: the `-sessid-` value is hashed into the vendor's session id, so the same value keeps the same exit IP across requests and instances, and a request without `-sessid-` gets a fresh vendor session every time. The country is part of that hash: `-sessid-order-1-cc-de` and `-sessid-order-1-cc-us` are two vendor sessions with two exits, each kept for as long as the client reuses it, since a vendor does not move a session it has already placed to another country. This applies under every routing strategy, not only `sticky`. See [Dynamic sessions]({{ site.baseurl }}/providers#descriptor-reference).
 

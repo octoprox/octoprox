@@ -386,8 +386,8 @@ class TestDynamicSessions:
         assert [p.id for p in manager.get_routable_proxies_for_project("project-1")] == ["gw"]
 
     async def test_explicit_session_is_derived_and_stable(self, manager: ProxyManager) -> None:
-        first = await manager.select_proxy_for_project("project-1", "order-1", sessid="order-1", country="de")
-        second = await manager.select_proxy_for_project("project-1", "order-1", sessid="order-1", country="de")
+        first = await manager.select_proxy_for_project("project-1", "order-1", country="de")
+        second = await manager.select_proxy_for_project("project-1", "order-1", country="de")
         assert first is not None and second is not None
         assert first.id == "gw" and first.username == second.username
         assert first.username.startswith("customer-alice-cc-DE-sessid-") and first.username.endswith("-sesstime-10")
@@ -396,10 +396,10 @@ class TestDynamicSessions:
         assert first.metadata["session_id"] in first.username and first.metadata["geo"] == "DE"
         assert manager._proxies["gw"].username == "customer-alice-sessid-probe0probe0-sesstime-10"  # stored row untouched
 
-    async def test_client_ip_fallback_does_not_pin_a_vendor_session(self, manager: ProxyManager) -> None:
-        # session_id carries the client address for sticky routing; sessid is None, so the vendor rotates.
-        first = await manager.select_proxy_for_project("project-1", "10.0.0.7", sessid=None)
-        second = await manager.select_proxy_for_project("project-1", "10.0.0.7", sessid=None)
+    async def test_no_session_id_does_not_pin_a_vendor_session(self, manager: ProxyManager) -> None:
+        # A request without -sessid- has no routing key at all, so the vendor rotates.
+        first = await manager.select_proxy_for_project("project-1", None)
+        second = await manager.select_proxy_for_project("project-1", None)
         assert first is not None and second is not None
         assert first.username != second.username
         assert "session_id" not in first.metadata and "-cc-" not in first.username

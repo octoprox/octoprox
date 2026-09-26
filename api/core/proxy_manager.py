@@ -2127,7 +2127,6 @@ class ProxyManager:
         target_host: str | None = None,
         country: str | None = None,
         exclude: frozenset[str] | None = None,
-        sessid: str | None = None,
     ) -> Proxy | None:
         """Select a proxy for a specific project using the project's routing strategy.
 
@@ -2136,12 +2135,11 @@ class ProxyManager:
         proxies by id before the strategy runs (preflight retry); a sticky
         session bound to an excluded proxy is re-bound to the pick.
 
-        ``session_id`` is the routing key (the client's ``-sessid-`` or, for
-        sticky routing, its address); ``sessid`` is only the explicit
-        ``-sessid-`` value. A dynamic-sessions gateway row derives the vendor
-        session from ``sessid`` and renders the requested country into its
-        credentials before they are resolved; with no ``sessid`` every request
-        gets a fresh vendor session.
+        ``session_id`` is the client's explicit ``-sessid-`` value: the
+        routing key, and the seed a dynamic-sessions gateway row derives its
+        vendor session from before rendering the requested country into its
+        credentials. A request without one has no key, is never pinned to
+        its address, and gets a fresh vendor session every time.
 
         When sticky_quarantine is enabled on a connector's rate limit config
         and the project uses sticky routing, a session whose assigned proxy is
@@ -2188,7 +2186,7 @@ class ProxyManager:
         if selected is None:
             return None
         if is_dynamic_gateway(selected):
-            selected = self._render_dynamic_request(selected, project_id, sessid, country)
+            selected = self._render_dynamic_request(selected, project_id, session_id, country)
         return self.resolve_proxy_credentials(selected)
 
     def group_by_connector(self, proxies: list[Proxy]) -> list[ProxyGroup]:
@@ -2216,7 +2214,7 @@ class ProxyManager:
             strategy.forget_group(connector_id)
 
     def _render_dynamic_request(
-        self, proxy: Proxy, project_id: str, sessid: str | None, country: str | None
+        self, proxy: Proxy, project_id: str, session_id: str | None, country: str | None
     ) -> Proxy:
         """Credentials for one request through a dynamic-sessions gateway row."""
         connector = self._connectors.get(proxy.connector_id)
@@ -2224,7 +2222,7 @@ class ProxyManager:
         if provider is None or not provider.is_dynamic:
             # The row says dynamic but the connector no longer does (mid-sync): use it as stored.
             return proxy
-        return provider.render_request(proxy, sessid=sessid, country=country, scope=project_id)
+        return provider.render_request(proxy, sessid=session_id, country=country, scope=project_id)
 
     def set_project_strategy(self, project_id: str, strategy_name: str) -> None:
         """Change the routing strategy for a project."""

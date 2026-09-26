@@ -145,7 +145,10 @@ def _http_proxy(port: int) -> Proxy:
 
 
 async def _forward(
-    server: ProxyServer, target: str, headers: dict[str, str] | None = None
+    server: ProxyServer,
+    target: str,
+    headers: dict[str, str] | None = None,
+    session_id: str | None = "abcd",
 ) -> _ClientWriter:
     client_reader = asyncio.StreamReader()
     client_reader.feed_eof()
@@ -158,8 +161,7 @@ async def _forward(
         "HTTP/1.1",
         dict(CLIENT_HEADERS if headers is None else headers),
         project_id="project-1",
-        client_ip="127.0.0.1",
-        sessid="abcd",
+        session_id=session_id,
         country="US",
     )
     return client_writer
@@ -208,6 +210,22 @@ class TestEndToEndHeaders:
         }
         kept = ProxyServer._end_to_end_headers(headers, HOP_BY_HOP_REQUEST_HEADERS)
         assert set(kept) == {"host", "content-length", "transfer-encoding"}
+
+
+class TestRoutingKey:
+    async def test_no_sessid_means_no_session_key(self, upstream: _Capture) -> None:
+        # The client's address is never a routing key: without -sessid- the
+        # selection sees no session at all, under every strategy.
+        server = _server(_http_proxy(upstream.port))
+        await _forward(server, "http://ip-api.com/", session_id=None)
+        kwargs = server._get_upstream_proxy.await_args.kwargs  # type: ignore[attr-defined]
+        assert kwargs["session_id"] is None
+
+    async def test_sessid_is_the_session_key(self, upstream: _Capture) -> None:
+        server = _server(_http_proxy(upstream.port))
+        await _forward(server, "http://ip-api.com/", session_id="order-1")
+        kwargs = server._get_upstream_proxy.await_args.kwargs  # type: ignore[attr-defined]
+        assert kwargs["session_id"] == "order-1"
 
 
 class TestHttpUpstream:

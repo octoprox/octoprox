@@ -41,7 +41,6 @@ class ProxySelector(Protocol):
         target_host: str | None = None,
         country: str | None = None,
         exclude: frozenset[str] | None = None,
-        sessid: str | None = None,
     ) -> Proxy | None: ...
 
     def strategy_for_project(self, project_id: str) -> RoutingStrategy: ...
@@ -74,13 +73,12 @@ class ExitVerifier:
         session_id: str | None,
         country: str | None,
         target_host: str | None,
-        sessid: str | None = None,
     ) -> ExitDecision:
         """Return the proxy to forward through, or a rejection.
 
-        ``sessid`` is the client's explicit ``-sessid-`` value, handed back to
-        the selector on a retry so a dynamic-sessions row keeps the same
-        vendor session.
+        ``session_id`` is the client's explicit ``-sessid-`` value, handed
+        back to the selector on a retry so a dynamic-sessions row keeps the
+        same vendor session.
 
         Anything but a confirmed mismatch lets the request through: an echo
         outage must never become a traffic outage.
@@ -91,7 +89,7 @@ class ExitVerifier:
         # A session-less request on a dynamic gateway retries by re-rendering:
         # selecting the same row again mints a fresh vendor session, so the
         # row is not excluded and the strategy's promise about rows holds.
-        rerender = is_dynamic_gateway(proxy) and not sessid
+        rerender = is_dynamic_gateway(proxy) and not session_id
         can_retry = mode == PreflightMode.RETRY and (
             rerender or self._proxy_selector.strategy_for_project(project.id).allows_exit_reselection(session_id)
         )
@@ -116,10 +114,10 @@ class ExitVerifier:
                 ip=verdict.ip,
             )
             if can_retry and attempts < self._preflight_checker.max_attempts:
-                if not (is_dynamic_gateway(proxy) and not sessid):
+                if not rerender:
                     excluded.add(proxy.id)
                 replacement = await self._proxy_selector.select_proxy_for_project(
-                    project.id, session_id, target_host, country, exclude=frozenset(excluded), sessid=sessid
+                    project.id, session_id, target_host, country, exclude=frozenset(excluded)
                 )
                 if replacement is not None:
                     logger.info(

@@ -141,15 +141,15 @@ class TestVerify:
         rerendered.metadata.update({"dynamic_sessions": "true", "exit_sample_percent": 100})
         selector = _selector("sticky", picks=[rerendered])
         decision = await ExitVerifier(checker, selector).verify(
-            _project(PreflightMode.RETRY), gateway, session_id="10.0.0.7", country="GB", target_host="x", sessid=None
+            _project(PreflightMode.RETRY), gateway, session_id=None, country="GB", target_host="x"
         )
         assert not decision.rejected and decision.proxy is not None and decision.proxy.host == "gb"
         assert selector.select_proxy_for_project.await_args.kwargs["exclude"] == frozenset()
-        assert selector.select_proxy_for_project.await_args.kwargs["sessid"] is None
+        assert selector.select_proxy_for_project.await_args.args[1] is None  # still no session on the retry
         # With an explicit client session the row is excluded like any other under a movable strategy.
         selector = _selector(picks=[_proxy("gb")])
         decision = await ExitVerifier(checker, selector).verify(
-            _project(PreflightMode.RETRY), gateway, session_id="order-1", country="GB", target_host="x", sessid="order-1"
+            _project(PreflightMode.RETRY), gateway, session_id="order-1", country="GB", target_host="x"
         )
         assert not decision.rejected
         assert selector.select_proxy_for_project.await_args.kwargs["exclude"] == frozenset({"gw"})

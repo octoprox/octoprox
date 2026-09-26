@@ -56,7 +56,7 @@ class _Binding:
 
 
 class StickySessionStrategy(RoutingStrategy):
-    """Maintains the same proxy for a given session/client.
+    """Maintains the same proxy for a given session; a request without one is routed like random.
 
     Across connectors a new session is placed by weighted rendezvous
     hashing: every connector scores the session id, scaled by its weight,

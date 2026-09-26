@@ -167,7 +167,6 @@ class ProxyServer:
         session_id: str | None = None,
         target_host: str | None = None,
         country: str | None = None,
-        sessid: str | None = None,
     ) -> Proxy | None:
         """Select an upstream proxy from the authenticated project's pool.
 
@@ -177,20 +176,22 @@ class ProxyServer:
 
         Args:
             project_id: The authenticated project.
-            session_id: Session identifier for sticky routing.
+            session_id: The client's explicit -sessid- value: the routing key
+                for sticky routing and the seed of a dynamic-sessions vendor
+                session. Only an explicit -sessid- is a session: without one
+                the request has no key, sticky routes it like random, and
+                nothing is pinned to the client's address, which behind a NAT
+                or load balancer is everyone's address.
             target_host: If provided, only consider proxies from connectors
                 whose domain routing config allows this host.
             country: If provided, only consider proxies that serve this
                 country (from the -cc- username suffix).
-            sessid: The explicit -sessid- value, if the client sent one.
-                Unlike session_id it never falls back to the client address;
-                dynamic-sessions connectors derive the vendor session from it.
 
         Returns:
             Selected proxy or None if no healthy proxies available.
         """
         return await self._proxy_manager.select_proxy_for_project(
-            project_id, session_id, target_host, country, sessid=sessid
+            project_id, session_id, target_host, country
         )
 
     def _authenticate_project(self, headers: dict[str, str]) -> AuthResult | None:
@@ -303,13 +304,12 @@ class ProxyServer:
         country: str | None,
         target_host: str | None,
         client_writer: asyncio.StreamWriter,
-        sessid: str | None = None,
     ) -> Proxy | None:
         """Hand the selected upstream to preflight; None when the request was refused."""
         if self._exit_verifier is None:
             return proxy
         decision = await self._exit_verifier.verify(
-            project, proxy, session_id=session_id, country=country, target_host=target_host, sessid=sessid
+            project, proxy, session_id=session_id, country=country, target_host=target_host
         )
         if not decision.rejected:
             return decision.proxy
@@ -367,11 +367,6 @@ class ProxyServer:
         client_addr = client_writer.get_extra_info("peername")
         logger.debug("New client connection", client_addr=client_addr)
 
-        # Extract client IP for sticky session routing
-        client_ip: str | None = None
-        if client_addr and isinstance(client_addr, tuple) and len(client_addr) >= 1:
-            client_ip = str(client_addr[0])
-
         try:
             # Read the first line to determine request type
             first_line = await asyncio.wait_for(
@@ -407,7 +402,7 @@ class ProxyServer:
                 return
 
             project = auth_result.project
-            sessid = auth_result.sessid
+            session_id = auth_result.sessid
             country = auth_result.country
             project_id = project.id
             logger.debug(
@@ -415,19 +410,18 @@ class ProxyServer:
                 project_id=project_id,
                 project_name=project.name,
                 client_addr=client_addr,
-                sessid=sessid,
+                session_id=session_id,
                 country=country,
             )
 
             if method.upper() == "CONNECT":
                 await self._handle_connect(
-                    client_reader, client_writer, target, headers, project, client_ip, sessid,
-                    country,
+                    client_reader, client_writer, target, headers, project, session_id, country,
                 )
             else:
                 await self._handle_http(
                     client_reader, client_writer, method, target, version, headers, project_id,
-                    client_ip, sessid, country,
+                    session_id, country,
                 )
 
         except asyncio.CancelledError:
@@ -515,8 +509,7 @@ class ProxyServer:
         target: str,
         headers: dict[str, str],
         project: Project,
-        client_ip: str | None = None,
-        sessid: str | None = None,
+        session_id: str | None = None,
         country: str | None = None,
     ) -> None:
         """Handle HTTPS CONNECT tunneling."""
@@ -528,21 +521,15 @@ class ProxyServer:
             target_host = target
             target_port = 443  # Default HTTPS port
 
-        # Use explicit session ID from username if provided, otherwise fall back to client IP
-        session_id = sessid if sessid is not None else client_ip
-
         # Select upstream proxy scoped to the authenticated project
         proxy = await self._get_upstream_proxy(
             project_id=project.id, session_id=session_id, target_host=target_host, country=country,
-            sessid=sessid,
         )
         if not proxy:
             await self._reject_no_proxy(client_writer, project.id, target_host, session_id, country)
             return
 
-        verified = await self._verify_exit(
-            project, proxy, session_id, country, target_host, client_writer, sessid=sessid
-        )
+        verified = await self._verify_exit(project, proxy, session_id, country, target_host, client_writer)
         if verified is None:
             return
         proxy = verified
@@ -766,21 +753,16 @@ class ProxyServer:
         version: str,
         headers: dict[str, str],
         project_id: str,
-        client_ip: str | None = None,
-        sessid: str | None = None,
+        session_id: str | None = None,
         country: str | None = None,
     ) -> None:
         """Handle regular HTTP request forwarding."""
         # Parse target host before proxy selection (needed for domain filtering)
         parsed_host, _, _ = self._parse_http_url(target)
 
-        # Use explicit session ID from username if provided, otherwise fall back to client IP
-        session_id = sessid if sessid is not None else client_ip
-
         # Select upstream proxy scoped to the authenticated project
         proxy = await self._get_upstream_proxy(
             project_id=project_id, session_id=session_id, target_host=parsed_host, country=country,
-            sessid=sessid,
         )
         if not proxy:
             await self._reject_no_proxy(client_writer, project_id, parsed_host, session_id, country)
@@ -788,9 +770,7 @@ class ProxyServer:
 
         project = self._proxy_manager.get_project(project_id)
         if project is not None:
-            verified = await self._verify_exit(
-                project, proxy, session_id, country, parsed_host, client_writer, sessid=sessid
-            )
+            verified = await self._verify_exit(project, proxy, session_id, country, parsed_host, client_writer)
             if verified is None:
                 return
             proxy = verified
