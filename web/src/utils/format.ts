@@ -31,7 +31,7 @@ export function formatBytesDecimal(bytes: number, digits = 2): string {
 /** Money in the viewer's locale for an ISO 4217 code; falls back to "12.34 XYZ" for codes Intl rejects. */
 export function formatMoney(amount: number, currency: string): string {
   try {
-    return new Intl.NumberFormat(undefined, { style: 'currency', currency, maximumFractionDigits: amount < 10 ? 2 : 0 }).format(amount)
+    return new Intl.NumberFormat(undefined, { style: 'currency', currency }).format(amount)
   } catch {
     return `${amount.toFixed(2)} ${currency}`
   }

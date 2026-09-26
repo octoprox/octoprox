@@ -866,6 +866,15 @@ class ProxyServer:
                 upstream_writer.write(chunk)
                 await upstream_writer.drain()
                 if not meter.add_sent(len(chunk)):
+                    # Cut by the connector's traffic limit before any response
+                    # was started, so the client can still be told why.
+                    status = meter.limit_status
+                    await self._send_error(
+                        client_writer, status,
+                        TRAFFIC_LIMIT_REASONS.get(status, "Bandwidth Limit Exceeded"),
+                        "The connector serving this request has reached its traffic limit.",
+                        extra_headers=[TRAFFIC_LIMIT_PROXY_STATUS],
+                    )
                     return
 
             await upstream_writer.drain()
@@ -1002,11 +1011,19 @@ class ProxyServer:
                 count(len(trailing))
                 break
 
-            # Read chunk data + CRLF
-            chunk_data = await reader.readexactly(chunk_size + 2)
-            writer.write(chunk_data)
-            await writer.drain()
-            if not count(len(chunk_data)):
+            # Read chunk data + CRLF in pieces, so a large chunk is metered
+            # as it flows rather than buffered whole.
+            remaining = chunk_size + 2
+            stopped = False
+            while remaining > 0:
+                piece = await reader.readexactly(min(BUFFER_SIZE, remaining))
+                remaining -= len(piece)
+                writer.write(piece)
+                await writer.drain()
+                if not count(len(piece)):
+                    stopped = True
+                    break
+            if stopped:
                 break
 
         await writer.drain()

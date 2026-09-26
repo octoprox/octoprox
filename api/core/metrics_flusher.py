@@ -95,17 +95,21 @@ class MetricsFlusher:
             connector_count=len(all_connector_metrics),
         )
 
+        # Every hash is cleared once the transaction is committed, whether its
+        # row was written or its entity was gone. Clearing inside the loop
+        # would lose a window if a later row made the transaction roll back.
+        flushed_proxies: list[str] = []
+        flushed_projects: list[str] = []
+        flushed_connectors: list[str] = []
         async with self._session_factory() as session:
             repo = MetricsRepository(session)
 
-            # Flush proxy metrics
             for proxy_id, metrics in all_proxy_metrics.items():
                 status_data = all_statuses.get(proxy_id, {})
                 status = status_data.get("status", "unknown")
                 if hasattr(status, "value"):
                     status = status.value
-
-                await repo.save_metrics_snapshot(
+                kept = await repo.save_metrics_snapshot(
                     proxy_id=proxy_id,
                     request_count=metrics.request_count,
                     success_count=metrics.success_count,
@@ -115,13 +119,12 @@ class MetricsFlusher:
                     bytes_received=metrics.bytes_received,
                     status=status,
                 )
+                if not kept:
+                    logger.warning("Dropping metrics of a proxy that no longer exists", proxy_id=proxy_id)
+                flushed_proxies.append(proxy_id)
 
-                # Reset Redis metrics after successful flush
-                await self._redis_client.reset_proxy_metrics(proxy_id)
-
-            # Flush project metrics
             for project_id, metrics in all_project_metrics.items():
-                await repo.save_project_metrics_snapshot(
+                kept = await repo.save_project_metrics_snapshot(
                     project_id=project_id,
                     request_count=metrics.request_count,
                     success_count=metrics.success_count,
@@ -130,13 +133,12 @@ class MetricsFlusher:
                     bytes_sent=metrics.bytes_sent,
                     bytes_received=metrics.bytes_received,
                 )
+                if not kept:
+                    logger.warning("Dropping metrics of a project that no longer exists", project_id=project_id)
+                flushed_projects.append(project_id)
 
-                # Reset Redis metrics after successful flush
-                await self._redis_client.reset_project_metrics(project_id)
-
-            # Flush connector metrics
             for connector_id, metrics in all_connector_metrics.items():
-                await repo.save_connector_metrics_snapshot(
+                kept = await repo.save_connector_metrics_snapshot(
                     connector_id=connector_id,
                     request_count=metrics.request_count,
                     success_count=metrics.success_count,
@@ -145,9 +147,18 @@ class MetricsFlusher:
                     bytes_sent=metrics.bytes_sent,
                     bytes_received=metrics.bytes_received,
                 )
-                await self._redis_client.reset_connector_metrics(connector_id)
+                if not kept:
+                    logger.warning("Dropping metrics of a connector that no longer exists", connector_id=connector_id)
+                flushed_connectors.append(connector_id)
 
             await session.commit()
+
+        for proxy_id in flushed_proxies:
+            await self._redis_client.reset_proxy_metrics(proxy_id)
+        for project_id in flushed_projects:
+            await self._redis_client.reset_project_metrics(project_id)
+        for connector_id in flushed_connectors:
+            await self._redis_client.reset_connector_metrics(connector_id)
 
         logger.info(
             "Metrics flush complete",

@@ -7,6 +7,7 @@ import asyncio
 from collections.abc import Callable
 from typing import Any, Literal
 
+import structlog
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, ValidationError
 from sqlalchemy.exc import IntegrityError
@@ -33,6 +34,8 @@ from api.providers.registry import ProviderRegistry, UnknownProviderError, get_p
 from api.providers.sdk.validation import ConfigValidationError
 from api.routes.common import unique_name_violation
 from api.routes.metrics import RANGE_CONFIG, MetricsHistoryResponse, MetricsSnapshot
+
+logger = structlog.get_logger()
 
 router = APIRouter(prefix="/projects/{project_id}/connectors")
 
@@ -61,7 +64,10 @@ def _traffic_usage(proxy_manager: Any, connector: Connector) -> TrafficUsage | N
     """The connector's traffic usage as this instance sees it."""
     try:
         usage: TrafficUsage = proxy_manager.traffic_usage(connector)
-    except Exception:  # a mocked manager in tests, or a connector mid-removal
+    except Exception:  # a connector mid-removal, or a mocked manager in tests
+        logger.warning(
+            "Could not read connector traffic usage", connector_id=connector.id, exc_info=True
+        )
         return None
     return usage
 

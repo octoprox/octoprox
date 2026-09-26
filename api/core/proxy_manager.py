@@ -382,6 +382,7 @@ class ProxyManager:
             self._connectors.pop(connector_id, None)
             self._forget_connector_routing_state(connector_id)
             self._traffic_limiter.forget_local(connector_id)
+            self._pending_connector_deltas.pop(connector_id, None)
             return
         await self.reload_connector(connector_id)
 
@@ -417,6 +418,9 @@ class ProxyManager:
     def _evict_project_from_cache(self, project_id: str) -> None:
         self._projects.pop(project_id, None)
         self._project_strategies.pop(project_id, None)
+        # Never flush a delta for a row that is gone: it would recreate the
+        # Redis hash the owner just cleared.
+        self._pending_project_deltas.pop(project_id, None)
 
     async def _evict_proxy_from_cache(self, proxy_id: str) -> None:
         if proxy_id in self._proxies:
@@ -424,6 +428,7 @@ class ProxyManager:
             await self._redis_client.reset_proxy_metrics(proxy_id)
             await self._rate_limiter.remove_proxy(proxy_id)
             del self._proxies[proxy_id]
+            self._pending_proxy_deltas.pop(proxy_id, None)
 
     def _instance_snapshot_json(self) -> str | None:
         """Serialise this instance's self-report, or None if it cannot be built.
@@ -824,6 +829,7 @@ class ProxyManager:
             if pid not in projects:
                 self._projects.pop(pid, None)
                 self._project_strategies.pop(pid, None)
+                self._pending_project_deltas.pop(pid, None)
         for pid, fresh in projects.items():
             existing = self._projects.get(pid)
             if existing is None:
@@ -848,6 +854,7 @@ class ProxyManager:
                 self._connectors.pop(cid, None)
                 self._forget_connector_routing_state(cid)
                 self._traffic_limiter.forget_local(cid)
+                self._pending_connector_deltas.pop(cid, None)
         self._connectors.update(connectors)
 
         # Proxies - patch in place to keep request counters, status, and
@@ -857,6 +864,7 @@ class ProxyManager:
             await self._redis_client.delete_proxy_status(pid)
             await self._redis_client.reset_proxy_metrics(pid)
             self._proxies.pop(pid, None)
+            self._pending_proxy_deltas.pop(pid, None)
         if removed_proxy_ids:
             await self._rate_limiter.remove_proxies(removed_proxy_ids)
         for pid, fresh_proxy in proxies.items():
@@ -1372,6 +1380,7 @@ class ProxyManager:
 
         # Remove from cache
         del self._projects[project_id]
+        self._pending_project_deltas.pop(project_id, None)
         if project_id in self._project_strategies:
             del self._project_strategies[project_id]
 
@@ -1683,11 +1692,14 @@ class ProxyManager:
         # The connector's own metrics hash would otherwise be flushed against
         # a row that no longer exists; its block key and usage go with it.
         await self._redis_client.reset_connector_metrics(connector_id)
-        self._pending_connector_deltas.pop(connector_id, None)
         await self._traffic_limiter.forget(connector_id)
 
         # Remove from cache
         del self._connectors[connector_id]
+        # Only now: while the awaits above yielded, a transfer still running
+        # could report progress and re-create the delta for a connector whose
+        # row is already gone.
+        self._pending_connector_deltas.pop(connector_id, None)
         self._forget_connector_routing_state(connector_id)
         # Also remove associated proxies from cache
         self._proxies.remove_groups([connector_id])
@@ -2287,6 +2299,7 @@ class ProxyManager:
         await self._rate_limiter.remove_proxy(proxy_id)
 
         del self._proxies[proxy_id]
+        self._pending_proxy_deltas.pop(proxy_id, None)
         logger.info("Removed proxy", proxy_id=proxy_id)
 
         await event_bus.publish(proxy_removed,

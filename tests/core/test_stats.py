@@ -110,6 +110,10 @@ class TestMetricDelta:
         assert parsed == {"a": MetricDelta(request_count=2)}
         assert MetricDelta.parse_many(None) == {}
         assert MetricDelta.parse_many([1, 2]) == {}
+        # Numbers arriving as JSON strings or floats for int fields still land as the right types.
+        coerced = MetricDelta.from_dict({"request_count": "3", "bytes_sent": 7.0, "latency_sum_ms": 5})
+        assert coerced == MetricDelta(request_count=3, bytes_sent=7, latency_sum_ms=5.0)
+        assert isinstance(coerced.latency_sum_ms, float) and isinstance(coerced.bytes_sent, int)
 
 
 class TestApplyTo:
@@ -184,7 +188,7 @@ class TestApplyTo:
     def test_apply_from_partial_wire_form(self) -> None:
         """Deltas deserialised from JSON may be missing optional keys; they read as zero."""
         target = MockStatsObject()
-        delta = MetricDelta.model_validate({"request_count": 4, "success_count": 4, "latency_sum_ms": 400.0})
+        delta = MetricDelta.from_dict({"request_count": 4, "success_count": 4, "latency_sum_ms": 400.0})
         delta.apply_to(target)
         assert target.request_count == 4
         assert target.success_count == 4

@@ -425,7 +425,28 @@ class RedisClient:
     async def get_connector_traffic_blocked(self, connector_id: str) -> float | None:
         """The epoch second a connector's block ends, or None when it is not blocked."""
         key = CONNECTOR_TRAFFIC_BLOCKED_KEY.format(connector_id=connector_id)
-        value = await self.client.get(key)
+        return self._blocked_until(await self.client.get(key))
+
+    async def get_connector_traffic_blocked_many(
+        self, connector_ids: Iterable[str]
+    ) -> dict[str, float]:
+        """Block end per connector for those currently blocked, in one round trip."""
+        ids = list(connector_ids)
+        if not ids:
+            return {}
+        values = await self.client.mget(
+            [CONNECTOR_TRAFFIC_BLOCKED_KEY.format(connector_id=cid) for cid in ids]
+        )
+        blocked: dict[str, float] = {}
+        for connector_id, value in zip(ids, values, strict=True):
+            until = self._blocked_until(value)
+            if until is not None:
+                blocked[connector_id] = until
+        return blocked
+
+    @staticmethod
+    def _blocked_until(value: Any) -> float | None:
+        """Decode one block key's value; None when absent, unreadable or already over."""
         if value is None:
             return None
         try:

@@ -209,3 +209,26 @@ class TestConnectorMetrics:
         assert await connector_repo.delete(connector.id)
         await db_session.commit()
         assert await metrics_repo.get_connector_metrics_history(connector.id) == []
+
+
+class TestSnapshotsForGoneEntities:
+    """A Redis hash can outlive its row; its snapshot is dropped, never a foreign key error."""
+
+    async def test_unknown_parent_is_skipped_without_raising(
+        self,
+        metrics_repo: MetricsRepository,
+        project_repo: ProjectRepository,
+        credential_repo: CredentialRepository,
+        connector_repo: ConnectorRepository,
+        db_session: AsyncSession,
+    ) -> None:
+        _project, connector = await _connector(project_repo, credential_repo, connector_repo, db_session)
+        common = {"request_count": 1, "success_count": 1, "failure_count": 0, "avg_latency_ms": 1.0}
+        assert await metrics_repo.save_connector_metrics_snapshot(connector_id=connector.id, **common) is True
+        assert await metrics_repo.save_connector_metrics_snapshot(connector_id="gone", **common) is False
+        assert await metrics_repo.save_project_metrics_snapshot(project_id="gone", **common) is False
+        assert await metrics_repo.save_metrics_snapshot(proxy_id="gone", status="healthy", **common) is False
+        await db_session.commit()
+        # The transaction survived the misses: the real row is there, nothing else.
+        assert len(await metrics_repo.get_connector_metrics_history(connector.id)) == 1
+        assert await metrics_repo.get_connector_metrics_history("gone") == []
