@@ -143,6 +143,8 @@ Databases reach an instance three ways:
 
 Databases are consulted in **priority** order, lowest first. The first database with a country answers; the others fill in fields it lacked (a country database plus an ASN database give one merged record). Uploading, enabling, disabling or removing a database re-attributes every proxy with a known exit IP, offline.
 
+**Which files to load.** Load one geolocation database per vendor. A city file already contains everything the same vendor's country file does, so never add both: choose the country file when you only route by country and want the smaller footprint, or the city file when you want region, city and coordinates recorded for each exit. Nothing routes on those fields today, so the country file is the usual choice. Adding a second vendor's geolocation file is worthwhile: the resolver treats each database as an independent opinion, and answers the databases disagree on are marked uncertain rather than confirmed (see the conflict rule below). ASN and anonymity files sit alongside any of these and only fill in fields the geolocation file lacks.
+
 Free editions carry a license attribution; the settings page shows it while such a database is loaded.
 
 ## Source policy

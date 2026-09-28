@@ -187,7 +187,7 @@ function DatabasesTab() {
           <div className="flex items-center gap-2">
             <Database className="w-4 h-4 text-fg-muted" />
             <h3 className="text-sm font-semibold text-fg">Installed databases</h3>
-            <span className="text-xs text-fg-subtle">Consulted lowest priority first. The first database with a country answers.</span>
+            <span className="text-xs text-fg-subtle">Consulted lowest priority first. The first database with a country answers. Load one geolocation file per vendor: a city file already answers country.</span>
           </div>
           <Button variant="outline" size="sm" onClick={() => reattributeMutation.mutate()} disabled={reattributeMutation.isPending} title="Re-run attribution for every proxy with a known exit IP, offline">
             <RefreshCw className={cn('w-3.5 h-3.5', reattributeMutation.isPending && 'animate-spin')} /> Re-attribute proxies
@@ -273,7 +273,9 @@ const URL_PRESETS: { label: string; url: string; hint: string; auth: 'basic' | '
   { label: 'MaxMind GeoLite2 City', url: 'https://download.maxmind.com/geoip/databases/GeoLite2-City/download?suffix=tar.gz', hint: 'Account ID as username, license key as password', auth: 'basic', interval: 24 },
   { label: 'MaxMind GeoLite2 Country', url: 'https://download.maxmind.com/geoip/databases/GeoLite2-Country/download?suffix=tar.gz', hint: 'Account ID as username, license key as password', auth: 'basic', interval: 24 },
   { label: 'MaxMind GeoLite2 ASN', url: 'https://download.maxmind.com/geoip/databases/GeoLite2-ASN/download?suffix=tar.gz', hint: 'Account ID as username, license key as password', auth: 'basic', interval: 24 },
-  { label: 'DB-IP Country Lite', url: 'https://download.db-ip.com/free/dbip-country-lite-{YYYY}-{MM}.mmdb.gz', hint: '{YYYY} and {MM} are filled in on each run, falling back to the previous month until DB-IP publishes the new file; no credentials', auth: 'none', interval: 720 },
+  { label: 'DB-IP Country Lite', url: 'https://download.db-ip.com/free/dbip-country-lite-{YYYY}-{MM}.mmdb.gz', hint: '{YYYY} and {MM} are filled in on each run, falling back to the previous month until DB-IP publishes the new file; no credentials. Not needed alongside DB-IP City Lite', auth: 'none', interval: 720 },
+  { label: 'DB-IP City Lite', url: 'https://download.db-ip.com/free/dbip-city-lite-{YYYY}-{MM}.mmdb.gz', hint: 'Country, region, city and coordinates; supersedes DB-IP Country Lite. {YYYY} and {MM} are filled in on each run, falling back to the previous month until DB-IP publishes the new file; no credentials', auth: 'none', interval: 720 },
+  { label: 'DB-IP ASN Lite', url: 'https://download.db-ip.com/free/dbip-asn-lite-{YYYY}-{MM}.mmdb.gz', hint: 'ASN and organisation only; fills in what a geolocation file lacks. {YYYY} and {MM} are filled in on each run, falling back to the previous month until DB-IP publishes the new file; no credentials', auth: 'none', interval: 720 },
   { label: 'IPinfo country + ASN', url: 'https://ipinfo.io/data/free/country_asn.mmdb?token=', hint: 'Append your IPinfo token to the URL', auth: 'none', interval: 24 },
   { label: 'Custom URL', url: '', hint: 'Any HTTPS URL serving an mmdb, .mmdb.gz or .tar.gz containing one. {YYYY} and {MM} are filled in on each run for vendors that name files by month.', auth: 'none', interval: 24 },
 ]
