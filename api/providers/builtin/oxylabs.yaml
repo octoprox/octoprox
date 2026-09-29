@@ -46,7 +46,7 @@ connector_fields:
     details: >-
       Dynamic keeps one gateway proxy and renders the vendor credentials per request: a client -sessid-
       always maps to the same vendor session, a request without one gets a fresh session and the vendor
-      rotates the exit, and -cc- picks the country per request. "Number of proxies" does not apply and the
+      rotates the exit, -cc- picks the country per request and -st- and -city- narrow it. "Number of proxies" does not apply and the
       listed countries become an allow-list. The gateway is not health-checked and counts as healthy.
     show_when: { field: credential.proxy_type, in: [residential, mobile] }
   - key: exit_sample_percent
@@ -107,15 +107,20 @@ proxy_types:
       separator: "-"
       parts:
         - text: "customer-{credential.username}"
-        - text: "cc-{connector.country_code}"
-          when: { field: connector.country_code }
+        - text: "cc-{geo.country}"
+          when: { field: geo.country }
+        # Dynamic sessions: a US state as its name (st-us_california), a city as a slug.
+        - text: "st-{geo.country|lower}_{geo.state_name}"
+          when: { field: geo.state_name }
+        - text: "city-{geo.city}"
+          when: { field: geo.city }
         - text: "sessid-{session_id}"
         - text: "sesstime-{connector.session_duration_minutes}"
           when: { field: connector.session_duration_minutes }
     password: "{credential.password}"
     tags: [oxylabs, residential]
     metadata:
-      country_code: "{connector.country_code}"
+      country_code: "{geo.country}"
       session_duration_minutes: "{connector.session_duration_minutes}"
 
   - key: mobile
@@ -127,15 +132,20 @@ proxy_types:
       separator: "-"
       parts:
         - text: "customer-{credential.username}"
-        - text: "cc-{connector.country_code}"
-          when: { field: connector.country_code }
+        - text: "cc-{geo.country}"
+          when: { field: geo.country }
+        # Dynamic sessions: a US state as its name (st-us_california), a city as a slug.
+        - text: "st-{geo.country|lower}_{geo.state_name}"
+          when: { field: geo.state_name }
+        - text: "city-{geo.city}"
+          when: { field: geo.city }
         - text: "sessid-{session_id}"
         - text: "sesstime-{connector.session_duration_minutes}"
           when: { field: connector.session_duration_minutes }
     password: "{credential.password}"
     tags: [oxylabs, mobile]
     metadata:
-      country_code: "{connector.country_code}"
+      country_code: "{geo.country}"
       session_duration_minutes: "{connector.session_duration_minutes}"
 
   - key: isp
@@ -150,6 +160,8 @@ proxy_types:
       url: https://ip.oxylabs.io/location
       ip_path: ip
       country_path: providers.maxmind.country
+      # The endpoint consults several databases and MaxMind often has no city: the first one that does.
+      city_path: "providers.[maxmind.city, dbip.city, ip2location.city, ipinfo.city][?@ != ''] | [0]"
       max_retries_per_slot: 1
       max_consecutive_failures: 1
     tags: [oxylabs, isp]
@@ -168,6 +180,8 @@ proxy_types:
       url: https://ip.oxylabs.io/location
       ip_path: ip
       country_path: providers.maxmind.country
+      # The endpoint consults several databases and MaxMind often has no city: the first one that does.
+      city_path: "providers.[maxmind.city, dbip.city, ip2location.city, ipinfo.city][?@ != ''] | [0]"
       max_retries_per_slot: 1
       max_consecutive_failures: 1
     tags: [oxylabs, dedicated_isp]
@@ -186,6 +200,8 @@ proxy_types:
       url: https://ip.oxylabs.io/location
       ip_path: ip
       country_path: providers.maxmind.country
+      # The endpoint consults several databases and MaxMind often has no city: the first one that does.
+      city_path: "providers.[maxmind.city, dbip.city, ip2location.city, ipinfo.city][?@ != ''] | [0]"
       max_retries_per_slot: 1
       max_consecutive_failures: 1
     tags: [oxylabs, datacenter]
@@ -204,6 +220,8 @@ proxy_types:
       url: https://ip.oxylabs.io/location
       ip_path: ip
       country_path: providers.maxmind.country
+      # The endpoint consults several databases and MaxMind often has no city: the first one that does.
+      city_path: "providers.[maxmind.city, dbip.city, ip2location.city, ipinfo.city][?@ != ''] | [0]"
       max_retries_per_slot: 1
       max_consecutive_failures: 1
     tags: [oxylabs, datacenter_dedicated]

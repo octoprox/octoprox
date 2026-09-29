@@ -19,6 +19,7 @@ import httpx
 import structlog
 from httpx_socks import AsyncProxyTransport  # type: ignore[import-untyped]
 
+from api.models.location import LocationTarget
 from api.models.proxy import ProxyProtocol
 from api.providers.sdk.descriptor import IpDiscoverySpec, KnownIpsSpec, ListSourceSpec
 from api.providers.sdk.extract import ValueExtractor
@@ -37,33 +38,33 @@ def default_proxied_client_factory(proxy_url: str, timeout: float) -> httpx.Asyn
     return httpx.AsyncClient(proxy=proxy_url, timeout=timeout)
 
 
-def extract_ip_and_country(
+def extract_ip_and_place(
     response: httpx.Response,
     ip_path: str,
     country_path: str | None = None,
+    state_path: str | None = None,
+    city_path: str | None = None,
     extractor: ValueExtractor | None = None,
-) -> tuple[str | None, str]:
-    """Pull ``(ip, country)`` out of an echo endpoint's response.
+) -> tuple[str | None, LocationTarget | None]:
+    """Pull ``(ip, place)`` out of an echo endpoint's response.
 
     ``ip_path`` is a JMESPath into the JSON body, or ``"@text"`` for a plain
     text body (httpbin-style ``origin`` values may list several addresses;
-    the first is the client). The country is ``""`` when absent.
+    the first is the client). The place holds whatever of country, state and
+    city the declared paths yield, normalised; None when none do.
     """
     values = extractor or ValueExtractor()
     if ip_path == "@text":
         text = response.text.strip()
-        return (_first_ip(text) or None), ""
+        return (_first_ip(text) or None), None
     try:
         document = response.json()
     except ValueError:
-        return None, ""
+        return None, None
     value = values.extract_str(ip_path, document)
     ip = _first_ip(value) if value else None
-    country = ""
-    if country_path:
-        raw = values.extract_str(country_path, document)
-        country = raw.strip().upper() if raw else ""
-    return ip, country
+    reported = [values.extract_str(path, document) if path else None for path in (country_path, state_path, city_path)]
+    return ip, LocationTarget.reported(*reported)
 
 
 def _first_ip(value: str) -> str:
@@ -83,17 +84,13 @@ class IpDiscoverer:
         self._extractor = extractor or ValueExtractor()
         self._client_factory = client_factory or default_proxied_client_factory
 
-    async def discover(self, proxy_url: str, *, log_context: dict[str, Any] | None = None) -> str | None:
-        """Return the discovered IP, or ``None`` when the request fails."""
-        ip, _country = await self.discover_with_country(proxy_url, log_context=log_context)
-        return ip
-
-    async def discover_with_country(
+    async def discover_with_place(
         self, proxy_url: str, *, log_context: dict[str, Any] | None = None
-    ) -> tuple[str | None, str]:
-        """Return ``(ip, country)``; ip is ``None`` on failure, country is ``""`` when not reported.
+    ) -> tuple[str | None, LocationTarget | None]:
+        """Return ``(ip, place)``; ip is ``None`` on failure, place is None when nothing was reported.
 
-        The country comes from ``country_path`` when the spec declares one.
+        The place holds what the spec's ``country_path``, ``state_path`` and
+        ``city_path`` yield.
         """
         context = log_context or {}
         try:
@@ -101,26 +98,30 @@ class IpDiscoverer:
                 response = await client.get(self._spec.url)
         except httpx.TimeoutException:
             logger.warning("IP discovery timed out", **context)
-            return None, ""
+            return None, None
         except httpx.HTTPError as exc:
             logger.warning("IP discovery request failed", error=str(exc), **context)
-            return None, ""
+            return None, None
         if response.status_code != 200:
             logger.warning("IP discovery returned an error", status_code=response.status_code, **context)
-            return None, ""
-        ip, country = self._extract(response)
+            return None, None
+        ip, place = self._extract(response)
         if not ip:
             logger.warning("IP discovery response had no IP", **context)
-        return ip, country
+        return ip, place
 
-    def _extract(self, response: httpx.Response) -> tuple[str | None, str]:
-        return extract_ip_and_country(response, self._spec.ip_path, self._spec.country_path, self._extractor)
+    def _extract(self, response: httpx.Response) -> tuple[str | None, LocationTarget | None]:
+        spec = self._spec
+        return extract_ip_and_place(
+            response, spec.ip_path, spec.country_path, spec.state_path, spec.city_path, self._extractor
+        )
 
 
 @dataclass(frozen=True)
 class KnownIp:
     ip: str
-    country: str
+    # What the vendor says about the IP's place, when its list says anything.
+    place: LocationTarget | None
 
 
 class KnownIpsSource:
@@ -143,9 +144,16 @@ class KnownIpsSource:
             ip = self._extractor.extract_str(self._spec.ip, item)
             if not ip:
                 continue
-            country = (self._extractor.extract_str(self._spec.country, item) or "").strip().upper()
-            entries.append(KnownIp(ip=ip, country=country))
+            entries.append(KnownIp(ip=ip, place=self._place_of(item)))
         return entries
+
+    def _place_of(self, item: Any) -> LocationTarget | None:
+        spec = self._spec
+        return LocationTarget.reported(
+            self._extractor.extract_str(spec.country, item) if spec.country else None,
+            self._extractor.extract_str(spec.state, item) if spec.state else None,
+            self._extractor.extract_str(spec.city, item) if spec.city else None,
+        )
 
 
 @dataclass(frozen=True)
@@ -158,7 +166,8 @@ class ListedProxy:
     username: str | None
     password: str | None
     protocol: ProxyProtocol
-    country: str
+    # What the vendor's list says about the exit's place, when it says anything.
+    place: LocationTarget | None
     raw: dict[str, Any]
 
 
@@ -203,7 +212,11 @@ class ListSource:
                     username=self._extractor.extract_str(self._spec.username, item),
                     password=self._extractor.extract_str(self._spec.password, item),
                     protocol=protocol,
-                    country=(self._extractor.extract_str(self._spec.country, item) or "").strip().upper(),
+                    place=LocationTarget.reported(
+                        self._extractor.extract_str(self._spec.country, item) if self._spec.country else None,
+                        self._extractor.extract_str(self._spec.state, item) if self._spec.state else None,
+                        self._extractor.extract_str(self._spec.city, item) if self._spec.city else None,
+                    ),
                     raw=item if isinstance(item, dict) else {},
                 )
             )

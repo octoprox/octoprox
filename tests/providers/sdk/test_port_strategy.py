@@ -189,7 +189,7 @@ class TestDecodoGatewayPorts:
         vendor.discovery_handler = handler
         credential = make_credential("decodo", {"proxy_type": "isp", "username": "smith", "password": "pw"})
         provider = DescriptorProvider(builtins["decodo"], make_connector("decodo", {"num_proxies": 1, "country_code": ["DE"]}), credential, vendor.runtime())
-        assert provider.country_key is None and provider.filter_countries == ["DE"]
+        assert not provider.geo_targeted and provider.filter_countries == ["DE"]
         to_add, _ = await provider.sync_proxies([])
         assert [(p.port, p.display_host, p.metadata["country"]) for p in to_add] == [(10002, "5.5.5.2", "DE")]
         assert all(p.username == "user-smith" for p in to_add)
@@ -464,3 +464,54 @@ class TestRefreshReportsOnlyChanges:
         assert to_remove == []
         assert [p.id for p in updated] == ["b"] and updated[0].metadata["country"] == "DE"
         assert proxies[0].metadata == {"discovered_ip": "1.1.1.1", "country": "US"}
+
+
+class TestPlaceClaims:
+    """Vendor discovery endpoints and lists report a state and city; both are recorded as the vendor's claim."""
+
+    async def test_brightdata_discovery_records_state_and_city(self, builtins: dict[str, ProviderDescriptor]) -> None:
+        vendor = MockVendor(api_handler=lambda r: json_response([]))  # no known-IP list: fall back to discovery
+        vendor.discovery_handler = lambda r: json_response(
+            {"ip": "5.5.5.9", "country": "GB", "geo": {"city": "Tower Hamlets", "region": "ENG", "region_name": "England"}}
+        )
+        credential = make_credential("brightdata", {"token": "t", "customer_id": "c1"})
+        connector = make_connector("brightdata", {"zone_name": "isp", "zone_password": "zp", "proxy_type": "isp", "num_proxies": 1})
+        provider = DescriptorProvider(builtins["brightdata"], connector, credential, vendor.runtime())
+        to_add, _ = await provider.sync_proxies([])
+        metadata = to_add[0].metadata
+        assert (metadata["country"], metadata["vendor_country"]) == ("GB", "GB")
+        assert (metadata["vendor_state"], metadata["vendor_city"]) == ("ENG", "tower_hamlets")
+        assert "endpoint_state" not in metadata
+
+    async def test_third_party_echo_place_is_evidence(self, builtins: dict[str, ProviderDescriptor]) -> None:
+        from api.providers.sdk.loader import descriptor_from_dict
+
+        spec = builtins["oxylabs"].model_dump(mode="json", by_alias=True, exclude_none=True)
+        for ptype in spec["proxy_types"]:
+            if ptype["key"] == "isp":
+                ptype["discovery"] = {"url": "https://echo.example/ip", "ip_path": "ip", "country_path": "country", "state_path": "state", "city_path": "city", "vendor_operated": False}
+        vendor = MockVendor(api_handler=lambda r: json_response({}))
+        vendor.discovery_handler = lambda r: json_response({"ip": "1.1.1.1", "country": "us", "state": "California", "city": "Los Angeles"})
+        credential = make_credential("oxylabs", {"proxy_type": "isp", "username": "u", "password": "p"})
+        provider = DescriptorProvider(descriptor_from_dict(spec), make_connector("oxylabs", {"num_proxies": 1}), credential, vendor.runtime())
+        to_add, _ = await provider.sync_proxies([])
+        metadata = to_add[0].metadata
+        # A US state name maps to its code on the way in; the city becomes the comparison slug.
+        assert (metadata["endpoint_country"], metadata["endpoint_state"], metadata["endpoint_city"]) == ("US", "CA", "los_angeles")
+        assert "vendor_state" not in metadata and metadata["country"] == "US"
+
+    async def test_oxylabs_city_comes_from_the_first_provider_that_has_one(self, builtins: dict[str, ProviderDescriptor]) -> None:
+        vendor = MockVendor(api_handler=lambda r: json_response({}))
+        vendor.discovery_handler = lambda r: json_response({
+            "ip": "82.21.177.110",
+            "providers": {
+                "dbip": {"country": "GB", "city": "London"},
+                "ip2location": {"country": "GB", "city": "London"},
+                "ipinfo": {"country": "GB", "city": ""},
+                "maxmind": {"country": "GB", "city": ""},
+            },
+        })
+        credential = make_credential("oxylabs", {"proxy_type": "isp", "username": "u", "password": "p"})
+        provider = DescriptorProvider(builtins["oxylabs"], make_connector("oxylabs", {"num_proxies": 1}), credential, vendor.runtime())
+        to_add, _ = await provider.sync_proxies([])
+        assert to_add[0].metadata["vendor_country"] == "GB" and to_add[0].metadata["vendor_city"] == "london"

@@ -255,6 +255,12 @@ export interface Proxy {
   location_conflict: boolean
   /** Full record from the IP databases, when any covers the exit IP. */
   location: IpLocation | null
+  /** State code and city that -st- and -city- routing matches this exit on, each with its source. */
+  state_code: string | null
+  /** manual when pinned by hand, else the attribution source the policy let decide (database, vendor, endpoint). */
+  state_source: string | null
+  city: string | null
+  city_source: string | null
   tags: string[]
   created_at: string
 }
@@ -264,6 +270,8 @@ export interface Proxy {
 export interface IpLocation {
   country?: string | null
   region?: string | null
+  /** ISO 3166-2 subdivision part (NY, ON, ENG), when the database knows it. */
+  state_code?: string | null
   city?: string | null
   postal_code?: string | null
   latitude?: number | null
@@ -292,6 +300,8 @@ export interface GeoSettingsDoc {
   echo_url: string
   echo_ip_path: string
   echo_country_path: string | null
+  echo_state_path: string | null
+  echo_city_path: string | null
   echo_timeout_seconds: number
   health_check_attribution: boolean
   preflight_session_ttl_seconds: number
@@ -381,13 +391,15 @@ export interface GeoLookupCandidate {
   location: IpLocation | null
 }
 
+/** What the resolver decided for one IP: the claim, what independent evidence observed, and what routing uses. */
 export interface GeoResolution {
-  country: string | null
-  source: GeoSourceKind | null
-  origin: string | null
-  conflict: boolean
-  disagreement: boolean
   claimed_country: string | null
+  observed_country: string | null
+  resolved_country: string | null
+  resolved_source: GeoSourceKind | null
+  resolved_origin: string | null
+  /** One verdict per level: true contradicted, false confirmed, null no verdict. */
+  country_conflict: boolean | null
   location: IpLocation | null
 }
 
@@ -414,17 +426,40 @@ export interface IpObservation {
   endpoint_country: string | null
   resolved_country: string | null
   resolved_source: string | null
-  conflict: boolean
-  disagreement: boolean
+  /** One verdict per level: true contradicted, false confirmed, null no verdict (nothing independent answered, or sources disagreed). */
+  country_conflict: boolean | null
+  claimed_state: string | null
+  claimed_city: string | null
+  resolved_state: string | null
+  resolved_city: string | null
+  state_conflict: boolean | null
+  city_conflict: boolean | null
   candidates: { source: string; origin: string; country: string | null }[]
   instance_id: string
 }
 
-/** A contradicted pair: what the vendor claimed, what attribution resolved, how many exits. */
+export type PlaceLevel = 'country' | 'state' | 'city'
+
+/** A contradicted pair at one level: what was claimed, what attribution resolved, how many exits. */
 export interface ClaimBreakdown {
-  claimed_country: string | null
-  observed_country: string | null
+  level: PlaceLevel
+  claimed: string | null
+  observed: string | null
   exits: number
+}
+
+/**
+ * How a connector's exits with a claim at one level were judged, each exit once.
+ * `open` is a claim without a verdict: no independent source answered at that
+ * level, or they disagreed. It counts in neither: `accuracy` is confirmed over
+ * confirmed plus contradicted.
+ */
+export interface LevelAccuracy {
+  claimed: number
+  confirmed: number
+  contradicted: number
+  open: number
+  accuracy: number | null
 }
 
 /** A connector's distinct exits in the window and how their vendor claims were judged, each exit once. */
@@ -433,11 +468,9 @@ export interface ConnectorAccuracy {
   connector_name: string | null
   project_id: string | null
   exits: number
-  claimed: number
-  confirmed: number
-  contradicted: number
-  uncertain: number
-  accuracy: number | null
+  country: LevelAccuracy
+  state: LevelAccuracy
+  city: LevelAccuracy
   breakdown: ClaimBreakdown[]
   coverage: ExitCoverage | null
 }
@@ -490,8 +523,13 @@ export interface ExitIp {
   source: string | null
   claimed_country: string | null
   resolved_source: string | null
-  conflict: boolean
-  disagreement: boolean
+  country_conflict: boolean | null
+  claimed_state: string | null
+  claimed_city: string | null
+  resolved_state: string | null
+  resolved_city: string | null
+  state_conflict: boolean | null
+  city_conflict: boolean | null
 }
 
 export interface ExitIpFilters {
@@ -543,7 +581,7 @@ export const lookupGeoIp = async (ip: string, claimedCountry?: string, projectId
   (await api.post('/geo/lookup', { ip, claimed_country: claimedCountry || null, project_id: projectId || null })).data
 export const reattributeProxies = async (connectorId?: string): Promise<{ scanned: number; updated: number }> =>
   (await api.post('/geo/reattribute', { connector_id: connectorId ?? null })).data
-export type ObservationVerdict = 'contradicted' | 'uncertain' | 'confirmed' | 'no_claim'
+export type ObservationVerdict = 'contradicted' | 'open' | 'confirmed' | 'no_claim'
 
 export interface ObservationFilters {
   connector_id?: string
@@ -590,6 +628,9 @@ export interface ProxyCreate {
   tags?: string[]
   /** Exit country (ISO code). Omit to have it looked up through the proxy. */
   country?: string
+  /** Exit state code (NY, ON, ENG) and city, pinned by hand for -st- and -city- routing. */
+  state?: string
+  city?: string
 }
 
 export interface ProxyUpdate {
@@ -601,6 +642,9 @@ export interface ProxyUpdate {
   tags?: string[]
   /** Exit country (ISO code); empty string clears it. */
   country?: string
+  /** Exit state code and city pinned by hand; empty string clears each. */
+  state?: string
+  city?: string
 }
 
 export interface ProxyUploadError {

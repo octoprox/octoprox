@@ -27,13 +27,14 @@ from api.geo.settings import GeoSettingsStore
 from api.geo.store import GeoDatabaseStore
 from api.models.connector import Connector
 from api.models.credential import CredentialType
+from api.models.location import LocationTarget
 from api.models.project import Project
 from api.models.proxy import Proxy, ProxyProtocol
 from api.providers.sdk.sources import IpDiscoverer
 from api.providers.sdk.strategies import (
     META_DISCOVERED_IP,
     META_DYNAMIC_SESSIONS,
-    META_GEO,
+    META_GEO_COUNTRY,
     META_SESSION_ID,
 )
 from tests.geo.test_readers import MAXMIND_RECORD, write_mmdb
@@ -172,13 +173,13 @@ class TestLookup:
         seen: list[str] = []
         use_echo(geo_service, {"ip": ECHO_IP, "country": "de"}, seen=seen)
         attributor = ProxyAttributor(geo_service, _settings())
-        assert await attributor.locate(_proxy()) == (ECHO_IP, "DE")
+        assert await attributor.locate(_proxy()) == (ECHO_IP, LocationTarget(country="DE"))
         assert seen == ["http://u:p@203.0.113.10:8080"]
 
     async def test_locate_failure(self, geo_service: GeoService) -> None:
         use_echo(geo_service, {}, status=500)
         attributor = ProxyAttributor(geo_service, _settings())
-        assert await attributor.locate(_proxy()) == (None, "")
+        assert await attributor.locate(_proxy()) == (None, None)
 
     async def test_enrich_records_ip_and_country(self, geo_service: GeoService) -> None:
         store = FakeStore()
@@ -272,7 +273,7 @@ class TestObservations:
         self, geo_service: GeoService
     ) -> None:
         store = FakeStore()
-        proxy = store.add(_proxy(connector_id="oxy", metadata={META_GEO: "US"}))
+        proxy = store.add(_proxy(connector_id="oxy", metadata={META_GEO_COUNTRY: "US"}))
         attributor = await _attributor(geo_service, store)
         try:
             await exit_ip_observed.send_async(
@@ -326,7 +327,7 @@ class TestObservations:
             await attributor.observe(proxy.id, GB_IP, source=ObservationSource.HEALTH_CHECK)
             assert store.update_proxy.await_count == 1
             await attributor.observe(
-                proxy.id, ECHO_IP, source=ObservationSource.HEALTH_CHECK, endpoint_country="DE"
+                proxy.id, ECHO_IP, source=ObservationSource.HEALTH_CHECK, endpoint=LocationTarget(country="DE")
             )
             assert store.update_proxy.await_count == 2 and proxy.country == "DE"
         finally:
@@ -345,7 +346,7 @@ class TestObservations:
         try:
             before = geo_service.observation_recorder.pending
             await attributor.observe(gateway.id, GB_IP, source=ObservationSource.MANUAL)
-            await attributor.observe(gateway.id, ECHO_IP, source=ObservationSource.MANUAL, endpoint_country="DE")
+            await attributor.observe(gateway.id, ECHO_IP, source=ObservationSource.MANUAL, endpoint=LocationTarget(country="DE"))
             assert geo_service.observation_recorder.pending == before + 2
             sighting = geo_service.observation_recorder._buffer[-1]
             assert sighting.connector_id == "oxy" and sighting.project_id == "p" and sighting.session_id == "probe"
@@ -377,8 +378,8 @@ class TestObservations:
 
     async def test_project_policy_decides(self, geo_service: GeoService) -> None:
         store = FakeStore()
-        trusting = store.add(_proxy(id="t", connector_id="trusting-c", metadata={META_GEO: "US"}))
-        default = store.add(_proxy(id="d", connector_id="oxy", metadata={META_GEO: "US"}))
+        trusting = store.add(_proxy(id="t", connector_id="trusting-c", metadata={META_GEO_COUNTRY: "US"}))
+        default = store.add(_proxy(id="d", connector_id="oxy", metadata={META_GEO_COUNTRY: "US"}))
         attributor = await _attributor(geo_service, store)
         try:
             assert attributor.policy_for("trusting-c") == SourcePolicy(
@@ -395,20 +396,6 @@ class TestObservations:
 
 
 class TestMismatch:
-    async def test_fixed_exit_is_flagged(self, geo_service: GeoService) -> None:
-        store = FakeStore()
-        proxy = store.add(_proxy(connector_id="oxy"))
-        attributor = await _attributor(geo_service, store)
-        try:
-            await exit_location_mismatch.send_async(
-                None, proxy_id=proxy.id, project_id="p", expected="GB", observed="US", ip=ECHO_IP
-            )
-        finally:
-            await attributor.stop()
-        assert proxy.metadata[META_LOCATION_CONFLICT] is True and proxy.display_host == ECHO_IP
-        store.update_proxy.assert_awaited_once_with(proxy)
-        store.remove_proxy.assert_not_awaited()
-
     async def test_vendor_session_is_rotated(self, geo_service: GeoService) -> None:
         store = FakeStore()
         proxy = store.add(_proxy(connector_id="oxy", metadata={META_SESSION_ID: "abc"}))

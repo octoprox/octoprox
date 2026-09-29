@@ -324,8 +324,11 @@ function ProxyPanel({ proxy, connectorType, canMutate, onClose, onRelease, onDel
   const { selectedProjectId } = useProject()
   const toast = useToast()
   const { presets } = useProviders()
-  const [form, setForm] = useState({ host: proxy.host, port: String(proxy.port), protocol: proxy.protocol, username: proxy.username || '', password: proxy.password || '', country: proxy.country || '' })
-  const dirty = form.host !== proxy.host || form.port !== String(proxy.port) || form.protocol !== proxy.protocol || form.username !== (proxy.username || '') || form.password !== (proxy.password || '') || form.country !== (proxy.country || '')
+  // The state and city fields edit the hand-set pin only, each on its own; a place the databases resolved is shown as a placeholder.
+  const pinnedState = proxy.state_source === 'manual' ? proxy.state_code || '' : ''
+  const pinnedCity = proxy.city_source === 'manual' ? proxy.city || '' : ''
+  const [form, setForm] = useState({ host: proxy.host, port: String(proxy.port), protocol: proxy.protocol, username: proxy.username || '', password: proxy.password || '', country: proxy.country || '', state: pinnedState, city: pinnedCity })
+  const dirty = form.host !== proxy.host || form.port !== String(proxy.port) || form.protocol !== proxy.protocol || form.username !== (proxy.username || '') || form.password !== (proxy.password || '') || form.country !== (proxy.country || '') || form.state !== pinnedState || form.city !== pinnedCity
 
   const updateMutation = useMutation({
     mutationFn: (d: ProxyUpdate) => updateProjectProxy(selectedProjectId!, proxy.id, d),
@@ -389,7 +392,7 @@ function ProxyPanel({ proxy, connectorType, canMutate, onClose, onRelease, onDel
       </InspectorSection>
 
       <InspectorSection title="Configuration">
-        <form id="proxy-form" onSubmit={(e) => { e.preventDefault(); updateMutation.mutate({ host: form.host, port: parseInt(form.port), protocol: form.protocol, username: form.username || undefined, password: form.password || undefined, ...(isStatic && form.country !== (proxy.country || '') ? { country: form.country } : {}) }) }} className="space-y-3">
+        <form id="proxy-form" onSubmit={(e) => { e.preventDefault(); updateMutation.mutate({ host: form.host, port: parseInt(form.port), protocol: form.protocol, username: form.username || undefined, password: form.password || undefined, ...(isStatic && form.country !== (proxy.country || '') ? { country: form.country } : {}), ...(isStatic && form.state !== pinnedState ? { state: form.state } : {}), ...(isStatic && form.city !== pinnedCity ? { city: form.city } : {}) }) }} className="space-y-3">
           <div>
             <Label className="text-xs">Connector</Label>
             <div className="h-9 px-3 rounded-lg bg-surface-raised text-fg-muted text-sm flex items-center gap-2">
@@ -438,6 +441,17 @@ function ProxyPanel({ proxy, connectorType, canMutate, onClose, onRelease, onDel
                 )}
               </div>
               <p className="text-xs text-fg-subtle mt-1">Looked up through the proxy when it was added. Set it by hand if the lookup was wrong or unavailable.</p>
+              <div className="grid grid-cols-2 gap-3 mt-3">
+                <div>
+                  <Label className="text-xs">Exit state</Label>
+                  <Input value={form.state} onChange={(e) => setForm({ ...form, state: e.target.value })} placeholder={!pinnedState && proxy.state_code ? `${proxy.state_code} (databases)` : 'ISO 3166-2 code: NY, ON, ENG'} disabled={!canMutate} className="font-mono" />
+                </div>
+                <div>
+                  <Label className="text-xs">Exit city</Label>
+                  <Input value={form.city} onChange={(e) => setForm({ ...form, city: e.target.value })} placeholder={!pinnedCity && proxy.city ? `${proxy.city} (databases)` : 'e.g. New York'} disabled={!canMutate} />
+                </div>
+              </div>
+              <p className="text-xs text-fg-subtle mt-1">What -st- and -city- requests match this proxy on. Leave empty to use the IP databases' answer; set them when you know where the IP really is.</p>
             </div>
           ) : (
             <p className="text-xs text-fg-subtle">Provisioned by its connector; edit the connector to change how these proxies are created.</p>
@@ -448,6 +462,8 @@ function ProxyPanel({ proxy, connectorType, canMutate, onClose, onRelease, onDel
       <InspectorSection title="Location">
         <KeyValue label="Country" value={proxy.country ? <span className="inline-flex items-center gap-1.5">{proxy.country}{proxy.country_source && <span className="text-fg-subtle font-sans text-xs">via {proxy.country_source}</span>}</span> : '-'} mono />
         {proxy.vendor_country && <KeyValue label="Vendor claimed" value={proxy.vendor_country} mono />}
+        {proxy.state_code && <KeyValue label="State" value={<span className="inline-flex items-center gap-1.5">{proxy.state_code}{proxy.state_source && <span className="text-fg-subtle font-sans text-xs">via {proxy.state_source}</span>}</span>} mono />}
+        {proxy.city && <KeyValue label="City" value={<span className="inline-flex items-center gap-1.5">{proxy.city}{proxy.city_source && <span className="text-fg-subtle font-sans text-xs">via {proxy.city_source}</span>}</span>} mono />}
         {proxy.location_conflict && (
           <div className="flex gap-2 p-2.5 rounded-lg bg-danger-soft text-danger text-xs leading-relaxed">
             <AlertTriangle className="w-3.5 h-3.5 flex-shrink-0 mt-0.5" />
@@ -473,7 +489,7 @@ function ProxyPanel({ proxy, connectorType, canMutate, onClose, onRelease, onDel
 function NewProxyPanel({ connectors, onClose, onCreated }: { connectors: { id: string; name: string }[]; onClose: () => void; onCreated: () => void }) {
   const { selectedProjectId } = useProject()
   const { presets } = useProviders()
-  const [form, setForm] = useState({ host: '', port: '', protocol: 'http', connector_id: connectors[0]?.id ?? '', username: '', password: '', country: '' })
+  const [form, setForm] = useState({ host: '', port: '', protocol: 'http', connector_id: connectors[0]?.id ?? '', username: '', password: '', country: '', state: '', city: '' })
   const [error, setError] = useState<string | null>(null)
   const countryOptions: RichSelectOption[] = [
     { value: '', label: 'Detect automatically', description: 'One request goes through the proxy after it is added' },
@@ -503,7 +519,7 @@ function NewProxyPanel({ connectors, onClose, onCreated }: { connectors: { id: s
         onSubmit={(e) => {
           e.preventDefault()
           setError(null)
-          createMutation.mutate({ host: form.host, port: parseInt(form.port), protocol: form.protocol, connector_id: form.connector_id, username: form.username || undefined, password: form.password || undefined, country: form.country || undefined })
+          createMutation.mutate({ host: form.host, port: parseInt(form.port), protocol: form.protocol, connector_id: form.connector_id, username: form.username || undefined, password: form.password || undefined, country: form.country || undefined, state: form.state || undefined, city: form.city || undefined })
         }}
       >
         {error && <Alert>{error}</Alert>}
@@ -533,6 +549,16 @@ function NewProxyPanel({ connectors, onClose, onCreated }: { connectors: { id: s
         <div>
           <Label className="text-xs">Exit country</Label>
           <RichSelect options={countryOptions} value={form.country} onChange={(v) => setForm({ ...form, country: v })} placeholder="Detect automatically" />
+        </div>
+        <div className="grid grid-cols-2 gap-3">
+          <div>
+            <Label className="text-xs">Exit state</Label>
+            <Input value={form.state} onChange={(e) => setForm({ ...form, state: e.target.value })} placeholder="Optional, e.g. NY" className="font-mono" />
+          </div>
+          <div>
+            <Label className="text-xs">Exit city</Label>
+            <Input value={form.city} onChange={(e) => setForm({ ...form, city: e.target.value })} placeholder="Optional, e.g. New York" />
+          </div>
         </div>
         <InspectorSection title="Authentication">
           <div className="grid grid-cols-2 gap-3">

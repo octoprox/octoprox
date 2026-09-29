@@ -17,7 +17,7 @@ import asyncio
 import hashlib
 import time
 from datetime import timedelta
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Any, NamedTuple, Protocol
 
 import httpx
 import structlog
@@ -31,8 +31,9 @@ from api.core.signals import exit_ip_observed, health_check_completed
 from api.core.workers import WorkerName
 from api.db.redis import INSTANCE_REGISTRY_SCAN, RedisClient
 from api.models.connector import Connector
+from api.models.location import LocationTarget
 from api.models.proxy import Proxy, ProxyProtocol, ProxyStatus
-from api.providers.sdk.sources import extract_ip_and_country
+from api.providers.sdk.sources import extract_ip_and_place
 from api.providers.sdk.strategies import is_dynamic_gateway
 
 if TYPE_CHECKING:
@@ -48,19 +49,39 @@ DEFAULT_HEALTHCHECK_URL = "https://httpbin.org/ip"
 # extracted and the proxy's location is left alone).
 HEALTHCHECK_IP_PATH_KEY = "healthcheck_ip_path"
 HEALTHCHECK_COUNTRY_PATH_KEY = "healthcheck_country_path"
+HEALTHCHECK_STATE_PATH_KEY = "healthcheck_state_path"
+HEALTHCHECK_CITY_PATH_KEY = "healthcheck_city_path"
+
+
+class ExtractionPaths(NamedTuple):
+    """JMESPaths into a check response: the caller's IP, and its place where the response has it."""
+
+    ip: str
+    country: str | None = None
+    state: str | None = None
+    city: str | None = None
+
+
+def _clean_path(config: dict[str, Any], key: str) -> str | None:
+    value = config.get(key)
+    return value.strip() if isinstance(value, str) and value.strip() else None
 
 
 def default_ip_paths(
     url: str, connector_config: dict[str, Any] | None, *, include_default_url: bool = True
-) -> tuple[str, str | None] | None:
-    """``(ip_path, country_path)`` from the connector's config, else the httpbin default, else None."""
+) -> ExtractionPaths | None:
+    """Paths from the connector's config, else the httpbin default, else None."""
     config = connector_config or {}
-    custom = config.get(HEALTHCHECK_IP_PATH_KEY)
-    if isinstance(custom, str) and custom.strip():
-        country = config.get(HEALTHCHECK_COUNTRY_PATH_KEY)
-        return custom.strip(), (country.strip() if isinstance(country, str) and country.strip() else None)
+    custom = _clean_path(config, HEALTHCHECK_IP_PATH_KEY)
+    if custom:
+        return ExtractionPaths(
+            custom,
+            _clean_path(config, HEALTHCHECK_COUNTRY_PATH_KEY),
+            _clean_path(config, HEALTHCHECK_STATE_PATH_KEY),
+            _clean_path(config, HEALTHCHECK_CITY_PATH_KEY),
+        )
     if include_default_url and url.rstrip("/") == DEFAULT_HEALTHCHECK_URL:
-        return "origin", None
+        return ExtractionPaths("origin")
     return None
 
 
@@ -72,7 +93,7 @@ class IpExtractionRules(Protocol):
         """URL checked when a connector names none; the echo endpoint, in practice."""
         ...
 
-    def ip_paths(self, url: str, connector_config: dict[str, Any]) -> tuple[str, str | None] | None: ...
+    def ip_paths(self, url: str, connector_config: dict[str, Any]) -> ExtractionPaths | None: ...
 
 def _hrw_owner(proxy_id: str, instances: list[str]) -> str:
     """Return the instance id that owns this proxy under rendezvous hashing.
@@ -290,29 +311,29 @@ class HealthChecker:
             return self._extraction_rules.default_check_url
         return DEFAULT_HEALTHCHECK_URL
 
-    def _ip_paths(self, proxy: Proxy, url: str) -> tuple[str, str | None] | None:
-        """``(ip_path, country_path)`` to read the exit IP from a check response, or None."""
+    def _ip_paths(self, proxy: Proxy, url: str) -> ExtractionPaths | None:
+        """Paths to read the exit IP, and its place, from a check response, or None."""
         connector = self._proxy_data_provider.get_connector(proxy.connector_id)
         config = connector.config if connector and connector.config else {}
         if self._extraction_rules is not None:
             return self._extraction_rules.ip_paths(url, config)
         return default_ip_paths(url, config)
 
-    def _observed_ip(self, proxy: Proxy, url: str, response: httpx.Response) -> tuple[str | None, str | None]:
+    def _observed_exit(self, proxy: Proxy, url: str, response: httpx.Response) -> tuple[str | None, LocationTarget | None]:
         paths = self._ip_paths(proxy, url)
         if paths is None:
             return None, None
         try:
-            ip, country = extract_ip_and_country(response, paths[0], paths[1])
+            ip, place = extract_ip_and_place(response, paths.ip, paths.country, paths.state, paths.city)
         except Exception as exc:
             logger.debug("Health check IP extraction failed", proxy_id=proxy.id, error=str(exc))
             return None, None
         if ip is None:
             logger.debug(
                 "Health check response carried no IP at the configured path",
-                proxy_id=proxy.id, url=url, ip_path=paths[0],
+                proxy_id=proxy.id, url=url, ip_path=paths.ip,
             )
-        return ip, (country or None)
+        return ip, place
 
     async def _check_proxy(self, proxy: Proxy) -> None:
         """Check health of a single proxy and emit signal with result."""
@@ -358,14 +379,16 @@ class HealthChecker:
                         latency_ms=latency_ms,
                         consecutive_failures=0,
                     )
-                    observed_ip, observed_country = self._observed_ip(proxy, healthcheck_url, response)
+                    observed_ip, observed_place = self._observed_exit(proxy, healthcheck_url, response)
                     if observed_ip:
                         await event_bus.publish(exit_ip_observed,
                             self,
                             proxy_id=proxy.id,
                             ip=observed_ip,
                             source="health_check",
-                            endpoint_country=observed_country,
+                            endpoint_country=observed_place.country if observed_place else None,
+                            endpoint_state=observed_place.state if observed_place else None,
+                            endpoint_city=observed_place.city if observed_place else None,
                         )
                 else:
                     await self._handle_check_failure(

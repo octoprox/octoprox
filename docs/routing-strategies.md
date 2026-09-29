@@ -86,9 +86,9 @@ Proxy-Authorization: Basic base64(my-project-sessid-abc456:password)
 - If the upstream proxy assigned to a session becomes unhealthy (e.g., IP rotation), a new proxy is automatically assigned on the next request.
 - Without a session ID, the sticky strategy picks a connector by weight and a proxy inside it at random for each request, exactly like `random`.
 - This feature only takes effect when the project's routing strategy is set to `sticky`. Other strategies ignore the session ID.
-- Connectors running a residential or mobile product with **dynamic sessions** also forward the session to the vendor: the `-sessid-` value is hashed into the vendor's session id, so the same value keeps the same exit IP across requests and instances, and a request without `-sessid-` gets a fresh vendor session every time. The country is part of that hash: `-sessid-order-1-cc-de` and `-sessid-order-1-cc-us` are two vendor sessions with two exits, each kept for as long as the client reuses it, since a vendor does not move a session it has already placed to another country. This applies under every routing strategy, not only `sticky`. See [Dynamic sessions]({{ site.baseurl }}/providers#descriptor-reference).
+- Connectors running a residential or mobile product with **dynamic sessions** also forward the session to the vendor: the `-sessid-` value is hashed into the vendor's session id, so the same value keeps the same exit IP across requests and instances, and a request without `-sessid-` gets a fresh vendor session every time. The whole requested place is part of that hash: `-sessid-order-1-cc-de` and `-sessid-order-1-cc-us` are two vendor sessions with two exits, and so are `-cc-us-city-austin` and `-cc-us-city-dallas` under one `-sessid-`, each kept for as long as the client reuses it, since a vendor does not move a session it has already placed somewhere else. This applies under every routing strategy, not only `sticky`. See [Dynamic sessions]({{ site.baseurl }}/providers#descriptor-reference).
 
-> **Note:** The string `-sessid-` is a reserved delimiter and should not appear in your project username.
+> **Note:** The strings `-sessid-`, `-cc-`, `-st-` and `-city-` are reserved delimiters and should not appear in your project username or in session IDs.
 
 ## Country Routing
 
@@ -96,7 +96,7 @@ A single project can hold connectors that exit from different countries. Instead
 
 **Format:** `<username>-cc-<iso_code>`
 
-The code is a two-letter ISO 3166-1 alpha-2 country code and is case-insensitive. `uk` is accepted as an alias of `gb`, the ISO code for the United Kingdom, wherever a country is entered: in this suffix, in a connector's country settings and on a manually added proxy.
+The code is a two-letter ISO 3166-1 alpha-2 country code and is case-insensitive. `uk` is accepted as an alias of `gb`, the ISO code for the United Kingdom, wherever a country is entered: in this suffix, in a connector's country settings and on a manually added proxy. Anything else (`-cc-usa`) is answered with `400 Bad Request` rather than routed.
 
 **Examples:**
 
@@ -135,14 +135,43 @@ Octoprox narrows the project's healthy proxies before the routing strategy runs,
 
 If nothing in the project serves the requested country, the request is rejected with `502 Bad Gateway`. Octoprox never silently falls back to another country.
 
-With the project's preflight check set to `reject`, a session whose exit turns out to be somewhere other than the requested country is also rejected with `502 Bad Gateway` (`Exit location mismatch`), after one echo request through the selected upstream.
+## State and City Routing
+
+Below the country a request can name a state and a city:
+
+**Format:** `<username>-cc-<iso_code>[-st-<subdivision>][-city-<slug>]`
+
+- `-st-` takes the country's first-level subdivision, whatever it is called locally, as the subdivision part of its ISO 3166-2 code: a US state (`ny` for `US-NY`), a Canadian province (`on`), a German Land (`by`), a French region (`idf`), England (`eng`). The full code (`US-NY`) is accepted too. "State" is the word the vendors use; the IP databases report the same first-level subdivision, so a fixed exit in Ontario matches `-cc-ca-st-on`.
+- `-city-` takes the city as a slug: lower case, underscores for spaces (`new_york`, `los_angeles`, `saint_denis`). Spaces and hyphens typed instead are turned into underscores. A few spellings of one city are folded into one slug (`city_of_london` and `nyc` are `london` and `new_york`), and a qualifier in parentheses is dropped, so the IP databases' district entries (`Sofia (g.k. Banishora)`, `London (Soho)`) are the city they belong to.
+- Both need `-cc-`. A username with a state or city and no country, a state that is not a subdivision code, or a city with nothing to slug is answered with `400 Bad Request` rather than routed anywhere.
+
+```
+# New York City exits
+Proxy-Authorization: Basic base64(myuser-cc-us-st-ny-city-new_york:password)
+
+# Any exit in Texas, kept for a session
+Proxy-Authorization: Basic base64(myuser-cc-us-st-tx-sessid-order-9:password)
+```
+
+Two kinds of proxy can serve such a request, and a request is never quietly widened to the country:
+
+| Proxy | How it serves a state or city |
+|-------|-------------------------------|
+| A residential or mobile connector with **dynamic sessions** | The state and city are rendered into the vendor request, in the vendor's spelling: Oxylabs and Decodo get the US state as a name (`us_new_york`), IPRoyal the name without spaces (`newyork`), Bright Data the ISO code, NetNut the `country_state_city` triple. A connector whose vendor cannot say what was asked is skipped: Oxylabs, Decodo, IPRoyal and NetNut name only US states, so `-cc-gb-st-eng` reaches Bright Data alone; NetNut takes a city only together with its state. The Webshare descriptor mirrors a proxy list and targets nothing per request. |
+| A fixed exit: static, ISP, datacenter, list-mode and cloud proxies | Matched on where its exit IP is known to be: the state code and city [IP attribution]({{ site.baseurl }}/ip-attribution) resolved under the project's source policy from the IP databases, the vendor's own word (a city its list or discovery endpoint names) and the echo endpoint, exactly as the country is; or the state and city an operator set by hand on a static proxy (the pin wins). A proxy whose state or city is unknown does not match a request that names one. |
+
+Pooled residential slots (fixed pool of sessions) serve the country only: their sessions were placed by the vendor without a state or city, and nothing is provisioned per city. If nothing in the project serves the place, the request is rejected with `502 Bad Gateway` naming it.
+
+Vendors take US states everywhere and other subdivisions only on Bright Data, and cities everywhere; how well they honour a state or city is what the **Exit locations** pages report per level (see [Provider accuracy]({{ site.baseurl }}/ip-attribution#provider-accuracy)). Verification below the country needs a city-level IP database loaded.
+
+With the project's preflight check set to `reject`, a session whose exit turns out to be somewhere other than the requested country is also rejected with `502 Bad Gateway` (`Exit country mismatch: requested DE, observed FR (...)`; a state or city that fails is named the same way), after one echo request through the selected upstream.
 
 Requests **without** a `-cc-` suffix are unaffected: they may use any proxy in the project, except the on-demand country groups of *all countries* pools, which keep serving only the clients that asked for that country.
 
 **Other behavior:**
 
-- With the `sticky` strategy, a session that switches country is re-bound to a proxy in the new country.
+- With the `sticky` strategy, a session that switches country, state or city is re-bound to a proxy in the new place.
 - Country groups created on demand are not removed automatically. Delete unused ones from the Proxies page, or list the countries you need on the connector so the sync manages them.
-- The Proxies page shows each proxy's country when it is known, and the Overview page shows a world map of where the project's proxies exit from, with healthy and total counts per country. A dynamic-sessions connector has no exit of its own to plot, since the vendor picks one per request, so the map tints the countries its allow-list names, or the whole world when it names none.
+- The Proxies page shows each proxy's country, and its state and city when known, and the Overview page shows a world map of where the project's proxies exit from, with healthy and total counts per country. A dynamic-sessions connector has no exit of its own to plot, since the vendor picks one per request, so the map tints the countries its allow-list names, or the whole world when it names none.
 
-> **Note:** The string `-cc-` is a reserved delimiter and should not appear in your project username or in session IDs.
+> **Note:** The strings `-cc-`, `-st-` and `-city-` are reserved delimiters and should not appear in your project username or in session IDs.

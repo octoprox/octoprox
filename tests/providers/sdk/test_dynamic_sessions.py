@@ -7,6 +7,7 @@ import re
 
 import pytest
 
+from api.models.location import LocationTarget
 from api.models.proxy import Proxy, ProxyStatus
 from api.providers.registry import build_registry
 from api.providers.sdk.descriptor import ProviderDescriptor, SessionIdSpec
@@ -15,7 +16,9 @@ from api.providers.sdk.session_ids import SessionIdGenerator
 from api.providers.sdk.strategies import (
     META_DYNAMIC_SESSIONS,
     META_EXIT_SAMPLE_PERCENT,
-    META_GEO,
+    META_GEO_CITY,
+    META_GEO_COUNTRY,
+    META_GEO_STATE,
     META_SESSION_ID,
 )
 from api.providers.sdk.validation import ConfigValidationError
@@ -67,7 +70,7 @@ class TestGatewayRow:
         assert gateway.host == "pr.oxylabs.io" and gateway.port == 7777
         assert gateway.status == ProxyStatus.HEALTHY
         assert gateway.metadata[META_DYNAMIC_SESSIONS] == "true"
-        assert META_GEO not in gateway.metadata
+        assert META_GEO_COUNTRY not in gateway.metadata
         # Stored with a random session for the health probe and no country.
         assert re.fullmatch(r"customer-alice-sessid-[a-z0-9]{12}-sesstime-10", gateway.username or "")
         assert gateway.password == "{password}"
@@ -125,8 +128,8 @@ class TestRenderRequest:
 
     async def test_client_session_derives_the_same_vendor_session(self, builtins: dict[str, ProviderDescriptor], runtime: SdkRuntime, gateway: Proxy) -> None:
         provider = _oxylabs(builtins, runtime)
-        first = provider.render_request(gateway, sessid="order-123", country=None, scope="proj-1")
-        second = provider.render_request(gateway, sessid="order-123", country=None, scope="proj-1")
+        first = provider.render_request(gateway, sessid="order-123", location=None, scope="proj-1")
+        second = provider.render_request(gateway, sessid="order-123", location=None, scope="proj-1")
         assert first.username == second.username
         assert re.fullmatch(r"customer-alice-sessid-[a-z0-9]{12}-sesstime-10", first.username or "")
         assert "order-123" not in (first.username or "")  # the client's string never reaches the vendor
@@ -135,56 +138,56 @@ class TestRenderRequest:
         assert first.metadata[META_EXIT_SAMPLE_PERCENT] == 5  # preflight reads the share off the request
         assert first.password == "{password}"  # secrets stay for the proxy manager
         assert first.id == gateway.id and gateway.username != first.username  # the stored row is untouched
-        other_project = provider.render_request(gateway, sessid="order-123", country=None, scope="proj-2")
+        other_project = provider.render_request(gateway, sessid="order-123", location=None, scope="proj-2")
         assert other_project.username != first.username
 
     async def test_no_client_session_rotates(self, builtins: dict[str, ProviderDescriptor], runtime: SdkRuntime, gateway: Proxy) -> None:
         provider = _oxylabs(builtins, runtime)
-        rendered = [provider.render_request(gateway, sessid=None, country=None, scope="p") for _ in range(5)]
+        rendered = [provider.render_request(gateway, sessid=None, location=None, scope="p") for _ in range(5)]
         assert len({r.username for r in rendered}) == 5
         assert all(META_SESSION_ID not in r.metadata for r in rendered)
-        assert provider.render_request(gateway, sessid="", country=None, scope="p").metadata.get(META_SESSION_ID) is None
+        assert provider.render_request(gateway, sessid="", location=None, scope="p").metadata.get(META_SESSION_ID) is None
 
     async def test_requested_country_is_rendered(self, builtins: dict[str, ProviderDescriptor], runtime: SdkRuntime, gateway: Proxy) -> None:
         provider = _oxylabs(builtins, runtime)
-        rendered = provider.render_request(gateway, sessid="s", country="de", scope="p")
+        rendered = provider.render_request(gateway, sessid="s", location=LocationTarget(country="DE"), scope="p")
         assert (rendered.username or "").startswith("customer-alice-cc-DE-sessid-")
-        assert rendered.metadata[META_GEO] == "DE"
-        untargeted = provider.render_request(gateway, sessid="s", country=None, scope="p")
-        assert "-cc-" not in (untargeted.username or "") and META_GEO not in untargeted.metadata
+        assert rendered.metadata[META_GEO_COUNTRY] == "DE"
+        untargeted = provider.render_request(gateway, sessid="s", location=None, scope="p")
+        assert "-cc-" not in (untargeted.username or "") and META_GEO_COUNTRY not in untargeted.metadata
 
     async def test_client_session_holds_one_vendor_session_per_country(self, builtins: dict[str, ProviderDescriptor], runtime: SdkRuntime, gateway: Proxy) -> None:
         provider = _oxylabs(builtins, runtime)
-        de = provider.render_request(gateway, sessid="order-1", country="de", scope="p")
-        us = provider.render_request(gateway, sessid="order-1", country="us", scope="p")
-        plain = provider.render_request(gateway, sessid="order-1", country=None, scope="p")
+        de = provider.render_request(gateway, sessid="order-1", location=LocationTarget(country="DE"), scope="p")
+        us = provider.render_request(gateway, sessid="order-1", location=LocationTarget(country="US"), scope="p")
+        plain = provider.render_request(gateway, sessid="order-1", location=None, scope="p")
         sessions = {r.metadata[META_SESSION_ID] for r in (de, us, plain)}
         assert len(sessions) == 3  # the vendor is never asked to move a placed session to another country
-        again = provider.render_request(gateway, sessid="order-1", country="DE", scope="p")
+        again = provider.render_request(gateway, sessid="order-1", location=LocationTarget(country="DE"), scope="p")
         assert again.username == de.username  # coming back finds the same session and exit
 
     async def test_explicit_country_meets_the_allow_list_pick(self, builtins: dict[str, ProviderDescriptor], runtime: SdkRuntime) -> None:
         provider = _oxylabs(builtins, runtime, country_code=["US", "DE"])
         gateway = (await provider.sync_proxies([]))[0][0]
-        picked = provider.render_request(gateway, sessid="order-2", country=None, scope="p")
-        explicit = provider.render_request(gateway, sessid="order-2", country=picked.metadata[META_GEO], scope="p")
+        picked = provider.render_request(gateway, sessid="order-2", location=None, scope="p")
+        explicit = provider.render_request(gateway, sessid="order-2", location=LocationTarget(country=picked.metadata[META_GEO_COUNTRY]), scope="p")
         assert explicit.username == picked.username
 
     async def test_allow_list_picks_a_listed_country_when_none_requested(self, builtins: dict[str, ProviderDescriptor], runtime: SdkRuntime, gateway: Proxy) -> None:
         provider = _oxylabs(builtins, runtime, country_code=["US", "DE"])
-        seen = {provider.render_request(gateway, sessid=None, country=None, scope="p").metadata[META_GEO] for _ in range(40)}
+        seen = {provider.render_request(gateway, sessid=None, location=None, scope="p").metadata[META_GEO_COUNTRY] for _ in range(40)}
         assert seen <= {"US", "DE"} and len(seen) == 2
-        assert provider.render_request(gateway, sessid=None, country="us", scope="p").metadata[META_GEO] == "US"
+        assert provider.render_request(gateway, sessid=None, location=LocationTarget(country="US"), scope="p").metadata[META_GEO_COUNTRY] == "US"
         # An unlisted request never gets here (routing filters the connector) but renders nothing rather than lying.
-        outside = provider.render_request(gateway, sessid=None, country="FR", scope="p")
-        assert META_GEO not in outside.metadata and "-cc-" not in (outside.username or "")
+        outside = provider.render_request(gateway, sessid=None, location=LocationTarget(country="FR"), scope="p")
+        assert META_GEO_COUNTRY not in outside.metadata and "-cc-" not in (outside.username or "")
 
     async def test_password_encoded_vendor(self, builtins: dict[str, ProviderDescriptor], runtime: SdkRuntime) -> None:
         credential = make_credential("iproyal", {"username": "royal", "password": "pw"})
         connector = make_connector("iproyal", {"session_mode": "dynamic", "session_lifetime": "30m"})
         provider = DescriptorProvider(builtins["iproyal"], connector, credential, runtime)
         to_add, _ = await provider.sync_proxies([])
-        rendered = provider.render_request(to_add[0], sessid="abc", country="gb", scope="p")
+        rendered = provider.render_request(to_add[0], sessid="abc", location=LocationTarget(country="GB"), scope="p")
         assert rendered.username == "royal"
         assert re.fullmatch(r"\{password\}_country-gb_session-[a-z0-9]{8}_lifetime-30m", rendered.password or "")
 
@@ -215,15 +218,15 @@ class TestReviewFindings:
         # Per-country pool.
         provider = _oxylabs(builtins, runtime, session_mode="pool", num_proxies=1, country_code=["US"])
         to_add, to_remove = await provider.sync_proxies([gateway])
-        assert to_remove == ["gw"] and len(to_add) == 1 and to_add[0].metadata[META_GEO] == "US"
+        assert to_remove == ["gw"] and len(to_add) == 1 and to_add[0].metadata[META_GEO_COUNTRY] == "US"
 
     async def test_client_session_keeps_one_allow_list_country(self, builtins: dict[str, ProviderDescriptor], runtime: SdkRuntime) -> None:
         provider = _oxylabs(builtins, runtime, country_code=["US", "DE", "GB", "FR"])
         gateway = (await provider.sync_proxies([]))[0][0]
-        countries = {provider.render_request(gateway, sessid="order-9", country=None, scope="p").metadata[META_GEO] for _ in range(30)}
+        countries = {provider.render_request(gateway, sessid="order-9", location=None, scope="p").metadata[META_GEO_COUNTRY] for _ in range(30)}
         assert len(countries) == 1
         # Different sessions spread over the list; rotating requests too.
-        spread = {provider.render_request(gateway, sessid=f"s{i}", country=None, scope="p").metadata[META_GEO] for i in range(60)}
+        spread = {provider.render_request(gateway, sessid=f"s{i}", location=None, scope="p").metadata[META_GEO_COUNTRY] for i in range(60)}
         assert len(spread) > 1
 
     async def test_allow_list_edits_move_few_sessions(self, builtins: dict[str, ProviderDescriptor], runtime: SdkRuntime) -> None:
@@ -233,7 +236,7 @@ class TestReviewFindings:
         def picks(countries: list[str]) -> dict[str, str]:
             provider = _oxylabs(builtins, runtime, country_code=countries)
             gateway = Proxy(id="gw", host="h", port=1, connector_id="conn-1", metadata={META_DYNAMIC_SESSIONS: "true"})
-            return {s: provider.render_request(gateway, sessid=s, country=None, scope="p").metadata[META_GEO] for s in sessions}
+            return {s: provider.render_request(gateway, sessid=s, location=None, scope="p").metadata[META_GEO_COUNTRY] for s in sessions}
 
         three = picks(["US", "DE", "GB"])
         four = picks(["US", "DE", "GB", "FR"])
@@ -257,7 +260,7 @@ class TestReviewFindings:
             ],
             "proxy_types": [{
                 "key": "res", "label": "Res", "mode": "session",
-                "host": "{connector.country_code|lower|or:any}.gw.example", "port": "{connector.country_code|or:9000}",
+                "host": "{geo.country|lower|or:any}.gw.example", "port": "{geo.country|or:9000}",
                 "username": "{credential.username}-{session_id}", "password": "{credential.password}",
             }],
         }
@@ -268,7 +271,7 @@ class TestReviewFindings:
         provider = DescriptorProvider(descriptor, make_connector("geohost", {"session_mode": "dynamic"}), credential, runtime)
         gateway = (await provider.sync_proxies([]))[0][0]
         assert gateway.host == "any.gw.example"
-        rendered = provider.render_request(gateway, sessid="s", country="de", scope="p")
+        rendered = provider.render_request(gateway, sessid="s", location=LocationTarget(country="DE"), scope="p")
         assert rendered.host == "de.gw.example" and rendered.port == 9000
 
     def test_long_derived_ids_have_no_fixed_padding(self) -> None:
@@ -277,3 +280,59 @@ class TestReviewFindings:
         assert all(len(i) == 64 for i in ids)
         tails = {i[-10:] for i in ids}
         assert len(tails) == 20  # every tail differs: no shared padding
+
+
+class TestPlaceRendering:
+    """State and city reach the vendor through the request namespace, in its spelling."""
+
+    @pytest.fixture
+    async def gateway(self, builtins: dict[str, ProviderDescriptor], runtime: SdkRuntime) -> Proxy:
+        to_add, _ = await _oxylabs(builtins, runtime).sync_proxies([])
+        return to_add[0]
+
+    async def test_oxylabs_names_the_state_and_slugs_the_city(self, builtins: dict[str, ProviderDescriptor], runtime: SdkRuntime, gateway: Proxy) -> None:
+        provider = _oxylabs(builtins, runtime)
+        target = LocationTarget(country="US", state="CA", city="los_angeles")
+        rendered = provider.render_request(gateway, sessid="s", location=target, scope="p")
+        assert re.fullmatch(r"customer-alice-cc-US-st-us_california-city-los_angeles-sessid-[a-z0-9]{12}-sesstime-10", rendered.username or "")
+        assert rendered.metadata[META_GEO_COUNTRY] == "US"
+        assert rendered.metadata[META_GEO_STATE] == "CA" and rendered.metadata[META_GEO_CITY] == "los_angeles"
+        country_only = provider.render_request(gateway, sessid="s", location=LocationTarget(country="US"), scope="p")
+        assert "-st-" not in (country_only.username or "") and META_GEO_STATE not in country_only.metadata
+
+    async def test_brightdata_uses_the_state_code_and_squashes_the_city(self, builtins: dict[str, ProviderDescriptor], runtime: SdkRuntime) -> None:
+        credential = make_credential("brightdata", {"token": "t", "customer_id": "c1"})
+        connector = make_connector("brightdata", {"zone_name": "z", "zone_password": "zp", "proxy_type": "residential", "session_mode": "dynamic"})
+        provider = DescriptorProvider(builtins["brightdata"], connector, credential, runtime)
+        to_add, _ = await provider.sync_proxies([])
+        rendered = provider.render_request(to_add[0], sessid="s", location=LocationTarget(country="GB", state="ENG", city="tower_hamlets"), scope="p")
+        assert re.fullmatch(r"brd-customer-c1-zone-z-session-glob_[a-z0-9]{12}-country-gb-state-eng-city-towerhamlets", rendered.username or "")
+
+    async def test_netnut_composes_the_city_triple(self, builtins: dict[str, ProviderDescriptor], runtime: SdkRuntime) -> None:
+        credential = make_credential("netnut", {"proxy_type": "residential", "username": "nn", "password": "pw"})
+        connector = make_connector("netnut", {"session_mode": "dynamic"})
+        provider = DescriptorProvider(builtins["netnut"], connector, credential, runtime)
+        to_add, _ = await provider.sync_proxies([])
+        rendered = provider.render_request(to_add[0], sessid="s", location=LocationTarget(country="US", state="TX", city="dallas"), scope="p")
+        assert re.fullmatch(r"nn-res_sc-us_texas_dallas-sid-[1-9][0-9]{7}", rendered.username or "")
+        plain = provider.render_request(to_add[0], sessid="s", location=LocationTarget(country="US"), scope="p")
+        assert re.fullmatch(r"nn-res-us-sid-[1-9][0-9]{7}", plain.username or "")
+        assert not provider.serves_location(LocationTarget(country="US", city="dallas"))
+        assert provider.serves_location(LocationTarget(country="US", state="TX", city="dallas"))
+
+    async def test_the_place_is_part_of_the_vendor_session(self, builtins: dict[str, ProviderDescriptor], runtime: SdkRuntime, gateway: Proxy) -> None:
+        provider = _oxylabs(builtins, runtime)
+        la = provider.render_request(gateway, sessid="order-1", location=LocationTarget(country="US", city="los_angeles"), scope="p")
+        sf = provider.render_request(gateway, sessid="order-1", location=LocationTarget(country="US", city="san_francisco"), scope="p")
+        us = provider.render_request(gateway, sessid="order-1", location=LocationTarget(country="US"), scope="p")
+        assert len({la.metadata[META_SESSION_ID], sf.metadata[META_SESSION_ID], us.metadata[META_SESSION_ID]}) == 3
+        again = provider.render_request(gateway, sessid="order-1", location=LocationTarget(country="US", city="los_angeles"), scope="p")
+        assert again.metadata[META_SESSION_ID] == la.metadata[META_SESSION_ID]
+
+    async def test_serves_location(self, builtins: dict[str, ProviderDescriptor], runtime: SdkRuntime) -> None:
+        provider = _oxylabs(builtins, runtime)
+        assert provider.serves_location(None) and provider.serves_location(LocationTarget(country="US"))
+        assert provider.serves_location(LocationTarget(country="US", state="NY", city="new_york"))
+        assert not provider.serves_location(LocationTarget(country="GB", state="ENG"))  # no name for it
+        pooled = _oxylabs(builtins, runtime, session_mode="pool")
+        assert pooled.serves_location(LocationTarget(country="US")) and not pooled.serves_location(LocationTarget(country="US", city="austin"))

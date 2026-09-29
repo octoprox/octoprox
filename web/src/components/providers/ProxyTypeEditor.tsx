@@ -21,7 +21,7 @@ export function ProxyTypeEditor({ spec, onChange }: { spec: Spec; onChange: (pat
   const types: Spec[] = spec.proxy_types ?? []
   const [open, setOpen] = useState<number | null>(types.length ? null : 0)
   const authNames = Object.keys(spec.auth ?? {})
-  const slotPaths = ['session_id', 'index', 'port', 'discovered_ip']
+  const slotPaths = ['geo.country', 'geo.state', 'geo.state_name', 'geo.city', 'session_id', 'index', 'port', 'discovered_ip']
   const fieldPaths = fieldPathsOf(spec, slotPaths)
   const selectorCandidates = [
     ...(spec.credential_fields ?? []).filter((f: Spec) => f.type === 'select').map((f: Spec) => `credential.${f.key}`),

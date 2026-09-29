@@ -19,6 +19,7 @@ from api.geo.models import (
 )
 from api.geo.service import MANUAL_SOURCE
 from api.models.credential import CredentialType
+from api.models.location import set_manual_location
 from api.models.proxy import Proxy, ProxyCreate, ProxyProtocol, ProxyResponse, ProxyUpdate
 from api.providers.sdk.strategies import META_COUNTRY
 
@@ -115,6 +116,10 @@ def _proxy_to_response(
         vendor_country=proxy.metadata.get(META_VENDOR_COUNTRY),
         location_conflict=bool(proxy.metadata.get(META_LOCATION_CONFLICT)),
         location=proxy.metadata.get(META_LOCATION) if isinstance(proxy.metadata.get(META_LOCATION), dict) else None,
+        state_code=proxy.state_code,
+        state_source=proxy.state_source,
+        city=proxy.city_slug,
+        city_source=proxy.city_source,
         tags=proxy.tags,
         created_at=proxy.created_at,
     )
@@ -203,6 +208,7 @@ async def create_proxy(
     if proxy_data.country:
         metadata[META_COUNTRY] = proxy_data.country
         metadata[META_COUNTRY_SOURCE] = MANUAL_SOURCE
+    set_manual_location(metadata, state=proxy_data.state, city=proxy_data.city)
     proxy = Proxy(
         host=proxy_data.host,
         port=proxy_data.port,
@@ -383,6 +389,9 @@ async def update_proxy(
         else:
             proxy.metadata.pop(META_COUNTRY, None)
             proxy.metadata.pop(META_COUNTRY_SOURCE, None)
+    # A state or city set by hand is what -st- and -city- routing matches
+    # this proxy on, ahead of the databases' record.
+    set_manual_location(proxy.metadata, state=proxy_data.state, city=proxy_data.city)
 
     # Persist the update
     await proxy_manager.update_proxy(proxy)

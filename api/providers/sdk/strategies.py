@@ -16,7 +16,15 @@ from typing import Any, Literal
 
 import structlog
 
-from api.geo.models import META_ENDPOINT_COUNTRY, META_VENDOR_COUNTRY
+from api.geo.models import (
+    META_ENDPOINT_CITY,
+    META_ENDPOINT_COUNTRY,
+    META_ENDPOINT_STATE,
+    META_VENDOR_CITY,
+    META_VENDOR_COUNTRY,
+    META_VENDOR_STATE,
+)
+from api.models.location import LocationTarget
 from api.models.proxy import Proxy, ProxyStatus
 from api.providers.base import _sort_proxies_healthy_first
 from api.providers.sdk.descriptor import ProviderDescriptor, ProxyTypeSpec, check_port_range
@@ -41,7 +49,12 @@ META_COUNTRY = "country"  # exit country routing reads; upper-case ISO code (see
 # vendor: META_VENDOR_COUNTRY is what the vendor said (its list or known-IP
 # API, or its own discovery endpoint), META_ENDPOINT_COUNTRY what a
 # third-party discovery endpoint reported. Both from api.geo.models.
-META_GEO = "geo"  # country the slot was provisioned for (per-country slot groups)
+# The place a slot or request was targeted at. The country is written on
+# provisioned rows (per-country slot groups) and on rendered requests.
+META_GEO_COUNTRY = "geo"
+# State and city rendered into a dynamic-sessions request (never on a stored row).
+META_GEO_STATE = "geo_state"
+META_GEO_CITY = "geo_city"
 # "true" on the single gateway row of a dynamic-sessions connector: its session
 # id and country are rendered per request, not provisioned per slot.
 META_DYNAMIC_SESSIONS = "dynamic_sessions"
@@ -50,6 +63,39 @@ META_DYNAMIC_SESSIONS = "dynamic_sessions"
 def is_dynamic_gateway(proxy: Proxy) -> bool:
     """Whether ``proxy`` is the gateway row of a dynamic-sessions connector."""
     return proxy.metadata.get(META_DYNAMIC_SESSIONS) == "true"
+
+
+# Where a source's word about an exit's place is kept, per level: the vendor's
+# (its list, known-IP API or own discovery endpoint) and an independent endpoint's.
+_VENDOR_PLACE_KEYS = (META_VENDOR_COUNTRY, META_VENDOR_STATE, META_VENDOR_CITY)
+_ENDPOINT_PLACE_KEYS = (META_ENDPOINT_COUNTRY, META_ENDPOINT_STATE, META_ENDPOINT_CITY)
+
+
+def record_place_claim(metadata: dict[str, Any], place: LocationTarget, *, vendor: bool) -> None:
+    """Write what a source said about an exit's place, replacing what that source said before.
+
+    ``vendor`` says the place is the vendor's claim rather than a third-party
+    endpoint's observation; attribution treats the two differently, so each
+    has its own keys and the other's are cleared. The country also lands in
+    ``country`` for routing until attribution resolves it.
+    """
+    own, other = (_VENDOR_PLACE_KEYS, _ENDPOINT_PLACE_KEYS) if vendor else (_ENDPOINT_PLACE_KEYS, _VENDOR_PLACE_KEYS)
+    for key, value in zip(own, (place.country, place.state, place.city), strict=True):
+        if value:
+            metadata[key] = value
+        else:
+            metadata.pop(key, None)
+    for key in other:
+        metadata.pop(key, None)
+    if place.country:
+        metadata[META_COUNTRY] = place.country
+
+
+def recorded_place_claim(metadata: dict[str, Any], *, vendor: bool) -> LocationTarget | None:
+    """The place a source last said, as :func:`record_place_claim` stored it."""
+    keys = _VENDOR_PLACE_KEYS if vendor else _ENDPOINT_PLACE_KEYS
+    values = [metadata.get(key) for key in keys]
+    return LocationTarget(*[v if isinstance(v, str) and v else None for v in values]) or None
 # On a request rendered for a dynamic gateway: the connector's percentage of
 # session-less requests preflight may echo to observe the exit.
 META_EXIT_SAMPLE_PERCENT = "exit_sample_percent"
@@ -124,9 +170,8 @@ class ProxyBuilder:
             )
         metadata = self.metadata(ctx.with_item(listed.raw))
         metadata[META_LIST_IDENTITY] = listed.identity
-        if listed.country:
-            metadata[META_COUNTRY] = listed.country.strip().upper()
-            metadata[META_VENDOR_COUNTRY] = metadata[META_COUNTRY]
+        if listed.place:
+            record_place_claim(metadata, listed.place, vendor=True)
         return Proxy(
             host=listed.host,
             port=listed.port,
@@ -164,8 +209,8 @@ class ProxyBuilder:
                 metadata[key] = value
         if ctx.session_id is not None:
             metadata[META_SESSION_ID] = ctx.session_id
-        if ctx.slot_country:
-            metadata[META_GEO] = ctx.slot_country
+        if ctx.target_country:
+            metadata[META_GEO_COUNTRY] = ctx.target_country
         return metadata
 
     def slot_count(self, ctx: RenderContext) -> int:
@@ -360,8 +405,8 @@ class PortModeStrategy(SyncStrategy):
         """
         if self._countries:
             return set(self._countries)
-        if self._ctx.slot_country:
-            return {self._ctx.slot_country.strip().upper()}
+        if self._ctx.target_country:
+            return {self._ctx.target_country.strip().upper()}
         return None
 
     def needs_periodic_sync(self) -> bool:
@@ -369,10 +414,10 @@ class PortModeStrategy(SyncStrategy):
         # elsewhere; the reconciliation right after it discovers replacements.
         return self._allowed_countries is not None
 
-    def _moved_out(self, proxy: Proxy, country: str) -> bool:
+    def _moved_out(self, proxy: Proxy, place: LocationTarget | None) -> bool:
         """True when a refreshed location falls outside the allowed countries."""
         allowed = self._allowed_countries
-        code = country.strip().upper() if country else ""
+        code = place.country if place and place.country else ""
         if allowed is None or not code or code in allowed:
             return False
         logger.info(
@@ -431,7 +476,7 @@ class PortModeStrategy(SyncStrategy):
             scanned += 1
             index = port - self._base_port
             proxy = self._build_slot(index, port, ProxyStatus.INITIALIZING)
-            ip, country = await self._discover(proxy, index, port)
+            ip, place = await self._discover(proxy, index, port)
             port += 1
             if ip is None:
                 consecutive_failures += 1
@@ -455,7 +500,7 @@ class PortModeStrategy(SyncStrategy):
                     break
                 continue
             consecutive_duplicates = 0
-            code = country.strip().upper() if country else ""
+            code = place.country if place and place.country else ""
             if not code or wanted.get(code, 0) <= 0:
                 logger.debug(
                     "Skipping port outside wanted countries",
@@ -465,7 +510,7 @@ class PortModeStrategy(SyncStrategy):
                 )
                 continue
             existing_ips.add(ip)
-            self._assign_ip(proxy, index, port - 1, ip, code, vendor=self._discovery_is_claim)
+            self._assign_ip(proxy, index, port - 1, ip, place, vendor=self._discovery_is_claim)
             wanted[code] -= 1
             proxies.append(proxy)
         if any(wanted.values()):
@@ -484,11 +529,11 @@ class PortModeStrategy(SyncStrategy):
             known = await self._known_ips.fetch(self._ctx)
             if known:
                 for entry in known:
-                    code = entry.country.strip().upper()
+                    code = entry.place.country if entry.place and entry.place.country else ""
                     if entry.ip in existing_ips or wanted.get(code, 0) <= 0:
                         continue
                     proxy = self._build_slot(index, self._base_port, ProxyStatus.INITIALIZING)
-                    self._assign_ip(proxy, index, self._base_port, entry.ip, code, vendor=True)
+                    self._assign_ip(proxy, index, self._base_port, entry.ip, entry.place, vendor=True)
                     existing_ips.add(entry.ip)
                     wanted[code] -= 1
                     proxies.append(proxy)
@@ -504,19 +549,19 @@ class PortModeStrategy(SyncStrategy):
         while any(wanted.values()) and attempts_left > 0:
             attempts_left -= 1
             proxy = self._build_slot(index, self._base_port, ProxyStatus.INITIALIZING)
-            ip, country = await self._discover(proxy, index, self._base_port)
+            ip, place = await self._discover(proxy, index, self._base_port)
             if ip is None:
                 consecutive_failures += 1
                 if consecutive_failures >= discovery.max_consecutive_failures:
                     break
                 continue
             consecutive_failures = 0
-            code = country.strip().upper() if country else ""
+            code = place.country if place and place.country else ""
             if ip in existing_ips or not code or wanted.get(code, 0) <= 0:
                 continue
             existing_ips.add(ip)
             self._assign_ip(
-                proxy, index, self._base_port, ip, code, vendor=self._discovery_is_claim
+                proxy, index, self._base_port, ip, place, vendor=self._discovery_is_claim
             )
             wanted[code] -= 1
             proxies.append(proxy)
@@ -571,7 +616,7 @@ class PortModeStrategy(SyncStrategy):
         proxies: list[Proxy] = []
         for (index, port), entry in zip(slots, available, strict=False):
             proxy = self._build_slot(index, port, ProxyStatus.INITIALIZING)
-            self._assign_ip(proxy, index, port, entry.ip, entry.country, vendor=True)
+            self._assign_ip(proxy, index, port, entry.ip, entry.place, vendor=True)
             existing_ips.add(entry.ip)
             proxies.append(proxy)
         return proxies
@@ -622,7 +667,7 @@ class PortModeStrategy(SyncStrategy):
         attempts = 1 if self._sequential else discovery.max_retries_per_slot
         saw_duplicate = False
         for attempt in range(attempts):
-            ip, country = await self._discover(proxy, index, port)
+            ip, place = await self._discover(proxy, index, port)
             if ip is None:
                 return "failed"
             if ip in existing_ips:
@@ -632,7 +677,7 @@ class PortModeStrategy(SyncStrategy):
                 )
                 continue
             existing_ips.add(ip)
-            self._assign_ip(proxy, index, port, ip, country, vendor=self._discovery_is_claim)
+            self._assign_ip(proxy, index, port, ip, place, vendor=self._discovery_is_claim)
             return "added"
         return "duplicate" if saw_duplicate else "failed"
 
@@ -653,7 +698,7 @@ class PortModeStrategy(SyncStrategy):
         known = await self._known_ips.fetch(self._ctx)
         if not known:
             return None
-        by_ip = {entry.ip: entry.country for entry in known}
+        by_ip = {entry.ip: entry.place for entry in known}
         updated: list[Proxy] = []
         to_remove: list[str] = []
         seen: set[str] = set()
@@ -669,15 +714,14 @@ class PortModeStrategy(SyncStrategy):
                 to_remove.append(proxy.id)
                 continue
             seen.add(ip)
-            country = by_ip[ip]
-            if self._moved_out(proxy, country):
+            place = by_ip[ip]
+            if self._moved_out(proxy, place):
                 to_remove.append(proxy.id)
                 continue
             # Compared against the recorded claim only: META_COUNTRY is what
             # attribution resolved and may legitimately differ from the vendor.
-            if country and proxy.metadata.get(META_VENDOR_COUNTRY) != country:
-                proxy.metadata[META_COUNTRY] = country
-                proxy.metadata[META_VENDOR_COUNTRY] = country
+            if place and recorded_place_claim(proxy.metadata, vendor=True) != place:
+                record_place_claim(proxy.metadata, place, vendor=True)
                 updated.append(proxy)  # only changed rows are written back and announced
         return updated, to_remove
 
@@ -693,18 +737,18 @@ class PortModeStrategy(SyncStrategy):
         assert discovery is not None
         semaphore = asyncio.Semaphore(discovery.refresh_concurrency)
 
-        async def probe(proxy: Proxy) -> tuple[int, str | None, str]:
+        async def probe(proxy: Proxy) -> tuple[int, str | None, LocationTarget | None]:
             index = self._slot_index(proxy)
             async with semaphore:
-                ip, country = await self._discover(proxy, index, proxy.port)
-            return index, ip, country
+                ip, place = await self._discover(proxy, index, proxy.port)
+            return index, ip, place
 
         results = await asyncio.gather(*(probe(p) for p in proxies))
 
         updated: list[Proxy] = []
         to_remove: list[str] = []
         seen: set[str] = set()
-        for proxy, (index, ip, country) in zip(proxies, results, strict=True):
+        for proxy, (index, ip, place) in zip(proxies, results, strict=True):
             if ip is None:
                 continue  # probe failed; keep what we know
             if ip in seen:
@@ -712,11 +756,10 @@ class PortModeStrategy(SyncStrategy):
                 to_remove.append(proxy.id)
                 continue
             seen.add(ip)
-            if self._moved_out(proxy, country):
+            if self._moved_out(proxy, place):
                 to_remove.append(proxy.id)
                 continue
             claim = self._discovery_is_claim
-            country_key = META_VENDOR_COUNTRY if claim else META_ENDPOINT_COUNTRY
             if ip != proxy.metadata.get(META_DISCOVERED_IP):
                 logger.info(
                     "Proxy IP changed",
@@ -725,29 +768,22 @@ class PortModeStrategy(SyncStrategy):
                     new_ip=ip,
                 )
                 self._assign_ip(
-                    proxy,
-                    index,
-                    proxy.port,
-                    ip,
-                    country or proxy.metadata.get(META_COUNTRY, ""),
-                    vendor=claim,
+                    proxy, index, proxy.port, ip, place or recorded_place_claim(proxy.metadata, vendor=claim), vendor=claim
                 )
                 updated.append(proxy)
-            elif country and proxy.metadata.get(country_key) != country:
+            elif place and recorded_place_claim(proxy.metadata, vendor=claim) != place:
                 # Compared against what this endpoint said last time, never
                 # against META_COUNTRY: that is attribution's answer and may
-                # legitimately differ. A proxy from before the key existed is
+                # legitimately differ. A proxy from before the keys existed is
                 # written once so the claim is on record.
-                proxy.metadata[META_COUNTRY] = country
-                proxy.metadata[country_key] = country
+                record_place_claim(proxy.metadata, place, vendor=claim)
                 updated.append(proxy)
-            if (
-                claim
-                and proxy.metadata.pop(META_ENDPOINT_COUNTRY, None) is not None
-                and proxy not in updated
-            ):
-                # Recorded as evidence before the descriptor said the URL is the vendor's; relabelled.
-                updated.append(proxy)
+            if claim:
+                # Recorded as evidence before the descriptor said the URL is the
+                # vendor's; relabelled. Every key goes, not just the first found.
+                relabelled = [proxy.metadata.pop(key, None) is not None for key in _ENDPOINT_PLACE_KEYS]
+                if any(relabelled) and proxy not in updated:
+                    updated.append(proxy)
         return updated, to_remove
 
     # --- helpers -----------------------------------------------------------------
@@ -757,18 +793,18 @@ class PortModeStrategy(SyncStrategy):
             self._ctx.with_slot(index=index, port=port), port=port, status=status
         )
 
-    async def _discover(self, proxy: Proxy, index: int, port: int) -> tuple[str | None, str]:
+    async def _discover(self, proxy: Proxy, index: int, port: int) -> tuple[str | None, LocationTarget | None]:
         url = self._builder.resolved_url(proxy, self._ctx)
-        return await self._discoverer.discover_with_country(
+        return await self._discoverer.discover_with_place(
             url, log_context={"proxy_id": proxy.id, "index": index, "port": port}
         )
 
     def _assign_ip(
-        self, proxy: Proxy, index: int, port: int, ip: str, country: str, *, vendor: bool = False
+        self, proxy: Proxy, index: int, port: int, ip: str, place: LocationTarget | None, *, vendor: bool = False
     ) -> None:
-        """Record a slot's exit IP and country.
+        """Record a slot's exit IP and what the source said about its place.
 
-        ``vendor`` says the country is the vendor's claim (its list or known-IP
+        ``vendor`` says the place is the vendor's claim (its list or known-IP
         API, or a discovery URL the vendor operates) rather than a third-party
         endpoint's observation; attribution treats the two differently.
         """
@@ -776,12 +812,8 @@ class PortModeStrategy(SyncStrategy):
         proxy.metadata[META_DISCOVERED_IP] = ip
         if not self._sequential:
             proxy.metadata[META_HASHED_IP] = ip
-        if country:
-            # Vendors report codes in either case; stored values are always upper-case ISO codes.
-            code = country.strip().upper()
-            proxy.metadata[META_COUNTRY] = code
-            proxy.metadata[META_VENDOR_COUNTRY if vendor else META_ENDPOINT_COUNTRY] = code
-            proxy.metadata.pop(META_ENDPOINT_COUNTRY if vendor else META_VENDOR_COUNTRY, None)
+        if place:
+            record_place_claim(proxy.metadata, place, vendor=vendor)
         proxy.status = ProxyStatus.HEALTHY
         if not self._sequential:
             self._builder.rerender(
@@ -871,9 +903,8 @@ class ListModeStrategy(SyncStrategy):
             proxy.username = fresh.username
             proxy.password = fresh.password
             proxy.protocol = fresh.protocol
-        if entry.country and proxy.metadata.get(META_VENDOR_COUNTRY) != entry.country:
-            proxy.metadata[META_COUNTRY] = entry.country
-            proxy.metadata[META_VENDOR_COUNTRY] = entry.country
+        if entry.place and recorded_place_claim(proxy.metadata, vendor=True) != entry.place:
+            record_place_claim(proxy.metadata, entry.place, vendor=True)
             changed = True
         return changed
 

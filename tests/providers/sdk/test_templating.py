@@ -5,13 +5,22 @@
 
 import pytest
 
-from api.providers.sdk.descriptor import Condition, TemplatePart, TemplateSpec
+from api.models.location import LocationTarget
+from api.providers.sdk.descriptor import (
+    Condition,
+    ProxyTypeSpec,
+    TargetingSpec,
+    TemplatePart,
+    TemplateSpec,
+)
 from api.providers.sdk.templating import (
     RenderContext,
+    TargetingSupport,
     TemplateError,
     TemplateRenderer,
     country_field_key,
     resolve_runtime_placeholders,
+    targeting_support,
 )
 
 
@@ -133,15 +142,16 @@ class TestListValuesAndSlotCountry:
         assert renderer.render_string("{connector.many|lower}", ctx) == "us,de"
         assert renderer.render_string("{connector.none|or:any}", ctx) == "any"
 
-    def test_with_country_narrows_field_and_marks_slot(self, ctx: RenderContext) -> None:
-        narrowed = ctx.with_country("country_code", "DE")
-        assert narrowed.lookup("connector.country_code") == "DE"
-        assert narrowed.slot_country == "DE"
-        assert narrowed.with_slot(session_id="zzz").slot_country == "DE"
-        assert ctx.lookup("connector.country_code") == "US"  # original untouched
-        cleared = ctx.with_country("country_code", None)
-        assert cleared.lookup("connector.country_code") == ""
-        assert TemplateRenderer().evaluate(Condition(field="connector.country_code"), cleared) is False
+    def test_with_place_targets_the_slot_and_leaves_the_field_alone(self, ctx: RenderContext) -> None:
+        narrowed = ctx.with_place(LocationTarget(country="DE"))
+        assert narrowed.lookup("geo.country") == "DE"
+        assert narrowed.target_country == "DE"
+        assert narrowed.with_slot(session_id="zzz").target_country == "DE"
+        # The connector field is the list the admin configured, never a slot's country.
+        assert narrowed.lookup("connector.country_code") == "US" and ctx.lookup("geo.country") is None
+        cleared = ctx.with_place(None)
+        assert cleared.lookup("geo.country") is None and cleared.target_country is None
+        assert TemplateRenderer().evaluate(Condition(field="geo.country"), cleared) is False
 
 
 class TestListConditions:
@@ -157,3 +167,80 @@ class TestListConditions:
         assert renderer.render(spec, ctx) == "country-us"
         pinned = ctx.with_slot(discovered_ip="1.2.3.4")
         assert renderer.render(spec, pinned) == "ip-1.2.3.4"
+
+
+class TestGeoNamespace:
+    def test_with_place_exposes_the_place(self, ctx: RenderContext) -> None:
+        target = LocationTarget(country="US", state="NY", city="new_york")
+        request = ctx.with_place(target)
+        assert request.lookup("geo.country") == "US"
+        assert request.lookup("geo.state") == "NY"
+        assert request.lookup("geo.state_name") == "new_york"
+        assert request.lookup("geo.city") == "new_york"
+        assert ctx.lookup("geo.city") is None  # original untouched
+        # Copies keep the request; clearing it drops every key.
+        assert request.with_slot(session_id="x").lookup("geo.city") == "new_york"
+        assert request.with_place(None).lookup("geo.city") is None
+        # A non-US state has no name on record: empty, so a part conditioned on it is dropped.
+        assert ctx.with_place(LocationTarget(country="GB", state="ENG")).lookup("geo.state_name") == ""
+        # Slot-group rendering targets the country alone.
+        assert ctx.with_place(LocationTarget(country="DE")).lookup("geo.country") == "DE"
+        assert ctx.with_place(LocationTarget(country="DE")).lookup("geo.city") == ""
+
+    def test_geo_parts_render_and_filter(self, ctx: RenderContext) -> None:
+        template = TemplateSpec(
+            separator="-",
+            parts=[
+                TemplatePart(text="cc-{geo.country}"),
+                TemplatePart(text="st-{geo.country|lower}_{geo.state_name}", when=Condition(field="geo.state_name")),
+                TemplatePart(text="city-{geo.city|nospace}", when=Condition(field="geo.city")),
+            ],
+        )
+        renderer = TemplateRenderer()
+        assert renderer.render(template, ctx.with_place(LocationTarget(country="US", state="CA", city="los_angeles"))) == "cc-US-st-us_california-city-losangeles"
+        assert renderer.render(template, ctx.with_place(LocationTarget(country="US"))) == "cc-US"
+        assert renderer.render_string("{geo.city|nospace}", ctx.with_place(LocationTarget(country="FR", city="saint_denis"))) == "saintdenis"
+
+
+class TestTargetingSupport:
+    def test_builtins(self, builtins: dict) -> None:
+        oxy = targeting_support(builtins["oxylabs"].get_proxy_type("residential"))
+        assert oxy == TargetingSupport(state=True, city=True, state_by_name=True)
+        brd = targeting_support(builtins["brightdata"].get_proxy_type("residential"))
+        assert brd == TargetingSupport(state=True, city=True, state_by_name=False)
+        assert targeting_support(builtins["netnut"].get_proxy_type("residential")) == TargetingSupport(state=True, city=True, state_by_name=True)
+        assert targeting_support(builtins["iproyal"].get_proxy_type("residential")).city
+        assert targeting_support(builtins["decodo"].get_proxy_type("mobile")).state
+        # Port and list types carry nothing of the request.
+        assert targeting_support(builtins["oxylabs"].get_proxy_type("isp")) == TargetingSupport()
+        assert targeting_support(builtins["webshare"].get_proxy_type("proxies")) == TargetingSupport()
+
+    def test_serves(self, builtins: dict) -> None:
+        oxy_type = builtins["oxylabs"].get_proxy_type("residential")
+        oxy = targeting_support(oxy_type)
+        assert oxy.serves(LocationTarget(country="US", state="CA", city="los_angeles"), oxy_type)
+        assert oxy.serves(LocationTarget(country="DE", city="berlin"), oxy_type)
+        # Oxylabs names the state, so only US states can be said.
+        assert not oxy.serves(LocationTarget(country="GB", state="ENG"), oxy_type)
+        brd_type = builtins["brightdata"].get_proxy_type("residential")
+        assert targeting_support(brd_type).serves(LocationTarget(country="GB", state="ENG"), brd_type)
+        # NetNut cannot say a city without its state.
+        netnut_type = builtins["netnut"].get_proxy_type("residential")
+        netnut = targeting_support(netnut_type)
+        assert not netnut.serves(LocationTarget(country="US", city="dallas"), netnut_type)
+        assert netnut.serves(LocationTarget(country="US", state="TX", city="dallas"), netnut_type)
+        # A type with nothing of the request serves the country alone.
+        isp_type = builtins["oxylabs"].get_proxy_type("isp")
+        assert targeting_support(isp_type).serves(LocationTarget(country="US"), isp_type)
+        assert not targeting_support(isp_type).serves(LocationTarget(country="US", state="NY"), isp_type)
+
+    def test_state_or_city_constraint(self) -> None:
+        spec = ProxyTypeSpec(
+            key="r", label="R", mode="session", host="h", port=1,
+            username="{credential.u}-{geo.state}-{geo.city}",
+            targeting=TargetingSpec(state_or_city=True),
+        )
+        support = targeting_support(spec)
+        assert support.serves(LocationTarget(country="US", state="AZ"), spec)
+        assert support.serves(LocationTarget(country="US", city="houston"), spec)
+        assert not support.serves(LocationTarget(country="US", state="TX", city="houston"), spec)

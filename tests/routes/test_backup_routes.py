@@ -198,7 +198,7 @@ class TestBackupRoundTrip:
         # The restored file is open again: the sample range resolves.
         resp = authenticated_client.post("/api/v1/geo/lookup", json={"ip": "81.2.69.142"})
         assert resp.status_code == 200, resp.text
-        assert resp.json()["resolution"]["country"] == MAXMIND_RECORD["country"]["iso_code"]
+        assert resp.json()["resolution"]["resolved_country"] == MAXMIND_RECORD["country"]["iso_code"]
 
         authenticated_client.delete(f"/api/v1/geo/databases/{db_id}")
 

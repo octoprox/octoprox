@@ -4,23 +4,17 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useQueries, useQuery } from '@tanstack/react-query'
 import { ColumnDef, ColumnFiltersState } from '@tanstack/react-table'
-import { AlertTriangle, Network } from 'lucide-react'
+import { Network } from 'lucide-react'
 import { fetchGeoExitIps, fetchProjectConnectors, fetchProjects, ExitIp, ExitIpFilters, ObservationVerdict } from '../../api/client'
 import { DataTable } from '../DataTable'
 import { EmptyState } from '../layout/Page'
 import { Badge, Card, Select } from '../ui'
 import { formatDateTime, relativeTime } from '../../utils/format'
-import { HeaderWithTip, TIPS } from './columns'
-
-function verdictOf(e: ExitIp): ObservationVerdict {
-  if (e.conflict) return 'contradicted'
-  if (e.disagreement) return 'uncertain'
-  return e.claimed_country ? 'confirmed' : 'no_claim'
-}
+import { HeaderWithTip, TIPS, VerdictCell, countryVerdict, placeLabel } from './columns'
 
 const VERDICT_OPTIONS: { value: ObservationVerdict; label: string }[] = [
   { value: 'contradicted', label: 'contradicted' },
-  { value: 'uncertain', label: 'uncertain' },
+  { value: 'open', label: 'open' },
   { value: 'confirmed', label: 'confirmed' },
   { value: 'no_claim', label: 'no claim' },
 ]
@@ -113,33 +107,27 @@ export function ExitIpsPanel({ projectId }: { projectId?: string }) {
     { accessorKey: 'last_seen', header: 'Last seen', size: 120, enableSorting: false, cell: ({ getValue }) => <span title={formatDateTime(getValue<string>())}>{relativeTime(getValue<string>())}</span> },
     { accessorKey: 'sightings', header: () => <HeaderWithTip label="Sightings" tip={TIPS.sightings} />, size: 110, enableSorting: false, meta: { align: 'right' as const }, cell: ({ getValue }) => getValue<number>().toLocaleString() },
     {
-      id: 'claimed', accessorFn: (e: ExitIp) => e.claimed_country ?? '', size: 120, enableSorting: false,
+      id: 'claimed', accessorFn: (e: ExitIp) => e.claimed_country ?? '', size: 150, enableSorting: false,
       header: () => <HeaderWithTip label="Vendor said" tip={TIPS.vendorSaid} />,
       meta: { filterVariant: 'text' as const },
-      cell: ({ getValue }) => <span className="font-mono text-xs">{getValue<string>() || '-'}</span>,
+      cell: ({ row }) => <span className="font-mono text-xs">{placeLabel(row.original.claimed_country, row.original.claimed_state, row.original.claimed_city)}</span>,
     },
     {
-      id: 'resolved', accessorFn: (e: ExitIp) => e.country ?? '', size: 150, enableSorting: false,
+      id: 'resolved', accessorFn: (e: ExitIp) => e.country ?? '', size: 180, enableSorting: false,
       header: () => <HeaderWithTip label="Resolved" tip={TIPS.resolved} />,
       meta: { filterVariant: 'text' as const },
       cell: ({ row }) => (
-        <span className="font-mono text-xs">
-          {row.original.country ?? '-'}
-          {row.original.resolved_source && <span className="text-fg-subtle font-sans"> via {row.original.resolved_source}</span>}
-        </span>
+        <div className="min-w-0">
+          <div className="font-mono text-xs truncate">{placeLabel(row.original.country, row.original.claimed_state ? row.original.resolved_state : null, row.original.claimed_city ? row.original.resolved_city : null)}</div>
+          {row.original.resolved_source && <div className="text-[11px] text-fg-subtle">via {row.original.resolved_source}</div>}
+        </div>
       ),
     },
     {
-      id: 'verdict', accessorFn: verdictOf, size: 150, enableSorting: false,
+      id: 'verdict', accessorFn: countryVerdict, size: 160, enableSorting: false,
       header: () => <HeaderWithTip label="Verdict" tip={TIPS.latestState} />,
       meta: { filterVariant: 'select' as const, filterOptions: VERDICT_OPTIONS },
-      cell: ({ row }) => {
-        const v = verdictOf(row.original)
-        const seen = row.original.source ? <span className="text-[11px] text-fg-subtle ml-1">via {row.original.source.replace('_', ' ')}</span> : null
-        if (v === 'contradicted') return <><Badge color="red" className="inline-flex items-center gap-1"><AlertTriangle className="w-3 h-3" /> contradicted</Badge>{seen}</>
-        if (v === 'uncertain') return <><Badge color="yellow">uncertain</Badge>{seen}</>
-        return <>{v === 'confirmed' ? <Badge color="green">confirmed</Badge> : <Badge color="gray">no claim</Badge>}{seen}</>
-      },
+      cell: ({ row }) => <VerdictCell row={row.original} note={row.original.source ? `via ${row.original.source.replace('_', ' ')}` : undefined} />,
     },
     { accessorKey: 'proxy_id', header: 'Proxy', size: 110, enableSorting: false, meta: { filterVariant: 'text' as const }, cell: ({ getValue }) => <span className="font-mono text-[11px] text-fg-muted" title={getValue<string | null>() ?? undefined}>{(getValue<string | null>() ?? '').slice(0, 8) || '-'}</span> },
   ], [projectId, connectorOptions])

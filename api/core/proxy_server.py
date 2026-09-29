@@ -30,6 +30,7 @@ from api.core.signals import request_completed, request_rejected
 from api.core.traffic_limiter import TrafficMeter
 from api.core.username_params import AuthResult, parse_username_params
 from api.geo.verifier import ExitVerifier
+from api.models.location import LocationTarget
 from api.models.project import MitmMode, Project
 from api.models.proxy import Proxy, ProxyProtocol
 
@@ -166,7 +167,7 @@ class ProxyServer:
         project_id: str,
         session_id: str | None = None,
         target_host: str | None = None,
-        country: str | None = None,
+        location: LocationTarget | None = None,
     ) -> Proxy | None:
         """Select an upstream proxy from the authenticated project's pool.
 
@@ -184,14 +185,14 @@ class ProxyServer:
                 or load balancer is everyone's address.
             target_host: If provided, only consider proxies from connectors
                 whose domain routing config allows this host.
-            country: If provided, only consider proxies that serve this
-                country (from the -cc- username suffix).
+            location: If provided, only consider proxies that serve this
+                place (from the -cc-, -st- and -city- username suffixes).
 
         Returns:
             Selected proxy or None if no healthy proxies available.
         """
         return await self._proxy_manager.select_proxy_for_project(
-            project_id, session_id, target_host, country
+            project_id, session_id, target_host, location
         )
 
     def _authenticate_project(self, headers: dict[str, str]) -> AuthResult | None:
@@ -200,14 +201,14 @@ class ProxyServer:
         Expects HTTP Basic Auth in the Proxy-Authorization header with
         project username and password. The username may carry routing
         parameters as suffixes, in any order:
-        <username>[-sessid-<session_id>][-cc-<country_code>]
+        <username>[-sessid-<session_id>][-cc-<country>][-st-<state>][-city-<city>]
 
         Args:
             headers: Request headers (lowercase keys)
 
         Returns:
             AuthResult with authenticated Project and optional sessid and
-            country, or None if authentication fails.
+            location, or None if authentication fails.
         """
         auth_header = headers.get("proxy-authorization", "")
         if not auth_header:
@@ -226,7 +227,7 @@ class ProxyServer:
         except (ValueError, UnicodeDecodeError):
             return None
 
-        # Parse routing parameters (sessid, country) from username
+        # Parse routing parameters (sessid, location) from username
         params = parse_username_params(username)
         real_username = params.username
 
@@ -241,13 +242,15 @@ class ProxyServer:
             logger.debug("Invalid password for project", project_id=project.id)
             return None
 
-        return AuthResult(project=project, sessid=params.sessid, country=params.country)
+        return AuthResult(
+            project=project, sessid=params.sessid, location=params.location, location_error=params.location_error
+        )
 
     @staticmethod
-    def _no_proxy_message(country: str | None) -> str:
+    def _no_proxy_message(location: LocationTarget | None) -> str:
         """Human-readable 502 body when no upstream proxy matched the request."""
-        if country:
-            return f"No upstream proxy available for country {country} and this domain"
+        if location:
+            return f"No upstream proxy available for {location.describe()} and this domain"
         return "No upstream proxy available for this domain"
 
     async def _reject_no_proxy(
@@ -256,7 +259,7 @@ class ProxyServer:
         project_id: str,
         target_host: str | None,
         session_id: str | None,
-        country: str | None,
+        location: LocationTarget | None,
     ) -> None:
         """Answer a request no proxy could serve, saying why.
 
@@ -268,7 +271,7 @@ class ProxyServer:
         for this request.
         """
         if await self._proxy_manager.are_all_proxies_quarantined(
-            project_id, target_host, session_id, country
+            project_id, target_host, session_id, location
         ):
             await self._send_error(
                 client_writer, 429, "Too Many Requests",
@@ -278,7 +281,7 @@ class ProxyServer:
                 self, project_id=project_id, reason="all_proxies_quarantined"
             )
             return
-        limit_status = self._proxy_manager.traffic_limit_status(project_id, target_host, country)
+        limit_status = self._proxy_manager.traffic_limit_status(project_id, target_host, location)
         if limit_status is not None:
             await self._send_error(
                 client_writer, limit_status, TRAFFIC_LIMIT_REASONS.get(limit_status, "Bandwidth Limit Exceeded"),
@@ -290,7 +293,7 @@ class ProxyServer:
             )
             return
         await self._send_error(
-            client_writer, 502, "Bad Gateway", self._no_proxy_message(country)
+            client_writer, 502, "Bad Gateway", self._no_proxy_message(location)
         )
         await event_bus.publish(request_rejected,
             self, project_id=project_id, reason="no_proxy_available"
@@ -301,7 +304,7 @@ class ProxyServer:
         project: Project,
         proxy: Proxy,
         session_id: str | None,
-        country: str | None,
+        location: LocationTarget | None,
         target_host: str | None,
         client_writer: asyncio.StreamWriter,
     ) -> Proxy | None:
@@ -309,7 +312,7 @@ class ProxyServer:
         if self._exit_verifier is None:
             return proxy
         decision = await self._exit_verifier.verify(
-            project, proxy, session_id=session_id, country=country, target_host=target_host
+            project, proxy, session_id=session_id, location=location, target_host=target_host
         )
         if not decision.rejected:
             return decision.proxy
@@ -403,7 +406,7 @@ class ProxyServer:
 
             project = auth_result.project
             session_id = auth_result.sessid
-            country = auth_result.country
+            location = auth_result.location
             project_id = project.id
             logger.debug(
                 "Authenticated project",
@@ -411,17 +414,24 @@ class ProxyServer:
                 project_name=project.name,
                 client_addr=client_addr,
                 session_id=session_id,
-                country=country,
+                location=location.key if location else None,
             )
+
+            if auth_result.location_error:
+                # A state or city without a country: nothing could serve it
+                # faithfully, and routing it anywhere would be a silent widening.
+                await self._send_error(client_writer, 400, "Bad Request", auth_result.location_error)
+                await event_bus.publish(request_rejected, self, project_id=project_id, reason="invalid_location")
+                return
 
             if method.upper() == "CONNECT":
                 await self._handle_connect(
-                    client_reader, client_writer, target, headers, project, session_id, country,
+                    client_reader, client_writer, target, headers, project, session_id, location,
                 )
             else:
                 await self._handle_http(
                     client_reader, client_writer, method, target, version, headers, project_id,
-                    session_id, country,
+                    session_id, location,
                 )
 
         except asyncio.CancelledError:
@@ -510,7 +520,7 @@ class ProxyServer:
         headers: dict[str, str],
         project: Project,
         session_id: str | None = None,
-        country: str | None = None,
+        location: LocationTarget | None = None,
     ) -> None:
         """Handle HTTPS CONNECT tunneling."""
         # Parse target host:port before proxy selection (needed for domain filtering)
@@ -523,13 +533,13 @@ class ProxyServer:
 
         # Select upstream proxy scoped to the authenticated project
         proxy = await self._get_upstream_proxy(
-            project_id=project.id, session_id=session_id, target_host=target_host, country=country,
+            project_id=project.id, session_id=session_id, target_host=target_host, location=location,
         )
         if not proxy:
-            await self._reject_no_proxy(client_writer, project.id, target_host, session_id, country)
+            await self._reject_no_proxy(client_writer, project.id, target_host, session_id, location)
             return
 
-        verified = await self._verify_exit(project, proxy, session_id, country, target_host, client_writer)
+        verified = await self._verify_exit(project, proxy, session_id, location, target_host, client_writer)
         if verified is None:
             return
         proxy = verified
@@ -754,7 +764,7 @@ class ProxyServer:
         headers: dict[str, str],
         project_id: str,
         session_id: str | None = None,
-        country: str | None = None,
+        location: LocationTarget | None = None,
     ) -> None:
         """Handle regular HTTP request forwarding."""
         # Parse target host before proxy selection (needed for domain filtering)
@@ -762,15 +772,15 @@ class ProxyServer:
 
         # Select upstream proxy scoped to the authenticated project
         proxy = await self._get_upstream_proxy(
-            project_id=project_id, session_id=session_id, target_host=parsed_host, country=country,
+            project_id=project_id, session_id=session_id, target_host=parsed_host, location=location,
         )
         if not proxy:
-            await self._reject_no_proxy(client_writer, project_id, parsed_host, session_id, country)
+            await self._reject_no_proxy(client_writer, project_id, parsed_host, session_id, location)
             return
 
         project = self._proxy_manager.get_project(project_id)
         if project is not None:
-            verified = await self._verify_exit(project, proxy, session_id, country, parsed_host, client_writer)
+            verified = await self._verify_exit(project, proxy, session_id, location, parsed_host, client_writer)
             if verified is None:
                 return
             proxy = verified

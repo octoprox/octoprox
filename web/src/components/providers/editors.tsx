@@ -14,7 +14,7 @@ import { cn } from '../../utils/cn'
 
 export type Spec = Record<string, any>
 
-export const TEMPLATE_HELP = 'Templates: {credential.key}, {connector.key}, {session_id}, {index}, {port}, {discovered_ip}, {auth.token}, {item.key}; filters |lower |upper |urlencode |or:fallback'
+export const TEMPLATE_HELP = 'Templates: {credential.key}, {connector.key}, {geo.country}, {geo.state}, {geo.state_name}, {geo.city} (the place this slot or request targets), {session_id}, {index}, {port}, {discovered_ip}, {auth.token}, {item.key}; filters |lower |upper |urlencode |nospace |or:fallback'
 
 export function Field({ label, help, children, className }: { label: ReactNode; help?: ReactNode; children: ReactNode; className?: string }) {
   return (

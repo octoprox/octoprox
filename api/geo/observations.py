@@ -179,8 +179,13 @@ def _latest_state(sighting: ExitSighting, o: IpObservation) -> None:
     sighting.source = o.source.value
     sighting.claimed_country = o.claimed_country
     sighting.resolved_source = o.resolved_source.value if o.resolved_source else None
-    sighting.conflict = o.conflict
-    sighting.disagreement = o.disagreement
+    sighting.country_conflict = o.country_conflict
+    sighting.claimed_state = o.claimed_state
+    sighting.claimed_city = o.claimed_city
+    sighting.resolved_state = o.resolved_state
+    sighting.resolved_city = o.resolved_city
+    sighting.state_conflict = o.state_conflict
+    sighting.city_conflict = o.city_conflict
 
 
 def aggregate_exits(sightings: list[tuple[IpObservation, bool]]) -> dict[tuple[str, str], ExitSighting]:

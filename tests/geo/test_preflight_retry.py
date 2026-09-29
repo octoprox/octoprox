@@ -19,6 +19,7 @@ from api.geo.service import GeoService
 from api.geo.settings import GeoSettingsStore
 from api.geo.store import GeoDatabaseStore
 from api.geo.verifier import ExitVerifier
+from api.models.location import LocationTarget
 from api.models.project import Project
 from api.models.proxy import Proxy, ProxyStatus
 from api.providers.sdk.sources import IpDiscoverer
@@ -57,7 +58,11 @@ async def checker(tmp_path: Path) -> PreflightChecker:
 
 
 def _proxy(host: str) -> Proxy:
-    return Proxy(id=host, host=host, port=8000, connector_id="conn", username="u", password="p", status=ProxyStatus.HEALTHY)
+    """A pooled session slot: preflight applies to session-bound rows only."""
+    return Proxy(
+        id=host, host=host, port=8000, connector_id="conn", username="u", password="p",
+        status=ProxyStatus.HEALTHY, metadata={"session_id": f"slot-{host}"},
+    )
 
 
 def _project(mode: PreflightMode) -> Project:
@@ -94,14 +99,14 @@ def mismatches() -> Iterator[Mismatches]:
 class TestVerify:
     async def test_match_keeps_the_selection(self, checker: PreflightChecker, mismatches: Mismatches) -> None:
         selector = _selector()
-        decision = await ExitVerifier(checker, selector).verify(_project(PreflightMode.RETRY), _proxy("gb"), session_id="s", country="gb", target_host="x")
+        decision = await ExitVerifier(checker, selector).verify(_project(PreflightMode.RETRY), _proxy("gb"), session_id="s", location=LocationTarget(country="GB"), target_host="x")
         assert not decision.rejected and decision.proxy is not None and decision.proxy.id == "gb"
         selector.select_proxy_for_project.assert_not_called()
         assert mismatches.events == []
 
     async def test_retry_moves_to_another_proxy(self, checker: PreflightChecker, mismatches: Mismatches) -> None:
         selector = _selector(picks=[_proxy("gb")])
-        decision = await ExitVerifier(checker, selector).verify(_project(PreflightMode.RETRY), _proxy("us"), session_id=None, country="GB", target_host="x")
+        decision = await ExitVerifier(checker, selector).verify(_project(PreflightMode.RETRY), _proxy("us"), session_id=None, location=LocationTarget(country="GB"), target_host="x")
         assert not decision.rejected and decision.proxy is not None and decision.proxy.id == "gb"
         assert selector.select_proxy_for_project.await_args.kwargs["exclude"] == frozenset({"us"})
         assert len(mismatches.events) == 1
@@ -110,25 +115,25 @@ class TestVerify:
 
     async def test_retry_gives_up_after_max_attempts(self, checker: PreflightChecker, mismatches: Mismatches) -> None:
         selector = _selector(picks=[_proxy("us2"), _proxy("us")])
-        decision = await ExitVerifier(checker, selector).verify(_project(PreflightMode.RETRY), _proxy("us"), session_id=None, country="GB", target_host="x")
+        decision = await ExitVerifier(checker, selector).verify(_project(PreflightMode.RETRY), _proxy("us"), session_id=None, location=LocationTarget(country="GB"), target_host="x")
         assert decision.rejected and "requested GB" in (decision.rejection or "")
         # max_attempts is 3: the first proxy plus two replacements were checked.
         assert len(mismatches.events) == 3
 
     async def test_retry_stops_when_nothing_else_is_eligible(self, checker: PreflightChecker, mismatches: Mismatches) -> None:
-        decision = await ExitVerifier(checker, _selector(picks=[None])).verify(_project(PreflightMode.RETRY), _proxy("us"), session_id=None, country="GB", target_host="x")
+        decision = await ExitVerifier(checker, _selector(picks=[None])).verify(_project(PreflightMode.RETRY), _proxy("us"), session_id=None, location=LocationTarget(country="GB"), target_host="x")
         assert decision.rejected and len(mismatches.events) == 1
 
     async def test_sticky_session_is_rejected_not_moved(self, checker: PreflightChecker, mismatches: Mismatches) -> None:
         selector = _selector("sticky", picks=[_proxy("gb")])
-        decision = await ExitVerifier(checker, selector).verify(_project(PreflightMode.RETRY), _proxy("us"), session_id="sess", country="GB", target_host="x")
+        decision = await ExitVerifier(checker, selector).verify(_project(PreflightMode.RETRY), _proxy("us"), session_id="sess", location=LocationTarget(country="GB"), target_host="x")
         assert decision.rejected
         selector.select_proxy_for_project.assert_not_called()
         assert len(mismatches.events) == 1
 
     async def test_sticky_without_session_may_move(self, checker: PreflightChecker) -> None:
         selector = _selector("sticky", picks=[_proxy("gb")])
-        decision = await ExitVerifier(checker, selector).verify(_project(PreflightMode.RETRY), _proxy("us"), session_id=None, country="GB", target_host="x")
+        decision = await ExitVerifier(checker, selector).verify(_project(PreflightMode.RETRY), _proxy("us"), session_id=None, location=LocationTarget(country="GB"), target_host="x")
         assert not decision.rejected and decision.proxy is not None and decision.proxy.id == "gb"
 
     async def test_rotating_dynamic_request_retries_by_rerendering(self, checker: PreflightChecker, mismatches: Mismatches) -> None:
@@ -141,7 +146,7 @@ class TestVerify:
         rerendered.metadata.update({"dynamic_sessions": "true", "exit_sample_percent": 100})
         selector = _selector("sticky", picks=[rerendered])
         decision = await ExitVerifier(checker, selector).verify(
-            _project(PreflightMode.RETRY), gateway, session_id=None, country="GB", target_host="x"
+            _project(PreflightMode.RETRY), gateway, session_id=None, location=LocationTarget(country="GB"), target_host="x"
         )
         assert not decision.rejected and decision.proxy is not None and decision.proxy.host == "gb"
         assert selector.select_proxy_for_project.await_args.kwargs["exclude"] == frozenset()
@@ -149,24 +154,24 @@ class TestVerify:
         # With an explicit client session the row is excluded like any other under a movable strategy.
         selector = _selector(picks=[_proxy("gb")])
         decision = await ExitVerifier(checker, selector).verify(
-            _project(PreflightMode.RETRY), gateway, session_id="order-1", country="GB", target_host="x"
+            _project(PreflightMode.RETRY), gateway, session_id="order-1", location=LocationTarget(country="GB"), target_host="x"
         )
         assert not decision.rejected
         assert selector.select_proxy_for_project.await_args.kwargs["exclude"] == frozenset({"gw"})
 
     async def test_report_forwards_without_a_mismatch_signal(self, checker: PreflightChecker, mismatches: Mismatches) -> None:
-        decision = await ExitVerifier(checker, _selector()).verify(_project(PreflightMode.REPORT), _proxy("us"), session_id=None, country="GB", target_host="x")
+        decision = await ExitVerifier(checker, _selector()).verify(_project(PreflightMode.REPORT), _proxy("us"), session_id=None, location=LocationTarget(country="GB"), target_host="x")
         assert not decision.rejected and decision.proxy is not None and decision.proxy.id == "us"
         assert mismatches.events == []
 
     async def test_reject_fails_first_mismatch(self, checker: PreflightChecker, mismatches: Mismatches) -> None:
         selector = _selector(picks=[_proxy("gb")])
-        decision = await ExitVerifier(checker, selector).verify(_project(PreflightMode.REJECT), _proxy("us"), session_id=None, country="GB", target_host="x")
+        decision = await ExitVerifier(checker, selector).verify(_project(PreflightMode.REJECT), _proxy("us"), session_id=None, location=LocationTarget(country="GB"), target_host="x")
         assert decision.rejected and len(mismatches.events) == 1
         selector.select_proxy_for_project.assert_not_called()
 
     async def test_off_skips_everything(self, checker: PreflightChecker) -> None:
-        decision = await ExitVerifier(checker, _selector()).verify(_project(PreflightMode.OFF), _proxy("us"), session_id=None, country="GB", target_host="x")
+        decision = await ExitVerifier(checker, _selector()).verify(_project(PreflightMode.OFF), _proxy("us"), session_id=None, location=LocationTarget(country="GB"), target_host="x")
         assert not decision.rejected and decision.proxy is not None and decision.proxy.id == "us"
 
 

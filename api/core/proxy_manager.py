@@ -79,11 +79,12 @@ from api.models.connector import (
     TrafficUsage,
 )
 from api.models.credential import Credential
+from api.models.location import LocationTarget
 from api.models.project import Project
 from api.models.proxy import Proxy, ProxyStatus
 from api.providers.registry import ProviderRegistry, ProviderType, get_provider_registry
 from api.providers.sdk.provider import DescriptorProvider
-from api.providers.sdk.strategies import META_GEO, is_dynamic_gateway
+from api.providers.sdk.strategies import META_GEO_COUNTRY, is_dynamic_gateway
 from api.providers.store import ProviderStore
 from api.strategies import ProxyGroup, StickySessionStrategy, get_strategy
 
@@ -1783,7 +1784,7 @@ class ProxyManager:
         """IDs of the connectors returned by _enabled_connectors."""
         return {c.id for c in self._enabled_connectors(project_id, target_host)}
 
-    # --- Country routing (-cc-<code> username suffix) -------------------------
+    # --- Location routing (-cc-, -st-, -city- username suffixes) ---------------
     #
     # A connector declares the countries its proxies exit from (``countries``
     # on static/cloud connectors, the provider's country field on descriptor
@@ -1801,6 +1802,9 @@ class ProxyManager:
     # Without a requested country every proxy is eligible, except on-demand
     # geo groups of "All countries" pools, which keep serving only the
     # clients that asked for that country.
+    # A state or city below the country is served only by dynamic-sessions
+    # gateways whose descriptor renders it and by fixed exits whose known
+    # region and city match; nothing is provisioned for it.
 
     def _descriptor_provider(self, connector: Connector) -> DescriptorProvider | None:
         """A DescriptorProvider for the connector, or None for code-implemented types.
@@ -1853,21 +1857,38 @@ class ProxyManager:
         provider = self._descriptor_provider(connector)
         return provider is not None and provider.accepts_request_country()
 
+    def _serves_location(self, connector_id: str, target: LocationTarget) -> bool:
+        """Whether a dynamic-sessions connector can render the state and city ``target`` names."""
+        connector = self._connectors.get(connector_id)
+        provider = self._descriptor_provider(connector) if connector is not None else None
+        return provider is not None and provider.serves_location(target)
+
     def _eligible_proxies(
         self,
         project_id: str,
         target_host: str | None,
-        country: str | None,
+        location: LocationTarget | None,
         *,
         include_quarantined: bool,
         include_traffic_blocked: bool = False,
     ) -> list[Proxy]:
-        """Healthy proxies a request may use, after domain and country filtering.
+        """Healthy proxies a request may use, after domain and location filtering.
+
+        ``location`` is what the request asked for. The country is matched as
+        documented on
+        ``get_routable_proxies_for_project``. A state or city below it is
+        served two ways: a dynamic-sessions gateway whose descriptor renders
+        those levels into the vendor request, and a fixed exit whose known
+        region and city match (``Proxy.location_matches``). Pooled session
+        slots and rows with an unknown place are out; a request is never
+        widened to the country.
 
         Under a ``strict`` location policy the project also refuses proxies
         whose vendor-declared location is contradicted by attribution.
         """
-        wanted = country.strip().upper() if country else None
+        target = location or None
+        wanted = target.country if target else None
+        narrowed = target is not None and target.below_country
         project = self._projects.get(project_id)
         strict = project is not None and project.location_policy == LocationPolicy.STRICT
         connectors: dict[str, tuple[list[str], bool]] = {}
@@ -1891,6 +1912,8 @@ class ProxyManager:
             declared, hide_geo_groups = entry
             if is_dynamic_gateway(p):
                 # The connector-level allow-list was applied above; the row itself has no country.
+                if narrowed and target is not None and not self._serves_location(p.connector_id, target):
+                    continue
                 eligible.append(p)
                 continue
             proxy_country = p.country
@@ -1900,7 +1923,9 @@ class ProxyManager:
                         continue
                 elif wanted not in declared:
                     continue
-            elif hide_geo_groups and p.metadata.get(META_GEO):
+            elif hide_geo_groups and p.metadata.get(META_GEO_COUNTRY):
+                continue
+            if narrowed and target is not None and not p.location_matches(target):
                 continue
             eligible.append(p)
         return eligible
@@ -1945,7 +1970,7 @@ class ProxyManager:
                     for proxy in existing:
                         if proxy.id not in self._proxies:
                             await self.reload_proxy(proxy.id)
-                    if any(p.metadata.get(META_GEO) == country for p in existing):
+                    if any(p.metadata.get(META_GEO_COUNTRY) == country for p in existing):
                         logger.debug(
                             "Country slot group already provisioned by a peer",
                             connector_id=connector.id, country=country,
@@ -1976,7 +2001,7 @@ class ProxyManager:
             return await ProxyRepository(session).get_by_connector(connector_id)
 
     def _has_geo_group(self, connector_id: str, country: str) -> bool:
-        return any(p.metadata.get(META_GEO) == country for p in self._proxies.for_connector(connector_id))
+        return any(p.metadata.get(META_GEO_COUNTRY) == country for p in self._proxies.for_connector(connector_id))
 
     async def _wait_for_geo_group(self, connector_id: str, country: str, timeout: float = 3.0) -> None:
         """Poll the local cache until a peer's slot group for ``country`` shows up (or timeout)."""
@@ -2011,7 +2036,7 @@ class ProxyManager:
         self,
         project_id: str,
         target_host: str | None = None,
-        country: str | None = None,
+        location: LocationTarget | None = None,
     ) -> list[Proxy]:
         """Healthy proxies a request may be routed to.
 
@@ -2022,13 +2047,16 @@ class ProxyManager:
             project_id: The project to get proxies for.
             target_host: If provided, only return proxies from connectors whose
                 domain routing config allows this host.
-            country: If provided (ISO 3166-1 alpha-2), only return proxies
-                that serve this country: proxies whose known exit country
-                matches, or unlabelled proxies of a connector that lists it.
-                Without it, on-demand country groups of "all countries" pools
-                are left out, so untargeted traffic keeps its default exits.
+            location: If provided, only return proxies that serve that
+                place. For the
+                country: proxies whose known exit country matches, or
+                unlabelled proxies of a connector that lists it. A state or
+                city narrows further to dynamic gateways that can render it
+                and fixed exits known to be there. Without a location,
+                on-demand country groups of "all countries" pools are left
+                out, so untargeted traffic keeps its default exits.
         """
-        return self._eligible_proxies(project_id, target_host, country, include_quarantined=False)
+        return self._eligible_proxies(project_id, target_host, location, include_quarantined=False)
 
     async def _is_sticky_quarantine_blocked(
         self, project_id: str, session_id: str | None
@@ -2070,7 +2098,7 @@ class ProxyManager:
         project_id: str,
         target_host: str | None = None,
         session_id: str | None = None,
-        country: str | None = None,
+        location: LocationTarget | None = None,
     ) -> bool:
         """Check if proxy selection failed due to quarantine.
 
@@ -2081,7 +2109,7 @@ class ProxyManager:
         if await self._is_sticky_quarantine_blocked(project_id, session_id):
             return True
 
-        healthy = self._eligible_proxies(project_id, target_host, country, include_quarantined=True)
+        healthy = self._eligible_proxies(project_id, target_host, location, include_quarantined=True)
         if not healthy:
             return False
         return all(self._rate_limiter.is_quarantined(p.id) for p in healthy)
@@ -2090,7 +2118,7 @@ class ProxyManager:
         self,
         project_id: str,
         target_host: str | None = None,
-        country: str | None = None,
+        location: LocationTarget | None = None,
     ) -> int | None:
         """The status to answer with when only traffic-blocked connectors could serve the request.
 
@@ -2099,10 +2127,10 @@ class ProxyManager:
         blocked connectors disagreeing on their status, 509 wins: it is the
         one that cannot be mistaken for anything else.
         """
-        if self._eligible_proxies(project_id, target_host, country, include_quarantined=True):
+        if self._eligible_proxies(project_id, target_host, location, include_quarantined=True):
             return None
         held_back = self._eligible_proxies(
-            project_id, target_host, country, include_quarantined=True, include_traffic_blocked=True
+            project_id, target_host, location, include_quarantined=True, include_traffic_blocked=True
         )
         statuses: set[int] = set()
         for proxy in held_back:
@@ -2125,7 +2153,7 @@ class ProxyManager:
         project_id: str,
         session_id: str | None = None,
         target_host: str | None = None,
-        country: str | None = None,
+        location: LocationTarget | None = None,
         exclude: frozenset[str] | None = None,
     ) -> Proxy | None:
         """Select a proxy for a specific project using the project's routing strategy.
@@ -2137,7 +2165,7 @@ class ProxyManager:
 
         ``session_id`` is the client's explicit ``-sessid-`` value: the
         routing key, and the seed a dynamic-sessions gateway row derives its
-        vendor session from before rendering the requested country into its
+        vendor session from before rendering the requested location into its
         credentials. A request without one has no key, is never pinned to
         its address, and gets a fresh vendor session every time.
 
@@ -2157,18 +2185,21 @@ class ProxyManager:
             session_id: Session identifier for sticky routing.
             target_host: If provided, only consider proxies from connectors
                 whose domain routing config allows this host.
-            country: If provided, only consider proxies that serve this
-                country (see get_routable_proxies_for_project). "All countries"
-                provider pools get a slot group for it on first use.
+            location: If provided, only consider proxies that serve this
+                place (see get_routable_proxies_for_project). "All countries"
+                provider pools get a slot group for a country on first use;
+                a state or city never provisions anything.
         """
         if await self._is_sticky_quarantine_blocked(project_id, session_id):
             return None
 
-        healthy_proxies = self.get_routable_proxies_for_project(project_id, target_host, country)
-        if country and not healthy_proxies:
-            wanted = country.strip().upper()
-            if await self._provision_country_slots(project_id, target_host, wanted):
-                healthy_proxies = self.get_routable_proxies_for_project(project_id, target_host, wanted)
+        target = location or None
+        healthy_proxies = self.get_routable_proxies_for_project(project_id, target_host, target)
+        if (
+            target is not None and target.country and not target.below_country and not healthy_proxies
+            and await self._provision_country_slots(project_id, target_host, target.country)
+        ):
+            healthy_proxies = self.get_routable_proxies_for_project(project_id, target_host, target)
         if exclude:
             healthy_proxies = [p for p in healthy_proxies if p.id not in exclude]
         strategy = self._project_strategies.get(project_id, self._strategy)
@@ -2186,7 +2217,7 @@ class ProxyManager:
         if selected is None:
             return None
         if is_dynamic_gateway(selected):
-            selected = self._render_dynamic_request(selected, project_id, session_id, country)
+            selected = self._render_dynamic_request(selected, project_id, session_id, target)
         return self.resolve_proxy_credentials(selected)
 
     def group_by_connector(self, proxies: list[Proxy]) -> list[ProxyGroup]:
@@ -2214,7 +2245,7 @@ class ProxyManager:
             strategy.forget_group(connector_id)
 
     def _render_dynamic_request(
-        self, proxy: Proxy, project_id: str, session_id: str | None, country: str | None
+        self, proxy: Proxy, project_id: str, session_id: str | None, location: LocationTarget | None
     ) -> Proxy:
         """Credentials for one request through a dynamic-sessions gateway row."""
         connector = self._connectors.get(proxy.connector_id)
@@ -2222,7 +2253,7 @@ class ProxyManager:
         if provider is None or not provider.is_dynamic:
             # The row says dynamic but the connector no longer does (mid-sync): use it as stored.
             return proxy
-        return provider.render_request(proxy, sessid=session_id, country=country, scope=project_id)
+        return provider.render_request(proxy, sessid=session_id, location=location, scope=project_id)
 
     def set_project_strategy(self, project_id: str, strategy_name: str) -> None:
         """Change the routing strategy for a project."""

@@ -46,7 +46,7 @@ connector_fields:
     details: >-
       Dynamic keeps one gateway proxy and renders the vendor credentials per request: a client -sessid-
       always maps to the same vendor session, a request without one gets a fresh session and the vendor
-      rotates the exit, and -cc- picks the country per request. "Number of proxies" does not apply and the
+      rotates the exit, -cc- picks the country per request and -st- and -city- narrow it. "Number of proxies" does not apply and the
       listed countries become an allow-list. The gateway is not health-checked and counts as healthy.
   - key: exit_sample_percent
     label: Exit sampling (%)
@@ -102,12 +102,19 @@ proxy_types:
       parts:
         - text: "{credential.username}"
         - text: "res"
-        - text: "{connector.country_code|lower|or:any}"
+          when: { field: geo.city, negate: true }
+        - text: "{geo.country|lower|or:any}"
+          when: { field: geo.city, negate: true }
+        # Dynamic sessions: a city is targeted as res_sc-<country>_<state name>_<city>,
+        # which replaces the res-<country> pair; the state is required.
+        - text: "res_sc-{geo.country|lower}_{geo.state_name}_{geo.city}"
+          when: { field: geo.city }
         - text: "sid-{session_id}"
     password: "{credential.password}"
+    targeting: { city_requires_state: true }
     tags: [netnut, residential]
     metadata:
-      country_code: "{connector.country_code}"
+      country_code: "{geo.country}"
 
   - key: static_residential
     label: Static residential (ISP)
@@ -119,12 +126,12 @@ proxy_types:
       parts:
         - text: "{credential.username}"
         - text: "stc"
-        - text: "{connector.country_code|lower|or:any}"
+        - text: "{geo.country|lower|or:any}"
         - text: "sid-{session_id}"
     password: "{credential.password}"
     tags: [netnut, static_residential]
     metadata:
-      country_code: "{connector.country_code}"
+      country_code: "{geo.country}"
 
   - key: mobile
     label: Mobile
@@ -136,12 +143,17 @@ proxy_types:
       parts:
         - text: "{credential.username}"
         - text: "mob"
-        - text: "{connector.country_code|lower|or:any}"
+          when: { field: geo.city, negate: true }
+        - text: "{geo.country|lower|or:any}"
+          when: { field: geo.city, negate: true }
+        - text: "mob_sc-{geo.country|lower}_{geo.state_name}_{geo.city}"
+          when: { field: geo.city }
         - text: "sid-{session_id}"
     password: "{credential.password}"
+    targeting: { city_requires_state: true }
     tags: [netnut, mobile]
     metadata:
-      country_code: "{connector.country_code}"
+      country_code: "{geo.country}"
 
   - key: datacenter
     label: Datacenter
@@ -153,9 +165,9 @@ proxy_types:
       parts:
         - text: "{credential.username}"
         - text: "dc"
-        - text: "{connector.country_code|lower|or:any}"
+        - text: "{geo.country|lower|or:any}"
         - text: "sid-{session_id}"
     password: "{credential.password}"
     tags: [netnut, datacenter]
     metadata:
-      country_code: "{connector.country_code}"
+      country_code: "{geo.country}"

@@ -123,7 +123,7 @@ The install-wide settings (default source precedence and conflict rule, echo end
 |--------|-------------|---------|
 | `geo.cache_dir` | Where this instance caches IP database files fetched from Postgres | data/geo |
 | `geo.databases` | Operator-managed database files: list of `{path, name, priority, enabled}` entries loaded at startup | [] |
-| `geo.defaults` | Initial settings for a fresh install: `default_sources`, `default_conflict_rule`, `echo_url`, `echo_ip_path`, `echo_country_path`, `echo_timeout_seconds`, `health_check_attribution`, `preflight_session_ttl_seconds`, `preflight_max_attempts`, `observation_retention_days`, `exit_ip_retention_days` | built-in |
+| `geo.defaults` | Initial settings for a fresh install: `default_sources`, `default_conflict_rule`, `echo_url`, `echo_ip_path`, `echo_country_path`, `echo_state_path`, `echo_city_path`, `echo_timeout_seconds`, `health_check_attribution`, `preflight_session_ttl_seconds`, `preflight_max_attempts`, `observation_retention_days`, `exit_ip_retention_days` | built-in |
 | `geo.echo.enabled` | Serve the public `/echo` endpoint on this instance | true |
 | `geo.echo.trusted_proxies` | CIDRs of load balancers whose `X-Forwarded-For` the `/echo` endpoint trusts for the client IP | [] |
 | `geo.observations.publish_interval_seconds` | How often buffered IP observations are pushed to Redis | 5 |

@@ -70,7 +70,7 @@ class TestNormalizeRecord:
         location = normalize_record(MAXMIND_RECORD)
         assert location is not None
         assert location.country == "GB"
-        assert location.region == "England"
+        assert location.region == "England" and location.state_code == "ENG"
         assert location.city == "London"
         assert location.postal_code == "EC1"
         assert location.latitude == 51.5 and location.longitude == -0.12
@@ -81,6 +81,7 @@ class TestNormalizeRecord:
         assert location is not None
         assert location.country == "DE"
         assert location.region == "Berlin" and location.city == "Berlin"
+        assert location.state_code is None  # only US state names map to a code
         assert location.latitude == 52.52
         assert location.asn == 3320 and location.organization == "Deutsche Telekom"
         assert location.postal_code == "10115"
@@ -89,6 +90,7 @@ class TestNormalizeRecord:
         location = normalize_record(IP2LOCATION_RECORD)
         assert location is not None
         assert (location.country, location.region, location.city) == ("US", "California", "Los Angeles")
+        assert location.state_code == "CA"  # the name mapped back to its code
         assert location.postal_code == "90001"
 
     def test_anonymous_flags(self) -> None:

@@ -32,7 +32,7 @@ from api.core.signals import (
 )
 from api.core.workers import LeaseName, WorkerName, resource_lease
 from api.db.redis import RedisClient
-from api.geo.models import META_ENDPOINT_COUNTRY
+from api.geo.models import META_ENDPOINT_CITY, META_ENDPOINT_COUNTRY, META_ENDPOINT_STATE
 from api.models.connector import Connector
 from api.models.credential import Credential
 from api.models.proxy import Proxy
@@ -111,20 +111,28 @@ class ProxyProviderSyncer:
     async def announce_exit_ip(self, proxy: Proxy) -> None:
         """Tell attribution which exit IP a discovered proxy has, once the pool holds it.
 
-        The discovery endpoint's country, recorded by the strategy, travels
-        along as one more candidate. Attribution itself is someone else's job.
+        The place the discovery endpoint reported, recorded by the strategy at
+        every level, travels along as one more candidate. Attribution itself
+        is someone else's job.
         """
         ip = proxy.metadata.get(META_DISCOVERED_IP)
         if not isinstance(ip, str) or not ip:
             return
-        endpoint_country = proxy.metadata.get(META_ENDPOINT_COUNTRY)
+        reported = {
+            name: value if isinstance(value, str) else None
+            for name, value in (
+                ("endpoint_country", proxy.metadata.get(META_ENDPOINT_COUNTRY)),
+                ("endpoint_state", proxy.metadata.get(META_ENDPOINT_STATE)),
+                ("endpoint_city", proxy.metadata.get(META_ENDPOINT_CITY)),
+            )
+        }
         await event_bus.publish(
             exit_ip_observed,
             self,
             proxy_id=proxy.id,
             ip=ip,
             source="discovery",
-            endpoint_country=endpoint_country if isinstance(endpoint_country, str) else None,
+            **reported,
         )
 
     def _is_syncable(self, credential: Credential) -> bool:

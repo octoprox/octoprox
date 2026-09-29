@@ -34,6 +34,7 @@ from api.geo.models import (
     GeoVendor,
     IpLocation,
 )
+from api.models.location import us_state_code_from_name
 
 logger = structlog.get_logger()
 
@@ -229,10 +230,14 @@ def normalize_record(record: Mapping[str, Any] | None) -> IpLocation | None:
 
     subdivisions = record.get("subdivisions")
     region = None
+    state_code = None
     if isinstance(subdivisions, list) and subdivisions and isinstance(subdivisions[0], Mapping):
         region = _english_name(subdivisions[0])
+        state_code = _first_str(subdivisions[0], ("iso_code",))
     if region is None:
         region = _first_str(record, ("region",), ("region_name",), ("state",), ("stateprov",))
+    if state_code is None:
+        state_code = _first_str(record, ("region_code",), ("state_code",), ("subdivision_code",))
 
     country = _first_str(
         record,
@@ -248,9 +253,13 @@ def normalize_record(record: Mapping[str, Any] | None) -> IpLocation | None:
         if isinstance(plain, str):
             country = plain
 
+    if state_code is None:
+        # IPinfo and IP2Location name the region only; US states map back to their code.
+        state_code = us_state_code_from_name(country.strip().upper() if isinstance(country, str) else None, region)
     location = IpLocation(
         country=country,
         region=region,
+        state_code=state_code.strip().upper() if state_code else None,
         city=_english_name(record, "city") or _first_str(record, ("city_name",)),
         postal_code=_first_str(record, ("postal", "code"), ("postal",), ("postal_code",), ("zip_code",), ("zipcode",)),
         latitude=_first_float(record, ("location", "latitude"), ("latitude",), ("lat",)),

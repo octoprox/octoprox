@@ -34,6 +34,7 @@ class EchoResponse(BaseModel):
     ip: str
     country: str | None = None
     region: str | None = None
+    state_code: str | None = None
     city: str | None = None
     latitude: float | None = None
     longitude: float | None = None
@@ -111,6 +112,7 @@ def build_echo(
         ip=ip,
         country=fields.get("country"),
         region=fields.get("region"),
+        state_code=fields.get("state_code"),
         city=fields.get("city"),
         latitude=fields.get("latitude"),
         longitude=fields.get("longitude"),

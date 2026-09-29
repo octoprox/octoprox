@@ -26,6 +26,7 @@ from api.geo.preflight import PreflightChecker, PreflightVerdict
 from api.geo.service import GeoService
 from api.geo.settings import GeoSettingsStore
 from api.geo.store import GeoDatabaseStore
+from api.models.location import LocationTarget
 from api.models.project import Project
 from api.models.proxy import Proxy
 from api.providers.sdk.sources import IpDiscoverer
@@ -67,67 +68,85 @@ def _proxy(**metadata: object) -> Proxy:
 
 class TestPreflight:
     def test_applies(self) -> None:
-        proxy = _proxy()
-        assert not PreflightChecker.applies(_project(PreflightMode.OFF), "GB", proxy)
-        assert PreflightChecker.applies(_project(PreflightMode.REPORT), "GB", proxy)
-        assert PreflightChecker.applies(_project(PreflightMode.RETRY), "GB", proxy)
-        assert not PreflightChecker.applies(_project(PreflightMode.REJECT), None, proxy)
+        slot = _proxy(session_id="slot-1")
+        assert not PreflightChecker.applies(_project(PreflightMode.OFF), LocationTarget(country="GB"), slot)
+        assert PreflightChecker.applies(_project(PreflightMode.REPORT), LocationTarget(country="GB"), slot)
+        assert PreflightChecker.applies(_project(PreflightMode.RETRY), LocationTarget(country="GB"), slot)
+        assert not PreflightChecker.applies(_project(PreflightMode.REJECT), None, slot)
         # A promised country counts; a merely attributed one does not.
-        assert PreflightChecker.applies(_project(PreflightMode.REJECT), None, _proxy(geo="US"))
-        assert PreflightChecker.applies(_project(PreflightMode.REJECT), None, _proxy(vendor_country="US"))
-        assert PreflightChecker.applies(_project(PreflightMode.REJECT), None, _proxy(country="US", country_source="manual"))
-        assert not PreflightChecker.applies(_project(PreflightMode.REJECT), None, _proxy(country="US", country_source="database"))
+        assert PreflightChecker.applies(_project(PreflightMode.REJECT), None, _proxy(session_id="s", geo="US"))
+        assert PreflightChecker.applies(_project(PreflightMode.REJECT), None, _proxy(session_id="s", vendor_country="US"))
+        assert PreflightChecker.applies(_project(PreflightMode.REJECT), None, _proxy(session_id="s", country="US", country_source="manual"))
+        assert not PreflightChecker.applies(_project(PreflightMode.REJECT), None, _proxy(session_id="s", country="US", country_source="database"))
+        # A fixed exit (no vendor session) is never checked: discovery placed
+        # it and health checks re-read it, whatever was asked or promised.
+        assert not PreflightChecker.applies(_project(PreflightMode.REJECT), LocationTarget(country="GB"), _proxy())
+        assert not PreflightChecker.applies(_project(PreflightMode.REJECT), None, _proxy(geo="US"))
+        assert not PreflightChecker.applies(_project(PreflightMode.REJECT), LocationTarget(country="GB"), _proxy(country="GB", country_source="manual"))
+
+    def test_expected_location(self) -> None:
+        assert PreflightChecker.expected_location(None, _proxy()) is None
+        assert PreflightChecker.expected_location(LocationTarget(country="GB"), _proxy()) == LocationTarget(country="GB")
+        assert PreflightChecker.expected_location(None, _proxy(geo="US")) == LocationTarget(country="US")
+        requested = LocationTarget(country="US", state="NY", city="new_york")
+        assert PreflightChecker.expected_location(requested, _proxy()) == requested
+        # What a dynamic request rendered counts like the request itself.
+        rendered = _proxy(dynamic_sessions="true", geo="US", geo_state="CA", geo_city="los_angeles")
+        assert PreflightChecker.expected_location(None, rendered) == LocationTarget(country="US", state="CA", city="los_angeles")
+        # A state or city with no country to hang on is nothing to verify.
+        assert PreflightChecker.expected_location(None, _proxy(geo_state="CA")) is None
 
     async def test_match(self, geo_service: GeoService) -> None:
         calls: list[str] = []
         checker = _checker(geo_service, {"ip": GB_IP, "country": "GB"}, calls=calls)
-        verdict = await checker.check(_project(PreflightMode.REJECT), _proxy(), session_id="s", requested_country="gb")
-        assert verdict.ok and verdict.observed == "GB" and verdict.expected == "GB" and verdict.reason == "match"
+        verdict = await checker.check(_project(PreflightMode.REJECT), _proxy(), session_id="s", requested=LocationTarget(country="GB"))
+        assert verdict.ok and verdict.observed == LocationTarget(country="GB") and verdict.expected == LocationTarget(country="GB") and verdict.reason == "match"
         assert calls == ["http://u:p@gw:8000"]
         assert checker.checks == 1 and checker.rejections == 0
         observation = geo_service.observation_recorder._buffer[-1]
         assert observation.source == ObservationSource.PREFLIGHT and observation.session_id == "s"
-        assert observation.project_id == "proj" and not observation.conflict
+        assert observation.project_id == "proj" and not observation.country_conflict
 
     async def test_mismatch(self, geo_service: GeoService) -> None:
         checker = _checker(geo_service, {"ip": GB_IP, "country": "GB"})
-        verdict = await checker.check(_project(PreflightMode.REJECT), _proxy(), session_id=None, requested_country="US")
-        assert not verdict.ok and verdict.observed == "GB" and verdict.expected == "US"
+        verdict = await checker.check(_project(PreflightMode.REJECT), _proxy(), session_id=None, requested=LocationTarget(country="US"))
+        assert not verdict.ok and verdict.observed == LocationTarget(country="GB") and verdict.expected == LocationTarget(country="US")
+        assert verdict.country_conflict is True and verdict.failed_levels == ("country",)
         assert verdict.endpoint_country == "GB" and checker.max_attempts == 3
         assert checker.rejections == 1
         assert "requested US" in PreflightChecker.rejection_message(verdict)
-        assert geo_service.observation_recorder._buffer[-1].conflict
+        assert geo_service.observation_recorder._buffer[-1].country_conflict
 
     async def test_expected_from_vendor_claim(self, geo_service: GeoService) -> None:
         checker = _checker(geo_service, {"ip": GB_IP})
-        verdict = await checker.check(_project(PreflightMode.REPORT), _proxy(geo="US"), session_id=None, requested_country=None)
-        assert not verdict.ok and verdict.expected == "US"
+        verdict = await checker.check(_project(PreflightMode.REPORT), _proxy(geo="US"), session_id=None, requested=None)
+        assert not verdict.ok and verdict.expected == LocationTarget(country="US")
 
     async def test_untargeted_slot_with_observed_country_is_not_verified(self, geo_service: GeoService) -> None:
         checker = _checker(geo_service, {"ip": GB_IP})
-        verdict = await checker.check(_project(PreflightMode.REJECT), _proxy(country="US", country_source="database"), session_id=None, requested_country=None)
+        verdict = await checker.check(_project(PreflightMode.REJECT), _proxy(country="US", country_source="database"), session_id=None, requested=None)
         assert verdict.ok and verdict.reason == "not applicable" and checker.checks == 0
 
     async def test_unknown_location_is_ok(self, geo_service: GeoService) -> None:
         checker = _checker(geo_service, {"ip": "203.0.113.5"})
-        verdict = await checker.check(_project(PreflightMode.REJECT), _proxy(), session_id=None, requested_country="US")
+        verdict = await checker.check(_project(PreflightMode.REJECT), _proxy(), session_id=None, requested=LocationTarget(country="US"))
         assert verdict.ok and verdict.reason == "location unknown"
 
     async def test_echo_failure_is_ok(self, geo_service: GeoService) -> None:
         checker = _checker(geo_service, {}, status=503)
-        verdict = await checker.check(_project(PreflightMode.REJECT), _proxy(), session_id=None, requested_country="US")
+        verdict = await checker.check(_project(PreflightMode.REJECT), _proxy(), session_id=None, requested=LocationTarget(country="US"))
         assert verdict.ok and verdict.reason == "echo request failed"
         assert geo_service.observation_recorder.pending == 0
 
     async def test_no_expected_country_skips(self, geo_service: GeoService) -> None:
         checker = _checker(geo_service, {"ip": GB_IP})
-        verdict = await checker.check(_project(PreflightMode.REJECT), _proxy(), session_id=None, requested_country=None)
+        verdict = await checker.check(_project(PreflightMode.REJECT), _proxy(), session_id=None, requested=None)
         assert verdict.ok and verdict.reason == "not applicable" and checker.checks == 0
 
     def test_dynamic_rows_always_apply(self) -> None:
         gateway = _proxy(dynamic_sessions="true")
         assert PreflightChecker.applies(_project(PreflightMode.REPORT), None, gateway)
-        assert not PreflightChecker.applies(_project(PreflightMode.OFF), "GB", gateway)
+        assert not PreflightChecker.applies(_project(PreflightMode.OFF), LocationTarget(country="GB"), gateway)
 
     async def test_dynamic_session_is_verified_and_cached_per_vendor_session(self, geo_service: GeoService) -> None:
         checker = _checker(geo_service, {"ip": GB_IP, "country": "GB"})
@@ -143,23 +162,23 @@ class TestPreflight:
         checker._store = store  # type: ignore[method-assign]
         checker._cached = cached  # type: ignore[method-assign]
         rendered = _proxy(dynamic_sessions="true", session_id="abc123", geo="GB")
-        verdict = await checker.check(_project(PreflightMode.REJECT), rendered, session_id="order-1", requested_country="gb")
+        verdict = await checker.check(_project(PreflightMode.REJECT), rendered, session_id="order-1", requested=LocationTarget(country="GB"))
         assert verdict.ok and verdict.reason == "match" and checker.checks == 1
         assert list(stored) == [GEO_PREFLIGHT_KEY.format(project_id="proj", proxy_id=rendered.id) + ":abc123:GB"]
         assert geo_service.observation_recorder._buffer[-1].session_id == "abc123"
         # Same vendor session again: served from the cache.
-        again = await checker.check(_project(PreflightMode.REJECT), rendered, session_id="order-1", requested_country="gb")
+        again = await checker.check(_project(PreflightMode.REJECT), rendered, session_id="order-1", requested=LocationTarget(country="GB"))
         assert again.ok and checker.checks == 1
         # The same client session asking for another country is verified again, not served the GB verdict.
         moved = _proxy(dynamic_sessions="true", session_id="abc123", geo="US")
         moved.id = rendered.id
-        mismatch = await checker.check(_project(PreflightMode.REJECT), moved, session_id="order-1", requested_country="us")
-        assert not mismatch.ok and mismatch.expected == "US" and checker.checks == 2
+        mismatch = await checker.check(_project(PreflightMode.REJECT), moved, session_id="order-1", requested=LocationTarget(country="US"))
+        assert not mismatch.ok and mismatch.expected == LocationTarget(country="US") and checker.checks == 2
         assert GEO_PREFLIGHT_KEY.format(project_id="proj", proxy_id=rendered.id) + ":abc123:US" in stored
         # Another session on the same gateway row is its own verification.
         other = _proxy(dynamic_sessions="true", session_id="zzz999", geo="US")
         other.id = rendered.id
-        mismatch = await checker.check(_project(PreflightMode.REJECT), other, session_id="order-2", requested_country="us")
+        mismatch = await checker.check(_project(PreflightMode.REJECT), other, session_id="order-2", requested=LocationTarget(country="US"))
         assert not mismatch.ok and checker.checks == 3
 
     async def test_rotating_request_is_sampled_and_uncached(self, geo_service: GeoService) -> None:
@@ -167,7 +186,7 @@ class TestPreflight:
         # No session_id: the request minted its own vendor session. The connector's sampling share rides along.
         skipped = await checker.check(
             _project(PreflightMode.REJECT), _proxy(dynamic_sessions="true", exit_sample_percent=0),
-            session_id="1.2.3.4", requested_country=None,
+            session_id="1.2.3.4", requested=None,
         )
         assert skipped.reason == "not applicable" and checker.checks == 0
         rotating = _proxy(dynamic_sessions="true", exit_sample_percent=100)
@@ -177,14 +196,14 @@ class TestPreflight:
             stored.append(key)
 
         checker._store = store  # type: ignore[method-assign]
-        observed = await checker.check(_project(PreflightMode.REJECT), rotating, session_id="1.2.3.4", requested_country=None)
-        assert observed.ok and observed.reason == "observed" and observed.observed == "GB" and checker.checks == 1
+        observed = await checker.check(_project(PreflightMode.REJECT), rotating, session_id="1.2.3.4", requested=None)
+        assert observed.ok and observed.reason == "observed" and observed.observed == LocationTarget(country="GB") and checker.checks == 1
         assert stored == []  # nothing else will ever use this vendor session
         sighting = geo_service.observation_recorder._buffer[-1]
-        assert sighting.claimed_country is None and sighting.resolved_country == "GB" and not sighting.conflict
+        assert sighting.claimed_country is None and sighting.resolved_country == "GB" and not sighting.country_conflict
         # A sampled rotating request that named a country is still judged.
         targeted = _proxy(dynamic_sessions="true", geo="US", exit_sample_percent=100)
-        judged = await checker.check(_project(PreflightMode.REJECT), targeted, session_id=None, requested_country="US")
+        judged = await checker.check(_project(PreflightMode.REJECT), targeted, session_id=None, requested=LocationTarget(country="US"))
         assert not judged.ok and judged.reason == "mismatch" and checker.rejections == 1
 
     async def test_hard_modes_verify_every_targeted_rotating_request(self, geo_service: GeoService) -> None:
@@ -192,21 +211,68 @@ class TestPreflight:
         checker = _checker(geo_service, {"ip": GB_IP, "country": "GB"})
         unsampled = _proxy(dynamic_sessions="true", exit_sample_percent=0)
         for mode in (PreflightMode.REJECT, PreflightMode.RETRY):
-            verdict = await checker.check(_project(mode), unsampled, session_id=None, requested_country="US")
+            verdict = await checker.check(_project(mode), unsampled, session_id=None, requested=LocationTarget(country="US"))
             assert not verdict.ok and verdict.reason == "mismatch"
         assert checker.checks == 2
         # A promised country (allow-list pick rendered into the request) counts as expected too.
         promised = _proxy(dynamic_sessions="true", geo="US", exit_sample_percent=0)
-        assert not (await checker.check(_project(PreflightMode.REJECT), promised, session_id=None, requested_country=None)).ok
+        assert not (await checker.check(_project(PreflightMode.REJECT), promised, session_id=None, requested=None)).ok
         # Report mode only observes, so the percentage applies even when a country was asked.
-        report = await checker.check(_project(PreflightMode.REPORT), unsampled, session_id=None, requested_country="US")
+        report = await checker.check(_project(PreflightMode.REPORT), unsampled, session_id=None, requested=LocationTarget(country="US"))
         assert report.reason == "not applicable" and checker.checks == 3
 
+    async def test_state_and_city_are_verified_below_the_country(self, geo_service: GeoService) -> None:
+        checker = _checker(geo_service, {"ip": GB_IP, "country": "GB"})
+        target = LocationTarget(country="GB", state="ENG", city="london")
+        ok = await checker.check(_project(PreflightMode.REJECT), _proxy(session_id="s1"), session_id="s", requested=target)
+        assert ok.ok and ok.reason == "match" and ok.state_conflict is False and ok.city_conflict is False
+        assert ok.expected == target and ok.observed == target
+        observation = geo_service.observation_recorder._buffer[-1]
+        assert (observation.claimed_state, observation.claimed_city) == ("ENG", "london")
+        assert (observation.resolved_state, observation.resolved_city) == ("ENG", "london")
+        assert observation.state_conflict is False and observation.city_conflict is False and not observation.country_conflict
+        # A wrong city is a mismatch even though the country is right; the country verdict stays clean.
+        wrong = await checker.check(
+            _project(PreflightMode.REJECT), _proxy(session_id="s2"), session_id=None,
+            requested=LocationTarget(country="GB", city="manchester"),
+        )
+        assert not wrong.ok and wrong.reason == "mismatch" and wrong.city_conflict is True and wrong.state_conflict is None
+        assert wrong.country_conflict is False and wrong.failed_levels == ("city",)
+        assert wrong.observed == LocationTarget(country="GB", city="london")
+        message = PreflightChecker.rejection_message(wrong)
+        assert message.startswith("Exit city mismatch: requested GB, city manchester, observed GB, city london")
+        latest = geo_service.observation_recorder._buffer[-1]
+        assert not latest.country_conflict and latest.city_conflict is True and latest.claimed_state is None
+        # What a dynamic request rendered is the claim when the request named nothing.
+        rendered = _proxy(dynamic_sessions="true", session_id="abc", geo="GB", geo_state="SCT", geo_city="glasgow")
+        judged = await checker.check(_project(PreflightMode.REJECT), rendered, session_id="order-1", requested=None)
+        assert not judged.ok and judged.expected == LocationTarget(country="GB", state="SCT", city="glasgow")
+        assert judged.state_conflict is True and judged.city_conflict is True
+        # No database answer at a level is no verdict: the request goes through.
+        unknown = _checker(geo_service, {"ip": "203.0.113.5"})
+        verdict = await unknown.check(_project(PreflightMode.REJECT), _proxy(session_id="s3"), session_id=None, requested=LocationTarget(country="GB", state="SCT"))
+        assert verdict.ok and verdict.reason == "location unknown" and verdict.state_conflict is None
+
+    async def test_country_is_judged_under_the_project_conflict_rule(self, geo_service: GeoService) -> None:
+        # The database says GB, the echo endpoint says FR: under consensus the independent sources
+        # disagree, so a US claim is left unjudged and the request goes through, as attribution would.
+        checker = _checker(geo_service, {"ip": GB_IP, "country": "FR"})
+        verdict = await checker.check(_project(PreflightMode.REJECT), _proxy(session_id="s1"), session_id=None, requested=LocationTarget(country="US"))
+        assert verdict.ok and verdict.country_conflict is None and verdict.reason == "match"
+        observation = geo_service.observation_recorder._buffer[-1]
+        assert observation.country_conflict is None and observation.claimed_country == "US"
+        # Under the first rule the top-ranked independent source decides.
+        first = Project(id="proj", name="P", username="u", password="p", location_preflight=PreflightMode.REJECT, location_conflict_rule="first")
+        verdict = await checker.check(first, _proxy(session_id="s2"), session_id=None, requested=LocationTarget(country="US"))
+        assert not verdict.ok and verdict.country_conflict is True and verdict.observed == LocationTarget(country="GB")
+
     def test_verdict_roundtrip(self) -> None:
-        verdict = PreflightVerdict(ok=False, expected="US", observed="GB", ip=GB_IP, reason="mismatch", endpoint_country="GB")
+        verdict = PreflightVerdict(ok=False, expected=LocationTarget(country="US", state="NY"), observed=LocationTarget(country="GB", state="ENG"), ip=GB_IP, reason="mismatch", endpoint_country="GB", country_conflict=False, state_conflict=True)
         parsed = PreflightVerdict.from_json(verdict.to_json())
         assert parsed == verdict
         assert PreflightVerdict.from_json("garbage") is None
+        # A verdict cached by the previous version, with bare country codes, is a miss.
+        assert PreflightVerdict.from_json('{"ok": true, "expected": "GB", "observed": "GB", "ip": "1.1.1.1", "reason": "match"}') is None
 
 
 @pytest.mark.usefixtures("db_engine")
@@ -216,7 +282,7 @@ class TestPreflightCache:
         checker.start()
         try:
             key = GEO_PREFLIGHT_KEY.format(project_id="p", proxy_id="x")
-            verdict = PreflightVerdict(ok=True, expected="GB", observed="GB", ip="81.2.69.160", reason="match")
+            verdict = PreflightVerdict(ok=True, expected=LocationTarget(country="GB"), observed=LocationTarget(country="GB"), ip="81.2.69.160", reason="match")
             await checker._store(key, verdict, ttl=600)
             assert await checker._cached(key) is not None
             # Another proxy moving leaves this verdict alone.
@@ -302,7 +368,7 @@ class TestAggregate:
 
     def test_decode_batch_splits_sightings_from_judgements_and_skips_garbage(self) -> None:
         good = IpObservation(source=ObservationSource.MANUAL, ip="1.1.1.1").model_dump_json()
-        judgement = ExitJudgement(proxy_id="p1", connector_id="c1", ip="1.1.1.1", conflict=True).model_dump_json()
+        judgement = ExitJudgement(proxy_id="p1", connector_id="c1", ip="1.1.1.1", country_conflict=True).model_dump_json()
         observations, judgements = decode_batch([good.encode(), judgement.encode(), b"not json", json.dumps({"ip": "x"}).encode()])
         assert len(observations) == 1 and observations[0].ip == "1.1.1.1"
-        assert len(judgements) == 1 and judgements[0].proxy_id == "p1" and judgements[0].conflict is True
+        assert len(judgements) == 1 and judgements[0].proxy_id == "p1" and judgements[0].country_conflict is True

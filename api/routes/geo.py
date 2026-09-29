@@ -42,6 +42,7 @@ from api.geo.models import (
 from api.geo.readers import GeoDatabaseError, inspect_file, is_ip
 from api.geo.updater import DownloadError, validate_bytes
 from api.models.connector import Connector
+from api.models.location import LocationTarget
 
 if TYPE_CHECKING:
     from api.core.proxy_manager import ProxyManager
@@ -98,7 +99,10 @@ class GeoDatabaseFromUrl(BaseModel):
 
 class LookupRequest(BaseModel):
     ip: str
+    # What to judge the databases' answer against, as a vendor's claim would be.
     claimed_country: str | None = None
+    claimed_state: str | None = None
+    claimed_city: str | None = None
     # Resolve under this project's source policy instead of the install default.
     project_id: str | None = None
 
@@ -137,11 +141,34 @@ class ObservationsResponse(BaseModel):
 
 
 class ClaimBreakdown(BaseModel):
-    """A contradicted pair: what the vendor claimed, what attribution resolved, how many exits."""
+    """A contradicted pair at one level: what was claimed, what attribution resolved, how many exits."""
 
-    claimed_country: str | None
-    observed_country: str | None
+    level: Literal["country", "state", "city"] = "country"
+    claimed: str | None
+    observed: str | None
     exits: int
+
+
+class LevelAccuracy(BaseModel):
+    """How a connector's exits with a claim at one level were judged, each exit once.
+
+    ``open`` is a claim without a verdict: nothing independent answered at
+    that level (no database knows the IP, or none knows its city), or the
+    independent sources disagreed under ``consensus``. It is neither the
+    vendor's credit nor its fault, so ``accuracy`` is confirmed over
+    confirmed plus contradicted, at every level.
+    """
+
+    claimed: int = 0
+    confirmed: int = 0
+    contradicted: int = 0
+    open: int = 0
+    accuracy: float | None = None
+
+    @classmethod
+    def from_counts(cls, counts: dict[str, int]) -> LevelAccuracy:
+        judged = counts.get("confirmed", 0) + counts.get("contradicted", 0)
+        return cls(accuracy=round(counts.get("confirmed", 0) / judged, 4) if judged else None, **counts)
 
 
 class ExitCoverage(BaseModel):
@@ -174,8 +201,9 @@ def _exit_coverage(manager: ProxyManager, connector: Connector | None) -> ExitCo
 class ConnectorAccuracy(BaseModel):
     """How a connector's distinct exits, seen in the window, judge the vendor's claims.
 
-    Each exit counts once with the verdict of its latest observation.
-    ``accuracy`` is confirmed over claimed; uncertain exits count against it.
+    Each exit counts once with the verdict of its latest observation, at
+    every level a claim was made: the country the vendor promised, and the
+    state and city requests asked for.
     """
 
     connector_id: str
@@ -183,11 +211,9 @@ class ConnectorAccuracy(BaseModel):
     project_id: str | None = None
     coverage: ExitCoverage | None = None
     exits: int
-    claimed: int  # exits the vendor made a claim for
-    confirmed: int
-    contradicted: int
-    uncertain: int
-    accuracy: float | None
+    country: LevelAccuracy = Field(default_factory=LevelAccuracy)
+    state: LevelAccuracy = Field(default_factory=LevelAccuracy)
+    city: LevelAccuracy = Field(default_factory=LevelAccuracy)
     breakdown: list[ClaimBreakdown]
 
 
@@ -230,8 +256,13 @@ class ExitIp(BaseModel):
     source: str | None = None
     claimed_country: str | None = None
     resolved_source: str | None = None
-    conflict: bool = False
-    disagreement: bool = False
+    country_conflict: bool | None = None
+    claimed_state: str | None = None
+    claimed_city: str | None = None
+    resolved_state: str | None = None
+    resolved_city: str | None = None
+    state_conflict: bool | None = None
+    city_conflict: bool | None = None
 
 
 class ExitIpsResponse(BaseModel):
@@ -611,9 +642,10 @@ async def lookup(request: Request, body: LookupRequest, _user: CurrentUserDep) -
     ip = body.ip.strip()
     if not is_ip(ip):
         raise HTTPException(status_code=400, detail="Not a valid IP address")
-    claimed = normalize_country(body.claimed_country) if body.claimed_country else None
-    if body.claimed_country and claimed is None:
+    claimed_country = normalize_country(body.claimed_country) if body.claimed_country else None
+    if body.claimed_country and claimed_country is None:
         raise HTTPException(status_code=400, detail="claimed_country must be a two-letter ISO code")
+    claimed = LocationTarget.reported(claimed_country, body.claimed_state, body.claimed_city)
     policy = runtime.geo_service.default_policy
     if body.project_id:
         project = _manager(request).get_project(body.project_id)
@@ -670,7 +702,7 @@ async def observations(
     ip: str | None = None,
     claimed_country: str | None = None,
     resolved_country: str | None = None,
-    verdict: Literal["contradicted", "uncertain", "confirmed", "no_claim"] | None = None,
+    verdict: Literal["contradicted", "open", "confirmed", "no_claim"] | None = None,
     conflicts_only: bool = False,
     limit: int = 100,
     offset: int = 0,
@@ -678,8 +710,10 @@ async def observations(
     """One page of IP observations, newest first, filtered on the server.
 
     The filters mirror the columns of the history table; ``verdict`` is the
-    label shown there (``conflicts_only`` is the older spelling of
-    ``verdict=contradicted``).
+    country badge shown there: ``contradicted``, ``confirmed``, ``open`` (a
+    claim with no verdict) or ``no_claim``. The state and city verdicts are
+    returned per row and do not move the label (``conflicts_only`` is the
+    older spelling of ``verdict=contradicted``).
     """
     filters: dict[str, Any] = {
         "connector_id": connector_id,
@@ -729,14 +763,18 @@ async def accuracy(
         connector = connectors.get(row["connector_id"])
         result.append(
             ConnectorAccuracy(
+                connector_id=row["connector_id"],
                 connector_name=connector.name if connector else None,
                 project_id=connector.project_id if connector else None,
                 coverage=_exit_coverage(manager, connector),
-                accuracy=round(row["confirmed"] / row["claimed"], 4) if row["claimed"] else None,
-                **row,
+                exits=row["exits"],
+                country=LevelAccuracy.from_counts(row["country"]),
+                state=LevelAccuracy.from_counts(row["state"]),
+                city=LevelAccuracy.from_counts(row["city"]),
+                breakdown=row["breakdown"],
             )
         )
-    result.sort(key=lambda c: (-c.claimed, c.connector_name or ""))
+    result.sort(key=lambda c: (-c.country.claimed, c.connector_name or ""))
     return AccuracyResponse(since=since, connectors=result)
 
 
@@ -785,14 +823,15 @@ async def exit_ips(
     proxy_id: str | None = None,
     country: str | None = None,
     claimed_country: str | None = None,
-    verdict: Literal["contradicted", "uncertain", "confirmed", "no_claim"] | None = None,
+    verdict: Literal["contradicted", "open", "confirmed", "no_claim"] | None = None,
     limit: int = 100,
     offset: int = 0,
 ) -> ExitIpsResponse:
     """One page of distinct exit IPs with their latest state, most recently seen first.
 
     The unique-exits counterpart of the observation log: one row per connector
-    and IP instead of one per sighting. Filters apply on the server.
+    and IP instead of one per sighting. Filters apply on the server;
+    ``verdict`` is the country verdict, as for observations.
     """
     manager = _manager(request)
     connectors = {c.id: c for c in manager.connectors}

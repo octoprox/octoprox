@@ -26,6 +26,9 @@ from sqlalchemy import (
     update,
     values,
 )
+from sqlalchemy import (
+    cast as cast_sql,
+)
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -51,6 +54,26 @@ from api.geo.models import (
 )
 
 
+def _verdict_clauses(m: type[IpObservationModel] | type[ConnectorExitIpModel], verdict: str | None) -> list[Any]:
+    """The rows a verdict label selects.
+
+    The label is the country badge the tables show, built from the country
+    claim and its nullable verdict: ``contradicted``, ``confirmed``, ``open``
+    (claimed, no verdict) or ``no_claim``. The state and city verdicts are
+    shown under the badge and do not move the label: an exit that is right at
+    the country is usable at the country whatever its city turned out to be.
+    """
+    if verdict == "contradicted":
+        return [m.country_conflict.is_(True)]
+    if verdict == "confirmed":
+        return [m.country_conflict.is_(False)]
+    if verdict == "open":
+        return [m.claimed_country.is_not(None), m.country_conflict.is_(None)]
+    if verdict == "no_claim":
+        return [m.claimed_country.is_(None)]
+    return []
+
+
 @dataclass
 class ExitSighting:
     """One batch's worth of sightings of one (connector, IP), ready to upsert.
@@ -67,8 +90,13 @@ class ExitSighting:
     source: str | None = None
     claimed_country: str | None = None
     resolved_source: str | None = None
-    conflict: bool = False
-    disagreement: bool = False
+    country_conflict: bool | None = None
+    claimed_state: str | None = None
+    claimed_city: str | None = None
+    resolved_state: str | None = None
+    resolved_city: str | None = None
+    state_conflict: bool | None = None
+    city_conflict: bool | None = None
 
 
 class GeoSettingsRepository:
@@ -79,6 +107,8 @@ class GeoSettingsRepository:
         "echo_url",
         "echo_ip_path",
         "echo_country_path",
+        "echo_state_path",
+        "echo_city_path",
         "echo_timeout_seconds",
         "health_check_attribution",
         "preflight_session_ttl_seconds",
@@ -278,8 +308,13 @@ class ObservationRepository:
                 "endpoint_country": o.endpoint_country,
                 "resolved_country": o.resolved_country,
                 "resolved_source": o.resolved_source.value if o.resolved_source else None,
-                "conflict": o.conflict,
-                "disagreement": o.disagreement,
+                "country_conflict": o.country_conflict,
+                "claimed_state": o.claimed_state,
+                "claimed_city": o.claimed_city,
+                "resolved_state": o.resolved_state,
+                "resolved_city": o.resolved_city,
+                "state_conflict": o.state_conflict,
+                "city_conflict": o.city_conflict,
                 "candidates": o.candidates,
                 "instance_id": o.instance_id,
             }
@@ -306,7 +341,7 @@ class ObservationRepository:
 
         The table can hold millions of rows, so the browser never sees more
         than one page; every filter must therefore narrow the query itself.
-        ``verdict`` is the label the page shows, derived from three columns.
+        ``verdict`` is the label the page shows (see :func:`_verdict_clauses`).
         """
         m = IpObservationModel
         if connector_id:
@@ -323,16 +358,7 @@ class ObservationRepository:
             query = query.where(m.claimed_country == claimed_country.upper())
         if resolved_country:
             query = query.where(m.resolved_country == resolved_country.upper())
-        if verdict == "contradicted" or conflicts_only:
-            query = query.where(m.conflict.is_(True))
-        elif verdict == "uncertain":
-            query = query.where(m.conflict.is_(False), m.disagreement.is_(True))
-        elif verdict == "confirmed":
-            query = query.where(
-                m.conflict.is_(False), m.disagreement.is_(False), m.claimed_country.is_not(None)
-            )
-        elif verdict == "no_claim":
-            query = query.where(m.claimed_country.is_(None))
+        query = query.where(*_verdict_clauses(m, "contradicted" if conflicts_only else verdict))
         return query
 
     async def recent(
@@ -389,8 +415,13 @@ class ObservationRepository:
                 "endpoint_country": m.endpoint_country,
                 "resolved_country": m.resolved_country,
                 "resolved_source": m.resolved_source,
-                "conflict": m.conflict,
-                "disagreement": m.disagreement,
+                "country_conflict": m.country_conflict,
+                "claimed_state": m.claimed_state,
+                "claimed_city": m.claimed_city,
+                "resolved_state": m.resolved_state,
+                "resolved_city": m.resolved_city,
+                "state_conflict": m.state_conflict,
+                "city_conflict": m.city_conflict,
                 "candidates": list(m.candidates or []),
                 "instance_id": m.instance_id,
             }
@@ -405,50 +436,90 @@ class ObservationRepository:
 
         Each exit counts once, with the verdict of its latest observation, so
         re-checks of the same exit change nothing and a re-attribution after a
-        database change simply rewrites the verdicts. ``breakdown`` lists the
-        contradicted (claimed, resolved) pairs with the number of exits each.
+        database change simply rewrites the verdicts. ``country``, ``state``
+        and ``city`` each hold ``claimed`` / ``confirmed`` / ``contradicted`` /
+        ``open``, where open is a claim with no verdict: nothing independent
+        answered at that level, or the independent sources disagreed.
+        ``breakdown`` lists the contradicted (claimed, resolved) pairs per
+        level with the number of exits each.
         """
         m = ConnectorExitIpModel
-        claimed = m.claimed_country.is_not(None)
-        confirmed = and_(claimed, m.conflict.is_(False), m.disagreement.is_(False))
-        uncertain = and_(claimed, m.conflict.is_(False), m.disagreement.is_(True))
+
+        def counted(condition: Any) -> Any:
+            return func.sum(case((condition, 1), else_=0))
+
         totals = select(
             m.connector_id,
             func.count().label("exits"),
-            func.sum(case((claimed, 1), else_=0)).label("claimed"),
-            func.sum(case((confirmed, 1), else_=0)).label("confirmed"),
-            func.sum(case((m.conflict.is_(True), 1), else_=0)).label("contradicted"),
-            func.sum(case((uncertain, 1), else_=0)).label("uncertain"),
+            counted(m.claimed_country.is_not(None)).label("claimed"),
+            counted(m.country_conflict.is_(False)).label("confirmed"),
+            counted(m.country_conflict.is_(True)).label("contradicted"),
+            counted(and_(m.claimed_country.is_not(None), m.country_conflict.is_(None))).label("open"),
+            counted(m.claimed_state.is_not(None)).label("state_claimed"),
+            counted(m.state_conflict.is_(False)).label("state_confirmed"),
+            counted(m.state_conflict.is_(True)).label("state_contradicted"),
+            counted(and_(m.claimed_state.is_not(None), m.state_conflict.is_(None))).label("state_open"),
+            counted(m.claimed_city.is_not(None)).label("city_claimed"),
+            counted(m.city_conflict.is_(False)).label("city_confirmed"),
+            counted(m.city_conflict.is_(True)).label("city_contradicted"),
+            counted(and_(m.claimed_city.is_not(None), m.city_conflict.is_(None))).label("city_open"),
         ).group_by(m.connector_id)
-        wrong = (
-            select(m.connector_id, m.claimed_country, m.country, func.count().label("exits"))
-            .where(m.conflict.is_(True))
-            .group_by(m.connector_id, m.claimed_country, m.country)
-        )
+        wrong_by_level = {
+            "country": (
+                select(m.connector_id, m.claimed_country.label("claimed"), m.country.label("observed"), func.count().label("exits"))
+                .where(m.country_conflict.is_(True))
+                .group_by(m.connector_id, m.claimed_country, m.country)
+            ),
+            "state": (
+                select(m.connector_id, m.claimed_state.label("claimed"), m.resolved_state.label("observed"), func.count().label("exits"))
+                .where(m.state_conflict.is_(True))
+                .group_by(m.connector_id, m.claimed_state, m.resolved_state)
+            ),
+            "city": (
+                select(m.connector_id, m.claimed_city.label("claimed"), m.resolved_city.label("observed"), func.count().label("exits"))
+                .where(m.city_conflict.is_(True))
+                .group_by(m.connector_id, m.claimed_city, m.resolved_city)
+            ),
+        }
         if connector_ids is not None:
             if not connector_ids:
                 return []
             totals = totals.where(m.connector_id.in_(connector_ids))
-            wrong = wrong.where(m.connector_id.in_(connector_ids))
+            wrong_by_level = {level: q.where(m.connector_id.in_(connector_ids)) for level, q in wrong_by_level.items()}
         if since is not None:
             totals = totals.where(m.last_seen >= since)
-            wrong = wrong.where(m.last_seen >= since)
+            wrong_by_level = {level: q.where(m.last_seen >= since) for level, q in wrong_by_level.items()}
         rows = {
             row.connector_id: {
                 "connector_id": row.connector_id,
                 "exits": int(row.exits or 0),
-                "claimed": int(row.claimed or 0),
-                "confirmed": int(row.confirmed or 0),
-                "contradicted": int(row.contradicted or 0),
-                "uncertain": int(row.uncertain or 0),
+                "country": {
+                    "claimed": int(row.claimed or 0),
+                    "confirmed": int(row.confirmed or 0),
+                    "contradicted": int(row.contradicted or 0),
+                    "open": int(row.open or 0),
+                },
+                "state": {
+                    "claimed": int(row.state_claimed or 0),
+                    "confirmed": int(row.state_confirmed or 0),
+                    "contradicted": int(row.state_contradicted or 0),
+                    "open": int(row.state_open or 0),
+                },
+                "city": {
+                    "claimed": int(row.city_claimed or 0),
+                    "confirmed": int(row.city_confirmed or 0),
+                    "contradicted": int(row.city_contradicted or 0),
+                    "open": int(row.city_open or 0),
+                },
                 "breakdown": [],
             }
             for row in (await self._session.execute(totals)).all()
         }
-        for row in (await self._session.execute(wrong)).all():
-            rows[row.connector_id]["breakdown"].append(
-                {"claimed_country": row.claimed_country, "observed_country": row.country, "exits": int(row.exits)}
-            )
+        for level, query in wrong_by_level.items():
+            for row in (await self._session.execute(query)).all():
+                rows[row.connector_id]["breakdown"].append(
+                    {"level": level, "claimed": row.claimed, "observed": row.observed, "exits": int(row.exits)}
+                )
         for entry in rows.values():
             entry["breakdown"].sort(key=lambda b: -b["exits"])
         return list(rows.values())
@@ -471,7 +542,10 @@ class ObservationRepository:
 
     # --- distinct exits per connector -----------------------------------------------------
 
-    _LATEST_STATE = ("proxy_id", "source", "claimed_country", "resolved_source", "conflict", "disagreement")
+    _LATEST_STATE = (
+        "proxy_id", "source", "claimed_country", "resolved_source", "country_conflict",
+        "claimed_state", "claimed_city", "resolved_state", "resolved_city", "state_conflict", "city_conflict",
+    )
 
     async def add_exit_ips(self, exits: dict[tuple[str, str], ExitSighting]) -> None:
         """Upsert (connector, ip) rows: first sighting kept, last sighting and count advanced.
@@ -547,8 +621,13 @@ class ObservationRepository:
                 j.claimed_country,
                 j.resolved_country,
                 j.resolved_source.value if j.resolved_source else None,
-                j.conflict,
-                j.disagreement,
+                j.country_conflict,
+                j.claimed_state,
+                j.claimed_city,
+                j.resolved_state,
+                j.resolved_city,
+                j.state_conflict,
+                j.city_conflict,
             )
             for j in sorted(judgements, key=lambda j: j.judged_at)
             if j.connector_id
@@ -563,8 +642,13 @@ class ObservationRepository:
             column("claimed_country", String),
             column("country", String),
             column("resolved_source", String),
-            column("conflict", Boolean),
-            column("disagreement", Boolean),
+            column("country_conflict", Boolean),
+            column("claimed_state", String),
+            column("claimed_city", String),
+            column("resolved_state", String),
+            column("resolved_city", String),
+            column("state_conflict", Boolean),
+            column("city_conflict", Boolean),
             name="judged",
         ).data(data)
         table = cast("Table", ConnectorExitIpModel.__table__)
@@ -581,8 +665,15 @@ class ObservationRepository:
                 claimed_country=judged.c.claimed_country,
                 country=func.coalesce(judged.c.country, table.c.country),
                 resolved_source=judged.c.resolved_source,
-                conflict=judged.c.conflict,
-                disagreement=judged.c.disagreement,
+                # A VALUES column that is NULL in every row is untyped text to
+                # Postgres; the casts keep an all-NULL batch assignable.
+                country_conflict=cast_sql(judged.c.country_conflict, Boolean),
+                claimed_state=cast_sql(judged.c.claimed_state, String),
+                claimed_city=cast_sql(judged.c.claimed_city, String),
+                resolved_state=cast_sql(judged.c.resolved_state, String),
+                resolved_city=cast_sql(judged.c.resolved_city, String),
+                state_conflict=cast_sql(judged.c.state_conflict, Boolean),
+                city_conflict=cast_sql(judged.c.city_conflict, Boolean),
             )
         )
         result = await self._session.execute(statement)
@@ -670,16 +761,7 @@ class ObservationRepository:
             query = query.where(m.country == country.upper())
         if claimed_country:
             query = query.where(m.claimed_country == claimed_country.upper())
-        if verdict == "contradicted":
-            query = query.where(m.conflict.is_(True))
-        elif verdict == "uncertain":
-            query = query.where(m.conflict.is_(False), m.disagreement.is_(True))
-        elif verdict == "confirmed":
-            query = query.where(
-                m.conflict.is_(False), m.disagreement.is_(False), m.claimed_country.is_not(None)
-            )
-        elif verdict == "no_claim":
-            query = query.where(m.claimed_country.is_(None))
+        query = query.where(*_verdict_clauses(m, verdict))
         query = query.order_by(m.last_seen.desc(), m.connector_id, m.ip).offset(offset).limit(limit)
         result = (await self._session.execute(query)).all()
         total = int(result[0].total) if result else 0

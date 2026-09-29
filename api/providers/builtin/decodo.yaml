@@ -57,7 +57,7 @@ connector_fields:
     details: >-
       Dynamic keeps one gateway proxy and renders the vendor credentials per request: a client -sessid-
       always maps to the same vendor session, a request without one gets a fresh session and the vendor
-      rotates the exit, and -cc- picks the country per request. "Number of proxies" does not apply and the
+      rotates the exit, -cc- picks the country per request and -st- and -city- narrow it. "Number of proxies" does not apply and the
       listed countries become an allow-list. The gateway is not health-checked and counts as healthy.
     show_when: { field: credential.proxy_type, in: [residential, mobile] }
   - key: exit_sample_percent
@@ -125,15 +125,20 @@ proxy_types:
       separator: "-"
       parts:
         - text: "user-{credential.username}"
-        - text: "country-{connector.country_code|lower}"
-          when: { field: connector.country_code }
+        - text: "country-{geo.country|lower}"
+          when: { field: geo.country }
+        # Dynamic sessions: a US state as its name (state-us_new_york), a city as a slug.
+        - text: "state-{geo.country|lower}_{geo.state_name}"
+          when: { field: geo.state_name }
+        - text: "city-{geo.city}"
+          when: { field: geo.city }
         - text: "session-{session_id}"
         - text: "sessionduration-{connector.session_duration_minutes}"
           when: { field: connector.session_duration_minutes }
     password: "{credential.password}"
     tags: [decodo, residential]
     metadata:
-      country_code: "{connector.country_code}"
+      country_code: "{geo.country}"
       session_duration_minutes: "{connector.session_duration_minutes}"
 
   - key: mobile
@@ -145,15 +150,20 @@ proxy_types:
       separator: "-"
       parts:
         - text: "user-{credential.username}"
-        - text: "country-{connector.country_code|lower}"
-          when: { field: connector.country_code }
+        - text: "country-{geo.country|lower}"
+          when: { field: geo.country }
+        # Dynamic sessions: a US state as its name (state-us_new_york), a city as a slug.
+        - text: "state-{geo.country|lower}_{geo.state_name}"
+          when: { field: geo.state_name }
+        - text: "city-{geo.city}"
+          when: { field: geo.city }
         - text: "session-{session_id}"
         - text: "sessionduration-{connector.session_duration_minutes}"
           when: { field: connector.session_duration_minutes }
     password: "{credential.password}"
     tags: [decodo, mobile]
     metadata:
-      country_code: "{connector.country_code}"
+      country_code: "{geo.country}"
       session_duration_minutes: "{connector.session_duration_minutes}"
 
   - key: isp
@@ -171,6 +181,7 @@ proxy_types:
       url: https://ip.decodo.com/json
       ip_path: proxy.ip
       country_path: country.code
+      city_path: city.name
     tags: [decodo, isp]
     metadata:
       port: "{port}"
@@ -190,6 +201,7 @@ proxy_types:
       url: https://ip.decodo.com/json
       ip_path: proxy.ip
       country_path: country.code
+      city_path: city.name
     tags: [decodo, datacenter]
     metadata:
       port: "{port}"

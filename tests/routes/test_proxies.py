@@ -191,8 +191,9 @@ class TestProxyEndpoints:
         from unittest.mock import AsyncMock
 
         from api.geo.attributor import ProxyAttributor
+        from api.models.location import LocationTarget
 
-        monkeypatch.setattr(ProxyAttributor, "locate", AsyncMock(return_value=("198.51.100.7", "NL")))
+        monkeypatch.setattr(ProxyAttributor, "locate", AsyncMock(return_value=("198.51.100.7", LocationTarget(country="NL"))))
         project_id = created_project["id"]
         proxy_id = created_proxy["id"]
 
