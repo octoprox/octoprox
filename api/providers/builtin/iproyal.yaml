@@ -46,7 +46,7 @@ connector_fields:
     details: >-
       Dynamic keeps one gateway proxy and renders the vendor credentials per request: a client -sessid-
       always maps to the same vendor session, a request without one gets a fresh session and the vendor
-      rotates the exit, and -cc- picks the country per request. "Number of proxies" does not apply and the
+      rotates the exit, -cc- picks the country per request and -st- and -city- narrow it. "Number of proxies" does not apply and the
       listed countries become an allow-list. The gateway is not health-checked and counts as healthy.
   - key: exit_sample_percent
     label: Exit sampling (%)
@@ -125,12 +125,18 @@ proxy_types:
       separator: "_"
       parts:
         - text: "{credential.password}"
-        - text: "country-{connector.country_code|lower}"
-          when: { field: connector.country_code }
+        - text: "country-{geo.country|lower}"
+          when: { field: geo.country }
+        # Dynamic sessions: US state and city as plain names; the password's own
+        # separator is the underscore, so the slug's underscores are dropped.
+        - text: "state-{geo.state_name|nospace}"
+          when: { field: geo.state_name }
+        - text: "city-{geo.city|nospace}"
+          when: { field: geo.city }
         - text: "session-{session_id}"
         - text: "lifetime-{connector.session_lifetime}"
           when: { field: connector.session_lifetime }
     tags: [iproyal, residential]
     metadata:
-      country_code: "{connector.country_code}"
+      country_code: "{geo.country}"
       session_lifetime: "{connector.session_lifetime}"

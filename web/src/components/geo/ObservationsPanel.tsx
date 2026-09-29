@@ -4,24 +4,18 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useQueries, useQuery } from '@tanstack/react-query'
 import { ColumnDef, ColumnFiltersState } from '@tanstack/react-table'
-import { AlertTriangle, Globe } from 'lucide-react'
+import { Globe } from 'lucide-react'
 import { fetchGeoObservations, fetchProjectConnectors, fetchProjects, IpObservation, ObservationFilters, ObservationVerdict } from '../../api/client'
 import { DataTable } from '../DataTable'
 import { EmptyState } from '../layout/Page'
 import { Badge, Card, Select } from '../ui'
 import { formatDateTime, relativeTime } from '../../utils/format'
-import { HeaderWithTip, TIPS } from './columns'
-
-function verdictOf(o: IpObservation): ObservationVerdict {
-  if (o.conflict) return 'contradicted'
-  if (o.disagreement) return 'uncertain'
-  return o.claimed_country ? 'confirmed' : 'no_claim'
-}
+import { HeaderWithTip, TIPS, VerdictCell, countryVerdict, placeLabel } from './columns'
 
 const SOURCE_OPTIONS = ['discovery', 'health_check', 'geo_lookup', 'manual', 'preflight'].map((s) => ({ value: s, label: s.replace('_', ' ') }))
 const VERDICT_OPTIONS: { value: ObservationVerdict; label: string }[] = [
   { value: 'contradicted', label: 'contradicted' },
-  { value: 'uncertain', label: 'uncertain' },
+  { value: 'open', label: 'open' },
   { value: 'confirmed', label: 'confirmed' },
   { value: 'no_claim', label: 'no claim' },
 ]
@@ -125,32 +119,27 @@ export function ObservationsPanel({ projectId }: { projectId?: string }) {
     },
     { accessorKey: 'ip', header: 'Exit IP', size: 140, enableSorting: false, meta: { filterVariant: 'text' as const }, cell: ({ getValue }) => <span className="font-mono text-xs">{getValue<string>()}</span> },
     {
-      id: 'claimed', accessorFn: (o: IpObservation) => o.claimed_country ?? '', size: 120, enableSorting: false,
+      id: 'claimed', accessorFn: (o: IpObservation) => o.claimed_country ?? '', size: 150, enableSorting: false,
       header: () => <HeaderWithTip label="Vendor said" tip={TIPS.vendorSaid} />,
       meta: { filterVariant: 'text' as const },
-      cell: ({ getValue }) => <span className="font-mono text-xs">{getValue<string>() || '-'}</span>,
+      cell: ({ row }) => <span className="font-mono text-xs">{placeLabel(row.original.claimed_country, row.original.claimed_state, row.original.claimed_city)}</span>,
     },
     {
-      id: 'resolved', accessorFn: (o: IpObservation) => o.resolved_country ?? '', size: 150, enableSorting: false,
+      id: 'resolved', accessorFn: (o: IpObservation) => o.resolved_country ?? '', size: 180, enableSorting: false,
       header: () => <HeaderWithTip label="Resolved" tip={TIPS.resolved} />,
       meta: { filterVariant: 'text' as const },
       cell: ({ row }) => (
-        <span className="font-mono text-xs">
-          {row.original.resolved_country ?? '-'}
-          {row.original.resolved_source && <span className="text-fg-subtle font-sans"> via {row.original.resolved_source}</span>}
-        </span>
+        <div className="min-w-0">
+          <div className="font-mono text-xs truncate">{placeLabel(row.original.resolved_country, row.original.claimed_state ? row.original.resolved_state : null, row.original.claimed_city ? row.original.resolved_city : null)}</div>
+          {row.original.resolved_source && <div className="text-[11px] text-fg-subtle">via {row.original.resolved_source}</div>}
+        </div>
       ),
     },
     {
-      id: 'verdict', accessorFn: verdictOf, size: 150, enableSorting: false,
+      id: 'verdict', accessorFn: countryVerdict, size: 160, enableSorting: false,
       header: () => <HeaderWithTip label="Verdict" tip={TIPS.verdict} />,
       meta: { filterVariant: 'select' as const, filterOptions: VERDICT_OPTIONS },
-      cell: ({ row }) => {
-        const v = verdictOf(row.original)
-        if (v === 'contradicted') return <Badge color="red" className="inline-flex items-center gap-1"><AlertTriangle className="w-3 h-3" /> contradicted</Badge>
-        if (v === 'uncertain') return <Badge color="yellow">uncertain</Badge>
-        return v === 'confirmed' ? <Badge color="green">confirmed</Badge> : <Badge color="gray">no claim</Badge>
-      },
+      cell: ({ row }) => <VerdictCell row={row.original} />,
     },
     { accessorKey: 'proxy_id', header: 'Proxy', size: 110, enableSorting: false, meta: { filterVariant: 'text' as const }, cell: ({ getValue }) => <span className="font-mono text-[11px] text-fg-muted" title={getValue<string | null>() ?? undefined}>{(getValue<string | null>() ?? '').slice(0, 8) || '-'}</span> },
   ], [projectId, connectorOptions])

@@ -175,7 +175,7 @@ class TestOxylabsCountryGroups:
     async def test_port_type_lists_countries_but_never_on_demand(self, builtins: dict[str, ProviderDescriptor], runtime: SdkRuntime) -> None:
         credential = make_credential("oxylabs", {"proxy_type": "isp", "username": "alice", "password": "pw"})
         provider = DescriptorProvider(builtins["oxylabs"], make_connector("oxylabs", {"num_proxies": 1}), credential, runtime)
-        assert provider.country_key is None
+        assert not provider.geo_targeted
         assert not provider.accepts_request_country()
 
 

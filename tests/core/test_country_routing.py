@@ -15,6 +15,7 @@ from api.core.proxy_server import ProxyServer
 from api.db.redis import RedisClient
 from api.models.connector import Connector, ProxyTarget, normalize_country_list
 from api.models.credential import Credential, CredentialType
+from api.models.location import LocationTarget
 from api.models.project import Project
 from api.models.proxy import Proxy, ProxyProtocol, ProxyStatus
 
@@ -120,42 +121,42 @@ class TestEligibilityRules:
         manager._proxies["px-us-ca"] = _healthy(Proxy(id="px-us-ca", host="ca", port=1, connector_id="conn-us", metadata={"country": "CA"}))
         return manager
 
-    def _ids(self, manager: ProxyManager, country: str | None = None) -> set[str]:
-        return {p.id for p in manager.get_routable_proxies_for_project("project-1", country=country)}
+    def _ids(self, manager: ProxyManager, location: LocationTarget | None = None) -> set[str]:
+        return {p.id for p in manager.get_routable_proxies_for_project("project-1", location=location)}
 
     def test_no_country_returns_everything(self, manager: ProxyManager) -> None:
         assert self._ids(manager) == {"px-uk-1", "px-fr", "px-de", "px-unknown", "px-us-ca"}
 
     def test_connector_list_covers_unlabelled_proxies(self, manager: ProxyManager) -> None:
-        assert self._ids(manager, "GB") == {"px-uk-1"}
-        assert self._ids(manager, "ie") == {"px-uk-1"}
+        assert self._ids(manager, LocationTarget(country="GB")) == {"px-uk-1"}
+        assert self._ids(manager, LocationTarget(country="IE")) == {"px-uk-1"}
 
     def test_per_proxy_country_matches_case_insensitively(self, manager: ProxyManager) -> None:
-        assert self._ids(manager, "FR") == {"px-fr"}
-        assert self._ids(manager, "de") == {"px-de"}
+        assert self._ids(manager, LocationTarget(country="FR")) == {"px-fr"}
+        assert self._ids(manager, LocationTarget(country="DE")) == {"px-de"}
 
     async def test_unlabelled_proxy_on_unlisted_connector_never_matches(self, manager: ProxyManager) -> None:
-        assert "px-unknown" not in self._ids(manager, "FR")
-        assert self._ids(manager, "JP") == set()
-        assert not await manager.are_all_proxies_quarantined("project-1", country="JP")
+        assert "px-unknown" not in self._ids(manager, LocationTarget(country="FR"))
+        assert self._ids(manager, LocationTarget(country="JP")) == set()
+        assert not await manager.are_all_proxies_quarantined("project-1", location=LocationTarget(country="JP"))
 
     def test_vendor_mismatch_serves_neither_country(self, manager: ProxyManager) -> None:
         # Declared US, discovered in CA: the reported country rules it out for US,
         # and the connector's list keeps it out of CA requests.
-        assert self._ids(manager, "US") == set()
-        assert self._ids(manager, "CA") == set()
+        assert self._ids(manager, LocationTarget(country="US")) == set()
+        assert self._ids(manager, LocationTarget(country="CA")) == set()
 
     async def test_select_respects_country(self, manager: ProxyManager) -> None:
         for _ in range(3):
-            selected = await manager.select_proxy_for_project("project-1", country="GB")
+            selected = await manager.select_proxy_for_project("project-1", location=LocationTarget(country="GB"))
             assert selected is not None and selected.id == "px-uk-1"
 
     async def test_sticky_session_rebinds_when_country_changes(self, manager: ProxyManager) -> None:
         manager._redis_client.get_sticky_binding = AsyncMock(return_value=None)
         manager._redis_client.set_sticky_binding = AsyncMock()
         manager.set_project_strategy("project-1", "sticky")
-        first = await manager.select_proxy_for_project("project-1", "sess-1", country="GB")
-        second = await manager.select_proxy_for_project("project-1", "sess-1", country="FR")
+        first = await manager.select_proxy_for_project("project-1", "sess-1", location=LocationTarget(country="GB"))
+        second = await manager.select_proxy_for_project("project-1", "sess-1", location=LocationTarget(country="FR"))
         assert first is not None and first.id == "px-uk-1"
         assert second is not None and second.id == "px-fr"
 
@@ -202,8 +203,8 @@ class TestOnDemandCountryGroups:
         assert not manager._accepts_request_country(manager._connectors["conn-any"])
 
     async def test_first_request_provisions_group_and_selects_from_it(self, manager: ProxyManager) -> None:
-        assert manager.get_routable_proxies_for_project("project-1", country="DE") == []
-        selected = await manager.select_proxy_for_project("project-1", country="de")
+        assert manager.get_routable_proxies_for_project("project-1", location=LocationTarget(country="DE")) == []
+        selected = await manager.select_proxy_for_project("project-1", location=LocationTarget(country="DE"))
         assert selected is not None
         assert selected.metadata["geo"] == "DE"
         assert selected.username.startswith("customer-alice-cc-DE-sessid-")
@@ -214,26 +215,26 @@ class TestOnDemandCountryGroups:
         assert all(p.status == ProxyStatus.HEALTHY for p in de_group)
 
     async def test_group_is_created_once(self, manager: ProxyManager) -> None:
-        await manager.select_proxy_for_project("project-1", country="DE")
-        await manager.select_proxy_for_project("project-1", country="DE")
+        await manager.select_proxy_for_project("project-1", location=LocationTarget(country="DE"))
+        await manager.select_proxy_for_project("project-1", location=LocationTarget(country="DE"))
         assert len([p for p in manager._proxies.values() if p.metadata.get("geo") == "DE"]) == 2
 
     async def test_requests_without_country_skip_geo_groups(self, manager: ProxyManager) -> None:
-        await manager.select_proxy_for_project("project-1", country="DE")
+        await manager.select_proxy_for_project("project-1", location=LocationTarget(country="DE"))
         ids = {p.id for p in manager.get_routable_proxies_for_project("project-1")}
         assert ids == {"px-aaa", "px-bbb"}
 
     async def test_pool_health_counts_on_demand_groups(self, manager: ProxyManager) -> None:
         """Dashboard health is not routing: the DE group is healthy and must not read as unhealthy."""
-        await manager.select_proxy_for_project("project-1", country="DE")
+        await manager.select_proxy_for_project("project-1", location=LocationTarget(country="DE"))
         all_proxies = manager.get_proxies_for_project("project-1")
         healthy = manager.get_healthy_proxies_for_project("project-1")
         assert len(all_proxies) == 4  # 2 base + 2 on demand
         assert {p.id for p in healthy} == {p.id for p in all_proxies}
 
     async def test_geo_group_serves_only_its_country(self, manager: ProxyManager) -> None:
-        await manager.select_proxy_for_project("project-1", country="DE")
-        assert manager.get_routable_proxies_for_project("project-1", country="FR") == []
+        await manager.select_proxy_for_project("project-1", location=LocationTarget(country="DE"))
+        assert manager.get_routable_proxies_for_project("project-1", location=LocationTarget(country="FR")) == []
 
     async def test_group_provisioned_by_a_peer_is_adopted_not_duplicated(self, manager: ProxyManager) -> None:
         """Cluster: a peer created the DE group and released the lease before our cache heard about it."""
@@ -250,7 +251,7 @@ class TestOnDemandCountryGroups:
         manager._fetch_connector_proxies = AsyncMock(return_value=list(in_db.values()))  # type: ignore[method-assign]
         manager.reload_proxy = AsyncMock(side_effect=lambda pid: manager._proxies.__setitem__(pid, in_db[pid]))  # type: ignore[method-assign]
 
-        selected = await manager.select_proxy_for_project("project-1", country="DE")
+        selected = await manager.select_proxy_for_project("project-1", location=LocationTarget(country="DE"))
 
         assert selected is not None and selected.id in {"peer-0", "peer-1"}
         de_group = [p for p in manager._proxies.values() if p.metadata.get("geo") == "DE"]
@@ -258,7 +259,7 @@ class TestOnDemandCountryGroups:
 
     async def test_lease_lost_waits_and_provisions_nothing(self, manager: ProxyManager) -> None:
         manager._redis_client.client.set = AsyncMock(return_value=False)
-        selected = await manager.select_proxy_for_project("project-1", country="DE")
+        selected = await manager.select_proxy_for_project("project-1", location=LocationTarget(country="DE"))
         assert selected is None
         assert not any(p.metadata.get("geo") for p in manager._proxies.values())
 
@@ -285,22 +286,33 @@ class TestProxyServerCountryAuth:
         assert result is not None
         assert result.project.id == project.id
         assert result.sessid == "abc"
-        assert result.country == "US"
+        assert result.location == LocationTarget(country="US") and result.location_error is None
 
     def test_country_alone(self) -> None:
         project = Project(name="P", username="geo", password="pw")
         result = self._server(project)._authenticate_project(self._headers("geo-cc-de", "pw"))
         assert result is not None
         assert result.sessid is None
-        assert result.country == "DE"
+        assert result.location == LocationTarget(country="DE")
 
     def test_wrong_password_with_country_fails(self) -> None:
         project = Project(name="P", username="geo", password="pw")
         assert self._server(project)._authenticate_project(self._headers("geo-cc-de", "nope")) is None
 
-    def test_no_proxy_message_mentions_country(self) -> None:
-        assert "country US" in ProxyServer._no_proxy_message("US")
-        assert "country" not in ProxyServer._no_proxy_message(None)
+    def test_no_proxy_message_names_the_place(self) -> None:
+        assert "for US and" in ProxyServer._no_proxy_message(LocationTarget(country="US"))
+        assert "US, state NY, city new_york" in ProxyServer._no_proxy_message(LocationTarget(country="US", state="NY", city="new_york"))
+        assert "for this domain" in ProxyServer._no_proxy_message(None)
+
+    def test_state_and_city_are_extracted(self) -> None:
+        project = Project(name="P", username="geo", password="pw")
+        result = self._server(project)._authenticate_project(self._headers("geo-cc-us-st-ny-city-new_york-sessid-abc", "pw"))
+        assert result is not None
+        assert result.location == LocationTarget(country="US", state="NY", city="new_york") and result.sessid == "abc"
+        assert result.location_error is None
+        # A state without a country authenticates but cannot be routed.
+        orphan = self._server(project)._authenticate_project(self._headers("geo-st-ny", "pw"))
+        assert orphan is not None and orphan.location_error
 
 
 class TestDatabaseBackedCountryRouting:
@@ -341,10 +353,10 @@ class TestDatabaseBackedCountryRouting:
             await proxy_manager.add_proxy(p)
 
         assert {p.id for p in proxy_manager.get_healthy_proxies_for_project(project.id)} == {px_us.id, px_any.id}
-        assert [p.id for p in proxy_manager.get_routable_proxies_for_project(project.id, country="US")] == [px_us.id]
-        assert proxy_manager.get_routable_proxies_for_project(project.id, target_host="blocked.com", country="US") == []
-        assert proxy_manager.get_routable_proxies_for_project(project.id, country="DE") == []
-        selected = await proxy_manager.select_proxy_for_project(project.id, target_host="allowed.com", country="us")
+        assert [p.id for p in proxy_manager.get_routable_proxies_for_project(project.id, location=LocationTarget(country="US"))] == [px_us.id]
+        assert proxy_manager.get_routable_proxies_for_project(project.id, target_host="blocked.com", location=LocationTarget(country="US")) == []
+        assert proxy_manager.get_routable_proxies_for_project(project.id, location=LocationTarget(country="DE")) == []
+        selected = await proxy_manager.select_proxy_for_project(project.id, target_host="allowed.com", location=LocationTarget(country="US"))
         assert selected is not None and selected.id == px_us.id
 
 
@@ -373,7 +385,7 @@ class TestDynamicSessions:
 
     def test_gateway_serves_any_country(self, manager: ProxyManager) -> None:
         assert [p.id for p in manager.get_routable_proxies_for_project("project-1")] == ["gw"]
-        assert [p.id for p in manager.get_routable_proxies_for_project("project-1", country="DE")] == ["gw"]
+        assert [p.id for p in manager.get_routable_proxies_for_project("project-1", location=LocationTarget(country="DE"))] == ["gw"]
         assert not manager._accepts_request_country(manager._connectors["conn-dyn"])
         assert manager.get_connector_target(manager._connectors["conn-dyn"]) == ProxyTarget(
             total=1, dynamic=True, exit_sample_percent=5
@@ -381,13 +393,13 @@ class TestDynamicSessions:
 
     def test_allow_list_filters_at_the_connector(self, manager: ProxyManager) -> None:
         manager._connectors["conn-dyn"].config["country_code"] = ["US", "DE"]
-        assert [p.id for p in manager.get_routable_proxies_for_project("project-1", country="de")] == ["gw"]
-        assert manager.get_routable_proxies_for_project("project-1", country="FR") == []
+        assert [p.id for p in manager.get_routable_proxies_for_project("project-1", location=LocationTarget(country="DE"))] == ["gw"]
+        assert manager.get_routable_proxies_for_project("project-1", location=LocationTarget(country="FR")) == []
         assert [p.id for p in manager.get_routable_proxies_for_project("project-1")] == ["gw"]
 
     async def test_explicit_session_is_derived_and_stable(self, manager: ProxyManager) -> None:
-        first = await manager.select_proxy_for_project("project-1", "order-1", country="de")
-        second = await manager.select_proxy_for_project("project-1", "order-1", country="de")
+        first = await manager.select_proxy_for_project("project-1", "order-1", location=LocationTarget(country="DE"))
+        second = await manager.select_proxy_for_project("project-1", "order-1", location=LocationTarget(country="DE"))
         assert first is not None and second is not None
         assert first.id == "gw" and first.username == second.username
         assert first.username.startswith("customer-alice-cc-DE-sessid-") and first.username.endswith("-sesstime-10")
@@ -403,3 +415,90 @@ class TestDynamicSessions:
         assert first is not None and second is not None
         assert first.username != second.username
         assert "session_id" not in first.metadata and "-cc-" not in first.username
+
+
+class TestPlaceRouting:
+    """-st- and -city-: fixed exits match their known place; dynamic gateways render it."""
+
+    @pytest.fixture
+    def manager(self) -> ProxyManager:
+        manager = _in_memory_manager()
+        manager._projects["project-1"] = Project(id="project-1", name="P", username="p", password="pw")
+        manager._credentials["cred-static"] = Credential(
+            id="cred-static", name="Static", type=CredentialType.STATIC_PROXY_PROVIDER, project_id="project-1", config={},
+        )
+        manager._connectors["conn-static"] = Connector(
+            id="conn-static", name="Static", credential_id="cred-static",
+            credential_type=CredentialType.STATIC_PROXY_PROVIDER, project_id="project-1",
+        )
+        places = {
+            "px-ny": {"country": "US", "location": {"state_code": "NY", "city": "New York"}},
+            "px-la": {"country": "US", "location": {"state_code": "CA", "city": "Los Angeles"}},
+            "px-us-unknown": {"country": "US"},
+            # The databases say Austin; the operator pinned Buffalo, and the pin wins.
+            "px-pinned": {
+                "country": "US",
+                "location": {"state_code": "TX", "city": "Austin"},
+                "manual_location": {"state_code": "NY", "city": "buffalo"},
+            },
+        }
+        for proxy_id, metadata in places.items():
+            manager._proxies[proxy_id] = _healthy(Proxy(id=proxy_id, host=proxy_id, port=1, connector_id="conn-static", metadata=metadata))
+        manager._credentials["cred-oxy"] = Credential(
+            id="cred-oxy", name="Oxylabs", type="oxylabs", project_id="project-1",
+            config={"proxy_type": "residential", "username": "alice", "password": "s3cret"},
+        )
+        manager._connectors["conn-dyn"] = Connector(
+            id="conn-dyn", name="Oxy dynamic", credential_id="cred-oxy", credential_type="oxylabs",
+            project_id="project-1", config={"session_mode": "dynamic", "session_duration_minutes": 10},
+        )
+        manager._proxies["gw"] = _healthy(Proxy(
+            id="gw", host="pr.oxylabs.io", port=7777, protocol=ProxyProtocol.HTTP,
+            username="customer-alice-sessid-probe0probe0-sesstime-10", password="{password}",
+            connector_id="conn-dyn",
+            metadata={"provider": "oxylabs", "proxy_type": "residential", "session_id": "probe0probe0", "dynamic_sessions": "true"},
+        ))
+        manager._connectors["conn-pool"] = Connector(
+            id="conn-pool", name="Oxy pool", credential_id="cred-oxy", credential_type="oxylabs",
+            project_id="project-1", config={"num_proxies": 1, "session_duration_minutes": 10, "country_code": ["US"]},
+        )
+        manager._proxies["slot"] = _healthy(Proxy(
+            id="slot", host="pr.oxylabs.io", port=7777, protocol=ProxyProtocol.HTTP,
+            username="customer-alice-cc-US-sessid-aaa-sesstime-10", password="{password}", connector_id="conn-pool",
+            metadata={"provider": "oxylabs", "proxy_type": "residential", "session_id": "aaa", "geo": "US"},
+        ))
+        return manager
+
+    def _ids(self, manager: ProxyManager, location: LocationTarget) -> set[str]:
+        return {p.id for p in manager.get_routable_proxies_for_project("project-1", location=location)}
+
+    def test_country_alone_is_unchanged(self, manager: ProxyManager) -> None:
+        assert self._ids(manager, LocationTarget(country="US")) == {"px-ny", "px-la", "px-us-unknown", "px-pinned", "gw", "slot"}
+
+    def test_state_matches_known_regions_and_the_gateway(self, manager: ProxyManager) -> None:
+        assert self._ids(manager, LocationTarget(country="US", state="NY")) == {"px-ny", "px-pinned", "gw"}
+        assert self._ids(manager, LocationTarget(country="US", state="CA")) == {"px-la", "gw"}
+
+    def test_city_matches_the_slug(self, manager: ProxyManager) -> None:
+        assert self._ids(manager, LocationTarget(country="US", city="new_york")) == {"px-ny", "gw"}
+        assert self._ids(manager, LocationTarget(country="US", state="NY", city="buffalo")) == {"px-pinned", "gw"}
+        assert self._ids(manager, LocationTarget(country="US", state="TX", city="austin")) == {"gw"}
+
+    def test_unknown_places_and_pooled_slots_are_never_widened(self, manager: ProxyManager) -> None:
+        narrowed = self._ids(manager, LocationTarget(country="US", state="CA"))
+        assert "px-us-unknown" not in narrowed and "slot" not in narrowed
+
+    def test_gateway_serves_only_what_it_can_say(self, manager: ProxyManager) -> None:
+        # Oxylabs names US states; England has no name on record and nothing else is there.
+        assert self._ids(manager, LocationTarget(country="GB", state="ENG")) == set()
+        assert self._ids(manager, LocationTarget(country="DE", city="berlin")) == {"gw"}
+
+    async def test_select_renders_the_place_and_never_provisions(self, manager: ProxyManager) -> None:
+        manager._provision_country_slots = AsyncMock(return_value=False)  # type: ignore[method-assign]
+        selected = await manager.select_proxy_for_project("project-1", "order-1", location=LocationTarget(country="DE", city="berlin"))
+        assert selected is not None and selected.id == "gw" and "-city-berlin-" in (selected.username or "")
+        assert selected.metadata["geo_city"] == "berlin"
+        assert await manager.select_proxy_for_project("project-1", location=LocationTarget(country="FR", state="IDF")) is None
+        manager._provision_country_slots.assert_not_called()
+        # A message for the client names the whole place.
+        assert not await manager.are_all_proxies_quarantined("project-1", location=LocationTarget(country="FR", state="IDF"))

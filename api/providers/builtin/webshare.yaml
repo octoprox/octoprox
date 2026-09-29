@@ -72,6 +72,7 @@ proxy_types:
       username: username
       password: password
       country: country_code
+      city: city_name
       identity: id
       filter: valid
     tags: [webshare]

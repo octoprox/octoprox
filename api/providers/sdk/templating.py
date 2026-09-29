@@ -8,11 +8,26 @@ Grammar
 ``{credential.username}``            value from the credential config
 ``{connector.country_code|lower}``   with a filter (``lower``, ``upper``, ``urlencode``)
 ``{connector.country_code|or:any}``  fallback when the value is empty
+``{geo.country}`` ``{geo.state}`` ``{geo.city}``  the place this slot or request targets
 ``{session_id}`` ``{index}`` ``{port}`` ``{discovered_ip}`` ``{auth.token}`` ``{item.name}``
 
+The ``geo`` namespace is the place the proxy being rendered is targeted at,
+and is the only thing a template should read the country from. It is set
+per render (:meth:`RenderContext.with_place`):
+for a pooled connector each slot group is rendered with one of the
+connector's listed countries (or the country a client asked for on demand),
+so ``geo.country`` is that group's country; for a dynamic-sessions request
+it is the country rendered for that request (the ``-cc-`` code or the
+allow-list pick) and ``geo.state`` / ``geo.city`` are what the request asked
+for below it. ``geo.state`` is the ISO 3166-2 subdivision code (``NY``),
+``geo.state_name`` that state's name as a slug (``new_york``, US states only)
+and ``geo.city`` the city slug (``los_angeles``). The ``nospace`` filter
+drops the underscores for vendors that want ``losangeles``.
+
 A config value that is a list (a multi-country field) renders as its single
-element, or joined with commas when it holds several. Slot-level rendering
-narrows it to one country via :meth:`RenderContext.with_country`.
+element, or joined with commas when it holds several. The connector's country
+field is such a list and is never narrowed: a template that reads it gets
+the whole list, which is why the country goes through ``geo.country``.
 
 Rendering is plain string substitution - there is no expression language and
 no attribute access, so a descriptor cannot reach anything that is not
@@ -32,6 +47,7 @@ from dataclasses import dataclass, field
 from typing import Any, Literal
 from urllib.parse import quote
 
+from api.models.location import LocationTarget
 from api.providers.sdk.descriptor import (
     Condition,
     ProviderDescriptor,
@@ -57,12 +73,36 @@ class RenderContext:
     connector: dict[str, Any] = field(default_factory=dict)
     auth: dict[str, Any] = field(default_factory=dict)
     item: dict[str, Any] = field(default_factory=dict)
+    # The place this render targets: the slot group's country, or the whole
+    # location a dynamic request asked for. Empty when nothing is targeted.
+    geo: dict[str, Any] = field(default_factory=dict)
     session_id: str | None = None
     index: int | None = None
     port: int | None = None
     discovered_ip: str | None = None
-    slot_country: str | None = None
     secret_keys: frozenset[str] = frozenset()
+
+    @property
+    def target_country(self) -> str | None:
+        """The country this render targets (``geo.country``), or None when none."""
+        country = self.geo.get("country")
+        return country if isinstance(country, str) and country else None
+
+    def _copy(self, **changes: Any) -> RenderContext:
+        values: dict[str, Any] = {
+            "credential": self.credential,
+            "connector": self.connector,
+            "auth": self.auth,
+            "item": self.item,
+            "geo": self.geo,
+            "session_id": self.session_id,
+            "index": self.index,
+            "port": self.port,
+            "discovered_ip": self.discovered_ip,
+            "secret_keys": self.secret_keys,
+        }
+        values.update(changes)
+        return RenderContext(**values)
 
     def lookup(self, path: str) -> Any:
         """Resolve a dotted variable path; unknown paths resolve to ``None``.
@@ -93,6 +133,7 @@ class RenderContext:
             "connector": self.connector,
             "auth": self.auth,
             "item": self.item,
+            "geo": self.geo,
         }
         source = namespaces.get(namespace)
         if source is None:
@@ -112,67 +153,40 @@ class RenderContext:
         discovered_ip: str | None = None,
     ) -> RenderContext:
         """Copy with per-slot variables set."""
-        return RenderContext(
-            credential=self.credential,
-            connector=self.connector,
-            auth=self.auth,
-            item=self.item,
+        return self._copy(
             session_id=session_id if session_id is not None else self.session_id,
             index=index if index is not None else self.index,
             port=port if port is not None else self.port,
             discovered_ip=discovered_ip if discovered_ip is not None else self.discovered_ip,
-            slot_country=self.slot_country,
-            secret_keys=self.secret_keys,
         )
 
-    def with_country(self, key: str, country: str | None) -> RenderContext:
-        """Copy narrowed to one country: ``connector.<key>`` becomes ``country`` (or empty).
+    @staticmethod
+    def _geo_of(target: LocationTarget | None) -> dict[str, str]:
+        if target is None:
+            return {}
+        return {
+            "country": target.country or "",
+            "state": target.state or "",
+            "state_name": target.state_name or "",
+            "city": target.city or "",
+        }
 
-        Used to provision one slot group per country from a connector whose
-        country field lists several, and to geo-target on-demand groups.
+    def with_place(self, target: LocationTarget | None) -> RenderContext:
+        """Copy targeted at ``target``, exposed as the ``geo`` namespace.
+
+        A pooled slot group is rendered with a country alone, one of the
+        connector's listed countries or the one a client asked for on demand.
+        A dynamic request is rendered with everything it asked for, so a
+        template can build a vendor's ``us_new_york`` from ``geo.country`` and
+        ``geo.state_name``. None targets nothing and empties the namespace.
         """
-        connector = dict(self.connector)
-        connector[key] = country if country is not None else ""
-        return RenderContext(
-            credential=self.credential,
-            connector=connector,
-            auth=self.auth,
-            item=self.item,
-            session_id=self.session_id,
-            index=self.index,
-            port=self.port,
-            discovered_ip=self.discovered_ip,
-            slot_country=country,
-            secret_keys=self.secret_keys,
-        )
+        return self._copy(geo=self._geo_of(target))
 
     def with_item(self, item: dict[str, Any]) -> RenderContext:
-        return RenderContext(
-            credential=self.credential,
-            connector=self.connector,
-            auth=self.auth,
-            item=item,
-            session_id=self.session_id,
-            index=self.index,
-            port=self.port,
-            discovered_ip=self.discovered_ip,
-            slot_country=self.slot_country,
-            secret_keys=self.secret_keys,
-        )
+        return self._copy(item=item)
 
     def with_auth(self, auth: dict[str, Any]) -> RenderContext:
-        return RenderContext(
-            credential=self.credential,
-            connector=self.connector,
-            auth=auth,
-            item=self.item,
-            session_id=self.session_id,
-            index=self.index,
-            port=self.port,
-            discovered_ip=self.discovered_ip,
-            slot_country=self.slot_country,
-            secret_keys=self.secret_keys,
-        )
+        return self._copy(auth=auth)
 
     def secret_values(self) -> list[str]:
         """Concrete secret strings, for log redaction."""
@@ -196,6 +210,9 @@ def _apply_filter(value: str, name: str, arg: str | None) -> str:
         return quote(value, safe="")
     if name == "or":
         return value if value else (arg or "")
+    if name == "nospace":
+        # A place slug without its underscores: ``los_angeles`` becomes ``losangeles``.
+        return "".join(ch for ch in value if ch.isalnum())
     raise TemplateError(f"unknown template filter '{name}'")
 
 
@@ -283,11 +300,13 @@ class TemplateRenderer:
 def country_field_key(descriptor: ProviderDescriptor, ptype: ProxyTypeSpec) -> str | None:
     """Connector config key through which ``ptype`` geo-targets its upstream credentials.
 
-    Returns the key of a connector field of type ``country`` (or using the
-    ``countries`` preset) that the proxy type's username, password, host or
-    port template references, or None when none of them carries a country. Templates that
-    depend on list items are excluded, since list-mode credentials come from
-    the vendor.
+    Returns the key of the descriptor's connector field of type ``country``
+    (or using the ``countries`` preset) when the proxy type's username,
+    password, host or port template reads ``{geo.country}``, the country a
+    slot or request targets. None when none of them carries a country, or
+    the descriptor has no country field to draw the list from. Templates
+    that depend on list items are excluded, since list-mode credentials come
+    from the vendor.
 
     Proxy types with such a key are provisioned as one slot group per
     country, and can take unlisted countries on demand from ``-cc-``
@@ -300,14 +319,69 @@ def country_field_key(descriptor: ProviderDescriptor, ptype: ProxyTypeSpec) -> s
     paths |= TemplateRenderer.referenced_paths(ptype.host) | TemplateRenderer.referenced_paths(ptype.port_template)
     if any(path.startswith("item.") for path in paths):
         return None
-    for path in sorted(paths):
-        scope, _, key = path.partition(".")
-        if scope != "connector" or not key:
-            continue
-        field_spec = descriptor.find_field("connector", key)
-        if field_spec is not None and (field_spec.type == "country" or field_spec.options_preset == "countries"):
-            return key
-    return None
+    if "geo.country" not in paths:
+        return None
+    field_spec = descriptor.country_field()
+    return field_spec.key if field_spec is not None else None
+
+
+def _credential_paths(ptype: ProxyTypeSpec) -> set[str]:
+    """Every variable path the type's credentials and endpoint templates reference."""
+    return (
+        TemplateRenderer.referenced_paths(ptype.username)
+        | TemplateRenderer.referenced_paths(ptype.password)
+        | TemplateRenderer.referenced_paths(ptype.host)
+        | TemplateRenderer.referenced_paths(ptype.port_template)
+    )
+
+
+@dataclass(frozen=True)
+class TargetingSupport:
+    """Which sub-country levels a proxy type can render into a request.
+
+    Derived from the templates: a type targets a state when its credentials
+    reference ``geo.state`` or ``geo.state_name``, and a city when
+    they reference ``geo.city``. ``state_by_name`` says the state reaches
+    the vendor only as a name, so a subdivision with no name on record (any
+    non-US state) cannot be rendered and the type does not serve it.
+    """
+
+    state: bool = False
+    city: bool = False
+    state_by_name: bool = False
+
+    def serves(self, target: LocationTarget, spec: ProxyTypeSpec) -> bool:
+        """Whether a request for ``target`` can be rendered faithfully by this type.
+
+        Faithfully means every level the client named reaches the vendor:
+        a request is never quietly widened to the country.
+        """
+        if target.state:
+            if not self.state:
+                return False
+            if self.state_by_name and target.state_name is None:
+                return False
+        if target.city and not self.city:
+            return False
+        constraints = spec.targeting
+        if constraints is not None:
+            if constraints.city_requires_state and target.city and not target.state:
+                return False
+            if constraints.state_or_city and target.city and target.state:
+                return False
+        return True
+
+
+def targeting_support(ptype: ProxyTypeSpec) -> TargetingSupport:
+    """What ``ptype``'s templates can render of a request's state and city."""
+    paths = _credential_paths(ptype)
+    by_code = "geo.state" in paths
+    by_name = "geo.state_name" in paths
+    return TargetingSupport(
+        state=by_code or by_name,
+        city="geo.city" in paths,
+        state_by_name=by_name and not by_code,
+    )
 
 
 def resolve_runtime_placeholders(text: str | None, values: dict[str, Any]) -> str | None:

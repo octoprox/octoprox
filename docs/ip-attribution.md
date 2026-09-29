@@ -61,21 +61,23 @@ So a proxy whose exit never moves costs one lookup and one write in its lifetime
 
 ```mermaid
 flowchart TD
-    select["Select the upstream<br/>strategy, -cc- filter, strict filter"] --> expected["Expected country<br/>the -cc- value, else the vendor's promise<br/>(geo slot, listed IP), else a manual pin"]
+    select["Select the upstream<br/>strategy, -cc-/-st-/-city- filter, strict filter"] --> bound{"exit bound to a<br/>vendor session?"}
+    bound -->|"no: fixed exit"| fwd0["forward: discovery placed it,<br/>health checks re-read it"]
+    bound -->|yes| expected["Expected location<br/>the -cc-, -st-, -city- values, else the vendor's promise<br/>(geo slot, rendered request), else a manual pin"]
     expected -->|none| fwd1["forward: nothing asked or promised"]
     expected -->|some| cached{"verdict cached for<br/>(project, proxy)?"}
     cached -->|yes| reuse["reuse it<br/>preflight_session_ttl_seconds,<br/>dropped early if the exit moves"]
     cached -->|no| echo["Echo request through the proxy"]
     echo -->|fails| fwd2["forward: an echo outage<br/>never blocks traffic<br/>(failure cached 30 s)"]
     echo -->|ip| resolve["Resolve: databases + echo country<br/>(the expectation is left out)<br/>record observation; cache the verdict"]
-    resolve -->|"match, or unknown"| fwd3["forward"]
-    resolve -->|mismatch| mode{"location_preflight"}
+    resolve -->|"match at every level, or unknown"| fwd3["forward"]
+    resolve -->|"mismatch at any level"| mode{"location_preflight"}
     mode -->|report| fwd4["forward anyway;<br/>the proxy is left alone"]
     mode -->|"retry, reject"| mismatch["publish exit_location_mismatch"]
     mismatch --> attributor["ProxyAttributor"]
-    attributor -->|"vendor-session slot"| rotate["remove it; the syncer<br/>provisions a fresh session"]
-    attributor -->|"fixed exit"| flag["set location_conflict;<br/>strict projects skip it from now on"]
-    mismatch -->|reject| r502["502 Exit location mismatch"]
+    attributor -->|"pooled vendor-session slot"| rotate["remove it; the syncer<br/>provisions a fresh session"]
+    attributor -->|"dynamic gateway"| leave["leave the row; the session<br/>was this request's alone"]
+    mismatch -->|reject| r502["502 Exit country/state/city mismatch"]
     mismatch -->|retry| allowed{"strategy allows moving<br/>this request?"}
     allowed -->|"no: sticky with a session"| r502b["502"]
     allowed -->|yes| reselect["select again, excluding failed proxies<br/>502 after preflight_max_attempts"]
@@ -143,7 +145,7 @@ Databases reach an instance three ways:
 
 Databases are consulted in **priority** order, lowest first. The first database with a country answers; the others fill in fields it lacked (a country database plus an ASN database give one merged record). Uploading, enabling, disabling or removing a database re-attributes every proxy with a known exit IP, offline.
 
-**Which files to load.** Load one geolocation database per vendor. A city file already contains everything the same vendor's country file does, so never add both: choose the country file when you only route by country and want the smaller footprint, or the city file when you want region, city and coordinates recorded for each exit. Nothing routes on those fields today, so the country file is the usual choice. Adding a second vendor's geolocation file is worthwhile: the resolver treats each database as an independent opinion, and answers the databases disagree on are marked uncertain rather than confirmed (see the conflict rule below). ASN and anonymity files sit alongside any of these and only fill in fields the geolocation file lacks.
+**Which files to load.** Load one geolocation database per vendor. A city file already contains everything the same vendor's country file does, so never add both: choose the country file when you only route by country and want the smaller footprint, or the city file when you route or verify below the country. [State and city routing]({{ site.baseurl }}/routing-strategies#state-and-city-routing) matches fixed exits on the state code and city the databases record, and preflight can only judge a state or city claim with a city-level database loaded, so any project that targets `-st-` or `-city-` wants the city file. Adding a second vendor's geolocation file is worthwhile: the resolver treats each database as an independent opinion, and answers the databases disagree on are left open rather than confirmed (see the conflict rule below). ASN and anonymity files sit alongside any of these and only fill in fields the geolocation file lacks.
 
 Free editions carry a license attribution; the settings page shows it while such a database is loaded.
 
@@ -161,7 +163,7 @@ The install has a default policy (Settings → IP attribution → Policy & echo)
 
 **Conflict rule** says when a vendor claim counts as contradicted:
 
-* `consensus` (default): every independent source agrees with each other and all of them disagree with the vendor. Databases lag on residential ranges, so a single dissenting database is not evidence against a vendor; independent sources that disagree among themselves mark the observation *uncertain* instead.
+* `consensus` (default): every independent source agrees with each other and all of them disagree with the vendor. Databases lag on residential ranges, so a single dissenting database is not evidence against a vendor; independent sources that disagree among themselves leave the claim *open* instead: no verdict, so the vendor is neither cleared nor blamed. A claim no independent source can judge at all, an IP no loaded database knows, is open for the same reason.
 * `first`: the top-ranked independent source disagrees with the vendor.
 
 A missing vendor claim never conflicts. A country set by hand on a proxy stays the routing country and is treated as the claim to verify.
@@ -179,15 +181,19 @@ Each project chooses how strict to be (project settings → Location):
 
 ## Preflight
 
-A residential or mobile exit belongs to the session, not to the proxy row, so verifying it means checking the proxy the request was actually routed to. With preflight on, Octoprox makes one echo request through the selected upstream, attributes the IP, and compares it with the country the request *requires*: the `-cc-` country, else the country the vendor promised for the proxy (a geo-targeted slot, a listed IP) or one an operator pinned by hand. A country that was merely observed is not a requirement, so an untargeted residential slot, which may move countries freely, is not preflighted unless the request names a country.
+A residential or mobile exit belongs to the session, not to the proxy row, so verifying it means checking the proxy the request was actually routed to. With preflight on, Octoprox makes one echo request through the selected upstream, attributes the IP, and compares it with the location the request *requires*: the `-cc-`, `-st-` and `-city-` values, else the country the vendor promised for the proxy (a geo-targeted slot, or what a dynamic request rendered) or one an operator pinned by hand. A location that was merely observed is not a requirement, so an untargeted residential slot, which may move countries freely, is not preflighted unless the request names a place.
+
+Only rows whose exit the vendor can move are checked: dynamic-sessions gateways and pooled session slots. A fixed exit (static, ISP, datacenter, list-mode) was placed by discovery and is re-read by every health check that reports its IP, so an echo per request would only repeat what attribution already knows; those rows are never preflighted, whatever was asked or promised.
+
+Every level is judged the same way, under the project's source policy and conflict rule: the expected place is the claim, the databases and the echo endpoint are the evidence, and the level is contradicted, confirmed, or left open when nothing independent answered there or the independent sources disagreed under `consensus`. The echo endpoint contributes below the country only when `echo_state_path` and `echo_city_path` are set (Octoprox's own `/echo` answers `state_code` and `city`), and a country-only database never answers there. A confirmed mismatch at any level fails the check; an open level never does.
 
 The verdict is cached in Redis per project and proxy for `preflight_session_ttl_seconds` (default 600), so a session pays one extra round trip and the rest of its requests pay nothing. That rests on the assumption that a vendor session keeps its exit for about that long. Vendors do not always oblige: a sticky window may be shorter, or the exit may be replaced after an upstream failure. So the cache is also dropped the moment a health check or an IP refresh sees the proxy exiting from a different address (the `exit_ip_changed` signal), and the next request through that proxy is verified again. The window during which a rotated exit is trusted unverified is therefore at most one `health_check_interval`, not the whole TTL. Lower the TTL for a tighter bound at the cost of one echo request per proxy per TTL.
 
 * `report` records the observation and forwards the request regardless.
 * `retry` re-selects among the project's remaining eligible proxies on a mismatch, up to `preflight_max_attempts` proxies, then answers 502. Whether a request may move is the routing strategy's call: under `sticky` a request with a session was promised one exit, so a mismatch fails it instead of moving it; the other strategies allow the move.
-* `reject` answers `502 Bad Gateway` with `Exit location mismatch: requested GB, observed US (…)` on the first mismatch.
+* `reject` answers `502 Bad Gateway` naming the failed level, `Exit city mismatch: requested GB, city manchester, observed GB, city london (…)`, on the first mismatch.
 
-Under `retry` and `reject` a mismatch also acts on the proxy. A vendor-session slot (residential, mobile) is rotated: removed, so the provider sync provisions a fresh session in its place. A fixed exit (static, port-mode, ISP) is flagged as contradicted, so `strict` projects skip it on later selections without another echo request, and the cached verdict lets `retry` pass over it quickly.
+Under `retry` and `reject` a mismatch also acts on the proxy. A pooled vendor-session slot (residential, mobile) is rotated: removed, so the provider sync provisions a fresh session in its place. A dynamic gateway row is left alone: the misplaced session was that request's, and the next request mints another.
 
 An unreachable echo endpoint or an IP no source knows never blocks traffic: preflight only rejects a confirmed mismatch. Rotating pools without a session id cannot be gated this way; their observations still feed provider accuracy.
 
@@ -195,7 +201,7 @@ An unreachable echo endpoint or an IP no source knows never blocks traffic: pref
 
 ## Provider accuracy
 
-Every observation records what the vendor claimed and what attribution resolved, and the exit IP table keeps the latest of those per distinct exit. Provider accuracy is computed from that table: of a connector's distinct exits last seen in the window, how many carried a vendor claim, and how many of those the latest verdict confirms, contradicts or leaves uncertain. Each IP counts once however often it was seen, so a restart, an hourly refresh or a re-attribution does not inflate the numbers, and a re-attribution after a database change rewrites the verdicts rather than adding to a frozen history. For a residential pool that hands out a fresh IP per session this is one judgement per exit; for pools that reuse exits a wrong IP counts once, not once per hand-out. Every user sees it for the current project under **Exit locations** in the project menu; admins see all projects, with a project filter, under Settings → IP attribution. The connector inspector shows the connector's own numbers. For a dynamic-sessions connector the unique-exit figures carry a "sampled N%" or "preflight off" mark, since only preflight sees that traffic (see [Preflight](#preflight)).
+Every observation records what the vendor claimed and what attribution resolved, and the exit IP table keeps the latest of those per distinct exit. Provider accuracy is computed from that table: of a connector's distinct exits last seen in the window, how many carried a vendor claim, and how many of those the latest verdict confirms, contradicts or leaves open (no independent answer, or independent sources that disagree). The same is kept one level down. A claim below the country is a city or state the vendor's list or discovery endpoint named for an exit, the place a request asked for with `-st-` or `-city-`, or one an operator pinned on a static proxy; it is judged by the same policy and conflict rule as the country, against the databases and the echo endpoint, and the observation records the claim, what was resolved at that level, and a verdict with the polarity of the country's (`state_conflict`, `city_conflict`: true contradicted, false confirmed, null when nothing was claimed, nothing independent answered, or the independent sources disagreed under `consensus`). Routing on a fixed exit reads the resolved state and city, so a policy that ranks the vendor lets its city stand where no database knows one, exactly as for the country. Cities are compared as slugs: the databases' district entries (`Sofia (g.k. Banishora)`, `Sofia (Old City Center)`, `London (Soho)`: DB-IP has tens per city) lose the parenthesised part and count as their city, and a few spellings of one place are folded together (`City of London` is `london`). After such a rule changes, **Re-attribute** on the IP attribution settings page re-judges every exit under it; the observation log keeps what was judged at the time. The accuracy table shows a country rate, a state rate and a city rate; the two lower rates are confirmed over the exits with a verdict, so a missing city-level database shows as *open* claims rather than as a bad vendor. Opening a connector's row shows the judgement per level and every contradicted pair, filterable by level and by place. The observation log and the exit IP table show the country verdict as the row's badge, since an exit right at the country is usable at the country whatever its city turned out to be, and the state and city verdicts as their own lines under it ("city contradicted"); the verdict filter is the country verdict. Each IP counts once however often it was seen, so a restart, an hourly refresh or a re-attribution does not inflate the numbers, and a re-attribution after a database change rewrites the verdicts rather than adding to a frozen history. For a residential pool that hands out a fresh IP per session this is one judgement per exit; for pools that reuse exits a wrong IP counts once, not once per hand-out. Every user sees it for the current project under **Exit locations** in the project menu; admins see all projects, with a project filter, under Settings → IP attribution. The connector inspector shows the connector's own numbers. For a dynamic-sessions connector the unique-exit figures carry a "sampled N%" or "preflight off" mark, since only preflight sees that traffic (see [Preflight](#preflight)).
 
 Rates below 100% are normal for residential pools whose ranges databases have not caught up with. A rate that keeps falling, or one vendor far below the others, is a vendor problem.
 
@@ -235,13 +241,15 @@ Connectors that name no check URL are checked against the echo endpoint, so ever
 |--------------|---------|
 | `country` | The resolved country routing reads |
 | `country_source` | `database`, `vendor`, `endpoint` or `manual` |
-| `vendor_country` | What the vendor claimed |
-| `endpoint_country` | What a third-party discovery endpoint or the echo reported; a vendor-operated discovery URL writes `vendor_country` instead |
-| `location` | Full record from the databases: region, city, coordinates, ASN, anonymity flags |
+| `vendor_country`, `vendor_state`, `vendor_city` | What the vendor claimed at each level: its proxy list, known-IP API or own discovery endpoint |
+| `endpoint_country`, `endpoint_state`, `endpoint_city` | What a third-party discovery endpoint or the echo reported; a vendor-operated discovery URL writes the `vendor_*` keys instead |
+| `state_code`, `city` | The resolved state and city routing reads for `-st-` and `-city-`, with `state_source` and `city_source` |
+| `location` | Full record from the databases: the first-level subdivision as `region` (its name) and `state_code` (its ISO 3166-2 part), city, coordinates, ASN, anonymity flags |
+| `manual_location` | A state code and city an operator pinned by hand on a static proxy; routing matches on them ahead of `location` |
 | `location_conflict` | The vendor's claim is contradicted under the conflict rule |
 | `location_candidates` | Each source's answer, for the inspector |
 
-Only `country` takes part in routing today; the rest is stored so region- or city-level routing can be added without another lookup.
+`country`, `location.state_code` and `location.city` (or the manual pin) take part in routing: `-cc-` matches the country, `-st-` the state code and `-city-` the city as a slug. The rest is shown in the inspector.
 
 ## Backup and restore
 

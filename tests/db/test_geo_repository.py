@@ -4,6 +4,7 @@
 """Tests for the IP attribution repositories and the observation flusher against Postgres."""
 
 from datetime import datetime, timedelta
+from typing import Any
 
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -151,7 +152,7 @@ def _observation(**overrides: object) -> IpObservation:
         "ip": "81.2.69.160",
         "claimed_country": "US",
         "resolved_country": "GB",
-        "conflict": True,
+        "country_conflict": True,
     }
     values.update(overrides)
     return IpObservation(**values)  # type: ignore[arg-type]
@@ -163,13 +164,13 @@ class TestObservations:
         repo = ObservationRepository(db_session)
         rows = [
             _observation(),
-            _observation(ip="81.2.69.161", claimed_country="GB", conflict=False),
+            _observation(ip="81.2.69.161", claimed_country="GB", country_conflict=False),
             _observation(
                 connector_id="conn-2",
                 proxy_id="proxy-2",
                 claimed_country=None,
                 resolved_country="DE",
-                conflict=False,
+                country_conflict=False,
             ),
         ]
         assert await repo.insert_many(rows) == 3
@@ -207,7 +208,7 @@ class TestObservations:
             [
                 ExitJudgement(
                     proxy_id="proxy-1", connector_id="conn-1", ip="10.0.0.2",
-                    claimed_country="GB", resolved_country="GB", conflict=False,
+                    claimed_country="GB", resolved_country="GB", country_conflict=False,
                 ),
                 # An exit never sighted has no row to judge; nothing is created.
                 ExitJudgement(proxy_id="proxy-1", connector_id="conn-1", ip="10.0.0.42", claimed_country="GB"),
@@ -215,13 +216,13 @@ class TestObservations:
                 # read): the sighting saw the proxy's state later, so it stands.
                 ExitJudgement(
                     proxy_id="proxy-1", connector_id="conn-1", ip="10.0.0.1",
-                    judged_at=day2 - timedelta(minutes=1), claimed_country="US", resolved_country="US", conflict=False,
+                    judged_at=day2 - timedelta(minutes=1), claimed_country="US", resolved_country="US", country_conflict=False,
                 ),
                 # Another slot of the connector sharing the exit, with its own claim: the
                 # row's verdict belongs to its holder, so this one is dropped.
                 ExitJudgement(
                     proxy_id="proxy-9", connector_id="conn-1", ip="10.0.0.3",
-                    claimed_country="DE", resolved_country="GB", conflict=True,
+                    claimed_country="DE", resolved_country="GB", country_conflict=True,
                 ),
             ]
         )
@@ -248,13 +249,13 @@ class TestObservations:
         by_ip = {r["ip"]: r for r in rows}
         reused = by_ip["10.0.0.1"]
         assert reused["sightings"] == 2 and reused["first_seen"] == day1 and reused["last_seen"] == day2
-        assert reused["country"] == "FR" and reused["conflict"] is True and reused["source"] == "discovery"  # the older judgement was dropped
+        assert reused["country"] == "FR" and reused["country_conflict"] is True and reused["source"] == "discovery"  # the older judgement was dropped
         third = by_ip["10.0.0.3"]
         assert third["claimed_country"] == "US" and third["source"] == "discovery"  # the non-holder's judgement was dropped
         # The judgement rewrote the verdict but not the count or the sighting times.
         refreshed = by_ip["10.0.0.2"]
         assert refreshed["sightings"] == 1 and refreshed["source"] == "reattribute"
-        assert refreshed["claimed_country"] == "GB" and refreshed["conflict"] is False
+        assert refreshed["claimed_country"] == "GB" and refreshed["country_conflict"] is False
         # The holder is the proxy whose sighting was most recent; a judgement does not change it.
         assert refreshed["proxy_id"] == "proxy-1" and refreshed["last_seen"] == day1 and refreshed["first_seen"] == day1
 
@@ -272,12 +273,14 @@ class TestObservations:
         # exits with a claim, one of which the re-attribution confirmed.
         accuracy = {a["connector_id"]: a for a in await repo.exit_accuracy()}
         c1 = accuracy["conn-1"]
-        assert (c1["exits"], c1["claimed"], c1["confirmed"], c1["contradicted"], c1["uncertain"]) == (3, 3, 1, 2, 0)
-        assert c1["breakdown"] == [{"claimed_country": "US", "observed_country": "FR", "exits": 1}, {"claimed_country": "US", "observed_country": "GB", "exits": 1}] or \
-            c1["breakdown"] == [{"claimed_country": "US", "observed_country": "GB", "exits": 1}, {"claimed_country": "US", "observed_country": "FR", "exits": 1}]
+        assert c1["exits"] == 3 and c1["country"] == {"claimed": 3, "confirmed": 1, "contradicted": 2, "open": 0}
+        assert sorted(c1["breakdown"], key=lambda b: b["observed"]) == [
+            {"level": "country", "claimed": "US", "observed": "FR", "exits": 1},
+            {"level": "country", "claimed": "US", "observed": "GB", "exits": 1},
+        ]
         # The window is by last sighting; the judged exit was last seen on day1 and drops out of a day2 window.
         windowed = {a["connector_id"]: a for a in await repo.exit_accuracy(since=day2)}
-        assert windowed["conn-1"]["exits"] == 2 and windowed["conn-1"]["confirmed"] == 0
+        assert windowed["conn-1"]["exits"] == 2 and windowed["conn-1"]["country"]["confirmed"] == 0
         assert windowed["conn-2"]["exits"] == 1
         assert await repo.exit_accuracy(connector_ids=[]) == []
 
@@ -335,25 +338,55 @@ class TestObservations:
             connector_id="conn-1", source=ObservationSource.DISCOVERY.value
         ) == ([], 0)
 
-        # The verdict filter is the label the page shows, built from three columns.
+        # The verdict filter is the label the page shows, built from the claim and the nullable verdict.
         assert (await repo.recent(verdict="contradicted"))[1] == 6  # every fixture row conflicts
         assert (await repo.recent(verdict="confirmed"))[1] == 0
         await repo.insert_many(
             [
-                _observation(ip="10.0.2.1", claimed_country="GB", conflict=False),
-                _observation(
-                    ip="10.0.2.2", claimed_country=None, conflict=False, disagreement=True
-                ),
+                _observation(ip="10.0.2.1", claimed_country="GB", country_conflict=False),
+                _observation(ip="10.0.2.2", claimed_country="FR", country_conflict=None),  # claimed, no verdict
+                _observation(ip="10.0.2.3", claimed_country=None, country_conflict=None),
             ]
         )
         await db_session.commit()
         page, total = await repo.recent(verdict="confirmed")
         assert total == 1 and page[0]["ip"] == "10.0.2.1"
-        page, total = await repo.recent(verdict="uncertain")
+        page, total = await repo.recent(verdict="open")
         assert total == 1 and page[0]["ip"] == "10.0.2.2"
         assert (await repo.recent(verdict="no_claim"))[1] == 1
         assert (await repo.recent(claimed_country="gb"))[1] == 1
-        assert (await repo.recent(resolved_country="GB"))[1] == 8
+        assert (await repo.recent(resolved_country="GB"))[1] == 9
+
+    async def test_verdict_filter_is_the_country_verdict(self, db_session: AsyncSession) -> None:
+        """The verdict label is the country's on both tables; state and city verdicts do not move it."""
+        await _connectors(db_session, "conn-1")
+        repo = ObservationRepository(db_session)
+        rows = [
+            # Country right, city wrong: still confirmed at the country.
+            _observation(ip="10.1.0.1", claimed_country="US", resolved_country="US", country_conflict=False, claimed_city="new_york", resolved_city="newark", city_conflict=True),
+            # Country right, state without a verdict: confirmed at the country.
+            _observation(ip="10.1.0.2", claimed_country="US", resolved_country="US", country_conflict=False, claimed_state="NY", state_conflict=None),
+            # Every claimed level right: confirmed.
+            _observation(ip="10.1.0.3", claimed_country="US", resolved_country="US", country_conflict=False, claimed_state="NY", resolved_state="NY", state_conflict=False, claimed_city="new_york", resolved_city="new_york", city_conflict=False),
+            # Country open, city wrong: open at the country.
+            _observation(ip="10.1.0.4", claimed_country="US", resolved_country=None, country_conflict=None, claimed_city="new_york", resolved_city="newark", city_conflict=True),
+            _observation(ip="10.1.0.5", claimed_country=None, resolved_country="US", country_conflict=None),
+        ]
+        from api.geo.observations import aggregate_exits
+
+        await repo.insert_many(rows)
+        await repo.add_exit_ips(aggregate_exits([(o, True) for o in rows]))
+        await db_session.commit()
+
+        def ips(page: list[dict[str, Any]]) -> set[str]:
+            return {r["ip"] for r in page}
+
+        for fetch in (repo.recent, repo.exit_ips):
+            assert ips((await fetch(verdict="contradicted"))[0]) == set()
+            assert ips((await fetch(verdict="open"))[0]) == {"10.1.0.4"}
+            assert ips((await fetch(verdict="confirmed"))[0]) == {"10.1.0.1", "10.1.0.2", "10.1.0.3"}
+            assert ips((await fetch(verdict="no_claim"))[0]) == {"10.1.0.5"}
+            assert (await fetch())[1] == 5
 
     async def test_retention(self, db_session: AsyncSession) -> None:
         repo = ObservationRepository(db_session)
@@ -382,7 +415,7 @@ class TestFlusher:
         await redis_client.client.delete(GEO_OBSERVATIONS_KEY)
         recorder = ObservationRecorder(redis_client)
         recorder.record(_observation())
-        recorder.record(_observation(ip="81.2.69.161", claimed_country="GB", conflict=False))
+        recorder.record(_observation(ip="81.2.69.161", claimed_country="GB", country_conflict=False))
         # A connector deleted before the flush: its raw rows are kept, its aggregates skipped.
         recorder.record(_observation(connector_id="gone", ip="81.2.69.162"))
         assert await recorder.publish() == 3
@@ -414,12 +447,12 @@ class TestFlusher:
         assert row["sightings"] == 1
         assert await redis_client.client.hget("proxy:status:proxy-1", "exit_ip") == "81.2.69.170"
         # A judgement of that exit travels the same list: verdict rewritten, no log row, no sighting.
-        recorder.record(ExitJudgement(proxy_id="proxy-1", connector_id="conn-1", ip="81.2.69.170", claimed_country="US", resolved_country="GB", conflict=True))
+        recorder.record(ExitJudgement(proxy_id="proxy-1", connector_id="conn-1", ip="81.2.69.170", claimed_country="US", resolved_country="GB", country_conflict=True))
         recorder.record(ExitJudgement(proxy_id="proxy-x", connector_id="gone", ip="81.2.69.170"))  # deleted connector: skipped
         await recorder.publish()
         assert await flusher.flush_once() == 1  # one verdict rewritten; the skipped judgement is not work done
         (row,), _ = await ObservationRepository(db_session).exit_ips(connector_ids=["conn-1"], ip="81.2.69.170")
-        assert row["sightings"] == 1 and row["conflict"] is True and row["source"] == "reattribute"
+        assert row["sightings"] == 1 and row["country_conflict"] is True and row["source"] == "reattribute"
         await redis_client.client.delete("proxy:status:proxy-1")
         assert await ObservationRepository(db_session).exit_ips(connector_ids=["gone"]) == ([], 0)
         assert await redis_client.client.llen(GEO_OBSERVATIONS_KEY) == 0
@@ -427,7 +460,7 @@ class TestFlusher:
 
         assert await repo.count() == before + 5  # three sightings, then the repeat and the move
         accuracy = {a["connector_id"]: a for a in await repo.exit_accuracy(connector_ids=["conn-1"])}
-        assert accuracy["conn-1"]["claimed"] >= 2
+        assert accuracy["conn-1"]["country"]["claimed"] >= 2
         assert await repo.exit_accuracy(connector_ids=["gone"]) == []
 
     async def test_exit_on_record_is_not_counted_again_when_redis_knows_nothing(
@@ -471,3 +504,54 @@ class TestFlusher:
         assert await redis_client.client.hget("proxy:status:proxy-7", "exit_ip") == "10.0.0.7"
         assert await redis_client.client.hget("proxy:status:proxy-8", "exit_ip") == "10.0.0.80"
         await redis_client.client.delete("proxy:status:proxy-7", "proxy:status:proxy-8", "proxy:status:proxy-9")
+
+
+class TestPlaceAccuracy:
+    async def test_state_and_city_verdicts_per_connector(self, db_session: AsyncSession) -> None:
+        await _connectors(db_session, "conn-1")
+        repo = ObservationRepository(db_session)
+        from api.geo.observations import aggregate_exits
+
+        when = datetime(2026, 9, 20, 8, 0, 0)
+        sightings = [
+            # City asked and confirmed; state asked and confirmed.
+            _observation(ip="10.1.0.1", observed_at=when, claimed_country="GB", resolved_country="GB", country_conflict=False,
+                         claimed_state="ENG", claimed_city="london", resolved_state="ENG", resolved_city="london",
+                         state_conflict=False, city_conflict=False),
+            # Right country, wrong city.
+            _observation(ip="10.1.0.2", observed_at=when, claimed_country="GB", resolved_country="GB", country_conflict=False,
+                         claimed_city="manchester", resolved_city="london", city_conflict=True),
+            # City asked, no city-level answer: unverified.
+            _observation(ip="10.1.0.3", observed_at=when, claimed_country="GB", resolved_country="GB", country_conflict=False,
+                         claimed_city="leeds"),
+            # Wrong state, and the country itself contradicted.
+            _observation(ip="10.1.0.4", observed_at=when, claimed_country="GB", resolved_country="FR", country_conflict=True,
+                         claimed_state="SCT", resolved_state="IDF", state_conflict=True),
+        ]
+        await repo.insert_many(sightings)
+        await repo.add_exit_ips(aggregate_exits([(o, True) for o in sightings]))
+        await db_session.commit()
+
+        (row,) = await repo.exit_accuracy(connector_ids=["conn-1"])
+        assert row["country"] == {"claimed": 4, "confirmed": 3, "contradicted": 1, "open": 0}
+        assert row["state"] == {"claimed": 2, "confirmed": 1, "contradicted": 1, "open": 0}
+        assert row["city"] == {"claimed": 3, "confirmed": 1, "contradicted": 1, "open": 1}
+        assert sorted((b["level"], b["claimed"], b["observed"]) for b in row["breakdown"]) == [
+            ("city", "manchester", "london"),
+            ("country", "GB", "FR"),
+            ("state", "SCT", "IDF"),
+        ]
+        # The exit rows carry the place for the views.
+        rows, _ = await repo.exit_ips(connector_ids=["conn-1"], ip="10.1.0.2")
+        assert rows[0]["claimed_city"] == "manchester" and rows[0]["resolved_city"] == "london" and rows[0]["city_conflict"] is True
+        page, _ = await repo.recent(connector_id="conn-1", ip="10.1.0.1")
+        assert page[0]["claimed_state"] == "ENG" and page[0]["state_conflict"] is False
+        # A judgement rewrites the place verdict with the rest.
+        applied = await repo.apply_judgements([
+            ExitJudgement(proxy_id="proxy-1", connector_id="conn-1", ip="10.1.0.2", claimed_country="GB",
+                          resolved_country="GB", country_conflict=False, claimed_city="manchester", resolved_city="manchester", city_conflict=False),
+        ])
+        await db_session.commit()
+        assert applied == 1
+        (row,) = await repo.exit_accuracy(connector_ids=["conn-1"])
+        assert row["city"]["contradicted"] == 0 and row["city"]["confirmed"] == 2

@@ -54,7 +54,7 @@ FieldScope = Literal["credential", "connector"]
 # Namespaces a template may reference. ``credential``/``connector`` come from
 # stored config; the rest are provided by the engine at render time.
 TEMPLATE_NAMESPACES = frozenset(
-    {"credential", "connector", "auth", "item", "session_id", "index", "port", "discovered_ip"}
+    {"credential", "connector", "auth", "item", "geo", "session_id", "index", "port", "discovered_ip"}
 )
 
 
@@ -422,6 +422,11 @@ class IpDiscoverySpec(BaseModel):
         default=None,
         description="JMESPath to the exit country (ISO code) in the JSON body; recorded on the proxy when present",
     )
+    state_path: str | None = Field(
+        default=None,
+        description="JMESPath to the exit's state: an ISO 3166-2 subdivision code, or a US state name",
+    )
+    city_path: str | None = Field(default=None, description="JMESPath to the exit's city name")
     vendor_operated: bool = Field(
         default=True,
         description=(
@@ -475,6 +480,8 @@ class KnownIpsSpec(BaseModel):
     items: str = "@"
     ip: ValueSource = "ip"
     country: ValueSource | None = None
+    state: ValueSource | None = None
+    city: ValueSource | None = None
 
 
 class ListSourceSpec(BaseModel):
@@ -490,10 +497,31 @@ class ListSourceSpec(BaseModel):
     password: ValueSource | None = None
     protocol: ValueSource | None = None
     country: ValueSource | None = None
+    state: ValueSource | None = None
+    city: ValueSource | None = None
     identity: ValueSource | None = Field(
         default=None, description="Stable id per entry; defaults to host:port"
     )
     filter: str | None = None
+
+
+class TargetingSpec(BaseModel):
+    """Constraints on state and city targeting that the templates alone cannot say.
+
+    Which levels a type can render is read off its templates (a part that
+    references ``geo.state`` or ``geo.state_name`` targets states,
+    one that references ``geo.city`` targets cities). This block only
+    narrows the combinations the vendor accepts in one request.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    city_requires_state: bool = Field(
+        default=False, description="The vendor targets a city only together with its state (NetNut)"
+    )
+    state_or_city: bool = Field(
+        default=False, description="The vendor takes a state or a city per request, never both (Webshare)"
+    )
 
 
 class ProxyTypeSpec(BaseModel):
@@ -504,6 +532,9 @@ class ProxyTypeSpec(BaseModel):
     key: str
     label: str
     mode: ProxyMode
+    targeting: TargetingSpec | None = Field(
+        default=None, description="Vendor limits on combining state and city in one request"
+    )
     host: Template | None = None
     port: int | str | None = Field(
         default=None,

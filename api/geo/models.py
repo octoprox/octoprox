@@ -17,6 +17,7 @@ from uuid import uuid4
 from pydantic import BaseModel, Field, field_validator
 
 from api.core import utc_now
+from api.models.location import slugify_place
 
 
 class GeoVendor(StrEnum):
@@ -119,13 +120,16 @@ def normalize_country(value: Any) -> str | None:
 class IpLocation(BaseModel):
     """One database's normalised answer for an IP.
 
-    Only ``country`` takes part in routing today. The rest is stored on the
-    proxy so region- or city-level routing can be added without another
-    lookup, and shown in the inspector.
+    ``country``, ``state_code`` and ``city`` take part in routing: a
+    request for ``-st-`` or ``-city-`` matches a fixed exit on them (see
+    ``Proxy.location_matches``). ``region`` is the first-level subdivision's
+    name as the database spells it, kept for display; ``state_code`` its ISO
+    3166-2 part (``NY``, ``ON``, ``ENG``), which is what ``-st-`` names.
     """
 
     country: str | None = None
     region: str | None = None
+    state_code: str | None = None
     city: str | None = None
     postal_code: str | None = None
     latitude: float | None = None
@@ -159,7 +163,11 @@ class IpLocation(BaseModel):
 
 
 class LocationCandidate(BaseModel):
-    """One source's opinion about an IP's country."""
+    """One source's opinion about where an IP is.
+
+    ``country`` is the answer at the level every source can give; ``location``
+    carries the rest (state code, city, and for databases the whole record).
+    """
 
     source: GeoSourceKind
     origin: str  # database id, "vendor", or the endpoint URL
@@ -171,20 +179,60 @@ class LocationCandidate(BaseModel):
     def _country(cls, value: Any) -> str | None:
         return normalize_country(value)
 
+    @property
+    def state(self) -> str | None:
+        """The candidate's subdivision code, or None."""
+        return (self.location.state_code or None) if self.location else None
+
+    @property
+    def city(self) -> str | None:
+        """The candidate's city as the comparison slug (a database records the name)."""
+        return slugify_place(self.location.city) if self.location else None
+
 
 class Resolution(BaseModel):
-    """What the resolver decided for one IP."""
+    """What the resolver decided for one IP.
 
-    country: str | None = None
-    source: GeoSourceKind | None = None
-    origin: str | None = None
-    # The vendor's claim is contradicted by independent evidence (see ConflictRule).
-    conflict: bool = False
-    # Independent sources disagree with each other; the answer is uncertain.
-    disagreement: bool = False
+    Three countries, one question each:
+
+    * ``claimed_country``: what was promised. The vendor's claim for the
+      exit, or the place a request required when preflight verifies it.
+    * ``observed_country``: what independent evidence found. The first
+      database or endpoint answer in policy order; None when only the
+      vendor had an opinion. This is what verification compares against.
+    * ``resolved_country``: what routing uses. The first candidate in
+      ``policy.sources`` order with an answer, which the policy may let be
+      the claim itself when it ranks the vendor first or nothing else knows.
+
+    ``country_conflict`` judges the claim by the independent evidence under
+    the conflict rule, never by ``resolved_country``.
+
+    The state and the city are resolved the same way, from the same
+    candidates under the same policy: a vendor's listed city or a ``-city-``
+    request is the claim, databases and endpoints are the evidence, and the
+    policy decides what routing uses. Every level's verdict has the same
+    form: ``country_conflict``, ``state_conflict``, ``city_conflict``.
+    """
+
+    resolved_country: str | None = None
+    resolved_source: GeoSourceKind | None = None
+    resolved_origin: str | None = None
+    observed_country: str | None = None
+    country_conflict: bool | None = None
     claimed_country: str | None = None
+    # The databases' merged record, for display and for the row's ``location``.
     location: IpLocation | None = None
     candidates: list[LocationCandidate] = Field(default_factory=list)
+    claimed_state: str | None = None
+    observed_state: str | None = None
+    resolved_state: str | None = None
+    resolved_state_source: GeoSourceKind | None = None
+    state_conflict: bool | None = None
+    claimed_city: str | None = None
+    observed_city: str | None = None
+    resolved_city: str | None = None
+    resolved_city_source: GeoSourceKind | None = None
+    city_conflict: bool | None = None
 
     def compact_candidates(self) -> list[dict[str, Any]]:
         """Short form stored in proxy metadata: no nested location records."""
@@ -241,6 +289,10 @@ class GeoSettings(BaseModel):
     echo_url: str = DEFAULT_ECHO_URL
     echo_ip_path: str = DEFAULT_ECHO_IP_PATH
     echo_country_path: str | None = None
+    # Where the echo reports the exit's state and city, when it does; Octoprox's own
+    # /echo answers ``state_code`` and ``city`` from the loaded databases.
+    echo_state_path: str | None = None
+    echo_city_path: str | None = None
     echo_timeout_seconds: float = Field(default=15.0, gt=0)
     # Attribute the IP the health checker sees when the check URL is the echo URL.
     health_check_attribution: bool = True
@@ -321,8 +373,13 @@ class IpObservation(BaseModel):
     endpoint_country: str | None = None
     resolved_country: str | None = None
     resolved_source: GeoSourceKind | None = None
-    conflict: bool = False
-    disagreement: bool = False
+    country_conflict: bool | None = None
+    claimed_state: str | None = None
+    claimed_city: str | None = None
+    resolved_state: str | None = None
+    resolved_city: str | None = None
+    state_conflict: bool | None = None
+    city_conflict: bool | None = None
     candidates: list[dict[str, Any]] = Field(default_factory=list)
     instance_id: str = ""
 
@@ -350,8 +407,15 @@ class ExitJudgement(BaseModel):
     claimed_country: str | None = None
     resolved_country: str | None = None
     resolved_source: GeoSourceKind | None = None
-    conflict: bool = False
-    disagreement: bool = False
+    # One verdict per level: True contradicted, False confirmed, None when nothing
+    # was claimed, nothing independent answered, or the sources disagreed.
+    country_conflict: bool | None = None
+    claimed_state: str | None = None
+    claimed_city: str | None = None
+    resolved_state: str | None = None
+    resolved_city: str | None = None
+    state_conflict: bool | None = None
+    city_conflict: bool | None = None
     instance_id: str = ""
 
 
@@ -380,7 +444,20 @@ class LoadedDatabase(BaseModel):
 META_VENDOR_COUNTRY = "vendor_country"  # what the vendor claimed for this exit
 META_ENDPOINT_COUNTRY = "endpoint_country"  # what a third-party discovery or echo endpoint reported for this exit
 META_COUNTRY_SOURCE = "country_source"  # GeoSourceKind that produced metadata.country
+# The same one level down. What routing reads (``state_code``, ``city``) is
+# what attribution resolved, with its source; the vendor's and the endpoint's
+# own words are kept apart so the claim can be judged.
+META_STATE = "state_code"
+META_CITY = "city"
+META_STATE_SOURCE = "state_source"
+META_CITY_SOURCE = "city_source"
+META_VENDOR_STATE = "vendor_state"
+META_VENDOR_CITY = "vendor_city"
+META_ENDPOINT_STATE = "endpoint_state"
+META_ENDPOINT_CITY = "endpoint_city"
 META_LOCATION = "location"  # IpLocation dump from the databases
+# META_MANUAL_LOCATION (api.models.location): region code and city an operator
+# pinned by hand on a static proxy; routing prefers them to the databases.
 META_LOCATION_CONFLICT = "location_conflict"  # bool, see ConflictRule
 META_LOCATION_CANDIDATES = "location_candidates"  # compact candidate list
 META_LOCATION_CHECKED_AT = "location_checked_at"  # ISO timestamp of the last resolution

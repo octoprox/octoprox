@@ -13,7 +13,8 @@ import {
 import { useToast } from '../../contexts/ToastContext'
 import { DataTable } from '../../components/DataTable'
 import { Page, EmptyState } from '../../components/layout/Page'
-import { ProviderAccuracyPanel } from '../../components/geo/ProviderAccuracyPanel'
+import { ACCURACY_RANGES, AccuracyRow, ProviderAccuracyPanel } from '../../components/geo/ProviderAccuracyPanel'
+import { AccuracyDetailsInspector } from '../../components/geo/AccuracyDetails'
 import { ObservationsPanel } from '../../components/geo/ObservationsPanel'
 import { ExitIpsPanel } from '../../components/geo/ExitIpsPanel'
 import { formatBytes, formatDateTime } from '../../utils/format'
@@ -44,11 +45,17 @@ const VENDOR_LABELS: Record<string, string> = {
 export default function GeoSection() {
   const [tab, setTab] = useState<Tab>('databases')
   const { data: status } = useQuery({ queryKey: ['geo-status'], queryFn: fetchGeoStatus, refetchInterval: 30_000 })
+  const [range, setRange] = useState<(typeof ACCURACY_RANGES)[number]['value']>('30d')
+  const [inspecting, setInspecting] = useState<AccuracyRow | null>(null)
+  const days = ACCURACY_RANGES.find((r) => r.value === range)?.days ?? 30
 
   return (
     <Page
       title="IP attribution"
       subtitle="Where exit IPs really are: local IP databases, the vendor's word, and an echo endpoint, combined under one policy."
+      panel={inspecting && tab === 'accuracy' ? (
+        <AccuracyDetailsInspector row={inspecting} exits={inspecting.exit_stats} days={days} projectName={inspecting.project_name} onClose={() => setInspecting(null)} />
+      ) : undefined}
       toolbar={status && (
         <div className="flex items-center gap-2 text-xs text-fg-muted">
           <Badge color={status.databases_loaded > 0 ? 'green' : 'gray'}>{status.databases_loaded} database{status.databases_loaded === 1 ? '' : 's'} loaded</Badge>
@@ -70,7 +77,7 @@ export default function GeoSection() {
       />
       {tab === 'databases' && <DatabasesTab />}
       {tab === 'policy' && <PolicyTab />}
-      {tab === 'accuracy' && <ProviderAccuracyPanel />}
+      {tab === 'accuracy' && <ProviderAccuracyPanel range={range} onRangeChange={setRange} onInspect={setInspecting} inspecting={inspecting?.connector_id ?? null} />}
       {tab === 'exits' && <ExitIpsPanel />}
       {tab === 'observations' && <ObservationsPanel />}
     </Page>
@@ -439,7 +446,7 @@ function PolicyTab() {
               <Label htmlFor="geo-echo-url">URL</Label>
               <Input id="geo-echo-url" className="font-mono text-xs" value={policy.echo_url} onChange={(e) => update({ echo_url: e.target.value })} required />
             </div>
-            <div className="grid grid-cols-[minmax(0,1fr)_minmax(0,1fr)_minmax(0,1fr)] gap-3">
+            <div className="grid grid-cols-[minmax(0,1fr)_minmax(0,1fr)_minmax(0,1fr)_minmax(0,1fr)_minmax(0,1fr)] gap-3">
               <div className="min-w-0">
                 <Label htmlFor="geo-echo-ip">IP path</Label>
                 <Input id="geo-echo-ip" className="font-mono text-xs" value={policy.echo_ip_path} onChange={(e) => update({ echo_ip_path: e.target.value })} placeholder="ip" required />
@@ -447,6 +454,14 @@ function PolicyTab() {
               <div className="min-w-0">
                 <Label htmlFor="geo-echo-country">Country path</Label>
                 <Input id="geo-echo-country" className="font-mono text-xs" value={policy.echo_country_path ?? ''} onChange={(e) => update({ echo_country_path: e.target.value || null })} placeholder="none" />
+              </div>
+              <div className="min-w-0">
+                <Label htmlFor="geo-echo-state">State path</Label>
+                <Input id="geo-echo-state" className="font-mono text-xs" value={policy.echo_state_path ?? ''} onChange={(e) => update({ echo_state_path: e.target.value || null })} placeholder="none" title="JMESPath to the exit's state code (state_code on Octoprox's /echo); evidence for -st- verification" />
+              </div>
+              <div className="min-w-0">
+                <Label htmlFor="geo-echo-city">City path</Label>
+                <Input id="geo-echo-city" className="font-mono text-xs" value={policy.echo_city_path ?? ''} onChange={(e) => update({ echo_city_path: e.target.value || null })} placeholder="none" title="JMESPath to the exit's city (city on Octoprox's /echo); evidence for -city- verification" />
               </div>
               <div className="min-w-0">
                 <Label htmlFor="geo-echo-timeout">Timeout (s)</Label>
@@ -534,10 +549,11 @@ function LookupCard() {
           <div className="flex items-center gap-2 flex-wrap">
             <span className="font-mono">{result.ip}</span>
             <span className="text-fg-muted">resolves to</span>
-            {result.resolution.country ? <Badge color="blue">{result.resolution.country}</Badge> : <Badge color="gray">unknown</Badge>}
-            {result.resolution.source && <span className="text-xs text-fg-subtle">from {SOURCE_LABELS[result.resolution.source]}</span>}
-            {result.resolution.conflict && <Badge color="red">vendor claim contradicted</Badge>}
-            {result.resolution.disagreement && <Badge color="yellow">sources disagree</Badge>}
+            {result.resolution.resolved_country ? <Badge color="blue">{result.resolution.resolved_country}</Badge> : <Badge color="gray">unknown</Badge>}
+            {result.resolution.resolved_source && <span className="text-xs text-fg-subtle">from {SOURCE_LABELS[result.resolution.resolved_source]}</span>}
+            {result.resolution.country_conflict === true && <Badge color="red">claim contradicted</Badge>}
+            {result.resolution.country_conflict === false && <Badge color="green">claim confirmed</Badge>}
+            {result.resolution.country_conflict === null && result.resolution.claimed_country && <Badge color="yellow">claim open: no independent answer, or sources disagree</Badge>}
             {result.databases_loaded === 0 && <span className="text-xs text-warning">No databases loaded.</span>}
           </div>
           {result.candidates.length > 0 && (

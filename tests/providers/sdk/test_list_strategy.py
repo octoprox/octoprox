@@ -14,7 +14,7 @@ PAGE_1 = {
     "count": 3,
     "next": "https://proxy.webshare.io/api/v2/proxy/list/?mode=direct&page=2&page_size=100",
     "results": [
-        {"id": "a", "username": "u1", "password": "p1", "proxy_address": "1.1.1.1", "port": 8000, "valid": True, "country_code": "US"},
+        {"id": "a", "username": "u1", "password": "p1", "proxy_address": "1.1.1.1", "port": 8000, "valid": True, "country_code": "US", "city_name": "New York"},
         {"id": "b", "username": "u2", "password": "p2", "proxy_address": "2.2.2.2", "port": 8001, "valid": False, "country_code": "FR"},
     ],
 }
@@ -82,3 +82,12 @@ async def test_refresh_updates_credentials_in_place(builtins: dict[str, Provider
     assert to_remove == ["gone"]
     assert [p.id for p in updated] == ["a"]
     assert (updated[0].username, updated[0].password) == ("u1", "p1")
+
+
+async def test_listed_city_is_the_vendor_claim(builtins: dict[str, ProviderDescriptor]) -> None:
+    """Webshare names a city per IP; it is recorded as the vendor's claim, as its country is."""
+    vendor = MockVendor(api_handler=_api)
+    to_add, _ = await _provider(builtins, vendor, {}).sync_proxies([])
+    by_host = {p.host: p.metadata for p in to_add}
+    assert by_host["1.1.1.1"]["vendor_country"] == "US" and by_host["1.1.1.1"]["vendor_city"] == "new_york"
+    assert "vendor_city" not in by_host["3.3.3.3"] and by_host["3.3.3.3"]["vendor_country"] == "DE"

@@ -171,11 +171,17 @@ def _static_checks(descriptor: ProviderDescriptor, registry: ProviderRegistry) -
     }
     if descriptor.validation is not None:
         known_fields |= {f"credential.{k}" for k in descriptor.validation.capture}
+    country_field = descriptor.country_field()
     for ptype in descriptor.proxy_types:
         for template in (ptype.host, ptype.username, ptype.password):
             for path in TemplateRenderer.referenced_paths(template):
                 if path.startswith(("credential.", "connector.")) and path not in known_fields:
                     warnings.append(f"proxy type '{ptype.key}' references unknown field '{path}'")
+                elif country_field is not None and path == f"connector.{country_field.key}":
+                    warnings.append(
+                        f"proxy type '{ptype.key}' reads the connector's country list through '{path}'; "
+                        "use {geo.country} for the country a slot or request targets"
+                    )
     if not descriptor.credential_fields:
         warnings.append("descriptor has no credential fields")
     return errors, warnings

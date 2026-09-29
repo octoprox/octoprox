@@ -389,7 +389,7 @@ class DescriptorTester:
         except HttpCallError as exc:
             return DiscoveryOutcome(ok=False, message=str(exc), traces=[exc.trace] if exc.trace else [])
         preview = [
-            {"host": p.host, "port": p.port, "username": p.username, "country": p.country, "identity": p.identity}
+            {"host": p.host, "port": p.port, "username": p.username, "country": p.place.country if p.place else None, "identity": p.identity}
             for p in listed[:50]
         ]
         return DiscoveryOutcome(ok=True, message=f"{len(listed)} proxies", result=preview)

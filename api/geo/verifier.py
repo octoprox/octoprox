@@ -23,6 +23,7 @@ from api.core.event_bus import event_bus
 from api.core.signals import exit_location_mismatch
 from api.geo.models import PreflightMode
 from api.geo.preflight import PreflightChecker
+from api.models.location import LocationTarget
 from api.models.project import Project
 from api.models.proxy import Proxy
 from api.providers.sdk.strategies import is_dynamic_gateway
@@ -39,7 +40,7 @@ class ProxySelector(Protocol):
         project_id: str,
         session_id: str | None = None,
         target_host: str | None = None,
-        country: str | None = None,
+        location: LocationTarget | None = None,
         exclude: frozenset[str] | None = None,
     ) -> Proxy | None: ...
 
@@ -71,7 +72,7 @@ class ExitVerifier:
         proxy: Proxy,
         *,
         session_id: str | None,
-        country: str | None,
+        location: LocationTarget | None,
         target_host: str | None,
     ) -> ExitDecision:
         """Return the proxy to forward through, or a rejection.
@@ -83,7 +84,7 @@ class ExitVerifier:
         Anything but a confirmed mismatch lets the request through: an echo
         outage must never become a traffic outage.
         """
-        if not PreflightChecker.applies(project, country, proxy):
+        if not PreflightChecker.applies(project, location, proxy):
             return ExitDecision(proxy)
         mode = project.location_preflight
         # A session-less request on a dynamic gateway retries by re-rendering:
@@ -98,7 +99,7 @@ class ExitVerifier:
         while True:
             attempts += 1
             try:
-                verdict = await self._preflight_checker.check(project, proxy, session_id=session_id, requested_country=country)
+                verdict = await self._preflight_checker.check(project, proxy, session_id=session_id, requested=location)
             except Exception as exc:
                 logger.warning("Preflight check errored", proxy_id=proxy.id, error=str(exc))
                 return ExitDecision(proxy)
@@ -109,15 +110,15 @@ class ExitVerifier:
                 self,
                 proxy_id=proxy.id,
                 project_id=project.id,
-                expected=verdict.expected or "",
-                observed=verdict.observed,
+                expected=verdict.expected.key if verdict.expected else "",
+                observed=verdict.observed.key if verdict.observed else None,
                 ip=verdict.ip,
             )
             if can_retry and attempts < self._preflight_checker.max_attempts:
                 if not rerender:
                     excluded.add(proxy.id)
                 replacement = await self._proxy_selector.select_proxy_for_project(
-                    project.id, session_id, target_host, country, exclude=frozenset(excluded)
+                    project.id, session_id, target_host, location, exclude=frozenset(excluded)
                 )
                 if replacement is not None:
                     logger.info(

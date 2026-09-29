@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from api.core.health_checker import default_ip_paths
+from api.core.health_checker import ExtractionPaths, default_ip_paths
 from api.geo.service import GeoService
 
 
@@ -27,11 +27,11 @@ class EchoExtractionRules:
         """Health checks with no connector URL go to the echo endpoint, so every check reports the exit IP."""
         return self._geo_service.settings.echo_url
 
-    def ip_paths(self, url: str, connector_config: dict[str, Any]) -> tuple[str, str | None] | None:
+    def ip_paths(self, url: str, connector_config: dict[str, Any]) -> ExtractionPaths | None:
         configured = default_ip_paths(url, connector_config, include_default_url=False)
         if configured is not None:
             return configured
         if self._geo_service.settings.health_check_attribution and self._geo_service.is_echo_url(url):
             spec = self._geo_service.echo_spec()
-            return spec.ip_path, spec.country_path
+            return ExtractionPaths(spec.ip_path, spec.country_path, spec.state_path, spec.city_path)
         return default_ip_paths(url, connector_config)

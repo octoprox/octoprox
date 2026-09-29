@@ -96,7 +96,7 @@ class TestDatabases:
         )
 
         before = authenticated_client.post("/api/v1/geo/lookup", json={"ip": GB_IP}).json()
-        assert before["resolution"]["country"] is None and before["databases_loaded"] == 0
+        assert before["resolution"]["resolved_country"] is None and before["databases_loaded"] == 0
 
         response = _upload(authenticated_client, path, name="City test", priority=10)
         assert response.status_code == 201, response.text
@@ -116,7 +116,7 @@ class TestDatabases:
         lookup = authenticated_client.post(
             "/api/v1/geo/lookup", json={"ip": GB_IP, "claimed_country": "us"}
         ).json()
-        assert lookup["resolution"]["country"] == "GB" and lookup["resolution"]["conflict"] is True
+        assert lookup["resolution"]["resolved_country"] == "GB" and lookup["resolution"]["country_conflict"] is True
         assert lookup["candidates"][0]["location"]["city"] == "London"
 
         settings = authenticated_client.get("/api/v1/geo/settings").json()
@@ -134,7 +134,7 @@ class TestDatabases:
         assert (
             authenticated_client.post("/api/v1/geo/lookup", json={"ip": GB_IP}).json()[
                 "resolution"
-            ]["country"]
+            ]["resolved_country"]
             is None
         )
 
@@ -165,7 +165,7 @@ class TestDatabases:
         lookup = authenticated_client.post("/api/v1/geo/lookup", json={"ip": GB_IP}).json()
         # IPinfo (priority 10) wins; the databases disagree so nothing is certain.
         assert (
-            lookup["resolution"]["country"] == "DE" and lookup["resolution"]["disagreement"] is True
+            lookup["resolution"]["resolved_country"] == "DE" and lookup["resolution"]["country_conflict"] is None
         )
         assert [c["country"] for c in lookup["candidates"]] == ["DE", "GB"]
 
@@ -342,18 +342,18 @@ class TestProxyAttribution:
             "/api/v1/geo/lookup", json={"ip": GB_IP, "claimed_country": "US"}
         ).json()
         assert (
-            default["resolution"]["country"] == "GB"
+            default["resolution"]["resolved_country"] == "GB"
             and default["policy"]["sources"][0] == "database"
         )
         scoped = authenticated_client.post(
             "/api/v1/geo/lookup",
             json={"ip": GB_IP, "claimed_country": "US", "project_id": project["id"]},
         ).json()
-        assert scoped["resolution"]["country"] == "US" and scoped["policy"]["sources"] == [
+        assert scoped["resolution"]["resolved_country"] == "US" and scoped["policy"]["sources"] == [
             "vendor",
             "database",
         ]
-        assert scoped["resolution"]["conflict"] is True
+        assert scoped["resolution"]["country_conflict"] is True
 
         cleared = authenticated_client.patch(
             f"/api/v1/projects/{project['id']}",
@@ -386,7 +386,7 @@ class TestObservationsAndStatus:
         accuracy = authenticated_client.get("/api/v1/geo/accuracy?days=7").json()
         assert isinstance(accuracy["connectors"], list) and accuracy["since"]
         for row in accuracy["connectors"]:
-            assert set(row) >= {"exits", "claimed", "confirmed", "contradicted", "uncertain", "accuracy", "breakdown", "coverage"}
+            assert set(row) >= {"exits", "claimed", "confirmed", "contradicted", "open", "accuracy", "breakdown", "coverage"}
         status = authenticated_client.get("/api/v1/geo/status").json()
         assert status["databases_total"] >= status["databases_loaded"]
         assert status["preflight_checks"] == 0 and status["stored_observations"] >= 0

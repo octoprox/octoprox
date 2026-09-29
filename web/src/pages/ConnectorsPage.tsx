@@ -28,7 +28,8 @@ import { ProviderLogo } from '../components/ProviderLogo'
 import { SchemaForm, MultiCountryPicker, defaultValues, serializeValues, splitCountries } from '../components/SchemaForm'
 import { relativeTime, formatDateTime, formatDate, formatBytesDecimal, formatMoney } from '../utils/format'
 import { targetTotal, describeTarget, isDynamic } from '../utils/connectors'
-import { coverageLabel } from '../components/geo/ProviderAccuracyPanel'
+import { coverageLabel } from '../components/geo/coverage'
+import { MismatchSummary, rateClass, ratePercent } from '../components/geo/AccuracyDetails'
 import { RichSelect, RichSelectOption } from '../components/RichSelect'
 import { Button, Input, Label, Badge, Alert, ChipInput, Inspector, Tabs, Segmented, Select, ConfirmDialog, KeyValue, InspectorSection, InfoTip } from '../components/ui'
 
@@ -387,6 +388,10 @@ function ConnectorEditor({ connector, siblings, canMutate, onClose, onDelete, on
   })
   const [error, setError] = useState<string | null>(null)
   const [creatingCredential, setCreatingCredential] = useState(false)
+  // Declared here with the other state: every hook must run on every render, including the
+  // type-picker render before `type` is chosen, or React sees more hooks once a type is picked.
+  const [limitText, setLimitText] = useState<string>(() => (connector?.traffic_config?.limit_bytes ? String(connector.traffic_config.limit_bytes / BYTES_PER_GB) : ''))
+  const [priceText, setPriceText] = useState<string>(() => (connector?.traffic_config?.price_per_gb != null ? String(connector.traffic_config.price_per_gb) : ''))
 
   const { data: credentialsData } = useQuery({
     queryKey: ['credentials', selectedProjectId],
@@ -659,14 +664,12 @@ function ConnectorEditor({ connector, siblings, canMutate, onClose, onDelete, on
     setFormData({ ...formData, traffic_config: next })
   }
   const setPeriod = (p: TrafficPeriod) => setTraffic({ period: p, reset_day: p === 'week' && resetDay > 7 ? 1 : resetDay })
-  const [limitText, setLimitText] = useState<string>(() => (connector?.traffic_config?.limit_bytes ? String(connector.traffic_config.limit_bytes / BYTES_PER_GB) : ''))
   const setLimitGb = (raw: string) => {
     setLimitText(raw)
     const n = Number(raw)
     if (raw.trim() === '' || !Number.isFinite(n) || n <= 0) { setTraffic({ limit_bytes: undefined }); return }
     setTraffic({ limit_bytes: Math.round(n * BYTES_PER_GB) })
   }
-  const [priceText, setPriceText] = useState<string>(() => (connector?.traffic_config?.price_per_gb != null ? String(connector.traffic_config.price_per_gb) : ''))
   const setPrice = (raw: string) => {
     setPriceText(raw)
     const n = Number(raw)
@@ -1066,16 +1069,23 @@ function ConnectorAccuracySection({ connectorId }: { connectorId: string }) {
   })
   const row = data?.connectors.find((c) => c.connector_id === connectorId)
   const exits = exitsData?.connectors.find((c) => c.connector_id === connectorId)
-  if ((!row || row.claimed === 0) && !exits) return null
-  const pct = row?.accuracy == null ? null : Math.round(row.accuracy * 1000) / 10
-  const wrong = (row?.breakdown ?? []).filter((b) => b.claimed_country && b.observed_country && b.claimed_country !== b.observed_country).slice(0, 3)
+  if ((!row || row.country.claimed === 0) && !exits) return null
+  const pct = ratePercent(row?.country.accuracy)
+  const rate = (value: number | null) => (value == null ? <span className="text-fg-subtle">open</span> : <span className={rateClass(value)}>{value}%</span>)
   return (
     <InspectorSection title="Exit locations (30 days)">
       {exits && <KeyValue label="Unique exit IPs" value={<span className="tabular-nums" title={coverageLabel(exits.coverage)?.title}>{exits.unique_in_window.toLocaleString()}<span className="text-fg-subtle font-normal"> / {exits.unique_total.toLocaleString()} ever</span>{coverageLabel(exits.coverage) && <span className="ml-1.5 text-[10px] uppercase tracking-wide text-warning">{coverageLabel(exits.coverage)?.text}</span>}</span>} />}
       {exits && exits.unique_total > 0 && <KeyValue label="Reused IPs" value={`${Math.round((exits.reused / exits.unique_total) * 1000) / 10}%`} />}
-      {row && row.claimed > 0 && <KeyValue label="Exits with a vendor claim" value={row.claimed.toLocaleString()} />}
-      {row && row.claimed > 0 && <KeyValue label="Confirmed" value={pct == null ? '-' : <span className={pct >= 95 ? 'text-success' : pct >= 80 ? 'text-warning' : 'text-danger'}>{pct}%</span>} />}
-      {wrong.length > 0 && <KeyValue label="Contradicted" value={<span className="text-xs">{wrong.map((b) => `${b.claimed_country} → ${b.observed_country} (${b.exits})`).join(', ')}</span>} />}
+      {row && row.country.claimed > 0 && <KeyValue label="Exits with a vendor claim" value={row.country.claimed.toLocaleString()} />}
+      {row && row.country.claimed > 0 && <KeyValue label="Country confirmed" value={pct == null ? '-' : rate(pct)} />}
+      {row && row.state.claimed > 0 && <KeyValue label="State confirmed" value={<span title={`${row.state.confirmed} confirmed, ${row.state.contradicted} contradicted, ${row.state.open} open of ${row.state.claimed} asked`}>{rate(ratePercent(row.state.accuracy))}</span>} />}
+      {row && row.city.claimed > 0 && <KeyValue label="City confirmed" value={<span title={`${row.city.confirmed} confirmed, ${row.city.contradicted} contradicted, ${row.city.open} open of ${row.city.claimed} asked`}>{rate(ratePercent(row.city.accuracy))}</span>} />}
+      {row && row.breakdown.length > 0 && (
+        <div className="pt-1.5">
+          <div className="text-[11px] text-fg-muted mb-1">Where it was wrong</div>
+          <MismatchSummary breakdown={row.breakdown} limit={3} />
+        </div>
+      )}
     </InspectorSection>
   )
 }

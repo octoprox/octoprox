@@ -12,7 +12,7 @@ signals:
 * ``proxy_added``: a manually added proxy of a static connector with no
   country yet gets one request through it to the echo endpoint.
 * ``exit_location_mismatch``: preflight found a proxy exiting somewhere
-  other than expected; a vendor-session slot is rotated, a fixed exit flagged.
+  other than expected; the pooled vendor-session slot is rotated.
 
 It reaches the proxy pool through the small :class:`ProxyStore` protocol,
 which the proxy manager satisfies, and resolves each proxy under the source
@@ -30,16 +30,15 @@ from api.core.config import Settings
 from api.core.event_bus import event_bus
 from api.core.signals import exit_ip_changed, exit_ip_observed, exit_location_mismatch, proxy_added
 from api.geo.models import (
-    META_ENDPOINT_COUNTRY,
     META_LOCATION_CONFLICT,
     ObservationSource,
     SourcePolicy,
-    normalize_country,
 )
 from api.geo.readers import is_ip
 from api.geo.service import GeoService
 from api.models.connector import Connector
 from api.models.credential import CredentialType
+from api.models.location import LocationTarget
 from api.models.project import Project
 from api.models.proxy import Proxy
 from api.providers.sdk.strategies import META_DISCOVERED_IP, META_SESSION_ID, is_dynamic_gateway
@@ -138,7 +137,7 @@ class ProxyAttributor:
         ip: str,
         *,
         source: ObservationSource,
-        endpoint_country: str | None = None,
+        endpoint: LocationTarget | None = None,
     ) -> Proxy | None:
         """Attribute ``ip`` for the proxy and persist it when anything changed.
 
@@ -160,7 +159,7 @@ class ProxyAttributor:
                 ip,
                 source=source,
                 policy=self.policy_for(proxy.connector_id),
-                endpoint_country=endpoint_country,
+                endpoint=endpoint,
                 project_id=self.project_id_for(proxy.connector_id),
                 session_id=proxy.metadata.get(META_SESSION_ID),
             )
@@ -174,7 +173,7 @@ class ProxyAttributor:
             ip,
             policy=self.policy_for(proxy.connector_id),
             source=source,
-            endpoint_country=endpoint_country,
+            endpoint=endpoint,
             project_id=project_id,
         )
         if changed:
@@ -193,14 +192,17 @@ class ProxyAttributor:
         ip: str,
         source: str,
         endpoint_country: str | None = None,
+        endpoint_state: str | None = None,
+        endpoint_city: str | None = None,
         **_: object,
     ) -> None:
         try:
             kind = ObservationSource(source)
         except ValueError:
             kind = ObservationSource.DISCOVERY
+        endpoint = LocationTarget.reported(endpoint_country, endpoint_state, endpoint_city)
         try:
-            await self.observe(proxy_id, ip, source=kind, endpoint_country=endpoint_country)
+            await self.observe(proxy_id, ip, source=kind, endpoint=endpoint)
         except Exception as exc:
             logger.warning("Attribution failed", proxy_id=proxy_id, ip=ip, error=str(exc))
 
@@ -235,9 +237,9 @@ class ProxyAttributor:
             except Exception as exc:
                 logger.warning("Exit location lookup errored", proxy_id=proxy_id, error=str(exc))
 
-    async def locate(self, proxy: Proxy) -> tuple[str | None, str]:
-        """``(exit_ip, endpoint_country)`` for a proxy with resolved credentials; ip is None on failure."""
-        return await self._geo_service.discoverer().discover_with_country(
+    async def locate(self, proxy: Proxy) -> tuple[str | None, LocationTarget | None]:
+        """``(exit_ip, place the echo reported)`` for a proxy with resolved credentials; ip is None on failure."""
+        return await self._geo_service.discoverer().discover_with_place(
             proxy.url, log_context={"proxy_id": proxy.id, "host": proxy.host, "port": proxy.port}
         )
 
@@ -254,7 +256,7 @@ class ProxyAttributor:
         proxy = self._proxy_store.get_proxy(proxy_id)
         if proxy is None:
             return None
-        ip, endpoint_country = await self.locate(self._proxy_store.resolve_proxy_credentials(proxy))
+        ip, endpoint = await self.locate(self._proxy_store.resolve_proxy_credentials(proxy))
         if ip is None:
             logger.info("Exit location lookup failed", proxy_id=proxy_id, host=proxy.host)
             return None
@@ -263,7 +265,7 @@ class ProxyAttributor:
             ip,
             policy=self.policy_for(proxy.connector_id),
             source=source,
-            endpoint_country=endpoint_country or None,
+            endpoint=endpoint,
             project_id=self.project_id_for(proxy.connector_id),
         )
         await self._proxy_store.update_proxy(proxy)
@@ -281,10 +283,13 @@ class ProxyAttributor:
         ip: str | None = None,
         **_: object,
     ) -> None:
-        """A vendor-session slot is rotated; a fixed exit is flagged as contradicted.
+        """A pooled vendor-session slot is rotated; a dynamic gateway is left alone.
 
-        A dynamic-sessions gateway is neither: the misplaced session was this
-        request's alone and the next request mints another, so the row stays.
+        Only session-bound rows are preflighted, so a mismatch always concerns
+        a vendor session: a pooled slot is removed so the provider sync mints a
+        fresh session in its place, while a dynamic-sessions gateway stays,
+        since the misplaced session was this request's alone and the next
+        request mints another.
         """
         if self._proxy_store is None:
             return
@@ -297,9 +302,6 @@ class ProxyAttributor:
         if proxy.metadata.get(META_SESSION_ID):
             logger.info("Rotating misplaced vendor session", proxy_id=proxy_id, expected=expected, observed=observed, ip=ip)
             await self._proxy_store.remove_proxy(proxy_id)
-            return
-        if ip and self._geo_service.flag_preflight_mismatch(proxy, ip, expected, normalize_country(observed)):
-            await self._proxy_store.update_proxy(proxy)
 
     # --- offline re-attribution --------------------------------------------------------
 
@@ -322,12 +324,11 @@ class ProxyAttributor:
             if not isinstance(ip, str) or not is_ip(ip):
                 continue
             scanned += 1
-            endpoint_country = proxy.metadata.get(META_ENDPOINT_COUNTRY)
             _, did_change = self._geo_service.rejudge(
                 proxy,
                 ip,
                 policy=self.policy_for(proxy.connector_id),
-                endpoint_country=endpoint_country if isinstance(endpoint_country, str) else None,
+                endpoint=GeoService.endpoint_place_of(proxy),
             )
             if did_change:
                 changed.append(proxy)

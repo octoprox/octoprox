@@ -58,7 +58,7 @@ connector_fields:
     details: >-
       Dynamic keeps one gateway proxy and renders the vendor credentials per request: a client -sessid-
       always maps to the same vendor session, a request without one gets a fresh session and the vendor
-      rotates the exit, and -cc- picks the country per request. "Number of proxies" does not apply and the
+      rotates the exit, -cc- picks the country per request and -st- and -city- narrow it. "Number of proxies" does not apply and the
       listed countries become an allow-list. The gateway is not health-checked and counts as healthy.
     show_when: { field: connector.proxy_type, in: [residential, mobile] }
   - key: exit_sample_percent
@@ -192,13 +192,18 @@ proxy_types:
         - text: "brd-customer-{credential.customer_id}"
         - text: "zone-{connector.zone_name}"
         - text: "session-{session_id}"
-        - text: "country-{connector.country_code|lower}"
-          when: { field: connector.country_code }
+        - text: "country-{geo.country|lower}"
+          when: { field: geo.country }
+        # Dynamic sessions: ISO 3166-2 state code, city without spaces (sanfrancisco).
+        - text: "state-{geo.state|lower}"
+          when: { field: geo.state }
+        - text: "city-{geo.city|nospace}"
+          when: { field: geo.city }
     password: "{connector.zone_password}"
     tags: [brightdata, residential]
     metadata:
       zone_name: "{connector.zone_name}"
-      country_code: "{connector.country_code}"
+      country_code: "{geo.country}"
 
   - key: mobile
     label: Mobile
@@ -211,13 +216,18 @@ proxy_types:
         - text: "brd-customer-{credential.customer_id}"
         - text: "zone-{connector.zone_name}"
         - text: "session-{session_id}"
-        - text: "country-{connector.country_code|lower}"
-          when: { field: connector.country_code }
+        - text: "country-{geo.country|lower}"
+          when: { field: geo.country }
+        # Dynamic sessions: ISO 3166-2 state code, city without spaces (sanfrancisco).
+        - text: "state-{geo.state|lower}"
+          when: { field: geo.state }
+        - text: "city-{geo.city|nospace}"
+          when: { field: geo.city }
     password: "{connector.zone_password}"
     tags: [brightdata, mobile]
     metadata:
       zone_name: "{connector.zone_name}"
-      country_code: "{connector.country_code}"
+      country_code: "{geo.country}"
 
   - key: isp
     label: ISP
@@ -234,22 +244,24 @@ proxy_types:
           when: { field: discovered_ip }
         # A pinned IP fixes the exit; the country only steers the pre-pin
         # request (discovery fallback when the route_ips API is unavailable).
-        - text: "country-{connector.country_code|lower}"
+        - text: "country-{geo.country|lower}"
           when:
-            - { field: connector.country_code }
+            - { field: geo.country }
             - { field: discovered_ip, negate: true }
     password: "{connector.zone_password}"
     discovery:
       url: https://lumtest.com/myip.json
       ip_path: ip
       country_path: country
+      state_path: geo.region
+      city_path: geo.city
     known_ips:
       call:
         url: https://api.brightdata.com/zone/route_ips
         params:
           zone: "{connector.zone_name}"
           list_countries: "true"
-          country: "{connector.country_code|lower}"
+          country: "{geo.country|lower}"
         headers:
           Authorization: "Bearer {credential.token}"
       items: "@"
@@ -258,7 +270,7 @@ proxy_types:
     tags: [brightdata, isp]
     metadata:
       zone_name: "{connector.zone_name}"
-      country_code: "{connector.country_code}"
+      country_code: "{geo.country}"
       index: "{index}"
 
   - key: datacenter
@@ -276,22 +288,24 @@ proxy_types:
           when: { field: discovered_ip }
         # A pinned IP fixes the exit; the country only steers the pre-pin
         # request (discovery fallback when the route_ips API is unavailable).
-        - text: "country-{connector.country_code|lower}"
+        - text: "country-{geo.country|lower}"
           when:
-            - { field: connector.country_code }
+            - { field: geo.country }
             - { field: discovered_ip, negate: true }
     password: "{connector.zone_password}"
     discovery:
       url: https://lumtest.com/myip.json
       ip_path: ip
       country_path: country
+      state_path: geo.region
+      city_path: geo.city
     known_ips:
       call:
         url: https://api.brightdata.com/zone/route_ips
         params:
           zone: "{connector.zone_name}"
           list_countries: "true"
-          country: "{connector.country_code|lower}"
+          country: "{geo.country|lower}"
         headers:
           Authorization: "Bearer {credential.token}"
       items: "@"
@@ -300,5 +314,5 @@ proxy_types:
     tags: [brightdata, datacenter]
     metadata:
       zone_name: "{connector.zone_name}"
-      country_code: "{connector.country_code}"
+      country_code: "{geo.country}"
       index: "{index}"

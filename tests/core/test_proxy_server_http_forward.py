@@ -26,6 +26,7 @@ from api.core.proxy_server import (
     ProxyServer,
 )
 from api.core.traffic_limiter import TrafficMeter
+from api.models.location import LocationTarget
 from api.models.proxy import Proxy, ProxyProtocol
 
 CLIENT_TOKEN = base64.b64encode(b"ivan-sessid-abcd-cc-us:ivan").decode()
@@ -162,7 +163,7 @@ async def _forward(
         dict(CLIENT_HEADERS if headers is None else headers),
         project_id="project-1",
         session_id=session_id,
-        country="US",
+        location=LocationTarget(country="US"),
     )
     return client_writer
 
