@@ -133,6 +133,29 @@ The install-wide settings (default source precedence and conflict rule, echo end
 
 Connector config keys read by the health checker: `healthcheck_url` (custom check URL; without it the attribution echo endpoint is checked), `healthcheck_ip_path` (JMESPath, or `@text`, of the exit IP in that URL's response; unset means the response carries no IP unless the URL is the echo or httpbin endpoint) and `healthcheck_country_path`.
 
+### WireGuard
+
+```yaml
+wireguard:
+  enabled: false           # terminate the tunnel on this instance (CAP_NET_ADMIN, wireguard-tools, nftables)
+  interface: wg0
+  # listen_port: 51820     # only when it differs from the install's endpoint port
+  transparent_port: 8081   # tunnel TCP is redirected here (bound on the tunnel address)
+  dns_port: 5353           # tunnel DNS is redirected here
+  mtu: 1420
+  fake_ip_range: 198.18.0.0/15
+  sniff_timeout_seconds: 2
+  block_encrypted_dns: true  # close DoT and known DoH resolvers so devices keep the tunnel resolver
+  defaults:                # seeds the install-wide row on a fresh install
+    endpoint_host: vpn.example.com
+    endpoint_port: 51820
+    subnet: 10.66.0.0/16
+```
+
+Environment variables: `OCTOPROX_WIREGUARD_ENABLED`, `OCTOPROX_WIREGUARD_INTERFACE`, `OCTOPROX_WIREGUARD_LISTEN_PORT`, `OCTOPROX_WIREGUARD_TRANSPARENT_PORT`, `OCTOPROX_WIREGUARD_DNS_PORT`, `OCTOPROX_WIREGUARD_MTU`, `OCTOPROX_WIREGUARD_FAKE_IP_RANGE`, `OCTOPROX_WIREGUARD_SNIFF_TIMEOUT_SECONDS`, `OCTOPROX_WIREGUARD_BLOCK_ENCRYPTED_DNS`.
+
+The key pair, public endpoint and tunnel subnet are install-wide, stored in Postgres and edited under **Settings → WireGuard**. See [WireGuard Devices](wireguard) for what each setting does and what the terminating instance needs.
+
 ## Logging
 
 ```yaml

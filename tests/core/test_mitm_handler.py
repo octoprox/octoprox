@@ -4,12 +4,16 @@
 """Tests for MitmHandler."""
 
 import asyncio
+import ssl
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from api.core.mitm.handler import MitmHandler
+from api.core.mitm.handler import MitmHandler, start_tls_with_head
+from api.core.tls_cert_manager import TLSCertManager
 from api.models.project import MitmEngine, MitmMode
+from api.wireguard.sniff import take_buffered
 
 
 class TestMitmHandler:
@@ -139,3 +143,47 @@ class TestMitmHandler:
         # Check that 502 was written
         written_data = b"".join(call.args[0] for call in writer.write.call_args_list)
         assert b"HTTP/1.1 502" in written_data
+
+
+class TestStartTlsWithHead:
+    """The TLS upgrade must see a ClientHello the caller already took off the socket."""
+
+    async def test_peeked_client_hello_reaches_the_handshake(self, tmp_path: Path) -> None:
+        manager = TLSCertManager(ca_cert_path=tmp_path / "ca.crt", ca_key_path=tmp_path / "ca.key")
+        manager._generate_ca()
+        server_ctx = manager.get_server_ssl_context("localhost")
+        served: list[bytes] = []
+
+        async def serve(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+            # As the transparent listener does: the ClientHello is peeked into
+            # the reader (for its SNI) before the decision to intercept.
+            while len(reader._buffer) < 5:  # type: ignore[attr-defined]
+                await reader._wait_for_data("peek")  # type: ignore[attr-defined]
+            head = take_buffered(reader)
+            transport = writer.transport
+            new_transport = await start_tls_with_head(
+                asyncio.get_running_loop(), head, transport, transport.get_protocol(), server_ctx
+            )
+            writer._transport = new_transport  # type: ignore[attr-defined]
+            served.append(await reader.readline())
+            writer.write(b"pong\n")
+            await writer.drain()
+            writer.close()
+
+        server = await asyncio.start_server(serve, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
+        client_ctx = ssl.create_default_context()
+        client_ctx.check_hostname = False
+        client_ctx.verify_mode = ssl.CERT_NONE
+        try:
+            reader, writer = await asyncio.wait_for(
+                asyncio.open_connection("127.0.0.1", port, ssl=client_ctx), 5
+            )
+            writer.write(b"ping\n")
+            await writer.drain()
+            assert await asyncio.wait_for(reader.readline(), 5) == b"pong\n"
+            writer.close()
+        finally:
+            server.close()
+            await server.wait_closed()
+        assert served == [b"ping\n"]

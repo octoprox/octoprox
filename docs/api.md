@@ -997,6 +997,170 @@ Requested through a proxy it reports the proxy's exit. Behind a load balancer, l
 
 ---
 
+## WireGuard
+
+Devices that cannot use a proxy join a project through a WireGuard tunnel
+(see [WireGuard Devices](wireguard)). Server settings are install-wide and
+need an admin to change; devices (peers) are project entities editors manage.
+
+### Server settings
+
+```http
+GET /api/v1/wireguard/settings
+```
+
+Returns the public key, endpoint, subnet, gateway and the answering
+instance's tunnel status:
+
+```json
+{
+  "public_key": "HIgo9xNzJMWLKASShiTqIybxZ0U3wGLiUeJ1PKf8ykw=",
+  "endpoint_host": "vpn.example.com",
+  "endpoint_port": 51820,
+  "subnet": "10.66.0.0/16",
+  "gateway": "10.66.0.1",
+  "persistent_keepalive": 25,
+  "client_mtu": null,
+  "configured": true,
+  "updated_at": "2026-10-03T09:00:00",
+  "status": {
+    "enabled": true,
+    "state": "running",
+    "error": null,
+    "instance_id": "7d6b...",
+    "interface": "wg0",
+    "backend": "kernel",
+    "listen_port": 51820,
+    "transparent_port": 8081,
+    "dns_port": 5353,
+    "fake_ip_range": "198.18.0.0/15",
+    "active_connections": 3,
+    "peers_total": 4,
+    "peers_enabled": 4,
+    "peers_online": 2,
+    "connections_by_address": 0,
+    "encrypted_dns_blocked": 1,
+    "block_encrypted_dns": true
+  }
+}
+```
+
+```http
+PUT /api/v1/wireguard/settings
+Content-Type: application/json
+
+{
+  "endpoint_host": "vpn.example.com",
+  "endpoint_port": 51820,
+  "subnet": "10.66.0.0/16",
+  "persistent_keepalive": 25,
+  "client_mtu": null
+}
+```
+
+Admin only. The subnet must still contain every device's address. Changing
+the subnet re-addresses the gateway on the next restart of the terminating
+instance.
+
+```http
+POST /api/v1/wireguard/settings/rotate-key
+```
+
+Admin only. Issues a new server key pair; every device config becomes invalid.
+
+### Devices (peers)
+
+```http
+GET /api/v1/projects/{project_id}/wireguard/peers
+```
+
+```json
+{
+  "total": 1,
+  "server_configured": true,
+  "server_public_key": "HIgo...",
+  "peers": [
+    {
+      "id": "…",
+      "project_id": "…",
+      "name": "Living room TV",
+      "public_key": "…",
+      "has_private_key": true,
+      "has_preshared_key": true,
+      "address": "10.66.0.2",
+      "enabled": true,
+      "session_id": "sofa",
+      "country": "US",
+      "state": "NY",
+      "city": "new_york",
+      "created_at": "…",
+      "updated_at": "…",
+      "status": {
+        "online": true,
+        "last_handshake_at": "2026-10-03T09:04:12",
+        "rx_bytes": 1048576,
+        "tx_bytes": 23068672,
+        "endpoint": "203.0.113.9:40123",
+        "connections_by_address": 0,
+        "encrypted_dns_blocked": 0
+      }
+    }
+  ]
+}
+```
+
+`status` is null until the instance terminating the tunnel has published a
+reading (every ten seconds while it runs).
+
+```http
+POST /api/v1/projects/{project_id}/wireguard/peers
+Content-Type: application/json
+
+{
+  "name": "Living room TV",
+  "public_key": null,
+  "preshared": true,
+  "enabled": true,
+  "session_id": "sofa",
+  "country": "us",
+  "state": "ny",
+  "city": "New York"
+}
+```
+
+Editor or admin. With `public_key` null Octoprox generates the key pair and
+keeps the private key so the config can be shown again; with a device's own
+public key only the public half is stored. The device gets the next free
+address of the subnet. A state or city needs a country. Names are unique per
+project, ignoring case.
+
+```http
+GET    /api/v1/projects/{project_id}/wireguard/peers/{peer_id}
+PATCH  /api/v1/projects/{project_id}/wireguard/peers/{peer_id}
+DELETE /api/v1/projects/{project_id}/wireguard/peers/{peer_id}
+POST   /api/v1/projects/{project_id}/wireguard/peers/{peer_id}/rotate-keys
+```
+
+`PATCH` takes any of `name`, `enabled`, `session_id`, `country`, `state`,
+`city`; an empty string clears the last four. `rotate-keys` issues a new key
+pair (and preshared key, if the device had one).
+
+```http
+GET /api/v1/projects/{project_id}/wireguard/peers/{peer_id}/config
+```
+
+```json
+{
+  "filename": "Living-room-TV.conf",
+  "config": "[Interface]\nPrivateKey = …\nAddress = 10.66.0.2/32\nDNS = 10.66.0.1\n\n[Peer]\nPublicKey = …\nPresharedKey = …\nAllowedIPs = 0.0.0.0/0, ::/0\nEndpoint = vpn.example.com:51820\nPersistentKeepalive = 25\n",
+  "complete": true,
+  "server_configured": true
+}
+```
+
+`complete` is false when the device holds its own private key (the file
+carries a placeholder) or the endpoint host is not set yet.
+
 ## Health Check
 
 Public endpoint for load balancer health checks:

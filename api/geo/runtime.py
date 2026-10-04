@@ -28,13 +28,14 @@ from api.core.event_bus import event_bus
 from api.core.signals import geo_database_changed
 from api.core.workers import WorkerName
 from api.db.redis import RedisClient
+from api.db.session import SessionFactory
 from api.geo.attributor import ProxyAttributor
 from api.geo.extraction import EchoExtractionRules
 from api.geo.observations import ObservationFlusher, ObservationRecorder
 from api.geo.preflight import PreflightChecker
 from api.geo.service import GeoService
 from api.geo.settings import GeoSettingsStore
-from api.geo.store import GeoDatabaseStore, SessionFactory
+from api.geo.store import GeoDatabaseStore
 from api.geo.updater import GeoDatabaseUpdater
 from api.providers.sdk.egress import EgressPolicy
 

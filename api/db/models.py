@@ -327,6 +327,66 @@ class ProviderAuditModel(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now, index=True)
 
 
+class WireGuardSettingsModel(Base):
+    """The install's WireGuard identity and device-config defaults: exactly one row, id 1.
+
+    One key pair for the whole install rather than one per instance, so a
+    device's config stays valid whichever instance answers on the endpoint.
+    The private key is here, not in a file, for the same reason the MITM CA
+    is shared: every instance must present the same identity.
+    """
+
+    __tablename__ = "wireguard_settings"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
+    private_key: Mapped[str] = mapped_column(String(44), nullable=False)
+    public_key: Mapped[str] = mapped_column(String(44), nullable=False)
+    endpoint_host: Mapped[str] = mapped_column(String(255), nullable=False, default="", server_default="")
+    endpoint_port: Mapped[int] = mapped_column(Integer, nullable=False, default=51820, server_default="51820")
+    subnet: Mapped[str] = mapped_column(String(43), nullable=False, default="10.66.0.0/16", server_default="10.66.0.0/16")
+    persistent_keepalive: Mapped[int] = mapped_column(Integer, nullable=False, default=25, server_default="25")
+    client_mtu: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    updated_by: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now, onupdate=utc_now)
+
+
+class WireGuardPeerModel(Base):
+    """A device allowed into the tunnel, and the project its traffic belongs to.
+
+    The tunnel address is the credential. WireGuard only delivers packets
+    whose source address is in the sending peer's allowed IPs, so the address
+    a connection arrives from names this row, and through it the project,
+    the fixed session and the exit location its traffic is routed with.
+    """
+
+    __tablename__ = "wireguard_peers"
+    __table_args__ = (
+        Index("ix_wireguard_peers_project_name_unique", "project_id", text("lower(name)"), unique=True),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    project_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    public_key: Mapped[str] = mapped_column(String(44), nullable=False, unique=True)
+    # Kept when Octoprox generated the pair, so the config can be shown again;
+    # null when the operator brought their own public key.
+    private_key: Mapped[str | None] = mapped_column(String(44), nullable=True)
+    preshared_key: Mapped[str | None] = mapped_column(String(44), nullable=True)
+    address: Mapped[str] = mapped_column(String(45), nullable=False, unique=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default=text("true"))
+    # Routing the device cannot express itself: the -sessid- and -cc-/-st-/-city-
+    # a proxy client would put in its username.
+    session_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    country: Mapped[str | None] = mapped_column(String(2), nullable=True)
+    state: Mapped[str | None] = mapped_column(String(8), nullable=True)
+    city: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now, onupdate=utc_now)
+
+
 class GeoSettingsModel(Base):
     """The install-wide IP attribution settings: exactly one row, id 1.
 

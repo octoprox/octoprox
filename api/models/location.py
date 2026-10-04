@@ -41,6 +41,43 @@ US_STATES: dict[str, str] = {
 }
 _US_STATE_BY_SLUG: dict[str, str] = {slug: code for code, slug in US_STATES.items()}
 
+# Common non-ISO spellings accepted anywhere a country code is entered, mapped
+# to the ISO 3166-1 alpha-2 code the vendors, the IP databases and the map use.
+# A connector allow-list saying UK would otherwise never match a -cc-gb request.
+COUNTRY_ALIASES: dict[str, str] = {"UK": "GB"}
+
+
+def normalize_country_code(value: str | None) -> str | None:
+    """Normalise a country code to upper-case ISO 3166-1 alpha-2, or None if blank.
+
+    Applies ``COUNTRY_ALIASES`` (UK becomes GB). Raises ValueError for values
+    that cannot be a country code (anything other than two ASCII letters).
+    """
+    if value is None:
+        return None
+    code = value.strip().upper()
+    if not code:
+        return None
+    if len(code) != 2 or not code.isascii() or not code.isalpha():
+        raise ValueError(f'country must be a two-letter ISO 3166-1 alpha-2 code, got {value!r}')
+    return COUNTRY_ALIASES.get(code, code)
+
+
+def normalize_country_list(value: Any) -> list[str]:
+    """Normalise a countries value (list, or comma-separated string) to unique upper-case codes.
+
+    Order is preserved; blanks are dropped. Raises ValueError on a malformed code.
+    """
+    if value is None:
+        return []
+    raw: list[Any] = value.split(",") if isinstance(value, str) else list(value)
+    result: list[str] = []
+    for item in raw:
+        code = normalize_country_code(str(item)) if item is not None else None
+        if code and code not in result:
+            result.append(code)
+    return result
+
 _STATE_CODE = re.compile(r"^[A-Z0-9]{1,3}$")
 _NON_ALNUM = re.compile(r"[^a-z0-9]+")
 # A qualifier in parentheses names a part of the place, not the place: DB-IP's
@@ -66,6 +103,13 @@ CITY_ALIASES: dict[str, str] = {
 # columns on observations and exit IPs, so a client-typed -city- value or an
 # odd database record can never fail the observation batch that carries it.
 MAX_PLACE_SLUG_LENGTH = 120
+
+# Why a place a client named cannot be honoured. Shared by every surface that
+# takes client input (proxy usernames, WireGuard peers) so the wording is one.
+LOCATION_NEEDS_COUNTRY = "State and city targeting need a country: add -cc-<code> to the username"
+LOCATION_INVALID_COUNTRY = "Country must be a two-letter ISO 3166-1 code, such as -cc-us"
+LOCATION_INVALID_STATE = "State must be the subdivision part of an ISO 3166-2 code, such as -st-ny or -st-eng"
+LOCATION_INVALID_CITY = "City must be a name with letters or digits, such as -city-new_york"
 
 # Proxy metadata key: the state code and city an operator pinned by hand on
 # a static proxy, as {"state_code": "NY", "city": "new_york"}. Routing
@@ -112,6 +156,34 @@ def slugify_place(value: Any) -> str | None:
     text = unicodedata.normalize("NFKD", _PARENTHESISED.sub(" ", value)).encode("ascii", "ignore").decode("ascii").lower()
     slug = _NON_ALNUM.sub("_", text).strip("_")[:MAX_PLACE_SLUG_LENGTH].rstrip("_")
     return CITY_ALIASES.get(slug, slug) or None
+
+
+def normalize_level(level: str, value: Any) -> str | None:
+    """Canonical form of one level of a place a client typed, or None for a blank.
+
+    ``country`` is an ISO 3166-1 alpha-2 code, ``state`` the subdivision part
+    of an ISO 3166-2 code, ``city`` a slug. Raises ValueError with the message
+    the client should read when the value cannot be one.
+    """
+    text = value.strip() if isinstance(value, str) else value
+    if text is None or text == "":
+        return None
+    if level == "country":
+        try:
+            return normalize_country_code(text)
+        except ValueError:
+            raise ValueError(LOCATION_INVALID_COUNTRY) from None
+    if level == "state":
+        try:
+            return normalize_state_code(text)
+        except ValueError:
+            raise ValueError(LOCATION_INVALID_STATE) from None
+    if level == "city":
+        slug = slugify_place(text)
+        if slug is None:
+            raise ValueError(LOCATION_INVALID_CITY)
+        return slug
+    raise ValueError(f"unknown location level {level!r}")
 
 
 def normalize_state_code(value: Any) -> str | None:
@@ -177,8 +249,6 @@ class LocationTarget:
         US, as its name (``California``); a city in any spelling. None when
         nothing usable was reported.
         """
-        from api.models.connector import normalize_country_code
-
         code: str | None
         try:
             code = normalize_country_code(country) if isinstance(country, str) else None
@@ -191,6 +261,24 @@ class LocationTarget:
             except ValueError:
                 state_code = us_state_code_from_name(code, state)
         return cls(country=code, state=state_code, city=slugify_place(city)) or None
+
+    @classmethod
+    def parse(cls, country: Any = None, state: Any = None, city: Any = None) -> LocationTarget | None:
+        """A place as a client named it, normalised strictly.
+
+        The counterpart of :meth:`reported`: a value that cannot be read, or
+        a state or city without a country, raises ValueError with the message
+        the client should see, because routing a request to whatever part of
+        it did parse would be a silent widening. None when nothing was named.
+        """
+        target = cls(
+            country=normalize_level("country", country),
+            state=normalize_level("state", state),
+            city=normalize_level("city", city),
+        )
+        if target.below_country and target.country is None:
+            raise ValueError(LOCATION_NEEDS_COUNTRY)
+        return target or None
 
     @property
     def is_empty(self) -> bool:

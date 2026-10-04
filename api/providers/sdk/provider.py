@@ -9,9 +9,9 @@ import hashlib
 import random
 from dataclasses import dataclass
 
-from api.models.connector import Connector, ProxyTarget, normalize_country_list
+from api.models.connector import Connector, ProxyTarget
 from api.models.credential import Credential
-from api.models.location import LocationTarget
+from api.models.location import LocationTarget, normalize_country_list
 from api.models.proxy import Proxy
 from api.providers.base import ProxyProvider
 from api.providers.sdk.descriptor import (

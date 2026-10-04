@@ -14,6 +14,7 @@ parsing and serialization, replacing manual request/response parsing.
 import asyncio
 import contextlib
 import json
+import ssl
 import time
 from typing import TYPE_CHECKING
 
@@ -30,6 +31,47 @@ if TYPE_CHECKING:
     from api.models.proxy import Proxy
 
 logger = structlog.get_logger()
+
+
+async def start_tls_with_head(
+    loop: asyncio.AbstractEventLoop,
+    head: bytes,
+    transport: asyncio.WriteTransport,
+    protocol: asyncio.BaseProtocol,
+    ssl_context: ssl.SSLContext,
+) -> asyncio.Transport | None:
+    """Server-side ``loop.start_tls`` that first feeds the TLS layer ``head``.
+
+    start_tls swaps the transport's protocol and resumes reading, so only
+    bytes still in the socket reach the handshake. ``head`` is what a caller
+    already pulled off the socket before deciding to intercept (the
+    transparent listener peeks the ClientHello for its SNI); it is handed to
+    the SSL protocol right after its connection_made, in the loop turn order
+    start_tls itself schedules. Without this the handshake would wait for a
+    ClientHello that never comes.
+    """
+    handshake = asyncio.ensure_future(
+        loop.start_tls(transport, protocol, ssl_context, server_side=True)
+    )
+    if head:
+        # One turn: start_tls has now installed the SSL protocol and queued
+        # its connection_made and resume_reading. The replay goes behind them.
+        await asyncio.sleep(0)
+
+        def replay() -> None:
+            if handshake.done():
+                return
+            ssl_protocol = transport.get_protocol()
+            view = memoryview(head)
+            while view:
+                buffer = ssl_protocol.get_buffer(len(view))  # type: ignore[attr-defined]
+                n = min(len(buffer), len(view))
+                buffer[:n] = view[:n]
+                ssl_protocol.buffer_updated(n)  # type: ignore[attr-defined]
+                view = view[n:]
+
+        loop.call_soon(replay)
+    return await handshake
 
 # Read buffer size for client-facing connection
 _READ_SIZE = 65536
@@ -133,12 +175,19 @@ class MitmHandler:
         upstream_reader: asyncio.StreamReader | None = None,
         upstream_writer: asyncio.StreamWriter | None = None,
         meter: "TrafficMeter | None" = None,
+        client_head: bytes = b"",
     ) -> tuple[int, int]:
         """Run MITM interception on the client connection.
 
         Upgrades the client connection to TLS, then uses h11 to parse
         HTTP/1.1 requests and serialize responses, relaying them via
         the appropriate strategy based on project settings.
+
+        ``client_head`` is the start of the client's TLS stream when the
+        caller has already read it off the socket (a transparent connection
+        whose ClientHello was sniffed for its name); it is fed to the
+        handshake, which would otherwise never see it. A CONNECT client
+        sends nothing before the 200, so that path passes nothing.
 
         With a ``meter``, every request and response is counted as it is
         relayed, and once the connector's traffic limit cuts the connection
@@ -160,12 +209,7 @@ class MitmHandler:
         protocol = transport.get_protocol()
 
         try:
-            new_transport = await loop.start_tls(
-                transport,
-                protocol,
-                server_ssl_ctx,
-                server_side=True,
-            )
+            new_transport = await start_tls_with_head(loop, client_head, transport, protocol, server_ssl_ctx)
         except Exception as e:
             logger.debug("MITM TLS handshake failed", target_host=target_host, error=str(e))
             return bytes_sent, bytes_received

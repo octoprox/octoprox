@@ -13,9 +13,9 @@ from api.core.config import Settings
 from api.core.proxy_manager import ProxyManager
 from api.core.proxy_server import ProxyServer
 from api.db.redis import RedisClient
-from api.models.connector import Connector, ProxyTarget, normalize_country_list
+from api.models.connector import Connector, ProxyTarget
 from api.models.credential import Credential, CredentialType
-from api.models.location import LocationTarget
+from api.models.location import LocationTarget, normalize_country_list
 from api.models.project import Project
 from api.models.proxy import Proxy, ProxyProtocol, ProxyStatus
 

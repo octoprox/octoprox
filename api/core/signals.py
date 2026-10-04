@@ -206,6 +206,21 @@ geo_database_changed = signal("geo-database-changed")
 # Args: entity_id ("default"), op (Literal["updated"])
 geo_settings_changed = signal("geo-settings-changed")
 
+# Emitted by the WireGuard routes after a peer (a device allowed into the
+# tunnel) is created, changed or deleted. Cross-instance: every instance
+# re-reads the row into its peer directory, and the one carrying the tunnel
+# re-syncs the interface so the device can (or can no longer) connect.
+# Sender: wireguard route
+# Args: entity_id (peer id, str), op (Literal["added", "updated", "removed"])
+wireguard_peer_changed = signal("wireguard-peer-changed")
+
+# Emitted after the install-wide WireGuard settings row (key pair, endpoint,
+# subnet) is written. Cross-instance: receivers reload it from Postgres and a
+# carrying instance re-applies its key and port to the interface.
+# Sender: wireguard route
+# Args: entity_id ("default"), op (Literal["updated"])
+wireguard_settings_changed = signal("wireguard-settings-changed")
+
 # Emitted in-process whenever a code path learns which IP a proxy exits from:
 # the provider syncer after discovery, the health checker after a check whose
 # response carried the caller's address. Local only; the ProxyAttributor

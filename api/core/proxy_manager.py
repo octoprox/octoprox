@@ -131,6 +131,9 @@ class ProxyManager:
         self._settings = settings
         self._provider_registry = provider_registry or get_provider_registry()
         self._cross_instance_extra_signals: list[Any] = list((cross_instance_handlers or {}).keys())
+        # Additive: a subsystem may register for a signal this class already
+        # handles (a project removal must also drop that project's WireGuard
+        # peers), so the subscriber runs the built-in handler and then these.
         self._cross_instance_handlers: dict[str, Callable[[str, str | None], Awaitable[None]]] = {
             signal.name: handler for signal, handler in (cross_instance_handlers or {}).items()
         }
@@ -306,7 +309,7 @@ class ProxyManager:
             proxy_quarantine_changed,
         )
 
-        dispatch: dict[str, Any] = {
+        builtin: dict[str, Any] = {
             project_changed.name: self._apply_project_change,
             credential_changed.name: self._apply_credential_change,
             connector_changed.name: self._apply_connector_change,
@@ -314,8 +317,10 @@ class ProxyManager:
             proxy_quarantine_changed.name: self._apply_proxy_quarantine_change,
             connector_traffic_changed.name: self._apply_connector_traffic_change,
             provider_changed.name: self._apply_provider_change,
-            **self._cross_instance_handlers,
         }
+        dispatch: dict[str, list[Any]] = {name: [handler] for name, handler in builtin.items()}
+        for name, handler in self._cross_instance_handlers.items():
+            dispatch.setdefault(name, []).append(handler)
         my_id = self._settings.instance_id
         while self._running:
             try:
@@ -337,22 +342,23 @@ class ProxyManager:
                             continue
                         if payload.get("instance_id") == my_id:
                             continue
-                        handler = dispatch.get(payload.get("signal"))
+                        handlers = dispatch.get(payload.get("signal"))
                         entity_id = payload.get("entity_id")
-                        if handler is None or not entity_id:
+                        if not handlers or not entity_id:
                             continue
                         op = payload.get("op")
-                        try:
-                            with job_stats.track(WorkerName.CROSS_INSTANCE_SUBSCRIBER):
-                                await handler(entity_id, op)
-                        except Exception:
-                            logger.warning(
-                                "Cross-instance reload handler failed",
-                                signal=payload.get("signal"),
-                                entity_id=entity_id,
-                                op=op,
-                                exc_info=True,
-                            )
+                        for handler in handlers:
+                            try:
+                                with job_stats.track(WorkerName.CROSS_INSTANCE_SUBSCRIBER):
+                                    await handler(entity_id, op)
+                            except Exception:
+                                logger.warning(
+                                    "Cross-instance reload handler failed",
+                                    signal=payload.get("signal"),
+                                    entity_id=entity_id,
+                                    op=op,
+                                    exc_info=True,
+                                )
                 finally:
                     with contextlib.suppress(Exception):
                         await pubsub.unsubscribe(EVENT_CHANNEL)

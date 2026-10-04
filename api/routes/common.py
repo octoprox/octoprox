@@ -5,8 +5,28 @@
 
 from __future__ import annotations
 
-from fastapi import HTTPException
+from typing import TYPE_CHECKING, cast
+
+from fastapi import HTTPException, Request
 from sqlalchemy.exc import IntegrityError
+
+if TYPE_CHECKING:
+    from api.core.proxy_manager import ProxyManager
+    from api.geo.runtime import GeoRuntime
+    from api.wireguard.runtime import WireGuardRuntime
+
+
+def proxy_manager_of(request: Request) -> ProxyManager:
+    """The process's proxy manager, as the lifespan left it on ``app.state``."""
+    return cast("ProxyManager", request.app.state.proxy_manager)
+
+
+def geo_runtime_of(request: Request) -> GeoRuntime:
+    return cast("GeoRuntime", request.app.state.geo_runtime)
+
+
+def wireguard_runtime_of(request: Request) -> WireGuardRuntime:
+    return cast("WireGuardRuntime", request.app.state.wireguard_runtime)
 
 
 def unique_name_violation(exc: IntegrityError, kind: str, name: str) -> HTTPException:

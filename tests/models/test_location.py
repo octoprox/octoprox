@@ -124,3 +124,23 @@ class TestProxyPlace:
         assert ProxyUpdate(state="us-ca").state == "CA"
         with pytest.raises(ValueError):
             ProxyCreate(host="h", port=1, connector_id="c", state="california")
+
+
+class TestParse:
+    """Client input, strictly: what proxy usernames and WireGuard peers share."""
+
+    def test_normalises_every_level(self) -> None:
+        target = LocationTarget.parse(" us ", "ny", "New York")
+        assert target == LocationTarget(country="US", state="NY", city="new_york")
+        assert LocationTarget.parse("uk") == LocationTarget(country="GB")
+        assert LocationTarget.parse(None, "", "  ") is None
+
+    def test_refuses_unreadable_values_and_orphans(self) -> None:
+        with pytest.raises(ValueError, match="two-letter"):
+            LocationTarget.parse("usa")
+        with pytest.raises(ValueError, match="ISO 3166-2"):
+            LocationTarget.parse("us", "new york")
+        with pytest.raises(ValueError, match="letters or digits"):
+            LocationTarget.parse("us", None, "!!!")
+        with pytest.raises(ValueError, match="need a country"):
+            LocationTarget.parse(None, "ny")

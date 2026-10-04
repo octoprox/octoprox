@@ -51,6 +51,8 @@ from api.db.models import (
     ProxyMetricsModel,
     ProxyModel,
     UserModel,
+    WireGuardPeerModel,
+    WireGuardSettingsModel,
 )
 from api.models.backup import (
     BackupEnvelope,
@@ -103,6 +105,10 @@ _ENTITY_SPECS: tuple[_EntitySpec, ...] = (
     _EntitySpec("geo_database_blobs", GeoDatabaseBlobModel, is_database_file=True),
     _EntitySpec("ip_observations", IpObservationModel, is_metric=True, preserve_id=False),
     _EntitySpec("connector_exit_ips", ConnectorExitIpModel, is_metric=True),
+    # WireGuard: the install's key pair and the devices allowed in. Peers
+    # reference projects, so they come after them (and here is after).
+    _EntitySpec("wireguard_settings", WireGuardSettingsModel),
+    _EntitySpec("wireguard_peers", WireGuardPeerModel),
 )
 
 
@@ -428,6 +434,8 @@ async def replace_all(
     await session.execute(delete(GeoSettingsModel))
     await session.execute(delete(GeoDatabaseModel))
     await session.execute(delete(IpObservationModel))
+    # The WireGuard identity row is global too; its peers cascade with projects.
+    await session.execute(delete(WireGuardSettingsModel))
     if keep_user_id is not None:
         await session.execute(delete(UserModel).where(UserModel.id != keep_user_id))
     else:

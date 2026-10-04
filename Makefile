@@ -34,7 +34,7 @@ help:
 	@echo "  docker-run     - Run Docker container"
 	@echo "  docker-compose-up   - Start all services with docker-compose (single instance)"
 	@echo "  docker-compose-down - Stop all services"
-	@echo "  cluster-up          - Start 3-instance cluster behind HAProxy (local build)"
+	@echo "  cluster-up          - Start 3-instance cluster behind nginx (local build)"
 	@echo "  cluster-down        - Stop the cluster"
 	@echo "  cluster-logs        - Tail logs from the cluster"
 	@echo "  cluster-rebuild     - Rebuild images and restart the cluster"
@@ -103,10 +103,10 @@ docker-compose-up:
 docker-compose-down:
 	docker-compose down
 
-# Multi-instance cluster: 3 octoprox replicas behind HAProxy.
+# Multi-instance cluster: 3 octoprox replicas behind nginx.
 # API + Web UI:    http://localhost:8000
 # Proxy traffic:   localhost:8080  (HTTP/SOCKS via Proxy-Authorization)
-# HAProxy stats:   http://localhost:8404
+# WireGuard:       localhost:51820/udp
 cluster-up:
 	docker compose -f docker-compose.cluster.yml up -d --build
 

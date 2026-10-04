@@ -1817,3 +1817,133 @@ export const fetchSystemHistory = async (
 
 export default api
 
+
+// WireGuard: the install's tunnel endpoint and the devices allowed in (see docs/wireguard.md)
+export type WireGuardState = 'disabled' | 'starting' | 'running' | 'failed' | 'stopped'
+
+export interface WireGuardStatus {
+  /** Whether the instance that answered terminates the tunnel. */
+  enabled: boolean
+  state: WireGuardState
+  error: string | null
+  instance_id: string
+  interface: string
+  backend: 'kernel' | 'userspace' | null
+  listen_port: number | null
+  transparent_port: number
+  dns_port: number
+  fake_ip_range: string
+  active_connections: number
+  peers_total: number
+  peers_enabled: number
+  peers_online: number
+  /** Connections relayed by address because no destination name could be recovered, since this instance started. */
+  connections_by_address: number
+  /** Encrypted-DNS connections (DoT, known DoH resolvers) closed so devices keep the tunnel resolver. */
+  encrypted_dns_blocked: number
+  block_encrypted_dns: boolean
+}
+
+export interface WireGuardServerSettings {
+  public_key: string
+  endpoint_host: string
+  endpoint_port: number
+  subnet: string
+  gateway: string
+  persistent_keepalive: number
+  client_mtu: number | null
+  configured: boolean
+  updated_at: string
+  status: WireGuardStatus
+}
+
+export interface WireGuardServerSettingsDoc {
+  endpoint_host: string
+  endpoint_port: number
+  subnet: string
+  persistent_keepalive: number
+  client_mtu: number | null
+}
+
+export interface WireGuardPeerStatus {
+  online: boolean
+  last_handshake_at: string | null
+  rx_bytes: number
+  tx_bytes: number
+  endpoint: string | null
+  connections_by_address: number
+  encrypted_dns_blocked: number
+}
+
+export interface WireGuardPeer {
+  id: string
+  project_id: string
+  name: string
+  public_key: string
+  has_private_key: boolean
+  has_preshared_key: boolean
+  address: string
+  enabled: boolean
+  session_id: string | null
+  country: string | null
+  state: string | null
+  city: string | null
+  created_at: string
+  updated_at: string
+  /** Null until the instance carrying the tunnel has published its first reading. */
+  status: WireGuardPeerStatus | null
+}
+
+export interface WireGuardPeerListResponse {
+  total: number
+  peers: WireGuardPeer[]
+  server_configured: boolean
+  server_public_key: string
+}
+
+export interface WireGuardPeerCreate {
+  name: string
+  public_key?: string | null
+  preshared?: boolean
+  enabled?: boolean
+  session_id?: string | null
+  country?: string | null
+  state?: string | null
+  city?: string | null
+}
+
+/** Partial update; an empty string clears session_id, country, state or city. */
+export interface WireGuardPeerUpdate {
+  name?: string
+  enabled?: boolean
+  session_id?: string
+  country?: string
+  state?: string
+  city?: string
+}
+
+export interface WireGuardPeerConfig {
+  filename: string
+  config: string
+  complete: boolean
+  server_configured: boolean
+}
+
+export const fetchWireGuardSettings = async (): Promise<WireGuardServerSettings> => (await api.get('/wireguard/settings')).data
+export const updateWireGuardSettings = async (doc: WireGuardServerSettingsDoc): Promise<WireGuardServerSettings> =>
+  (await api.put('/wireguard/settings', doc)).data
+export const rotateWireGuardServerKey = async (): Promise<WireGuardServerSettings> => (await api.post('/wireguard/settings/rotate-key')).data
+
+export const fetchWireGuardPeers = async (projectId: string): Promise<WireGuardPeerListResponse> =>
+  (await api.get(`/projects/${projectId}/wireguard/peers`)).data
+export const createWireGuardPeer = async (projectId: string, data: WireGuardPeerCreate): Promise<WireGuardPeer> =>
+  (await api.post(`/projects/${projectId}/wireguard/peers`, data)).data
+export const updateWireGuardPeer = async (projectId: string, peerId: string, data: WireGuardPeerUpdate): Promise<WireGuardPeer> =>
+  (await api.patch(`/projects/${projectId}/wireguard/peers/${peerId}`, data)).data
+export const deleteWireGuardPeer = async (projectId: string, peerId: string): Promise<void> => {
+  await api.delete(`/projects/${projectId}/wireguard/peers/${peerId}`)
+}
+export const rotateWireGuardPeerKeys = async (projectId: string, peerId: string): Promise<WireGuardPeer> =>
+  (await api.post(`/projects/${projectId}/wireguard/peers/${peerId}/rotate-keys`)).data
+export const fetchWireGuardPeerConfig = async (projectId: string, peerId: string): Promise<WireGuardPeerConfig> =>
+  (await api.get(`/projects/${projectId}/wireguard/peers/${peerId}/config`)).data

@@ -19,8 +19,16 @@ Examples:
 
 from typing import NamedTuple
 
-from api.models.connector import normalize_country_code
-from api.models.location import LocationTarget, normalize_state_code, slugify_place
+from api.models.location import (
+    LOCATION_INVALID_CITY,
+    LOCATION_INVALID_COUNTRY,
+    LOCATION_INVALID_STATE,
+    LOCATION_NEEDS_COUNTRY,
+    LocationTarget,
+    normalize_country_code,
+    normalize_state_code,
+    slugify_place,
+)
 from api.models.project import Project
 
 SESSID_SEPARATOR = "-sessid-"
@@ -38,10 +46,16 @@ _PARAM_SEPARATORS: dict[str, str] = {
     CITY_SEPARATOR: "city",
 }
 
-LOCATION_NEEDS_COUNTRY = "State and city targeting need a country: add -cc-<code> to the username"
-LOCATION_INVALID_COUNTRY = "Country must be a two-letter ISO 3166-1 code, such as -cc-us"
-LOCATION_INVALID_STATE = "State must be the subdivision part of an ISO 3166-2 code, such as -st-ny or -st-eng"
-LOCATION_INVALID_CITY = "City must be a name with letters or digits, such as -city-new_york"
+__all__ = [
+    "LOCATION_INVALID_CITY",
+    "LOCATION_INVALID_COUNTRY",
+    "LOCATION_INVALID_STATE",
+    "LOCATION_NEEDS_COUNTRY",
+    "AuthResult",
+    "UsernameParams",
+    "parse_proxy_username",
+    "parse_username_params",
+]
 
 
 class UsernameParams(NamedTuple):

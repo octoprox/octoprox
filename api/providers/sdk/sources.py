@@ -34,7 +34,7 @@ ProxiedClientFactory = Callable[[str, float], httpx.AsyncClient]
 def default_proxied_client_factory(proxy_url: str, timeout: float) -> httpx.AsyncClient:
     """Client that sends every request through ``proxy_url`` (HTTP or SOCKS)."""
     if proxy_url.startswith(("socks4://", "socks5://")):
-        return httpx.AsyncClient(transport=AsyncProxyTransport.from_url(proxy_url), timeout=timeout)
+        return httpx.AsyncClient(transport=AsyncProxyTransport.from_url(proxy_url, rdns=True), timeout=timeout)
     return httpx.AsyncClient(proxy=proxy_url, timeout=timeout)
 
 
