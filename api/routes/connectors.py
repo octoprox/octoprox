@@ -32,7 +32,7 @@ from api.models.connector import (
 from api.models.credential import Credential
 from api.providers.registry import ProviderRegistry, UnknownProviderError, get_provider_registry
 from api.providers.sdk.validation import ConfigValidationError
-from api.routes.common import unique_name_violation
+from api.routes.common import proxy_manager_of, unique_name_violation
 from api.routes.metrics import RANGE_CONFIG, MetricsHistoryResponse, MetricsSnapshot
 
 logger = structlog.get_logger()
@@ -126,7 +126,7 @@ def _connector_to_response(
 @router.get("", response_model=ConnectorListResponse)
 async def list_connectors(request: Request, project_id: str) -> ConnectorListResponse:
     """List all connectors for a project."""
-    proxy_manager = request.app.state.proxy_manager
+    proxy_manager = proxy_manager_of(request)
 
     project = proxy_manager.get_project(project_id)
     if not project:
@@ -163,7 +163,7 @@ async def create_connector(
     _guard: RequireEditorDep,
 ) -> ConnectorResponse:
     """Create a new connector."""
-    proxy_manager = request.app.state.proxy_manager
+    proxy_manager = proxy_manager_of(request)
 
     project = proxy_manager.get_project(project_id)
     if not project:
@@ -230,7 +230,7 @@ async def create_connector(
 @router.get("/{connector_id}", response_model=ConnectorResponse)
 async def get_connector(request: Request, connector_id: str) -> ConnectorResponse:
     """Get a specific connector by ID."""
-    proxy_manager = request.app.state.proxy_manager
+    proxy_manager = proxy_manager_of(request)
     connector = proxy_manager.get_connector(connector_id)
 
     if connector is None:
@@ -250,7 +250,7 @@ async def get_connector_metrics_history(
     Unlike per-proxy history these survive the connector's proxies being
     rotated or re-synced, so a period's traffic can be charted in full.
     """
-    proxy_manager = request.app.state.proxy_manager
+    proxy_manager = proxy_manager_of(request)
     connector = proxy_manager.get_connector(connector_id)
     if connector is None:
         raise HTTPException(status_code=404, detail="Connector not found")
@@ -280,7 +280,7 @@ async def reset_connector_traffic(
     the current period simply counts from this moment, and a block raised
     by the limit is lifted.
     """
-    proxy_manager = request.app.state.proxy_manager
+    proxy_manager = proxy_manager_of(request)
     connector = await proxy_manager.reset_connector_traffic(connector_id)
     if connector is None:
         raise HTTPException(status_code=404, detail="Connector not found")
@@ -292,7 +292,7 @@ async def update_connector(
     request: Request, connector_id: str, connector_data: ConnectorUpdate, _guard: RequireEditorDep
 ) -> ConnectorResponse:
     """Update a connector."""
-    proxy_manager = request.app.state.proxy_manager
+    proxy_manager = proxy_manager_of(request)
     connector = proxy_manager.get_connector(connector_id)
 
     if connector is None:
@@ -370,7 +370,7 @@ async def delete_connector(request: Request, connector_id: str, _guard: RequireE
 
     For non-cloud connectors, the connector and proxies are deleted immediately.
     """
-    proxy_manager = request.app.state.proxy_manager
+    proxy_manager = proxy_manager_of(request)
 
     if not await proxy_manager.delete_connector_async(connector_id):
         raise HTTPException(status_code=404, detail="Connector not found")

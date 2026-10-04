@@ -9,6 +9,8 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel
 
+from api.routes.common import proxy_manager_of, redis_client_of
+
 router = APIRouter(prefix="/projects/{project_id}/mitm")
 
 
@@ -80,12 +82,12 @@ async def list_mitm_requests(
     cursor: str | None = Query(None, description="Stream entry ID for cursor pagination"),
 ) -> MitmRequestsResponse:
     """List recent MITM-intercepted requests for a project (newest first)."""
-    proxy_manager = request.app.state.proxy_manager
+    proxy_manager = proxy_manager_of(request)
     project = proxy_manager.get_project(project_id)
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
 
-    redis_client = request.app.state.redis_client
+    redis_client = redis_client_of(request)
 
     # Fetch count+1 to determine if there's a next page
     raw_records = await redis_client.get_mitm_requests(
@@ -137,11 +139,11 @@ async def clear_mitm_requests(
     project_id: str,
 ) -> dict[str, str]:
     """Clear all MITM request records for a project."""
-    proxy_manager = request.app.state.proxy_manager
+    proxy_manager = proxy_manager_of(request)
     project = proxy_manager.get_project(project_id)
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
 
-    redis_client = request.app.state.redis_client
+    redis_client = redis_client_of(request)
     await redis_client.clear_mitm_requests(project_id)
     return {"status": "ok"}

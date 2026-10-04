@@ -13,6 +13,7 @@ from api.core import utc_now
 from api.db.repository import MetricsRepository
 from api.models.proxy import ProxyStatus
 from api.providers.sdk.strategies import is_dynamic_gateway
+from api.routes.common import proxy_manager_of
 
 router = APIRouter(prefix="/projects/{project_id}/metrics")
 
@@ -69,7 +70,7 @@ async def get_metrics(request: Request, project_id: str) -> MetricsResponse:
 
     These metrics persist across proxy rotation.
     """
-    proxy_manager = request.app.state.proxy_manager
+    proxy_manager = proxy_manager_of(request)
 
     project = proxy_manager.get_project(project_id)
     if not project:
@@ -128,7 +129,7 @@ async def get_scaling_metrics(request: Request, project_id: str) -> ScalingMetri
     connectors only (AWS, GCP, Azure) - these are the ones with auto-scaling.
     Static proxy providers are excluded.
     """
-    proxy_manager = request.app.state.proxy_manager
+    proxy_manager = proxy_manager_of(request)
 
     project = proxy_manager.get_project(project_id)
     if not project:
@@ -255,7 +256,7 @@ async def get_metrics_history(
     range: Literal["1h", "6h", "24h", "7d", "30d"] = Query("24h", alias="range"),
 ) -> MetricsHistoryResponse:
     """Get historical metrics snapshots for a project."""
-    proxy_manager = request.app.state.proxy_manager
+    proxy_manager = proxy_manager_of(request)
 
     project = proxy_manager.get_project(project_id)
     if not project:
@@ -291,7 +292,7 @@ async def prometheus_metrics(request: Request, project_id: str) -> str:
 
     Uses project-level metrics from the Project model which persist across proxy rotation.
     """
-    proxy_manager = request.app.state.proxy_manager
+    proxy_manager = proxy_manager_of(request)
 
     project = proxy_manager.get_project(project_id)
     if not project:
@@ -409,7 +410,7 @@ async def get_traffic_split(
     window, which outlive the connector's proxies, so a rotation does not
     make the numbers disagree.
     """
-    proxy_manager = request.app.state.proxy_manager
+    proxy_manager = proxy_manager_of(request)
 
     project = proxy_manager.get_project(project_id)
     if not project:

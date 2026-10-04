@@ -30,7 +30,7 @@ from api.providers.registry import (
 )
 from api.providers.sdk.discovery import CredentialValidator
 from api.providers.sdk.validation import ConfigValidationError
-from api.routes.common import unique_name_violation
+from api.routes.common import proxy_manager_of, unique_name_violation
 
 router = APIRouter(prefix="/projects/{project_id}/credentials")
 
@@ -105,7 +105,7 @@ async def _verify_with_vendor(
 @router.get("", response_model=CredentialListResponse)
 async def list_credentials(request: Request, project_id: str) -> CredentialListResponse:
     """List all credentials for a project."""
-    proxy_manager = request.app.state.proxy_manager
+    proxy_manager = proxy_manager_of(request)
 
     project = proxy_manager.get_project(project_id)
     if not project:
@@ -126,7 +126,7 @@ async def create_credential(
     _guard: RequireEditorDep,
 ) -> CredentialDetailResponse:
     """Create a new credential."""
-    proxy_manager = request.app.state.proxy_manager
+    proxy_manager = proxy_manager_of(request)
 
     project = proxy_manager.get_project(project_id)
     if not project:
@@ -154,7 +154,7 @@ async def create_credential(
 @router.get("/{credential_id}", response_model=CredentialDetailResponse)
 async def get_credential(request: Request, credential_id: str) -> CredentialDetailResponse:
     """Get a specific credential by ID (includes config)."""
-    proxy_manager = request.app.state.proxy_manager
+    proxy_manager = proxy_manager_of(request)
     credential = proxy_manager.get_credential(credential_id)
 
     if credential is None:
@@ -168,7 +168,7 @@ async def update_credential(
     request: Request, credential_id: str, credential_data: CredentialUpdate, _guard: RequireEditorDep
 ) -> CredentialDetailResponse:
     """Update a credential."""
-    proxy_manager = request.app.state.proxy_manager
+    proxy_manager = proxy_manager_of(request)
     credential = proxy_manager.get_credential(credential_id)
 
     if credential is None:
@@ -211,7 +211,7 @@ def _secret_material_changed(ptype: ProviderType, old: dict[str, Any], new: dict
 @router.delete("/{credential_id}", status_code=204)
 async def delete_credential(request: Request, credential_id: str, _guard: RequireEditorDep) -> None:
     """Delete a credential."""
-    proxy_manager = request.app.state.proxy_manager
+    proxy_manager = proxy_manager_of(request)
 
     credential = proxy_manager.get_credential(credential_id)
     if credential is None:

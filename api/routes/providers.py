@@ -56,6 +56,7 @@ from api.providers.sdk.loader import (
     descriptor_to_yaml,
 )
 from api.providers.sdk.templating import TemplateRenderer
+from api.routes.common import proxy_manager_of
 
 logger = structlog.get_logger()
 
@@ -291,7 +292,7 @@ async def list_providers(request: Request, session: DbDep) -> ProviderListRespon
     """Catalog of every provider type with its form schemas."""
     registry = get_provider_registry()
     records = {r.id: r for r in await ProviderDescriptorRepository(session).get_all()}
-    proxy_manager: ProxyManager = request.app.state.proxy_manager
+    proxy_manager: ProxyManager = proxy_manager_of(request)
     providers = [_summary(proxy_manager, t, records.get(t.id)) for t in registry.list()]
     return ProviderListResponse(
         total=len(providers), providers=providers, presets=registry.presets, countries=COUNTRIES
@@ -305,7 +306,7 @@ async def get_provider(request: Request, provider_id: str, session: DbDep) -> Pr
     if ptype is None:
         raise HTTPException(status_code=404, detail="Provider not found")
     record = await ProviderDescriptorRepository(session).get_by_id(provider_id)
-    return _detail(request.app.state.proxy_manager, ptype, record)
+    return _detail(proxy_manager_of(request), ptype, record)
 
 
 @router.post("/{provider_id}/options/{option_name}", response_model=ProviderOptionsResponse)
@@ -340,7 +341,7 @@ async def resolve_options(
         raise HTTPException(status_code=404, detail=f"Provider has no options source '{option_name}'")
     credential_config: dict[str, Any] | None = body.credential_config
     if body.credential_id and body.spec is None:
-        proxy_manager = request.app.state.proxy_manager
+        proxy_manager = proxy_manager_of(request)
         credential = proxy_manager.get_credential(body.credential_id)
         if credential is None or credential.type != provider_id:
             raise HTTPException(status_code=404, detail="Credential not found for this provider")
@@ -416,7 +417,7 @@ async def _create(
     await _audit(session, descriptor.id, action, actor, descriptor, hosts_changed=bool(descriptor.egress_hosts()))
     await session.commit()
 
-    proxy_manager: ProxyManager = request.app.state.proxy_manager
+    proxy_manager: ProxyManager = proxy_manager_of(request)
     proxy_manager.provider_store.apply_record(record, descriptor.id)
     await _publish(descriptor.id, "added")
     logger.info("Provider descriptor created", provider_id=descriptor.id, actor=actor.username,
@@ -489,7 +490,7 @@ async def _update(
     await _audit(session, ptype.id, "updated", actor, descriptor or ptype.descriptor, hosts_changed)
     await session.commit()
 
-    proxy_manager: ProxyManager = request.app.state.proxy_manager
+    proxy_manager: ProxyManager = proxy_manager_of(request)
     proxy_manager.provider_store.apply_record(record, ptype.id)
     await _publish(ptype.id, "updated")
     logger.info("Provider descriptor updated", provider_id=ptype.id, actor=actor.username, hosts_changed=hosts_changed)
@@ -519,7 +520,7 @@ async def delete_provider(
     """Delete a custom provider descriptor (admin). Refused while credentials use it."""
     registry = get_provider_registry()
     ptype = _editable_type(registry, provider_id)
-    credential_count, _ = _usage(request.app.state.proxy_manager, provider_id)
+    credential_count, _ = _usage(proxy_manager_of(request), provider_id)
     if credential_count:
         raise HTTPException(
             status_code=400,

@@ -31,6 +31,7 @@ from api.core.backup import (
 )
 from api.db.session import get_db
 from api.models.backup import ExportRequest, ImportSummary
+from api.routes.common import geo_runtime_of, proxy_manager_of
 
 logger = structlog.get_logger()
 
@@ -124,14 +125,14 @@ async def import_backup(
 
     # 4. Purge stale Redis state for the replaced entities and rebuild the
     #    live cache so the imported setup is immediately effective.
-    proxy_manager = request.app.state.proxy_manager
+    proxy_manager = proxy_manager_of(request)
     await proxy_manager.apply_imported_state(
         result.old_project_ids, result.old_proxy_ids, result.old_connector_ids
     )
     # Attribution settings and database rows were replaced too: reload them and
     # reopen whatever database files came with the backup. Peers catch up on
     # their periodic reload.
-    await request.app.state.geo_runtime.geo_service.resync()
+    await geo_runtime_of(request).geo_service.resync()
 
     logger.info(
         "Backup imported",

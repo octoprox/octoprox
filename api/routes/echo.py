@@ -9,6 +9,7 @@ from fastapi import APIRouter, HTTPException, Request
 
 from api.core.config import settings
 from api.geo.echo import EchoResponse, build_echo, client_ip, parse_trusted
+from api.routes.common import geo_runtime_of
 
 router = APIRouter()
 
@@ -27,4 +28,4 @@ async def echo(request: Request, nonce: str | None = None) -> EchoResponse:
     ip = client_ip(peer, request.headers.get("x-forwarded-for"), parse_trusted(settings.geo_echo_trusted_proxies))
     if ip is None:
         raise HTTPException(status_code=400, detail="Could not determine the client address")
-    return build_echo(ip, request.app.state.geo_runtime.database_store, nonce)
+    return build_echo(ip, geo_runtime_of(request).database_store, nonce)

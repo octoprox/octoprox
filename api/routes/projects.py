@@ -19,6 +19,7 @@ from api.models.project import (
     ProjectSummary,
     ProjectUpdate,
 )
+from api.routes.common import proxy_manager_of
 
 router = APIRouter(prefix="/projects")
 
@@ -117,7 +118,7 @@ async def download_ca_certificate() -> FileResponse:
 @router.get("", response_model=ProjectListResponse)
 async def list_projects(request: Request) -> ProjectListResponse:
     """List all projects."""
-    proxy_manager = request.app.state.proxy_manager
+    proxy_manager = proxy_manager_of(request)
     projects = proxy_manager.projects
 
     summaries = []
@@ -145,7 +146,7 @@ async def create_project(
     request: Request, project_data: ProjectCreate, _guard: RequireEditorDep
 ) -> ProjectResponse:
     """Create a new project."""
-    proxy_manager = request.app.state.proxy_manager
+    proxy_manager = proxy_manager_of(request)
 
     # Check for duplicate username
     existing = proxy_manager.get_project_by_username(project_data.username)
@@ -182,7 +183,7 @@ async def create_project(
 @router.get("/{project_id}", response_model=ProjectResponse)
 async def get_project(request: Request, project_id: str) -> ProjectResponse:
     """Get a specific project by ID."""
-    proxy_manager = request.app.state.proxy_manager
+    proxy_manager = proxy_manager_of(request)
     project = proxy_manager.get_project(project_id)
 
     if project is None:
@@ -207,7 +208,7 @@ async def update_project(
     request: Request, project_id: str, project_data: ProjectUpdate, _guard: RequireEditorDep
 ) -> ProjectResponse:
     """Update a project."""
-    proxy_manager = request.app.state.proxy_manager
+    proxy_manager = proxy_manager_of(request)
     project = proxy_manager.get_project(project_id)
 
     if project is None:
@@ -306,7 +307,7 @@ async def delete_project(
     Requires confirmation by typing "permanently delete" in the request body.
     This will cascade delete all sources and proxies associated with the project.
     """
-    proxy_manager = request.app.state.proxy_manager
+    proxy_manager = proxy_manager_of(request)
 
     # Verify confirmation
     if body.confirmation != "permanently delete":

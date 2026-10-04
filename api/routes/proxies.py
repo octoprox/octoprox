@@ -22,6 +22,7 @@ from api.models.credential import CredentialType
 from api.models.location import set_manual_location
 from api.models.proxy import Proxy, ProxyCreate, ProxyProtocol, ProxyResponse, ProxyUpdate
 from api.providers.sdk.strategies import META_COUNTRY
+from api.routes.common import geo_runtime_of, proxy_manager_of
 
 router = APIRouter(prefix="/projects/{project_id}/proxies")
 
@@ -128,7 +129,7 @@ def _proxy_to_response(
 @router.get("", response_model=ProxyListResponse)
 async def list_proxies(request: Request, project_id: str) -> ProxyListResponse:
     """List all proxies for a project (including those from disabled connectors)."""
-    proxy_manager = request.app.state.proxy_manager
+    proxy_manager = proxy_manager_of(request)
 
     project = proxy_manager.get_project(project_id)
     if not project:
@@ -176,7 +177,7 @@ async def create_proxy(
     afterwards by the attributor, which reacts to the proxy_added signal
     (``proxy.geo_lookup`` settings and the attribution echo endpoint).
     """
-    proxy_manager = request.app.state.proxy_manager
+    proxy_manager = proxy_manager_of(request)
 
     # Validate project exists
     project = proxy_manager.get_project(project_id)
@@ -248,7 +249,7 @@ async def upload_proxies(
     - http://192.168.1.1:8080
     - socks5://user:pass@10.0.0.1:1080
     """
-    proxy_manager = request.app.state.proxy_manager
+    proxy_manager = proxy_manager_of(request)
 
     # Validate project exists
     project = proxy_manager.get_project(project_id)
@@ -337,7 +338,7 @@ async def upload_proxies(
 @router.get("/{proxy_id}", response_model=ProxyResponse)
 async def get_proxy(request: Request, proxy_id: str) -> ProxyResponse:
     """Get a specific proxy by ID."""
-    proxy_manager = request.app.state.proxy_manager
+    proxy_manager = proxy_manager_of(request)
     proxy = proxy_manager.get_proxy(proxy_id)
 
     if proxy is None:
@@ -359,7 +360,7 @@ async def update_proxy(
     request: Request, proxy_id: str, proxy_data: ProxyUpdate, _guard: RequireEditorDep
 ) -> ProxyResponse:
     """Update a proxy."""
-    proxy_manager = request.app.state.proxy_manager
+    proxy_manager = proxy_manager_of(request)
     proxy = proxy_manager.get_proxy(proxy_id)
 
     if proxy is None:
@@ -417,7 +418,7 @@ async def delete_proxy(request: Request, proxy_id: str, _guard: RequireEditorDep
 
     For non-cloud proxies, the proxy is removed immediately.
     """
-    proxy_manager = request.app.state.proxy_manager
+    proxy_manager = proxy_manager_of(request)
 
     if not await proxy_manager.delete_proxy_async(proxy_id):
         raise HTTPException(status_code=404, detail="Proxy not found")
@@ -430,12 +431,12 @@ async def locate_proxy(request: Request, proxy_id: str, _guard: RequireEditorDep
     Records the result on the proxy and returns it. Fails with 502 when the
     request through the proxy does not succeed.
     """
-    proxy_manager = request.app.state.proxy_manager
+    proxy_manager = proxy_manager_of(request)
     proxy = proxy_manager.get_proxy(proxy_id)
     if proxy is None:
         raise HTTPException(status_code=404, detail="Proxy not found")
 
-    updated = await request.app.state.geo_runtime.proxy_attributor.enrich(proxy_id, source=ObservationSource.MANUAL)
+    updated = await geo_runtime_of(request).proxy_attributor.enrich(proxy_id, source=ObservationSource.MANUAL)
     if updated is None:
         raise HTTPException(status_code=502, detail="Could not determine the exit location through this proxy")
 
@@ -455,7 +456,7 @@ async def unquarantine_proxy(
     request: Request, proxy_id: str, _guard: RequireEditorDep
 ) -> dict[str, str]:
     """Forcefully remove a proxy from quarantine."""
-    proxy_manager = request.app.state.proxy_manager
+    proxy_manager = proxy_manager_of(request)
 
     proxy = proxy_manager.get_proxy(proxy_id)
     if proxy is None:
@@ -473,7 +474,7 @@ async def set_strategy(
     request: Request, strategy_req: StrategyRequest, _guard: RequireEditorDep
 ) -> dict[str, str]:
     """Change the routing strategy."""
-    proxy_manager = request.app.state.proxy_manager
+    proxy_manager = proxy_manager_of(request)
 
     try:
         proxy_manager.set_strategy(strategy_req.strategy)
