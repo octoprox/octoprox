@@ -7,6 +7,7 @@ from fastapi import APIRouter, Request
 from pydantic import BaseModel
 
 from api import __version__
+from api.routes.common import proxy_manager_of
 
 router = APIRouter()
 
@@ -22,7 +23,7 @@ class HealthResponse(BaseModel):
 @router.get("/health", response_model=HealthResponse)
 async def health_check(request: Request) -> HealthResponse:
     """Check the health of the service."""
-    proxy_manager = request.app.state.proxy_manager
+    proxy_manager = proxy_manager_of(request)
 
     return HealthResponse(
         status="healthy",

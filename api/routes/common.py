@@ -12,6 +12,7 @@ from sqlalchemy.exc import IntegrityError
 
 if TYPE_CHECKING:
     from api.core.proxy_manager import ProxyManager
+    from api.db.redis import RedisClient
     from api.geo.runtime import GeoRuntime
     from api.wireguard.runtime import WireGuardRuntime
 
@@ -23,6 +24,10 @@ def proxy_manager_of(request: Request) -> ProxyManager:
 
 def geo_runtime_of(request: Request) -> GeoRuntime:
     return cast("GeoRuntime", request.app.state.geo_runtime)
+
+
+def redis_client_of(request: Request) -> RedisClient:
+    return cast("RedisClient", request.app.state.redis_client)
 
 
 def wireguard_runtime_of(request: Request) -> WireGuardRuntime:
