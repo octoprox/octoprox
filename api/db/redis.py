@@ -78,6 +78,22 @@ AUTOSCALER_LAST_ACTION_KEY = "autoscaler:last_action"
 # IP attribution: observations queued for the leader's flusher, and per-session
 # preflight verdicts.
 GEO_OBSERVATIONS_KEY = "geo:observations"
+# One hash per instance carrying the WireGuard tunnel (peer public key -> JSON
+# status), rewritten every WIREGUARD_STATUS_INTERVAL seconds and expiring soon
+# after the carrier stops, so a dead carrier's peers read as offline. Several
+# carriers behind a UDP load balancer each publish their own; readers merge.
+WIREGUARD_PEER_STATUS_KEY = "wireguard:peer_status:{instance_id}"
+WIREGUARD_PEER_STATUS_SCAN = "wireguard:peer_status:*"
+# The fake-IP mapping the tunnel DNS hands out, shared so a connection that
+# lands on a different instance from the one that answered the query still
+# knows the name. Two keys per mapping, both refreshed when read, so a name
+# nobody has asked about for a week frees its address.
+WIREGUARD_FAKEIP_NAME_KEY = "wireguard:fakeip:name:{name}"
+WIREGUARD_FAKEIP_ADDR_KEY = "wireguard:fakeip:addr:{offset}"
+WIREGUARD_FAKEIP_COUNTER_KEY = "wireguard:fakeip:next"
+WIREGUARD_FAKEIP_TTL_SECONDS = 7 * 86400
+WIREGUARD_STATUS_INTERVAL = 10
+WIREGUARD_STATUS_TTL_SECONDS = 30
 GEO_PREFLIGHT_KEY = "geo:preflight:{project_id}:{proxy_id}"  # one verdict per proxy, shared by its sessions
 
 # Logical grouping of the keyspace, used by the admin system view to report
@@ -99,6 +115,7 @@ REDIS_KEY_GROUPS: tuple[tuple[str, str], ...] = (
     ("lease:", "Worker leases"),
     ("autoscaler:", "Auto-scaler state"),
     ("geo:", "IP attribution"),
+    ("wireguard:", "WireGuard"),
 )
 
 OTHER_KEY_GROUP = "Other"
@@ -549,6 +566,77 @@ class RedisClient:
         """Delete all MITM request records for a project."""
         key = MITM_REQUESTS_KEY.format(project_id=project_id)
         await self.client.delete(key)
+
+    # WireGuard peer status
+
+    async def set_wireguard_peer_status(self, instance_id: str, statuses: dict[str, str]) -> None:
+        """Replace this instance's published peer statuses (public key -> JSON) with a fresh expiry."""
+        key = WIREGUARD_PEER_STATUS_KEY.format(instance_id=instance_id)
+        pipe = self.client.pipeline()
+        pipe.delete(key)
+        if statuses:
+            pipe.hset(key, mapping=statuses)
+        pipe.expire(key, WIREGUARD_STATUS_TTL_SECONDS)
+        await pipe.execute()
+
+    async def fakeip_offset_for(self, name: str) -> int | None:
+        """The pool offset a name was given on any instance, refreshing its lease; None if never."""
+        name_key = WIREGUARD_FAKEIP_NAME_KEY.format(name=name)
+        raw = await self.client.get(name_key)
+        if raw is None:
+            return None
+        offset = int(raw)
+        pipe = self.client.pipeline()
+        pipe.expire(name_key, WIREGUARD_FAKEIP_TTL_SECONDS)
+        pipe.expire(WIREGUARD_FAKEIP_ADDR_KEY.format(offset=offset), WIREGUARD_FAKEIP_TTL_SECONDS)
+        await pipe.execute()
+        return offset
+
+    async def fakeip_name_for(self, offset: int) -> str | None:
+        """The name a pool offset was handed out for on any instance, refreshing its lease."""
+        addr_key = WIREGUARD_FAKEIP_ADDR_KEY.format(offset=offset)
+        name = await self.client.get(addr_key)
+        if name is None:
+            return None
+        pipe = self.client.pipeline()
+        pipe.expire(addr_key, WIREGUARD_FAKEIP_TTL_SECONDS)
+        pipe.expire(WIREGUARD_FAKEIP_NAME_KEY.format(name=name), WIREGUARD_FAKEIP_TTL_SECONDS)
+        await pipe.execute()
+        return str(name)
+
+    async def fakeip_allocate(self, name: str, capacity: int, attempts: int = 64) -> int:
+        """Give ``name`` a free pool offset, cluster-wide.
+
+        A shared counter walks the pool; an offset whose lease has not
+        expired is skipped. Two instances allocating the same name at once
+        each get an offset and both point at the name, which is harmless.
+        """
+        for _ in range(attempts):
+            counter = int(await self.client.incr(WIREGUARD_FAKEIP_COUNTER_KEY))
+            offset = (counter - 1) % capacity
+            claimed = await self.client.set(
+                WIREGUARD_FAKEIP_ADDR_KEY.format(offset=offset), name, nx=True, ex=WIREGUARD_FAKEIP_TTL_SECONDS
+            )
+            if claimed:
+                await self.client.set(
+                    WIREGUARD_FAKEIP_NAME_KEY.format(name=name), str(offset), ex=WIREGUARD_FAKEIP_TTL_SECONDS
+                )
+                return offset
+        raise RuntimeError(f"no free fake IP after {attempts} attempts; the range is exhausted")
+
+    async def get_wireguard_peer_status(self) -> list[dict[str, str]]:
+        """What every carrying instance last published, one hash per carrier; [] when none is carrying."""
+        keys = [
+            k if isinstance(k, str) else k.decode()
+            async for k in self.client.scan_iter(match=WIREGUARD_PEER_STATUS_SCAN)
+        ]
+        if not keys:
+            return []
+        pipe = self.client.pipeline()
+        for key in keys:
+            pipe.hgetall(key)
+        results: list[dict[str, str]] = await pipe.execute()
+        return [r for r in results if r]
 
 
 @lru_cache

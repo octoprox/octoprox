@@ -36,8 +36,8 @@ from api.core.leadership import Lease
 from api.core.workers import LeaseName, WorkerName
 from api.db.geo_repository import ExitSighting, ObservationRepository
 from api.db.redis import GEO_OBSERVATIONS_KEY, RedisClient
+from api.db.session import SessionFactory
 from api.geo.models import ExitJudgement, IpObservation
-from api.geo.store import SessionFactory
 
 logger = structlog.get_logger()
 

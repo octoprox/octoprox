@@ -89,4 +89,8 @@ async def test_index_present_after_fresh_migration(db_session: AsyncSession) -> 
     rows = await db_session.execute(
         text("SELECT indexname FROM pg_indexes WHERE indexname LIKE 'ix_%_project_name_unique' ORDER BY indexname")
     )
-    assert rows.scalars().all() == ["ix_connectors_project_name_unique", "ix_credentials_project_name_unique"]
+    assert rows.scalars().all() == [
+        "ix_connectors_project_name_unique",
+        "ix_credentials_project_name_unique",
+        "ix_wireguard_peers_project_name_unique",
+    ]

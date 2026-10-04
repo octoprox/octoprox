@@ -6,6 +6,13 @@ services:
     ports:
       - "8000:8000"
       - "8080:8080"
+      # WireGuard endpoint (docs/wireguard.md): uncomment with the cap_add and
+      # devices blocks below, and set OCTOPROX_WIREGUARD_ENABLED=true.
+      # - "51820:51820/udp"
+    # cap_add:
+    #   - NET_ADMIN            # create the tunnel interface and nftables rules
+    # devices:
+    #   - /dev/net/tun:/dev/net/tun   # only for the wireguard-go fallback
     environment:
       - OCTOPROX_AUTH_USERNAME=admin
       - OCTOPROX_AUTH_PASSWORD=admin
@@ -18,6 +25,7 @@ services:
       - OCTOPROX_DB_PASSWORD=octoprox
       - OCTOPROX_DB_NAME=octoprox
       - OCTOPROX_LOG_LEVEL=INFO
+      # - OCTOPROX_WIREGUARD_ENABLED=true
     volumes:
       - ./config:/app/config:ro
       - ca_data:/app/data/ca

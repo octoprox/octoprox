@@ -96,6 +96,19 @@ def _load_yaml_config(config_path: Path) -> dict[str, Any]:
             flat_config["provider_http_timeout_seconds"] = http_cfg.get("timeout_seconds")
             flat_config["provider_http_max_response_bytes"] = http_cfg.get("max_response_bytes")
 
+    if "wireguard" in config_data:
+        wg_cfg = config_data["wireguard"] or {}
+        flat_config["wireguard_enabled"] = wg_cfg.get("enabled")
+        flat_config["wireguard_interface"] = wg_cfg.get("interface")
+        flat_config["wireguard_listen_port"] = wg_cfg.get("listen_port")
+        flat_config["wireguard_transparent_port"] = wg_cfg.get("transparent_port")
+        flat_config["wireguard_dns_port"] = wg_cfg.get("dns_port")
+        flat_config["wireguard_mtu"] = wg_cfg.get("mtu")
+        flat_config["wireguard_fake_ip_range"] = wg_cfg.get("fake_ip_range")
+        flat_config["wireguard_sniff_timeout_seconds"] = wg_cfg.get("sniff_timeout_seconds")
+        flat_config["wireguard_block_encrypted_dns"] = wg_cfg.get("block_encrypted_dns")
+        flat_config["wireguard_defaults"] = wg_cfg.get("defaults")
+
     if "tls_mitm" in config_data:
         mitm_cfg = config_data["tls_mitm"]
         if "ca_cert_path" in mitm_cfg:
@@ -340,6 +353,40 @@ class Settings(BaseSettings):
     tls_mitm_ca_key_path: str = Field(
         default="data/ca/octoprox-ca.key",
         description="Path to the MITM CA private key file (auto-generated if missing)",
+    )
+
+    # WireGuard endpoint (see docs/wireguard.md). The key pair, public endpoint
+    # and subnet are install-wide and live in Postgres; these describe this
+    # process: whether it terminates the tunnel, and on what.
+    wireguard_enabled: bool = Field(
+        default=False,
+        description="Terminate the WireGuard tunnel on this instance (needs CAP_NET_ADMIN, wireguard-tools and nftables)",
+    )
+    wireguard_interface: str = Field(default="wg0", description="Name of the tunnel interface this instance creates")
+    wireguard_listen_port: int | None = Field(
+        default=None,
+        description="UDP port to listen on when it differs from the install's endpoint port (behind a port-mapping NAT)",
+    )
+    wireguard_transparent_port: int = Field(
+        default=8081, description="Local TCP port tunnel connections are redirected to (bound on the tunnel address only)"
+    )
+    wireguard_dns_port: int = Field(
+        default=5353, description="Local port of the tunnel's fake-IP DNS resolver (port 53 on the tunnel is redirected to it)"
+    )
+    wireguard_mtu: int = Field(default=1420, ge=1280, le=1500, description="MTU of the tunnel interface")
+    wireguard_fake_ip_range: str = Field(
+        default="198.18.0.0/15", description="IPv4 range the tunnel DNS answers from; connections to it carry the name"
+    )
+    wireguard_sniff_timeout_seconds: float = Field(
+        default=2.0, gt=0, description="How long to wait for a connection's first bytes before routing it by address alone"
+    )
+    wireguard_block_encrypted_dns: bool = Field(
+        default=True,
+        description="Close tunnel connections to DNS-over-TLS (port 853) and known DNS-over-HTTPS resolvers so devices keep using the tunnel resolver",
+    )
+    wireguard_defaults: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Seed for the install-wide WireGuard settings row on a fresh install: endpoint_host, endpoint_port, subnet, persistent_keepalive, client_mtu",
     )
 
     # Authentication settings

@@ -34,9 +34,10 @@ from api.core.leadership import Lease
 from api.core.workers import LeaseName, WorkerName
 from api.db.geo_repository import GeoDatabaseRepository
 from api.db.redis import RedisClient
+from api.db.session import SessionFactory
 from api.geo.models import GeoDatabaseRecord, GeoDatabaseSource
 from api.geo.readers import GeoDatabaseError, inspect_file
-from api.geo.store import GeoDatabaseStore, SessionFactory
+from api.geo.store import GeoDatabaseStore
 from api.providers.sdk.egress import EgressDeniedError, EgressGuard, EgressPolicy
 
 logger = structlog.get_logger()

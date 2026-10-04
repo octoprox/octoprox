@@ -32,46 +32,9 @@ from api.models.cloud_options import (
     get_gcp_architecture,
 )
 from api.models.credential import CredentialType
+from api.models.location import normalize_country_list
 
 # --- Typed Config Models for Validation ---
-
-# Common non-ISO spellings accepted anywhere a country code is entered, mapped
-# to the ISO 3166-1 alpha-2 code the vendors, the IP databases and the map use.
-# A connector allow-list saying UK would otherwise never match a -cc-gb request.
-COUNTRY_ALIASES: dict[str, str] = {"UK": "GB"}
-
-
-def normalize_country_code(value: str | None) -> str | None:
-    """Normalise a country code to upper-case ISO 3166-1 alpha-2, or None if blank.
-
-    Applies ``COUNTRY_ALIASES`` (UK becomes GB). Raises ValueError for values
-    that cannot be a country code (anything other than two ASCII letters).
-    """
-    if value is None:
-        return None
-    code = value.strip().upper()
-    if not code:
-        return None
-    if len(code) != 2 or not code.isascii() or not code.isalpha():
-        raise ValueError(f'country must be a two-letter ISO 3166-1 alpha-2 code, got {value!r}')
-    return COUNTRY_ALIASES.get(code, code)
-
-
-def normalize_country_list(value: Any) -> list[str]:
-    """Normalise a countries value (list, or comma-separated string) to unique upper-case codes.
-
-    Order is preserved; blanks are dropped. Raises ValueError on a malformed code.
-    """
-    if value is None:
-        return []
-    raw: list[Any] = value.split(",") if isinstance(value, str) else list(value)
-    result: list[str] = []
-    for item in raw:
-        code = normalize_country_code(str(item)) if item is not None else None
-        if code and code not in result:
-            result.append(code)
-    return result
-
 
 class StaticProxyProviderConnectorConfig(BaseModel):
     """Configuration for Static Proxy Provider connectors.

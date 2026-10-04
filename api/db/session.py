@@ -3,7 +3,8 @@
 
 """Database session management."""
 
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Callable
+from contextlib import AbstractAsyncContextManager
 from functools import lru_cache
 
 from sqlalchemy.ext.asyncio import (
@@ -14,6 +15,10 @@ from sqlalchemy.ext.asyncio import (
 )
 
 from api.core.config import settings
+
+# What components take to open sessions on demand: the async_sessionmaker the
+# lifespan builds, or anything else callable the same way (tests pass stubs).
+SessionFactory = Callable[[], AbstractAsyncContextManager[AsyncSession]]
 
 
 def get_async_engine(

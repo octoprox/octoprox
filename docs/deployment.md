@@ -14,16 +14,18 @@ nav_id: deployment
 
 One Octoprox process, one Postgres, one Redis. Fine for development, demos,
 and small production workloads (one host, tens of thousands of proxies, a
-few hundred concurrent tunnels).
+few hundred concurrent tunnels). The WireGuard port is optional: see
+[WireGuard Devices](wireguard) for enabling it.
 
 ```
         client ──┐
                  ▼
-        ┌────────────────────┐         ┌──────────┐
-        │ Octoprox           │ ──────▶ │ Postgres │
-        │  :8000 API + UI    │         │  Redis   │
-        │  :8080 proxy port  │         └──────────┘
-        └────────────────────┘
+        ┌─────────────────────────┐         ┌──────────┐
+        │ Octoprox                │ ──────▶ │ Postgres │
+        │  :8000 API + UI         │         │  Redis   │
+        │  :8080 proxy port       │         └──────────┘
+        │  :51820/udp WireGuard   │
+        └─────────────────────────┘
                  │
                  ▼
         upstream proxy pool
@@ -33,16 +35,17 @@ Compose files: [`docker-compose.yml`](https://github.com/octoprox/octoprox/blob/
 
 ### Multi-instance cluster (HA + horizontal scaling)
 
-Multiple identical Octoprox processes behind an L4 load balancer (HAProxy
-in the bundled compose; any TCP/HTTP-capable LB works). All instances
-share one Postgres and one Redis.
+Multiple identical Octoprox processes behind a load balancer (nginx in the
+bundled compose; any balancer that forwards HTTP, TCP and UDP works). All
+instances share one Postgres and one Redis, and every instance terminates
+the WireGuard tunnel.
 
 ```
    client ──▶ ┌────────────┐     ┌── Octoprox-1 ──┐
-              │  HAProxy   │     │  :8000 :8080   │ ──┐
+   device ──▶ │  nginx     │     │  :8000 :8080   │ ──┐
               │  :8000     │ ───▶├── Octoprox-2 ──┤   │
               │  :8080     │     │  :8000 :8080   │ ──┼──▶  Postgres
-              │  :8404 UI  │     ├── Octoprox-3 ──┤   │     Redis
+              │  :51820/udp│     ├── Octoprox-3 ──┤   │     Redis
               └────────────┘     │  :8000 :8080   │ ──┘
                                  └────────────────┘
                                           │
@@ -50,7 +53,7 @@ share one Postgres and one Redis.
                                    upstream proxy pool
 ```
 
-Compose files: [`docker-compose.cluster.yml`](https://github.com/octoprox/octoprox/blob/main/docker-compose.cluster.yml) (build from source) or [`docker-compose.cluster.ghcr.yml`](https://github.com/octoprox/octoprox/blob/main/docker-compose.cluster.ghcr.yml) (pre-built image). HAProxy config: [`haproxy/haproxy.cfg`](https://github.com/octoprox/octoprox/blob/main/haproxy/haproxy.cfg).
+Compose files: [`docker-compose.cluster.yml`](https://github.com/octoprox/octoprox/blob/main/docker-compose.cluster.yml) (build from source) or [`docker-compose.cluster.ghcr.yml`](https://github.com/octoprox/octoprox/blob/main/docker-compose.cluster.ghcr.yml) (pre-built image). nginx config: [`nginx/nginx.conf`](https://github.com/octoprox/octoprox/blob/main/nginx/nginx.conf).
 
 ```bash
 # Local-build cluster (Makefile targets, fast iteration)
@@ -78,6 +81,39 @@ docker compose -f docker-compose.cluster.ghcr.yml down
   instance at a time (rendezvous-hashed by `proxy_id` across the live
   membership). Adding instances divides the workload.
 - **Zero-downtime deploys.** Rolling-restart one instance at a time.
+
+
+### The WireGuard endpoint in a cluster
+
+Every replica terminates the tunnel, and nginx forwards the UDP port with
+consistent hashing by source address, so a device keeps landing on the
+same replica while its address holds and the others carry other devices.
+The key pair, endpoint and device list are install-wide, so every replica
+accepts every device's config, and the fake-IP mapping the tunnel DNS hands
+out is shared through Redis, so a connection that lands on a different
+replica from the one that answered the device's DNS query still knows the
+name. Two things to know:
+
+- **A flow that moves stalls briefly.** A device that changes source
+  address (a phone switching networks) or whose replica disappears is
+  hashed to another replica, which has no session keys for it yet. The
+  device's next handshake attempt (a few seconds, or at the next rekey)
+  establishes a session there and traffic resumes. Open TCP connections
+  from before the move are gone, as with any L4 balancer.
+- **nginx notices a dead container, not a dead host.** Open source nginx
+  has no active UDP health check. A replica whose container is down is
+  skipped (the host answers with ICMP unreachable); one whose host is
+  gone keeps its share of devices until it returns or the server list is
+  edited. For a hands-off alternative run keepalived with a floating IP
+  in front of the replicas instead of balancing the UDP port, or use a
+  cloud L4 balancer (AWS NLB, GCP passthrough NLB, Azure LB) which checks
+  health actively.
+
+Each carrying replica publishes its peer status to Redis and the admin
+views merge them, so the device list is correct whichever replica a device
+is currently talking to. The endpoint a device appears to connect from is
+nginx's address, since nginx proxies the datagrams. See
+[WireGuard Devices](wireguard).
 
 ## What does *not* scale by adding instances
 
@@ -185,22 +221,27 @@ instance trips a limit.
 
 ### Endpoints
 
-| Port | Served by | What                                             |
-|------|-----------|--------------------------------------------------|
-| 8000 | HAProxy   | API + Web UI (HTTP, sticky per client, see below)  |
-| 8080 | HAProxy   | Proxy traffic (TCP, least-conn across replicas)  |
-| 8404 | HAProxy   | HAProxy stats UI                                 |
+| Port      | Served by | What                                                  |
+|-----------|-----------|-------------------------------------------------------|
+| 8000      | nginx     | API + Web UI (HTTP, sticky per client, see below)     |
+| 8080      | nginx     | Proxy traffic (TCP, least-conn across replicas)       |
+| 51820/udp | nginx     | WireGuard (UDP, each device pinned to one replica)    |
 
-Both 8000 and 8080 use the same HTTP `/health` probe (on port 8000) to
-decide whether a backend is fit. A container with a crashed API server
-gets pulled out of the proxy-traffic backend automatically.
+Health is passive, as open source nginx does it: a replica that refuses or
+times out is skipped for ten seconds and the request goes to the next one.
+For HTTP and TCP that is immediate. For UDP a dead container is noticed
+through the ICMP unreachable its host answers with; a dead host is not,
+and its devices reconnect once their replica is back or they are moved
+(see the WireGuard section above). If you need active health checks on the
+UDP port, Envoy's UDP proxy with cluster health checks, or a cloud L4
+balancer, provides them.
 
 ### Echo endpoint
 
 Every instance serves `GET /echo` on port 8000 for [IP attribution]({{ site.baseurl }}/ip-attribution):
 health checks, discovery and preflight request it *through* a proxy to learn
-the exit IP. The bundled HAProxy config adds `X-Forwarded-For` on the API
-frontend; set `geo.echo.trusted_proxies` to the HAProxy address range so the
+the exit IP. The bundled nginx config adds `X-Forwarded-For` on the API
+listener; set `geo.echo.trusted_proxies` to the nginx address range so the
 instances report the real client instead of the balancer.
 
 The request travels out through the vendor and back in from the public
@@ -218,18 +259,20 @@ on one replica and immediately lists credentials on another can therefore
 miss its own write for a few milliseconds, which in the UI looked like a
 saved item not appearing in the table.
 
-HAProxy avoids this by pinning each browser to one replica with an
-`OCTOPROX_SRV` cookie (`cookie ... insert indirect nocache` in
-`haproxy/haproxy.cfg`). New clients are still spread round-robin, and
-`option redispatch` moves a client to a healthy replica if its pinned one
-goes down. The cookie is handled by HAProxy alone; the instances never see
-it. If you front Octoprox with a different load balancer, configure the
-equivalent session affinity for the API port.
+The bundled nginx config avoids this by pinning each bearer token to one
+replica (`hash $octoprox_api_key consistent` in `nginx/nginx.conf`). The
+UI and API clients send the token on every call and it stays the same for
+the life of a login, so each signed-in user lands on one replica, and a
+whole company behind one office address or VPN is spread across them.
+Calls without a token (login, the SPA assets, `/health`, `/echo`) hash on
+the client address instead; none of them need the pin. If the pinned
+replica is down the request is retried on another (`proxy_next_upstream`).
+If you front Octoprox with a different load balancer, configure the
+equivalent affinity on the `Authorization` header, or a cookie-based one.
 
-API clients that do not keep cookies, such as scripts using a bearer
-token, are still balanced per request. A script that writes and then
-immediately reads may see the pre-write state from another replica; retry
-the read or reuse a cookie jar if that matters.
+A client that logs in again between a write and a read gets a new token
+and possibly another replica, and may see the pre-write state for a few
+milliseconds; retry the read if that matters.
 
 ### Inspecting cluster state
 
@@ -244,8 +287,8 @@ docker compose -f docker-compose.cluster.yml exec redis \
     echo "$k held by $(docker compose -f docker-compose.cluster.yml exec -T redis redis-cli GET "$k")"
   done
 
-# HAProxy backend status (CSV)
-curl -s 'http://localhost:8404/;csv' | awk -F, '/^api_http|^proxy_tcp/{print $1"/"$2,$18}'
+# Which replica served what (nginx logs the upstream address on every line)
+docker compose -f docker-compose.cluster.yml logs --tail=50 nginx
 ```
 
 ### Failover smoke test

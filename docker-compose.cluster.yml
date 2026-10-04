@@ -1,15 +1,15 @@
-# Multi-instance Octoprox cluster, fronted by HAProxy. Builds the
+# Multi-instance Octoprox cluster, fronted by nginx. Builds the
 # image from this checkout - equivalent to docker-compose.yml but
 # scaled out. For a production-ready cluster that pulls the pre-built
 # image from GitHub Container Registry, see docker-compose.cluster.ghcr.yml.
 #
-#   Clients hit HAProxy on port 8000 (API/UI) and 8080 (proxy traffic).
-#   HAProxy distributes across octoprox-{1,2,3}, all sharing Postgres
-#   and Redis. Health checks use GET /health on each instance's API.
+#   Clients hit nginx on port 8000 (API/UI), 8080 (proxy traffic) and
+#   51820/udp (WireGuard). nginx distributes across octoprox-{1,2,3},
+#   all sharing Postgres and Redis. Every replica terminates WireGuard;
+#   a device is pinned to one by its source address.
 #
 # Start:   docker compose -f docker-compose.cluster.yml up -d --build
 # Stop:    docker compose -f docker-compose.cluster.yml down
-# Stats:   http://localhost:8404/
 #
 # Four compose flavours coexist in this repo:
 #   docker-compose.yml              single instance, builds from src
@@ -18,8 +18,14 @@
 #   docker-compose.cluster.ghcr.yml cluster, pre-built image
 
 # Shared base for all three octoprox replicas. Each replica overrides
-# OCTOPROX_INSTANCE_ID so logs are unambiguous.
+# OCTOPROX_INSTANCE_ID so logs are unambiguous. Every replica terminates
+# the WireGuard tunnel (docs/wireguard.md): NET_ADMIN for the interface
+# and nftables rules, /dev/net/tun only for the wireguard-go fallback.
 x-octoprox-base: &octoprox-base
+  cap_add:
+    - NET_ADMIN
+  devices:
+    - /dev/net/tun:/dev/net/tun
   build:
     context: .
     dockerfile: Dockerfile
@@ -35,6 +41,7 @@ x-octoprox-base: &octoprox-base
     OCTOPROX_DB_PASSWORD: octoprox
     OCTOPROX_DB_NAME: octoprox
     OCTOPROX_LOG_LEVEL: INFO
+    OCTOPROX_WIREGUARD_ENABLED: "true"
   volumes:
     - ./config:/app/config:ro
     - ca_data:/app/data/ca
@@ -77,15 +84,15 @@ services:
       <<: *octoprox-env
       OCTOPROX_INSTANCE_ID: octoprox-3
 
-  haproxy:
-    image: haproxy:3.2-alpine
-    container_name: octoprox-haproxy
+  nginx:
+    image: nginx:1.30-alpine
+    container_name: octoprox-nginx
     ports:
-      - "8000:8000"   # API + Web UI
-      - "8080:8080"   # Proxy traffic
-      - "8404:8404"   # HAProxy stats UI
+      - "8000:8000"         # API + Web UI
+      - "8080:8080"         # Proxy traffic
+      - "51820:51820/udp"   # WireGuard
     volumes:
-      - ./haproxy/haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
     depends_on:
       - octoprox-1
       - octoprox-2

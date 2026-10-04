@@ -38,6 +38,9 @@ ENTITY_KEYS = (
     "geo_database_blobs",
     "ip_observations",
     "connector_exit_ips",
+    # WireGuard: the install's key pair, then the devices (they reference projects).
+    "wireguard_settings",
+    "wireguard_peers",
 )
 
 
@@ -82,6 +85,8 @@ class BackupPayload(BaseModel):
     geo_database_blobs: list[dict[str, Any]] = Field(default_factory=list)
     ip_observations: list[dict[str, Any]] = Field(default_factory=list)
     connector_exit_ips: list[dict[str, Any]] = Field(default_factory=list)
+    wireguard_settings: list[dict[str, Any]] = Field(default_factory=list)
+    wireguard_peers: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class ExportRequest(BaseModel):
@@ -127,5 +132,7 @@ class ImportSummary(BaseModel):
     geo_database_blobs: int = 0
     ip_observations: int = 0
     connector_exit_ips: int = 0
+    wireguard_settings: int = 0
+    wireguard_peers: int = 0
     kept_current_user: bool = False
     user_conflicts: list[UserConflict] = Field(default_factory=list)

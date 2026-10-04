@@ -66,3 +66,23 @@ providers:
   http:
     timeout_seconds: 60
     max_response_bytes: 52428800   # 0 disables the limit
+
+# WireGuard endpoint (see docs/wireguard.md). Devices with no proxy support
+# join a project's pool through a tunnel this instance terminates. The key
+# pair, public endpoint and subnet are install-wide and edited under
+# Settings -> WireGuard; this block describes this process.
+wireguard:
+  enabled: false           # needs CAP_NET_ADMIN, wireguard-tools, nftables
+  interface: wg0
+  # listen_port: 51820     # only when it differs from the endpoint port (port-mapping NAT)
+  transparent_port: 8081   # bound on the tunnel address only
+  dns_port: 5353           # port 53 inside the tunnel is redirected here
+  mtu: 1420
+  fake_ip_range: 198.18.0.0/15
+  sniff_timeout_seconds: 2
+  block_encrypted_dns: true   # DoT and known DoH resolvers are closed so devices keep the tunnel resolver
+  # Seed for the install-wide settings row on a fresh install:
+  # defaults:
+  #   endpoint_host: vpn.example.com
+  #   endpoint_port: 51820
+  #   subnet: 10.66.0.0/16

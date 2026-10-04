@@ -67,6 +67,7 @@ if TYPE_CHECKING:
     from api.core.proxy_server import ProxyServer
     from api.core.tls_cert_manager import TLSCertManager
     from api.geo.runtime import GeoRuntime
+    from api.wireguard.runtime import WireGuardRuntime
 
 logger = structlog.get_logger()
 
@@ -437,7 +438,11 @@ def _task_state(task: asyncio.Task[Any]) -> tuple[str, str | None]:
     return "done", None
 
 
-def collect_tasks(proxy_manager: ProxyManager | None, geo_runtime: GeoRuntime | None = None) -> list[WorkerTask]:
+def collect_tasks(
+    proxy_manager: ProxyManager | None,
+    geo_runtime: GeoRuntime | None = None,
+    wireguard_runtime: WireGuardRuntime | None = None,
+) -> list[WorkerTask]:
     """The background loops of this process: alive, elected, and doing work.
 
     ``state`` comes from the asyncio task, the counters from
@@ -449,6 +454,8 @@ def collect_tasks(proxy_manager: ProxyManager | None, geo_runtime: GeoRuntime | 
     handles = list(proxy_manager.background_tasks) if proxy_manager is not None else []
     if geo_runtime is not None:
         handles.extend(geo_runtime.background_tasks)
+    if wireguard_runtime is not None:
+        handles.extend(wireguard_runtime.background_tasks)
     if not handles:
         return []
     runs = job_stats.snapshot()
@@ -497,6 +504,7 @@ async def collect_workers(
     redis_client: RedisClient | None,
     instance_id: str,
     geo_runtime: GeoRuntime | None = None,
+    wireguard_runtime: WireGuardRuntime | None = None,
 ) -> WorkerStats:
     """Local task health plus the cluster-wide lease and membership picture."""
     leases: list[LeaseInfo] = []
@@ -511,7 +519,7 @@ async def collect_workers(
             logger.warning("Worker lease/instance scan failed", error=str(exc))
 
     return WorkerStats(
-        tasks=collect_tasks(proxy_manager, geo_runtime),
+        tasks=collect_tasks(proxy_manager, geo_runtime, wireguard_runtime),
         leases=leases,
         instances=instances,
         proxy_server_listening=proxy_server.is_listening if proxy_server else False,
@@ -531,6 +539,7 @@ def build_instance_snapshot(
     proxy_server: ProxyServer | None = None,
     cert_manager: TLSCertManager | None = None,
     geo_runtime: GeoRuntime | None = None,
+    wireguard_runtime: WireGuardRuntime | None = None,
 ) -> InstanceSnapshot:
     """Assemble what this process publishes about itself on its heartbeat.
 
@@ -544,7 +553,7 @@ def build_instance_snapshot(
             settings, started_at, proxy_port=proxy_server.port if proxy_server else None
         ),
         cache=collect_cache(proxy_manager, cert_manager),
-        tasks=collect_tasks(proxy_manager, geo_runtime),
+        tasks=collect_tasks(proxy_manager, geo_runtime, wireguard_runtime),
         proxy_server_listening=proxy_server.is_listening if proxy_server else False,
         proxy_server_connections=proxy_server.active_connections if proxy_server else 0,
         geo_lookup_enabled=geo_runtime.proxy_attributor.enabled if geo_runtime else False,
@@ -567,6 +576,7 @@ async def collect_system_stats(
     redis_client: RedisClient | None = None,
     started_at: datetime | None = None,
     geo_runtime: GeoRuntime | None = None,
+    wireguard_runtime: WireGuardRuntime | None = None,
 ) -> SystemStats:
     """Gather every section of the admin system view.
 
@@ -586,7 +596,9 @@ async def collect_system_stats(
     (inventory, projects, database), redis_stats, workers = await asyncio.gather(
         _postgres(),
         _redis(),
-        collect_workers(proxy_manager, proxy_server, redis_client, settings.instance_id, geo_runtime),
+        collect_workers(
+            proxy_manager, proxy_server, redis_client, settings.instance_id, geo_runtime, wireguard_runtime
+        ),
     )
 
     return SystemStats(

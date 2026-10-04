@@ -130,9 +130,11 @@ class ProxyServer:
         if self._server:
             # Stop accepting new connections
             self._server.close()
-            await self._server.wait_closed()
 
-            # Cancel all active client tasks
+            # Cancel all active client tasks. This happens before wait_closed,
+            # which since Python 3.12.1 waits for every accepted connection to
+            # finish: an open tunnel would otherwise hold shutdown until the
+            # client went away on its own.
             if self._client_tasks:
                 logger.info(
                     "Cancelling active client connections",
@@ -145,6 +147,7 @@ class ProxyServer:
                 await asyncio.gather(*self._client_tasks, return_exceptions=True)
                 self._client_tasks.clear()
 
+            await self._server.wait_closed()
             logger.info("Proxy server stopped")
 
     async def _handle_client_wrapper(
@@ -343,8 +346,12 @@ class ProxyServer:
             ConnectionError: If connection or handshake fails
             TimeoutError: If connection times out
         """
-        # Create proxy instance from URL (handles all protocol types)
-        socks_proxy = SocksProxy.from_url(proxy.url)
+        # Create proxy instance from URL (handles all protocol types). The
+        # target name travels to the proxy unresolved on every protocol:
+        # SOCKS5 and HTTP CONNECT carry names natively, and rdns makes SOCKS4
+        # use its 4a form instead of resolving here, so no path looks a
+        # target up on this host.
+        socks_proxy = SocksProxy.from_url(proxy.url, rdns=True)
 
         # Connect through the proxy - returns a socket with tunnel established
         sock = await asyncio.wait_for(
@@ -542,8 +549,38 @@ class ProxyServer:
         verified = await self._verify_exit(project, proxy, session_id, location, target_host, client_writer)
         if verified is None:
             return
-        proxy = verified
 
+        await self._relay(
+            client_reader, client_writer, verified, project, target_host, target_port,
+            established=b"HTTP/1.1 200 Connection Established\r\n\r\n",
+            use_mitm=project.tls_mitm_mode != MitmMode.OFF and self._mitm_handler is not None,
+        )
+
+    async def _relay(
+        self,
+        client_reader: asyncio.StreamReader,
+        client_writer: asyncio.StreamWriter,
+        proxy: Proxy,
+        project: Project,
+        target_host: str,
+        target_port: int,
+        *,
+        established: bytes | None,
+        use_mitm: bool,
+        client_head: bytes = b"",
+    ) -> None:
+        """Open the upstream leg to ``target_host:target_port`` and relay until either side is done.
+
+        The tail of a CONNECT and the whole of a transparent tunnel connection:
+        the client has been authenticated and the proxy selected and verified.
+        ``established`` is written to the client once the upstream leg is up
+        (the CONNECT 200 line); None for a transparent client, which believes
+        it is talking to the origin and must hear nothing from us. With
+        ``use_mitm`` the MITM handler takes both legs over after that;
+        ``client_head`` is whatever of the client's TLS stream the caller has
+        already taken off the socket, which the handshake must be fed.
+        """
+        target = f"{target_host}:{target_port}"
         start_time = time.monotonic()
         success = False
         client_disconnected = False
@@ -552,12 +589,6 @@ class ProxyServer:
         # carries only what the meter has not reported yet.
         meter = self._proxy_manager.traffic_meter(proxy, project.id)
         upstream_writer: asyncio.StreamWriter | None = None
-
-        # Check if MITM is enabled for this project
-        use_mitm = (
-            project.tls_mitm_mode != MitmMode.OFF
-            and self._mitm_handler is not None
-        )
 
         try:
             # Connect through upstream proxy (handles all protocols)
@@ -568,9 +599,9 @@ class ProxyServer:
             # Measure latency up to connection establishment (before tunneling)
             latency_ms = (time.monotonic() - start_time) * 1000
 
-            # Tell client the tunnel is established
-            client_writer.write(b"HTTP/1.1 200 Connection Established\r\n\r\n")
-            await client_writer.drain()
+            if established is not None:
+                client_writer.write(established)
+                await client_writer.drain()
             success = True
 
             if use_mitm:
@@ -581,6 +612,7 @@ class ProxyServer:
                     upstream_reader=upstream_reader,
                     upstream_writer=upstream_writer,
                     meter=meter,
+                    client_head=client_head,
                 )
                 upstream_writer = None  # MitmHandler/relay owns it now
             else:
@@ -677,6 +709,12 @@ class ProxyServer:
                 while True:
                     data = await reader.read(BUFFER_SIZE)
                     if not data:
+                        # Pass the half-close on: a peer that waits for our
+                        # EOF before answering (or before closing itself)
+                        # would otherwise wait forever. TLS transports
+                        # cannot half-close and are left alone.
+                        if writer.can_write_eof():
+                            writer.write_eof()
                         break
                     total_bytes += len(data)
                     writer.write(data)

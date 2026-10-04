@@ -24,7 +24,13 @@ from api.core.proxy_manager import ProxyManager
 from api.core.proxy_server import ProxyServer
 from api.core.request_context import REQUEST_ID_HEADER, RequestContextMiddleware
 from api.core.seed import seed_admin_user
-from api.core.signals import geo_database_changed, geo_settings_changed
+from api.core.signals import (
+    geo_database_changed,
+    geo_settings_changed,
+    project_changed,
+    wireguard_peer_changed,
+    wireguard_settings_changed,
+)
 from api.core.system_stats import build_instance_snapshot
 from api.core.tls_cert_manager import TLSCertManager
 from api.db.migrations import run_migrations
@@ -47,7 +53,9 @@ from api.routes import (
     proxies,
     system,
     users,
+    wireguard,
 )
+from api.wireguard.runtime import WireGuardRuntime
 
 # Configure logging before getting the logger
 setup_logging(settings.log_level, settings.log_format, settings.instance_id)
@@ -87,9 +95,15 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     app.state.geo_runtime = geo_runtime
     await geo_runtime.start()
 
-    # Initialize proxy manager with dependencies. Attribution joins the
-    # cross-instance change feed and the periodic reload here, explicitly,
-    # rather than the manager knowing what it is wiring.
+    # WireGuard: the install's key pair and the devices allowed in, loaded on
+    # every instance; the tunnel itself comes up later, on the instance that
+    # terminates it.
+    wireguard_runtime = WireGuardRuntime(settings, session_factory, redis_client)
+    app.state.wireguard_runtime = wireguard_runtime
+
+    # Initialize proxy manager with dependencies. Attribution and WireGuard
+    # join the cross-instance change feed and the periodic reload here,
+    # explicitly, rather than the manager knowing what it is wiring.
     proxy_manager = ProxyManager(
         session_factory=session_factory,
         redis_client=redis_client,
@@ -98,8 +112,13 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         cross_instance_handlers={
             geo_database_changed: geo_runtime.reload_database,
             geo_settings_changed: geo_runtime.reload_settings,
+            wireguard_peer_changed: wireguard_runtime.reload_peer,
+            wireguard_settings_changed: wireguard_runtime.reload_settings,
+            # Runs after the manager's own project handler: a project deleted
+            # on a peer drops its WireGuard peers here too.
+            project_changed: wireguard_runtime.on_project_change,
         },
-        reload_hooks=[geo_runtime.resync],
+        reload_hooks=[geo_runtime.resync, wireguard_runtime.resync],
     )
     app.state.proxy_manager = proxy_manager
 
@@ -121,6 +140,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         proxy_server=getattr(app.state, "proxy_server", None),
         cert_manager=getattr(app.state, "cert_manager", None),
         geo_runtime=geo_runtime,
+        wireguard_runtime=wireguard_runtime,
     )
 
     # Start background tasks (loads from DB, hydrates from Redis)
@@ -142,10 +162,16 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     await proxy_server.start()
     app.state.proxy_server = proxy_server
 
+    # Bring the WireGuard tunnel up where this instance terminates it. The
+    # transparent listener behind it shares the manager, MITM handler and
+    # verifier with the proxy server: same routing, same metering.
+    await wireguard_runtime.start(proxy_manager, mitm_handler=mitm_handler, exit_verifier=exit_verifier)
+
     yield
 
     # Cleanup
     logger.info("Shutting down Octoprox")
+    await wireguard_runtime.stop()
     await proxy_server.stop()
     await proxy_manager.stop()
     await geo_runtime.stop()
@@ -222,6 +248,12 @@ def create_app() -> FastAPI:
     )
     app.include_router(
         geo.router, prefix="/api/v1", tags=["IP attribution"], dependencies=auth_dependency
+    )
+    app.include_router(
+        wireguard.server_router, prefix="/api/v1", tags=["WireGuard"], dependencies=auth_dependency
+    )
+    app.include_router(
+        wireguard.router, prefix="/api/v1", tags=["WireGuard"], dependencies=auth_dependency
     )
 
     # Serve frontend static files in production (when web/dist exists)

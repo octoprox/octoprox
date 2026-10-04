@@ -22,16 +22,14 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import hashlib
-from collections.abc import Callable
-from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass
 from pathlib import Path
 
 import structlog
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.core.fileio import atomic_write
 from api.db.geo_repository import GeoDatabaseRepository
+from api.db.session import SessionFactory
 from api.geo.models import (
     GeoDatabaseFormat,
     GeoDatabaseRecord,
@@ -44,7 +42,6 @@ from api.geo.readers import GeoDatabaseError, GeoReader, inspect_file, open_read
 
 logger = structlog.get_logger()
 
-SessionFactory = Callable[[], AbstractAsyncContextManager[AsyncSession]]
 
 _EXTENSIONS = {GeoDatabaseFormat.MMDB: "mmdb", GeoDatabaseFormat.IP2LOCATION_BIN: "BIN"}
 

@@ -757,3 +757,42 @@ class TestCrossInstanceMetricDeltas:
         assert cached_after is not None
         assert cached_after.request_count == 4
         assert cached_after.success_count == 4
+
+
+class TestAdditiveHandlers:
+    """A subsystem's handler for a signal the manager handles itself runs after the built-in one."""
+
+    async def test_extra_project_handler_runs_alongside_the_eviction(
+        self,
+        db_session_factory: async_sessionmaker[AsyncSession],
+        redis_client: RedisClient,
+        test_settings: Settings,
+        db_session: AsyncSession,
+    ) -> None:
+        from api.core.signals import project_changed
+
+        seen: list[tuple[str, str | None]] = []
+
+        async def extra(entity_id: str, op: str | None) -> None:
+            seen.append((entity_id, op))
+
+        manager = ProxyManager(
+            session_factory=db_session_factory,
+            redis_client=redis_client,
+            settings=test_settings,
+            cross_instance_handlers={project_changed: extra},
+        )
+        await manager.start()
+        try:
+            await asyncio.sleep(0.2)
+            project = Project(name="Doomed", username="doomed", password="pw")
+            manager._projects[project.id] = project
+            payload = json.dumps(
+                {"signal": project_changed.name, "instance_id": "peer", "entity_id": project.id, "op": "removed"}
+            )
+            await redis_client.client.publish(EVENT_CHANNEL, payload)
+            assert await _wait_until(lambda: seen == [(project.id, "removed")])
+            # The manager's own handler still ran: the project is gone from its cache.
+            assert manager.get_project(project.id) is None
+        finally:
+            await manager.stop()

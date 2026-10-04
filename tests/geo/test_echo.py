@@ -25,7 +25,7 @@ class TestClientIp:
     def test_rightmost_untrusted_hop_is_the_exit(self) -> None:
         """A proxy that appends the requester's address must not be echoed back as the exit."""
         trusted = parse_trusted(["10.0.0.0/8"])
-        # Octoprox (203.0.113.7) -> vendor proxy adds it -> exit 198.51.100.1 -> HAProxy appends the exit.
+        # Octoprox (203.0.113.7) -> vendor proxy adds it -> exit 198.51.100.1 -> the load balancer appends the exit.
         assert client_ip("10.1.2.3", "203.0.113.7, 198.51.100.1", trusted) == "198.51.100.1"
         # Trusted hops to the right (a second balancer) are skipped; junk is skipped.
         assert client_ip("10.1.2.3", "198.51.100.1, 10.9.9.9", trusted) == "198.51.100.1"

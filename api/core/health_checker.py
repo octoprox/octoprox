@@ -281,7 +281,8 @@ class HealthChecker:
                 "https://": transport,
             }
         elif proxy.protocol in (ProxyProtocol.SOCKS4, ProxyProtocol.SOCKS5):
-            transport = AsyncProxyTransport.from_url(proxy_url)
+            # rdns: a SOCKS4 proxy gets the check URL's name (4a form) rather than an address resolved here.
+            transport = AsyncProxyTransport.from_url(proxy_url, rdns=True)
             return {
                 "http://": transport,
                 "https://": transport,

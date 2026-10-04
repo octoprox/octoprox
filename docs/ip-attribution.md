@@ -229,7 +229,7 @@ The request travels out through the vendor's proxy and back in from the public i
 OCTOPROX_ECHO_DATABASES=/data/GeoLite2-City.mmdb octoprox-echo   # same image, listens on :8090
 ```
 
-Behind a load balancer the peer address is the balancer's, so list its addresses in `geo.echo.trusted_proxies` (or `OCTOPROX_ECHO_TRUSTED_PROXIES` for the standalone service) and the client IP is read from `X-Forwarded-For`. The bundled HAProxy config sets that header on the API frontend.
+Behind a load balancer the peer address is the balancer's, so list its addresses in `geo.echo.trusted_proxies` (or `OCTOPROX_ECHO_TRUSTED_PROXIES` for the standalone service) and the client IP is read from `X-Forwarded-For`. The bundled nginx config sets that header on the API listener.
 
 ## Health checks
 

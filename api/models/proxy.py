@@ -11,10 +11,10 @@ from uuid import uuid4
 from pydantic import BaseModel, Field, field_validator
 
 from api.core import utc_now
-from api.models.connector import normalize_country_code
 from api.models.location import (
     META_MANUAL_LOCATION,
     LocationTarget,
+    normalize_country_code,
     normalize_state_code,
     slugify_place,
 )

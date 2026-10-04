@@ -10,7 +10,7 @@ nav_id: getting-started
 
 ## Quick Start with Docker (Recommended)
 
-The fastest way to get Octoprox running is with the pre-built Docker image from GitHub Container Registry. You can run a **single standalone instance** or a **multi-instance cluster** behind HAProxy - pick whichever fits.
+The fastest way to get Octoprox running is with the pre-built Docker image from GitHub Container Registry. You can run a **single standalone instance** or a **multi-instance cluster** behind nginx - pick whichever fits.
 
 ### Standalone (single instance)
 
@@ -43,29 +43,29 @@ To stop the services:
 docker compose -f docker-compose.ghcr.yml down
 ```
 
-### Cluster (multi-instance, behind HAProxy)
+### Cluster (multi-instance, behind nginx)
 
-For higher availability and throughput, run three Octoprox replicas behind an HAProxy load balancer, all sharing a single Postgres and Redis. The cluster compose file mounts its HAProxy config from `haproxy/haproxy.cfg`, so you need to download **both** files - keep the config in a `haproxy/` directory next to the compose file:
+For higher availability and throughput, run three Octoprox replicas behind an nginx load balancer, all sharing a single Postgres and Redis. The cluster compose file mounts its nginx config from `nginx/nginx.conf`, so you need to download **both** files - keep the config in an `nginx/` directory next to the compose file:
 
 ```bash
-# Download the cluster compose file and the HAProxy config it mounts
+# Download the cluster compose file and the nginx config it mounts
 curl -O https://raw.githubusercontent.com/octoprox/octoprox/main/docker-compose.cluster.ghcr.yml
-mkdir -p haproxy
-curl -o haproxy/haproxy.cfg https://raw.githubusercontent.com/octoprox/octoprox/main/haproxy/haproxy.cfg
+mkdir -p nginx
+curl -o nginx/nginx.conf https://raw.githubusercontent.com/octoprox/octoprox/main/nginx/nginx.conf
 
-# Start the cluster (3 replicas + HAProxy + shared Postgres/Redis)
+# Start the cluster (3 replicas + nginx + shared Postgres/Redis)
 docker compose -f docker-compose.cluster.ghcr.yml up -d
 
 # View aggregated logs
 docker compose -f docker-compose.cluster.ghcr.yml logs -f
 ```
 
-Once started, the cluster exposes the same endpoints as the standalone setup, plus the HAProxy stats UI:
+Once started, the cluster exposes the same endpoints as the standalone setup, plus the WireGuard port:
 - **Web UI / API**: [http://localhost:8000](http://localhost:8000)
 - **Proxy Server**: [http://localhost:8080](http://localhost:8080)
-- **HAProxy stats**: [http://localhost:8404](http://localhost:8404)
+- **WireGuard**: `localhost:51820/udp` (see [WireGuard Devices]({{ site.baseurl }}/wireguard))
 
-> **Important**: the compose file mounts `./haproxy/haproxy.cfg`. If that file is missing when you run `up`, Docker silently creates an empty directory in its place and HAProxy crash-loops printing its usage banner - so make sure the config is downloaded first. Apply the same production hardening as the standalone setup: set a strong `OCTOPROX_AUTH_PASSWORD`, a secure random `OCTOPROX_JWT_SECRET`, and change `OCTOPROX_DB_PASSWORD` to match `POSTGRES_PASSWORD`.
+> **Important**: the compose file mounts `./nginx/nginx.conf`. If that file is missing when you run `up`, Docker silently creates an empty directory in its place and nginx fails to start - so make sure the config is downloaded first. Apply the same production hardening as the standalone setup: set a strong `OCTOPROX_AUTH_PASSWORD`, a secure random `OCTOPROX_JWT_SECRET`, and change `OCTOPROX_DB_PASSWORD` to match `POSTGRES_PASSWORD`.
 
 To stop the cluster:
 
@@ -146,7 +146,7 @@ The web UI will be available at `http://localhost:3000`.
 Octoprox ships with four ready-made Docker Compose flavours so you can
 match the deployment shape to what you actually need - a single
 instance for development, or a horizontally-scaled cluster fronted by
-HAProxy for HA / higher throughput. Two of those flavours use the
+nginx for HA / higher throughput. Two of those flavours use the
 pre-built image from GitHub Container Registry (no local build), and
 two build from your checkout.
 
@@ -154,8 +154,8 @@ two build from your checkout.
 |-----------------------------------|----------------------|-----------|--------------------------------------|
 | `docker-compose.yml`              | local build          | 1         | day-to-day development               |
 | `docker-compose.ghcr.yml`         | `ghcr.io/.../latest` | 1         | quickest "just run it" demo          |
-| `docker-compose.cluster.yml`      | local build          | 3 + HAProxy | testing distributed code paths      |
-| `docker-compose.cluster.ghcr.yml` | `ghcr.io/.../latest` | 3 + HAProxy | production-ready starting point    |
+| `docker-compose.cluster.yml`      | local build          | 3 + nginx   | testing distributed code paths      |
+| `docker-compose.cluster.ghcr.yml` | `ghcr.io/.../latest` | 3 + nginx   | production-ready starting point    |
 
 Single-instance shortcuts:
 
@@ -172,21 +172,21 @@ make docker-run
 Multi-instance cluster shortcuts:
 
 ```bash
-# Local build (3 replicas + HAProxy + shared Postgres/Redis)
+# Local build (3 replicas + nginx + shared Postgres/Redis)
 make cluster-up
 make cluster-logs
 make cluster-down
 
 # Pre-built GHCR image - production-ready starting point.
-# Needs the compose file + haproxy/haproxy.cfg - see the cluster Quick Start above.
+# Needs the compose file + nginx/nginx.conf - see the cluster Quick Start above.
 docker compose -f docker-compose.cluster.ghcr.yml up -d
 docker compose -f docker-compose.cluster.ghcr.yml logs -f
 docker compose -f docker-compose.cluster.ghcr.yml down
 ```
 
 The cluster exposes the same `:8000` (API/UI) and `:8080` (proxy
-traffic) ports as the single-instance setup, plus `:8404` for HAProxy
-stats. See [Deployment & Scaling]({{ site.baseurl }}/deployment) for
+traffic) ports as the single-instance setup, plus `:51820/udp` for
+WireGuard. See [Deployment & Scaling]({{ site.baseurl }}/deployment) for
 how the multi-instance machinery works - what's shared, what's elected,
 how failover happens.
 
@@ -205,7 +205,7 @@ Here are the most commonly used commands:
 | `make format` | Format code with ruff |
 | `make docker-compose-up` | Start all services with Docker (single instance) |
 | `make docker-compose-down` | Stop all services |
-| `make cluster-up` | Start 3-instance cluster behind HAProxy (local build) |
+| `make cluster-up` | Start 3-instance cluster behind nginx (local build) |
 | `make cluster-down` | Stop the cluster |
 | `make cluster-logs` | Tail aggregated logs from the cluster |
 | `make cluster-rebuild` | Rebuild images and restart the cluster |

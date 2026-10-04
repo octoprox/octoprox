@@ -22,8 +22,8 @@ from pydantic import ValidationError
 
 from api.core.config import Settings
 from api.db.geo_repository import GeoSettingsRepository
+from api.db.session import SessionFactory
 from api.geo.models import GeoSettings, SourcePolicy
-from api.geo.store import SessionFactory
 
 logger = structlog.get_logger()
 

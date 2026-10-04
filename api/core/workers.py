@@ -40,6 +40,7 @@ class WorkerName(StrEnum):
     GEO_OBSERVATION_PUBLISHER = "geo_observation_publisher"
     GEO_OBSERVATION_FLUSHER = "geo_observation_flusher"
     GEO_DATABASE_UPDATER = "geo_database_updater"
+    WIREGUARD_STATUS_PUBLISHER = "wireguard_status_publisher"
 
 
 class LeaseName(StrEnum):
@@ -157,6 +158,10 @@ WORKERS: dict[WorkerName, WorkerInfo] = {
         "publishes the new file to every instance",
         lease=LeaseName.GEO_DATABASE_UPDATER,
         lease_label="IP database updates",
+    ),
+    WorkerName.WIREGUARD_STATUS_PUBLISHER: WorkerInfo(
+        "Publishes each WireGuard peer's handshake and transfer counters from the "
+        "tunnel interface this instance carries, so every instance can show them",
     ),
 }
 

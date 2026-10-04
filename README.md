@@ -13,6 +13,7 @@ A dynamic and flexible proxy manager that acts as an intelligent proxy aggregato
 - **Per-request Targeting**: Pick a sticky session (`-sessid-`) or an exit country (`-cc-`) from the proxy username, so one project can serve many locations
 - **IP Attribution**: Resolve exit locations from your own MaxMind, DB-IP, IPinfo or IP2Location databases, verify vendor claims, track each provider's accuracy, and optionally reject sessions that exit in the wrong country (see [docs/ip-attribution.md](docs/ip-attribution.md))
 - **Traffic Limits & Billing**: Cap the bytes a connector carries per billing period, alert, block or cut transfers at the cap, and see spend from the price you pay per GB (see [docs/traffic-limits.md](docs/traffic-limits.md))
+- **WireGuard Devices**: Routers, TVs, consoles and phones with no proxy settings join a project's pool through a WireGuard tunnel Octoprox terminates; one config or QR code per device, names resolved at the exit (see [docs/wireguard.md](docs/wireguard.md))
 - **Health Monitoring**: Automatic health checks with configurable intervals and thresholds
 - **Performance Metrics**: Track latency, success rates, and request counts per proxy
 - **REST API**: Full CRUD operations for managing projects, credentials, connectors, and proxies
@@ -63,23 +64,23 @@ production image from GitHub Container Registry.
 
 ```bash
 # Local-build cluster (fast iteration on your own code)
-make cluster-up       # 3 octoprox replicas + HAProxy + Postgres + Redis
+make cluster-up       # 3 octoprox replicas + nginx + Postgres + Redis
 make cluster-logs
 make cluster-down
 
 # Production-ready cluster using the pre-built ghcr.io image.
-# Download both the compose file and the HAProxy config it mounts:
+# Download both the compose file and the nginx config it mounts:
 curl -O https://raw.githubusercontent.com/octoprox/octoprox/main/docker-compose.cluster.ghcr.yml
-mkdir -p haproxy
-curl -o haproxy/haproxy.cfg https://raw.githubusercontent.com/octoprox/octoprox/main/haproxy/haproxy.cfg
+mkdir -p nginx
+curl -o nginx/nginx.conf https://raw.githubusercontent.com/octoprox/octoprox/main/nginx/nginx.conf
 docker compose -f docker-compose.cluster.ghcr.yml up -d
 docker compose -f docker-compose.cluster.ghcr.yml logs -f
 docker compose -f docker-compose.cluster.ghcr.yml down
 ```
 
-> **Important**: the cluster compose files mount `./haproxy/haproxy.cfg`. If
+> **Important**: the cluster compose files mount `./nginx/nginx.conf`. If
 > that file is missing when you run `up`, Docker silently creates an empty
-> directory in its place and HAProxy crash-loops printing its usage banner -
+> directory in its place and nginx fails to start -
 > so make sure the config is present (it ships in your checkout for the
 > local-build variant; download it as shown above for the pre-built image).
 
@@ -89,16 +90,16 @@ The full compose-file matrix:
 |-----------------------------------|----------------------|-----------|--------------------------------------|
 | `docker-compose.yml`              | local build          | 1         | day-to-day development               |
 | `docker-compose.ghcr.yml`         | `ghcr.io/.../latest` | 1         | quickest "just run it" demo          |
-| `docker-compose.cluster.yml`      | local build          | 3 + HAProxy | testing distributed code paths      |
-| `docker-compose.cluster.ghcr.yml` | `ghcr.io/.../latest` | 3 + HAProxy | production-ready starting point    |
+| `docker-compose.cluster.yml`      | local build          | 3 + nginx   | testing distributed code paths      |
+| `docker-compose.cluster.ghcr.yml` | `ghcr.io/.../latest` | 3 + nginx   | production-ready starting point    |
 
 Endpoints exposed on the host (same for both cluster variants):
 
 | Port | What                                                    |
 |------|---------------------------------------------------------|
-| 8000 | API + Web UI (HAProxy → octoprox-{1,2,3}:8000, HTTP)    |
-| 8080 | Proxy traffic (HAProxy → octoprox-{1,2,3}:8080, TCP)    |
-| 8404 | HAProxy stats UI - useful for seeing which backend served a given request |
+| 8000 | API + Web UI (nginx → octoprox-{1,2,3}:8000, HTTP)    |
+| 8080 | Proxy traffic (nginx → octoprox-{1,2,3}:8080, TCP)    |
+| 51820/udp | WireGuard (nginx → octoprox-{1,2,3}:51820, each device pinned to one replica) |
 
 All three instances share the same Postgres and Redis, generate distinct
 `OCTOPROX_INSTANCE_ID` values, advertise themselves via Redis heartbeat,
@@ -107,7 +108,7 @@ compactor, system snapshotter) and per-connector workers (autoscaler,
 provider syncer). See
 [`docker-compose.cluster.yml`](docker-compose.cluster.yml),
 [`docker-compose.cluster.ghcr.yml`](docker-compose.cluster.ghcr.yml), and
-[`haproxy/haproxy.cfg`](haproxy/haproxy.cfg) for the wiring details.
+[`nginx/nginx.conf`](nginx/nginx.conf) for the wiring details.
 
 For the architecture behind multi-instance - what's shared, what's
 elected, how failover works - see the
@@ -453,6 +454,12 @@ For detailed setup instructions, see:
 Residential, ISP and datacenter vendors are integrated through the provider SDK: each vendor is a YAML descriptor that declares its credential and connector fields, how they turn into proxy endpoints (gateway sessions, port-mapped IPs or an API-served list) and which vendor API calls discover zones or validate credentials. Oxylabs, Bright Data, Decodo, Webshare, IPRoyal and NetNut are shipped; admins can add or duplicate providers under **Settings → Providers**, operators can mount YAML files or install Python plugins.
 
 - [Providers & SDK](docs/providers.md) - Descriptor format, security model, UI builder
+
+## WireGuard Devices
+
+Anything that cannot be pointed at a proxy becomes a client by connecting to a WireGuard tunnel that Octoprox terminates. Each device is a peer of a project with its own tunnel address and the routing a proxy client would put in its username (sticky session, exit country, state, city). Inside the tunnel every name resolves to a synthetic address and every TCP connection is turned into a CONNECT through the project's upstream, so DNS never leaks and the device needs no proxy support. The bundled cluster runs it on every replica behind nginx; a single instance enables it with `OCTOPROX_WIREGUARD_ENABLED=true`, `cap_add: [NET_ADMIN]` and the UDP port published.
+
+- [WireGuard Devices](docs/wireguard.md) - How it works, enabling the endpoint, adding devices, limitations
 - [BrightData Setup](docs/brightdata-setup.md)
 - [Oxylabs Setup](docs/oxylabs-setup.md)
 
@@ -471,7 +478,7 @@ make docker-build  # Build Docker image
 make docker-compose-up    # Start all services (single instance)
 make docker-compose-down  # Stop all services
 
-# Multi-instance cluster (3 octoprox replicas behind HAProxy)
+# Multi-instance cluster (3 octoprox replicas behind nginx)
 make cluster-up          # Start cluster, building image from local source
 make cluster-down        # Stop the cluster
 make cluster-logs        # Tail aggregated cluster logs

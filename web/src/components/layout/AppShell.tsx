@@ -7,7 +7,7 @@ import { useQuery } from '@tanstack/react-query'
 import {
   BarChart3, Server, Link2, Key, Eye, Settings as SettingsIcon, LogOut, ChevronLeft, ChevronRight,
   ChevronsUpDown, FolderOpen, ArrowLeft, User as UserIcon, Palette, Users as UsersIcon, DatabaseBackup, Puzzle,
-  Activity, Globe,
+  Activity, Globe, Router,
 } from 'lucide-react'
 import octoproxLogo from '../../assets/logos/octoprox_horizontal.svg'
 import octoproxLogoDark from '../../assets/logos/octoprox_horizontal_dark.svg'
@@ -30,6 +30,7 @@ const PAGE_TITLES: Record<string, string> = {
   credentials: 'Credentials',
   'mitm-inspector': 'MITM Inspector',
   locations: 'Exit locations',
+  wireguard: 'WireGuard devices',
   account: 'Account',
   appearance: 'Appearance',
   users: 'Users',
@@ -157,6 +158,7 @@ export default function AppShell({ onLogout }: { onLogout: () => void }) {
                   <NavItem to={`${settingsBase}/users`} icon={<UsersIcon />} label="Users" collapsed={collapsed} />
                   <NavItem to={`${settingsBase}/providers`} icon={<Puzzle />} label="Providers" collapsed={collapsed} />
                   <NavItem to={`${settingsBase}/geo`} icon={<Globe />} label="IP attribution" collapsed={collapsed} />
+                  <NavItem to={`${settingsBase}/wireguard`} icon={<Router />} label="WireGuard" collapsed={collapsed} />
                   <NavItem to={`${settingsBase}/backup`} icon={<DatabaseBackup />} label="Backup & Migration" collapsed={collapsed} />
                   <NavItem to={`${settingsBase}/system`} icon={<Activity />} label="System" collapsed={collapsed} />
                 </>
@@ -173,6 +175,7 @@ export default function AppShell({ onLogout }: { onLogout: () => void }) {
               <NavGroup label="Tools" collapsed={collapsed} />
               <NavItem to={`${base}/locations`} icon={<Globe />} label="Exit locations" collapsed={collapsed} />
               <NavItem to={`${base}/mitm-inspector`} icon={<Eye />} label="MITM Inspector" collapsed={collapsed} />
+              <NavItem to={`${base}/wireguard`} icon={<Router />} label="WireGuard devices" collapsed={collapsed} />
             </>
           ) : null}
         </nav>

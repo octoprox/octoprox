@@ -139,7 +139,7 @@ class TLSCertManager:
 
         Every instance shares one CA volume so that the leaf certs minted by
         any instance validate against the same CA, regardless of which
-        backend HAProxy routes a given client to. On a fresh volume this
+        backend the load balancer routes a given client to. On a fresh volume this
         ensures exactly one instance generates the CA:
 
         * Fast path - if the CA already exists, just load it.

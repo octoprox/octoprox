@@ -13,7 +13,7 @@ import asyncio
 import tempfile
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated, Any, Literal, cast
+from typing import TYPE_CHECKING, Annotated, Any, Literal
 
 import structlog
 from fastapi import APIRouter, Depends, Form, HTTPException, Request, UploadFile
@@ -43,6 +43,7 @@ from api.geo.readers import GeoDatabaseError, inspect_file, is_ip
 from api.geo.updater import DownloadError, validate_bytes
 from api.models.connector import Connector
 from api.models.location import LocationTarget
+from api.routes.common import geo_runtime_of, proxy_manager_of
 
 if TYPE_CHECKING:
     from api.core.proxy_manager import ProxyManager
@@ -288,17 +289,9 @@ class GeoStatusResponse(BaseModel):
 # --- helpers ---------------------------------------------------------------------------------
 
 
-def _runtime(request: Request) -> GeoRuntime:
-    return cast("GeoRuntime", request.app.state.geo_runtime)
-
-
-def _manager(request: Request) -> ProxyManager:
-    return cast("ProxyManager", request.app.state.proxy_manager)
-
-
 def _reattribute_later(request: Request) -> None:
     """Kick off an offline re-attribution without holding the request."""
-    runtime = _runtime(request)
+    runtime = geo_runtime_of(request)
 
     async def run() -> None:
         try:
@@ -388,7 +381,7 @@ def _record_from_info(
 @router.get("/settings", response_model=GeoSettingsResponse)
 async def get_settings(request: Request, _user: CurrentUserDep) -> GeoSettingsResponse:
     """The live attribution policy and the databases this instance has open."""
-    runtime = _runtime(request)
+    runtime = geo_runtime_of(request)
     return GeoSettingsResponse(
         settings=runtime.geo_service.settings,
         from_database=runtime.settings_store.from_database,
@@ -403,7 +396,7 @@ async def put_settings(
     request: Request, body: GeoSettings, admin: RequireAdminDep
 ) -> GeoSettingsResponse:
     """Replace the install-wide attribution settings (admin). Reaches every instance."""
-    runtime = _runtime(request)
+    runtime = geo_runtime_of(request)
     await runtime.settings_store.save(body, updated_by=admin.username)
     await event_bus.publish(geo_settings_changed, None, entity_id="default", op="updated")
     logger.info("Geo settings updated", admin=admin.username)
@@ -418,7 +411,7 @@ async def list_databases(
     request: Request, session: DbDep, _user: CurrentUserDep
 ) -> GeoDatabaseListResponse:
     """Every database: stored rows plus operator-managed files from the config."""
-    runtime = _runtime(request)
+    runtime = geo_runtime_of(request)
     repository = GeoDatabaseRepository(session)
     records = await repository.get_all()
     stored_ids = await repository.blob_ids()
@@ -443,7 +436,7 @@ async def upload_database(
     The file is opened before it is stored, so a broken or unrelated file is
     refused. Every proxy with a known exit IP is re-attributed afterwards.
     """
-    runtime = _runtime(request)
+    runtime = geo_runtime_of(request)
     raw = await file.read()
     if not raw:
         raise HTTPException(status_code=400, detail="Empty file")
@@ -488,7 +481,7 @@ async def add_database_from_url(
     The row is created first so a failed download leaves it in the list with
     the error on it, ready to retry once the credentials are fixed.
     """
-    runtime = _runtime(request)
+    runtime = geo_runtime_of(request)
     record = GeoDatabaseRecord(
         name=body.name.strip(),
         source=GeoDatabaseSource.URL,
@@ -526,7 +519,7 @@ async def update_database(
     admin: RequireAdminDep,
 ) -> GeoDatabaseResponse:
     """Change a database's name, priority, enabled flag or download schedule (admin)."""
-    runtime = _runtime(request)
+    runtime = geo_runtime_of(request)
     repo = GeoDatabaseRepository(session)
     record = await repo.get_by_id(database_id)
     if record is None:
@@ -559,7 +552,7 @@ async def refresh_database(
     request: Request, session: DbDep, database_id: str, admin: RequireAdminDep
 ) -> GeoDatabaseResponse:
     """Download a scheduled database now (admin)."""
-    runtime = _runtime(request)
+    runtime = geo_runtime_of(request)
     record = await GeoDatabaseRepository(session).get_by_id(database_id)
     if record is None:
         raise HTTPException(status_code=404, detail="Database not found")
@@ -580,7 +573,7 @@ async def delete_database(
     request: Request, session: DbDep, database_id: str, admin: RequireAdminDep
 ) -> None:
     """Remove a stored database everywhere (admin). Config-file databases cannot be removed here."""
-    runtime = _runtime(request)
+    runtime = geo_runtime_of(request)
     repo = GeoDatabaseRepository(session)
     record = await repo.get_by_id(database_id)
     if record is None:
@@ -638,7 +631,7 @@ async def inspect_upload(file: UploadFile, _admin: RequireAdminDep) -> dict[str,
 @router.post("/lookup", response_model=LookupResponse)
 async def lookup(request: Request, body: LookupRequest, _user: CurrentUserDep) -> LookupResponse:
     """Resolve one IP with the loaded databases, optionally against a vendor claim."""
-    runtime = _runtime(request)
+    runtime = geo_runtime_of(request)
     ip = body.ip.strip()
     if not is_ip(ip):
         raise HTTPException(status_code=400, detail="Not a valid IP address")
@@ -648,7 +641,7 @@ async def lookup(request: Request, body: LookupRequest, _user: CurrentUserDep) -
     claimed = LocationTarget.reported(claimed_country, body.claimed_state, body.claimed_city)
     policy = runtime.geo_service.default_policy
     if body.project_id:
-        project = _manager(request).get_project(body.project_id)
+        project = proxy_manager_of(request).get_project(body.project_id)
         if project is None:
             raise HTTPException(status_code=404, detail="Project not found")
         policy = project.source_policy(policy)
@@ -676,7 +669,7 @@ async def reattribute(
     request: Request, body: ReattributeRequest, admin: RequireAdminDep
 ) -> ReattributeResponse:
     """Re-run attribution offline for every proxy with a known exit IP (admin)."""
-    scanned, updated = await _runtime(request).proxy_attributor.reattribute_all(body.connector_id)
+    scanned, updated = await geo_runtime_of(request).proxy_attributor.reattribute_all(body.connector_id)
     logger.info(
         "Re-attribution requested",
         admin=admin.username,
@@ -730,7 +723,7 @@ async def observations(
     offset = max(0, offset)
     rows, total = await ObservationRepository(session).recent(**filters, limit=limit, offset=offset)
     # Names come from the caches, so a deleted connector shows its id only.
-    manager = _manager(request)
+    manager = proxy_manager_of(request)
     connectors = {c.id: c.name for c in manager.connectors}
     projects = {p.id: p.name for p in manager.projects}
     for row in rows:
@@ -749,7 +742,7 @@ async def accuracy(
     days: int = 30,
 ) -> AccuracyResponse:
     """Per connector: of the distinct exits seen in the window, how the vendor's claims were judged."""
-    manager = _manager(request)
+    manager = proxy_manager_of(request)
     since = utc_now() - timedelta(days=max(1, min(days, 3650)))
     connectors = {c.id: c for c in manager.connectors}
     wanted: list[str] | None = None
@@ -788,7 +781,7 @@ async def exits(
     days: int = 30,
 ) -> ExitsResponse:
     """Per connector: how many distinct exit IPs it has handed out, and how often they recur."""
-    manager = _manager(request)
+    manager = proxy_manager_of(request)
     since = utc_now() - timedelta(days=max(1, min(days, 3650)))
     connectors = {c.id: c for c in manager.connectors}
     wanted: list[str] | None = None
@@ -833,7 +826,7 @@ async def exit_ips(
     and IP instead of one per sighting. Filters apply on the server;
     ``verdict`` is the country verdict, as for observations.
     """
-    manager = _manager(request)
+    manager = proxy_manager_of(request)
     connectors = {c.id: c for c in manager.connectors}
     projects = {p.id: p.name for p in manager.projects}
     wanted: list[str] | None = None
@@ -870,7 +863,7 @@ async def exit_ips(
 @router.get("/status", response_model=GeoStatusResponse)
 async def status(request: Request, session: DbDep, _user: CurrentUserDep) -> GeoStatusResponse:
     """Pipeline health for the settings page."""
-    runtime = _runtime(request)
+    runtime = geo_runtime_of(request)
     records = await GeoDatabaseRepository(session).get_all()
     stored = await ObservationRepository(session).count()
     recorder = runtime.observation_recorder
