@@ -1,7 +1,7 @@
 # Copyright 2026 Octoprox Authors
 # SPDX-License-Identifier: Apache-2.0
 
-"""Text the WireGuard endpoint hands to ``wg``, ``nft`` and to devices.
+"""Text the WireGuard endpoint hands to ``wg`` and to devices.
 
 Pure functions, so what reaches the kernel and what a device is told can be
 tested without either.
@@ -72,39 +72,3 @@ def client_conf_filename(peer_name: str) -> str:
     """``<name>.conf`` with a stem wg-quick accepts as an interface name."""
     stem = _UNSAFE.sub("-", peer_name.strip()).strip("-.")[:_FILENAME_LIMIT].rstrip("-.")
     return f"{stem or 'octoprox'}.conf"
-
-
-def render_nft_ruleset(table: str, interface: str, transparent_port: int, dns_port: int) -> str:
-    """The nftables table that turns tunnel traffic into connections to our listeners.
-
-    Replaces the table atomically (create-if-missing, delete, define) so a
-    restart after a crash never stacks rules. Everything TCP coming off the
-    tunnel is redirected to the transparent listener and port 53 in either
-    protocol to the fake-IP resolver, so even a device with a hard-coded
-    resolver gets our answers. Any other UDP is rejected rather than dropped:
-    the ICMP unreachable makes a QUIC client fall back to TCP at once instead
-    of after a timeout. Nothing is forwarded; the tunnel only reaches the proxy
-    pool.
-    """
-    return f"""table inet {table} {{}}
-delete table inet {table}
-table inet {table} {{
-    chain prerouting {{
-        type nat hook prerouting priority dstnat; policy accept;
-        iifname "{interface}" udp dport 53 redirect to :{dns_port}
-        iifname "{interface}" tcp dport 53 redirect to :{dns_port}
-        iifname "{interface}" meta l4proto tcp redirect to :{transparent_port}
-    }}
-    chain input {{
-        type filter hook input priority filter; policy accept;
-        iifname "{interface}" udp dport {dns_port} accept
-        iifname "{interface}" tcp dport {{ {dns_port}, {transparent_port} }} accept
-        iifname "{interface}" meta l4proto udp reject
-        iifname "{interface}" meta l4proto tcp reject with tcp reset
-    }}
-    chain forward {{
-        type filter hook forward priority filter; policy accept;
-        iifname "{interface}" drop
-    }}
-}}
-"""

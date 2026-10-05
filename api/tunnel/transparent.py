@@ -6,7 +6,7 @@
 A connection arrives here because nftables rewrote its destination. The
 device thinks it is talking to the origin, so there is no request line and
 no ``Proxy-Authorization``: the peer's tunnel address is the credential (see
-:class:`PeerDirectory`) and the original destination is read back from the
+:mod:`api.tunnel.peers`) and the original destination is read back from the
 socket. From there it is the CONNECT path: pick an upstream for the project,
 verify the exit, relay bytes.
 """
@@ -24,9 +24,9 @@ import structlog
 
 from api.core.proxy_server import ProxyServer
 from api.models.project import MitmMode
-from api.wireguard.dns import FakeIpDirectory
-from api.wireguard.peers import PeerDirectory
-from api.wireguard.sniff import SniffResult, sniff, take_buffered
+from api.tunnel.dns import FakeIpDirectory
+from api.tunnel.peers import PeerLookup
+from api.tunnel.sniff import SniffResult, sniff, take_buffered
 
 if TYPE_CHECKING:
     from api.core.mitm import MitmHandler
@@ -81,10 +81,9 @@ class TransparentProxyServer(ProxyServer):
     def __init__(
         self,
         proxy_manager: ProxyManager,
-        peers: PeerDirectory,
+        peers: PeerLookup,
         fake_ips: FakeIpDirectory,
         *,
-        host: str,
         port: int,
         mitm_handler: MitmHandler | None = None,
         exit_verifier: ExitVerifier | None = None,
@@ -93,8 +92,10 @@ class TransparentProxyServer(ProxyServer):
         block_encrypted_dns: bool = True,
     ) -> None:
         super().__init__(proxy_manager, mitm_handler=mitm_handler, exit_verifier=exit_verifier)
-        self._host = host
         self._port = port
+        # One listening socket per tunnel gateway: nftables redirects a
+        # connection to the primary address of the interface it came in on.
+        self._servers: dict[str, asyncio.Server] = {}
         self._peers = peers
         self._fake_ips = fake_ips
         self._destination_of = destination_of
@@ -108,6 +109,49 @@ class TransparentProxyServer(ProxyServer):
         # from the one that resolved it.
         self.by_address: Counter[str] = Counter()
         self.encrypted_dns_blocked: Counter[str] = Counter()
+
+    @property
+    def is_listening(self) -> bool:
+        return any(server.is_serving() for server in self._servers.values())
+
+    @property
+    def hosts(self) -> list[str]:
+        return list(self._servers)
+
+    @property
+    def port(self) -> int:
+        for server in self._servers.values():
+            if server.sockets:
+                bound: int = server.sockets[0].getsockname()[1]
+                return bound
+        return self._port
+
+    async def start(self) -> None:
+        # The proxy server binds its configured host and port; this listener
+        # must only ever be reachable from inside a tunnel.
+        raise NotImplementedError("the transparent listener binds per tunnel gateway: use listen()")
+
+    async def listen(self, host: str) -> None:
+        """Accept redirected connections arriving at ``host``, a tunnel gateway address."""
+        if host in self._servers:
+            return
+        self._servers[host] = await asyncio.start_server(self._handle_client_wrapper, host, self.port)
+        logger.info("Transparent listener bound", host=host, port=self.port)
+
+    async def unlisten(self, host: str) -> None:
+        """Stop accepting at ``host``. Connections already relayed run on until they end."""
+        server = self._servers.pop(host, None)
+        if server is not None:
+            server.close()
+
+    async def stop(self) -> None:
+        servers = list(self._servers.values())
+        self._servers.clear()
+        for server in servers:
+            server.close()
+        await self._cancel_client_tasks()
+        for server in servers:
+            await server.wait_closed()
 
     async def _send_error(
         self,

@@ -13,7 +13,7 @@ import pytest
 from api.core.mitm.handler import MitmHandler, start_tls_with_head
 from api.core.tls_cert_manager import TLSCertManager
 from api.models.project import MitmEngine, MitmMode
-from api.wireguard.sniff import take_buffered
+from api.tunnel.sniff import take_buffered
 
 
 class TestMitmHandler:

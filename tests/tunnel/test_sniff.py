@@ -8,7 +8,7 @@ import struct
 
 import pytest
 
-from api.wireguard.sniff import (
+from api.tunnel.sniff import (
     clean_hostname,
     host_from_http_head,
     peek,

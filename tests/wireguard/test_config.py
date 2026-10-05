@@ -1,7 +1,7 @@
 # Copyright 2026 Octoprox Authors
 # SPDX-License-Identifier: Apache-2.0
 
-"""What devices, wg and nft are told."""
+"""What devices and wg are told."""
 
 import pytest
 
@@ -15,7 +15,6 @@ from api.wireguard.config import (
     PRIVATE_KEY_PLACEHOLDER,
     client_conf_filename,
     render_client_conf,
-    render_nft_ruleset,
     render_server_conf,
 )
 from api.wireguard.system import parse_dump
@@ -77,19 +76,6 @@ class TestClientConf:
         assert client_conf_filename("Living room TV") == "Living-room-TV.conf"
         assert client_conf_filename("a very long device name indeed") == "a-very-long-dev.conf"
         assert client_conf_filename("///") == "octoprox.conf"
-
-
-class TestNftRuleset:
-    def test_redirects_tunnel_tcp_and_dns_and_rejects_other_udp(self) -> None:
-        rules = render_nft_ruleset("octoprox_wg", "wg0", 8081, 5353)
-        assert rules.startswith("table inet octoprox_wg {}\ndelete table inet octoprox_wg\n")
-        assert 'iifname "wg0" udp dport 53 redirect to :5353' in rules
-        assert 'iifname "wg0" tcp dport 53 redirect to :5353' in rules
-        assert 'iifname "wg0" meta l4proto tcp redirect to :8081' in rules
-        assert 'iifname "wg0" meta l4proto udp reject' in rules
-        assert 'iifname "wg0" drop' in rules
-        # DNS redirect must come before the catch-all TCP redirect.
-        assert rules.index("tcp dport 53 redirect") < rules.index("meta l4proto tcp redirect")
 
 
 class TestSubnet:

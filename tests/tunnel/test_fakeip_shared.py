@@ -3,8 +3,8 @@
 
 """The cluster-wide fake-IP mapping, against a real Redis."""
 
-from api.db.redis import WIREGUARD_FAKEIP_COUNTER_KEY, RedisClient
-from api.wireguard.dns import FakeIpDirectory, FakeIpPool
+from api.db.redis import TUNNEL_FAKEIP_COUNTER_KEY, RedisClient
+from api.tunnel.dns import FakeIpDirectory, FakeIpPool
 
 
 async def test_two_instances_agree_on_the_mapping(redis_client: RedisClient) -> None:
@@ -26,7 +26,7 @@ async def test_allocation_skips_taken_offsets(redis_client: RedisClient) -> None
     pool = FakeIpPool("198.18.0.0/15")
     await redis_client.fakeip_allocate("a.test", pool.capacity)
     # Wind the counter back so the next allocation would land on a's offset.
-    await redis_client.client.set(WIREGUARD_FAKEIP_COUNTER_KEY, 0)
+    await redis_client.client.set(TUNNEL_FAKEIP_COUNTER_KEY, 0)
     offset = await redis_client.fakeip_allocate("b.test", pool.capacity)
     assert offset == 1
     assert await redis_client.fakeip_name_for(0) == "a.test"

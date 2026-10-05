@@ -55,6 +55,7 @@ from api.routes import (
     users,
     wireguard,
 )
+from api.tunnel.dataplane import TunnelDataPlane
 from api.wireguard.runtime import WireGuardRuntime
 
 # Configure logging before getting the logger
@@ -95,10 +96,15 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     app.state.geo_runtime = geo_runtime
     await geo_runtime.start()
 
-    # WireGuard: the install's key pair and the devices allowed in, loaded on
-    # every instance; the tunnel itself comes up later, on the instance that
-    # terminates it.
-    wireguard_runtime = WireGuardRuntime(settings, session_factory, redis_client)
+    # Tunnel devices. The data plane (fake-IP resolver, transparent listener,
+    # nftables) is one per process and shared by every tunnel protocol; its
+    # listeners come up once the proxy server's collaborators exist. WireGuard
+    # loads the install's key pair and the devices allowed in on every
+    # instance; the tunnel itself comes up later, on the instance that
+    # terminates it, by attaching its interface to the data plane.
+    tunnel = TunnelDataPlane(settings, redis_client)
+    app.state.tunnel = tunnel
+    wireguard_runtime = WireGuardRuntime(settings, session_factory, redis_client, tunnel)
     app.state.wireguard_runtime = wireguard_runtime
 
     # Initialize proxy manager with dependencies. Attribution and WireGuard
@@ -162,16 +168,18 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     await proxy_server.start()
     app.state.proxy_server = proxy_server
 
-    # Bring the WireGuard tunnel up where this instance terminates it. The
-    # transparent listener behind it shares the manager, MITM handler and
-    # verifier with the proxy server: same routing, same metering.
-    await wireguard_runtime.start(proxy_manager, mitm_handler=mitm_handler, exit_verifier=exit_verifier)
+    # The tunnel data plane shares the manager, MITM handler and verifier with
+    # the proxy server: same routing, same metering. Then bring the WireGuard
+    # tunnel up where this instance terminates it.
+    await tunnel.start(proxy_manager, mitm_handler=mitm_handler, exit_verifier=exit_verifier)
+    await wireguard_runtime.start()
 
     yield
 
     # Cleanup
     logger.info("Shutting down Octoprox")
     await wireguard_runtime.stop()
+    await tunnel.stop()
     await proxy_server.stop()
     await proxy_manager.stop()
     await geo_runtime.stop()

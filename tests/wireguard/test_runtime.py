@@ -11,13 +11,22 @@ import pytest
 
 from api.core.config import Settings
 from api.models.wireguard import WireGuardPeer, WireGuardServerSettings
-from api.wireguard.peers import NoFreeAddressError, PeerDirectory
+from api.tunnel.dataplane import TunnelDataPlane
+from api.tunnel.peers import NoFreeAddressError
+from api.wireguard.peers import PeerDirectory
 from api.wireguard.runtime import WireGuardRuntime, defaults_from_config
 from tests.wireguard.test_system import FakeRunner
 
 
 def _settings(**overrides: object) -> Settings:
     return Settings(_env_file=None, **overrides)  # type: ignore[call-arg]
+
+
+async def _runtime(settings: Settings, runner: FakeRunner | None = None, redis: object = None) -> WireGuardRuntime:
+    """A runtime on a started data plane, as the lifespan builds them."""
+    tunnel = TunnelDataPlane(settings, redis, runner=runner)  # type: ignore[arg-type]
+    await tunnel.start(MagicMock())
+    return WireGuardRuntime(settings, None, redis, tunnel, runner=runner)  # type: ignore[arg-type]
 
 
 def test_defaults_seed_from_config() -> None:
@@ -57,15 +66,18 @@ class TestPeerDirectory:
 
 @pytest.mark.asyncio
 async def test_disabled_runtime_only_loads_and_reports() -> None:
-    runtime = WireGuardRuntime(_settings(), None, None, runner=FakeRunner())
-    await runtime.start(MagicMock())
+    runtime = await _runtime(_settings(), FakeRunner())
+    await runtime.start()
     status = await runtime.status()
     assert status.state == "disabled" and status.enabled is False and status.listen_port is None
+    # The peers are findable by address through the data plane whether or not this instance carries the tunnel.
     peer = WireGuardPeer(project_id="p", name="tv", public_key="k", address="10.66.0.2")
     await runtime.add_peer(peer)
     assert runtime.peers.by_address("10.66.0.2") is peer
+    assert runtime.tunnel.peers.by_address("10.66.0.2") is peer
     assert await runtime.remove_peer(peer.id) is True
     await runtime.stop()
+    await runtime.tunnel.stop()
 
 
 @pytest.mark.asyncio
@@ -73,23 +85,26 @@ async def test_enabled_runtime_brings_everything_up_and_down(monkeypatch: pytest
     # The listeners bind the gateway address; point it at loopback for the test.
     monkeypatch.setattr(WireGuardServerSettings, "gateway", property(lambda self: "127.0.0.1"))
     runner = FakeRunner()
-    settings = _settings(wireguard_enabled=True, wireguard_transparent_port=0, wireguard_dns_port=0, wireguard_listen_port=51999)
-    runtime = WireGuardRuntime(settings, None, None, runner=runner)
+    settings = _settings(wireguard_enabled=True, tunnel_transparent_port=0, tunnel_dns_port=0, wireguard_listen_port=51999)
+    runtime = await _runtime(settings, runner)
     peer = WireGuardPeer(project_id="p", name="tv", public_key="k", address="10.66.0.2")
     runtime.peers.put(peer)
 
-    await runtime.start(MagicMock())
+    await runtime.start()
     try:
         assert runtime.state == "running", runtime.error
-        assert runtime.transparent_server is not None and runtime.transparent_server.is_listening
-        assert runtime.dns_server is not None and runtime.dns_server.is_listening
+        tunnel = runtime.tunnel
+        assert tunnel.interfaces == {"wg0": "127.0.0.1"}
+        assert tunnel.transparent_server is not None and tunnel.transparent_server.is_listening
+        assert tunnel.dns_server is not None and tunnel.dns_server.is_listening
         assert ("ip", "link", "add", "dev", "wg0", "type", "wireguard") in runner.calls
         assert "ListenPort = 51999" in runner.conf_files[0]
         assert "AllowedIPs = 10.66.0.2/32" in runner.conf_files[0]
         assert runner.calls[-1] == ("nft", "-f", "-")
         ruleset = runner.stdin[-1].decode()
-        assert f"redirect to :{runtime.transparent_server.port}" in ruleset
-        assert f"redirect to :{runtime.dns_server.port}" in ruleset
+        assert 'iifname { "wg0" }' in ruleset
+        assert f"redirect to :{tunnel.transparent_server.port}" in ruleset
+        assert f"redirect to :{tunnel.dns_server.port}" in ruleset
 
         status = await runtime.status()
         assert status.backend == "kernel" and status.listen_port == 51999 and status.peers_total == 1
@@ -102,20 +117,24 @@ async def test_enabled_runtime_brings_everything_up_and_down(monkeypatch: pytest
     finally:
         await runtime.stop()
     assert runtime.state == "stopped"
-    assert ("nft", "delete", "table", "inet", "octoprox_wg") in runner.calls
+    assert runtime.tunnel.interfaces == {}
+    assert ("nft", "delete", "table", "inet", "octoprox_tunnel") in runner.calls
     assert runner.calls[-1] == ("ip", "link", "del", "dev", "wg0")
+    await runtime.tunnel.stop()
 
 
 @pytest.mark.asyncio
 async def test_failure_to_bring_up_is_reported_not_fatal() -> None:
     runner = FakeRunner(failures={"ip link add": "RTNETLINK answers: Operation not permitted"})
-    runtime = WireGuardRuntime(_settings(wireguard_enabled=True), None, None, runner=runner)
-    await runtime.start(MagicMock())
+    runtime = await _runtime(_settings(wireguard_enabled=True), runner)
+    await runtime.start()
     assert runtime.state == "failed"
     assert runtime.error is not None and "CAP_NET_ADMIN" in runtime.error
+    assert runtime.tunnel.interfaces == {}
     status = await runtime.status()
     assert status.state == "failed"
     await runtime.stop()
+    await runtime.tunnel.stop()
 
 
 @pytest.mark.asyncio
@@ -136,7 +155,7 @@ async def test_peer_statuses_from_redis() -> None:
             "stale": json.dumps({"latest_handshake": now - 60, "rx_bytes": 3, "tx_bytes": 4, "endpoint": "5.6.7.8:9"}),
         },
     ])
-    runtime = WireGuardRuntime(_settings(), None, redis)
+    runtime = await _runtime(_settings(), redis=redis)
     statuses = await runtime.peer_statuses()
     assert statuses["online"].online is True and statuses["online"].rx_bytes == 5
     assert statuses["online"].connections_by_address == 3 and statuses["online"].encrypted_dns_blocked == 2

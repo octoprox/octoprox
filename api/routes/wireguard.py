@@ -33,9 +33,9 @@ from api.models.wireguard import (
     WireGuardServerSettingsResponse,
 )
 from api.routes.common import proxy_manager_of, wireguard_runtime_of
+from api.tunnel.peers import NoFreeAddressError
 from api.wireguard import keys
 from api.wireguard.config import client_conf_filename, render_client_conf
-from api.wireguard.peers import NoFreeAddressError
 
 if TYPE_CHECKING:
     from api.wireguard.runtime import WireGuardRuntime

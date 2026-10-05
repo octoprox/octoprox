@@ -6,10 +6,12 @@
 Two halves with different reach. The *management* half (settings row, peer
 directory, config rendering) runs on every instance, so any instance can
 serve the admin API and every instance can route a peer's traffic should it
-arrive there. The *data* half (interface, nftables, DNS, transparent
-listener) runs where ``wireguard.enabled`` is set: one instance, or every
-replica behind a UDP-capable balancer, since the key pair, peer list and
-fake-IP mapping are shared. A failure to bring the data half up is
+arrive there. The *data* half runs where ``wireguard.enabled`` is set: one
+instance, or every replica behind a UDP-capable balancer, since the key
+pair, peer list and fake-IP mapping are shared. It is the interface, which
+this module owns, attached to the tunnel data plane the process shares
+with every tunnel protocol (:mod:`api.tunnel.dataplane`): nftables, DNS and
+the transparent listener live there. A failure to bring the data half up is
 recorded and reported, never fatal to the process: the proxy ports keep
 working and the admin page says what went wrong.
 """
@@ -22,7 +24,7 @@ import json
 import time
 from collections.abc import Coroutine
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import structlog
 
@@ -41,17 +43,11 @@ from api.models.wireguard import (
     WireGuardState,
     WireGuardStatus,
 )
+from api.tunnel.dataplane import TunnelDataPlane
+from api.tunnel.system import CommandError, CommandRunner, explain
 from api.wireguard import keys
-from api.wireguard.config import render_nft_ruleset
-from api.wireguard.dns import DnsServer, FakeIpDirectory, FakeIpPool, FakeIpResolver
 from api.wireguard.peers import PeerDirectory
-from api.wireguard.system import CommandError, CommandRunner, Netfilter, WireGuardInterface, explain
-from api.wireguard.transparent import TransparentProxyServer
-
-if TYPE_CHECKING:
-    from api.core.mitm import MitmHandler
-    from api.core.proxy_manager import ProxyManager
-    from api.geo.verifier import ExitVerifier
+from api.wireguard.system import WireGuardInterface
 
 logger = structlog.get_logger()
 
@@ -119,6 +115,7 @@ class WireGuardRuntime:
         settings: Settings,
         session_factory: SessionFactory | None,
         redis_client: RedisClient | None,
+        tunnel: TunnelDataPlane,
         *,
         runner: CommandRunner | None = None,
     ) -> None:
@@ -127,13 +124,11 @@ class WireGuardRuntime:
         self._redis = redis_client
         self.settings_store = WireGuardSettingsStore(settings, session_factory)
         self.peers = PeerDirectory(session_factory)
-        self.pool = FakeIpPool(settings.wireguard_fake_ip_range)
-        # Shared through Redis so every instance carrying the tunnel agrees on the mapping.
-        self.fake_ips = FakeIpDirectory(self.pool, redis_client)
+        # The data plane routes a connection by the address it came from;
+        # our peers are found there whichever instance the connection lands on.
+        self.tunnel = tunnel
+        tunnel.peers.add(self.peers)
         self.interface = WireGuardInterface(settings.wireguard_interface, runner)
-        self.netfilter = Netfilter(runner=runner)
-        self.dns_server: DnsServer | None = None
-        self.transparent_server: TransparentProxyServer | None = None
         self.enabled = settings.wireguard_enabled
         self.state: WireGuardState = "disabled"
         self.error: str | None = None
@@ -142,14 +137,11 @@ class WireGuardRuntime:
 
     # --- lifecycle -----------------------------------------------------------------
 
-    async def start(
-        self,
-        proxy_manager: ProxyManager,
-        *,
-        mitm_handler: MitmHandler | None = None,
-        exit_verifier: ExitVerifier | None = None,
-    ) -> None:
-        """Load the row and the peers; bring the tunnel up when this instance is the endpoint."""
+    async def start(self) -> None:
+        """Load the row and the peers; bring the tunnel up when this instance is the endpoint.
+
+        The data plane must be started first: the interface is attached to it.
+        """
         await self.settings_store.load()
         await self.peers.load()
         # A deleted project takes its peers with it in Postgres (cascade). The
@@ -162,7 +154,7 @@ class WireGuardRuntime:
             return
         self.state = "starting"
         try:
-            await self._bring_up(proxy_manager, mitm_handler, exit_verifier)
+            await self._bring_up()
         except CommandError as exc:
             self.error = explain(exc)
         except Exception as exc:
@@ -174,12 +166,7 @@ class WireGuardRuntime:
         else:
             self.state = "running"
 
-    async def _bring_up(
-        self,
-        proxy_manager: ProxyManager,
-        mitm_handler: MitmHandler | None,
-        exit_verifier: ExitVerifier | None,
-    ) -> None:
+    async def _bring_up(self) -> None:
         server = self.settings_store.settings
         gateway = server.gateway
         await self.interface.up(
@@ -189,28 +176,7 @@ class WireGuardRuntime:
             mtu=self._config.wireguard_mtu,
             peers=self.peers.all(),
         )
-        self.dns_server = DnsServer(FakeIpResolver(self.fake_ips), gateway, self._config.wireguard_dns_port)
-        await self.dns_server.start()
-        self.transparent_server = TransparentProxyServer(
-            proxy_manager,
-            self.peers,
-            self.fake_ips,
-            host=gateway,
-            port=self._config.wireguard_transparent_port,
-            mitm_handler=mitm_handler,
-            exit_verifier=exit_verifier,
-            sniff_timeout=self._config.wireguard_sniff_timeout_seconds,
-            block_encrypted_dns=self._config.wireguard_block_encrypted_dns,
-        )
-        await self.transparent_server.start()
-        await self.netfilter.apply(
-            render_nft_ruleset(
-                self.netfilter.table,
-                self.interface.name,
-                self.transparent_server.port,
-                self.dns_server.port,
-            )
-        )
+        await self.tunnel.attach(self.interface.name, gateway)
         self._spawn(WorkerName.WIREGUARD_STATUS_PUBLISHER, self._status_publisher_loop())
         logger.info(
             "WireGuard endpoint running",
@@ -258,15 +224,7 @@ class WireGuardRuntime:
                 await task
         self._tasks.clear()
         with contextlib.suppress(Exception):
-            await self.netfilter.remove()
-        if self.transparent_server is not None:
-            with contextlib.suppress(Exception):
-                await self.transparent_server.stop()
-            self.transparent_server = None
-        if self.dns_server is not None:
-            with contextlib.suppress(Exception):
-                await self.dns_server.stop()
-            self.dns_server = None
+            await self.tunnel.detach(self.interface.name)
         with contextlib.suppress(Exception):
             await self.interface.down()
 
@@ -381,7 +339,7 @@ class WireGuardRuntime:
         if self._redis is None:
             return False
         peer_ids = {p.public_key: p.id for p in self.peers.all()}
-        server = self.transparent_server
+        server = self.tunnel.transparent_server
         statuses = {}
         for dump in await self.interface.dump():
             peer_id = peer_ids.get(dump.public_key, "")
@@ -441,6 +399,9 @@ class WireGuardRuntime:
 
     async def status(self) -> WireGuardStatus:
         statuses = await self.peer_statuses()
+        # The data plane's counters span every tunnel this instance serves;
+        # with WireGuard the only protocol they are its own.
+        server = self.tunnel.transparent_server
         return WireGuardStatus(
             enabled=self.enabled,
             state=self.state,
@@ -449,14 +410,14 @@ class WireGuardRuntime:
             interface=self.interface.name,
             backend=self.interface.backend,
             listen_port=(self.listen_port or self.settings_store.settings.endpoint_port) if self.enabled else None,
-            transparent_port=self._config.wireguard_transparent_port,
-            dns_port=self._config.wireguard_dns_port,
-            fake_ip_range=str(self.pool.network),
-            active_connections=self.transparent_server.active_connections if self.transparent_server else 0,
+            transparent_port=self._config.tunnel_transparent_port,
+            dns_port=self._config.tunnel_dns_port,
+            fake_ip_range=str(self.tunnel.pool.network),
+            active_connections=server.active_connections if server else 0,
             peers_total=len(self.peers),
             peers_enabled=self.peers.enabled_count,
             peers_online=sum(1 for s in statuses.values() if s.online),
-            connections_by_address=sum(self.transparent_server.by_address.values()) if self.transparent_server else 0,
-            encrypted_dns_blocked=sum(self.transparent_server.encrypted_dns_blocked.values()) if self.transparent_server else 0,
-            block_encrypted_dns=self._config.wireguard_block_encrypted_dns,
+            connections_by_address=sum(server.by_address.values()) if server else 0,
+            encrypted_dns_blocked=sum(server.encrypted_dns_blocked.values()) if server else 0,
+            block_encrypted_dns=self._config.tunnel_block_encrypted_dns,
         )

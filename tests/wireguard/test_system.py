@@ -1,21 +1,15 @@
 # Copyright 2026 Octoprox Authors
 # SPDX-License-Identifier: Apache-2.0
 
-"""The interface and nftables drivers, against a recorded command runner."""
+"""The interface driver, against a recorded command runner."""
 
 from pathlib import Path
 
 import pytest
 
 from api.models.wireguard import WireGuardPeer
-from api.wireguard.system import (
-    CommandError,
-    CommandRunner,
-    Netfilter,
-    WireGuardInterface,
-    explain,
-    privileged_argv,
-)
+from api.tunnel.system import CommandError, CommandRunner, explain
+from api.wireguard.system import WireGuardInterface
 
 PEER = WireGuardPeer(project_id="p", name="tv", public_key="pub", preshared_key="psk", address="10.66.0.2")
 
@@ -93,7 +87,7 @@ async def test_other_failures_propagate_with_a_hint() -> None:
     with pytest.raises(CommandError) as info:
         await iface.up(private_key="sk", listen_port=1, address="10.66.0.1/16", mtu=1420, peers=[])
     assert "CAP_NET_ADMIN" in explain(info.value)
-    assert "install wireguard-tools" in explain(CommandError(("wg",), 127, "wg is not installed"))
+    assert "install wireguard-tools in the image" in explain(CommandError(("wg",), 127, "wg is not installed"))
 
 
 @pytest.mark.asyncio
@@ -103,23 +97,3 @@ async def test_stale_interface_is_removed_first_and_existing_address_tolerated()
     await iface.up(private_key="sk", listen_port=1, address="10.66.0.1/16", mtu=1420, peers=[])
     assert runner.calls[1] == ("ip", "link", "del", "dev", "wg0")
     assert iface.backend == "kernel"
-
-
-@pytest.mark.asyncio
-async def test_netfilter_feeds_ruleset_on_stdin_and_removes_table() -> None:
-    runner = FakeRunner()
-    nft = Netfilter("octoprox_wg", runner)
-    await nft.apply("table inet octoprox_wg {}\n")
-    assert runner.calls[-1] == ("nft", "-f", "-")
-    assert runner.stdin == [b"table inet octoprox_wg {}\n"]
-    await nft.remove()
-    assert runner.calls[-1] == ("nft", "delete", "table", "inet", "octoprox_wg")
-
-
-def test_privileged_argv_uses_setpriv_only_for_non_root() -> None:
-    argv = ("ip", "link", "add", "dev", "wg0", "type", "wireguard")
-    assert privileged_argv(argv, euid=0, setpriv="/usr/bin/setpriv") == list(argv)
-    assert privileged_argv(argv, euid=1000, setpriv=None) == list(argv)
-    launched = privileged_argv(argv, euid=1000, setpriv="/usr/bin/setpriv")
-    assert launched[:1] == ["/usr/bin/setpriv"] and launched[-7:] == list(argv)
-    assert "--ambient-caps" in launched and "--inh-caps" in launched

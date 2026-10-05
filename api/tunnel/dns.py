@@ -235,7 +235,7 @@ class FakeIpDirectory:
         """Keep the shared mapping of a locally served name alive; the offset to answer with.
 
         A local hit never touches Redis, so without this the shared keys
-        would expire after WIREGUARD_FAKEIP_TTL_SECONDS of steady use and
+        would expire after TUNNEL_FAKEIP_TTL_SECONDS of steady use and
         another carrier could hand the offset to a different name. A round
         trip on every query is too much for the DNS path, so each name is
         refreshed at most once per LEASE_REFRESH_SECONDS. A lease that has
@@ -481,43 +481,58 @@ class _UdpProtocol(asyncio.DatagramProtocol):
 
 
 class DnsServer:
-    """The fake-IP resolver on one UDP and one TCP port."""
+    """The fake-IP resolver on one UDP and one TCP port, bound on every tunnel gateway it is told to serve."""
 
-    def __init__(self, resolver: FakeIpResolver, host: str, port: int) -> None:
+    def __init__(self, resolver: FakeIpResolver, port: int) -> None:
         self.resolver = resolver
-        self._host = host
         self._port = port
-        self._udp: asyncio.DatagramTransport | None = None
-        self._tcp: asyncio.Server | None = None
+        self._listeners: dict[str, tuple[asyncio.Server, asyncio.DatagramTransport]] = {}
 
     @property
     def is_listening(self) -> bool:
-        return self._udp is not None and not self._udp.is_closing() and self._tcp is not None
+        return any(not udp.is_closing() for _tcp, udp in self._listeners.values())
+
+    @property
+    def hosts(self) -> list[str]:
+        return list(self._listeners)
 
     @property
     def port(self) -> int:
-        if self._tcp is not None and self._tcp.sockets:
-            bound: int = self._tcp.sockets[0].getsockname()[1]
-            return bound
+        for tcp, _udp in self._listeners.values():
+            if tcp.sockets:
+                bound: int = tcp.sockets[0].getsockname()[1]
+                return bound
         return self._port
 
-    async def start(self) -> None:
+    async def listen(self, host: str) -> None:
+        """Serve on ``host``. The first bind decides the port when the configured one is 0 (tests)."""
+        if host in self._listeners:
+            return
         loop = asyncio.get_running_loop()
-        self._tcp = await asyncio.start_server(self._serve_tcp, self._host, self._port)
-        # Bind UDP to the port TCP got, so a configured port of 0 (tests) lands both on one number.
-        self._udp, _ = await loop.create_datagram_endpoint(
-            lambda: _UdpProtocol(self.resolver), local_addr=(self._host, self.port)
-        )
-        logger.info("Tunnel DNS started", host=self._host, port=self.port, fake_range=str(self.resolver.directory.network))
+        tcp = await asyncio.start_server(self._serve_tcp, host, self.port)
+        port: int = tcp.sockets[0].getsockname()[1]
+        try:
+            udp, _ = await loop.create_datagram_endpoint(
+                lambda: _UdpProtocol(self.resolver), local_addr=(host, port)
+            )
+        except Exception:
+            tcp.close()
+            raise
+        self._listeners[host] = (tcp, udp)
+        logger.info("Tunnel DNS listening", host=host, port=port, fake_range=str(self.resolver.directory.network))
+
+    async def unlisten(self, host: str) -> None:
+        listener = self._listeners.pop(host, None)
+        if listener is None:
+            return
+        tcp, udp = listener
+        udp.close()
+        tcp.close()
+        await tcp.wait_closed()
 
     async def stop(self) -> None:
-        if self._udp is not None:
-            self._udp.close()
-            self._udp = None
-        if self._tcp is not None:
-            self._tcp.close()
-            await self._tcp.wait_closed()
-            self._tcp = None
+        for host in list(self._listeners):
+            await self.unlisten(host)
 
     async def _serve_tcp(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         try:

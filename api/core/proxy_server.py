@@ -130,25 +130,24 @@ class ProxyServer:
         if self._server:
             # Stop accepting new connections
             self._server.close()
-
-            # Cancel all active client tasks. This happens before wait_closed,
-            # which since Python 3.12.1 waits for every accepted connection to
-            # finish: an open tunnel would otherwise hold shutdown until the
-            # client went away on its own.
-            if self._client_tasks:
-                logger.info(
-                    "Cancelling active client connections",
-                    count=len(self._client_tasks),
-                )
-                for task in self._client_tasks:
-                    task.cancel()
-
-                # Wait for all tasks to complete with a timeout
-                await asyncio.gather(*self._client_tasks, return_exceptions=True)
-                self._client_tasks.clear()
-
+            await self._cancel_client_tasks()
             await self._server.wait_closed()
             logger.info("Proxy server stopped")
+
+    async def _cancel_client_tasks(self) -> None:
+        """Cancel every connection in flight and wait for the handlers to finish.
+
+        Done before ``wait_closed``, which since Python 3.12.1 waits for every
+        accepted connection to finish: an open tunnel would otherwise hold
+        shutdown until the client went away on its own.
+        """
+        if not self._client_tasks:
+            return
+        logger.info("Cancelling active client connections", count=len(self._client_tasks))
+        for task in self._client_tasks:
+            task.cancel()
+        await asyncio.gather(*self._client_tasks, return_exceptions=True)
+        self._client_tasks.clear()
 
     async def _handle_client_wrapper(
         self,

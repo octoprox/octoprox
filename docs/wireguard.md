@@ -101,20 +101,25 @@ Then, as an admin, open **Settings → WireGuard** and set the **public endpoint
 
 ### Process settings
 
-In `config/*.yaml` under `wireguard:` or as `OCTOPROX_WIREGUARD_*` environment variables:
+The WireGuard side, in `config/*.yaml` under `wireguard:` or as `OCTOPROX_WIREGUARD_*` environment variables:
 
 | Setting | Default | Meaning |
 |---------|---------|---------|
 | `enabled` | `false` | Terminate the tunnel on this instance. |
 | `interface` | `wg0` | Name of the interface this instance creates. |
 | `listen_port` | endpoint port | Override the UDP port this instance binds when a port-mapping NAT sits in front of it. |
-| `transparent_port` | `8081` | Local TCP port tunnel connections are redirected to. Bound on the tunnel address only. |
-| `dns_port` | `5353` | Local port of the fake-IP resolver. Port 53 inside the tunnel is redirected to it. |
 | `mtu` | `1420` | MTU of the interface. |
+| `defaults` | | Seed for the install-wide row on a fresh install: `endpoint_host`, `endpoint_port`, `subnet`, `persistent_keepalive`, `client_mtu`. |
+
+What happens to traffic once it is inside a tunnel does not depend on the tunnel protocol, and its settings sit under `tunnel:` (or `OCTOPROX_TUNNEL_*`):
+
+| Setting | Default | Meaning |
+|---------|---------|---------|
+| `transparent_port` | `8081` | Local TCP port tunnel connections are redirected to. Bound on the tunnel gateway addresses only. |
+| `dns_port` | `5353` | Local port of the fake-IP resolver. Port 53 inside a tunnel is redirected to it. |
 | `fake_ip_range` | `198.18.0.0/15` | Range the resolver answers from. |
 | `sniff_timeout_seconds` | `2` | How long a connection's first bytes are awaited before it is routed by address alone (server-speaks-first protocols pay this once). |
 | `block_encrypted_dns` | `true` | Close connections to DNS over TLS (port 853) and known DNS-over-HTTPS resolvers so devices keep the tunnel resolver (see Encrypted DNS on devices). |
-| `defaults` | | Seed for the install-wide row on a fresh install: `endpoint_host`, `endpoint_port`, `subnet`, `persistent_keepalive`, `client_mtu`. |
 
 ### Install-wide settings
 
@@ -159,7 +164,7 @@ Changes reach every terminating instance through the same cross-instance change 
 The scheme above depends on the device asking the tunnel resolver. A device that resolves names elsewhere, over DNS over HTTPS or DNS over TLS, still cannot leave the tunnel (every TCP connection is redirected and UDP other than port 53 is rejected), but its connections then carry real addresses, and the name is recovered only when the stream repeats it: the TLS SNI or an HTTP `Host` header, which covers browsers and almost every app. A protocol that carries no name is relayed by address, so domain filters see an address and the exit may differ from the one that resolved it. Nothing errors, so Octoprox does three things about it:
 
 - **Firefox's canary.** Firefox asks the network resolver for `use-application-dns.net` before enabling DoH and keeps plain DNS when the answer is NXDOMAIN. The tunnel resolver answers it that way.
-- **Encrypted resolvers are closed** (`wireguard.block_encrypted_dns`, on by default): connections to port 853 and to the well-known public DoH resolvers (Google, Cloudflare, Quad9, NextDNS, AdGuard, OpenDNS and others) are closed instead of relayed, so a client in automatic mode falls back to the tunnel resolver. Chrome only upgrades to DoH when the system resolver is a known public one, which the tunnel gateway is not. Android's automatic Private DNS probes the gateway for DoT, finds none and uses plain DNS. A device with an **explicit** Private DNS hostname is the case this cannot fix: with port 853 closed it has no DNS at all. Set Private DNS to automatic or off on tunnel devices, or turn the block off.
+- **Encrypted resolvers are closed** (`tunnel.block_encrypted_dns`, on by default): connections to port 853 and to the well-known public DoH resolvers (Google, Cloudflare, Quad9, NextDNS, AdGuard, OpenDNS and others) are closed instead of relayed, so a client in automatic mode falls back to the tunnel resolver. Chrome only upgrades to DoH when the system resolver is a known public one, which the tunnel gateway is not. Android's automatic Private DNS probes the gateway for DoT, finds none and uses plain DNS. A device with an **explicit** Private DNS hostname is the case this cannot fix: with port 853 closed it has no DNS at all. Set Private DNS to automatic or off on tunnel devices, or turn the block off.
 - **The degradation is counted.** Each device shows how many of its connections were routed by address and how many encrypted-DNS connections were closed, and the WireGuard settings page shows the totals for the answering instance. Both count since the carrying instance started. A device with a growing "routed by address" number is resolving somewhere else, or speaking a protocol without a name.
 
 ## In a cluster
