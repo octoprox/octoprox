@@ -83,12 +83,13 @@ AUTOSCALER_LAST_ACTION_KEY = "autoscaler:last_action"
 # IP attribution: observations queued for the leader's flusher, and per-session
 # preflight verdicts.
 GEO_OBSERVATIONS_KEY = "geo:observations"
-# One hash per instance carrying the WireGuard tunnel (peer public key -> JSON
-# status), rewritten every WIREGUARD_STATUS_INTERVAL seconds and expiring soon
-# after the carrier stops, so a dead carrier's peers read as offline. Several
-# carriers behind a UDP load balancer each publish their own; readers merge.
-WIREGUARD_PEER_STATUS_KEY = "wireguard:peer_status:{instance_id}"
-WIREGUARD_PEER_STATUS_SCAN = "wireguard:peer_status:*"
+# One hash per instance carrying a tunnel protocol (peer key -> JSON status),
+# rewritten every TUNNEL_STATUS_INTERVAL seconds and expiring soon after the
+# carrier stops, so a dead carrier's peers read as offline. Several carriers
+# behind a load balancer each publish their own; readers merge. The protocol
+# is the key prefix: ``wireguard:peer_status:...``, ``openvpn:peer_status:...``.
+TUNNEL_PEER_STATUS_KEY = "{protocol}:peer_status:{instance_id}"
+TUNNEL_PEER_STATUS_SCAN = "{protocol}:peer_status:*"
 # The fake-IP mapping the tunnel DNS hands out, shared so a connection that
 # lands on a different instance from the one that answered the query still
 # knows the name, whichever tunnel protocol carried either. Two keys per
@@ -98,8 +99,8 @@ TUNNEL_FAKEIP_NAME_KEY = "tunnel:fakeip:name:{name}"
 TUNNEL_FAKEIP_ADDR_KEY = "tunnel:fakeip:addr:{offset}"
 TUNNEL_FAKEIP_COUNTER_KEY = "tunnel:fakeip:next"
 TUNNEL_FAKEIP_TTL_SECONDS = 7 * 86400
-WIREGUARD_STATUS_INTERVAL = 10
-WIREGUARD_STATUS_TTL_SECONDS = 30
+TUNNEL_STATUS_INTERVAL = 10
+TUNNEL_STATUS_TTL_SECONDS = 30
 GEO_PREFLIGHT_KEY = "geo:preflight:{project_id}:{proxy_id}"  # one verdict per proxy, shared by its sessions
 
 # Logical grouping of the keyspace, used by the admin system view to report
@@ -123,6 +124,7 @@ REDIS_KEY_GROUPS: tuple[tuple[str, str], ...] = (
     ("autoscaler:", "Auto-scaler state"),
     ("geo:", "IP attribution"),
     ("wireguard:", "WireGuard"),
+    ("openvpn:", "OpenVPN"),
     ("tunnel:", "Tunnel devices"),
 )
 
@@ -597,16 +599,16 @@ class RedisClient:
         key = MITM_REQUESTS_KEY.format(project_id=project_id)
         await self.client.delete(key)
 
-    # WireGuard peer status
+    # Tunnel peer status, per protocol
 
-    async def set_wireguard_peer_status(self, instance_id: str, statuses: dict[str, str]) -> None:
-        """Replace this instance's published peer statuses (public key -> JSON) with a fresh expiry."""
-        key = WIREGUARD_PEER_STATUS_KEY.format(instance_id=instance_id)
+    async def set_tunnel_peer_status(self, protocol: str, instance_id: str, statuses: dict[str, str]) -> None:
+        """Replace this instance's published peer statuses for a protocol (peer key -> JSON) with a fresh expiry."""
+        key = TUNNEL_PEER_STATUS_KEY.format(protocol=protocol, instance_id=instance_id)
         pipe = self.client.pipeline()
         pipe.delete(key)
         if statuses:
             pipe.hset(key, mapping=statuses)
-        pipe.expire(key, WIREGUARD_STATUS_TTL_SECONDS)
+        pipe.expire(key, TUNNEL_STATUS_TTL_SECONDS)
         await pipe.execute()
 
     async def fakeip_offset_for(self, name: str) -> int | None:
@@ -654,11 +656,11 @@ class RedisClient:
                 return offset
         raise RuntimeError(f"no free fake IP after {attempts} attempts; the range is exhausted")
 
-    async def get_wireguard_peer_status(self) -> list[dict[str, str]]:
-        """What every carrying instance last published, one hash per carrier; [] when none is carrying."""
+    async def get_tunnel_peer_status(self, protocol: str) -> list[dict[str, str]]:
+        """What every instance carrying a protocol last published, one hash per carrier; [] when none is."""
         keys = [
             k if isinstance(k, str) else k.decode()
-            async for k in self.client.scan_iter(match=WIREGUARD_PEER_STATUS_SCAN)
+            async for k in self.client.scan_iter(match=TUNNEL_PEER_STATUS_SCAN.format(protocol=protocol))
         ]
         if not keys:
             return []

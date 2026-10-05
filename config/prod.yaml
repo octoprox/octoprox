@@ -91,3 +91,18 @@ wireguard:
   #   endpoint_host: vpn.example.com
   #   endpoint_port: 51820
   #   subnet: 10.66.0.0/16
+
+# The OpenVPN tunnel (see docs/openvpn.md). The CA, server certificate,
+# public endpoint, transport and subnet are install-wide and edited under
+# Settings -> OpenVPN; this block describes this process.
+openvpn:
+  enabled: false           # needs CAP_NET_ADMIN, /dev/net/tun, openvpn, nftables
+  interface: ovpn0
+  # listen_port: 1194      # only when it differs from the endpoint port (port-mapping NAT)
+  mtu: 1500                # tun-mtu of the daemon's interface
+  # Seed for the install-wide settings row on a fresh install:
+  # defaults:
+  #   endpoint_host: vpn.example.com
+  #   endpoint_port: 1194
+  #   protocol: udp        # or tcp
+  #   subnet: 10.67.0.0/16

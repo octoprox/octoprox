@@ -64,6 +64,7 @@ Once started, the cluster exposes the same endpoints as the standalone setup, pl
 - **Web UI / API**: [http://localhost:8000](http://localhost:8000)
 - **Proxy Server**: [http://localhost:8080](http://localhost:8080)
 - **WireGuard**: `localhost:51820/udp` (see [WireGuard Devices]({{ site.baseurl }}/wireguard))
+- **OpenVPN**: `localhost:1194` over UDP or TCP (see [OpenVPN Devices]({{ site.baseurl }}/openvpn))
 
 > **Important**: the compose file mounts `./nginx/nginx.conf`. If that file is missing when you run `up`, Docker silently creates an empty directory in its place and nginx fails to start - so make sure the config is downloaded first. Apply the same production hardening as the standalone setup: set a strong `OCTOPROX_AUTH_PASSWORD`, a secure random `OCTOPROX_JWT_SECRET`, and change `OCTOPROX_DB_PASSWORD` to match `POSTGRES_PASSWORD`.
 
@@ -186,7 +187,7 @@ docker compose -f docker-compose.cluster.ghcr.yml down
 
 The cluster exposes the same `:8000` (API/UI) and `:8080` (proxy
 traffic) ports as the single-instance setup, plus `:51820/udp` for
-WireGuard. See [Deployment & Scaling]({{ site.baseurl }}/deployment) for
+WireGuard and `:1194` for OpenVPN. See [Deployment & Scaling]({{ site.baseurl }}/deployment) for
 how the multi-instance machinery works - what's shared, what's elected,
 how failover happens.
 

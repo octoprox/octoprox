@@ -41,6 +41,8 @@ class WorkerName(StrEnum):
     GEO_OBSERVATION_FLUSHER = "geo_observation_flusher"
     GEO_DATABASE_UPDATER = "geo_database_updater"
     WIREGUARD_STATUS_PUBLISHER = "wireguard_status_publisher"
+    OPENVPN_STATUS_PUBLISHER = "openvpn_status_publisher"
+    OPENVPN_SUPERVISOR = "openvpn_supervisor"
 
 
 class LeaseName(StrEnum):
@@ -164,6 +166,15 @@ WORKERS: dict[WorkerName, WorkerInfo] = {
         "Publishes each WireGuard peer's handshake and transfer counters from the "
         "tunnel interface this instance carries, so every instance can show them, "
         "and records new handshakes on the peer rows so last sightings survive restarts",
+    ),
+    WorkerName.OPENVPN_STATUS_PUBLISHER: WorkerInfo(
+        "Publishes the sessions the OpenVPN daemon on this instance carries (per device: "
+        "since when, from where, bytes), so every instance can show them, and records "
+        "new sessions on the peer rows so last sightings survive restarts",
+    ),
+    WorkerName.OPENVPN_SUPERVISOR: WorkerInfo(
+        "Watches the OpenVPN daemon this instance runs and starts it again, with "
+        "backoff, when it exits on its own",
     ),
 }
 

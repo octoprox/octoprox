@@ -11,11 +11,49 @@ tunnel protocol reports the same.
 
 from __future__ import annotations
 
+import ipaddress
 from datetime import datetime
 
 from pydantic import BaseModel
 
 from api.core.stats import TunnelPeerMetricDelta
+
+
+def clean_optional(value: str | None) -> str | None:
+    """A stripped string, or None for None and for whitespace."""
+    if value is None:
+        return None
+    value = value.strip()
+    return value or None
+
+
+def validate_endpoint_host(value: str) -> str:
+    """A bare hostname or IP literal (v4 or v6), never a URL or host:port pair."""
+    value = value.strip().strip("[]")
+    if not value:
+        return ""
+    try:
+        ipaddress.ip_address(value)
+    except ValueError:
+        pass
+    else:
+        return value
+    if any(ch in value for ch in " /:\\@"):
+        raise ValueError("endpoint_host is a hostname or IP address without a port or scheme")
+    return value
+
+
+def validate_tunnel_subnet(value: str, example: str) -> str:
+    """An IPv4 network with room for the gateway and at least one device, in canonical form."""
+    try:
+        network = ipaddress.IPv4Network(value.strip(), strict=True)
+    except ValueError as exc:
+        raise ValueError(f"subnet must be an IPv4 network such as {example}: {exc}") from None
+    if network.prefixlen > 30:
+        raise ValueError("subnet must leave room for the gateway and at least one device (/30 or larger)")
+    if network.is_loopback or network.is_multicast:
+        raise ValueError("subnet must be a unicast network")
+    return str(network)
 
 
 class TunnelPeerMetrics(BaseModel):

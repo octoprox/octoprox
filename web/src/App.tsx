@@ -14,7 +14,7 @@ import ConnectorsPage from './pages/ConnectorsPage'
 import CredentialsPage from './pages/CredentialsPage'
 import InspectorPage from './pages/InspectorPage'
 import LocationsPage from './pages/LocationsPage'
-import WireGuardPage from './pages/WireGuardPage'
+import DevicesPage from './pages/DevicesPage'
 import AccountSection from './pages/settings/AccountSection'
 import AppearanceSection from './pages/settings/AppearanceSection'
 import UsersSection from './pages/settings/UsersSection'
@@ -23,6 +23,7 @@ import ProvidersSection from './pages/settings/ProvidersSection'
 import SystemSection from './pages/settings/SystemSection'
 import GeoSection from './pages/settings/GeoSection'
 import WireGuardSection from './pages/settings/WireGuardSection'
+import OpenVpnSection from './pages/settings/OpenVpnSection'
 import { ProjectProvider } from './contexts/ProjectContext'
 import { AuthProvider, AuthContextValue } from './contexts/AuthContext'
 import { ToastProvider } from './contexts/ToastContext'
@@ -130,6 +131,7 @@ function AuthenticatedApp() {
       <Route path="providers" element={<RequireAdmin><ProvidersSection /></RequireAdmin>} />
       <Route path="geo" element={<RequireAdmin><GeoSection /></RequireAdmin>} />
       <Route path="wireguard" element={<RequireAdmin><WireGuardSection /></RequireAdmin>} />
+      <Route path="openvpn" element={<RequireAdmin><OpenVpnSection /></RequireAdmin>} />
       <Route path="system" element={<RequireAdmin><SystemSection /></RequireAdmin>} />
     </>
   )
@@ -160,7 +162,7 @@ function AuthenticatedApp() {
               <Route path="credentials" element={<CredentialsPage />} />
               <Route path="mitm-inspector" element={<InspectorPage />} />
               <Route path="locations" element={<LocationsPage />} />
-              <Route path="wireguard" element={<WireGuardPage />} />
+              <Route path="devices" element={<DevicesPage />} />
               <Route path="settings">{settingsRoutes}</Route>
               <Route path="*" element={<Navigate to="overview" replace />} />
             </Route>

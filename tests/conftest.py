@@ -145,6 +145,8 @@ async def db_session(
         await conn.execute(text("TRUNCATE TABLE tunnel_peer_metrics CASCADE"))
         await conn.execute(text("TRUNCATE TABLE wireguard_peers CASCADE"))
         await conn.execute(text("TRUNCATE TABLE wireguard_settings CASCADE"))
+        await conn.execute(text("TRUNCATE TABLE openvpn_peers CASCADE"))
+        await conn.execute(text("TRUNCATE TABLE openvpn_settings CASCADE"))
         await conn.commit()
 
 

@@ -28,7 +28,7 @@ export default function WireGuardSection() {
     mutationFn: rotateWireGuardServerKey,
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['wireguard-settings'] })
-      queryClient.invalidateQueries({ queryKey: ['wireguard-peer-config'] })
+      queryClient.invalidateQueries({ queryKey: ['tunnel-device-config', 'wireguard'] })
       setConfirmRotate(false)
       toast.show('Server key rotated; every device needs its config again')
     },
@@ -90,15 +90,17 @@ function EndpointForm({ settings }: { settings: WireGuardServerSettings }) {
     persistent_keepalive: s.persistent_keepalive, client_mtu: s.client_mtu,
   })
   const [doc, setDoc] = useState<WireGuardServerSettingsDoc>(toDoc(settings))
-  useEffect(() => setDoc(toDoc(settings)), [settings])
-  const dirty = JSON.stringify(doc) !== JSON.stringify(toDoc(settings))
+  // The page polls the status; only a change to the saved values resets the form, not every tick.
+  const saved = JSON.stringify(toDoc(settings))
+  useEffect(() => setDoc(JSON.parse(saved) as WireGuardServerSettingsDoc), [saved])
+  const dirty = JSON.stringify(doc) !== saved
 
   const save = useMutation({
     mutationFn: () => updateWireGuardSettings(doc),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['wireguard-settings'] })
-      queryClient.invalidateQueries({ queryKey: ['wireguard-peer-config'] })
-      queryClient.invalidateQueries({ queryKey: ['wireguard-peers'] })
+      queryClient.invalidateQueries({ queryKey: ['tunnel-device-config', 'wireguard'] })
+      queryClient.invalidateQueries({ queryKey: ['tunnel-devices', 'wireguard'] })
       toast.show('WireGuard settings saved')
     },
     onError: (e: Error) => toast.show(e.message || 'Failed to save settings', 'error'),
@@ -120,7 +122,7 @@ function EndpointForm({ settings }: { settings: WireGuardServerSettings }) {
           <Input id="wg-port" type="number" min={1} max={65535} value={doc.endpoint_port} onChange={(e) => setDoc({ ...doc, endpoint_port: Number(e.target.value) })} />
         </div>
         <div>
-          <Label htmlFor="wg-subnet" className="inline-flex items-center gap-1">Tunnel subnet <InfoTip>Devices get addresses from this network; its first host is the gateway devices use as DNS. Changing it needs every device removed first, and a restart of the instances terminating the tunnel.</InfoTip></Label>
+          <Label htmlFor="wg-subnet" className="inline-flex items-center gap-1">Tunnel subnet <InfoTip>Devices get addresses from this network; its first host is the gateway devices use as DNS. It must not overlap the OpenVPN subnet. Changing it needs every device removed first, and a restart of the instances terminating the tunnel.</InfoTip></Label>
           <Input id="wg-subnet" value={doc.subnet} onChange={(e) => setDoc({ ...doc, subnet: e.target.value })} placeholder="10.66.0.0/16" className="font-mono text-xs" />
         </div>
         <div>
@@ -167,7 +169,7 @@ function StatusCard({ status }: { status: WireGuardStatus }) {
       </dl>
       <div className="mt-4 flex items-start gap-2 text-xs text-fg-muted">
         <Router className="w-4 h-4 flex-none mt-0.5" />
-        <span>Devices are added per project under WireGuard devices. Each gets a config and a QR code.</span>
+        <span>Devices are added per project under Devices, picking WireGuard as the tunnel. Each gets a config and a QR code.</span>
       </div>
     </Card>
   )

@@ -14,6 +14,7 @@ if TYPE_CHECKING:
     from api.core.proxy_manager import ProxyManager
     from api.db.redis import RedisClient
     from api.geo.runtime import GeoRuntime
+    from api.openvpn.runtime import OpenVpnRuntime
     from api.wireguard.runtime import WireGuardRuntime
 
 
@@ -32,6 +33,10 @@ def redis_client_of(request: Request) -> RedisClient:
 
 def wireguard_runtime_of(request: Request) -> WireGuardRuntime:
     return cast("WireGuardRuntime", request.app.state.wireguard_runtime)
+
+
+def openvpn_runtime_of(request: Request) -> OpenVpnRuntime:
+    return cast("OpenVpnRuntime", request.app.state.openvpn_runtime)
 
 
 def unique_name_violation(exc: IntegrityError, kind: str, name: str) -> HTTPException:

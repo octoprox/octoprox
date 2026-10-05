@@ -1975,3 +1975,135 @@ export const fetchWireGuardPeerConfig = async (projectId: string, peerId: string
 /** The device's own metrics history: same ranges and tiers as project and connector history. */
 export const fetchWireGuardPeerMetricsHistory = async (projectId: string, peerId: string, range: string): Promise<TunnelPeerMetricsHistoryResponse> =>
   (await api.get(`/projects/${projectId}/wireguard/peers/${peerId}/metrics/history`, { params: { range } })).data
+
+// OpenVPN: the install's CA and endpoint, and the devices allowed in (see docs/openvpn.md)
+export type OpenVpnState = 'disabled' | 'starting' | 'running' | 'failed' | 'stopped'
+export type OpenVpnProtocol = 'udp' | 'tcp'
+
+export interface OpenVpnStatus {
+  /** Whether the instance that answered runs the daemon. */
+  enabled: boolean
+  state: OpenVpnState
+  error: string | null
+  instance_id: string
+  interface: string
+  protocol: OpenVpnProtocol
+  listen_port: number | null
+  daemon_version: string | null
+  /** Times the daemon exited on its own and was started again since this process started. */
+  restarts: number
+  /** Connections refused at the management interface (unknown, disabled or rotated device) since start. */
+  denied: number
+  transparent_port: number
+  dns_port: number
+  fake_ip_range: string
+  active_connections: number
+  peers_total: number
+  peers_enabled: number
+  peers_online: number
+  connections_by_address: number
+  encrypted_dns_blocked: number
+  block_encrypted_dns: boolean
+}
+
+export interface OpenVpnServerSettings {
+  ca_fingerprint: string
+  ca_expires_at: string
+  endpoint_host: string
+  endpoint_port: number
+  protocol: OpenVpnProtocol
+  subnet: string
+  gateway: string
+  keepalive_interval: number
+  keepalive_timeout: number
+  client_mtu: number | null
+  configured: boolean
+  updated_at: string
+  status: OpenVpnStatus
+}
+
+export interface OpenVpnServerSettingsDoc {
+  endpoint_host: string
+  endpoint_port: number
+  protocol: OpenVpnProtocol
+  subnet: string
+  keepalive_interval: number
+  keepalive_timeout: number
+  client_mtu: number | null
+}
+
+export interface OpenVpnPeerStatus {
+  online: boolean
+  /** When the current session started, while a carrying instance reports one. */
+  connected_since: string | null
+  /** The current session's start, or the persisted last connection. */
+  last_seen_at: string | null
+  endpoint: string | null
+  live: boolean
+  rx_bytes: number
+  tx_bytes: number
+}
+
+export interface OpenVpnPeer {
+  id: string
+  project_id: string
+  name: string
+  serial: string
+  certificate_expires_at: string
+  address: string
+  enabled: boolean
+  session_id: string | null
+  country: string | null
+  state: string | null
+  city: string | null
+  created_at: string
+  updated_at: string
+  status: OpenVpnPeerStatus
+  metrics: TunnelPeerMetrics
+}
+
+export interface OpenVpnPeerListResponse {
+  total: number
+  peers: OpenVpnPeer[]
+  server_configured: boolean
+  ca_fingerprint: string
+}
+
+export interface OpenVpnPeerCreate {
+  name: string
+  enabled?: boolean
+  session_id?: string | null
+  country?: string | null
+  state?: string | null
+  city?: string | null
+}
+
+export type OpenVpnPeerUpdate = WireGuardPeerUpdate
+
+export interface OpenVpnPeerConfig {
+  filename: string
+  config: string
+  complete: boolean
+  server_configured: boolean
+}
+
+export const fetchOpenVpnSettings = async (): Promise<OpenVpnServerSettings> => (await api.get('/openvpn/settings')).data
+export const updateOpenVpnSettings = async (doc: OpenVpnServerSettingsDoc): Promise<OpenVpnServerSettings> =>
+  (await api.put('/openvpn/settings', doc)).data
+export const rotateOpenVpnIdentity = async (): Promise<OpenVpnServerSettings> => (await api.post('/openvpn/settings/rotate-identity')).data
+
+export const fetchOpenVpnPeers = async (projectId: string): Promise<OpenVpnPeerListResponse> =>
+  (await api.get(`/projects/${projectId}/openvpn/peers`)).data
+export const createOpenVpnPeer = async (projectId: string, data: OpenVpnPeerCreate): Promise<OpenVpnPeer> =>
+  (await api.post(`/projects/${projectId}/openvpn/peers`, data)).data
+export const updateOpenVpnPeer = async (projectId: string, peerId: string, data: OpenVpnPeerUpdate): Promise<OpenVpnPeer> =>
+  (await api.patch(`/projects/${projectId}/openvpn/peers/${peerId}`, data)).data
+export const deleteOpenVpnPeer = async (projectId: string, peerId: string): Promise<void> => {
+  await api.delete(`/projects/${projectId}/openvpn/peers/${peerId}`)
+}
+export const rotateOpenVpnPeerCertificate = async (projectId: string, peerId: string): Promise<OpenVpnPeer> =>
+  (await api.post(`/projects/${projectId}/openvpn/peers/${peerId}/rotate-certificate`)).data
+export const fetchOpenVpnPeerConfig = async (projectId: string, peerId: string): Promise<OpenVpnPeerConfig> =>
+  (await api.get(`/projects/${projectId}/openvpn/peers/${peerId}/config`)).data
+export const fetchOpenVpnPeerMetricsHistory = async (projectId: string, peerId: string, range: string): Promise<TunnelPeerMetricsHistoryResponse> =>
+  (await api.get(`/projects/${projectId}/openvpn/peers/${peerId}/metrics/history`, { params: { range } })).data

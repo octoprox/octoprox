@@ -12,19 +12,21 @@ FROM python:3.12-slim
 
 WORKDIR /app
 
-# Install system dependencies. The WireGuard endpoint (docs/wireguard.md)
-# needs iproute2, wireguard-tools and nftables, plus wireguard-go for hosts
-# whose kernel has no WireGuard. The process runs unprivileged, so the tools
-# are launched through setpriv, which carries CAP_NET_ADMIN as a file
-# capability and hands it on as an ambient capability. (A file capability
-# on ip itself is not enough: iproute2 drops its capabilities when run by a
-# non-root user unless they are inheritable.) The container still has to be
-# granted the capability (cap_add: [NET_ADMIN]).
+# Install system dependencies. The tunnel endpoints need iproute2 and
+# nftables; WireGuard (docs/wireguard.md) wireguard-tools, plus wireguard-go
+# for hosts whose kernel has no WireGuard; OpenVPN (docs/openvpn.md) the
+# openvpn daemon. The process runs unprivileged, so the tools are launched
+# through setpriv, which carries CAP_NET_ADMIN as a file capability and
+# hands it on as an ambient capability. (A file capability on ip itself is
+# not enough: iproute2 drops its capabilities when run by a non-root user
+# unless they are inheritable.) The container still has to be granted the
+# capability (cap_add: [NET_ADMIN]), and /dev/net/tun for OpenVPN.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     iproute2 \
     libcap2-bin \
     nftables \
+    openvpn \
     wireguard-tools \
     wireguard-go \
     && rm -rf /var/lib/apt/lists/* \
@@ -49,8 +51,9 @@ RUN useradd -m -u 1000 octoprox \
     && chown -R octoprox:octoprox /app /run/wireguard
 USER octoprox
 
-# Expose ports (51820/udp is the WireGuard endpoint, used when wireguard.enabled)
-EXPOSE 8000 8080 51820/udp
+# Expose ports (51820/udp is the WireGuard endpoint, 1194 the OpenVPN one;
+# each is used only where its endpoint is enabled)
+EXPOSE 8000 8080 51820/udp 1194/udp 1194/tcp
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \

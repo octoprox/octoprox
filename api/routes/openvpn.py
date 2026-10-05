@@ -1,12 +1,11 @@
 # Copyright 2026 Octoprox Authors
 # SPDX-License-Identifier: Apache-2.0
 
-"""WireGuard endpoints: the install's server settings and each project's devices.
+"""OpenVPN endpoints: the install's server settings and each project's devices.
 
-Reads are open to every authenticated user. Peers are project entities, so
-editors manage them like credentials; the server settings shape the whole
-install (and rotating its key invalidates every device config), so they need
-an admin.
+The same shape and permissions as the WireGuard routes: reads for every
+authenticated user, devices for editors, the install-wide settings (and
+rotating the identity, which invalidates every device profile) for admins.
 """
 
 from __future__ import annotations
@@ -22,36 +21,35 @@ from api.core import utc_now
 from api.core.auth import RequireAdminDep, RequireEditorDep
 from api.db.repository import MetricsRepository
 from api.models.location import LOCATION_NEEDS_COUNTRY
+from api.models.openvpn import (
+    OpenVpnPeer,
+    OpenVpnPeerConfigResponse,
+    OpenVpnPeerCreate,
+    OpenVpnPeerListResponse,
+    OpenVpnPeerResponse,
+    OpenVpnPeerStatus,
+    OpenVpnPeerUpdate,
+    OpenVpnServerSettingsDoc,
+    OpenVpnServerSettingsResponse,
+)
 from api.models.tunnel import (
     TunnelPeerMetrics,
     TunnelPeerMetricsHistoryResponse,
     TunnelPeerMetricsSnapshot,
 )
-from api.models.wireguard import (
-    WireGuardPeer,
-    WireGuardPeerConfigResponse,
-    WireGuardPeerCreate,
-    WireGuardPeerListResponse,
-    WireGuardPeerResponse,
-    WireGuardPeerStatus,
-    WireGuardPeerUpdate,
-    WireGuardServerSettings,
-    WireGuardServerSettingsDoc,
-    WireGuardServerSettingsResponse,
-)
+from api.openvpn import pki
+from api.openvpn.config import client_profile_filename, render_client_profile
 from api.routes.common import openvpn_runtime_of, proxy_manager_of, wireguard_runtime_of
 from api.routes.metrics import RANGE_CONFIG
 from api.tunnel.peers import NoFreeAddressError
-from api.wireguard import keys
-from api.wireguard.config import client_conf_filename, render_client_conf
 
 if TYPE_CHECKING:
-    from api.wireguard.runtime import WireGuardRuntime
+    from api.openvpn.runtime import OpenVpnRuntime
 
 logger = structlog.get_logger()
 
-server_router = APIRouter(prefix="/wireguard")
-router = APIRouter(prefix="/projects/{project_id}/wireguard/peers")
+server_router = APIRouter(prefix="/openvpn")
+router = APIRouter(prefix="/projects/{project_id}/openvpn/peers")
 
 
 def _require_project(request: Request, project_id: str) -> None:
@@ -59,24 +57,20 @@ def _require_project(request: Request, project_id: str) -> None:
         raise HTTPException(status_code=404, detail="Project not found")
 
 
-def _require_peer(runtime: WireGuardRuntime, project_id: str, peer_id: str) -> WireGuardPeer:
+def _require_peer(runtime: OpenVpnRuntime, project_id: str, peer_id: str) -> OpenVpnPeer:
     peer = runtime.peers.get(peer_id)
     if peer is None or peer.project_id != project_id:
         raise HTTPException(status_code=404, detail="Peer not found")
     return peer
 
 
-def _peer_response(
-    runtime: WireGuardRuntime, peer: WireGuardPeer, live: dict[str, WireGuardPeerStatus]
-) -> WireGuardPeerResponse:
-    """The device with where it stands (live or last persisted sighting) and its traffic totals."""
-    return WireGuardPeerResponse(
+def _peer_response(runtime: OpenVpnRuntime, peer: OpenVpnPeer, live: dict[str, OpenVpnPeerStatus]) -> OpenVpnPeerResponse:
+    return OpenVpnPeerResponse(
         id=peer.id,
         project_id=peer.project_id,
         name=peer.name,
-        public_key=peer.public_key,
-        has_private_key=peer.private_key is not None,
-        has_preshared_key=peer.preshared_key is not None,
+        serial=peer.serial,
+        certificate_expires_at=peer.certificate_expires_at,
         address=peer.address,
         enabled=peer.enabled,
         session_id=peer.session_id,
@@ -85,31 +79,32 @@ def _peer_response(
         city=peer.city,
         created_at=peer.created_at,
         updated_at=peer.updated_at,
-        status=runtime.peer_status(peer, live.get(peer.public_key)),
+        status=runtime.peer_status(peer, live.get(peer.id)),
         metrics=TunnelPeerMetrics.from_delta(runtime.metrics_of(peer.id)),
     )
 
 
 def _name_conflict(exc: IntegrityError, name: str) -> HTTPException:
     text = str(exc.orig or exc)
-    if "ix_wireguard_peers_project_name_unique" in text:
+    if "ix_openvpn_peers_project_name_unique" in text:
         return HTTPException(status_code=400, detail=f"A device named '{name}' already exists in this project")
-    if "public_key" in text:
-        return HTTPException(status_code=400, detail="A device with this public key already exists")
     if "address" in text:
         return HTTPException(status_code=409, detail="The tunnel address was taken concurrently; retry")
     raise exc
 
 
-async def _settings_response(runtime: WireGuardRuntime) -> WireGuardServerSettingsResponse:
+async def _settings_response(runtime: OpenVpnRuntime) -> OpenVpnServerSettingsResponse:
     server = runtime.settings_store.settings
-    return WireGuardServerSettingsResponse(
-        public_key=server.public_key,
+    return OpenVpnServerSettingsResponse(
+        ca_fingerprint=pki.fingerprint_of(server.ca_cert),
+        ca_expires_at=pki.not_after_of(server.ca_cert),
         endpoint_host=server.endpoint_host,
         endpoint_port=server.endpoint_port,
+        protocol=server.protocol,
         subnet=server.subnet,
         gateway=server.gateway,
-        persistent_keepalive=server.persistent_keepalive,
+        keepalive_interval=server.keepalive_interval,
+        keepalive_timeout=server.keepalive_timeout,
         client_mtu=server.client_mtu,
         configured=server.configured,
         updated_at=server.updated_at,
@@ -120,25 +115,25 @@ async def _settings_response(runtime: WireGuardRuntime) -> WireGuardServerSettin
 # --- server ------------------------------------------------------------------------------
 
 
-@server_router.get("/settings", response_model=WireGuardServerSettingsResponse)
-async def get_server_settings(request: Request) -> WireGuardServerSettingsResponse:
-    """The install's public key, endpoint and subnet, plus what this instance is doing about the tunnel."""
-    return await _settings_response(wireguard_runtime_of(request))
+@server_router.get("/settings", response_model=OpenVpnServerSettingsResponse)
+async def get_server_settings(request: Request) -> OpenVpnServerSettingsResponse:
+    """The install's CA fingerprint, endpoint, transport and subnet, plus what this instance is doing about the daemon."""
+    return await _settings_response(openvpn_runtime_of(request))
 
 
-@server_router.put("/settings", response_model=WireGuardServerSettingsResponse)
+@server_router.put("/settings", response_model=OpenVpnServerSettingsResponse)
 async def update_server_settings(
-    request: Request, doc: WireGuardServerSettingsDoc, admin: RequireAdminDep
-) -> WireGuardServerSettingsResponse:
+    request: Request, doc: OpenVpnServerSettingsDoc, admin: RequireAdminDep
+) -> OpenVpnServerSettingsResponse:
     """Replace the editable settings. The subnet must still contain every device's address."""
-    runtime = wireguard_runtime_of(request)
+    runtime = openvpn_runtime_of(request)
     updated = runtime.settings_store.settings.model_copy(update=doc.model_dump())
     network, gateway = updated.network, updated.gateway
     # The data plane tells devices apart by tunnel address across every
     # protocol, so the two subnets must not share any.
-    other = openvpn_runtime_of(request).settings_store.settings.network
+    other = wireguard_runtime_of(request).settings_store.settings.network
     if network.overlaps(other):
-        raise HTTPException(status_code=400, detail=f"subnet {updated.subnet} overlaps the OpenVPN subnet {other}")
+        raise HTTPException(status_code=400, detail=f"subnet {updated.subnet} overlaps the WireGuard subnet {other}")
     outside = [p.address for p in runtime.peers.all() if ipaddress.IPv4Address(p.address) not in network or p.address == gateway]
     if outside:
         raise HTTPException(
@@ -149,67 +144,51 @@ async def update_server_settings(
     return await _settings_response(runtime)
 
 
-@server_router.post("/settings/rotate-key", response_model=WireGuardServerSettingsResponse)
-async def rotate_server_key(request: Request, admin: RequireAdminDep) -> WireGuardServerSettingsResponse:
-    """Give the install a new key pair. Every device must load a new config afterwards."""
-    runtime = wireguard_runtime_of(request)
-    private, public = keys.generate_keypair()
-    updated = runtime.settings_store.settings.model_copy(update={"private_key": private, "public_key": public})
-    await runtime.save_settings(updated, admin.username)
-    logger.warning("WireGuard server key rotated; every device config is now invalid", by=admin.username)
+@server_router.post("/settings/rotate-identity", response_model=OpenVpnServerSettingsResponse)
+async def rotate_identity(request: Request, admin: RequireAdminDep) -> OpenVpnServerSettingsResponse:
+    """A new CA, server certificate and tls-crypt key; every device is reissued and must load its profile again."""
+    runtime = openvpn_runtime_of(request)
+    await runtime.rotate_identity(admin.username)
     return await _settings_response(runtime)
 
 
 # --- peers -------------------------------------------------------------------------------
 
 
-@router.get("", response_model=WireGuardPeerListResponse)
-async def list_peers(request: Request, project_id: str) -> WireGuardPeerListResponse:
+@router.get("", response_model=OpenVpnPeerListResponse)
+async def list_peers(request: Request, project_id: str) -> OpenVpnPeerListResponse:
     _require_project(request, project_id)
-    runtime = wireguard_runtime_of(request)
+    runtime = openvpn_runtime_of(request)
     live = await runtime.peer_statuses()
     peers = runtime.peers.for_project(project_id)
     server = runtime.settings_store.settings
-    return WireGuardPeerListResponse(
+    return OpenVpnPeerListResponse(
         total=len(peers),
         peers=[_peer_response(runtime, p, live) for p in peers],
         server_configured=server.configured,
-        server_public_key=server.public_key,
+        ca_fingerprint=pki.fingerprint_of(server.ca_cert),
     )
 
 
-@router.post("", response_model=WireGuardPeerResponse, status_code=201)
+@router.post("", response_model=OpenVpnPeerResponse, status_code=201)
 async def create_peer(
-    request: Request, project_id: str, data: WireGuardPeerCreate, _guard: RequireEditorDep
-) -> WireGuardPeerResponse:
-    """Register a device. Without a public key Octoprox generates the pair and keeps it for the config."""
+    request: Request, project_id: str, data: OpenVpnPeerCreate, _guard: RequireEditorDep
+) -> OpenVpnPeerResponse:
+    """Register a device: a certificate from the install's CA and the next free address."""
     _require_project(request, project_id)
-    runtime = wireguard_runtime_of(request)
-
-    private_key: str | None
-    if data.public_key:
-        private_key, public_key = None, data.public_key
-    else:
-        private_key, public_key = keys.generate_keypair()
-
+    runtime = openvpn_runtime_of(request)
     try:
-        address = runtime.peers.allocate_address(runtime.settings_store.settings.network)
+        peer = runtime.issue_peer(
+            project_id=project_id,
+            name=data.name,
+            enabled=data.enabled,
+            session_id=data.session_id,
+            country=data.country,
+            state=data.state,
+            city=data.city,
+        )
     except NoFreeAddressError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from None
-
-    peer = WireGuardPeer(
-        project_id=project_id,
-        name=data.name,
-        public_key=public_key,
-        private_key=private_key,
-        preshared_key=keys.generate_preshared_key() if data.preshared else None,
-        address=address,
-        enabled=data.enabled,
-        session_id=data.session_id,
-        country=data.country,
-        state=data.state,
-        city=data.city,
-    )
     try:
         await runtime.add_peer(peer)
     except IntegrityError as exc:
@@ -217,24 +196,21 @@ async def create_peer(
     return _peer_response(runtime, peer, {})
 
 
-@router.get("/{peer_id}", response_model=WireGuardPeerResponse)
-async def get_peer(request: Request, project_id: str, peer_id: str) -> WireGuardPeerResponse:
+@router.get("/{peer_id}", response_model=OpenVpnPeerResponse)
+async def get_peer(request: Request, project_id: str, peer_id: str) -> OpenVpnPeerResponse:
     _require_project(request, project_id)
-    runtime = wireguard_runtime_of(request)
+    runtime = openvpn_runtime_of(request)
     peer = _require_peer(runtime, project_id, peer_id)
     return _peer_response(runtime, peer, await runtime.peer_statuses())
 
 
-@router.patch("/{peer_id}", response_model=WireGuardPeerResponse)
+@router.patch("/{peer_id}", response_model=OpenVpnPeerResponse)
 async def update_peer(
-    request: Request, project_id: str, peer_id: str, data: WireGuardPeerUpdate, _guard: RequireEditorDep
-) -> WireGuardPeerResponse:
+    request: Request, project_id: str, peer_id: str, data: OpenVpnPeerUpdate, _guard: RequireEditorDep
+) -> OpenVpnPeerResponse:
     _require_project(request, project_id)
-    runtime = wireguard_runtime_of(request)
+    runtime = openvpn_runtime_of(request)
     peer = _require_peer(runtime, project_id, peer_id)
-
-    # "" clears an optional field. name and enabled cannot be cleared, so an
-    # explicit null for them is ignored rather than becoming a NOT NULL error.
     changes = {
         key: (None if value == "" else value)
         for key, value in data.model_dump(exclude_unset=True).items()
@@ -253,27 +229,20 @@ async def update_peer(
 @router.delete("/{peer_id}", status_code=204)
 async def delete_peer(request: Request, project_id: str, peer_id: str, _guard: RequireEditorDep) -> None:
     _require_project(request, project_id)
-    runtime = wireguard_runtime_of(request)
+    runtime = openvpn_runtime_of(request)
     _require_peer(runtime, project_id, peer_id)
     await runtime.remove_peer(peer_id)
 
 
-@router.post("/{peer_id}/rotate-keys", response_model=WireGuardPeerResponse)
-async def rotate_peer_keys(
+@router.post("/{peer_id}/rotate-certificate", response_model=OpenVpnPeerResponse)
+async def rotate_peer_certificate(
     request: Request, project_id: str, peer_id: str, _guard: RequireEditorDep
-) -> WireGuardPeerResponse:
-    """New key pair (and preshared key, if it had one) for a device; the old config stops working."""
+) -> OpenVpnPeerResponse:
+    """A new certificate and key for a device; the profile it has stops working."""
     _require_project(request, project_id)
-    runtime = wireguard_runtime_of(request)
+    runtime = openvpn_runtime_of(request)
     peer = _require_peer(runtime, project_id, peer_id)
-    private, public = keys.generate_keypair()
-    updated = peer.model_copy(
-        update={
-            "private_key": private,
-            "public_key": public,
-            "preshared_key": keys.generate_preshared_key() if peer.preshared_key else None,
-        }
-    )
+    updated = runtime.reissue_certificate(peer)
     await runtime.update_peer(updated)
     return _peer_response(runtime, updated, {})
 
@@ -285,14 +254,9 @@ async def get_peer_metrics_history(
     peer_id: str,
     range: Literal["1h", "6h", "24h", "7d", "30d"] = Query("24h", alias="range"),
 ) -> TunnelPeerMetricsHistoryResponse:
-    """The device's own metrics history: requests, bytes and name-resolution signals per interval.
-
-    Same ranges and compaction tiers as project and connector history. Bytes
-    are what the proxy path relayed for the device, not the tunnel
-    interface's counters.
-    """
+    """The device's own metrics history, same ranges and tiers as the WireGuard devices'."""
     _require_project(request, project_id)
-    _require_peer(wireguard_runtime_of(request), project_id, peer_id)
+    _require_peer(openvpn_runtime_of(request), project_id, peer_id)
     delta, limit, bucket_seconds = RANGE_CONFIG[range]
     since = utc_now() - delta
     async with proxy_manager_of(request)._session_factory() as session:
@@ -308,16 +272,16 @@ async def get_peer_metrics_history(
     return TunnelPeerMetricsHistoryResponse(snapshots=[TunnelPeerMetricsSnapshot(**row) for row in reversed(rows)])
 
 
-@router.get("/{peer_id}/config", response_model=WireGuardPeerConfigResponse)
-async def get_peer_config(request: Request, project_id: str, peer_id: str) -> WireGuardPeerConfigResponse:
-    """The device's wg-quick file. Issued even before the endpoint is set, flagged as such."""
+@router.get("/{peer_id}/config", response_model=OpenVpnPeerConfigResponse)
+async def get_peer_config(request: Request, project_id: str, peer_id: str) -> OpenVpnPeerConfigResponse:
+    """The device's ``.ovpn`` profile. Issued even before the endpoint is set, flagged as such."""
     _require_project(request, project_id)
-    runtime = wireguard_runtime_of(request)
+    runtime = openvpn_runtime_of(request)
     peer = _require_peer(runtime, project_id, peer_id)
-    server: WireGuardServerSettings = runtime.settings_store.settings
-    return WireGuardPeerConfigResponse(
-        filename=client_conf_filename(peer.name),
-        config=render_client_conf(peer, server),
-        complete=peer.private_key is not None and server.configured,
+    server = runtime.settings_store.settings
+    return OpenVpnPeerConfigResponse(
+        filename=client_profile_filename(peer.name),
+        config=render_client_profile(peer, server),
+        complete=server.configured,
         server_configured=server.configured,
     )

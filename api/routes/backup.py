@@ -31,7 +31,12 @@ from api.core.backup import (
 )
 from api.db.session import get_db
 from api.models.backup import ExportRequest, ImportSummary
-from api.routes.common import geo_runtime_of, proxy_manager_of
+from api.routes.common import (
+    geo_runtime_of,
+    openvpn_runtime_of,
+    proxy_manager_of,
+    wireguard_runtime_of,
+)
 
 logger = structlog.get_logger()
 
@@ -130,9 +135,12 @@ async def import_backup(
         result.old_project_ids, result.old_proxy_ids, result.old_connector_ids
     )
     # Attribution settings and database rows were replaced too: reload them and
-    # reopen whatever database files came with the backup. Peers catch up on
-    # their periodic reload.
+    # reopen whatever database files came with the backup. The tunnel
+    # identities and devices likewise; an OpenVPN daemon here restarts under
+    # the restored CA. Peers catch up on their periodic reload.
     await geo_runtime_of(request).geo_service.resync()
+    await wireguard_runtime_of(request).resync()
+    await openvpn_runtime_of(request).resync()
 
     logger.info(
         "Backup imported",

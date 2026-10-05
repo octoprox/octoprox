@@ -27,6 +27,8 @@ from api.core.seed import seed_admin_user
 from api.core.signals import (
     geo_database_changed,
     geo_settings_changed,
+    openvpn_peer_changed,
+    openvpn_settings_changed,
     project_changed,
     wireguard_peer_changed,
     wireguard_settings_changed,
@@ -38,6 +40,7 @@ from api.db.redis import get_redis_client
 from api.db.session import get_async_session_factory
 from api.geo.runtime import GeoRuntime
 from api.geo.verifier import ExitVerifier
+from api.openvpn.runtime import OpenVpnRuntime
 from api.routes import (
     auth,
     backup,
@@ -48,6 +51,7 @@ from api.routes import (
     health,
     metrics,
     mitm,
+    openvpn,
     projects,
     providers,
     proxies,
@@ -98,18 +102,26 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     # Tunnel devices. The data plane (fake-IP resolver, transparent listener,
     # nftables) is one per process and shared by every tunnel protocol; its
-    # listeners come up once the proxy server's collaborators exist. WireGuard
-    # loads the install's key pair and the devices allowed in on every
-    # instance; the tunnel itself comes up later, on the instance that
+    # listeners come up once the proxy server's collaborators exist. Each
+    # protocol loads the install's identity and the devices allowed in on
+    # every instance; the tunnel itself comes up later, on the instance that
     # terminates it, by attaching its interface to the data plane.
     tunnel = TunnelDataPlane(settings, redis_client)
     app.state.tunnel = tunnel
     wireguard_runtime = WireGuardRuntime(settings, session_factory, redis_client, tunnel)
     app.state.wireguard_runtime = wireguard_runtime
+    openvpn_runtime = OpenVpnRuntime(settings, session_factory, redis_client, tunnel)
+    app.state.openvpn_runtime = openvpn_runtime
 
-    # Initialize proxy manager with dependencies. Attribution and WireGuard
-    # join the cross-instance change feed and the periodic reload here,
-    # explicitly, rather than the manager knowing what it is wiring.
+    async def on_project_change(entity_id: str, op: str | None) -> None:
+        # Runs after the manager's own project handler: a project deleted on
+        # a peer drops its tunnel devices here too, whatever their protocol.
+        await wireguard_runtime.on_project_change(entity_id, op)
+        await openvpn_runtime.on_project_change(entity_id, op)
+
+    # Initialize proxy manager with dependencies. Attribution and the tunnel
+    # protocols join the cross-instance change feed and the periodic reload
+    # here, explicitly, rather than the manager knowing what it is wiring.
     proxy_manager = ProxyManager(
         session_factory=session_factory,
         redis_client=redis_client,
@@ -120,16 +132,17 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             geo_settings_changed: geo_runtime.reload_settings,
             wireguard_peer_changed: wireguard_runtime.reload_peer,
             wireguard_settings_changed: wireguard_runtime.reload_settings,
-            # Runs after the manager's own project handler: a project deleted
-            # on a peer drops its WireGuard peers here too.
-            project_changed: wireguard_runtime.on_project_change,
+            openvpn_peer_changed: openvpn_runtime.reload_peer,
+            openvpn_settings_changed: openvpn_runtime.reload_settings,
+            project_changed: on_project_change,
         },
-        reload_hooks=[geo_runtime.resync, wireguard_runtime.resync],
+        reload_hooks=[geo_runtime.resync, wireguard_runtime.resync, openvpn_runtime.resync],
     )
     app.state.proxy_manager = proxy_manager
     # Tunnel devices are metered by the manager alongside proxies and
-    # projects; the WireGuard views read their totals from it.
+    # projects; the device views read their totals from it.
     wireguard_runtime.peer_metrics = proxy_manager.tunnel_peer_metrics
+    openvpn_runtime.peer_metrics = proxy_manager.tunnel_peer_metrics
 
     # The attributor writes attribution onto proxies as sightings arrive; the
     # manager is its proxy store.
@@ -150,6 +163,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         cert_manager=getattr(app.state, "cert_manager", None),
         geo_runtime=geo_runtime,
         wireguard_runtime=wireguard_runtime,
+        openvpn_runtime=openvpn_runtime,
     )
 
     # Start background tasks (loads from DB, hydrates from Redis)
@@ -172,15 +186,17 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     app.state.proxy_server = proxy_server
 
     # The tunnel data plane shares the manager, MITM handler and verifier with
-    # the proxy server: same routing, same metering. Then bring the WireGuard
-    # tunnel up where this instance terminates it.
+    # the proxy server: same routing, same metering. Then bring each tunnel
+    # protocol up where this instance terminates it.
     await tunnel.start(proxy_manager, mitm_handler=mitm_handler, exit_verifier=exit_verifier)
     await wireguard_runtime.start()
+    await openvpn_runtime.start()
 
     yield
 
     # Cleanup
     logger.info("Shutting down Octoprox")
+    await openvpn_runtime.stop()
     await wireguard_runtime.stop()
     await tunnel.stop()
     await proxy_server.stop()
@@ -265,6 +281,12 @@ def create_app() -> FastAPI:
     )
     app.include_router(
         wireguard.router, prefix="/api/v1", tags=["WireGuard"], dependencies=auth_dependency
+    )
+    app.include_router(
+        openvpn.server_router, prefix="/api/v1", tags=["OpenVPN"], dependencies=auth_dependency
+    )
+    app.include_router(
+        openvpn.router, prefix="/api/v1", tags=["OpenVPN"], dependencies=auth_dependency
     )
 
     # Serve frontend static files in production (when web/dist exists)

@@ -223,6 +223,22 @@ wireguard_peer_changed = signal("wireguard-peer-changed")
 # Args: entity_id ("default"), op (Literal["updated"])
 wireguard_settings_changed = signal("wireguard-settings-changed")
 
+# Emitted by the OpenVPN routes after a peer is created, changed or deleted.
+# Cross-instance: every instance re-reads the row into its peer directory,
+# and one carrying the endpoint ends the device's session when it may no
+# longer connect (disabled, removed, certificate rotated).
+# Sender: openvpn route
+# Args: entity_id (peer id, str), op (Literal["added", "updated", "removed"])
+openvpn_peer_changed = signal("openvpn-peer-changed")
+
+# Emitted after the install-wide OpenVPN settings row (identity, endpoint,
+# transport, subnet) is written. Cross-instance: receivers reload it from
+# Postgres and a carrying instance restarts its daemon when what the daemon
+# was started with changed.
+# Sender: openvpn route
+# Args: entity_id ("default"), op (Literal["updated"])
+openvpn_settings_changed = signal("openvpn-settings-changed")
+
 # Emitted by the transparent listener when a tunnel connection's destination
 # name could not be recovered (not a fake IP, no SNI, no Host header) and it
 # is relayed by address: domain filters then see an address and the exit may

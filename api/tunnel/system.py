@@ -70,6 +70,19 @@ class CommandRunner:
             raise CommandError(argv, process.returncode or 1, err.decode("utf-8", "replace").strip())
         return out.decode("utf-8", "replace")
 
+    async def spawn(self, *argv: str) -> asyncio.subprocess.Process:
+        """Start a long-running tool (a daemon) with the same privileges; its output is one merged pipe."""
+        launch = privileged_argv(argv, euid=self._euid, setpriv=self._setpriv)
+        try:
+            return await asyncio.create_subprocess_exec(
+                *launch,
+                stdin=asyncio.subprocess.DEVNULL,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+            )
+        except FileNotFoundError:
+            raise CommandError(argv, 127, f"{argv[0]} is not installed") from None
+
 
 # The package a missing tool comes from, which is what the hint has to name.
 _PACKAGE_OF = {"ip": "iproute2", "nft": "nftables", "wg": "wireguard-tools", "wireguard-go": "wireguard-go"}
