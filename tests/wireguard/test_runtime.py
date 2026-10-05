@@ -5,12 +5,15 @@
 
 import json
 import time
+from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from api.core import utc_now
 from api.core.config import Settings
-from api.models.wireguard import WireGuardPeer, WireGuardServerSettings
+from api.core.stats import TunnelPeerMetricDelta
+from api.models.wireguard import WireGuardPeer, WireGuardPeerStatus, WireGuardServerSettings
 from api.tunnel.dataplane import TunnelDataPlane
 from api.tunnel.peers import NoFreeAddressError
 from api.wireguard.peers import PeerDirectory
@@ -145,7 +148,7 @@ async def test_peer_statuses_from_redis() -> None:
     # and the one with the newer handshake is where the device's traffic lands.
     redis.get_wireguard_peer_status = AsyncMock(return_value=[
         {
-            "online": json.dumps({"latest_handshake": now - 30, "rx_bytes": 5, "tx_bytes": 7, "endpoint": "1.2.3.4:1", "connections_by_address": 3, "encrypted_dns_blocked": 2}),
+            "online": json.dumps({"latest_handshake": now - 30, "rx_bytes": 5, "tx_bytes": 7, "endpoint": "1.2.3.4:1"}),
             "stale": json.dumps({"latest_handshake": now - 3600, "rx_bytes": 0, "tx_bytes": 0, "endpoint": None}),
             "never": json.dumps({"latest_handshake": 0}),
             "junk": "{not json",
@@ -157,9 +160,71 @@ async def test_peer_statuses_from_redis() -> None:
     ])
     runtime = await _runtime(_settings(), redis=redis)
     statuses = await runtime.peer_statuses()
-    assert statuses["online"].online is True and statuses["online"].rx_bytes == 5
-    assert statuses["online"].connections_by_address == 3 and statuses["online"].encrypted_dns_blocked == 2
-    assert statuses["stale"].connections_by_address == 0
+    assert statuses["online"].online is True and statuses["online"].rx_bytes == 5 and statuses["online"].live is True
     assert statuses["stale"].online is True and statuses["stale"].endpoint == "5.6.7.8:9"
     assert statuses["never"].online is False and statuses["never"].last_handshake_at is None
     assert "junk" not in statuses
+
+
+class TestPeerStatus:
+    """The live reading when a carrier has one; the persisted sighting otherwise, or when it is newer."""
+
+    def test_nothing_carrying_falls_back_to_the_row(self) -> None:
+        seen = utc_now() - timedelta(seconds=30)
+        peer = WireGuardPeer(project_id="p", name="tv", public_key="k", address="10.66.0.2", last_handshake_at=seen, last_endpoint="9.9.9.9:1")
+        status = WireGuardRuntime.peer_status(peer, None)
+        assert status.online is True and status.live is False
+        assert status.last_handshake_at == seen and status.endpoint == "9.9.9.9:1"
+        assert (status.rx_bytes, status.tx_bytes) == (0, 0)
+        never = WireGuardRuntime.peer_status(WireGuardPeer(project_id="p", name="tv", public_key="k", address="10.66.0.3"), None)
+        assert never.online is False and never.last_handshake_at is None and never.endpoint is None
+
+    def test_restarted_carrier_without_a_handshake_keeps_the_last_sighting(self) -> None:
+        seen = utc_now() - timedelta(hours=2)
+        peer = WireGuardPeer(project_id="p", name="tv", public_key="k", address="10.66.0.2", last_handshake_at=seen, last_endpoint="9.9.9.9:1")
+        live = WireGuardPeerStatus(online=False, last_handshake_at=None, live=True, rx_bytes=12, tx_bytes=34)
+        status = WireGuardRuntime.peer_status(peer, live)
+        assert status.live is False and status.last_handshake_at == seen and status.online is False
+        # The interface counters are still the carrier's.
+        assert (status.rx_bytes, status.tx_bytes) == (12, 34)
+
+    def test_live_reading_wins_when_it_is_newer(self) -> None:
+        seen = utc_now() - timedelta(minutes=10)
+        peer = WireGuardPeer(project_id="p", name="tv", public_key="k", address="10.66.0.2", last_handshake_at=seen)
+        live = WireGuardPeerStatus(online=True, last_handshake_at=seen + timedelta(minutes=9), endpoint="1.1.1.1:5", live=True)
+        assert WireGuardRuntime.peer_status(peer, live) is live
+        older = WireGuardPeerStatus(online=False, last_handshake_at=seen - timedelta(days=1), endpoint="old", live=True)
+        assert WireGuardRuntime.peer_status(peer, older).last_handshake_at == seen
+
+
+@pytest.mark.asyncio
+async def test_publish_status_persists_new_handshakes() -> None:
+    """The carrier records a handshake newer than the row knows, and the cache follows."""
+    redis = MagicMock()
+    redis.set_wireguard_peer_status = AsyncMock()
+    runtime = await _runtime(_settings(), FakeRunner(), redis=redis)
+    # FakeRunner's dump: peer "pub" handshaked at 1700000000 from 1.2.3.4:5.
+    peer = WireGuardPeer(project_id="p", name="tv", public_key="pub", address="10.66.0.2")
+    runtime.peers.put(peer)
+    assert await runtime._publish_status() is True
+    published = redis.set_wireguard_peer_status.await_args.args[1]
+    assert json.loads(published["pub"])["endpoint"] == "1.2.3.4:5"
+    assert "connections_by_address" not in json.loads(published["pub"])
+    seen = datetime.fromtimestamp(1700000000, UTC).replace(tzinfo=None)
+    assert peer.last_handshake_at == seen and peer.last_endpoint == "1.2.3.4:5"
+    # Nothing newer on the next tick: the row is left alone (no session factory here, so the cache is the proof).
+    peer.last_endpoint = "unchanged"
+    await runtime._publish_status()
+    assert peer.last_endpoint == "unchanged"
+
+
+@pytest.mark.asyncio
+async def test_status_sums_device_metrics_from_the_manager() -> None:
+    runtime = await _runtime(_settings(), FakeRunner())
+    runtime.peers.put(WireGuardPeer(id="a", project_id="p", name="a", public_key="ka", address="10.66.0.2"))
+    runtime.peers.put(WireGuardPeer(id="b", project_id="p", name="b", public_key="kb", address="10.66.0.3"))
+    totals = {"a": TunnelPeerMetricDelta(by_address=2, encrypted_dns_blocked=1), "b": TunnelPeerMetricDelta(by_address=3)}
+    runtime.peer_metrics = lambda peer_id: totals.get(peer_id) or TunnelPeerMetricDelta()
+    status = await runtime.status()
+    assert (status.connections_by_address, status.encrypted_dns_blocked) == (5, 1)
+    assert runtime.metrics_of("nope") == TunnelPeerMetricDelta()

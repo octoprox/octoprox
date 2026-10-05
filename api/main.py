@@ -127,6 +127,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         reload_hooks=[geo_runtime.resync, wireguard_runtime.resync],
     )
     app.state.proxy_manager = proxy_manager
+    # Tunnel devices are metered by the manager alongside proxies and
+    # projects; the WireGuard views read their totals from it.
+    wireguard_runtime.peer_metrics = proxy_manager.tunnel_peer_metrics
 
     # The attributor writes attribution onto proxies as sightings arrive; the
     # manager is its proxy store.

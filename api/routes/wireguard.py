@@ -12,14 +12,21 @@ an admin.
 from __future__ import annotations
 
 import ipaddress
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 import structlog
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Query, Request
 from sqlalchemy.exc import IntegrityError
 
+from api.core import utc_now
 from api.core.auth import RequireAdminDep, RequireEditorDep
+from api.db.repository import MetricsRepository
 from api.models.location import LOCATION_NEEDS_COUNTRY
+from api.models.tunnel import (
+    TunnelPeerMetrics,
+    TunnelPeerMetricsHistoryResponse,
+    TunnelPeerMetricsSnapshot,
+)
 from api.models.wireguard import (
     WireGuardPeer,
     WireGuardPeerConfigResponse,
@@ -33,6 +40,7 @@ from api.models.wireguard import (
     WireGuardServerSettingsResponse,
 )
 from api.routes.common import proxy_manager_of, wireguard_runtime_of
+from api.routes.metrics import RANGE_CONFIG
 from api.tunnel.peers import NoFreeAddressError
 from api.wireguard import keys
 from api.wireguard.config import client_conf_filename, render_client_conf
@@ -58,7 +66,10 @@ def _require_peer(runtime: WireGuardRuntime, project_id: str, peer_id: str) -> W
     return peer
 
 
-def _peer_response(peer: WireGuardPeer, status: WireGuardPeerStatus | None) -> WireGuardPeerResponse:
+def _peer_response(
+    runtime: WireGuardRuntime, peer: WireGuardPeer, live: dict[str, WireGuardPeerStatus]
+) -> WireGuardPeerResponse:
+    """The device with where it stands (live or last persisted sighting) and its traffic totals."""
     return WireGuardPeerResponse(
         id=peer.id,
         project_id=peer.project_id,
@@ -74,7 +85,8 @@ def _peer_response(peer: WireGuardPeer, status: WireGuardPeerStatus | None) -> W
         city=peer.city,
         created_at=peer.created_at,
         updated_at=peer.updated_at,
-        status=status,
+        status=runtime.peer_status(peer, live.get(peer.public_key)),
+        metrics=TunnelPeerMetrics.from_delta(runtime.metrics_of(peer.id)),
     )
 
 
@@ -150,12 +162,12 @@ async def rotate_server_key(request: Request, admin: RequireAdminDep) -> WireGua
 async def list_peers(request: Request, project_id: str) -> WireGuardPeerListResponse:
     _require_project(request, project_id)
     runtime = wireguard_runtime_of(request)
-    statuses = await runtime.peer_statuses()
+    live = await runtime.peer_statuses()
     peers = runtime.peers.for_project(project_id)
     server = runtime.settings_store.settings
     return WireGuardPeerListResponse(
         total=len(peers),
-        peers=[_peer_response(p, statuses.get(p.public_key)) for p in peers],
+        peers=[_peer_response(runtime, p, live) for p in peers],
         server_configured=server.configured,
         server_public_key=server.public_key,
     )
@@ -197,7 +209,7 @@ async def create_peer(
         await runtime.add_peer(peer)
     except IntegrityError as exc:
         raise _name_conflict(exc, peer.name) from None
-    return _peer_response(peer, None)
+    return _peer_response(runtime, peer, {})
 
 
 @router.get("/{peer_id}", response_model=WireGuardPeerResponse)
@@ -205,8 +217,7 @@ async def get_peer(request: Request, project_id: str, peer_id: str) -> WireGuard
     _require_project(request, project_id)
     runtime = wireguard_runtime_of(request)
     peer = _require_peer(runtime, project_id, peer_id)
-    statuses = await runtime.peer_statuses()
-    return _peer_response(peer, statuses.get(peer.public_key))
+    return _peer_response(runtime, peer, await runtime.peer_statuses())
 
 
 @router.patch("/{peer_id}", response_model=WireGuardPeerResponse)
@@ -231,8 +242,7 @@ async def update_peer(
         await runtime.update_peer(updated)
     except IntegrityError as exc:
         raise _name_conflict(exc, updated.name) from None
-    statuses = await runtime.peer_statuses()
-    return _peer_response(updated, statuses.get(updated.public_key))
+    return _peer_response(runtime, updated, await runtime.peer_statuses())
 
 
 @router.delete("/{peer_id}", status_code=204)
@@ -260,7 +270,37 @@ async def rotate_peer_keys(
         }
     )
     await runtime.update_peer(updated)
-    return _peer_response(updated, None)
+    return _peer_response(runtime, updated, {})
+
+
+@router.get("/{peer_id}/metrics/history", response_model=TunnelPeerMetricsHistoryResponse)
+async def get_peer_metrics_history(
+    request: Request,
+    project_id: str,
+    peer_id: str,
+    range: Literal["1h", "6h", "24h", "7d", "30d"] = Query("24h", alias="range"),
+) -> TunnelPeerMetricsHistoryResponse:
+    """The device's own metrics history: requests, bytes and name-resolution signals per interval.
+
+    Same ranges and compaction tiers as project and connector history. Bytes
+    are what the proxy path relayed for the device, not the tunnel
+    interface's counters.
+    """
+    _require_project(request, project_id)
+    _require_peer(wireguard_runtime_of(request), project_id, peer_id)
+    delta, limit, bucket_seconds = RANGE_CONFIG[range]
+    since = utc_now() - delta
+    async with proxy_manager_of(request)._session_factory() as session:
+        repo = MetricsRepository(session)
+        if bucket_seconds:
+            rows = await repo.get_tunnel_peer_metrics_history_aggregated(
+                project_id=project_id, peer_id=peer_id, since=since, bucket_seconds=bucket_seconds
+            )
+        else:
+            rows = await repo.get_tunnel_peer_metrics_history(
+                project_id=project_id, peer_id=peer_id, since=since, limit=limit, granularity=60
+            )
+    return TunnelPeerMetricsHistoryResponse(snapshots=[TunnelPeerMetricsSnapshot(**row) for row in reversed(rows)])
 
 
 @router.get("/{peer_id}/config", response_model=WireGuardPeerConfigResponse)

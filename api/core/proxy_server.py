@@ -567,6 +567,7 @@ class ProxyServer:
         established: bytes | None,
         use_mitm: bool,
         client_head: bytes = b"",
+        peer_id: str | None = None,
     ) -> None:
         """Open the upstream leg to ``target_host:target_port`` and relay until either side is done.
 
@@ -578,6 +579,9 @@ class ProxyServer:
         ``use_mitm`` the MITM handler takes both legs over after that;
         ``client_head`` is whatever of the client's TLS stream the caller has
         already taken off the socket, which the handshake must be fed.
+        ``peer_id`` names the tunnel device the connection came from, so the
+        transfer is metered on the device as well as on the proxy, the
+        connector and the project.
         """
         target = f"{target_host}:{target_port}"
         start_time = time.monotonic()
@@ -586,7 +590,7 @@ class ProxyServer:
         latency_ms = 0.0
         # Counts the tunnel's bytes as they flow; the completion event below
         # carries only what the meter has not reported yet.
-        meter = self._proxy_manager.traffic_meter(proxy, project.id)
+        meter = self._proxy_manager.traffic_meter(proxy, project.id, peer_id=peer_id)
         upstream_writer: asyncio.StreamWriter | None = None
 
         try:
@@ -663,6 +667,7 @@ class ProxyServer:
                     latency_ms=latency_ms,
                     bytes_sent=bytes_sent,
                     bytes_received=bytes_received,
+                    peer_id=peer_id,
                 )
             else:
                 # Nothing will report the remainder; hand it over now so the

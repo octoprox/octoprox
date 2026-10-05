@@ -29,7 +29,9 @@ health_check_completed = signal("health-check-completed")
 # Emitted when a proxy request completes (success or failure)
 # Sender: ProxyServer
 # Args: proxy_id (str), project_id (str), success (bool), latency_ms (float),
-#       bytes_sent (int), bytes_received (int)
+#       bytes_sent (int), bytes_received (int),
+#       peer_id (str | None): the tunnel device the request came from, when it
+#       arrived through a tunnel rather than the proxy port
 request_completed = signal("request-completed")
 
 # Emitted when a request is rejected (e.g., no upstream proxy available)
@@ -220,6 +222,23 @@ wireguard_peer_changed = signal("wireguard-peer-changed")
 # Sender: wireguard route
 # Args: entity_id ("default"), op (Literal["updated"])
 wireguard_settings_changed = signal("wireguard-settings-changed")
+
+# Emitted by the transparent listener when a tunnel connection's destination
+# name could not be recovered (not a fake IP, no SNI, no Host header) and it
+# is relayed by address: domain filters then see an address and the exit may
+# differ from the one that resolved the name. Local only; the ProxyManager
+# counts it on the device, in the same pipeline as its requests.
+# Sender: TransparentProxyServer
+# Args: peer_id (str)
+tunnel_name_unresolved = signal("tunnel-name-unresolved")
+
+# Emitted by the transparent listener when it closes an encrypted-DNS
+# connection (DNS over TLS, or a known DNS-over-HTTPS resolver) from a tunnel
+# device so the device falls back to the tunnel resolver. Local only; counted
+# on the device like the signal above.
+# Sender: TransparentProxyServer
+# Args: peer_id (str)
+tunnel_encrypted_dns_blocked = signal("tunnel-encrypted-dns-blocked")
 
 # Emitted in-process whenever a code path learns which IP a proxy exits from:
 # the provider syncer after discovery, the health checker after a check whose

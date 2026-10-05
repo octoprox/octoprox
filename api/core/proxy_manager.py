@@ -50,8 +50,10 @@ from api.core.signals import (
     proxy_terminating_requested,
     proxy_update_requested,
     request_completed,
+    tunnel_encrypted_dns_blocked,
+    tunnel_name_unresolved,
 )
-from api.core.stats import MetricDelta
+from api.core.stats import MetricDelta, TunnelPeerMetricDelta
 from api.core.system_snapshotter import SystemSnapshotter
 from api.core.traffic_limiter import TrafficLimiter, TrafficMeter
 from api.core.workers import WorkerName
@@ -186,6 +188,13 @@ class ProxyManager:
         self._pending_proxy_deltas: dict[str, MetricDelta] = {}
         self._pending_project_deltas: dict[str, MetricDelta] = {}
         self._pending_connector_deltas: dict[str, MetricDelta] = {}
+        # Tunnel devices are not cached here (each tunnel protocol keeps its
+        # own directory), so their counters are not fields on an entity but
+        # a running total per device id: history plus the Redis window at
+        # hydration, then every flushed delta, ours and peers'. The routes
+        # read them through ``tunnel_peer_metrics``.
+        self._pending_tunnel_peer_deltas: dict[str, TunnelPeerMetricDelta] = {}
+        self._tunnel_peer_totals: dict[str, TunnelPeerMetricDelta] = {}
         self._running = False
         self._tasks: list[asyncio.Task[None]] = []
         # Builds what this instance publishes about itself on the heartbeat.
@@ -507,6 +516,8 @@ class ProxyManager:
         # Health check and request signals
         health_check_completed.connect(self._on_health_check_completed)
         request_completed.connect(self._on_request_completed)
+        tunnel_name_unresolved.connect(self._on_tunnel_name_unresolved)
+        tunnel_encrypted_dns_blocked.connect(self._on_tunnel_encrypted_dns_blocked)
 
         # AutoScaler request signals
         proxy_add_requested.connect(self._on_proxy_add_requested)
@@ -545,11 +556,20 @@ class ProxyManager:
         latency_ms: float,
         bytes_sent: int,
         bytes_received: int,
+        peer_id: str | None = None,
     ) -> None:
         """Handle request completed signal from ProxyServer."""
         await self._handle_request_stats(
-            proxy_id, project_id, success, latency_ms, bytes_sent, bytes_received
+            proxy_id, project_id, success, latency_ms, bytes_sent, bytes_received, peer_id
         )
+
+    async def _on_tunnel_name_unresolved(self, sender: object, peer_id: str) -> None:
+        """A tunnel connection relayed by address: counted on the device."""
+        self._pending_tunnel_peer_deltas.setdefault(peer_id, TunnelPeerMetricDelta()).by_address += 1
+
+    async def _on_tunnel_encrypted_dns_blocked(self, sender: object, peer_id: str) -> None:
+        """An encrypted-DNS connection closed: counted on the device."""
+        self._pending_tunnel_peer_deltas.setdefault(peer_id, TunnelPeerMetricDelta()).encrypted_dns_blocked += 1
 
     async def _on_proxy_add_requested(
         self,
@@ -617,13 +637,15 @@ class ProxyManager:
         latency_ms: float,
         bytes_sent: int,
         bytes_received: int,
+        peer_id: str | None = None,
     ) -> None:
         """Handle request statistics update (internal implementation).
 
         Accumulates the request's contribution into a pending delta -
         nothing else. The hot path makes zero Redis calls (except the
         rate-limiter check below, which is correctness-critical and
-        only opt-in).
+        only opt-in). A request from a tunnel device (``peer_id``) is
+        counted on the device as well.
 
         In-memory counters on ``Proxy`` / ``Project`` are intentionally
         NOT bumped here. The local instance would otherwise be ahead of
@@ -666,8 +688,19 @@ class ProxyManager:
                 success, latency_ms, bytes_sent, bytes_received,
             )
 
+        if peer_id is not None:
+            self._pending_tunnel_peer_deltas.setdefault(peer_id, TunnelPeerMetricDelta()).add_request(
+                success, latency_ms, bytes_sent, bytes_received,
+            )
+
     def _record_traffic_progress(
-        self, proxy_id: str, project_id: str, connector_id: str, bytes_sent: int, bytes_received: int
+        self,
+        proxy_id: str,
+        project_id: str,
+        connector_id: str,
+        peer_id: str | None,
+        bytes_sent: int,
+        bytes_received: int,
     ) -> None:
         """A running transfer reports bytes so far: bytes only, the request is counted at its end."""
         if proxy_id in self._proxies:
@@ -676,10 +709,26 @@ class ProxyManager:
             self._pending_connector_deltas.setdefault(connector_id, MetricDelta()).add_bytes(bytes_sent, bytes_received)
         if project_id in self._projects:
             self._pending_project_deltas.setdefault(project_id, MetricDelta()).add_bytes(bytes_sent, bytes_received)
+        if peer_id is not None:
+            self._pending_tunnel_peer_deltas.setdefault(peer_id, TunnelPeerMetricDelta()).add_bytes(
+                bytes_sent, bytes_received
+            )
 
-    def traffic_meter(self, proxy: Proxy, project_id: str) -> TrafficMeter:
-        """A meter for one transfer through ``proxy``; the server feeds it as bytes flow."""
-        return self._traffic_limiter.meter(proxy.id, project_id, proxy.connector_id)
+    def traffic_meter(self, proxy: Proxy, project_id: str, peer_id: str | None = None) -> TrafficMeter:
+        """A meter for one transfer through ``proxy``; the server feeds it as bytes flow.
+
+        ``peer_id`` is the tunnel device the transfer belongs to, when it
+        came through a tunnel: its bytes are then counted on the device too.
+        """
+        return self._traffic_limiter.meter(proxy.id, project_id, proxy.connector_id, peer_id)
+
+    def tunnel_peer_metrics(self, peer_id: str) -> TunnelPeerMetricDelta:
+        """A tunnel device's totals as this instance sees them: history, Redis window and flushed deltas.
+
+        Zero for a device nothing has been counted on. The object is the
+        running total itself, not a copy: read it, do not keep it.
+        """
+        return self._tunnel_peer_totals.get(peer_id) or TunnelPeerMetricDelta()
 
     async def _load_connector_traffic_totals(
         self, since_by_connector: dict[str, datetime]
@@ -766,6 +815,7 @@ class ProxyManager:
             repo = MetricsRepository(session)
             postgres_proxy_metrics = await repo.get_cumulative_metrics_for_all_proxies()
             postgres_project_metrics = await repo.get_cumulative_project_metrics()
+            postgres_tunnel_peer_metrics = await repo.get_cumulative_tunnel_peer_metrics()
 
         # Hydrate proxy metrics
         for proxy_id, proxy in self._proxies.items():
@@ -784,6 +834,16 @@ class ProxyManager:
             MetricDelta.summed(
                 postgres_project_metrics.get(project_id), redis_project_metrics.get(project_id)
             ).set_on(project)
+
+        # Tunnel device totals, rebuilt whole: a device deleted since the last
+        # hydration drops out here rather than lingering as a stale total.
+        redis_tunnel_peer_metrics = await self._redis_client.get_all_tunnel_peer_metrics()
+        self._tunnel_peer_totals = {
+            peer_id: TunnelPeerMetricDelta.summed(
+                postgres_tunnel_peer_metrics.get(peer_id), redis_tunnel_peer_metrics.get(peer_id)
+            )
+            for peer_id in postgres_tunnel_peer_metrics.keys() | redis_tunnel_peer_metrics.keys()
+        }
 
         # Restore quarantine state from Redis
         await self._rate_limiter.hydrate_from_redis(list(self._proxies.keys()))
@@ -933,6 +993,7 @@ class ProxyManager:
         self._pending_proxy_deltas.clear()
         self._pending_project_deltas.clear()
         self._pending_connector_deltas.clear()
+        self._pending_tunnel_peer_deltas.clear()
 
         await self.full_reload()
         logger.info(
@@ -981,19 +1042,22 @@ class ProxyManager:
             not self._pending_proxy_deltas
             and not self._pending_project_deltas
             and not self._pending_connector_deltas
+            and not self._pending_tunnel_peer_deltas
         ):
             return False
 
         proxy_deltas = self._pending_proxy_deltas
         project_deltas = self._pending_project_deltas
         connector_deltas = self._pending_connector_deltas
+        tunnel_peer_deltas = self._pending_tunnel_peer_deltas
         self._pending_proxy_deltas = {}
         self._pending_project_deltas = {}
         self._pending_connector_deltas = {}
+        self._pending_tunnel_peer_deltas = {}
 
         try:
             await self._redis_client.flush_metric_deltas(
-                proxy_deltas, project_deltas, connector_deltas
+                proxy_deltas, project_deltas, connector_deltas, tunnel_peer_deltas
             )
         except Exception:
             logger.warning(
@@ -1006,6 +1070,8 @@ class ProxyManager:
                 self._pending_project_deltas.setdefault(pid, MetricDelta()).merge(d)
             for cid, d in connector_deltas.items():
                 self._pending_connector_deltas.setdefault(cid, MetricDelta()).merge(d)
+            for peer_id, td in tunnel_peer_deltas.items():
+                self._pending_tunnel_peer_deltas.setdefault(peer_id, TunnelPeerMetricDelta()).merge(td)
             # Still a working cycle: there was a batch, and the retry carries
             # it. Only an empty buffer counts as idle.
             return True
@@ -1015,7 +1081,7 @@ class ProxyManager:
         # message below, so every instance updates its in-memory view
         # at the same logical moment instead of the local one leading
         # peers between request handling and propagation.
-        self._apply_peer_metric_deltas(proxy_deltas, project_deltas)
+        self._apply_peer_metric_deltas(proxy_deltas, project_deltas, tunnel_peer_deltas)
         # Our own connector bytes were counted as they happened; they only
         # change column, from unflushed to known.
         self._traffic_limiter.mark_flushed(connector_deltas)
@@ -1027,6 +1093,7 @@ class ProxyManager:
                     "proxy_deltas": MetricDelta.dump_many(proxy_deltas),
                     "project_deltas": MetricDelta.dump_many(project_deltas),
                     "connector_deltas": MetricDelta.dump_many(connector_deltas),
+                    "tunnel_peer_deltas": MetricDelta.dump_many(tunnel_peer_deltas),
                 }
             )
             await self._redis_client.client.publish(METRIC_DELTAS_CHANNEL, payload)
@@ -1100,6 +1167,7 @@ class ProxyManager:
                             self._apply_peer_metric_deltas(
                                 MetricDelta.parse_many(payload.get("proxy_deltas")),
                                 MetricDelta.parse_many(payload.get("project_deltas")),
+                                TunnelPeerMetricDelta.parse_many(payload.get("tunnel_peer_deltas")),
                             )
                             await self._traffic_limiter.apply_peer(
                                 MetricDelta.parse_many(payload.get("connector_deltas"))
@@ -1118,8 +1186,14 @@ class ProxyManager:
         self,
         proxy_deltas: dict[str, MetricDelta],
         project_deltas: dict[str, MetricDelta],
+        tunnel_peer_deltas: dict[str, TunnelPeerMetricDelta],
     ) -> None:
-        """Fold peer deltas into local in-memory counters."""
+        """Fold peer deltas into local in-memory counters.
+
+        Tunnel devices carry the request shape plus two counters of their
+        own (see ``TunnelPeerMetricDelta``), which is why their batch has its
+        own type; it is applied the same way, into the running totals.
+        """
         for proxy_id, delta in proxy_deltas.items():
             proxy = self._proxies.get(proxy_id)
             if proxy is not None:
@@ -1128,6 +1202,8 @@ class ProxyManager:
             project = self._projects.get(project_id)
             if project is not None:
                 delta.apply_to(project)
+        for peer_id, peer_delta in tunnel_peer_deltas.items():
+            self._tunnel_peer_totals.setdefault(peer_id, TunnelPeerMetricDelta()).merge(peer_delta)
 
     async def reload_project(self, project_id: str) -> None:
         """Re-read a project from Postgres into the cache.
@@ -1269,6 +1345,8 @@ class ProxyManager:
             "pending_proxy_deltas": len(self._pending_proxy_deltas),
             "pending_project_deltas": len(self._pending_project_deltas),
             "pending_connector_deltas": len(self._pending_connector_deltas),
+            "pending_tunnel_peer_deltas": len(self._pending_tunnel_peer_deltas),
+            "tunnel_peer_totals": len(self._tunnel_peer_totals),
             "quarantined_proxies": self._rate_limiter.active_quarantine_count,
             "traffic_blocked_connectors": self._traffic_limiter.blocked_count,
         }

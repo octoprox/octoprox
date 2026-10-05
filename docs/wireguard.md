@@ -62,10 +62,10 @@ flowchart LR
     end
 
     relay -->|CONNECT by name| pool["Project's upstream pool"]
-    redis[("Redis<br/>fake-IP mapping<br/>peer status")]
+    redis[("Redis<br/>fake-IP mapping<br/>live peer status<br/>metrics window")]
     dns <--> redis
     tp <--> redis
-    pg[("Postgres<br/>server key pair<br/>peers")]
+    pg[("Postgres<br/>server key pair<br/>peers, last sightings<br/>device metrics history")]
     pg -.->|load, change feed| iface
 ```
 
@@ -74,7 +74,7 @@ flowchart LR
 3. **Every TCP connection becomes a CONNECT.** nftables redirects all TCP leaving the tunnel to a local transparent listener. The listener reads the original destination back from the socket, turns a fake address into its name (or, for a literal address the device had from elsewhere, reads the name from the TLS ClientHello or the HTTP `Host` header), selects an upstream proxy for the peer's project, and relays bytes. Only the proxy pool is reachable through the tunnel; nothing is forwarded.
 4. **UDP other than DNS is rejected**, not dropped. The ICMP unreachable makes a browser's QUIC attempt fail immediately and fall back to TCP instead of waiting out a timeout.
 
-The same code paths serve the proxy port and the tunnel: proxy selection, exit preflight, traffic metering, the MITM handler (when the project has interception on and the connection is TLS) and the completion events that feed the metrics. A device's traffic shows up in the project's and connectors' counters like any other.
+The same code paths serve the proxy port and the tunnel: proxy selection, exit preflight, traffic metering, the MITM handler (when the project has interception on and the connection is TLS) and the completion events that feed the metrics. A device's traffic shows up in the project's and connectors' counters like any other, and in the device's own: every connection is also metered against the device it came from, so each device has the same history a connector has (see [Metrics]({{ site.baseurl }}/metrics)).
 
 ## Enabling the endpoint
 
@@ -149,7 +149,12 @@ The device gets the next free address of the subnet. Open it to see its configur
 
 The config sends everything into the tunnel (`AllowedIPs = 0.0.0.0/0, ::/0`) and uses the gateway as DNS. Both are required for the scheme above to work; a split tunnel that routes only some destinations through WireGuard would still send all DNS to the gateway and get fake addresses for names it then tries to reach directly.
 
-Each device's row shows whether it is **online** (a handshake within the last three minutes), when it last handshaked, from where, and how many bytes have crossed the tunnel. Every instance carrying the tunnel publishes these counters to Redis every ten seconds and the views merge them, so they are visible from any instance and correct when several instances carry sessions.
+### What a device shows
+
+Each device's row shows whether it is **online** (a handshake within the last three minutes), when it last handshaked and from where, and how much traffic the pool has relayed for it. Two different things are behind those numbers:
+
+- **Where the device stands** comes from the WireGuard interface on the instance carrying its session. Every carrying instance publishes what its interface knows to Redis every ten seconds and the views merge them, so the status is right whichever instance answers and when several instances carry sessions. A handshake newer than the device's row knows is also written to the row, so when a device was last seen, and from where, survives the carrying instance restarting (its interface starts from zero) and is there when nothing is carrying the device at all; the device panel says *on record* when that is what it is showing. The interface's own byte counters (wire bytes, handshakes and DNS included) are shown while an instance carries the device, labelled as such.
+- **What the device's traffic amounted to** is metered on the proxy path: every connection a device opens is counted against the device as well as against the proxy, the connector and the project, with the same completion events, the same bytes-as-they-flow metering and the same history pipeline. Each device has totals (connections, bytes up and down, success rate, time to connect) that are cluster-wide and survive restarts, and a history at the same ranges and compaction tiers as a connector's, charted in the device panel and served by `GET /projects/{id}/wireguard/peers/{id}/metrics/history`. Removing a device removes its history; a project's retention applies to its devices' history as to the rest.
 
 ### Disabling, rotating, removing
 
@@ -165,7 +170,7 @@ The scheme above depends on the device asking the tunnel resolver. A device that
 
 - **Firefox's canary.** Firefox asks the network resolver for `use-application-dns.net` before enabling DoH and keeps plain DNS when the answer is NXDOMAIN. The tunnel resolver answers it that way.
 - **Encrypted resolvers are closed** (`tunnel.block_encrypted_dns`, on by default): connections to port 853 and to the well-known public DoH resolvers (Google, Cloudflare, Quad9, NextDNS, AdGuard, OpenDNS and others) are closed instead of relayed, so a client in automatic mode falls back to the tunnel resolver. Chrome only upgrades to DoH when the system resolver is a known public one, which the tunnel gateway is not. Android's automatic Private DNS probes the gateway for DoT, finds none and uses plain DNS. A device with an **explicit** Private DNS hostname is the case this cannot fix: with port 853 closed it has no DNS at all. Set Private DNS to automatic or off on tunnel devices, or turn the block off.
-- **The degradation is counted.** Each device shows how many of its connections were routed by address and how many encrypted-DNS connections were closed, and the WireGuard settings page shows the totals for the answering instance. Both count since the carrying instance started. A device with a growing "routed by address" number is resolving somewhere else, or speaking a protocol without a name.
+- **The degradation is counted.** Each device shows how many of its connections were routed by address and how many encrypted-DNS connections were closed. Both ride the device's metrics: they are cluster-wide, survive restarts and have history (the device's chart can show them per interval), and the WireGuard settings page shows the totals over every device. A device with a growing "routed by address" number is resolving somewhere else, or speaking a protocol without a name.
 
 ## In a cluster
 
@@ -183,7 +188,7 @@ flowchart LR
     lb -->|A| r1["Replica 1<br/>wg0 + listener"]
     lb -->|B| r2["Replica 2<br/>wg0 + listener"]
     lb -->|C| r3["Replica 3<br/>wg0 + listener"]
-    r1 & r2 & r3 --> shared[("Postgres: key pair, peers<br/>Redis: fake-IP mapping, peer status")]
+    r1 & r2 & r3 --> shared[("Postgres: key pair, peers, device history<br/>Redis: fake-IP mapping, live status, metrics window")]
     r1 & r2 & r3 --> pool["Upstream proxy pool"]
 ```
 
@@ -198,4 +203,4 @@ flowchart LR
 
 ## API
 
-See the [API reference](api#wireguard) for the settings and peer endpoints.
+See the [API reference](api#wireguard) for the settings, peer and device history endpoints.

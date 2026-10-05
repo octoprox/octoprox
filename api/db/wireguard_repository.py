@@ -5,15 +5,20 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+from datetime import datetime
 from typing import Any
 
-from sqlalchemy import delete, select
+from sqlalchemy import DateTime, String, column, delete, or_, select, update, values
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.core import utc_now
-from api.db.models import WireGuardPeerModel, WireGuardSettingsModel
+from api.db.models import TunnelPeerMetricsModel, WireGuardPeerModel, WireGuardSettingsModel
 from api.models.wireguard import WireGuardPeer, WireGuardServerSettings
+
+# One handshake sighting: (peer id, when, the endpoint it came from).
+Sighting = tuple[str, datetime, str | None]
 
 
 class WireGuardSettingsRepository:
@@ -124,10 +129,48 @@ class WireGuardPeerRepository:
         return peer
 
     async def delete(self, peer_id: str) -> bool:
+        """Delete the device and its metrics history (no foreign key links the two, see the model)."""
         result = await self._session.execute(
             delete(WireGuardPeerModel).where(WireGuardPeerModel.id == peer_id)
         )
+        await self._session.execute(
+            delete(TunnelPeerMetricsModel).where(TunnelPeerMetricsModel.peer_id == peer_id)
+        )
         return bool(result.rowcount and result.rowcount > 0)  # type: ignore[attr-defined]
+
+    async def record_last_seen(self, sightings: Sequence[Sighting]) -> int:
+        """Advance devices' last handshakes in one statement; the number of rows that moved.
+
+        One ``UPDATE ... FROM (VALUES ...)`` for the whole batch, so a
+        carrier's status tick costs one round trip however many devices
+        handshaked. A row holding a newer handshake, or no row at all, is
+        left alone and not counted: several instances may carry a device in
+        turn, and whichever saw the latest handshake wins, so the column
+        only ever moves forward. Operational data: ``version`` is not
+        bumped, and ``updated_at`` is pinned to its current value to keep
+        its ``onupdate`` hook from firing (a sighting is not an edit).
+        """
+        if not sightings:
+            return 0
+        seen = values(
+            column("id", String), column("handshake_at", DateTime), column("endpoint", String), name="seen"
+        ).data(list(sightings))
+        result = await self._session.execute(
+            update(WireGuardPeerModel)
+            .where(WireGuardPeerModel.id == seen.c.id)
+            .where(
+                or_(
+                    WireGuardPeerModel.last_handshake_at.is_(None),
+                    WireGuardPeerModel.last_handshake_at < seen.c.handshake_at,
+                )
+            )
+            .values(
+                last_handshake_at=seen.c.handshake_at,
+                last_endpoint=seen.c.endpoint,
+                updated_at=WireGuardPeerModel.updated_at,
+            )
+        )
+        return int(result.rowcount or 0)  # type: ignore[attr-defined]
 
     @staticmethod
     def _to_domain(model: WireGuardPeerModel) -> WireGuardPeer:
@@ -144,6 +187,8 @@ class WireGuardPeerRepository:
             country=model.country,
             state=model.state,
             city=model.city,
+            last_handshake_at=model.last_handshake_at,
+            last_endpoint=model.last_endpoint,
             created_at=model.created_at,
             updated_at=model.updated_at,
         )

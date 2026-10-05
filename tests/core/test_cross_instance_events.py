@@ -796,3 +796,60 @@ class TestAdditiveHandlers:
             assert manager.get_project(project.id) is None
         finally:
             await manager.stop()
+
+
+class TestTunnelPeerDeltas:
+    """Tunnel devices ride the same pipeline: pending delta, Redis hash, pub/sub, running totals."""
+
+    async def test_device_requests_flush_and_fold_into_totals(
+        self,
+        started_proxy_manager: ProxyManager,
+        redis_client: RedisClient,
+    ) -> None:
+        from api.core.signals import tunnel_encrypted_dns_blocked, tunnel_name_unresolved
+        from api.core.stats import TunnelPeerMetricDelta
+        from api.db.redis import TUNNEL_PEER_METRICS_KEY
+
+        manager = started_proxy_manager
+        # A request from a device of a project this instance may not even
+        # cache: the device is counted regardless of the proxy lookup.
+        await manager._handle_request_stats(
+            proxy_id="unknown", project_id="unknown", success=True, latency_ms=50.0,
+            bytes_sent=10, bytes_received=20, peer_id="device-1",
+        )
+        manager._record_traffic_progress("unknown", "unknown", "unknown", "device-1", 5, 5)
+        await tunnel_name_unresolved.send_async(None, peer_id="device-1")
+        await tunnel_encrypted_dns_blocked.send_async(None, peer_id="device-1")
+        await tunnel_encrypted_dns_blocked.send_async(None, peer_id="device-1")
+        pending = manager._pending_tunnel_peer_deltas["device-1"]
+        assert pending == TunnelPeerMetricDelta(
+            request_count=1, success_count=1, latency_sum_ms=50.0, bytes_sent=15, bytes_received=25,
+            by_address=1, encrypted_dns_blocked=2,
+        )
+        assert manager.tunnel_peer_metrics("device-1") == TunnelPeerMetricDelta()
+
+        await manager._flush_pending_metrics()
+        assert "device-1" not in manager._pending_tunnel_peer_deltas
+        data = await redis_client.client.hgetall(TUNNEL_PEER_METRICS_KEY.format(peer_id="device-1"))
+        assert int(data["request_count"]) == 1 and int(data["by_address"]) == 1
+        assert int(data["encrypted_dns_blocked"]) == 2 and int(data["bytes_sent"]) == 15
+        assert await redis_client.get_tunnel_peer_metrics("device-1") == pending
+        assert manager.tunnel_peer_metrics("device-1") == pending
+
+        # A peer instance's flush lands in the same totals.
+        payload = json.dumps({
+            "instance_id": "peer-instance",
+            "proxy_deltas": {},
+            "project_deltas": {},
+            "tunnel_peer_deltas": {"device-1": {"request_count": 2, "failure_count": 2, "latency_sum_ms": 10.0, "by_address": 4}},
+        })
+        await redis_client.client.publish(METRIC_DELTAS_CHANNEL, payload)
+        assert await _wait_until(lambda: manager.tunnel_peer_metrics("device-1").request_count == 3)
+        totals = manager.tunnel_peer_metrics("device-1")
+        assert (totals.failure_count, totals.by_address, totals.encrypted_dns_blocked) == (2, 5, 2)
+        assert totals.avg_latency_ms == pytest.approx(20.0)
+
+        # Hydration rebuilds the totals from Postgres history plus the Redis window.
+        await manager._hydrate_from_redis()
+        assert manager.tunnel_peer_metrics("device-1") == pending
+        await redis_client.reset_tunnel_peer_metrics("device-1")

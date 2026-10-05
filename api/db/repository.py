@@ -10,7 +10,7 @@ from sqlalchemy import delete, exists, func, insert, literal, or_, select, text,
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.core import utc_now
-from api.core.stats import MetricDelta
+from api.core.stats import MetricDelta, TunnelPeerMetricDelta
 from api.db.models import (
     ConnectorMetricsModel,
     ConnectorModel,
@@ -22,7 +22,9 @@ from api.db.models import (
     ProxyMetricsModel,
     ProxyModel,
     SystemMetricsModel,
+    TunnelPeerMetricsModel,
     UserModel,
+    WireGuardPeerModel,
 )
 from api.geo.models import ConflictRule, GeoSourceKind, LocationPolicy, PreflightMode
 from api.models.connector import Connector
@@ -478,7 +480,7 @@ class ProxyRepository:
 
 
 def _totals_from_row(row: Any) -> MetricDelta:
-    """The additive batch shape from a cumulative-totals row (see the queries above)."""
+    """The additive batch shape from a cumulative-totals row (see ``_cumulative_total_columns``)."""
     return MetricDelta(
         request_count=int(row.total_requests or 0),
         success_count=int(row.total_successes or 0),
@@ -498,7 +500,30 @@ def _strip_tz(dt: datetime) -> datetime:
     return dt.replace(tzinfo=None) if dt.tzinfo else dt
 
 
-_MetricsModel = type[ProjectMetricsModel] | type[ProxyMetricsModel] | type[ConnectorMetricsModel]
+_MetricsModel = (
+    type[ProjectMetricsModel] | type[ProxyMetricsModel] | type[ConnectorMetricsModel] | type[TunnelPeerMetricsModel]
+)
+
+# Where each tunnel protocol keeps its devices: the table a device id is looked
+# up in when its metrics are flushed, and whose ``project_id`` the history row
+# copies. A new tunnel protocol registers its table here and gets history,
+# compaction and retention for its devices with nothing else to write.
+TUNNEL_PEER_TABLES: dict[str, type[WireGuardPeerModel]] = {"wireguard": WireGuardPeerModel}
+
+
+def _cumulative_total_columns(model: _MetricsModel) -> list[Any]:
+    """The all-time totals of a metrics table, labelled as ``_totals_from_row`` reads them.
+
+    Latency comes back as the weighted sum so the batches add.
+    """
+    return [
+        func.sum(model.request_count).label("total_requests"),
+        func.sum(model.success_count).label("total_successes"),
+        func.sum(model.failure_count).label("total_failures"),
+        func.sum(model.avg_latency_ms * model.request_count).label("weighted_latency_sum"),
+        func.sum(model.bytes_sent).label("total_bytes_sent"),
+        func.sum(model.bytes_received).label("total_bytes_received"),
+    ]
 
 
 def _bucket_expressions(
@@ -536,6 +561,31 @@ def _metrics_aggregate_columns(model: _MetricsModel) -> list[Any]:
         func.sum(model.bytes_sent).label("bytes_sent"),
         func.sum(model.bytes_received).label("bytes_received"),
     ]
+
+
+def _tunnel_peer_aggregate_columns() -> list[Any]:
+    """The standard aggregates plus the two per-device name-resolution counters."""
+    model = TunnelPeerMetricsModel
+    return [
+        *_metrics_aggregate_columns(model),
+        func.sum(model.by_address).label("by_address"),
+        func.sum(model.encrypted_dns_blocked).label("encrypted_dns_blocked"),
+    ]
+
+
+def _tunnel_peer_row(timestamp: datetime, row: Any) -> dict[str, Any]:
+    """One history point of a device, from a raw row or an aggregate row."""
+    return {
+        "timestamp": timestamp,
+        "request_count": int(row.request_count or 0),
+        "success_count": int(row.success_count or 0),
+        "failure_count": int(row.failure_count or 0),
+        "avg_latency_ms": float(row.avg_latency_ms or 0),
+        "bytes_sent": int(row.bytes_sent or 0),
+        "bytes_received": int(row.bytes_received or 0),
+        "connections_by_address": int(row.by_address or 0),
+        "encrypted_dns_blocked": int(row.encrypted_dns_blocked or 0),
+    }
 
 
 class MetricsRepository:
@@ -815,17 +865,7 @@ class MetricsRepository:
         window. Latency comes back as the weighted sum so the batches add.
         """
         query = (
-            select(
-                ProxyMetricsModel.proxy_id,
-                func.sum(ProxyMetricsModel.request_count).label("total_requests"),
-                func.sum(ProxyMetricsModel.success_count).label("total_successes"),
-                func.sum(ProxyMetricsModel.failure_count).label("total_failures"),
-                func.sum(
-                    ProxyMetricsModel.avg_latency_ms * ProxyMetricsModel.request_count
-                ).label("weighted_latency_sum"),
-                func.sum(ProxyMetricsModel.bytes_sent).label("total_bytes_sent"),
-                func.sum(ProxyMetricsModel.bytes_received).label("total_bytes_received"),
-            )
+            select(ProxyMetricsModel.proxy_id, *_cumulative_total_columns(ProxyMetricsModel))
             .group_by(ProxyMetricsModel.proxy_id)
         )
         result = await self._session.execute(query)
@@ -934,17 +974,7 @@ class MetricsRepository:
     async def get_cumulative_project_metrics(self) -> dict[str, MetricDelta]:
         """Each project's totals across all its snapshots, keyed by project id (see the proxy variant)."""
         query = (
-            select(
-                ProjectMetricsModel.project_id,
-                func.sum(ProjectMetricsModel.request_count).label("total_requests"),
-                func.sum(ProjectMetricsModel.success_count).label("total_successes"),
-                func.sum(ProjectMetricsModel.failure_count).label("total_failures"),
-                func.sum(
-                    ProjectMetricsModel.avg_latency_ms * ProjectMetricsModel.request_count
-                ).label("weighted_latency_sum"),
-                func.sum(ProjectMetricsModel.bytes_sent).label("total_bytes_sent"),
-                func.sum(ProjectMetricsModel.bytes_received).label("total_bytes_received"),
-            )
+            select(ProjectMetricsModel.project_id, *_cumulative_total_columns(ProjectMetricsModel))
             .group_by(ProjectMetricsModel.project_id)
         )
         result = await self._session.execute(query)
@@ -1128,6 +1158,168 @@ class MetricsRepository:
         )
         result = await self._session.execute(query)
         return [row[0] for row in result.all()]
+
+    # Tunnel device metrics methods
+
+    async def save_tunnel_peer_metrics_snapshot(self, peer_id: str, delta: TunnelPeerMetricDelta) -> bool:
+        """Save one device's window; False when no tunnel protocol knows the device any more.
+
+        The device's table is not known here (each protocol has its own), so
+        the insert is tried against each registered table: ``INSERT ...
+        SELECT`` from the device's row, which also supplies the protocol and
+        the project the history row carries. At most one table has the id.
+        """
+        table = TunnelPeerMetricsModel.__table__
+        values: dict[str, Any] = {
+            "peer_id": peer_id,
+            "timestamp": utc_now(),
+            "request_count": delta.request_count,
+            "success_count": delta.success_count,
+            "failure_count": delta.failure_count,
+            "avg_latency_ms": delta.avg_latency_ms,
+            "bytes_sent": delta.bytes_sent,
+            "bytes_received": delta.bytes_received,
+            "by_address": delta.by_address,
+            "encrypted_dns_blocked": delta.encrypted_dns_blocked,
+        }
+        columns = [*values, "protocol", "project_id"]
+        for protocol, peer_model in TUNNEL_PEER_TABLES.items():
+            source = select(
+                *[literal(value, type_=table.c[name].type).label(name) for name, value in values.items()],
+                literal(protocol, type_=table.c.protocol.type).label("protocol"),
+                peer_model.project_id.label("project_id"),
+            ).where(peer_model.id == peer_id)
+            result = await self._session.execute(insert(TunnelPeerMetricsModel).from_select(columns, source))
+            if result.rowcount:  # type: ignore[attr-defined]
+                return True
+        return False
+
+    async def get_cumulative_tunnel_peer_metrics(self) -> dict[str, TunnelPeerMetricDelta]:
+        """Each device's totals across all its rows, keyed by device id (see the proxy variant)."""
+        model = TunnelPeerMetricsModel
+        query = (
+            select(
+                model.peer_id,
+                *_cumulative_total_columns(model),
+                func.sum(model.by_address).label("total_by_address"),
+                func.sum(model.encrypted_dns_blocked).label("total_encrypted_dns_blocked"),
+            )
+            .group_by(model.peer_id)
+        )
+        result = await self._session.execute(query)
+        totals: dict[str, TunnelPeerMetricDelta] = {}
+        for row in result.all():
+            base = _totals_from_row(row)
+            totals[row.peer_id] = TunnelPeerMetricDelta(
+                **base.to_dict(),
+                by_address=int(row.total_by_address or 0),
+                encrypted_dns_blocked=int(row.total_encrypted_dns_blocked or 0),
+            )
+        return totals
+
+    async def get_tunnel_peer_metrics_history(
+        self,
+        project_id: str,
+        peer_id: str,
+        since: datetime | None = None,
+        limit: int = 100,
+        granularity: int = 60,
+    ) -> list[dict[str, Any]]:
+        """A device's history at one granularity, newest first.
+
+        Scoped by project as well as device so a route can answer for a
+        device of its project without consulting the protocol's directory.
+        """
+        model = TunnelPeerMetricsModel
+        query = select(model).where(
+            model.project_id == project_id,
+            model.peer_id == peer_id,
+            model.granularity == granularity,
+        )
+        if since:
+            query = query.where(model.timestamp >= since)
+        query = query.order_by(model.timestamp.desc()).limit(limit)
+        result = await self._session.execute(query)
+        return [_tunnel_peer_row(m.timestamp, m) for m in result.scalars().all()]
+
+    async def get_tunnel_peer_metrics_history_aggregated(
+        self,
+        project_id: str,
+        peer_id: str,
+        since: datetime,
+        bucket_seconds: int,
+    ) -> list[dict[str, Any]]:
+        """A device's history in fixed buckets, newest first (see the project variant)."""
+        model = TunnelPeerMetricsModel
+        bucket_epoch, bucket_ts = _bucket_expressions(model, bucket_seconds)
+        query = (
+            select(bucket_ts, *_tunnel_peer_aggregate_columns())
+            .where(model.project_id == project_id)
+            .where(model.peer_id == peer_id)
+            .where(model.timestamp >= since)
+            .where(model.granularity <= bucket_seconds)
+            .group_by(bucket_epoch)
+            .order_by(bucket_epoch.desc())
+        )
+        result = await self._session.execute(query)
+        return [_tunnel_peer_row(row.bucket_ts, row) for row in result.all()]
+
+    async def compact_tunnel_peer_metrics(
+        self,
+        project_id: str,
+        older_than: datetime,
+        source_granularity: int,
+        target_granularity: int,
+    ) -> int:
+        """Compact every device of a project from source to target granularity.
+
+        One statement for the whole project rather than one per device: the
+        rows carry the project, so the aggregate groups by device as well as
+        by bucket. Returns the number of source rows deleted.
+        """
+        model = TunnelPeerMetricsModel
+        bucket_epoch, bucket_ts = _bucket_expressions(model, target_granularity)
+        base_filter = [
+            model.project_id == project_id,
+            model.granularity == source_granularity,
+            model.timestamp < older_than,
+        ]
+        query = (
+            select(model.peer_id, model.protocol, bucket_ts, *_tunnel_peer_aggregate_columns())
+            .where(*base_filter)
+            .group_by(model.peer_id, model.protocol, bucket_epoch)
+        )
+        result = await self._session.execute(query)
+        buckets = result.all()
+        if not buckets:
+            return 0
+        for row in buckets:
+            self._session.add(TunnelPeerMetricsModel(
+                peer_id=row.peer_id,
+                protocol=row.protocol,
+                project_id=project_id,
+                timestamp=_strip_tz(row.bucket_ts),
+                request_count=row.request_count,
+                success_count=row.success_count,
+                failure_count=row.failure_count,
+                avg_latency_ms=float(row.avg_latency_ms or 0),
+                bytes_sent=row.bytes_sent,
+                bytes_received=row.bytes_received,
+                by_address=row.by_address,
+                encrypted_dns_blocked=row.encrypted_dns_blocked,
+                granularity=target_granularity,
+            ))
+        del_result = await self._session.execute(delete(model).where(*base_filter))
+        await self._session.flush()
+        return int(del_result.rowcount or 0)  # type: ignore[attr-defined]
+
+    async def delete_tunnel_peer_metrics_older_than(self, project_id: str, older_than: datetime) -> int:
+        """Delete a project's device history older than the timestamp."""
+        model = TunnelPeerMetricsModel
+        result = await self._session.execute(
+            delete(model).where(model.project_id == project_id).where(model.timestamp < older_than)
+        )
+        return int(result.rowcount or 0)  # type: ignore[attr-defined]
 
 
 # Gauge columns carried through the history endpoints, in chart order. Kept in

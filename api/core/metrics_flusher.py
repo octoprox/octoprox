@@ -77,14 +77,20 @@ class MetricsFlusher:
             await lease.release()
 
     async def _flush_metrics(self) -> None:
-        """Flush all proxy and project metrics from Redis to Postgres."""
+        """Flush all proxy, project, connector and tunnel device metrics from Redis to Postgres."""
         # Get all metrics from Redis
         all_proxy_metrics = await self._redis_client.get_all_proxy_metrics()
         all_project_metrics = await self._redis_client.get_all_project_metrics()
         all_connector_metrics = await self._redis_client.get_all_connector_metrics()
+        all_tunnel_peer_metrics = await self._redis_client.get_all_tunnel_peer_metrics()
         all_statuses = await self._redis_client.get_all_proxy_statuses()
 
-        if not all_proxy_metrics and not all_project_metrics and not all_connector_metrics:
+        if (
+            not all_proxy_metrics
+            and not all_project_metrics
+            and not all_connector_metrics
+            and not all_tunnel_peer_metrics
+        ):
             logger.debug("No metrics to flush")
             return
 
@@ -93,6 +99,7 @@ class MetricsFlusher:
             proxy_count=len(all_proxy_metrics),
             project_count=len(all_project_metrics),
             connector_count=len(all_connector_metrics),
+            tunnel_peer_count=len(all_tunnel_peer_metrics),
         )
 
         # Every hash is cleared once the transaction is committed, whether its
@@ -101,6 +108,7 @@ class MetricsFlusher:
         flushed_proxies: list[str] = []
         flushed_projects: list[str] = []
         flushed_connectors: list[str] = []
+        flushed_tunnel_peers: list[str] = []
         async with self._session_factory() as session:
             repo = MetricsRepository(session)
 
@@ -151,6 +159,12 @@ class MetricsFlusher:
                     logger.warning("Dropping metrics of a connector that no longer exists", connector_id=connector_id)
                 flushed_connectors.append(connector_id)
 
+            for peer_id, peer_metrics in all_tunnel_peer_metrics.items():
+                kept = await repo.save_tunnel_peer_metrics_snapshot(peer_id, peer_metrics)
+                if not kept:
+                    logger.warning("Dropping metrics of a tunnel device that no longer exists", peer_id=peer_id)
+                flushed_tunnel_peers.append(peer_id)
+
             await session.commit()
 
         for proxy_id in flushed_proxies:
@@ -159,12 +173,15 @@ class MetricsFlusher:
             await self._redis_client.reset_project_metrics(project_id)
         for connector_id in flushed_connectors:
             await self._redis_client.reset_connector_metrics(connector_id)
+        for peer_id in flushed_tunnel_peers:
+            await self._redis_client.reset_tunnel_peer_metrics(peer_id)
 
         logger.info(
             "Metrics flush complete",
             proxy_count=len(all_proxy_metrics),
             project_count=len(all_project_metrics),
             connector_count=len(all_connector_metrics),
+            tunnel_peer_count=len(all_tunnel_peer_metrics),
         )
 
     def stop(self) -> None:

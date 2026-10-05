@@ -111,9 +111,13 @@ name. Two things to know:
 
 Each carrying replica publishes its peer status to Redis and the admin
 views merge them, so the device list is correct whichever replica a device
-is currently talking to. The endpoint a device appears to connect from is
-nginx's address, since nginx proxies the datagrams. See
-[WireGuard Devices](wireguard).
+is currently talking to; the newest handshake is also written to the
+device's row, so where a device was last seen survives the replica
+restarting. A device's traffic is metered on the proxy path of whichever
+replica relays it and flows into the shared metrics pipeline, so its totals
+and history are cluster-wide like a connector's. The endpoint a device
+appears to connect from is nginx's address, since nginx proxies the
+datagrams. See [WireGuard Devices](wireguard).
 
 ## What does *not* scale by adding instances
 

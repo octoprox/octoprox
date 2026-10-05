@@ -115,7 +115,15 @@ class TestPeers:
         listed = authenticated_client.get(url).json()
         assert listed["total"] == 2 and listed["server_configured"] is True
         assert [p["name"] for p in listed["peers"]] == ["Living room TV", "Router"]
-        assert listed["peers"][0]["status"] is None  # nobody is carrying the tunnel in tests
+        # Nobody is carrying the tunnel in tests: no live reading, never seen, nothing counted yet.
+        status = listed["peers"][0]["status"]
+        assert status["live"] is False and status["online"] is False and status["last_handshake_at"] is None
+        assert listed["peers"][0]["metrics"]["request_count"] == 0
+
+        history = authenticated_client.get(f"{url}/{peer['id']}/metrics/history", params={"range": "7d"})
+        assert history.status_code == 200 and history.json() == {"snapshots": []}
+        assert authenticated_client.get(f"{url}/{peer['id']}/metrics/history", params={"range": "1y"}).status_code == 422
+        assert authenticated_client.get(f"{url}/nope/metrics/history").status_code == 404
 
         got = authenticated_client.get(f"{url}/{peer['id']}")
         assert got.status_code == 200 and got.json()["name"] == "Living room TV"

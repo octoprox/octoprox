@@ -5,6 +5,7 @@
 
 import time
 from collections.abc import Iterable
+from dataclasses import fields
 from functools import lru_cache
 from typing import Any
 
@@ -12,7 +13,7 @@ import redis.asyncio as redis
 import structlog
 
 from api.core import utc_now
-from api.core.stats import MetricDelta
+from api.core.stats import MetricDelta, TunnelPeerMetricDelta
 from api.models.proxy import ProxyStatus
 
 logger = structlog.get_logger()
@@ -36,6 +37,10 @@ return 0
 PROXY_METRICS_KEY = "proxy:metrics:{proxy_id}"
 PROJECT_METRICS_KEY = "project:metrics:{project_id}"
 CONNECTOR_METRICS_KEY = "connector:metrics:{connector_id}"
+# Per tunnel device (any protocol), the fourth hash in the metrics pipeline;
+# carries the two name-resolution counters as well (TunnelPeerMetricDelta).
+TUNNEL_PEER_METRICS_KEY = "tunnel_peer:metrics:{peer_id}"
+TUNNEL_PEER_METRICS_SCAN = "tunnel_peer:metrics:*"
 # Set while a connector takes no requests because its traffic limit was
 # reached (api.core.traffic_limiter). The value is the epoch second the
 # current period ends, which is also the key's expiry: a block never
@@ -107,6 +112,7 @@ REDIS_KEY_GROUPS: tuple[tuple[str, str], ...] = (
     ("proxy:requests:", "Rate-limit windows"),
     ("project:metrics:", "Project metrics"),
     ("connector:metrics:", "Connector metrics"),
+    ("tunnel_peer:metrics:", "Tunnel device metrics"),
     ("connector:traffic_blocked:", "Traffic limits"),
     ("sticky:", "Sticky bindings"),
     ("session:", "Sessions"),
@@ -280,6 +286,7 @@ class RedisClient:
         proxy_deltas: dict[str, MetricDelta],
         project_deltas: dict[str, MetricDelta],
         connector_deltas: dict[str, MetricDelta] | None = None,
+        tunnel_peer_deltas: dict[str, TunnelPeerMetricDelta] | None = None,
     ) -> None:
         """Apply batched per-entity metric deltas in a single pipeline.
 
@@ -290,7 +297,8 @@ class RedisClient:
         longer pays a Redis round-trip per request.
         """
         connector_deltas = connector_deltas or {}
-        if not proxy_deltas and not project_deltas and not connector_deltas:
+        tunnel_peer_deltas = tunnel_peer_deltas or {}
+        if not proxy_deltas and not project_deltas and not connector_deltas and not tunnel_peer_deltas:
             return
         now = utc_now().isoformat()
         pipe = self.client.pipeline()
@@ -303,6 +311,9 @@ class RedisClient:
         for connector_id, d in connector_deltas.items():
             key = CONNECTOR_METRICS_KEY.format(connector_id=connector_id)
             self._pipeline_metric_delta(pipe, key, d, now)
+        for peer_id, d in tunnel_peer_deltas.items():
+            key = TUNNEL_PEER_METRICS_KEY.format(peer_id=peer_id)
+            self._pipeline_metric_delta(pipe, key, d, now)
         await pipe.execute()
 
     @staticmethod
@@ -311,26 +322,27 @@ class RedisClient:
     ) -> None:
         """Queue HINCRBY/HINCRBYFLOAT ops for one entity onto a Redis pipeline.
 
-        Zero-valued fields are skipped so we don't emit no-op writes.
+        The hash fields are the delta's fields (so a subclass's extra
+        counters travel too). The command follows the field's declared
+        type, not the value's: an int-valued float field must still go
+        through HINCRBYFLOAT, or Redis rejects it once the hash field
+        holds a fraction and the whole pipeline fails. Zero-valued fields
+        are skipped so we don't emit no-op writes.
         """
-        if delta.request_count:
-            pipe.hincrby(key, "request_count", delta.request_count)
-        if delta.success_count:
-            pipe.hincrby(key, "success_count", delta.success_count)
-        if delta.failure_count:
-            pipe.hincrby(key, "failure_count", delta.failure_count)
-        if delta.latency_sum_ms:
-            pipe.hincrbyfloat(key, "latency_sum_ms", delta.latency_sum_ms)
-        if delta.bytes_sent:
-            pipe.hincrby(key, "bytes_sent", delta.bytes_sent)
-        if delta.bytes_received:
-            pipe.hincrby(key, "bytes_received", delta.bytes_received)
+        for f in fields(delta):
+            value = getattr(delta, f.name)
+            if not value:
+                continue
+            if f.type is float:
+                pipe.hincrbyfloat(key, f.name, value)
+            else:
+                pipe.hincrby(key, f.name, value)
         pipe.hset(key, "updated_at", now_iso)
 
     async def get_proxy_metrics(self, proxy_id: str) -> MetricDelta | None:
         """Get proxy metrics from Redis."""
         key = PROXY_METRICS_KEY.format(proxy_id=proxy_id)
-        return self._read_metrics_hash(await self.client.hgetall(key))  # type: ignore[misc]
+        return self._read_metrics_hash(await self.client.hgetall(key), MetricDelta)  # type: ignore[misc]
 
     async def get_all_proxy_metrics(self) -> dict[str, MetricDelta]:
         """Get all proxy metrics from Redis."""
@@ -381,7 +393,7 @@ class RedisClient:
     async def get_project_metrics(self, project_id: str) -> MetricDelta | None:
         """Get project-level metrics from Redis."""
         key = PROJECT_METRICS_KEY.format(project_id=project_id)
-        return self._read_metrics_hash(await self.client.hgetall(key))  # type: ignore[misc]
+        return self._read_metrics_hash(await self.client.hgetall(key), MetricDelta)  # type: ignore[misc]
 
     async def get_all_project_metrics(self) -> dict[str, MetricDelta]:
         """Get all project-level metrics from Redis."""
@@ -403,7 +415,7 @@ class RedisClient:
     async def get_connector_metrics(self, connector_id: str) -> MetricDelta | None:
         """Get connector-level metrics from Redis."""
         key = CONNECTOR_METRICS_KEY.format(connector_id=connector_id)
-        return self._read_metrics_hash(await self.client.hgetall(key))  # type: ignore[misc]
+        return self._read_metrics_hash(await self.client.hgetall(key), MetricDelta)  # type: ignore[misc]
 
     async def get_all_connector_metrics(self) -> dict[str, MetricDelta]:
         """Get all connector-level metrics from Redis."""
@@ -420,19 +432,35 @@ class RedisClient:
         key = CONNECTOR_METRICS_KEY.format(connector_id=connector_id)
         await self.client.delete(key)
 
+    # Tunnel device metrics: the same hash layout, one per device of any
+    # tunnel protocol, drained by the leader into tunnel_peer_metrics.
+    async def get_tunnel_peer_metrics(self, peer_id: str) -> TunnelPeerMetricDelta | None:
+        key = TUNNEL_PEER_METRICS_KEY.format(peer_id=peer_id)
+        return self._read_metrics_hash(await self.client.hgetall(key), TunnelPeerMetricDelta)  # type: ignore[misc]
+
+    async def get_all_tunnel_peer_metrics(self) -> dict[str, TunnelPeerMetricDelta]:
+        metrics = {}
+        async for key in self.client.scan_iter(match=TUNNEL_PEER_METRICS_SCAN):
+            peer_id = (key if isinstance(key, str) else key.decode()).split(":", 2)[2]
+            m = await self.get_tunnel_peer_metrics(peer_id)
+            if m:
+                metrics[peer_id] = m
+        return metrics
+
+    async def reset_tunnel_peer_metrics(self, peer_id: str) -> None:
+        """Reset a device's metrics after flushing to Postgres, or when the device goes."""
+        await self.client.delete(TUNNEL_PEER_METRICS_KEY.format(peer_id=peer_id))
+
     @staticmethod
-    def _read_metrics_hash(data: dict[str, Any]) -> MetricDelta | None:
-        """Decode one metrics hash into the additive batch shape, None for an absent key."""
+    def _read_metrics_hash[D: MetricDelta](data: dict[str, Any], shape: type[D]) -> D | None:
+        """Decode one metrics hash into the additive batch shape, None for an absent key.
+
+        Hash values are strings; ``from_dict`` converts them. Fields the
+        hash lacks (a peer on an older version wrote it) read as zero.
+        """
         if not data:
             return None
-        return MetricDelta(
-            request_count=int(data.get("request_count", 0)),
-            success_count=int(data.get("success_count", 0)),
-            failure_count=int(data.get("failure_count", 0)),
-            latency_sum_ms=float(data.get("latency_sum_ms", 0)),
-            bytes_sent=int(data.get("bytes_sent", 0)),
-            bytes_received=int(data.get("bytes_received", 0)),
-        )
+        return shape.from_dict({k: v for k, v in data.items() if k != "updated_at"})
 
     # Traffic limit block state (api.core.traffic_limiter)
     async def set_connector_traffic_blocked(self, connector_id: str, until_epoch: float) -> None:

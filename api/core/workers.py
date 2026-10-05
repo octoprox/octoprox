@@ -98,8 +98,9 @@ WORKERS: dict[WorkerName, WorkerInfo] = {
         "Probes the proxies this instance owns and publishes their status",
     ),
     WorkerName.METRICS_FLUSHER: WorkerInfo(
-        "Turns the Redis request counters into permanent Postgres history rows, "
-        "then resets them - the Redis-to-Postgres half of the metrics pipeline",
+        "Turns the Redis request counters (proxies, projects, connectors, tunnel "
+        "devices) into permanent Postgres history rows, then resets them - the "
+        "Redis-to-Postgres half of the metrics pipeline",
         lease=LeaseName.METRICS_FLUSHER,
         lease_label="Metrics flush to Postgres",
     ),
@@ -161,7 +162,8 @@ WORKERS: dict[WorkerName, WorkerInfo] = {
     ),
     WorkerName.WIREGUARD_STATUS_PUBLISHER: WorkerInfo(
         "Publishes each WireGuard peer's handshake and transfer counters from the "
-        "tunnel interface this instance carries, so every instance can show them",
+        "tunnel interface this instance carries, so every instance can show them, "
+        "and records new handshakes on the peer rows so last sightings survive restarts",
     ),
 }
 

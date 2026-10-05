@@ -162,8 +162,8 @@ function StatusCard({ status }: { status: WireGuardStatus }) {
         <Row label="Devices" value={`${status.peers_enabled} enabled of ${status.peers_total}`} />
         <Row label="Online now" value={status.peers_online} />
         <Row label="Open tunnels" value={status.active_connections} />
-        <Row label="Routed by address" value={status.connections_by_address} />
-        <Row label="Encrypted DNS" value={status.block_encrypted_dns ? `blocked (${status.encrypted_dns_blocked})` : 'allowed'} />
+        <Row label="Routed by address" value={status.connections_by_address} title="Connections of every device, all time, relayed by address because no destination name could be recovered. Each device's own count is on its row." />
+        <Row label="Encrypted DNS" value={status.block_encrypted_dns ? `blocked (${status.encrypted_dns_blocked})` : 'allowed'} title="Encrypted-DNS connections closed so devices keep the tunnel resolver: every device, all time." />
       </dl>
       <div className="mt-4 flex items-start gap-2 text-xs text-fg-muted">
         <Router className="w-4 h-4 flex-none mt-0.5" />
@@ -173,11 +173,11 @@ function StatusCard({ status }: { status: WireGuardStatus }) {
   )
 }
 
-function Row({ label, value, mono }: { label: string; value: string | number; mono?: boolean }) {
+function Row({ label, value, mono, title }: { label: string; value: string | number; mono?: boolean; title?: string }) {
   return (
     <>
-      <dt className="text-fg-muted">{label}</dt>
-      <dd className={mono ? 'font-mono text-xs truncate text-right' : 'text-right tabular-nums'} title={String(value)}>{value}</dd>
+      <dt className="text-fg-muted" title={title}>{label}</dt>
+      <dd className={mono ? 'font-mono text-xs truncate text-right' : 'text-right tabular-nums'} title={title ?? String(value)}>{value}</dd>
     </>
   )
 }

@@ -253,6 +253,44 @@ class ConnectorMetricsModel(Base):
     granularity: Mapped[int] = mapped_column(Integer, default=60, nullable=False)
 
 
+class TunnelPeerMetricsModel(Base):
+    """Historical per-device metrics for tunnel devices (flushed from Redis).
+
+    One table for every tunnel protocol: the data plane meters a device's
+    requests without knowing which protocol it arrived through, so its history
+    is keyed by the device id with the protocol alongside, and ``project_id``
+    (copied from the device's row at flush time) carries retention and the
+    project cascade. There is no foreign key to the device: each protocol
+    keeps its devices in its own table, and a device's rows are deleted with
+    it by its repository. Same shape and compaction tiers as the other
+    metrics tables, plus the two name-resolution signals the transparent
+    listener counts per device.
+    """
+
+    __tablename__ = "tunnel_peer_metrics"
+    __table_args__ = (
+        Index("ix_tunnel_peer_metrics_peer_granularity_ts", "peer_id", "granularity", "timestamp"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    peer_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    protocol: Mapped[str] = mapped_column(String(16), nullable=False)
+    project_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    timestamp: Mapped[datetime] = mapped_column(DateTime, default=utc_now, index=True)
+
+    request_count: Mapped[int] = mapped_column(Integer, default=0)
+    success_count: Mapped[int] = mapped_column(Integer, default=0)
+    failure_count: Mapped[int] = mapped_column(Integer, default=0)
+    avg_latency_ms: Mapped[float] = mapped_column(Float, default=0.0)
+    bytes_sent: Mapped[int] = mapped_column(BigInteger, default=0)
+    bytes_received: Mapped[int] = mapped_column(BigInteger, default=0)
+    by_address: Mapped[int] = mapped_column(Integer, default=0, nullable=False, server_default="0")
+    encrypted_dns_blocked: Mapped[int] = mapped_column(Integer, default=0, nullable=False, server_default="0")
+    granularity: Mapped[int] = mapped_column(Integer, default=60, nullable=False)
+
+
 class SystemMetricsModel(Base):
     """Periodic install-wide gauge readings, for the admin trend charts.
 
@@ -382,6 +420,13 @@ class WireGuardPeerModel(Base):
     country: Mapped[str | None] = mapped_column(String(2), nullable=True)
     state: Mapped[str | None] = mapped_column(String(8), nullable=True)
     city: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    # When the device last completed a handshake and from where, as the
+    # instance carrying its session last recorded it. Operational, not
+    # definition: written by the status publisher, never by an edit, and
+    # kept across restarts of the carrying instance (whose interface
+    # counters start from zero).
+    last_handshake_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    last_endpoint: Mapped[str | None] = mapped_column(String(64), nullable=True)
     version: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now, onupdate=utc_now)

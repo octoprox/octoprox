@@ -16,13 +16,14 @@ from __future__ import annotations
 import asyncio
 import socket
 import sys
-from collections import Counter
 from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 import structlog
 
+from api.core.event_bus import event_bus
 from api.core.proxy_server import ProxyServer
+from api.core.signals import tunnel_encrypted_dns_blocked, tunnel_name_unresolved
 from api.models.project import MitmMode
 from api.tunnel.dns import FakeIpDirectory
 from api.tunnel.peers import PeerLookup
@@ -102,13 +103,6 @@ class TransparentProxyServer(ProxyServer):
         self._sniff_timeout = sniff_timeout
         self._block_encrypted_dns = block_encrypted_dns
         self.unknown_peers = 0
-        # Degradation signals, per peer id, since this process started. A
-        # connection "by address" is one whose destination name could not be
-        # recovered from the fake-IP mapping or the stream: it is relayed by
-        # address, so domain filters see an address and the exit may differ
-        # from the one that resolved it.
-        self.by_address: Counter[str] = Counter()
-        self.encrypted_dns_blocked: Counter[str] = Counter()
 
     @property
     def is_listening(self) -> bool:
@@ -210,7 +204,8 @@ class TransparentProxyServer(ProxyServer):
             if self._block_encrypted_dns and (dst_port == DOT_PORT or target_host in ENCRYPTED_DNS_HOSTS):
                 # Let the device fall back to the tunnel resolver rather than
                 # resolve elsewhere and connect to addresses we cannot name.
-                self.encrypted_dns_blocked[peer.id] += 1
+                # Counted on the device, in the same pipeline as its requests.
+                await event_bus.publish(tunnel_encrypted_dns_blocked, self, peer_id=peer.id)
                 logger.info(
                     "Blocked encrypted DNS from a tunnel device", peer=peer.name, target=target_host or dst_ip, port=dst_port
                 )
@@ -221,8 +216,10 @@ class TransparentProxyServer(ProxyServer):
                     # stream did not repeat the name: nowhere real to send it.
                     logger.info("Fake IP without a name, dropping", peer=peer.name, address=dst_ip)
                     return
+                # Relayed by address: domain filters see an address and the
+                # exit may differ from the one that resolved the name.
                 target_host = dst_ip
-                self.by_address[peer.id] += 1
+                await event_bus.publish(tunnel_name_unresolved, self, peer_id=peer.id)
             session_id = peer.session_id
             location = peer.location
             logger.debug(
@@ -253,6 +250,7 @@ class TransparentProxyServer(ProxyServer):
                 # The peeked ClientHello is in the reader, not the socket; the
                 # TLS upgrade has to be fed it or it waits forever.
                 client_head=take_buffered(client_reader) if use_mitm else b"",
+                peer_id=peer.id,
             )
         except asyncio.CancelledError:
             raise

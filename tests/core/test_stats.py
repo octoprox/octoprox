@@ -5,7 +5,7 @@
 
 from dataclasses import dataclass
 
-from api.core.stats import MetricDelta
+from api.core.stats import MetricDelta, TunnelPeerMetricDelta
 
 
 @dataclass
@@ -196,3 +196,32 @@ class TestApplyTo:
         assert target.avg_latency_ms == 100.0
         assert target.bytes_sent == 0
         assert target.bytes_received == 0
+
+
+class TestTunnelPeerMetricDelta:
+    """The device shape: the request fields plus the two name-resolution counters."""
+
+    def test_extra_counters_travel_on_the_wire(self) -> None:
+        d = TunnelPeerMetricDelta(by_address=2, encrypted_dns_blocked=1)
+        d.add_request(success=True, latency_ms=20.0, bytes_sent=5, bytes_received=9)
+        wire = TunnelPeerMetricDelta.dump_many({"dev": d})
+        assert wire["dev"]["by_address"] == 2 and wire["dev"]["encrypted_dns_blocked"] == 1
+        assert wire["dev"]["request_count"] == 1 and wire["dev"]["bytes_received"] == 9
+        parsed = TunnelPeerMetricDelta.parse_many(wire)
+        assert parsed == {"dev": d}
+        assert isinstance(parsed["dev"], TunnelPeerMetricDelta)
+
+    def test_merge_and_sum_include_the_extras(self) -> None:
+        a = TunnelPeerMetricDelta(request_count=1, success_count=1, latency_sum_ms=10.0, by_address=1)
+        b = TunnelPeerMetricDelta(request_count=1, failure_count=1, latency_sum_ms=30.0, encrypted_dns_blocked=4)
+        total = TunnelPeerMetricDelta.summed(a, None, b)
+        assert isinstance(total, TunnelPeerMetricDelta)
+        assert (total.request_count, total.by_address, total.encrypted_dns_blocked) == (2, 1, 4)
+        assert total.avg_latency_ms == 20.0
+        # A plain delta merges its own fields and leaves the extras alone.
+        total.merge(MetricDelta(bytes_sent=7))
+        assert (total.bytes_sent, total.by_address) == (7, 1)
+
+    def test_older_wire_form_reads_extras_as_zero(self) -> None:
+        parsed = TunnelPeerMetricDelta.from_dict({"request_count": "3", "bytes_sent": "9"})
+        assert parsed == TunnelPeerMetricDelta(request_count=3, bytes_sent=9)

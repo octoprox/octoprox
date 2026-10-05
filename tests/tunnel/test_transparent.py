@@ -4,13 +4,16 @@
 """A tunnel connection from a peer ends up as a CONNECT through the project's upstream."""
 
 import asyncio
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterator
 from dataclasses import dataclass, field
 from datetime import datetime
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from blinker import Signal
 
+from api.core.signals import request_completed, tunnel_encrypted_dns_blocked, tunnel_name_unresolved
 from api.core.traffic_limiter import TrafficMeter
 from api.models.location import LocationTarget
 from api.models.project import Project
@@ -66,6 +69,17 @@ class _NoLimit:
         pass
 
 
+class _MeterFactory:
+    """Stands in for ``ProxyManager.traffic_meter``, remembering what each meter was asked for."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+
+    def __call__(self, proxy: Proxy, project_id: str, **kwargs: Any) -> TrafficMeter:
+        self.calls.append(((proxy, project_id), kwargs))
+        return TrafficMeter(_NoLimit(), proxy.id, project_id, proxy.connector_id, kwargs.get("peer_id"))  # type: ignore[arg-type]
+
+
 PROJECT = Project(id="proj", name="TVs", username="tv", password="pw")
 
 
@@ -100,6 +114,36 @@ async def upstream() -> AsyncIterator[_ConnectProxy]:
     await proxy.stop()
 
 
+class _Received:
+    """Every emission of a signal while the test runs; the listener reports through signals, not counters."""
+
+    def __init__(self, signal: Signal) -> None:
+        self.signal = signal
+        self.calls: list[dict[str, Any]] = []
+
+    async def _receive(self, _sender: object, **kwargs: Any) -> None:
+        self.calls.append(kwargs)
+
+    def __enter__(self) -> "_Received":
+        self.signal.connect(self._receive)
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        self.signal.disconnect(self._receive)
+
+
+@pytest.fixture
+def name_unresolved() -> Iterator[_Received]:
+    with _Received(tunnel_name_unresolved) as received:
+        yield received
+
+
+@pytest.fixture
+def encrypted_dns() -> Iterator[_Received]:
+    with _Received(tunnel_encrypted_dns_blocked) as received:
+        yield received
+
+
 def _server(upstream: _ConnectProxy, destination: tuple[str, int] | None, pool: FakeIpPool, peers: AddressDirectory[_Peer]) -> tuple[TransparentProxyServer, MagicMock]:
     manager = MagicMock()
     manager.get_project.return_value = PROJECT
@@ -107,7 +151,7 @@ def _server(upstream: _ConnectProxy, destination: tuple[str, int] | None, pool: 
     manager.select_proxy_for_project = AsyncMock(return_value=proxy)
     manager.are_all_proxies_quarantined = AsyncMock(return_value=False)
     manager.traffic_limit_status.return_value = None
-    manager.traffic_meter = lambda p, project_id: TrafficMeter(_NoLimit(), p.id, project_id, p.connector_id)  # type: ignore[arg-type]
+    manager.traffic_meter = _MeterFactory()
     server = TransparentProxyServer(
         manager, peers, FakeIpDirectory(pool), port=0,
         destination_of=lambda writer: destination, sniff_timeout=0.2,
@@ -134,13 +178,20 @@ async def test_fake_ip_destination_is_connected_by_name(upstream: _ConnectProxy)
     server, manager = _server(upstream, (fake, 8443), pool, peers)
     await server.listen("127.0.0.1")
     try:
-        assert await _roundtrip(server, b"hello tunnel") == b"hello tunnel"
+        with _Received(request_completed) as completed:
+            assert await _roundtrip(server, b"hello tunnel") == b"hello tunnel"
+            await server.stop()
     finally:
         await server.stop()
     assert upstream.targets == ["media.example.net:8443"]
     manager.select_proxy_for_project.assert_awaited_once_with(
         "proj", "sofa", "media.example.net", LocationTarget(country="DE")
     )
+    # The completion event names the device, so the request is metered on it
+    # as well as on the proxy, connector and project; so is the meter.
+    assert [c["peer_id"] for c in completed.calls] == [PEER.id]
+    assert completed.calls[0]["success"] is True and completed.calls[0]["project_id"] == "proj"
+    assert server._proxy_manager.traffic_meter.calls[0][1]["peer_id"] == PEER.id
 
 
 @pytest.mark.asyncio
@@ -236,7 +287,7 @@ async def test_expired_fake_ip_without_name_is_dropped(upstream: _ConnectProxy) 
 
 
 @pytest.mark.asyncio
-async def test_encrypted_dns_is_closed_and_counted(upstream: _ConnectProxy) -> None:
+async def test_encrypted_dns_is_closed_and_counted(upstream: _ConnectProxy, encrypted_dns: _Received) -> None:
     pool = FakeIpPool("198.18.0.0/15")
     fake_doh = str(pool.ip_for("dns.google"))
     peers = PeerDirectory()
@@ -262,7 +313,7 @@ async def test_encrypted_dns_is_closed_and_counted(upstream: _ConnectProxy) -> N
     finally:
         await server2.stop()
     assert upstream.targets == []
-    assert server.encrypted_dns_blocked[PEER.id] == 1 and server2.encrypted_dns_blocked[PEER.id] == 1
+    assert encrypted_dns.calls == [{"peer_id": PEER.id}, {"peer_id": PEER.id}]
     manager.select_proxy_for_project.assert_not_awaited()
 
 
@@ -283,7 +334,7 @@ async def test_encrypted_dns_passes_when_blocking_is_off(upstream: _ConnectProxy
 
 
 @pytest.mark.asyncio
-async def test_by_address_connections_are_counted(upstream: _ConnectProxy) -> None:
+async def test_by_address_connections_are_counted(upstream: _ConnectProxy, name_unresolved: _Received) -> None:
     pool = FakeIpPool("198.18.0.0/15")
     peers = PeerDirectory()
     peers.put(PEER)
@@ -298,4 +349,4 @@ async def test_by_address_connections_are_counted(upstream: _ConnectProxy) -> No
         writer.close()
     finally:
         await server.stop()
-    assert server.by_address[PEER.id] == 1
+    assert name_unresolved.calls == [{"peer_id": PEER.id}]

@@ -142,6 +142,9 @@ class CacheStats(BaseModel):
     pending_proxy_deltas: int = 0
     pending_project_deltas: int = 0
     pending_connector_deltas: int = 0
+    pending_tunnel_peer_deltas: int = 0
+    # Tunnel devices with a running metrics total on this instance.
+    tunnel_peer_totals: int = 0
     quarantined_proxies: int = 0
     traffic_blocked_connectors: int = 0
     tls_contexts: int = 0

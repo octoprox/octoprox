@@ -50,6 +50,7 @@ from api.db.models import (
     ProviderDescriptorModel,
     ProxyMetricsModel,
     ProxyModel,
+    TunnelPeerMetricsModel,
     UserModel,
     WireGuardPeerModel,
     WireGuardSettingsModel,
@@ -109,6 +110,8 @@ _ENTITY_SPECS: tuple[_EntitySpec, ...] = (
     # reference projects, so they come after them (and here is after).
     _EntitySpec("wireguard_settings", WireGuardSettingsModel),
     _EntitySpec("wireguard_peers", WireGuardPeerModel),
+    # Device history for every tunnel protocol: after the devices it describes.
+    _EntitySpec("tunnel_peer_metrics", TunnelPeerMetricsModel, is_metric=True, preserve_id=False),
 )
 
 

@@ -21,6 +21,7 @@ from pydantic import BaseModel, Field, ValidationInfo, field_validator, model_va
 
 from api.core import utc_now
 from api.models.location import LocationTarget, normalize_level
+from api.models.tunnel import TunnelPeerMetrics
 from api.wireguard import keys
 
 # Reserved RFC 2544 benchmarking range, the conventional pool for synthetic
@@ -155,7 +156,8 @@ class WireGuardStatus(BaseModel):
     peers_total: int = 0
     peers_enabled: int = 0
     peers_online: int = 0
-    # Degradation signals on this instance since it started (see docs/wireguard.md).
+    # Degradation signals summed over every device, all time, cluster-wide
+    # (see docs/wireguard.md); each device's own numbers are in its metrics.
     connections_by_address: int = 0
     encrypted_dns_blocked: int = 0
     block_encrypted_dns: bool = True
@@ -192,6 +194,11 @@ class WireGuardPeer(BaseModel):
     country: str | None = None
     state: str | None = None
     city: str | None = None
+    # When the device last handshaked and from where, as persisted by the
+    # instance that carried the session (see WireGuardPeerModel). Live
+    # readings are merged over these in the API.
+    last_handshake_at: datetime | None = None
+    last_endpoint: str | None = None
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
 
@@ -268,17 +275,25 @@ class WireGuardPeerUpdate(BaseModel):
 
 
 class WireGuardPeerStatus(BaseModel):
-    """Live state of one device, as the instance carrying its session last published it."""
+    """Where a device stands: its last handshake, and the tunnel counters while it is carried.
+
+    ``last_handshake_at`` and ``endpoint`` come from the instance carrying
+    the session when one is publishing, else from what was persisted the
+    last time one did, so a device's last sighting survives a restart.
+    ``rx_bytes`` / ``tx_bytes`` are the interface's own counters on the
+    current carrier since its interface came up: wire bytes, handshakes
+    and DNS included, zero when nothing is carrying the device. What the
+    device's traffic amounted to is in its metrics (``TunnelPeerMetrics``).
+    """
 
     online: bool = False
     last_handshake_at: datetime | None = None
+    endpoint: str | None = None
+    # True when a carrying instance published this reading within the last
+    # half minute; False when it is the persisted last sighting.
+    live: bool = False
     rx_bytes: int = 0
     tx_bytes: int = 0
-    endpoint: str | None = None
-    # Connections relayed by address because no name could be recovered, and
-    # encrypted-DNS connections closed, both since the carrying instance started.
-    connections_by_address: int = 0
-    encrypted_dns_blocked: int = 0
 
 
 class WireGuardPeerResponse(BaseModel):
@@ -296,7 +311,10 @@ class WireGuardPeerResponse(BaseModel):
     city: str | None
     created_at: datetime
     updated_at: datetime
-    status: WireGuardPeerStatus | None = None
+    status: WireGuardPeerStatus
+    # The device's totals, from the same pipeline as the project's and the
+    # connectors' counters: history plus the current window, cluster-wide.
+    metrics: TunnelPeerMetrics
 
 
 class WireGuardPeerListResponse(BaseModel):

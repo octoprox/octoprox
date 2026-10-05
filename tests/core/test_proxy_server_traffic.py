@@ -34,7 +34,9 @@ class StubLimiter:
     def limit_status_for(self, connector_id: str) -> int:
         return 509
 
-    def progress(self, proxy_id: str, project_id: str, connector_id: str, sent: int, received: int) -> None:
+    def progress(
+        self, proxy_id: str, project_id: str, connector_id: str, peer_id: str | None, sent: int, received: int
+    ) -> None:
         self.reports.append((sent, received))
 
 

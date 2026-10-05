@@ -178,6 +178,19 @@ class MetricsCompactor:
                     await session.commit()
                     total += count
 
+            # Tunnel device metrics carry the project, so one pass covers
+            # every device of the project whatever protocol it uses.
+            async with self._session_factory() as session:
+                repo = MetricsRepository(session)
+                count = await repo.compact_tunnel_peer_metrics(
+                    project_id=project_id,
+                    older_than=cutoff,
+                    source_granularity=source_gran,
+                    target_granularity=target_gran,
+                )
+                await session.commit()
+                total += count
+
         return total
 
     async def _apply_retention(
@@ -208,6 +221,7 @@ class MetricsCompactor:
             total += await repo.delete_connector_metrics_for_project_older_than(
                 project_id, cutoff
             )
+            total += await repo.delete_tunnel_peer_metrics_older_than(project_id, cutoff)
             await session.commit()
 
         return total

@@ -7,19 +7,21 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { ColumnDef } from '@tanstack/react-table'
 import { Check, Copy, Download, KeyRound, Plus, Router, Trash2 } from 'lucide-react'
 import { QRCodeSVG } from 'qrcode.react'
+import { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts'
 import {
-  createWireGuardPeer, deleteWireGuardPeer, fetchWireGuardPeerConfig, fetchWireGuardPeers,
+  createWireGuardPeer, deleteWireGuardPeer, fetchWireGuardPeerConfig, fetchWireGuardPeerMetricsHistory, fetchWireGuardPeers,
   rotateWireGuardPeerKeys, updateWireGuardPeer,
-  WireGuardPeer, WireGuardPeerCreate, WireGuardPeerUpdate,
+  TunnelPeerMetricsSnapshot, WireGuardPeer, WireGuardPeerCreate, WireGuardPeerUpdate,
 } from '../api/client'
 import { useProject } from '../contexts/ProjectContext'
 import { useAuth } from '../contexts/AuthContext'
+import { useTheme } from '../contexts/ThemeContext'
 import { useToast } from '../contexts/ToastContext'
 import { DataTable } from '../components/DataTable'
 import { Page, EmptyState } from '../components/layout/Page'
-import { formatBytes, formatDateTime, parseApiDate } from '../utils/format'
+import { formatBytes, formatDateTime, parseApiDate, plural } from '../utils/format'
 import {
-  Alert, Badge, Button, ConfirmDialog, InfoTip, Input, Inspector, InspectorSection, KeyValue, Label,
+  Alert, Badge, Button, ConfirmDialog, InfoTip, Input, Inspector, InspectorSection, KeyValue, Label, Segmented,
 } from '../components/ui'
 
 type PanelState = { kind: 'edit'; id: string } | { kind: 'new' } | null
@@ -93,12 +95,15 @@ export default function WireGuardPage() {
     {
       id: 'traffic',
       header: 'Traffic',
-      size: 150,
-      enableSorting: false,
-      accessorFn: (row: WireGuardPeer) => (row.status ? row.status.rx_bytes + row.status.tx_bytes : 0),
-      cell: ({ row }) => row.original.status
-        ? <span className="text-fg-muted tabular-nums text-xs">{formatBytes(row.original.status.rx_bytes)} in, {formatBytes(row.original.status.tx_bytes)} out</span>
-        : <span className="text-fg-subtle">-</span>,
+      size: 170,
+      accessorFn: (row: WireGuardPeer) => row.metrics.bytes_sent + row.metrics.bytes_received,
+      cell: ({ row }) => {
+        const m = row.original.metrics
+        const total = m.bytes_sent + m.bytes_received
+        return total > 0 || m.request_count > 0
+          ? <span className="text-fg-muted tabular-nums text-xs" title="What the pool relayed for this device, all time">{formatBytes(total)} · {m.request_count} {plural(m.request_count, 'connection', 'connections')}</span>
+          : <span className="text-fg-subtle">-</span>
+      },
     },
     ...(canMutate ? [{
       id: 'actions',
@@ -139,7 +144,7 @@ export default function WireGuardPage() {
   }
 
   const peers = data?.peers ?? []
-  const online = peers.filter((p) => p.status?.online).length
+  const online = peers.filter((p) => p.status.online).length
 
   return (
     <Page
@@ -195,7 +200,6 @@ export default function WireGuardPage() {
 
 function statusLabel(peer: WireGuardPeer): string {
   if (!peer.enabled) return 'Disabled'
-  if (!peer.status) return 'Unknown'
   if (peer.status.online) return 'Online'
   return peer.status.last_handshake_at ? 'Offline' : 'Never connected'
 }
@@ -203,7 +207,7 @@ function statusLabel(peer: WireGuardPeer): string {
 function StatusBadge({ peer }: { peer: WireGuardPeer }) {
   const label = statusLabel(peer)
   const color = label === 'Online' ? 'green' : label === 'Disabled' ? 'gray' : label === 'Offline' ? 'yellow' : 'slate'
-  const seen = peer.status?.last_handshake_at ? parseApiDate(peer.status.last_handshake_at) : null
+  const seen = peer.status.last_handshake_at ? parseApiDate(peer.status.last_handshake_at) : null
   return (
     <span className="inline-flex items-center gap-2" title={seen ? `Last handshake ${seen.toLocaleString()}` : undefined}>
       <Badge color={color}>{label}</Badge>
@@ -395,7 +399,7 @@ function PeerPanel({ peer, serverConfigured, canMutate, onClose, onDelete, onCha
     })
   }
 
-  const seen = peer.status?.last_handshake_at ? formatDateTime(peer.status.last_handshake_at) : 'never'
+  const seen = peer.status.last_handshake_at ? formatDateTime(peer.status.last_handshake_at) : 'never'
 
   return (
     <Inspector
@@ -445,22 +449,28 @@ function PeerPanel({ peer, serverConfigured, canMutate, onClose, onDelete, onCha
       </InspectorSection>
 
       <InspectorSection title="Connection">
-        <KeyValue label="Last handshake" value={seen} />
-        <KeyValue label="From" value={peer.status?.endpoint ?? '-'} mono />
-        <KeyValue label="Received" value={peer.status ? formatBytes(peer.status.rx_bytes) : '-'} />
-        <KeyValue label="Sent" value={peer.status ? formatBytes(peer.status.tx_bytes) : '-'} />
+        <KeyValue label="Last handshake" value={<span title={peer.status.live ? 'As the instance carrying the tunnel reports it right now' : 'The last sighting on record; no instance is reporting this device right now'}>{seen}{peer.status.last_handshake_at && !peer.status.live ? <span className="text-fg-subtle"> · on record</span> : null}</span>} />
+        <KeyValue label="From" value={peer.status.endpoint ?? '-'} mono />
+        <KeyValue
+          label="Tunnel counters"
+          value={peer.status.live
+            ? <span title="The carrying instance's interface counters since it came up: wire bytes, handshakes and DNS included">{formatBytes(peer.status.rx_bytes)} in, {formatBytes(peer.status.tx_bytes)} out</span>
+            : <span className="text-fg-subtle">not carried right now</span>}
+        />
         <KeyValue label="Added" value={formatDateTime(peer.created_at)} />
       </InspectorSection>
 
+      <PeerTrafficSection peer={peer} projectId={selectedProjectId!} />
+
       <InspectorSection title="Name resolution">
         <p className="text-xs text-fg-muted">
-          Connections whose destination name could not be recovered are relayed by address: domain filters see an address and the exit may differ from the one that resolved it. A device resolving names outside the tunnel (encrypted DNS) is the usual cause.
+          Connections whose destination name could not be recovered are relayed by address: domain filters see an address and the exit may differ from the one that resolved it. A device resolving names outside the tunnel (encrypted DNS) is the usual cause. Both counts are all time; the chart above has them per interval.
         </p>
         <KeyValue
           label="Routed by address"
-          value={peer.status ? <span className={peer.status.connections_by_address > 0 ? 'text-warning' : undefined}>{peer.status.connections_by_address}</span> : '-'}
+          value={<span className={peer.metrics.connections_by_address > 0 ? 'text-warning' : undefined}>{peer.metrics.connections_by_address}</span>}
         />
-        <KeyValue label="Encrypted DNS blocked" value={peer.status ? peer.status.encrypted_dns_blocked : '-'} />
+        <KeyValue label="Encrypted DNS blocked" value={peer.metrics.encrypted_dns_blocked} />
       </InspectorSection>
 
       {confirmRotate && (
@@ -474,6 +484,89 @@ function PeerPanel({ peer, serverConfigured, canMutate, onClose, onDelete, onCha
         />
       )}
     </Inspector>
+  )
+}
+
+type ChartRange = '24h' | '7d' | '30d'
+const CHART_RANGES: ChartRange[] = ['24h', '7d', '30d']
+type ChartSeries = 'bytes' | 'connections' | 'by_address'
+const SERIES: { value: ChartSeries; label: string }[] = [
+  { value: 'bytes', label: 'Bytes' }, { value: 'connections', label: 'Connections' }, { value: 'by_address', label: 'Name resolution' },
+]
+
+function tick(epoch: number, range: ChartRange): string {
+  const d = new Date(epoch)
+  if (range === '24h') return d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })
+  return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
+}
+
+function toPoints(snapshots: TunnelPeerMetricsSnapshot[]) {
+  return snapshots.map((s) => ({
+    time: parseApiDate(s.timestamp)?.getTime() ?? 0,
+    bytes: s.bytes_sent + s.bytes_received,
+    connections: s.request_count,
+    // Both name-resolution signals: relayed by address and encrypted DNS closed.
+    by_address: s.connections_by_address + s.encrypted_dns_blocked,
+  }))
+}
+
+/** What the pool relayed for the device: totals and a history chart, from the device's own metrics. */
+function PeerTrafficSection({ peer, projectId }: { peer: WireGuardPeer; projectId: string }) {
+  const { isDark } = useTheme()
+  const [range, setRange] = useState<ChartRange>('24h')
+  const [series, setSeries] = useState<ChartSeries>('bytes')
+  const { data: history } = useQuery({
+    queryKey: ['wireguard-peer-history', projectId, peer.id, range],
+    queryFn: () => fetchWireGuardPeerMetricsHistory(projectId, peer.id, range),
+    refetchInterval: 60_000,
+  })
+  const points = useMemo(() => toPoints(history?.snapshots ?? []), [history])
+  const rangeTotal = useMemo(() => points.reduce((a, p) => a + p[series], 0), [points, series])
+
+  const m = peer.metrics
+  const successRate = m.request_count > 0 ? Math.round((m.success_count / m.request_count) * 100) : null
+  const gridColor = isDark ? '#374151' : '#e5e7eb'
+  const tickColor = '#9ca3af'
+  const tooltipStyle = isDark
+    ? { backgroundColor: '#1f2937', border: '1px solid #374151', color: '#f3f4f6', borderRadius: 8, fontSize: 12 }
+    : { borderRadius: 8, fontSize: 12, border: '1px solid #e5e7eb' }
+  const lineColor = series === 'by_address' ? '#d97706' : '#2563eb'
+  const formatValue = (v: number) => (series === 'bytes' ? formatBytes(v) : String(v))
+  const seriesLabel = SERIES.find((s) => s.value === series)?.label ?? ''
+
+  return (
+    <InspectorSection title="Traffic">
+      <p className="text-xs text-fg-muted">
+        What the pool relayed for this device, counted like any proxy request and kept as history. The totals are cluster-wide and survive restarts; the tunnel's own counters are under Connection.
+      </p>
+      <KeyValue label="Relayed" value={<>{formatBytes(m.bytes_sent + m.bytes_received)} <span className="text-fg-subtle font-normal">· {formatBytes(m.bytes_sent)} up, {formatBytes(m.bytes_received)} down</span></>} />
+      <KeyValue
+        label="Connections"
+        value={<>{m.request_count}{successRate != null && <span className="text-fg-subtle font-normal"> · {successRate}% reached the exit, {Math.round(m.avg_latency_ms)} ms to connect</span>}</>}
+      />
+      <div className="pt-1">
+        <div className="flex items-center justify-between gap-2 mb-1 flex-wrap">
+          <span className="text-xs text-fg-muted tabular-nums">{formatValue(rangeTotal)} over {range}</span>
+          <div className="flex items-center gap-2">
+            <Segmented options={SERIES} value={series} onChange={setSeries} size="sm" />
+            <Segmented options={CHART_RANGES.map((r) => ({ value: r, label: r }))} value={range} onChange={setRange} size="sm" />
+          </div>
+        </div>
+        {points.length === 0 ? (
+          <p className="text-fg-subtle text-xs text-center h-[90px] flex items-center justify-center">No traffic in this range</p>
+        ) : (
+          <ResponsiveContainer width="100%" height={90}>
+            <AreaChart data={points} margin={{ top: 4, right: 4, left: -8, bottom: 0 }}>
+              <CartesianGrid strokeDasharray="2 4" stroke={gridColor} vertical={false} />
+              <XAxis dataKey="time" type="number" scale="time" domain={['dataMin', 'dataMax']} tickFormatter={(v: number) => tick(v, range)} tick={{ fontSize: 10, fill: tickColor }} axisLine={false} tickLine={false} minTickGap={40} />
+              <YAxis tick={{ fontSize: 10, fill: tickColor }} axisLine={false} tickLine={false} tickFormatter={(v: number) => (series === 'bytes' ? formatBytes(v) : String(v))} width={52} allowDecimals={false} />
+              <Tooltip labelFormatter={(v: number) => new Date(v).toLocaleString()} formatter={(v: number) => [formatValue(v), seriesLabel]} contentStyle={tooltipStyle} />
+              <Area type="monotone" dataKey={series} name={seriesLabel} stroke={lineColor} strokeWidth={2} fill={lineColor} fillOpacity={0.08} />
+            </AreaChart>
+          </ResponsiveContainer>
+        )}
+      </div>
+    </InspectorSection>
   )
 }
 

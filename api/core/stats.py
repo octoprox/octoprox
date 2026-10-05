@@ -3,6 +3,7 @@
 
 """Metric batches for proxies, projects and connectors."""
 
+from collections.abc import Mapping
 from dataclasses import dataclass, fields
 from typing import Any, Protocol
 
@@ -87,7 +88,7 @@ class MetricDelta:
         return self.latency_sum_ms / self.request_count if self.request_count else 0.0
 
     @classmethod
-    def summed(cls, *batches: "MetricDelta | None") -> "MetricDelta":
+    def summed[D: "MetricDelta"](cls: type[D], *batches: "MetricDelta | None") -> D:
         """One delta holding the sum of ``batches``; None entries are skipped."""
         total = cls()
         for batch in batches:
@@ -140,7 +141,7 @@ class MetricDelta:
         return {f.name: getattr(self, f.name) for f in fields(self)}
 
     @classmethod
-    def from_dict(cls, raw: Any) -> "MetricDelta":
+    def from_dict[D: "MetricDelta"](cls: type[D], raw: Any) -> D:
         """A delta from its wire form. Missing fields read as zero; wrong types raise.
 
         Raises TypeError for a non-mapping and ValueError for a value that is
@@ -160,19 +161,44 @@ class MetricDelta:
         return delta
 
     @staticmethod
-    def dump_many(deltas: dict[str, "MetricDelta"]) -> dict[str, dict[str, Any]]:
+    def dump_many(deltas: Mapping[str, "MetricDelta"]) -> dict[str, dict[str, Any]]:
         """The wire form of a per-entity batch, for the pub/sub payload."""
         return {entity_id: delta.to_dict() for entity_id, delta in deltas.items()}
 
     @classmethod
-    def parse_many(cls, raw: Any) -> dict[str, "MetricDelta"]:
+    def parse_many[D: "MetricDelta"](cls: type[D], raw: Any) -> dict[str, D]:
         """Per-entity deltas from a pub/sub payload; entries that do not parse are dropped."""
         if not isinstance(raw, dict):
             return {}
-        parsed: dict[str, MetricDelta] = {}
+        parsed: dict[str, D] = {}
         for entity_id, entry in raw.items():
             try:
                 parsed[str(entity_id)] = cls.from_dict(entry)
             except (TypeError, ValueError):
                 continue
         return parsed
+
+
+@dataclass(slots=True)
+class TunnelPeerMetricDelta(MetricDelta):
+    """A tunnel device's batch: the request shape plus the two name-resolution signals.
+
+    A device that resolves names outside the tunnel (encrypted DNS) has its
+    connections relayed by address, and the encrypted-DNS connections
+    themselves are closed. Both are counted per device alongside its
+    requests, in the same pipeline, so they have history and are visible
+    from every instance rather than only on the one carrying the tunnel.
+    The base class's wire form carries the extra fields automatically
+    (``fields`` includes inherited ones); only the sum needs to know them.
+    """
+
+    by_address: int = 0
+    encrypted_dns_blocked: int = 0
+
+    def merge(self, other: MetricDelta) -> None:
+        # Named, not super(): slots=True rebuilds the class, so the zero-argument
+        # form would bind to the class the dataclass decorator threw away.
+        MetricDelta.merge(self, other)
+        if isinstance(other, TunnelPeerMetricDelta):
+            self.by_address += other.by_address
+            self.encrypted_dns_blocked += other.encrypted_dns_blocked

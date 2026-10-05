@@ -879,8 +879,9 @@ function CacheCard({ view }: { view: InstanceView }) {
       <KeyValue label="Geo provisioning locks" value={formatCount(cache.geo_provision_locks)} />
       <KeyValue
         label="Metric deltas awaiting flush"
-        value={`${formatCount(cache.pending_proxy_deltas)} proxy · ${formatCount(cache.pending_project_deltas)} project · ${formatCount(cache.pending_connector_deltas ?? 0)} connector`}
+        value={`${formatCount(cache.pending_proxy_deltas)} proxy · ${formatCount(cache.pending_project_deltas)} project · ${formatCount(cache.pending_connector_deltas ?? 0)} connector · ${formatCount(cache.pending_tunnel_peer_deltas ?? 0)} device`}
       />
+      <KeyValue label="Tunnel device totals" value={formatCount(cache.tunnel_peer_totals ?? 0)} />
     </Card>
   )
 }

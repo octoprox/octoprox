@@ -1651,6 +1651,8 @@ export interface SystemCache {
   pending_proxy_deltas: number
   pending_project_deltas: number
   pending_connector_deltas?: number
+  pending_tunnel_peer_deltas?: number
+  tunnel_peer_totals?: number
   quarantined_proxies: number
   traffic_blocked_connectors?: number
   tls_contexts: number
@@ -1837,9 +1839,9 @@ export interface WireGuardStatus {
   peers_total: number
   peers_enabled: number
   peers_online: number
-  /** Connections relayed by address because no destination name could be recovered, since this instance started. */
+  /** Connections relayed by address because no destination name could be recovered: every device, all time, cluster-wide. */
   connections_by_address: number
-  /** Encrypted-DNS connections (DoT, known DoH resolvers) closed so devices keep the tunnel resolver. */
+  /** Encrypted-DNS connections (DoT, known DoH resolvers) closed so devices keep the tunnel resolver: every device, all time, cluster-wide. */
   encrypted_dns_blocked: number
   block_encrypted_dns: boolean
 }
@@ -1868,11 +1870,34 @@ export interface WireGuardServerSettingsDoc {
 export interface WireGuardPeerStatus {
   online: boolean
   last_handshake_at: string | null
+  endpoint: string | null
+  /** True when an instance carrying the tunnel published this reading in the last half minute; false when it is the persisted last sighting. */
+  live: boolean
+  /** The carrying instance's interface counters since its interface came up (wire bytes, handshakes and DNS included); zero when none is carrying the device. */
   rx_bytes: number
   tx_bytes: number
-  endpoint: string | null
+}
+
+/** A tunnel device's traffic as the pool relayed it: history plus the current window, cluster-wide. */
+export interface TunnelPeerMetrics {
+  request_count: number
+  success_count: number
+  failure_count: number
+  avg_latency_ms: number
+  bytes_sent: number
+  bytes_received: number
+  /** Connections relayed by address because no destination name could be recovered. */
   connections_by_address: number
+  /** Encrypted-DNS connections closed so the device keeps the tunnel resolver. */
   encrypted_dns_blocked: number
+}
+
+export interface TunnelPeerMetricsSnapshot extends TunnelPeerMetrics {
+  timestamp: string
+}
+
+export interface TunnelPeerMetricsHistoryResponse {
+  snapshots: TunnelPeerMetricsSnapshot[]
 }
 
 export interface WireGuardPeer {
@@ -1890,8 +1915,8 @@ export interface WireGuardPeer {
   city: string | null
   created_at: string
   updated_at: string
-  /** Null until the instance carrying the tunnel has published its first reading. */
-  status: WireGuardPeerStatus | null
+  status: WireGuardPeerStatus
+  metrics: TunnelPeerMetrics
 }
 
 export interface WireGuardPeerListResponse {
@@ -1947,3 +1972,6 @@ export const rotateWireGuardPeerKeys = async (projectId: string, peerId: string)
   (await api.post(`/projects/${projectId}/wireguard/peers/${peerId}/rotate-keys`)).data
 export const fetchWireGuardPeerConfig = async (projectId: string, peerId: string): Promise<WireGuardPeerConfig> =>
   (await api.get(`/projects/${projectId}/wireguard/peers/${peerId}/config`)).data
+/** The device's own metrics history: same ranges and tiers as project and connector history. */
+export const fetchWireGuardPeerMetricsHistory = async (projectId: string, peerId: string, range: string): Promise<TunnelPeerMetricsHistoryResponse> =>
+  (await api.get(`/projects/${projectId}/wireguard/peers/${peerId}/metrics/history`, { params: { range } })).data

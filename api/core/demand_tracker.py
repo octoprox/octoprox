@@ -85,6 +85,7 @@ class DemandTracker:
         latency_ms: float,
         bytes_sent: int,
         bytes_received: int,
+        peer_id: str | None = None,
     ) -> None:
         """Handle request completed signal to track demand."""
         await self.record_request(project_id)

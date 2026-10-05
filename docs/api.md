@@ -1098,19 +1098,35 @@ GET /api/v1/projects/{project_id}/wireguard/peers
       "status": {
         "online": true,
         "last_handshake_at": "2026-10-03T09:04:12",
-        "rx_bytes": 1048576,
-        "tx_bytes": 23068672,
         "endpoint": "203.0.113.9:40123",
+        "live": true,
+        "rx_bytes": 1048576,
+        "tx_bytes": 23068672
+      },
+      "metrics": {
+        "request_count": 318,
+        "success_count": 316,
+        "failure_count": 2,
+        "avg_latency_ms": 212.4,
+        "bytes_sent": 904211,
+        "bytes_received": 21874322,
         "connections_by_address": 0,
-        "encrypted_dns_blocked": 0
+        "encrypted_dns_blocked": 1
       }
     }
   ]
 }
 ```
 
-`status` is null until the instance terminating the tunnel has published a
-reading (every ten seconds while it runs).
+`status` is where the device stands. With `live` true it is what an instance
+carrying the tunnel published in the last half minute (every ten seconds
+while it runs), including the interface's own byte counters since that
+instance's interface came up; with `live` false it is the last sighting on
+record, which the carrying instance writes to the device's row whenever a
+newer handshake appears, and the byte counters are zero. `metrics` is what
+the pool relayed for the device: the same counters a connector has, cluster-wide
+and across restarts, plus the two name-resolution signals (see
+[WireGuard Devices](wireguard#encrypted-dns-on-devices)).
 
 ```http
 POST /api/v1/projects/{project_id}/wireguard/peers
@@ -1144,6 +1160,15 @@ POST   /api/v1/projects/{project_id}/wireguard/peers/{peer_id}/rotate-keys
 `PATCH` takes any of `name`, `enabled`, `session_id`, `country`, `state`,
 `city`; an empty string clears the last four. `rotate-keys` issues a new key
 pair (and preshared key, if the device had one).
+
+```http
+GET /api/v1/projects/{project_id}/wireguard/peers/{peer_id}/metrics/history?range=24h
+```
+
+The device's own history, in the shape of `metrics` above plus a
+`timestamp` per snapshot, wrapped as `{"snapshots": [...]}`. Same `range`
+values and bucketing as the project and connector history endpoints
+(`1h`, `6h`, `24h` raw minutes; `7d` hourly; `30d` 6-hourly).
 
 ```http
 GET /api/v1/projects/{project_id}/wireguard/peers/{peer_id}/config

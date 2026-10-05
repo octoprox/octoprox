@@ -21,17 +21,18 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
-import time
-from collections.abc import Coroutine
+from collections.abc import Callable, Coroutine
 from datetime import UTC, datetime
 from typing import Any
 
 import structlog
 
+from api.core import utc_now
 from api.core.config import Settings
 from api.core.event_bus import event_bus
 from api.core.job_stats import job_stats
 from api.core.signals import project_changed, wireguard_peer_changed, wireguard_settings_changed
+from api.core.stats import TunnelPeerMetricDelta
 from api.core.workers import WorkerName
 from api.db.redis import WIREGUARD_STATUS_INTERVAL, RedisClient
 from api.db.session import SessionFactory
@@ -134,6 +135,11 @@ class WireGuardRuntime:
         self.error: str | None = None
         self._tasks: list[asyncio.Task[None]] = []
         self._sync_lock = asyncio.Lock()
+        # A device's traffic totals, by device id. The proxy manager meters
+        # tunnel devices alongside proxies and projects and holds the running
+        # totals; the lifespan points this at it once the manager exists.
+        # Left None where the runtime stands alone, and every total reads zero.
+        self.peer_metrics: Callable[[str], TunnelPeerMetricDelta] | None = None
 
     # --- lifecycle -----------------------------------------------------------------
 
@@ -309,6 +315,12 @@ class WireGuardRuntime:
                 await session.commit()
         removed = self.peers.remove(peer_id) is not None
         await self._sync_interface()
+        if self._redis is not None:
+            # The device's history went with its row; its unflushed window
+            # would otherwise be flushed against a device that is gone (and
+            # dropped there, with a warning).
+            with contextlib.suppress(Exception):
+                await self._redis.reset_tunnel_peer_metrics(peer_id)
         await event_bus.publish(wireguard_peer_changed, self, entity_id=peer_id, op="removed")
         return removed
 
@@ -335,35 +347,65 @@ class WireGuardRuntime:
             await asyncio.sleep(WIREGUARD_STATUS_INTERVAL)
 
     async def _publish_status(self) -> bool:
-        """Push the peer counters to Redis; False when there was nothing to publish."""
+        """Push the peer counters to Redis and persist new handshakes; False when there was nothing to publish.
+
+        The Redis reading is the live view, gone half a minute after this
+        instance stops publishing. A handshake newer than the device's row
+        knows is also written to the row, so when a device was last seen,
+        and from where, survives this instance restarting (which starts the
+        interface's counters from zero) and is visible from every instance.
+        """
         if self._redis is None:
             return False
-        peer_ids = {p.public_key: p.id for p in self.peers.all()}
-        server = self.tunnel.transparent_server
+        by_key = {p.public_key: p for p in self.peers.all()}
         statuses = {}
+        advanced: list[tuple[WireGuardPeer, datetime, str | None]] = []
         for dump in await self.interface.dump():
-            peer_id = peer_ids.get(dump.public_key, "")
             statuses[dump.public_key] = json.dumps(
                 {
                     "latest_handshake": dump.latest_handshake,
                     "rx_bytes": dump.rx_bytes,
                     "tx_bytes": dump.tx_bytes,
                     "endpoint": dump.endpoint,
-                    "connections_by_address": server.by_address.get(peer_id, 0) if server else 0,
-                    "encrypted_dns_blocked": server.encrypted_dns_blocked.get(peer_id, 0) if server else 0,
                 }
             )
+            peer = by_key.get(dump.public_key)
+            if peer is not None and dump.latest_handshake:
+                seen = _naive_utc(dump.latest_handshake)
+                if peer.last_handshake_at is None or peer.last_handshake_at < seen:
+                    advanced.append((peer, seen, dump.endpoint))
         await self._redis.set_wireguard_peer_status(self._config.instance_id, statuses)
+        await self._persist_last_seen(advanced)
         return bool(statuses)
 
+    async def _persist_last_seen(self, advanced: list[tuple[WireGuardPeer, datetime, str | None]]) -> None:
+        """Record handshakes newer than the cached rows know; the cache follows, so the next tick skips them.
+
+        The row only moves forward (see the repository), so two instances
+        carrying the device in turn cannot regress it. The cache is updated
+        after the write: a failed write is retried on the next tick.
+        """
+        if not advanced:
+            return
+        if self._session_factory is not None:
+            async with self._session_factory() as session:
+                await WireGuardPeerRepository(session).record_last_seen(
+                    [(peer.id, seen, endpoint) for peer, seen, endpoint in advanced]
+                )
+                await session.commit()
+        for peer, seen, endpoint in advanced:
+            peer.last_handshake_at = seen
+            peer.last_endpoint = endpoint
+
     async def peer_statuses(self) -> dict[str, WireGuardPeerStatus]:
-        """Live state per public key, merged across every instance carrying the tunnel.
+        """Live readings per public key, merged across every instance carrying the tunnel.
 
         Behind a UDP load balancer several instances carry sessions at once
         and each publishes what its interface knows. A peer appears in every
         carrier's dump (they all configure every peer), so the reading that
         counts is the one with the latest handshake: that is where the device's
-        traffic currently lands.
+        traffic currently lands. Empty when nothing is carrying the tunnel;
+        ``peer_status`` fills in the persisted sighting then.
         """
         if self._redis is None:
             return {}
@@ -372,7 +414,7 @@ class WireGuardRuntime:
         except Exception as exc:
             logger.debug("Peer status unavailable", error=str(exc))
             return {}
-        now = time.time()
+        now = utc_now()
         latest: dict[str, int] = {}
         statuses: dict[str, WireGuardPeerStatus] = {}
         for carrier in published:
@@ -385,23 +427,51 @@ class WireGuardRuntime:
                 if public_key in statuses and handshake <= latest[public_key]:
                     continue
                 latest[public_key] = handshake
+                seen = _naive_utc(handshake) if handshake else None
                 statuses[public_key] = WireGuardPeerStatus(
-                    online=handshake > 0 and now - handshake <= ONLINE_WINDOW_SECONDS,
-                    # Naive UTC, like every other timestamp the API serialises.
-                    last_handshake_at=datetime.fromtimestamp(handshake, UTC).replace(tzinfo=None) if handshake else None,
+                    online=seen is not None and _within_online_window(seen, now),
+                    last_handshake_at=seen,
+                    endpoint=data.get("endpoint"),
+                    live=True,
                     rx_bytes=int(data.get("rx_bytes") or 0),
                     tx_bytes=int(data.get("tx_bytes") or 0),
-                    endpoint=data.get("endpoint"),
-                    connections_by_address=int(data.get("connections_by_address") or 0),
-                    encrypted_dns_blocked=int(data.get("encrypted_dns_blocked") or 0),
                 )
         return statuses
 
+    @staticmethod
+    def peer_status(peer: WireGuardPeer, live: WireGuardPeerStatus | None) -> WireGuardPeerStatus:
+        """Where a device stands: the live reading, or the persisted sighting when that is all there is or it is newer.
+
+        A carrier that just restarted reports no handshake for a device that
+        has not reconnected yet; the row still knows when it was last seen.
+        """
+        if live is not None and live.last_handshake_at is not None and (
+            peer.last_handshake_at is None or peer.last_handshake_at <= live.last_handshake_at
+        ):
+            return live
+        seen = peer.last_handshake_at
+        return WireGuardPeerStatus(
+            online=seen is not None and _within_online_window(seen, utc_now()),
+            last_handshake_at=seen,
+            endpoint=peer.last_endpoint if seen is not None else None,
+            live=False,
+            rx_bytes=live.rx_bytes if live is not None else 0,
+            tx_bytes=live.tx_bytes if live is not None else 0,
+        )
+
+    def metrics_of(self, peer_id: str) -> TunnelPeerMetricDelta:
+        """A device's traffic totals as the proxy manager has them; zero without a manager."""
+        if self.peer_metrics is None:
+            return TunnelPeerMetricDelta()
+        return self.peer_metrics(peer_id)
+
     async def status(self) -> WireGuardStatus:
-        statuses = await self.peer_statuses()
-        # The data plane's counters span every tunnel this instance serves;
-        # with WireGuard the only protocol they are its own.
+        live = await self.peer_statuses()
+        peers = self.peers.all()
         server = self.tunnel.transparent_server
+        # Every device's name-resolution signals, all time, from the same
+        # totals the device rows show: cluster-wide, not this instance's.
+        totals = TunnelPeerMetricDelta.summed(*(self.metrics_of(p.id) for p in peers))
         return WireGuardStatus(
             enabled=self.enabled,
             state=self.state,
@@ -414,10 +484,19 @@ class WireGuardRuntime:
             dns_port=self._config.tunnel_dns_port,
             fake_ip_range=str(self.tunnel.pool.network),
             active_connections=server.active_connections if server else 0,
-            peers_total=len(self.peers),
+            peers_total=len(peers),
             peers_enabled=self.peers.enabled_count,
-            peers_online=sum(1 for s in statuses.values() if s.online),
-            connections_by_address=sum(server.by_address.values()) if server else 0,
-            encrypted_dns_blocked=sum(server.encrypted_dns_blocked.values()) if server else 0,
+            peers_online=sum(1 for p in peers if self.peer_status(p, live.get(p.public_key)).online),
+            connections_by_address=totals.by_address,
+            encrypted_dns_blocked=totals.encrypted_dns_blocked,
             block_encrypted_dns=self._config.tunnel_block_encrypted_dns,
         )
+
+
+def _naive_utc(epoch: int) -> datetime:
+    """Naive UTC, like every other timestamp the API serialises."""
+    return datetime.fromtimestamp(epoch, UTC).replace(tzinfo=None)
+
+
+def _within_online_window(seen: datetime, now: datetime) -> bool:
+    return (now - seen).total_seconds() <= ONLINE_WINDOW_SECONDS
