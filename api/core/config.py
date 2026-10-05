@@ -101,13 +101,16 @@ def _load_yaml_config(config_path: Path) -> dict[str, Any]:
         flat_config["wireguard_enabled"] = wg_cfg.get("enabled")
         flat_config["wireguard_interface"] = wg_cfg.get("interface")
         flat_config["wireguard_listen_port"] = wg_cfg.get("listen_port")
-        flat_config["wireguard_transparent_port"] = wg_cfg.get("transparent_port")
-        flat_config["wireguard_dns_port"] = wg_cfg.get("dns_port")
         flat_config["wireguard_mtu"] = wg_cfg.get("mtu")
-        flat_config["wireguard_fake_ip_range"] = wg_cfg.get("fake_ip_range")
-        flat_config["wireguard_sniff_timeout_seconds"] = wg_cfg.get("sniff_timeout_seconds")
-        flat_config["wireguard_block_encrypted_dns"] = wg_cfg.get("block_encrypted_dns")
         flat_config["wireguard_defaults"] = wg_cfg.get("defaults")
+
+    if "tunnel" in config_data:
+        tunnel_cfg = config_data["tunnel"] or {}
+        flat_config["tunnel_transparent_port"] = tunnel_cfg.get("transparent_port")
+        flat_config["tunnel_dns_port"] = tunnel_cfg.get("dns_port")
+        flat_config["tunnel_fake_ip_range"] = tunnel_cfg.get("fake_ip_range")
+        flat_config["tunnel_sniff_timeout_seconds"] = tunnel_cfg.get("sniff_timeout_seconds")
+        flat_config["tunnel_block_encrypted_dns"] = tunnel_cfg.get("block_encrypted_dns")
 
     if "tls_mitm" in config_data:
         mitm_cfg = config_data["tls_mitm"]
@@ -367,26 +370,30 @@ class Settings(BaseSettings):
         default=None,
         description="UDP port to listen on when it differs from the install's endpoint port (behind a port-mapping NAT)",
     )
-    wireguard_transparent_port: int = Field(
-        default=8081, description="Local TCP port tunnel connections are redirected to (bound on the tunnel address only)"
-    )
-    wireguard_dns_port: int = Field(
-        default=5353, description="Local port of the tunnel's fake-IP DNS resolver (port 53 on the tunnel is redirected to it)"
-    )
     wireguard_mtu: int = Field(default=1420, ge=1280, le=1500, description="MTU of the tunnel interface")
-    wireguard_fake_ip_range: str = Field(
-        default="198.18.0.0/15", description="IPv4 range the tunnel DNS answers from; connections to it carry the name"
-    )
-    wireguard_sniff_timeout_seconds: float = Field(
-        default=2.0, gt=0, description="How long to wait for a connection's first bytes before routing it by address alone"
-    )
-    wireguard_block_encrypted_dns: bool = Field(
-        default=True,
-        description="Close tunnel connections to DNS-over-TLS (port 853) and known DNS-over-HTTPS resolvers so devices keep using the tunnel resolver",
-    )
     wireguard_defaults: dict[str, Any] = Field(
         default_factory=dict,
         description="Seed for the install-wide WireGuard settings row on a fresh install: endpoint_host, endpoint_port, subnet, persistent_keepalive, client_mtu",
+    )
+
+    # The tunnel data plane every tunnel protocol shares (see docs/wireguard.md):
+    # the listeners tunnel traffic is redirected to and how destination names
+    # are recovered. Per process; a tunnel's own settings sit with its protocol.
+    tunnel_transparent_port: int = Field(
+        default=8081, description="Local TCP port tunnel connections are redirected to (bound on the tunnel gateway addresses only)"
+    )
+    tunnel_dns_port: int = Field(
+        default=5353, description="Local port of the tunnel's fake-IP DNS resolver (port 53 on the tunnel is redirected to it)"
+    )
+    tunnel_fake_ip_range: str = Field(
+        default="198.18.0.0/15", description="IPv4 range the tunnel DNS answers from; connections to it carry the name"
+    )
+    tunnel_sniff_timeout_seconds: float = Field(
+        default=2.0, gt=0, description="How long to wait for a connection's first bytes before routing it by address alone"
+    )
+    tunnel_block_encrypted_dns: bool = Field(
+        default=True,
+        description="Close tunnel connections to DNS-over-TLS (port 853) and known DNS-over-HTTPS resolvers so devices keep using the tunnel resolver",
     )
 
     # Authentication settings

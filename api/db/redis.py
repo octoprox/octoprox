@@ -86,12 +86,13 @@ WIREGUARD_PEER_STATUS_KEY = "wireguard:peer_status:{instance_id}"
 WIREGUARD_PEER_STATUS_SCAN = "wireguard:peer_status:*"
 # The fake-IP mapping the tunnel DNS hands out, shared so a connection that
 # lands on a different instance from the one that answered the query still
-# knows the name. Two keys per mapping, both refreshed when read, so a name
-# nobody has asked about for a week frees its address.
-WIREGUARD_FAKEIP_NAME_KEY = "wireguard:fakeip:name:{name}"
-WIREGUARD_FAKEIP_ADDR_KEY = "wireguard:fakeip:addr:{offset}"
-WIREGUARD_FAKEIP_COUNTER_KEY = "wireguard:fakeip:next"
-WIREGUARD_FAKEIP_TTL_SECONDS = 7 * 86400
+# knows the name, whichever tunnel protocol carried either. Two keys per
+# mapping, both refreshed when read, so a name nobody has asked about for a
+# week frees its address.
+TUNNEL_FAKEIP_NAME_KEY = "tunnel:fakeip:name:{name}"
+TUNNEL_FAKEIP_ADDR_KEY = "tunnel:fakeip:addr:{offset}"
+TUNNEL_FAKEIP_COUNTER_KEY = "tunnel:fakeip:next"
+TUNNEL_FAKEIP_TTL_SECONDS = 7 * 86400
 WIREGUARD_STATUS_INTERVAL = 10
 WIREGUARD_STATUS_TTL_SECONDS = 30
 GEO_PREFLIGHT_KEY = "geo:preflight:{project_id}:{proxy_id}"  # one verdict per proxy, shared by its sessions
@@ -116,6 +117,7 @@ REDIS_KEY_GROUPS: tuple[tuple[str, str], ...] = (
     ("autoscaler:", "Auto-scaler state"),
     ("geo:", "IP attribution"),
     ("wireguard:", "WireGuard"),
+    ("tunnel:", "Tunnel devices"),
 )
 
 OTHER_KEY_GROUP = "Other"
@@ -581,26 +583,26 @@ class RedisClient:
 
     async def fakeip_offset_for(self, name: str) -> int | None:
         """The pool offset a name was given on any instance, refreshing its lease; None if never."""
-        name_key = WIREGUARD_FAKEIP_NAME_KEY.format(name=name)
+        name_key = TUNNEL_FAKEIP_NAME_KEY.format(name=name)
         raw = await self.client.get(name_key)
         if raw is None:
             return None
         offset = int(raw)
         pipe = self.client.pipeline()
-        pipe.expire(name_key, WIREGUARD_FAKEIP_TTL_SECONDS)
-        pipe.expire(WIREGUARD_FAKEIP_ADDR_KEY.format(offset=offset), WIREGUARD_FAKEIP_TTL_SECONDS)
+        pipe.expire(name_key, TUNNEL_FAKEIP_TTL_SECONDS)
+        pipe.expire(TUNNEL_FAKEIP_ADDR_KEY.format(offset=offset), TUNNEL_FAKEIP_TTL_SECONDS)
         await pipe.execute()
         return offset
 
     async def fakeip_name_for(self, offset: int) -> str | None:
         """The name a pool offset was handed out for on any instance, refreshing its lease."""
-        addr_key = WIREGUARD_FAKEIP_ADDR_KEY.format(offset=offset)
+        addr_key = TUNNEL_FAKEIP_ADDR_KEY.format(offset=offset)
         name = await self.client.get(addr_key)
         if name is None:
             return None
         pipe = self.client.pipeline()
-        pipe.expire(addr_key, WIREGUARD_FAKEIP_TTL_SECONDS)
-        pipe.expire(WIREGUARD_FAKEIP_NAME_KEY.format(name=name), WIREGUARD_FAKEIP_TTL_SECONDS)
+        pipe.expire(addr_key, TUNNEL_FAKEIP_TTL_SECONDS)
+        pipe.expire(TUNNEL_FAKEIP_NAME_KEY.format(name=name), TUNNEL_FAKEIP_TTL_SECONDS)
         await pipe.execute()
         return str(name)
 
@@ -612,14 +614,14 @@ class RedisClient:
         each get an offset and both point at the name, which is harmless.
         """
         for _ in range(attempts):
-            counter = int(await self.client.incr(WIREGUARD_FAKEIP_COUNTER_KEY))
+            counter = int(await self.client.incr(TUNNEL_FAKEIP_COUNTER_KEY))
             offset = (counter - 1) % capacity
             claimed = await self.client.set(
-                WIREGUARD_FAKEIP_ADDR_KEY.format(offset=offset), name, nx=True, ex=WIREGUARD_FAKEIP_TTL_SECONDS
+                TUNNEL_FAKEIP_ADDR_KEY.format(offset=offset), name, nx=True, ex=TUNNEL_FAKEIP_TTL_SECONDS
             )
             if claimed:
                 await self.client.set(
-                    WIREGUARD_FAKEIP_NAME_KEY.format(name=name), str(offset), ex=WIREGUARD_FAKEIP_TTL_SECONDS
+                    TUNNEL_FAKEIP_NAME_KEY.format(name=name), str(offset), ex=TUNNEL_FAKEIP_TTL_SECONDS
                 )
                 return offset
         raise RuntimeError(f"no free fake IP after {attempts} attempts; the range is exhausted")

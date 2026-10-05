@@ -8,7 +8,7 @@ import socket
 
 import pytest
 
-from api.wireguard.dns import (
+from api.tunnel.dns import (
     QTYPE_A,
     QTYPE_AAAA,
     QTYPE_PTR,
@@ -140,8 +140,8 @@ class TestResolver:
 @pytest.mark.asyncio
 async def test_server_answers_udp_and_tcp() -> None:
     pool = FakeIpPool("198.18.0.0/15")
-    server = DnsServer(FakeIpResolver(FakeIpDirectory(pool)), "127.0.0.1", 0)
-    await server.start()
+    server = DnsServer(FakeIpResolver(FakeIpDirectory(pool)), 0)
+    await server.listen("127.0.0.1")
     try:
         assert server.is_listening
         loop = asyncio.get_running_loop()

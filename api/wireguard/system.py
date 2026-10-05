@@ -1,96 +1,31 @@
 # Copyright 2026 Octoprox Authors
 # SPDX-License-Identifier: Apache-2.0
 
-"""The host side of the endpoint: the WireGuard interface and the nftables table.
+"""The WireGuard interface on the host.
 
-Everything here shells out to ``ip``, ``wg``, ``nft`` and, when the kernel has
-no WireGuard, ``wireguard-go``. The tools need CAP_NET_ADMIN. When the process
-is not root they are launched through ``setpriv``, which the image gives the
-capability as a file capability and which passes it on as an *ambient*
-capability, so the process itself stays unprivileged. A file capability on
-the tools themselves would not do: iproute2 drops its capabilities when run
-by a non-root user unless they are inheritable, and ambient makes them so.
+Shells out to ``ip``, ``wg`` and, when the kernel has no WireGuard,
+``wireguard-go``, through the privileged runner every tunnel shares (see
+:mod:`api.tunnel.system` for how the capability reaches the tools).
 """
 
 from __future__ import annotations
 
-import asyncio
 import contextlib
 import os
-import shutil
 import tempfile
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Literal
 
 import structlog
 
 from api.models.wireguard import WireGuardPeer
+from api.tunnel.system import CommandError, CommandRunner
 from api.wireguard.config import render_server_conf
 
 logger = structlog.get_logger()
 
 Backend = Literal["kernel", "userspace"]
-
-
-class CommandError(RuntimeError):
-    """A tool exited non-zero or is not installed."""
-
-    def __init__(self, argv: Sequence[str], returncode: int, stderr: str) -> None:
-        self.argv = list(argv)
-        self.returncode = returncode
-        self.stderr = stderr
-        super().__init__(f"{' '.join(argv)} failed ({returncode}): {stderr}")
-
-
-# How a privileged tool is launched by a non-root process: setpriv raises
-# the capabilities into the inheritable and ambient sets before exec, so the
-# tool starts with them and (iproute2) keeps them.
-AMBIENT_CAPS = "+net_admin,+net_raw"
-
-
-def privileged_argv(argv: Sequence[str], *, euid: int, setpriv: str | None) -> list[str]:
-    """``argv`` as it must be launched: as is for root or without setpriv, else through setpriv."""
-    if euid == 0 or setpriv is None:
-        return list(argv)
-    return [setpriv, "--inh-caps", AMBIENT_CAPS, "--ambient-caps", AMBIENT_CAPS, "--", *argv]
-
-
-class CommandRunner:
-    """Runs a tool and returns its stdout; the one seam the tests replace."""
-
-    def __init__(self) -> None:
-        self._euid = os.geteuid()
-        self._setpriv = shutil.which("setpriv")
-
-    async def run(self, *argv: str, stdin: bytes | None = None, check: bool = True) -> str:
-        launch = privileged_argv(argv, euid=self._euid, setpriv=self._setpriv)
-        try:
-            process = await asyncio.create_subprocess_exec(
-                *launch,
-                stdin=asyncio.subprocess.PIPE if stdin is not None else asyncio.subprocess.DEVNULL,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-        except FileNotFoundError:
-            raise CommandError(argv, 127, f"{argv[0]} is not installed") from None
-        out, err = await process.communicate(stdin)
-        if check and process.returncode != 0:
-            raise CommandError(argv, process.returncode or 1, err.decode("utf-8", "replace").strip())
-        return out.decode("utf-8", "replace")
-
-
-def explain(exc: CommandError) -> str:
-    """The error with the hint an operator needs most often."""
-    text = exc.stderr or str(exc)
-    if "not permitted" in text.lower():
-        return (
-            f"{text} (the tools need CAP_NET_ADMIN: in Docker add cap_add: [NET_ADMIN]; "
-            "a non-root process also needs setpriv with the capability set on it, as the image does)"
-        )
-    if exc.returncode == 127:
-        return f"{text} (install wireguard-tools, nftables and iproute2 in the image)"
-    return text
 
 
 def _kernel_unsupported(exc: CommandError) -> bool:
@@ -214,18 +149,3 @@ def parse_dump(text: str) -> list[PeerDump]:
         except ValueError:
             continue
     return peers
-
-
-class Netfilter:
-    """Owns one nftables table and nothing else on the host."""
-
-    def __init__(self, table: str = "octoprox_wg", runner: CommandRunner | None = None) -> None:
-        self.table = table
-        self._runner = runner or CommandRunner()
-
-    async def apply(self, ruleset: str) -> None:
-        await self._runner.run("nft", "-f", "-", stdin=ruleset.encode())
-        logger.info("nftables rules applied", table=self.table)
-
-    async def remove(self) -> None:
-        await self._runner.run("nft", "delete", "table", "inet", self.table, check=False)

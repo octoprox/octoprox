@@ -3,13 +3,11 @@
 
 """WireGuard endpoint: devices without proxy support become clients of the pool.
 
-A device connects to this instance over WireGuard. Inside the tunnel it does
-ordinary networking: it resolves names against the tunnel's DNS and opens TCP
-connections to the addresses it gets. Octoprox answers every name with a
-synthetic address from a reserved range (``dns``), redirects every TCP
-connection on the tunnel interface to a local listener with nftables
-(``system``), recovers the destination name from the synthetic address or
-from the stream itself (``sniff``), and then does exactly what it does for a
-``CONNECT`` request: picks an upstream proxy for the peer's project and
-relays bytes (``transparent``). ``runtime`` ties it together for one process.
+The WireGuard side of a tunnel device: the install's key pair, the peers
+(``peers``, ``keys``), the interface on the host (``system``), the text
+handed to ``wg`` and to devices (``config``), and ``runtime``, which ties
+them together for one process and attaches the interface to the shared
+tunnel data plane (:mod:`api.tunnel`), where everything that does not depend
+on the protocol happens: fake-IP DNS, the nftables redirect, name recovery
+and the relay through the project's upstream.
 """
