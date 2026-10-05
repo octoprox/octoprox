@@ -146,7 +146,7 @@ async def test_peer_statuses_from_redis() -> None:
     now = int(time.time())
     # Two carriers behind a UDP load balancer: every peer appears in both dumps,
     # and the one with the newer handshake is where the device's traffic lands.
-    redis.get_wireguard_peer_status = AsyncMock(return_value=[
+    redis.get_tunnel_peer_status = AsyncMock(return_value=[
         {
             "online": json.dumps({"latest_handshake": now - 30, "rx_bytes": 5, "tx_bytes": 7, "endpoint": "1.2.3.4:1"}),
             "stale": json.dumps({"latest_handshake": now - 3600, "rx_bytes": 0, "tx_bytes": 0, "endpoint": None}),
@@ -201,13 +201,13 @@ class TestPeerStatus:
 async def test_publish_status_persists_new_handshakes() -> None:
     """The carrier records a handshake newer than the row knows, and the cache follows."""
     redis = MagicMock()
-    redis.set_wireguard_peer_status = AsyncMock()
+    redis.set_tunnel_peer_status = AsyncMock()
     runtime = await _runtime(_settings(), FakeRunner(), redis=redis)
     # FakeRunner's dump: peer "pub" handshaked at 1700000000 from 1.2.3.4:5.
     peer = WireGuardPeer(project_id="p", name="tv", public_key="pub", address="10.66.0.2")
     runtime.peers.put(peer)
     assert await runtime._publish_status() is True
-    published = redis.set_wireguard_peer_status.await_args.args[1]
+    published = redis.set_tunnel_peer_status.await_args.args[2]
     assert json.loads(published["pub"])["endpoint"] == "1.2.3.4:5"
     assert "connections_by_address" not in json.loads(published["pub"])
     seen = datetime.fromtimestamp(1700000000, UTC).replace(tzinfo=None)

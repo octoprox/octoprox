@@ -104,6 +104,14 @@ def _load_yaml_config(config_path: Path) -> dict[str, Any]:
         flat_config["wireguard_mtu"] = wg_cfg.get("mtu")
         flat_config["wireguard_defaults"] = wg_cfg.get("defaults")
 
+    if "openvpn" in config_data:
+        ovpn_cfg = config_data["openvpn"] or {}
+        flat_config["openvpn_enabled"] = ovpn_cfg.get("enabled")
+        flat_config["openvpn_interface"] = ovpn_cfg.get("interface")
+        flat_config["openvpn_listen_port"] = ovpn_cfg.get("listen_port")
+        flat_config["openvpn_mtu"] = ovpn_cfg.get("mtu")
+        flat_config["openvpn_defaults"] = ovpn_cfg.get("defaults")
+
     if "tunnel" in config_data:
         tunnel_cfg = config_data["tunnel"] or {}
         flat_config["tunnel_transparent_port"] = tunnel_cfg.get("transparent_port")
@@ -374,6 +382,24 @@ class Settings(BaseSettings):
     wireguard_defaults: dict[str, Any] = Field(
         default_factory=dict,
         description="Seed for the install-wide WireGuard settings row on a fresh install: endpoint_host, endpoint_port, subnet, persistent_keepalive, client_mtu",
+    )
+
+    # OpenVPN endpoint (see docs/openvpn.md). The CA, server certificate, public
+    # endpoint, transport and subnet are install-wide and live in Postgres;
+    # these describe this process: whether it runs the daemon, and on what.
+    openvpn_enabled: bool = Field(
+        default=False,
+        description="Run the OpenVPN daemon on this instance (needs CAP_NET_ADMIN, /dev/net/tun, openvpn and nftables)",
+    )
+    openvpn_interface: str = Field(default="ovpn0", description="Name of the tun interface the daemon creates")
+    openvpn_listen_port: int | None = Field(
+        default=None,
+        description="Port to listen on when it differs from the install's endpoint port (behind a port-mapping NAT)",
+    )
+    openvpn_mtu: int = Field(default=1500, ge=1280, le=1500, description="tun-mtu of the daemon's interface")
+    openvpn_defaults: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Seed for the install-wide OpenVPN settings row on a fresh install: endpoint_host, endpoint_port, protocol, subnet, keepalive_interval, keepalive_timeout, client_mtu",
     )
 
     # The tunnel data plane every tunnel protocol shares (see docs/wireguard.md):

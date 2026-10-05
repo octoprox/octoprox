@@ -13,7 +13,7 @@ A dynamic and flexible proxy manager that acts as an intelligent proxy aggregato
 - **Per-request Targeting**: Pick a sticky session (`-sessid-`) or an exit country (`-cc-`) from the proxy username, so one project can serve many locations
 - **IP Attribution**: Resolve exit locations from your own MaxMind, DB-IP, IPinfo or IP2Location databases, verify vendor claims, track each provider's accuracy, and optionally reject sessions that exit in the wrong country (see [docs/ip-attribution.md](docs/ip-attribution.md))
 - **Traffic Limits & Billing**: Cap the bytes a connector carries per billing period, alert, block or cut transfers at the cap, and see spend from the price you pay per GB (see [docs/traffic-limits.md](docs/traffic-limits.md))
-- **WireGuard Devices**: Routers, TVs, consoles and phones with no proxy settings join a project's pool through a WireGuard tunnel Octoprox terminates; one config or QR code per device, names resolved at the exit (see [docs/wireguard.md](docs/wireguard.md))
+- **Tunnel Devices**: Routers, TVs, consoles and phones with no proxy settings join a project's pool through a WireGuard or OpenVPN tunnel Octoprox terminates; one config, QR code or profile per device, names resolved at the exit (see [docs/wireguard.md](docs/wireguard.md) and [docs/openvpn.md](docs/openvpn.md))
 - **Health Monitoring**: Automatic health checks with configurable intervals and thresholds
 - **Performance Metrics**: Track latency, success rates, and request counts per proxy
 - **REST API**: Full CRUD operations for managing projects, credentials, connectors, and proxies
@@ -100,6 +100,7 @@ Endpoints exposed on the host (same for both cluster variants):
 | 8000 | API + Web UI (nginx → octoprox-{1,2,3}:8000, HTTP)    |
 | 8080 | Proxy traffic (nginx → octoprox-{1,2,3}:8080, TCP)    |
 | 51820/udp | WireGuard (nginx → octoprox-{1,2,3}:51820, each device pinned to one replica) |
+| 1194 | OpenVPN, UDP and TCP (nginx → octoprox-{1,2,3}:1194, each device pinned to one replica) |
 
 All three instances share the same Postgres and Redis, generate distinct
 `OCTOPROX_INSTANCE_ID` values, advertise themselves via Redis heartbeat,
@@ -455,11 +456,12 @@ Residential, ISP and datacenter vendors are integrated through the provider SDK:
 
 - [Providers & SDK](docs/providers.md) - Descriptor format, security model, UI builder
 
-## WireGuard Devices
+## Tunnel Devices
 
-Anything that cannot be pointed at a proxy becomes a client by connecting to a WireGuard tunnel that Octoprox terminates. Each device is a peer of a project with its own tunnel address and the routing a proxy client would put in its username (sticky session, exit country, state, city). Inside the tunnel every name resolves to a synthetic address and every TCP connection is turned into a CONNECT through the project's upstream, so DNS never leaks and the device needs no proxy support. The bundled cluster runs it on every replica behind nginx; a single instance enables it with `OCTOPROX_WIREGUARD_ENABLED=true`, `cap_add: [NET_ADMIN]` and the UDP port published.
+Anything that cannot be pointed at a proxy becomes a client by connecting to a tunnel that Octoprox terminates, over WireGuard or OpenVPN; the protocol is picked per device. Each device is a peer of a project with its own tunnel address and the routing a proxy client would put in its username (sticky session, exit country, state, city). Inside the tunnel every name resolves to a synthetic address and every TCP connection is turned into a CONNECT through the project's upstream, so DNS never leaks and the device needs no proxy support. The bundled cluster runs both on every replica behind nginx; a single instance enables them with `OCTOPROX_WIREGUARD_ENABLED=true` and/or `OCTOPROX_OPENVPN_ENABLED=true`, `cap_add: [NET_ADMIN]`, `/dev/net/tun` for OpenVPN, and the ports published.
 
 - [WireGuard Devices](docs/wireguard.md) - How it works, enabling the endpoint, adding devices, limitations
+- [OpenVPN Devices](docs/openvpn.md) - The CA, admission through the management interface, the daemon, profiles
 - [BrightData Setup](docs/brightdata-setup.md)
 - [Oxylabs Setup](docs/oxylabs-setup.md)
 

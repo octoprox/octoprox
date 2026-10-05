@@ -8,7 +8,7 @@ nav_id: wireguard
 
 <p class="subtitle">Routers, TVs, consoles, phones: anything that cannot be pointed at a proxy becomes a client of the pool by connecting to a WireGuard tunnel that Octoprox terminates.</p>
 
-A proxy manager that can only be used from a browser or `curl` stops at the edge of the device world. Many of the things people most want to route through a residential or geo-targeted exit have no proxy setting at all: a smart TV, a streaming stick, a game console, a camera, a whole home router. WireGuard is the one tunnel protocol all of those speak (natively or through a cheap router), and the WireGuard app is on every phone store.
+A proxy manager that can only be used from a browser or `curl` stops at the edge of the device world. Many of the things people most want to route through a residential or geo-targeted exit have no proxy setting at all: a smart TV, a streaming stick, a game console, a camera, a whole home router. WireGuard is the one tunnel protocol all of those speak (natively or through a cheap router), and the WireGuard app is on every phone store. For a router or an older device that only has an OpenVPN client, or a network where only TCP gets out, there is [OpenVPN](openvpn) beside it; everything below about what happens inside the tunnel applies to both.
 
 Octoprox runs a WireGuard endpoint. A device connects to it, and everything the device sends is routed exactly as if it had authenticated to the proxy port with the project's credentials: the project's connectors, routing strategy, domain filters, traffic limits, exit verification and metrics all apply. Nothing on the device knows a proxy is involved.
 
@@ -136,7 +136,7 @@ Edited under **Settings → WireGuard** and stored in Postgres so every instance
 
 ## Adding a device
 
-Devices belong to a project. Under the project's **WireGuard devices** page, **Add device**:
+Devices belong to a project. Under the project's **Devices** page, **Add device**, pick **WireGuard** as the tunnel (the same page holds [OpenVPN devices](openvpn)):
 
 - **Name** it after the thing it is ("Living room TV").
 - **Keys.** By default Octoprox generates the key pair and keeps the private key, so the config and QR code can be shown again later. Untick *Generate keys for me* to register a public key the device already holds; the config then carries a placeholder where the private key goes, and no QR code is offered because it would be incomplete. A **preshared key** is added by default.

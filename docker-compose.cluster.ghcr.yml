@@ -20,8 +20,9 @@
 
 # Shared base for all three octoprox replicas. Each replica overrides
 # OCTOPROX_INSTANCE_ID so logs are unambiguous. Every replica terminates
-# the WireGuard tunnel (docs/wireguard.md): NET_ADMIN for the interface
-# and nftables rules, /dev/net/tun only for the wireguard-go fallback.
+# both tunnels (docs/wireguard.md, docs/openvpn.md): NET_ADMIN for the
+# interfaces and nftables rules, /dev/net/tun for OpenVPN (and for the
+# wireguard-go fallback).
 x-octoprox-base: &octoprox-base
   cap_add:
     - NET_ADMIN
@@ -41,6 +42,7 @@ x-octoprox-base: &octoprox-base
     OCTOPROX_DB_NAME: octoprox
     OCTOPROX_LOG_LEVEL: INFO
     OCTOPROX_WIREGUARD_ENABLED: "true"
+    OCTOPROX_OPENVPN_ENABLED: "true"
   volumes:
     - ca_data:/app/data/ca
     - geo_data:/app/data/geo
@@ -89,6 +91,8 @@ services:
       - "8000:8000"         # API + Web UI
       - "8080:8080"         # Proxy traffic
       - "51820:51820/udp"   # WireGuard
+      - "1194:1194/udp"     # OpenVPN over UDP
+      - "1194:1194/tcp"     # OpenVPN over TCP
     volumes:
       - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
     depends_on:

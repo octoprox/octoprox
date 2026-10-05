@@ -1186,6 +1186,169 @@ GET /api/v1/projects/{project_id}/wireguard/peers/{peer_id}/config
 `complete` is false when the device holds its own private key (the file
 carries a placeholder) or the endpoint host is not set yet.
 
+## OpenVPN
+
+The second tunnel protocol (see [OpenVPN Devices](openvpn)). The same
+shape as the WireGuard endpoints with the credential swapped: the install
+has a CA instead of a key pair, a device a certificate instead of keys.
+
+### Server settings
+
+```http
+GET /api/v1/openvpn/settings
+```
+
+Returns the CA fingerprint and expiry, endpoint, transport, subnet, gateway
+and the answering instance's daemon status. Private material (the CA key,
+the server key, the tls-crypt key) is never returned.
+
+```json
+{
+  "ca_fingerprint": "A1:B2:…",
+  "ca_expires_at": "2036-10-05T09:00:00",
+  "endpoint_host": "vpn.example.com",
+  "endpoint_port": 1194,
+  "protocol": "udp",
+  "subnet": "10.67.0.0/16",
+  "gateway": "10.67.0.1",
+  "keepalive_interval": 10,
+  "keepalive_timeout": 60,
+  "client_mtu": null,
+  "configured": true,
+  "updated_at": "2026-10-05T09:00:00",
+  "status": {
+    "enabled": true,
+    "state": "running",
+    "error": null,
+    "instance_id": "7d6b...",
+    "interface": "ovpn0",
+    "protocol": "udp",
+    "listen_port": 1194,
+    "daemon_version": "OpenVPN 2.6.3 x86_64-pc-linux-gnu",
+    "restarts": 0,
+    "denied": 1,
+    "transparent_port": 8081,
+    "dns_port": 5353,
+    "fake_ip_range": "198.18.0.0/15",
+    "active_connections": 3,
+    "peers_total": 2,
+    "peers_enabled": 2,
+    "peers_online": 1,
+    "connections_by_address": 0,
+    "encrypted_dns_blocked": 0,
+    "block_encrypted_dns": true
+  }
+}
+```
+
+```http
+PUT /api/v1/openvpn/settings
+Content-Type: application/json
+
+{
+  "endpoint_host": "vpn.example.com",
+  "endpoint_port": 1194,
+  "protocol": "udp",
+  "subnet": "10.67.0.0/16",
+  "keepalive_interval": 10,
+  "keepalive_timeout": 60,
+  "client_mtu": null
+}
+```
+
+Admin only. `protocol` is `udp` or `tcp`; `keepalive_timeout` must exceed
+`keepalive_interval`; the subnet must still contain every device's address.
+A change to the port, transport, subnet or keepalive restarts the daemon on
+every instance running it.
+
+```http
+POST /api/v1/openvpn/settings/rotate-identity
+```
+
+Admin only. Issues a new CA, server certificate and tls-crypt key, and
+reissues every device's certificate under the new CA in one transaction;
+every device profile becomes invalid.
+
+### Devices (peers)
+
+```http
+GET /api/v1/projects/{project_id}/openvpn/peers
+```
+
+```json
+{
+  "total": 1,
+  "server_configured": true,
+  "ca_fingerprint": "A1:B2:…",
+  "peers": [
+    {
+      "id": "…",
+      "project_id": "…",
+      "name": "Living room router",
+      "serial": "3891…",
+      "certificate_expires_at": "2036-10-05T09:00:00",
+      "address": "10.67.0.2",
+      "enabled": true,
+      "session_id": null,
+      "country": "US",
+      "state": null,
+      "city": null,
+      "created_at": "…",
+      "updated_at": "…",
+      "status": {
+        "online": true,
+        "connected_since": "2026-10-05T09:04:12",
+        "last_seen_at": "2026-10-05T09:04:12",
+        "endpoint": "203.0.113.9:40123",
+        "live": true,
+        "rx_bytes": 1048576,
+        "tx_bytes": 23068672
+      },
+      "metrics": { "request_count": 318, "…": "as for WireGuard devices" }
+    }
+  ]
+}
+```
+
+`status.online` means an instance running the daemon currently carries a
+session for the device; `last_seen_at` is that session's start, or the
+persisted start of the last one. `metrics` is the same `TunnelPeerMetrics`
+shape WireGuard devices carry.
+
+```http
+POST /api/v1/projects/{project_id}/openvpn/peers
+Content-Type: application/json
+
+{ "name": "Living room router", "session_id": null, "country": "US", "state": null, "city": null, "enabled": true }
+```
+
+Editor. Issues a certificate from the install's CA (the device id as common
+name) and takes the next free address. There is no bring-your-own key.
+
+```http
+GET    /api/v1/projects/{project_id}/openvpn/peers/{peer_id}
+PATCH  /api/v1/projects/{project_id}/openvpn/peers/{peer_id}
+DELETE /api/v1/projects/{project_id}/openvpn/peers/{peer_id}
+POST   /api/v1/projects/{project_id}/openvpn/peers/{peer_id}/rotate-certificate
+GET    /api/v1/projects/{project_id}/openvpn/peers/{peer_id}/metrics/history?range=24h
+GET    /api/v1/projects/{project_id}/openvpn/peers/{peer_id}/config
+```
+
+`PATCH` takes the same partial document as a WireGuard device (`name`,
+`enabled`, `session_id`, `country`, `state`, `city`; an empty string
+clears). Disabling, rotating or deleting a device ends any session it has.
+`rotate-certificate` issues a new certificate and key; the serial changes
+and the old profile stops working. `config` returns the `.ovpn` profile:
+
+```json
+{
+  "filename": "Living-room-router.ovpn",
+  "config": "client\ndev tun\nproto udp\nremote vpn.example.com 1194\n…<ca>…</ca>\n<cert>…</cert>\n<key>…</key>\n<tls-crypt>…</tls-crypt>\n",
+  "complete": true,
+  "server_configured": true
+}
+```
+
 ## Health Check
 
 Public endpoint for load balancer health checks:

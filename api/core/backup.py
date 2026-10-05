@@ -44,6 +44,8 @@ from api.db.models import (
     GeoDatabaseModel,
     GeoSettingsModel,
     IpObservationModel,
+    OpenVpnPeerModel,
+    OpenVpnSettingsModel,
     ProjectMetricsModel,
     ProjectModel,
     ProviderAuditModel,
@@ -110,6 +112,9 @@ _ENTITY_SPECS: tuple[_EntitySpec, ...] = (
     # reference projects, so they come after them (and here is after).
     _EntitySpec("wireguard_settings", WireGuardSettingsModel),
     _EntitySpec("wireguard_peers", WireGuardPeerModel),
+    # OpenVPN: the install's CA and server identity, and the devices allowed in.
+    _EntitySpec("openvpn_settings", OpenVpnSettingsModel),
+    _EntitySpec("openvpn_peers", OpenVpnPeerModel),
     # Device history for every tunnel protocol: after the devices it describes.
     _EntitySpec("tunnel_peer_metrics", TunnelPeerMetricsModel, is_metric=True, preserve_id=False),
 )
@@ -437,8 +442,9 @@ async def replace_all(
     await session.execute(delete(GeoSettingsModel))
     await session.execute(delete(GeoDatabaseModel))
     await session.execute(delete(IpObservationModel))
-    # The WireGuard identity row is global too; its peers cascade with projects.
+    # The WireGuard and OpenVPN identity rows are global too; their peers cascade with projects.
     await session.execute(delete(WireGuardSettingsModel))
+    await session.execute(delete(OpenVpnSettingsModel))
     if keep_user_id is not None:
         await session.execute(delete(UserModel).where(UserModel.id != keep_user_id))
     else:

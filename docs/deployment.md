@@ -14,8 +14,8 @@ nav_id: deployment
 
 One Octoprox process, one Postgres, one Redis. Fine for development, demos,
 and small production workloads (one host, tens of thousands of proxies, a
-few hundred concurrent tunnels). The WireGuard port is optional: see
-[WireGuard Devices](wireguard) for enabling it.
+few hundred concurrent tunnels). The tunnel ports are optional: see
+[WireGuard Devices](wireguard) and [OpenVPN Devices](openvpn) for enabling them.
 
 ```
         client ──┐
@@ -25,6 +25,7 @@ few hundred concurrent tunnels). The WireGuard port is optional: see
         │  :8000 API + UI         │         │  Redis   │
         │  :8080 proxy port       │         └──────────┘
         │  :51820/udp WireGuard   │
+        │  :1194 OpenVPN          │
         └─────────────────────────┘
                  │
                  ▼
@@ -38,7 +39,7 @@ Compose files: [`docker-compose.yml`](https://github.com/octoprox/octoprox/blob/
 Multiple identical Octoprox processes behind a load balancer (nginx in the
 bundled compose; any balancer that forwards HTTP, TCP and UDP works). All
 instances share one Postgres and one Redis, and every instance terminates
-the WireGuard tunnel.
+the WireGuard and OpenVPN tunnels.
 
 ```
    client ──▶ ┌────────────┐     ┌── Octoprox-1 ──┐
@@ -230,6 +231,7 @@ instance trips a limit.
 | 8000      | nginx     | API + Web UI (HTTP, sticky per client, see below)     |
 | 8080      | nginx     | Proxy traffic (TCP, least-conn across replicas)       |
 | 51820/udp | nginx     | WireGuard (UDP, each device pinned to one replica)    |
+| 1194      | nginx     | OpenVPN (UDP and TCP, each device pinned to one replica) |
 
 Health is passive, as open source nginx does it: a replica that refuses or
 times out is skipped for ten seconds and the request goes to the next one.

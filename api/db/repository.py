@@ -15,6 +15,7 @@ from api.db.models import (
     ConnectorMetricsModel,
     ConnectorModel,
     CredentialModel,
+    OpenVpnPeerModel,
     ProjectMetricsModel,
     ProjectModel,
     ProviderAuditModel,
@@ -508,7 +509,10 @@ _MetricsModel = (
 # up in when its metrics are flushed, and whose ``project_id`` the history row
 # copies. A new tunnel protocol registers its table here and gets history,
 # compaction and retention for its devices with nothing else to write.
-TUNNEL_PEER_TABLES: dict[str, type[WireGuardPeerModel]] = {"wireguard": WireGuardPeerModel}
+TUNNEL_PEER_TABLES: dict[str, type[WireGuardPeerModel] | type[OpenVpnPeerModel]] = {
+    "wireguard": WireGuardPeerModel,
+    "openvpn": OpenVpnPeerModel,
+}
 
 
 def _cumulative_total_columns(model: _MetricsModel) -> list[Any]:

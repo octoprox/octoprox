@@ -34,7 +34,7 @@ from api.core.job_stats import job_stats
 from api.core.signals import project_changed, wireguard_peer_changed, wireguard_settings_changed
 from api.core.stats import TunnelPeerMetricDelta
 from api.core.workers import WorkerName
-from api.db.redis import WIREGUARD_STATUS_INTERVAL, RedisClient
+from api.db.redis import TUNNEL_STATUS_INTERVAL, RedisClient
 from api.db.session import SessionFactory
 from api.db.wireguard_repository import WireGuardPeerRepository, WireGuardSettingsRepository
 from api.models.wireguard import (
@@ -334,7 +334,7 @@ class WireGuardRuntime:
 
     async def _status_publisher_loop(self) -> None:
         """Every instance that carries the tunnel publishes what ``wg`` reports about its peers."""
-        job_stats.declare_interval(WorkerName.WIREGUARD_STATUS_PUBLISHER, WIREGUARD_STATUS_INTERVAL)
+        job_stats.declare_interval(WorkerName.WIREGUARD_STATUS_PUBLISHER, TUNNEL_STATUS_INTERVAL)
         while True:
             try:
                 with job_stats.track(WorkerName.WIREGUARD_STATUS_PUBLISHER) as run:
@@ -344,7 +344,7 @@ class WireGuardRuntime:
                 raise
             except Exception as exc:
                 logger.warning("WireGuard status publish failed", error=str(exc))
-            await asyncio.sleep(WIREGUARD_STATUS_INTERVAL)
+            await asyncio.sleep(TUNNEL_STATUS_INTERVAL)
 
     async def _publish_status(self) -> bool:
         """Push the peer counters to Redis and persist new handshakes; False when there was nothing to publish.
@@ -374,7 +374,7 @@ class WireGuardRuntime:
                 seen = _naive_utc(dump.latest_handshake)
                 if peer.last_handshake_at is None or peer.last_handshake_at < seen:
                     advanced.append((peer, seen, dump.endpoint))
-        await self._redis.set_wireguard_peer_status(self._config.instance_id, statuses)
+        await self._redis.set_tunnel_peer_status("wireguard", self._config.instance_id, statuses)
         await self._persist_last_seen(advanced)
         return bool(statuses)
 
@@ -410,7 +410,7 @@ class WireGuardRuntime:
         if self._redis is None:
             return {}
         try:
-            published = await self._redis.get_wireguard_peer_status()
+            published = await self._redis.get_tunnel_peer_status("wireguard")
         except Exception as exc:
             logger.debug("Peer status unavailable", error=str(exc))
             return {}

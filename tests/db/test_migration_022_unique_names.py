@@ -92,5 +92,6 @@ async def test_index_present_after_fresh_migration(db_session: AsyncSession) -> 
     assert rows.scalars().all() == [
         "ix_connectors_project_name_unique",
         "ix_credentials_project_name_unique",
+        "ix_openvpn_peers_project_name_unique",
         "ix_wireguard_peers_project_name_unique",
     ]

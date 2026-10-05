@@ -1,13 +1,13 @@
 # Copyright 2026 Octoprox Authors
 # SPDX-License-Identifier: Apache-2.0
 
-"""WireGuard models: the install's server identity and the devices that may connect.
+"""OpenVPN models: the install's CA and server identity, and the devices that may connect.
 
-A device joins a project by becoming a *peer*: it gets a tunnel address, and
-everything it sends through the tunnel is routed as if it had authenticated
-with that project's proxy credentials. What a proxy client would put in its
-username (``-sessid-``, ``-cc-``, ``-st-``, ``-city-``) is stored on the peer,
-because a TV or a router cannot say it any other way. See docs/wireguard.md.
+The same shape as the WireGuard models with the credential swapped: a
+device holds a certificate the install's CA issued instead of a key pair,
+and is told apart at connect time by its common name (its id) and the
+certificate's serial. Routing is stored on the peer as for WireGuard. See
+docs/openvpn.md.
 """
 
 from __future__ import annotations
@@ -27,31 +27,38 @@ from api.models.tunnel import (
     validate_endpoint_host,
     validate_tunnel_subnet,
 )
-from api.wireguard import keys
 
-# Reserved RFC 2544 benchmarking range, the conventional pool for synthetic
-# "fake IP" DNS answers (sing-box and Clash use it too).
-DEFAULT_FAKE_IP_RANGE = "198.18.0.0/15"
-DEFAULT_SUBNET = "10.66.0.0/16"
-DEFAULT_ENDPOINT_PORT = 51820
+DEFAULT_SUBNET = "10.67.0.0/16"
+DEFAULT_ENDPOINT_PORT = 1194
+OpenVpnProtocol = Literal["udp", "tcp"]
+
+
+def validate_subnet(value: str) -> str:
+    return validate_tunnel_subnet(value, DEFAULT_SUBNET)
 
 
 # --- server ----------------------------------------------------------------------------------
 
 
-class WireGuardServerSettings(BaseModel):
-    """The install-wide WireGuard identity and the defaults every device config carries."""
+class OpenVpnServerSettings(BaseModel):
+    """The install-wide OpenVPN identity and the defaults every device profile carries."""
 
-    private_key: str
-    public_key: str
-    # Where devices reach the tunnel: a public hostname or IP. Empty until the
-    # admin sets it; configs cannot be issued before.
+    ca_cert: str
+    ca_key: str
+    server_cert: str
+    server_key: str
+    tls_crypt_key: str
+    # Where devices reach the endpoint: a public hostname or IP. Empty until the
+    # admin sets it; profiles cannot be completed before.
     endpoint_host: str = ""
     endpoint_port: int = Field(default=DEFAULT_ENDPOINT_PORT, ge=1, le=65535)
-    # Tunnel addresses: the first host is the gateway (this server), the rest go to peers.
+    # One transport per install: the daemon listens on one, every profile names it.
+    protocol: OpenVpnProtocol = "udp"
     subnet: str = DEFAULT_SUBNET
-    persistent_keepalive: int = Field(default=25, ge=0, le=3600)
-    # Written into device configs as MTU when set; WireGuard's own default otherwise.
+    # ``keepalive interval timeout`` on the daemon, pushed to devices.
+    keepalive_interval: int = Field(default=10, ge=1, le=600)
+    keepalive_timeout: int = Field(default=60, ge=2, le=3600)
+    # Written into device profiles as tun-mtu when set.
     client_mtu: int | None = Field(default=None, ge=1280, le=1500)
     updated_at: datetime = Field(default_factory=utc_now)
 
@@ -64,6 +71,12 @@ class WireGuardServerSettings(BaseModel):
     @classmethod
     def _host(cls, value: str) -> str:
         return validate_endpoint_host(value)
+
+    @model_validator(mode="after")
+    def _keepalive(self) -> OpenVpnServerSettings:
+        if self.keepalive_timeout <= self.keepalive_interval:
+            raise ValueError("keepalive_timeout must be longer than keepalive_interval")
+        return self
 
     @property
     def network(self) -> ipaddress.IPv4Network:
@@ -71,26 +84,30 @@ class WireGuardServerSettings(BaseModel):
 
     @property
     def gateway(self) -> str:
-        """The server's own tunnel address: the first host of the subnet."""
+        """The daemon's own tunnel address: the first host of the subnet."""
         return str(next(self.network.hosts()))
 
     @property
     def configured(self) -> bool:
         return bool(self.endpoint_host)
 
+    def daemon_signature(self) -> tuple[Any, ...]:
+        """What the daemon was started with; a change means it must be restarted."""
+        return (
+            self.ca_cert, self.server_cert, self.tls_crypt_key, self.endpoint_port, self.protocol, self.subnet,
+            self.keepalive_interval, self.keepalive_timeout,
+        )
 
-def validate_subnet(value: str) -> str:
-    """An IPv4 network with room for the gateway and at least one peer, in canonical form."""
-    return validate_tunnel_subnet(value, DEFAULT_SUBNET)
 
-
-class WireGuardServerSettingsDoc(BaseModel):
-    """What an admin edits: everything but the key pair."""
+class OpenVpnServerSettingsDoc(BaseModel):
+    """What an admin edits: everything but the identity."""
 
     endpoint_host: str = ""
     endpoint_port: int = Field(default=DEFAULT_ENDPOINT_PORT, ge=1, le=65535)
+    protocol: OpenVpnProtocol = "udp"
     subnet: str = DEFAULT_SUBNET
-    persistent_keepalive: int = Field(default=25, ge=0, le=3600)
+    keepalive_interval: int = Field(default=10, ge=1, le=600)
+    keepalive_timeout: int = Field(default=60, ge=2, le=3600)
     client_mtu: int | None = Field(default=None, ge=1280, le=1500)
 
     @field_validator("subnet")
@@ -103,26 +120,37 @@ class WireGuardServerSettingsDoc(BaseModel):
     def _host(cls, value: str) -> str:
         return validate_endpoint_host(value)
 
+    @model_validator(mode="after")
+    def _keepalive(self) -> OpenVpnServerSettingsDoc:
+        if self.keepalive_timeout <= self.keepalive_interval:
+            raise ValueError("keepalive_timeout must be longer than keepalive_interval")
+        return self
 
-WireGuardState = Literal["disabled", "starting", "running", "failed", "stopped"]
+
+OpenVpnState = Literal["disabled", "starting", "running", "failed", "stopped"]
 
 
-class WireGuardStatus(BaseModel):
-    """What the instance answering the request is doing about the tunnel.
+class OpenVpnStatus(BaseModel):
+    """What the instance answering the request is doing about the endpoint.
 
     In a cluster this describes the instance the API load balancer picked,
-    which may or may not be one carrying the tunnel. ``peers_online`` is
+    which may or may not be one carrying the endpoint. ``peers_online`` is
     merged from what every carrying instance publishes to Redis and is
     cluster-wide.
     """
 
     enabled: bool
-    state: WireGuardState
+    state: OpenVpnState
     error: str | None = None
     instance_id: str
     interface: str
-    backend: Literal["kernel", "userspace"] | None = None
+    protocol: OpenVpnProtocol
     listen_port: int | None = None
+    daemon_version: str | None = None
+    # Times the daemon exited on its own and was started again since this process started.
+    restarts: int = 0
+    # Connections refused at the management interface (unknown, disabled or rotated device) since start.
+    denied: int = 0
     transparent_port: int
     dns_port: int
     fake_ip_range: str
@@ -130,67 +158,66 @@ class WireGuardStatus(BaseModel):
     peers_total: int = 0
     peers_enabled: int = 0
     peers_online: int = 0
-    # Degradation signals summed over every device, all time, cluster-wide
-    # (see docs/wireguard.md); each device's own numbers are in its metrics.
     connections_by_address: int = 0
     encrypted_dns_blocked: int = 0
     block_encrypted_dns: bool = True
 
 
-class WireGuardServerSettingsResponse(BaseModel):
-    public_key: str
+class OpenVpnServerSettingsResponse(BaseModel):
+    ca_fingerprint: str
+    ca_expires_at: datetime
     endpoint_host: str
     endpoint_port: int
+    protocol: OpenVpnProtocol
     subnet: str
     gateway: str
-    persistent_keepalive: int
+    keepalive_interval: int
+    keepalive_timeout: int
     client_mtu: int | None
     configured: bool
     updated_at: datetime
-    status: WireGuardStatus
+    status: OpenVpnStatus
 
 
 # --- peers -----------------------------------------------------------------------------------
 
 
-class WireGuardPeer(BaseModel):
+class OpenVpnPeer(BaseModel):
     """A device that may connect, and how its traffic is routed."""
 
     id: str = Field(default_factory=lambda: str(uuid4()))
     project_id: str
     name: str
-    public_key: str
-    private_key: str | None = None
-    preshared_key: str | None = None
+    # Issued by the install's CA with the id as common name; the key is kept
+    # so the profile can be shown again (no bring-your-own for OpenVPN).
+    certificate: str
+    private_key: str
+    # Decimal serial of ``certificate``: a rotated device keeps its common
+    # name, so the serial is what tells the current certificate from an old one.
+    serial: str
+    certificate_expires_at: datetime
     address: str
     enabled: bool = True
     session_id: str | None = None
     country: str | None = None
     state: str | None = None
     city: str | None = None
-    # When the device last handshaked and from where, as persisted by the
-    # instance that carried the session (see WireGuardPeerModel). Live
-    # readings are merged over these in the API.
-    last_handshake_at: datetime | None = None
+    # When the device last connected and from where, as persisted by the
+    # instance that carried the session. Live readings are merged over these.
+    last_connected_at: datetime | None = None
     last_endpoint: str | None = None
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
 
     @property
     def location(self) -> LocationTarget | None:
-        """The exit this device's traffic must use, as a proxy client's ``-cc-`` suffixes would say it."""
         if not self.country:
             return None
         return LocationTarget(country=self.country, state=self.state, city=self.city)
 
 
-class WireGuardPeerCreate(BaseModel):
+class OpenVpnPeerCreate(BaseModel):
     name: str = Field(min_length=1, max_length=255)
-    # Bring-your-own key: the device keeps its private key and only the public
-    # half is registered. None has Octoprox generate the pair and keep it, so
-    # the config can be shown again.
-    public_key: str | None = None
-    preshared: bool = True
     enabled: bool = True
     session_id: str | None = Field(default=None, max_length=255)
     country: str | None = None
@@ -202,22 +229,14 @@ class WireGuardPeerCreate(BaseModel):
     def _strip(cls, value: Any) -> Any:
         return clean_optional(value) if isinstance(value, str) else value
 
-    @field_validator("public_key")
-    @classmethod
-    def _public_key(cls, value: str | None) -> str | None:
-        value = clean_optional(value)
-        if value is not None and not keys.is_valid_key(value):
-            raise ValueError("public_key must be a base64 WireGuard key (44 characters)")
-        return value
-
     @model_validator(mode="after")
-    def _location(self) -> WireGuardPeerCreate:
+    def _location(self) -> OpenVpnPeerCreate:
         target = LocationTarget.parse(self.country, self.state, self.city)
         self.country, self.state, self.city = (target.country, target.state, target.city) if target else (None, None, None)
         return self
 
 
-class WireGuardPeerUpdate(BaseModel):
+class OpenVpnPeerUpdate(BaseModel):
     """Partial update. An empty string clears session_id, country, state or city."""
 
     name: str | None = Field(default=None, min_length=1, max_length=255)
@@ -235,9 +254,6 @@ class WireGuardPeerUpdate(BaseModel):
     @field_validator("country", "state", "city")
     @classmethod
     def _level(cls, value: str | None, info: ValidationInfo) -> str | None:
-        # "" means clear and survives as such; a value is normalised. Whether a
-        # state or city still has a country is only known once merged with the
-        # stored peer, so the route checks that.
         if value is None or value == "":
             return value
         return normalize_level(info.field_name or "", value) or ""
@@ -248,35 +264,32 @@ class WireGuardPeerUpdate(BaseModel):
         return value.strip() if isinstance(value, str) else value
 
 
-class WireGuardPeerStatus(BaseModel):
-    """Where a device stands: its last handshake, and the tunnel counters while it is carried.
+class OpenVpnPeerStatus(BaseModel):
+    """Where a device stands: whether a carrier has a session for it, and when it was last seen.
 
-    ``last_handshake_at`` and ``endpoint`` come from the instance carrying
-    the session when one is publishing, else from what was persisted the
-    last time one did, so a device's last sighting survives a restart.
-    ``rx_bytes`` / ``tx_bytes`` are the interface's own counters on the
-    current carrier since its interface came up: wire bytes, handshakes
-    and DNS included, zero when nothing is carrying the device. What the
-    device's traffic amounted to is in its metrics (``TunnelPeerMetrics``).
+    ``connected_since`` and ``endpoint`` come from the instance carrying the
+    session when one is publishing; ``last_seen_at`` is that, or the
+    persisted last connection otherwise, so a device's last sighting
+    survives a restart. ``rx_bytes`` / ``tx_bytes`` are the daemon's counters
+    for the current session: wire bytes, control channel and DNS included.
+    What the device's traffic amounted to is in its metrics.
     """
 
     online: bool = False
-    last_handshake_at: datetime | None = None
+    connected_since: datetime | None = None
+    last_seen_at: datetime | None = None
     endpoint: str | None = None
-    # True when a carrying instance published this reading within the last
-    # half minute; False when it is the persisted last sighting.
     live: bool = False
     rx_bytes: int = 0
     tx_bytes: int = 0
 
 
-class WireGuardPeerResponse(BaseModel):
+class OpenVpnPeerResponse(BaseModel):
     id: str
     project_id: str
     name: str
-    public_key: str
-    has_private_key: bool
-    has_preshared_key: bool
+    serial: str
+    certificate_expires_at: datetime
     address: str
     enabled: bool
     session_id: str | None
@@ -285,26 +298,22 @@ class WireGuardPeerResponse(BaseModel):
     city: str | None
     created_at: datetime
     updated_at: datetime
-    status: WireGuardPeerStatus
-    # The device's totals, from the same pipeline as the project's and the
-    # connectors' counters: history plus the current window, cluster-wide.
+    status: OpenVpnPeerStatus
     metrics: TunnelPeerMetrics
 
 
-class WireGuardPeerListResponse(BaseModel):
+class OpenVpnPeerListResponse(BaseModel):
     total: int
-    peers: list[WireGuardPeerResponse]
-    # Whether configs can be issued: the admin has set the public endpoint.
+    peers: list[OpenVpnPeerResponse]
+    # Whether profiles can be issued: the admin has set the public endpoint.
     server_configured: bool
-    server_public_key: str
+    ca_fingerprint: str
 
 
-class WireGuardPeerConfigResponse(BaseModel):
-    """A device's ``wg-quick`` configuration file."""
+class OpenVpnPeerConfigResponse(BaseModel):
+    """A device's ``.ovpn`` profile."""
 
     filename: str
     config: str
-    # False when the device holds its own private key: the file carries a
-    # placeholder the operator fills in.
     complete: bool
     server_configured: bool

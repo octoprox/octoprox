@@ -7,13 +7,16 @@ services:
     ports:
       - "8000:8000"  # API and Web UI
       - "8080:8080"  # Proxy server
-      # WireGuard endpoint (docs/wireguard.md): uncomment with the cap_add and
-      # devices blocks below, and set OCTOPROX_WIREGUARD_ENABLED=true.
-      # - "51820:51820/udp"
+      # Tunnel endpoints: uncomment the port(s) with the cap_add and devices
+      # blocks below, and set OCTOPROX_WIREGUARD_ENABLED=true (docs/wireguard.md)
+      # and/or OCTOPROX_OPENVPN_ENABLED=true (docs/openvpn.md).
+      # - "51820:51820/udp"   # WireGuard
+      # - "1194:1194/udp"     # OpenVPN over UDP (the default transport)
+      # - "1194:1194/tcp"     # OpenVPN over TCP, when the transport is set to TCP
     # cap_add:
-    #   - NET_ADMIN            # create the tunnel interface and nftables rules
+    #   - NET_ADMIN            # create the tunnel interfaces and nftables rules
     # devices:
-    #   - /dev/net/tun:/dev/net/tun   # only for the wireguard-go fallback
+    #   - /dev/net/tun:/dev/net/tun   # OpenVPN always; WireGuard only for the wireguard-go fallback
     environment:
       - OCTOPROX_AUTH_USERNAME=admin
       - OCTOPROX_AUTH_PASSWORD=admin
@@ -27,6 +30,7 @@ services:
       - OCTOPROX_DB_NAME=octoprox
       - OCTOPROX_LOG_LEVEL=INFO
       # - OCTOPROX_WIREGUARD_ENABLED=true
+      # - OCTOPROX_OPENVPN_ENABLED=true
     volumes:
       - ca_data:/app/data/ca
       - geo_data:/app/data/geo

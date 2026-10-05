@@ -5,10 +5,10 @@
 
 import pytest
 
+from api.models.tunnel import validate_endpoint_host
 from api.models.wireguard import (
     WireGuardPeer,
     WireGuardServerSettings,
-    validate_endpoint_host,
     validate_subnet,
 )
 from api.wireguard.config import (

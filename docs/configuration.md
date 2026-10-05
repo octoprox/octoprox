@@ -158,6 +158,25 @@ Environment variables: `OCTOPROX_TUNNEL_TRANSPARENT_PORT`, `OCTOPROX_TUNNEL_DNS_
 
 The key pair, public endpoint and tunnel subnet are install-wide, stored in Postgres and edited under **Settings → WireGuard**. See [WireGuard Devices](wireguard) for what each setting does and what the terminating instance needs.
 
+## OpenVPN
+
+```yaml
+openvpn:
+  enabled: false           # run the daemon on this instance (CAP_NET_ADMIN, /dev/net/tun, openvpn, nftables)
+  interface: ovpn0
+  # listen_port: 1194      # only when it differs from the install's endpoint port
+  mtu: 1500                # tun-mtu of the daemon's interface
+  defaults:                # seeds the install-wide row on a fresh install
+    endpoint_host: vpn.example.com
+    endpoint_port: 1194
+    protocol: udp          # or tcp
+    subnet: 10.67.0.0/16
+```
+
+Environment variables: `OCTOPROX_OPENVPN_ENABLED`, `OCTOPROX_OPENVPN_INTERFACE`, `OCTOPROX_OPENVPN_LISTEN_PORT`, `OCTOPROX_OPENVPN_MTU`.
+
+The CA, server certificate, public endpoint, transport and subnet are install-wide, stored in Postgres and edited under **Settings → OpenVPN**. The `tunnel:` block above is shared with WireGuard. See [OpenVPN Devices](openvpn).
+
 ## Logging
 
 ```yaml

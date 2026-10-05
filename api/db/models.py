@@ -432,6 +432,74 @@ class WireGuardPeerModel(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now, onupdate=utc_now)
 
 
+class OpenVpnSettingsModel(Base):
+    """The install's OpenVPN identity and device-profile defaults: exactly one row, id 1.
+
+    A private CA, the server certificate it signed and the tls-crypt key,
+    kept here for the same reason as the WireGuard key pair: every instance
+    terminating the endpoint must present the same identity.
+    """
+
+    __tablename__ = "openvpn_settings"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
+    ca_cert: Mapped[str] = mapped_column(Text, nullable=False)
+    ca_key: Mapped[str] = mapped_column(Text, nullable=False)
+    server_cert: Mapped[str] = mapped_column(Text, nullable=False)
+    server_key: Mapped[str] = mapped_column(Text, nullable=False)
+    tls_crypt_key: Mapped[str] = mapped_column(Text, nullable=False)
+    endpoint_host: Mapped[str] = mapped_column(String(255), nullable=False, default="", server_default="")
+    endpoint_port: Mapped[int] = mapped_column(Integer, nullable=False, default=1194, server_default="1194")
+    protocol: Mapped[str] = mapped_column(String(3), nullable=False, default="udp", server_default="udp")
+    subnet: Mapped[str] = mapped_column(String(43), nullable=False, default="10.67.0.0/16", server_default="10.67.0.0/16")
+    keepalive_interval: Mapped[int] = mapped_column(Integer, nullable=False, default=10, server_default="10")
+    keepalive_timeout: Mapped[int] = mapped_column(Integer, nullable=False, default=60, server_default="60")
+    client_mtu: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    updated_by: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now, onupdate=utc_now)
+
+
+class OpenVpnPeerModel(Base):
+    """A device allowed into the OpenVPN endpoint, and the project its traffic belongs to.
+
+    The tunnel address is the credential, as with WireGuard: the daemon
+    pushes each device the address on its row and drops packets it sends
+    from any other, so the address a connection arrives from names this
+    row. The certificate is issued by the install's CA with the id as
+    common name; the serial tells the current certificate from a rotated
+    one when the device connects.
+    """
+
+    __tablename__ = "openvpn_peers"
+    __table_args__ = (
+        Index("ix_openvpn_peers_project_name_unique", "project_id", text("lower(name)"), unique=True),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    project_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    certificate: Mapped[str] = mapped_column(Text, nullable=False)
+    private_key: Mapped[str] = mapped_column(Text, nullable=False)
+    serial: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    # Read off the certificate when it is issued, so listing devices never parses PEM.
+    certificate_expires_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    address: Mapped[str] = mapped_column(String(45), nullable=False, unique=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default=text("true"))
+    session_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    country: Mapped[str | None] = mapped_column(String(2), nullable=True)
+    state: Mapped[str | None] = mapped_column(String(8), nullable=True)
+    city: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    # When the device's last session started and from where, as the carrying
+    # instance recorded it (operational, see WireGuardPeerModel).
+    last_connected_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    last_endpoint: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now, onupdate=utc_now)
+
+
 class GeoSettingsModel(Base):
     """The install-wide IP attribution settings: exactly one row, id 1.
 

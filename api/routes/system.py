@@ -48,6 +48,7 @@ async def get_system_stats(request: Request, session: DbDep, _admin: RequireAdmi
         cert_manager=getattr(state, "cert_manager", None),
         geo_runtime=getattr(state, "geo_runtime", None),
         wireguard_runtime=getattr(state, "wireguard_runtime", None),
+        openvpn_runtime=getattr(state, "openvpn_runtime", None),
         redis_client=getattr(state, "redis_client", None),
         started_at=getattr(state, "started_at", None),
     )
