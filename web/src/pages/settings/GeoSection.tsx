@@ -442,11 +442,17 @@ function PolicyTab() {
             {data && !data.echo_enabled && <span className="text-warning"> The local /echo endpoint is disabled in this install's config.</span>}
           </p>
           <div className="space-y-3">
-            <div>
-              <Label htmlFor="geo-echo-url">URL</Label>
-              <Input id="geo-echo-url" className="font-mono text-xs" value={policy.echo_url} onChange={(e) => update({ echo_url: e.target.value })} required />
+            <div className="grid grid-cols-[minmax(0,1fr)_100px] gap-3">
+              <div className="min-w-0">
+                <Label htmlFor="geo-echo-url">URL</Label>
+                <Input id="geo-echo-url" className="font-mono text-xs" value={policy.echo_url} onChange={(e) => update({ echo_url: e.target.value })} required />
+              </div>
+              <div>
+                <Label htmlFor="geo-echo-timeout" className="whitespace-nowrap">Timeout (s)</Label>
+                <Input id="geo-echo-timeout" type="number" min={1} step={1} value={policy.echo_timeout_seconds} onChange={(e) => update({ echo_timeout_seconds: parseFloat(e.target.value) || 15 })} />
+              </div>
             </div>
-            <div className="grid grid-cols-[minmax(0,1fr)_minmax(0,1fr)_minmax(0,1fr)_minmax(0,1fr)_minmax(0,1fr)] gap-3">
+            <div className="grid grid-cols-2 gap-3">
               <div className="min-w-0">
                 <Label htmlFor="geo-echo-ip">IP path</Label>
                 <Input id="geo-echo-ip" className="font-mono text-xs" value={policy.echo_ip_path} onChange={(e) => update({ echo_ip_path: e.target.value })} placeholder="ip" required />
@@ -462,10 +468,6 @@ function PolicyTab() {
               <div className="min-w-0">
                 <Label htmlFor="geo-echo-city">City path</Label>
                 <Input id="geo-echo-city" className="font-mono text-xs" value={policy.echo_city_path ?? ''} onChange={(e) => update({ echo_city_path: e.target.value || null })} placeholder="none" title="JMESPath to the exit's city (city on Octoprox's /echo); evidence for -city- verification" />
-              </div>
-              <div className="min-w-0">
-                <Label htmlFor="geo-echo-timeout">Timeout (s)</Label>
-                <Input id="geo-echo-timeout" type="number" min={1} step={1} value={policy.echo_timeout_seconds} onChange={(e) => update({ echo_timeout_seconds: parseFloat(e.target.value) || 15 })} />
               </div>
             </div>
             <label className="flex items-center gap-2 text-[13px] text-fg">
