@@ -17,8 +17,8 @@ interface CardHeaderProps extends Omit<HTMLAttributes<HTMLDivElement>, 'title'> 
 
 export function CardHeader({ title, action, className, ...props }: CardHeaderProps) {
   return (
-    <div className={cn('flex items-center justify-between gap-3', className)} {...props}>
-      <div className="text-sm font-semibold text-fg">{title}</div>
+    <div className={cn('flex items-center justify-between flex-wrap gap-x-3 gap-y-2', className)} {...props}>
+      <div className="text-sm font-semibold text-fg min-w-0">{title}</div>
       {action}
     </div>
   )

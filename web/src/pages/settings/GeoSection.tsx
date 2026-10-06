@@ -190,9 +190,9 @@ function DatabasesTab() {
       </div>
 
       <Card className="p-0 overflow-hidden">
-        <div className="flex items-center justify-between px-4 py-3 border-b border-line">
-          <div className="flex items-center gap-2">
-            <Database className="w-4 h-4 text-fg-muted" />
+        <div className="flex items-center justify-between flex-wrap gap-x-3 gap-y-2 px-4 py-3 border-b border-line">
+          <div className="flex items-center flex-wrap gap-x-2 gap-y-1 min-w-0">
+            <Database className="w-4 h-4 text-fg-muted flex-none" />
             <h3 className="text-sm font-semibold text-fg">Installed databases</h3>
             <span className="text-xs text-fg-subtle">Consulted lowest priority first. The first database with a country answers. Load one geolocation file per vendor: a city file already answers country.</span>
           </div>
@@ -345,8 +345,8 @@ function FromUrlCard({ onDone }: { onDone: () => void }) {
             </div>
           </div>
         )}
-        <div className="grid grid-cols-[minmax(0,1fr)_110px_100px] gap-3">
-          <div>
+        <div className="grid grid-cols-2 @sm:grid-cols-[minmax(0,1fr)_110px_100px] gap-3">
+          <div className="col-span-2 @sm:col-span-1">
             <Label htmlFor="geo-url-name">Name</Label>
             <Input id="geo-url-name" value={name} onChange={(e) => setName(e.target.value)} placeholder={current.label} />
           </div>
@@ -408,7 +408,7 @@ function PolicyTab() {
             {policy.default_sources.map((kind, i) => (
               <li key={kind} className="flex items-center gap-2 rounded-lg border border-line px-3 py-2 text-sm">
                 <span className="w-5 text-xs text-fg-subtle tabular-nums">{i + 1}.</span>
-                <span className="flex-1">{SOURCE_LABELS[kind]}</span>
+                <span className="flex-1 min-w-0">{SOURCE_LABELS[kind]}</span>
                 <Button type="button" variant="ghost" size="sm" onClick={() => move(kind, -1)} disabled={i === 0}>↑</Button>
                 <Button type="button" variant="ghost" size="sm" onClick={() => move(kind, 1)} disabled={i === policy.default_sources.length - 1}>↓</Button>
                 <Button type="button" variant="ghost" size="sm" onClick={() => toggle(kind)} disabled={policy.default_sources.length === 1}>Exclude</Button>
@@ -477,28 +477,28 @@ function PolicyTab() {
           </div>
 
           <h3 className="text-sm font-semibold text-fg mt-5 mb-1">Preflight</h3>
-          <div className="grid grid-cols-2 gap-3 items-start">
+          <div className="grid grid-cols-1 @sm:grid-cols-2 gap-3 items-start">
             <div>
-              <Label htmlFor="geo-preflight-ttl" className="whitespace-nowrap">Verdict cache (seconds)</Label>
+              <Label htmlFor="geo-preflight-ttl">Verdict cache (seconds)</Label>
               <Input id="geo-preflight-ttl" type="number" min={10} value={policy.preflight_session_ttl_seconds} onChange={(e) => update({ preflight_session_ttl_seconds: parseInt(e.target.value) || 600 })} />
               <p className="text-[11px] text-fg-subtle mt-1">One echo request per proxy per this window.</p>
             </div>
             <div>
-              <Label htmlFor="geo-preflight-attempts" className="whitespace-nowrap">Retry attempts</Label>
+              <Label htmlFor="geo-preflight-attempts">Retry attempts</Label>
               <Input id="geo-preflight-attempts" type="number" min={1} max={10} value={policy.preflight_max_attempts} onChange={(e) => update({ preflight_max_attempts: parseInt(e.target.value) || 1 })} />
               <p className="text-[11px] text-fg-subtle mt-1">Proxies tried in retry mode before a 502.</p>
             </div>
           </div>
 
           <h3 className="text-sm font-semibold text-fg mt-5 mb-1">History</h3>
-          <div className="grid grid-cols-2 gap-3 items-start">
+          <div className="grid grid-cols-1 @sm:grid-cols-2 gap-3 items-start">
             <div>
-              <Label htmlFor="geo-retention" className="whitespace-nowrap">Raw observations (days)</Label>
+              <Label htmlFor="geo-retention">Raw observations (days)</Label>
               <Input id="geo-retention" type="number" min={0} value={policy.observation_retention_days} onChange={(e) => update({ observation_retention_days: parseInt(e.target.value) || 0 })} />
               <p className="text-[11px] text-fg-subtle mt-1">Accuracy totals are kept forever.</p>
             </div>
             <div>
-              <Label htmlFor="geo-exit-retention" className="whitespace-nowrap">Exit IPs not seen for (days)</Label>
+              <Label htmlFor="geo-exit-retention">Exit IPs not seen for (days)</Label>
               <Input id="geo-exit-retention" type="number" min={0} value={policy.exit_ip_retention_days} onChange={(e) => update({ exit_ip_retention_days: parseInt(e.target.value) || 0 })} />
               <p className="text-[11px] text-fg-subtle mt-1">0 keeps every exit ever handed out.</p>
             </div>
@@ -506,9 +506,9 @@ function PolicyTab() {
         </Card>
       </div>
 
-      <div className="flex items-center justify-between gap-3">
+      <div className="flex items-center justify-between flex-wrap gap-3">
         <span className="text-xs text-fg-subtle">{data?.from_database ? 'Saved in the database; applies to every instance.' : 'Using the defaults from the config file until saved.'}</span>
-        <div className="flex gap-2">
+        <div className="flex gap-2 ml-auto">
           {draft && <Button type="button" variant="outline" size="sm" onClick={() => setDraft(null)}>Discard</Button>}
           <Button type="submit" size="sm" disabled={!draft || mutation.isPending}>{mutation.isPending ? 'Saving…' : 'Save settings'}</Button>
         </div>

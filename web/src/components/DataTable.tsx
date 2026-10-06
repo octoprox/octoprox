@@ -46,6 +46,9 @@ const rangeFilterFn: FilterFn<unknown> = (row, columnId, filterValue: [number | 
   return true
 }
 
+/** Room a column with no explicit size is guaranteed before the table starts scrolling sideways. */
+const UNSIZED_COLUMN_MIN_WIDTH = 170
+
 /** Paging driven by the server: `data` is one page and `total` is the size of the whole result. */
 export interface ManualPagination {
   pageIndex: number
@@ -180,7 +183,13 @@ export function DataTable<TData, TValue>({
 
   const pageSize = table.getState().pagination.pageSize
   const totalRows = manualPagination ? manualPagination.total : table.getFilteredRowModel().rows.length
-  const visibleColumnCount = table.getVisibleLeafColumns().length
+  const visibleColumns = table.getVisibleLeafColumns()
+  const visibleColumnCount = visibleColumns.length
+  // The table is fixed-layout and fills its container, so without a floor the
+  // sized columns would eat all the room on a narrow screen and the unsized ones
+  // (host, connector name) would collapse to nothing. Below this width the
+  // wrapper scrolls sideways instead, with the identifying column still first.
+  const minTableWidth = visibleColumns.reduce((sum, col) => sum + (col.getSize() !== 150 ? col.getSize() : UNSIZED_COLUMN_MIN_WIDTH), 0)
 
   const handleRowClick = (e: React.MouseEvent, original: TData) => {
     if (!onRowClick) return
@@ -192,7 +201,7 @@ export function DataTable<TData, TValue>({
   return (
     <div className={cn('bg-surface rounded-lg border border-line overflow-hidden min-w-0 flex flex-col', className)}>
       <div className="overflow-x-auto">
-        <table className="w-full text-[13px] table-fixed">
+        <table className="w-full text-[13px] table-fixed" style={{ minWidth: minTableWidth }}>
           <thead>
             <tr className="bg-surface-raised border-b border-line">
               {table.getHeaderGroups().map((headerGroup) =>
@@ -296,11 +305,11 @@ export function DataTable<TData, TValue>({
       {totalRows > 0 && (
         <div
           className={cn(
-            'flex items-center justify-between gap-4 px-3 py-2 border-t border-line text-xs',
+            '@container flex items-center justify-between flex-wrap gap-x-4 gap-y-2 px-3 py-2 border-t border-line text-xs',
             selectedRows.length > 0 && bulkActions ? 'bg-primary-soft text-primary-soft-fg' : 'text-fg-muted'
           )}
         >
-          <div className="flex items-center gap-3 min-w-0">
+          <div className="flex items-center gap-3 min-w-0 flex-wrap">
             {selectedRows.length > 0 && bulkActions ? (
               <>
                 <span className="font-semibold whitespace-nowrap">{selectedRows.length} selected</span>
@@ -309,7 +318,8 @@ export function DataTable<TData, TValue>({
             ) : (
               <>
                 <span className="whitespace-nowrap">
-                  Showing {currentPageIndex * pageSize + 1}-{Math.min((currentPageIndex + 1) * pageSize, totalRows)} of {totalRows}
+                  <span className="hidden @sm:inline">Showing </span>
+                  {currentPageIndex * pageSize + 1}-{Math.min((currentPageIndex + 1) * pageSize, totalRows)} of {totalRows}
                   {showColumnFilters && columnFilters.length > 0 && (
                     <span className="text-fg-subtle"> (filtered)</span>
                   )}
@@ -327,9 +337,9 @@ export function DataTable<TData, TValue>({
             )}
           </div>
 
-          <div className="flex items-center gap-3 flex-none">
-            <label className="flex items-center gap-1.5">
-              <span>Rows</span>
+          <div className="flex items-center gap-3 flex-none ml-auto">
+            <label className="flex items-center gap-1.5" title="Rows per page">
+              <span className="hidden @sm:inline">Rows</span>
               <select
                 value={pageSize}
                 onChange={(e) => table.setPageSize(Number(e.target.value))}
@@ -341,11 +351,11 @@ export function DataTable<TData, TValue>({
               </select>
             </label>
             <div className="flex items-center gap-1">
-              <PagerButton onClick={() => table.setPageIndex(0)} disabled={!table.getCanPreviousPage()} title="First page"><ChevronsLeft className="w-4 h-4" /></PagerButton>
+              <PagerButton onClick={() => table.setPageIndex(0)} disabled={!table.getCanPreviousPage()} title="First page" className="hidden @sm:block"><ChevronsLeft className="w-4 h-4" /></PagerButton>
               <PagerButton onClick={() => table.previousPage()} disabled={!table.getCanPreviousPage()} title="Previous page"><ChevronLeft className="w-4 h-4" /></PagerButton>
               <span className="px-1 tabular-nums text-fg">{currentPageIndex + 1}<span className="text-fg-subtle"> / {pageCount}</span></span>
               <PagerButton onClick={() => table.nextPage()} disabled={!table.getCanNextPage()} title="Next page"><ChevronRight className="w-4 h-4" /></PagerButton>
-              <PagerButton onClick={() => table.setPageIndex(pageCount - 1)} disabled={!table.getCanNextPage()} title="Last page"><ChevronsRight className="w-4 h-4" /></PagerButton>
+              <PagerButton onClick={() => table.setPageIndex(pageCount - 1)} disabled={!table.getCanNextPage()} title="Last page" className="hidden @sm:block"><ChevronsRight className="w-4 h-4" /></PagerButton>
             </div>
           </div>
         </div>
@@ -354,11 +364,11 @@ export function DataTable<TData, TValue>({
   )
 }
 
-function PagerButton({ children, ...props }: React.ButtonHTMLAttributes<HTMLButtonElement>) {
+function PagerButton({ children, className, ...props }: React.ButtonHTMLAttributes<HTMLButtonElement>) {
   return (
     <button
       type="button"
-      className="p-1 rounded text-fg-muted hover:bg-surface-raised hover:text-fg disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-transparent"
+      className={cn('p-1 rounded text-fg-muted hover:bg-surface-raised hover:text-fg disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-transparent', className)}
       {...props}
     >
       {children}

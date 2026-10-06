@@ -16,7 +16,7 @@ export default function BackupSection() {
       title="Backup & Migration"
       subtitle="Export the whole instance - users, projects, credentials, connectors and proxies - as one encrypted file, or restore one to migrate."
     >
-      <div className="grid grid-cols-2 gap-4 max-w-5xl items-stretch">
+      <div className="grid grid-cols-1 @3xl:grid-cols-2 gap-4 max-w-5xl items-stretch">
         <ExportCard />
         <ImportCard />
       </div>

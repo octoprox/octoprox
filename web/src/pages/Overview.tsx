@@ -14,7 +14,7 @@ import { useProject } from '../contexts/ProjectContext'
 import { useAuth } from '../contexts/AuthContext'
 import { useTheme } from '../contexts/ThemeContext'
 import { useToast } from '../contexts/ToastContext'
-import { formatBytes, formatMoney, plural } from '../utils/format'
+import { formatBytes, formatMoney, parseApiDate, plural } from '../utils/format'
 import { targetTotal, describeTarget, isDynamic } from '../utils/connectors'
 import { ProviderLogo } from '../components/ProviderLogo'
 import { Page } from '../components/layout/Page'
@@ -59,9 +59,11 @@ function buildChartData(snapshots: MetricsSnapshot[], range: TimeRange): ChartPo
   const points: ChartPoint[] = []
   for (let i = 0; i < snapshots.length; i++) {
     const s = snapshots[i]
-    const epoch = new Date(s.timestamp).getTime()
+    // Snapshot timestamps come back as naive UTC; a plain Date() would read them as
+    // local time and shift the whole chart by the viewer's offset.
+    const epoch = parseApiDate(s.timestamp)?.getTime() ?? 0
     if (i > 0) {
-      const prevEpoch = new Date(snapshots[i - 1].timestamp).getTime()
+      const prevEpoch = parseApiDate(snapshots[i - 1].timestamp)?.getTime() ?? 0
       if (epoch - prevEpoch > threshold) {
         points.push({ time: prevEpoch + 1, request_count: null, success_count: null, failure_count: null, avg_latency_ms: null, bytes_sent: null, bytes_received: null })
       }
@@ -489,7 +491,7 @@ function cnTrunc(off: boolean) {
 
 function Legend({ dot, n, label }: { dot: string; n: number; label: string }) {
   return (
-    <span className="inline-flex items-center gap-1.5">
+    <span className="inline-flex items-center gap-1.5 whitespace-nowrap">
       <span className={`w-2 h-2 rounded-full ${dot}`} />
       <b className="text-fg font-semibold">{n}</b> {label}
     </span>
@@ -498,7 +500,7 @@ function Legend({ dot, n, label }: { dot: string; n: number; label: string }) {
 
 function ChartLegend({ items, small }: { items: [string, string][]; small?: boolean }) {
   return (
-    <div className={`flex items-center gap-3 ${small ? 'text-[11px]' : 'text-xs'} text-fg-muted`}>
+    <div className={`flex items-center flex-wrap gap-x-3 gap-y-1 ${small ? 'text-[11px]' : 'text-xs'} text-fg-muted`}>
       {items.map(([label, color]) => (
         <span key={label} className="inline-flex items-center gap-1.5">
           <span className="inline-block w-2.5 h-0.5 rounded" style={{ background: color }} />
@@ -513,7 +515,8 @@ function Kpi({ label, value, sub, spark, color }: { label: string; value: string
   return (
     <div className="px-3 py-2.5 @lg:px-4 @lg:py-3 flex flex-col gap-1 min-w-0">
       <div className="text-xs text-fg-muted truncate">{label}</div>
-      <div className="flex items-end justify-between gap-2">
+      {/* Wrapping drops the sparkline under the value when both do not fit, so a tight tile never truncates the number */}
+      <div className="flex items-end justify-between flex-wrap gap-x-2 gap-y-1">
         <div className="min-w-0">
           <div className="text-[17px] leading-6 @lg:text-[21px] @lg:leading-7 font-semibold tabular-nums truncate" title={value}>{value}</div>
           {sub && <div className="text-[11px] text-fg-subtle truncate">{sub}</div>}

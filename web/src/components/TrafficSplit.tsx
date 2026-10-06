@@ -80,7 +80,7 @@ export function TrafficSplitPanel({ projectId, variant = 'card', onOpenConnector
   if (variant === 'inline') {
     return (
       <div className={className}>
-        <div className="flex items-center justify-between gap-3 mb-2">
+        <div className="flex items-center justify-between flex-wrap gap-x-3 gap-y-1.5 mb-2">
           <span className="text-xs text-fg-muted">Observed over</span>
           {rangePicker}
         </div>
@@ -121,7 +121,10 @@ function TrafficSplitBody({ split, onOpenConnector }: { split: TrafficSplitRespo
   if (split.connectors.length === 0) return <p className="text-xs text-fg-muted py-3">No connectors yet.</p>
   const priced = split.connectors.some((c) => c.cost != null)
   const spend = totalSpend(split.connectors)
-  const cols = priced ? 'grid-cols-[auto_minmax(0,1fr)_auto_auto_auto_auto]' : 'grid-cols-[auto_minmax(0,1fr)_auto_auto_auto]'
+  // Wide containers lay each connector out as one row of six columns. Below @xs
+  // (320px, a phone or a cramped sidebar column) that row cannot fit, so the
+  // numbers stack under the name on a second line instead of overlapping it.
+  const wideCols = priced ? '@xs:grid-cols-[auto_minmax(0,1fr)_auto_auto_auto_auto]' : '@xs:grid-cols-[auto_minmax(0,1fr)_auto_auto_auto]'
 
   return (
     <div className="space-y-3">
@@ -139,8 +142,8 @@ function TrafficSplitBody({ split, onOpenConnector }: { split: TrafficSplitRespo
       </div>
 
       {/* Per connector rows: weight, expected, observed, spend */}
-      <div className="-mx-1.5">
-        <div className={`grid ${cols} gap-x-3 px-1.5 text-[11px] text-fg-subtle`}>
+      <div className="@container -mx-1.5">
+        <div className={`hidden @xs:grid ${wideCols} gap-x-3 px-1.5 text-[11px] text-fg-subtle`}>
           <span />
           <span>Connector</span>
           <span className="text-right">Weight</span>
@@ -155,7 +158,7 @@ function TrafficSplitBody({ split, onOpenConnector }: { split: TrafficSplitRespo
             <Row
               key={c.connector_id}
               {...(onOpenConnector ? { type: 'button' as const, onClick: () => onOpenConnector(c.connector_id) } : {})}
-              className={`w-full grid ${cols} items-center gap-x-3 h-[32px] px-1.5 rounded-md text-[12.5px] text-left ${onOpenConnector ? 'hover:bg-surface-raised transition-colors' : ''}`}
+              className={`w-full grid grid-cols-[auto_minmax(0,1fr)_auto] ${wideCols} items-center gap-x-3 gap-y-0.5 py-1.5 @xs:py-0 @xs:h-[32px] px-1.5 rounded-md text-[12.5px] text-left ${onOpenConnector ? 'hover:bg-surface-raised transition-colors' : ''}`}
               title={describeShare(c, split)}
             >
               <span className={`w-2 h-2 rounded-full ${off ? 'bg-fg-subtle' : swatch(i)}`} />
@@ -167,16 +170,24 @@ function TrafficSplitBody({ split, onOpenConnector }: { split: TrafficSplitRespo
                 {c.excluded_reason === 'traffic_limit' && <span className="text-orange-500 text-[11px] flex-none">over traffic limit</span>}
                 {c.excluded_reason === 'no_eligible_proxies' && <span className="text-warning text-[11px] flex-none">no healthy proxy</span>}
               </span>
-              <span className="tabular-nums text-fg-muted text-right">{c.weight}</span>
-              <span className={`tabular-nums text-right font-medium ${off ? 'text-fg-subtle' : ''}`}>{formatShare(c.expected_share)}</span>
-              <span className="tabular-nums text-right text-fg-muted inline-flex items-center justify-end gap-2 min-w-[76px] whitespace-nowrap" title={`${formatBytesDecimal(c.observed_bytes)} over ${split.range}`}>
-                <span className="w-8 h-1 rounded-full bg-primary-soft overflow-hidden inline-block flex-none">
-                  <span className={`block h-full rounded-full ${swatch(i)}`} style={{ width: `${Math.min(100, c.observed_share ?? 0)}%` }} />
+              {/* Stacked: one line under the name. Wide: `contents` hands the three cells to the row grid. */}
+              <span className="col-start-2 col-span-2 row-start-2 flex items-center flex-wrap gap-x-3 gap-y-0.5 min-w-0 @xs:contents">
+                <span className="tabular-nums text-fg-muted whitespace-nowrap @xs:text-right">
+                  <span className="text-fg-subtle @xs:hidden">Weight </span>{c.weight}
                 </span>
-                {formatShare(c.observed_share)}
+                <span className={`tabular-nums font-medium whitespace-nowrap @xs:text-right ${off ? 'text-fg-subtle' : ''}`}>
+                  <span className="text-fg-subtle font-normal @xs:hidden">Expected </span>{formatShare(c.expected_share)}
+                </span>
+                <span className="tabular-nums text-fg-muted inline-flex items-center gap-2 whitespace-nowrap @xs:justify-end @xs:min-w-[76px]" title={`${formatBytesDecimal(c.observed_bytes)} over ${split.range}`}>
+                  <span className="text-fg-subtle @xs:hidden">Observed</span>
+                  <span className="w-8 h-1 rounded-full bg-primary-soft overflow-hidden inline-block flex-none">
+                    <span className={`block h-full rounded-full ${swatch(i)}`} style={{ width: `${Math.min(100, c.observed_share ?? 0)}%` }} />
+                  </span>
+                  {formatShare(c.observed_share)}
+                </span>
               </span>
               {priced && (
-                <span className="tabular-nums text-right text-fg-muted min-w-[64px] whitespace-nowrap">
+                <span className="col-start-3 row-start-1 @xs:col-auto @xs:row-auto tabular-nums text-right text-fg-muted whitespace-nowrap @xs:min-w-[64px]">
                   {c.cost != null && c.currency ? formatMoney(c.cost, c.currency) : '-'}
                 </span>
               )}
