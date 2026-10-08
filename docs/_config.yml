@@ -13,3 +13,6 @@ include:
   - "*.html"
   - "*.md"
 
+
+# GA4 measurement ID (G-XXXXXXXXXX). Leave empty to ship the site without the tag.
+google_analytics: "G-TYM25G15XE"
