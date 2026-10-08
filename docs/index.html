@@ -7,7 +7,7 @@ layout: null
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Octoprox - Dynamic Proxy Manager</title>
-  <meta name="description" content="A dynamic and flexible proxy manager that acts as an intelligent proxy aggregator, accepting client requests and routing them through managed proxy pools.">
+  <meta name="description" content="Open source proxy manager: one endpoint over cloud instances, provider sessions, static lists and tunnelled devices, with IP attribution, traffic limits and billing. A self-hosted replacement for Scrapoxy.">
   <link rel="icon" type="image/svg+xml" href="assets/favicon/favicon.svg">
   <link rel="icon" type="image/png" sizes="96x96" href="assets/favicon/favicon-96x96.png">
   <link rel="apple-touch-icon" sizes="180x180" href="assets/favicon/apple-touch-icon.png">
@@ -91,7 +91,7 @@ layout: null
 
     /* Features */
     .features { padding: 24px 0 64px; }
-    .features h2, .cloud-providers h2 { font-size: 22px; font-weight: 600; letter-spacing: -0.01em; text-align: center; margin-bottom: 8px; }
+    .features h2, .docs-index h2 { font-size: 22px; font-weight: 600; letter-spacing: -0.01em; text-align: center; margin-bottom: 8px; }
     .lead { text-align: center; color: var(--muted); margin-bottom: 32px; }
     .feature-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 16px; }
     .feature-card { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 20px; }
@@ -99,14 +99,26 @@ layout: null
     .feature-card h3 svg { width: 18px; height: 18px; color: var(--primary); flex: none; }
     .feature-card p { color: var(--muted); font-size: 14px; }
 
-    /* Providers */
-    .cloud-providers { padding: 0 0 72px; }
-    .provider-links { display: flex; justify-content: center; gap: 10px; flex-wrap: wrap; }
-    .provider-links a {
-      display: inline-flex; align-items: center; height: 36px; padding: 0 14px; background: var(--surface); border: 1px solid var(--line);
-      border-radius: 9999px; color: var(--fg); font-size: 13.5px; font-weight: 500; transition: border-color 0.15s, background 0.15s;
+    /* Notice (Scrapoxy) */
+    .notice { padding: 0 0 48px; }
+    .notice .container { max-width: 760px; }
+    .notice-card {
+      display: flex; gap: 14px; align-items: flex-start; padding: 16px 18px; border-radius: 10px;
+      background: var(--surface); border: 1px solid var(--line); border-left: 3px solid var(--primary);
     }
-    .provider-links a:hover { border-color: var(--primary); background: var(--primary-soft); color: var(--primary-soft-fg); }
+    .notice-card svg { width: 20px; height: 20px; color: var(--primary); flex: none; margin-top: 2px; }
+    .notice-card h3 { font-size: 15px; font-weight: 600; margin-bottom: 4px; }
+    .notice-card p { color: var(--muted); font-size: 14px; margin: 0; }
+    .notice-card p a { font-weight: 500; }
+
+    /* Docs index */
+    .docs-index { padding: 0 0 72px; }
+    .docs-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 16px; }
+    .docs-group { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 16px 18px; }
+    .docs-group h3 { font-size: 11px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: var(--subtle); margin-bottom: 8px; }
+    .docs-group a { display: block; padding: 5px 0; font-size: 14px; color: var(--fg); border-radius: 4px; }
+    .docs-group a:hover { color: var(--primary); }
+    .docs-group a span { color: var(--muted); font-size: 12.5px; display: block; }
 
     footer { padding: 32px 0; border-top: 1px solid var(--line); text-align: center; color: var(--muted); font-size: 13px; }
     @media (max-width: 640px) {
@@ -155,7 +167,7 @@ layout: null
     <div class="container">
       <span class="eyebrow">Open source core · Apache 2.0</span>
       <h1>One proxy endpoint. Any pool behind it.</h1>
-      <p>Octoprox accepts your client's requests and routes them through proxy pools you manage: cloud instances it provisions for you, provider sessions, or your own static list.</p>
+      <p>Octoprox accepts your client's requests and routes them through proxy pools you manage: cloud instances it provisions for you, provider sessions, your own static list, or devices on a WireGuard or OpenVPN tunnel. It verifies where each exit really is and meters what every pool costs you.</p>
       <div class="actions">
         <a href="getting-started" class="btn">Get started</a>
         <a href="https://github.com/octoprox/octoprox" class="btn btn-outline">View on GitHub</a>
@@ -172,6 +184,18 @@ docker compose -f docker-compose.ghcr.yml up -d</pre>
     </div>
   </section>
 
+  <section class="notice">
+    <div class="container">
+      <div class="notice-card">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 3h5v5"/><path d="M8 3H3v5"/><path d="M21 3 3 21"/><path d="M15 15l6 6"/></svg>
+        <div>
+          <h3>Coming from Scrapoxy?</h3>
+          <p>Scrapoxy was discontinued in February 2026: no images, no docs, no backend for GeoIP and health checks. Octoprox does the same job, self-hosted and Apache 2.0. The migration guide maps every Scrapoxy project, credential and connector to its Octoprox equivalent, and any vendor Octoprox lacks can be added as a YAML provider descriptor. <a href="scrapoxy-migration">Read the migration guide</a>.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
   <section class="features">
     <div class="container">
       <h2>What it does</h2>
@@ -183,7 +207,7 @@ docker compose -f docker-compose.ghcr.yml up -d</pre>
         </div>
         <div class="feature-card">
           <h3><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v18h18"/><path d="m19 9-5 5-4-4-3 3"/></svg>Smart routing</h3>
-          <p>Round-robin, least-used, random, sticky session and health-based strategies, plus per-connector domain filters, rate limits and traffic caps with billing.</p>
+          <p>Round-robin, least-used, random, sticky session and health-based strategies, weighted connectors, per-connector domain filters and rate limits. Pick a session or an exit country per request from the proxy username.</p>
         </div>
         <div class="feature-card">
           <h3><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>Health monitoring</h3>
@@ -198,6 +222,18 @@ docker compose -f docker-compose.ghcr.yml up -d</pre>
           <p>Latency, success rate, request counts and traffic per proxy and per project, with history you can chart over hours or weeks.</p>
         </div>
         <div class="feature-card">
+          <h3><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 10c0 6-8 12-8 12s-8-6-8-12a8 8 0 0 1 16 0Z"/><circle cx="12" cy="10" r="3"/></svg>IP attribution</h3>
+          <p>Resolve every exit's country, state and city from MaxMind, DB-IP, IPinfo or IP2Location databases you host, verify what vendors claim, track each provider's accuracy, and reject sessions that exit in the wrong place.</p>
+        </div>
+        <div class="feature-card">
+          <h3><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="5" width="20" height="14" rx="2"/><path d="M2 10h20"/></svg>Traffic limits and billing</h3>
+          <p>Cap the bytes each connector carries per billing period, alert, block or cut transfers at the cap, and see what every pool costs from the price you pay per GB.</p>
+        </div>
+        <div class="feature-card">
+          <h3><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="14" width="20" height="6" rx="2"/><path d="M6 17h.01"/><path d="M10 17h.01"/><path d="M12 14V8"/><path d="M8 8h8"/><path d="M12 4v4"/></svg>Tunnel devices</h3>
+          <p>Routers, TVs, consoles and phones with no proxy settings join a project's pool through a WireGuard or OpenVPN tunnel Octoprox terminates. One config, QR code or profile per device.</p>
+        </div>
+        <div class="feature-card">
           <h3><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 17H7A5 5 0 0 1 7 7h2"/><path d="M15 7h2a5 5 0 1 1 0 10h-2"/><line x1="8" x2="16" y1="12" y2="12"/></svg>REST API and dashboard</h3>
           <p>Full CRUD over projects, credentials, connectors and proxies, and a web dashboard for monitoring and configuration.</p>
         </div>
@@ -205,17 +241,52 @@ docker compose -f docker-compose.ghcr.yml up -d</pre>
     </div>
   </section>
 
-  <section class="cloud-providers">
+  <section class="docs-index">
     <div class="container">
-      <h2>Setup guides</h2>
-      <p class="lead">Connect the providers you already use.</p>
-      <div class="provider-links">
-        <a href="aws-setup">AWS</a>
-        <a href="gcp-setup">Google Cloud</a>
-        <a href="azure-setup">Azure</a>
-        <a href="providers">Providers &amp; SDK</a>
-        <a href="brightdata-setup">BrightData</a>
-        <a href="oxylabs-setup">Oxylabs</a>
+      <h2>Documentation</h2>
+      <p class="lead">Everything in the docs, in one place.</p>
+      <div class="docs-grid">
+        <div class="docs-group">
+          <h3>Getting started</h3>
+          <a href="getting-started">Quick start<span>Docker, single instance or cluster</span></a>
+          <a href="configuration">Configuration<span>Environment variables and YAML</span></a>
+          <a href="deployment">Deployment &amp; scaling<span>Multi-instance behind a load balancer</span></a>
+          <a href="scrapoxy-migration">Migrating from Scrapoxy<span>Recreate projects and connectors, repoint clients</span></a>
+        </div>
+        <div class="docs-group">
+          <h3>Routing</h3>
+          <a href="routing-strategies">Routing strategies<span>Round-robin to sticky, -sessid- and -cc-</span></a>
+          <a href="domain-filtering">Domain filtering<span>Allow or block targets per connector</span></a>
+          <a href="rate-limiting">Rate limiting<span>Per-proxy windows and quarantine</span></a>
+          <a href="tls-interception">TLS interception<span>MITM with browser fingerprints</span></a>
+        </div>
+        <div class="docs-group">
+          <h3>Attribution &amp; billing</h3>
+          <a href="ip-attribution">IP attribution<span>Where exits really are, vendor accuracy</span></a>
+          <a href="traffic-limits">Traffic limits &amp; billing<span>Byte caps per period, spend per GB</span></a>
+          <a href="metrics">Metrics<span>Latency, success rate, traffic, history</span></a>
+        </div>
+        <div class="docs-group">
+          <h3>Tunnel devices</h3>
+          <a href="wireguard">WireGuard devices<span>Configs and QR codes per device</span></a>
+          <a href="openvpn">OpenVPN devices<span>One profile per device</span></a>
+        </div>
+        <div class="docs-group">
+          <h3>Cloud providers</h3>
+          <a href="aws-setup">AWS</a>
+          <a href="gcp-setup">Google Cloud</a>
+          <a href="azure-setup">Azure</a>
+        </div>
+        <div class="docs-group">
+          <h3>Proxy providers</h3>
+          <a href="providers">Providers &amp; SDK<span>Oxylabs, Bright Data, Decodo, Webshare, IPRoyal, NetNut, or any vendor as a descriptor</span></a>
+          <a href="brightdata-setup">Bright Data setup</a>
+          <a href="oxylabs-setup">Oxylabs setup</a>
+        </div>
+        <div class="docs-group">
+          <h3>Reference</h3>
+          <a href="api">API reference<span>REST endpoints for everything in the UI</span></a>
+        </div>
       </div>
     </div>
   </section>

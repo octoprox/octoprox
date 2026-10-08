@@ -19,8 +19,11 @@ A dynamic and flexible proxy manager that acts as an intelligent proxy aggregato
 - **REST API**: Full CRUD operations for managing projects, credentials, connectors, and proxies
 - **Web Dashboard**: React-based UI for monitoring and configuration
 - **Backup & Migration**: Export the entire setup as an encrypted file and restore it on another instance
+- **Scrapoxy Replacement**: Scrapoxy was discontinued in February 2026; a step-by-step guide recreates its projects, credentials, connectors and proxy lists in Octoprox, and any vendor it had that Octoprox lacks can be added as a YAML descriptor (see [docs/scrapoxy-migration.md](docs/scrapoxy-migration.md))
 
 ## Quick Start
+
+> **Coming from Scrapoxy?** Start Octoprox as below, then follow the [migration guide](docs/scrapoxy-migration.md): it shows where each value lives in your `scrapoxy.json`, what it becomes in Octoprox, and how to repoint your clients.
 
 ### Quick Start with Docker (Recommended)
 

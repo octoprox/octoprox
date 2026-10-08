@@ -174,18 +174,25 @@
         <a href="{{ site.baseurl }}/getting-started" {% if page.nav_id == 'getting-started' %}class="active"{% endif %}>Quick Start</a>
         <a href="{{ site.baseurl }}/configuration" {% if page.nav_id == 'configuration' %}class="active"{% endif %}>Configuration</a>
         <a href="{{ site.baseurl }}/deployment" {% if page.nav_id == 'deployment' %}class="active"{% endif %}>Deployment &amp; Scaling</a>
+        <a href="{{ site.baseurl }}/scrapoxy-migration" {% if page.nav_id == 'scrapoxy-migration' %}class="active"{% endif %}>Migrating from Scrapoxy</a>
       </div>
       <div class="sidebar-section">
-        <h4>Features</h4>
+        <h4>Routing</h4>
         <a href="{{ site.baseurl }}/routing-strategies" {% if page.nav_id == 'routing-strategies' %}class="active"{% endif %}>Routing Strategies</a>
         <a href="{{ site.baseurl }}/domain-filtering" {% if page.nav_id == 'domain-filtering' %}class="active"{% endif %}>Domain Filtering</a>
-        <a href="{{ site.baseurl }}/ip-attribution" {% if page.nav_id == 'ip-attribution' %}class="active"{% endif %}>IP Attribution</a>
         <a href="{{ site.baseurl }}/rate-limiting" {% if page.nav_id == 'rate-limiting' %}class="active"{% endif %}>Rate Limiting</a>
-        <a href="{{ site.baseurl }}/traffic-limits" {% if page.nav_id == 'traffic-limits' %}class="active"{% endif %}>Traffic Limits &amp; Billing</a>
         <a href="{{ site.baseurl }}/tls-interception" {% if page.nav_id == 'tls-interception' %}class="active"{% endif %}>TLS Interception</a>
+      </div>
+      <div class="sidebar-section">
+        <h4>Attribution &amp; Billing</h4>
+        <a href="{{ site.baseurl }}/ip-attribution" {% if page.nav_id == 'ip-attribution' %}class="active"{% endif %}>IP Attribution</a>
+        <a href="{{ site.baseurl }}/traffic-limits" {% if page.nav_id == 'traffic-limits' %}class="active"{% endif %}>Traffic Limits &amp; Billing</a>
+        <a href="{{ site.baseurl }}/metrics" {% if page.nav_id == 'metrics' %}class="active"{% endif %}>Metrics &amp; Request Counting</a>
+      </div>
+      <div class="sidebar-section">
+        <h4>Tunnel Devices</h4>
         <a href="{{ site.baseurl }}/wireguard" {% if page.nav_id == 'wireguard' %}class="active"{% endif %}>WireGuard Devices</a>
         <a href="{{ site.baseurl }}/openvpn" {% if page.nav_id == 'openvpn' %}class="active"{% endif %}>OpenVPN Devices</a>
-        <a href="{{ site.baseurl }}/metrics" {% if page.nav_id == 'metrics' %}class="active"{% endif %}>Metrics &amp; Request Counting</a>
       </div>
       <div class="sidebar-section">
         <h4>Cloud Providers</h4>

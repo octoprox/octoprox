@@ -8,6 +8,8 @@ nav_id: getting-started
 
 <p class="subtitle">Get Octoprox up and running in minutes with Docker or set up a local development environment.</p>
 
+> **Coming from Scrapoxy?** Scrapoxy was discontinued in February 2026. Start Octoprox as described here, then follow [Migrating from Scrapoxy](scrapoxy-migration): it maps every Scrapoxy setting to its Octoprox equivalent and lists the client changes.
+
 ## Quick Start with Docker (Recommended)
 
 The fastest way to get Octoprox running is with the pre-built Docker image from GitHub Container Registry. You can run a **single standalone instance** or a **multi-instance cluster** behind nginx - pick whichever fits.
