@@ -17,7 +17,10 @@ defaults:
       layout: "default"
       # Extensionless URLs so canonical links and the sitemap match the nav links.
       permalink: /:basename
-      image: /assets/og-image.png
+      image:
+        path: /assets/og-image.png
+        width: 1200
+        height: 630
 
 include:
   - "*.html"
