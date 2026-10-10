@@ -1724,6 +1724,8 @@ export interface SystemTableStats {
   total_bytes: number
   table_bytes: number
   index_bytes: number
+  dead_rows: number
+  last_vacuum_at: string | null
 }
 
 export interface SystemDatabase {

@@ -122,6 +122,10 @@ class TestSystemStatsPayload:
             assert table["total_bytes"] >= table["table_bytes"]
             # Unknown until autovacuum analyses the table, never a bogus zero.
             assert table["row_estimate"] is None or table["row_estimate"] >= 0
+            # Bloat indicators: a count that is never negative, and a vacuum
+            # time that is simply absent on a table no vacuum has reached.
+            assert table["dead_rows"] >= 0
+            assert table["last_vacuum_at"] is None or isinstance(table["last_vacuum_at"], str)
 
     def test_redis_reports_memory_and_keyspace(
         self, authenticated_client: TestClient

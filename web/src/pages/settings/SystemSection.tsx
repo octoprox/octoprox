@@ -786,7 +786,9 @@ function DatabaseCard({ database }: { database: SystemDatabase }) {
               fraction={table.total_bytes / max}
               value={formatBytes(table.total_bytes)}
               hint={`${formatBytes(table.table_bytes)} data + ${formatBytes(table.index_bytes)} indexes` +
-                (table.row_estimate != null ? ` · ~${table.row_estimate.toLocaleString()} rows` : ' · row count not analysed yet')}
+                (table.row_estimate != null ? ` · ~${table.row_estimate.toLocaleString()} rows` : ' · row count not analysed yet') +
+                (table.dead_rows > 0 ? ` · ${table.dead_rows.toLocaleString()} dead rows awaiting vacuum` : '') +
+                (table.last_vacuum_at ? ` · last vacuum ${relativeTime(table.last_vacuum_at)}` : '')}
             />
           ))}
         </>

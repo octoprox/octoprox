@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, cast
 
+import structlog
 from sqlalchemy import (
     Boolean,
     DateTime,
@@ -18,6 +19,7 @@ from sqlalchemy import (
     case,
     column,
     delete,
+    event,
     func,
     or_,
     select,
@@ -31,6 +33,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import Session, SessionTransaction
 
 from api.core import utc_now
 from api.db.models import (
@@ -52,6 +55,9 @@ from api.geo.models import (
     GeoVendor,
     IpObservation,
 )
+
+logger = structlog.get_logger()
+
 
 
 def _verdict_clauses(m: type[IpObservationModel] | type[ConnectorExitIpModel], verdict: str | None) -> list[Any]:
@@ -197,9 +203,10 @@ class GeoDatabaseRepository:
         record.version = model.version
         record.updated_at = model.updated_at
         if blob is not None:
-            await self._session.execute(
+            result = await self._session.execute(
                 delete(GeoDatabaseBlobModel).where(GeoDatabaseBlobModel.database_id == record.id)
             )
+            mark_blob_rows_deleted(self._session, result.rowcount)  # type: ignore[attr-defined]
             self._session.add(GeoDatabaseBlobModel(database_id=record.id, data=blob))
         await self._session.flush()
         return record
@@ -208,6 +215,7 @@ class GeoDatabaseRepository:
         result = await self._session.execute(
             delete(GeoDatabaseModel).where(GeoDatabaseModel.id == database_id)
         )
+        mark_blob_rows_deleted(self._session, result.rowcount)  # type: ignore[attr-defined]
         return bool(result.rowcount and result.rowcount > 0)  # type: ignore[attr-defined]
 
     async def blob_ids(self) -> set[str]:
@@ -283,6 +291,50 @@ class GeoDatabaseRepository:
             created_at=model.created_at,
             updated_at=model.updated_at,
         )
+
+
+# --- blob storage housekeeping ----------------------------------------------------------
+#
+# Postgres never overwrites in place: a replaced or removed database file stays on
+# disk as dead TOAST tuples, and autovacuum only makes that space reusable, so the
+# table would settle at twice the files it holds. Whenever a session that deleted
+# blob rows (or the parent rows they cascade from) commits, the table is rewritten
+# instead. It has one row per database and is read only when an instance syncs a
+# file, so the exclusive lock of a second or two goes unnoticed. The code that
+# deletes such rows says so with mark_blob_rows_deleted; a delete that matched
+# nothing leaves nothing to reclaim and is not marked.
+
+_BLOB_ROWS_DELETED = "geo_blob_rows_deleted"
+# ANALYZE as well: VACUUM FULL alone leaves n_dead_tup at its pre-rewrite value and
+# never sets last_vacuum, so the system page would keep reporting the bloat it
+# just removed.
+_RECLAIM_SQL = text(f"VACUUM (FULL, ANALYZE) {GeoDatabaseBlobModel.__tablename__}")
+
+
+def mark_blob_rows_deleted(session: AsyncSession | Session, rowcount: int | None) -> None:
+    """Have the session's commit rewrite the blob table, if ``rowcount`` rows went."""
+    if rowcount is not None and rowcount > 0:
+        session.info[_BLOB_ROWS_DELETED] = True
+
+
+@event.listens_for(Session, "after_transaction_end")
+def _forget_deleted(session: Session, transaction: SessionTransaction) -> None:
+    # Outermost transaction only; covers rollback and a close() without one
+    # (which fires no after_rollback). After a commit the flag is already gone.
+    if transaction.parent is None:
+        session.info.pop(_BLOB_ROWS_DELETED, None)
+
+
+@event.listens_for(Session, "after_commit")
+def _reclaim_blob_space(session: Session) -> None:
+    if not session.info.pop(_BLOB_ROWS_DELETED, False):
+        return
+    try:
+        # VACUUM cannot run inside a transaction: a separate autocommit connection.
+        with session.get_bind().engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
+            conn.execute(_RECLAIM_SQL)
+    except Exception as exc:
+        logger.warning("Could not reclaim IP database storage", error=str(exc))
 
 
 class ObservationRepository:

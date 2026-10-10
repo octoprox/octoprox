@@ -4,23 +4,44 @@
 """Scheduled database downloads: redirects are followed by hand, each hop vetted."""
 
 import gzip
+import hashlib
 from datetime import datetime
+from pathlib import Path
+from unittest.mock import MagicMock
 
 import httpx
 import pytest
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from api.db.geo_repository import GeoDatabaseRepository
 from api.geo import updater
 from api.geo.models import GeoDatabaseRecord, GeoDatabaseSource
-from api.geo.updater import DownloadError, candidate_urls, download, expand_update_url
+from api.geo.store import GeoDatabaseStore
+from api.geo.updater import (
+    DownloadError,
+    GeoDatabaseUpdater,
+    candidate_urls,
+    download,
+    expand_update_url,
+)
 from api.providers.sdk.egress import EgressGuard, EgressPolicy
+from tests.geo.test_readers import MAXMIND_RECORD, write_mmdb
 
 OPEN = EgressPolicy(allow_http=True, allow_private=True, pin_dns=False)
 # Captured before any test patches the module attribute, so repeated patching does not nest.
 _REAL_CLIENT = httpx.AsyncClient
 
 
-def _record(url: str = "https://download.vendor.test/db.mmdb.gz", **auth: str) -> GeoDatabaseRecord:
-    return GeoDatabaseRecord(name="db", source=GeoDatabaseSource.URL, update_url=url, update_auth=dict(auth))
+def _record(
+    url: str = "https://download.vendor.test/db.mmdb.gz", update_interval_hours: int = 0, **auth: str
+) -> GeoDatabaseRecord:
+    return GeoDatabaseRecord(
+        name="db",
+        source=GeoDatabaseSource.URL,
+        update_url=url,
+        update_interval_hours=update_interval_hours,
+        update_auth=dict(auth),
+    )
 
 
 def _use_transport(monkeypatch: pytest.MonkeyPatch, handler: object) -> list[httpx.Request]:
@@ -119,3 +140,38 @@ class TestDownloadRedirects:
 
         _use_transport(monkeypatch, handler)
         assert await download(_record("https://download.vendor.test/db.mmdb"), EgressGuard(OPEN)) == b"raw"
+
+
+class TestRefresh:
+    async def test_stores_and_publishes_only_when_the_file_changed(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        db_session: AsyncSession,
+        db_session_factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        mmdb = write_mmdb(tmp_path / "country.mmdb", "GeoLite2-Country", {"81.2.69.0/24": MAXMIND_RECORD}).read_bytes()
+        _use_transport(monkeypatch, lambda request: httpx.Response(200, content=gzip.compress(mmdb)))
+        published: list[tuple[str, str]] = []
+
+        async def publish(database_id: str, op: str) -> None:
+            published.append((database_id, op))
+
+        record = _record(update_interval_hours=24)
+        await GeoDatabaseRepository(db_session).create(record, None)
+        await db_session.commit()
+        store = GeoDatabaseStore(db_session_factory, tmp_path / "cache")
+        refresher = GeoDatabaseUpdater(
+            db_session_factory, MagicMock(), "inst-1", store, publish, egress_policy=OPEN
+        )
+
+        await refresher.refresh(record)
+        assert record.last_update_error is None and record.sha256 == hashlib.sha256(mmdb).hexdigest()
+        assert await GeoDatabaseRepository(db_session).get_blob(record.id) == mmdb
+        assert published == [(record.id, "updated")]
+        assert [d.id for d in store.loaded] == [record.id]
+
+        # Same bytes again: nothing stored, nothing announced.
+        await refresher.refresh(record)
+        assert published == [(record.id, "updated")]
+        store.close_all()

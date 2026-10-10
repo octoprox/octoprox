@@ -886,7 +886,8 @@ keys it reports a sample and sets `"truncated": true`.
     "size_bytes": 8985623,
     "tables": [
       { "name": "proxies", "row_estimate": 29, "total_bytes": 294912,
-        "table_bytes": 65536, "index_bytes": 229376 }
+        "table_bytes": 65536, "index_bytes": 229376,
+        "dead_rows": 4, "last_vacuum_at": "2026-10-10T06:12:40Z" }
     ],
     "backends": 2, "pool_size": 5, "pool_checked_out": 1
   },

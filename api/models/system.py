@@ -81,6 +81,9 @@ class TableStats(BaseModel):
     total_bytes: int
     table_bytes: int
     index_bytes: int
+    # Deleted or replaced tuples no vacuum has reclaimed yet, TOAST chunks included.
+    dead_rows: int = 0
+    last_vacuum_at: datetime | None = None
 
 
 class DatabaseStats(BaseModel):

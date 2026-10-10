@@ -152,15 +152,22 @@ _PROJECT_USAGE_SQL = text(
     """
 )
 
+# Dead tuples and vacuum times of the table and its TOAST relation together,
+# since large values live in the latter and autovacuum visits the two separately.
 _TABLE_SIZES_SQL = text(
     """
     SELECT c.relname AS name,
            c.reltuples::bigint              AS row_estimate,
            pg_total_relation_size(c.oid)    AS total_bytes,
            pg_table_size(c.oid)             AS table_bytes,
-           pg_indexes_size(c.oid)           AS index_bytes
+           pg_indexes_size(c.oid)           AS index_bytes,
+           coalesce(s.n_dead_tup, 0) + coalesce(t.n_dead_tup, 0) AS dead_rows,
+           greatest(s.last_vacuum, s.last_autovacuum,
+                    t.last_vacuum, t.last_autovacuum)            AS last_vacuum_at
     FROM pg_class c
     JOIN pg_namespace n ON n.oid = c.relnamespace
+    LEFT JOIN pg_stat_all_tables s ON s.relid = c.oid
+    LEFT JOIN pg_stat_all_tables t ON t.relid = c.reltoastrelid
     WHERE c.relkind = 'r' AND n.nspname = current_schema()
     ORDER BY pg_total_relation_size(c.oid) DESC
     """
@@ -242,6 +249,8 @@ async def collect_database(session: AsyncSession) -> DatabaseStats:
                 total_bytes=int(r[2]),
                 table_bytes=int(r[3]),
                 index_bytes=int(r[4]),
+                dead_rows=int(r[5]),
+                last_vacuum_at=r[6],
             )
             for r in (await session.execute(_TABLE_SIZES_SQL)).all()
         ]

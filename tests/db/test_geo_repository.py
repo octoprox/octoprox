@@ -3,13 +3,16 @@
 
 """Tests for the IP attribution repositories and the observation flusher against Postgres."""
 
+import os
 from datetime import datetime, timedelta
 from typing import Any
 
 import pytest
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from api.core import utc_now
+from api.db import geo_repository
 from api.db.geo_repository import (
     GeoDatabaseRepository,
     GeoSettingsRepository,
@@ -142,6 +145,69 @@ class TestGeoDatabases:
             "password": "key",
         }
         assert await repo.get_blob(record.id) is None
+
+
+    async def test_replacing_or_removing_a_file_gives_its_disk_back(
+        self, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Postgres keeps the old bytes until the table is rewritten; the commit does that itself."""
+        size = 2 * 1024 * 1024  # random so TOAST cannot compress it away
+
+        async def table_bytes() -> int:
+            result = await db_session.execute(
+                text("SELECT pg_total_relation_size('geo_database_blobs')")
+            )
+            await db_session.commit()
+            return int(result.scalar_one())
+
+        repo = GeoDatabaseRepository(db_session)
+        record = GeoDatabaseRecord(name="City", sha256="a" * 64, size_bytes=size)
+        await repo.create(record, os.urandom(size))
+        await db_session.commit()
+        one_file = await table_bytes()
+
+        # With the rewrite switched off, every replaced file stays on disk.
+        monkeypatch.setattr(geo_repository, "_RECLAIM_SQL", text("SELECT 1"))
+        for _ in range(3):
+            await repo.update(record, blob=os.urandom(size))
+            await db_session.commit()
+        assert await table_bytes() >= one_file + 2 * size
+
+        monkeypatch.undo()
+        await repo.update(record, blob=os.urandom(size))
+        await db_session.commit()
+        assert await table_bytes() < one_file + size // 2
+        assert len(await repo.get_blob(record.id) or b"") == size
+
+        await repo.delete(record.id)
+        await db_session.commit()
+        assert await table_bytes() < size // 2
+
+    async def test_a_failed_rewrite_does_not_fail_the_commit(
+        self, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(geo_repository, "_RECLAIM_SQL", text("VACUUM FULL no_such_table"))
+        repo = GeoDatabaseRepository(db_session)
+        record = GeoDatabaseRecord(name="City", sha256="a" * 64, size_bytes=3)
+        await repo.create(record, b"abc")
+        await db_session.commit()
+        await repo.update(record, blob=b"xyz")
+        await db_session.commit()
+        assert await repo.get_blob(record.id) == b"xyz"
+
+    async def test_a_rolled_back_delete_triggers_no_rewrite(
+        self, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(geo_repository, "_RECLAIM_SQL", text("VACUUM FULL no_such_table"))
+        repo = GeoDatabaseRepository(db_session)
+        record = GeoDatabaseRecord(name="City", sha256="a" * 64, size_bytes=3)
+        await repo.create(record, b"abc")
+        await db_session.commit()
+        await repo.delete(record.id)
+        await db_session.rollback()
+        assert db_session.sync_session.info == {}
+        await db_session.commit()
+        assert await repo.get_blob(record.id) == b"abc"
 
 
 def _observation(**overrides: object) -> IpObservation:
