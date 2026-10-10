@@ -31,7 +31,9 @@ health_check_completed = signal("health-check-completed")
 # Args: proxy_id (str), project_id (str), success (bool), latency_ms (float),
 #       bytes_sent (int), bytes_received (int),
 #       peer_id (str | None): the tunnel device the request came from, when it
-#       arrived through a tunnel rather than the proxy port
+#       arrived through a tunnel rather than the proxy port,
+#       target_host (str | None): the destination the request was for (the
+#       CONNECT target or the URL host), counted per host under the connector
 request_completed = signal("request-completed")
 
 # Emitted when a request is rejected (e.g., no upstream proxy available)

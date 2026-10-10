@@ -7,6 +7,34 @@ from collections.abc import Mapping
 from dataclasses import dataclass, fields
 from typing import Any, Protocol
 
+# The row a flush window's hosts past the cap are folded into (see
+# ``Settings.host_metrics_max_hosts``). Not a valid hostname, so it cannot
+# collide with a real destination.
+HOST_OVERFLOW = "(other)"
+
+# Longest host the history table stores; anything longer is not a hostname
+# and is folded into the overflow row rather than truncated into a lookalike.
+MAX_HOST_LENGTH = 255
+
+
+def normalize_host(host: str | None) -> str | None:
+    """The form a destination host is counted under, or None for nothing countable.
+
+    Hostnames are case-insensitive and a trailing dot names the same host,
+    so both are folded; a bracketed IPv6 literal keeps its brackets so it
+    reads as one token. Whitespace, control characters and empty values
+    are not hosts: a NUL in particular would be rejected by Postgres and
+    abort the whole metrics flush, every time, as long as the hash lived.
+    """
+    if not host:
+        return None
+    value = host.strip().lower().rstrip(".")
+    if not value or " " in value or not value.isprintable():
+        return None
+    if len(value) > MAX_HOST_LENGTH:
+        return HOST_OVERFLOW
+    return value
+
 
 class HasStats(Protocol):
     """Protocol for objects that have stats fields."""

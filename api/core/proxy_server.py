@@ -590,7 +590,7 @@ class ProxyServer:
         latency_ms = 0.0
         # Counts the tunnel's bytes as they flow; the completion event below
         # carries only what the meter has not reported yet.
-        meter = self._proxy_manager.traffic_meter(proxy, project.id, peer_id=peer_id)
+        meter = self._proxy_manager.traffic_meter(proxy, project.id, peer_id=peer_id, target_host=target_host)
         upstream_writer: asyncio.StreamWriter | None = None
 
         try:
@@ -668,6 +668,7 @@ class ProxyServer:
                     bytes_sent=bytes_sent,
                     bytes_received=bytes_received,
                     peer_id=peer_id,
+                    target_host=target_host,
                 )
             else:
                 # Nothing will report the remainder; hand it over now so the
@@ -830,7 +831,7 @@ class ProxyServer:
         start_time = time.monotonic()
         success = False
         latency_ms = 0.0
-        meter = self._proxy_manager.traffic_meter(proxy, project_id)
+        meter = self._proxy_manager.traffic_meter(proxy, project_id, target_host=parsed_host)
         upstream_writer: asyncio.StreamWriter | None = None
 
         # Check if this is a SOCKS proxy
@@ -1006,6 +1007,7 @@ class ProxyServer:
                     latency_ms=latency_ms,
                     bytes_sent=bytes_sent,
                     bytes_received=bytes_received,
+                    target_host=parsed_host,
                 )
 
     async def _forward_chunked(

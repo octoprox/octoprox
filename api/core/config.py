@@ -45,6 +45,10 @@ def _load_yaml_config(config_path: Path) -> dict[str, Any]:
         flat_config["db_application_name"] = db_cfg.get("application_name")
         if "metrics_flush_interval" in db_cfg:
             flat_config["metrics_flush_interval"] = db_cfg["metrics_flush_interval"]
+    if "metrics" in config_data:
+        hosts_cfg = (config_data["metrics"] or {}).get("hosts") or {}
+        flat_config["host_metrics_enabled"] = hosts_cfg.get("enabled")
+        flat_config["host_metrics_max_hosts"] = hosts_cfg.get("max_hosts")
     if "system" in config_data:
         system_cfg = config_data["system"] or {}
         flat_config["system_metrics_interval"] = system_cfg.get("metrics_interval")
@@ -238,6 +242,26 @@ class Settings(BaseSettings):
 
     # Metrics flush interval (seconds) - how often to flush Redis metrics to Postgres
     metrics_flush_interval: int = Field(default=60)
+
+    # Per-host metrics: a project's requests by destination host and connector
+    # (the Hosts page). The one metrics table whose cardinality the operator
+    # does not control: a pool used to crawl the open web touches hosts
+    # without end. Every host is kept by default; an install that crawls can
+    # switch per-host counting off, or set a ceiling on how many hosts are
+    # named per project per window (the busiest ones), the rest sharing one
+    # "(other)" row.
+    host_metrics_enabled: bool = Field(
+        default=True,
+        description="Count requests per destination host and connector (the Hosts page)",
+    )
+    host_metrics_max_hosts: int = Field(
+        default=0,
+        ge=0,
+        description=(
+            "How many hosts one instance names per project in each 5-second metrics window, "
+            "busiest first; the rest are folded into \"(other)\". 0 keeps every host"
+        ),
+    )
 
     # Install-wide gauge snapshots behind the admin System trend charts.
     # One row per interval for the whole install, so the volume is small and

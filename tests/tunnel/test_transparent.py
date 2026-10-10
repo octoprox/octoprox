@@ -188,10 +188,13 @@ async def test_fake_ip_destination_is_connected_by_name(upstream: _ConnectProxy)
         "proj", "sofa", "media.example.net", LocationTarget(country="DE")
     )
     # The completion event names the device, so the request is metered on it
-    # as well as on the proxy, connector and project; so is the meter.
+    # as well as on the proxy, connector and project; so is the meter. Both
+    # carry the destination too, for the per-host history.
     assert [c["peer_id"] for c in completed.calls] == [PEER.id]
     assert completed.calls[0]["success"] is True and completed.calls[0]["project_id"] == "proj"
+    assert completed.calls[0]["target_host"] == "media.example.net"
     assert server._proxy_manager.traffic_meter.calls[0][1]["peer_id"] == PEER.id
+    assert server._proxy_manager.traffic_meter.calls[0][1]["target_host"] == "media.example.net"
 
 
 @pytest.mark.asyncio

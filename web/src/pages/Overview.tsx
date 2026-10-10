@@ -14,7 +14,7 @@ import { useProject } from '../contexts/ProjectContext'
 import { useAuth } from '../contexts/AuthContext'
 import { useTheme } from '../contexts/ThemeContext'
 import { useToast } from '../contexts/ToastContext'
-import { formatBytes, formatMoney, parseApiDate, plural } from '../utils/format'
+import { bytesShort, compact, formatBytes, formatMoney, parseApiDate, plural } from '../utils/format'
 import { targetTotal, describeTarget, isDynamic } from '../utils/connectors'
 import { ProviderLogo } from '../components/ProviderLogo'
 import { Page } from '../components/layout/Page'
@@ -105,21 +105,6 @@ function sample(values: number[], n = 24): number[] {
     out.push(slice.reduce((a, b) => a + b, 0) / slice.length)
   }
   return out
-}
-
-/** Short byte format for tight tiles and axis ticks: 1 decimal, no trailing zero. */
-function bytesShort(bytes: number): string {
-  if (bytes === 0) return '0 B'
-  const k = 1024
-  const sizes = ['B', 'KB', 'MB', 'GB', 'TB']
-  const i = Math.min(sizes.length - 1, Math.floor(Math.log(bytes) / Math.log(k)))
-  return `${parseFloat((bytes / Math.pow(k, i)).toFixed(1))} ${sizes[i]}`
-}
-
-function compact(n: number): string {
-  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(n >= 10_000_000 ? 0 : 2)}M`
-  if (n >= 10_000) return `${(n / 1000).toFixed(1)}K`
-  return n.toLocaleString()
 }
 
 function formatStrategy(strategy: string): string {

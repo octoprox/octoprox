@@ -6,15 +6,16 @@
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import delete, exists, func, insert, literal, or_, select, text, update
+from sqlalchemy import case, delete, exists, func, insert, literal, or_, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.core import utc_now
-from api.core.stats import MetricDelta, TunnelPeerMetricDelta
+from api.core.stats import HOST_OVERFLOW, MetricDelta, TunnelPeerMetricDelta
 from api.db.models import (
     ConnectorMetricsModel,
     ConnectorModel,
     CredentialModel,
+    HostMetricsModel,
     OpenVpnPeerModel,
     ProjectMetricsModel,
     ProjectModel,
@@ -502,7 +503,11 @@ def _strip_tz(dt: datetime) -> datetime:
 
 
 _MetricsModel = (
-    type[ProjectMetricsModel] | type[ProxyMetricsModel] | type[ConnectorMetricsModel] | type[TunnelPeerMetricsModel]
+    type[ProjectMetricsModel]
+    | type[ProxyMetricsModel]
+    | type[ConnectorMetricsModel]
+    | type[TunnelPeerMetricsModel]
+    | type[HostMetricsModel]
 )
 
 # Where each tunnel protocol keeps its devices: the table a device id is looked
@@ -577,16 +582,25 @@ def _tunnel_peer_aggregate_columns() -> list[Any]:
     ]
 
 
-def _tunnel_peer_row(timestamp: datetime, row: Any) -> dict[str, Any]:
-    """One history point of a device, from a raw row or an aggregate row."""
-    return {
-        "timestamp": timestamp,
+def _history_row(timestamp: datetime | None, row: Any) -> dict[str, Any]:
+    """The six standard counters of an aggregate row, with its timestamp when it has one."""
+    point: dict[str, Any] = {
         "request_count": int(row.request_count or 0),
         "success_count": int(row.success_count or 0),
         "failure_count": int(row.failure_count or 0),
         "avg_latency_ms": float(row.avg_latency_ms or 0),
         "bytes_sent": int(row.bytes_sent or 0),
         "bytes_received": int(row.bytes_received or 0),
+    }
+    if timestamp is not None:
+        point["timestamp"] = timestamp
+    return point
+
+
+def _tunnel_peer_row(timestamp: datetime, row: Any) -> dict[str, Any]:
+    """One history point of a device, from a raw row or an aggregate row."""
+    return {
+        **_history_row(timestamp, row),
         "connections_by_address": int(row.by_address or 0),
         "encrypted_dns_blocked": int(row.encrypted_dns_blocked or 0),
     }
@@ -1320,6 +1334,229 @@ class MetricsRepository:
     async def delete_tunnel_peer_metrics_older_than(self, project_id: str, older_than: datetime) -> int:
         """Delete a project's device history older than the timestamp."""
         model = TunnelPeerMetricsModel
+        result = await self._session.execute(
+            delete(model).where(model.project_id == project_id).where(model.timestamp < older_than)
+        )
+        return int(result.rowcount or 0)  # type: ignore[attr-defined]
+
+    # Host-level metrics: a project's requests by destination host and connector.
+
+    async def save_host_metrics_snapshots(
+        self, batch: dict[tuple[str, str, str], MetricDelta]
+    ) -> list[tuple[str, str, str]]:
+        """Insert one row per (project, connector, host) of a flush window; returns the keys dropped.
+
+        One lookup of the connectors involved, then a single multi-row
+        insert: a window can hold thousands of host rows and a statement
+        each would stretch the flush. A hash whose connector is gone (or
+        has moved project, which cannot happen but is checked all the same)
+        is dropped, as the single-row variants drop an orphan.
+        """
+        if not batch:
+            return []
+        connector_ids = {connector_id for _project, connector_id, _host in batch}
+        result = await self._session.execute(
+            select(ConnectorModel.id, ConnectorModel.project_id).where(ConnectorModel.id.in_(connector_ids))
+        )
+        known = {row.id: row.project_id for row in result.all()}
+        now = utc_now()
+        rows: list[dict[str, Any]] = []
+        dropped: list[tuple[str, str, str]] = []
+        for key, delta in batch.items():
+            project_id, connector_id, host = key
+            if known.get(connector_id) != project_id:
+                dropped.append(key)
+                continue
+            rows.append({
+                "project_id": project_id,
+                "connector_id": connector_id,
+                "host": host,
+                "timestamp": now,
+                "request_count": delta.request_count,
+                "success_count": delta.success_count,
+                "failure_count": delta.failure_count,
+                "avg_latency_ms": delta.avg_latency_ms,
+                "bytes_sent": delta.bytes_sent,
+                "bytes_received": delta.bytes_received,
+                "granularity": 60,
+            })
+        if rows:
+            await self._session.execute(insert(HostMetricsModel), rows)
+        return dropped
+
+    @staticmethod
+    def _host_window_filter(
+        project_id: str, since: datetime, connector_id: str | None, search: str | None
+    ) -> list[Any]:
+        model = HostMetricsModel
+        conditions: list[Any] = [model.project_id == project_id, model.timestamp >= since]
+        if connector_id is not None:
+            conditions.append(model.connector_id == connector_id)
+        if search:
+            escaped = search.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            conditions.append(model.host.ilike(f"%{escaped}%", escape="\\"))
+        return conditions
+
+    async def get_host_totals(
+        self,
+        project_id: str,
+        since: datetime,
+        *,
+        connector_id: str | None = None,
+        search: str | None = None,
+        limit: int = 500,
+    ) -> list[dict[str, Any]]:
+        """The hosts a project requested in the window, busiest first, with their totals.
+
+        Rows hold per-interval deltas at whatever granularity compaction
+        left them, so summing every row in the window is the total. One
+        connector or a host substring narrows the set. At most ``limit``
+        hosts come back; ``get_host_summary`` says how many there were.
+        """
+        model = HostMetricsModel
+        query = (
+            select(
+                model.host,
+                *_metrics_aggregate_columns(model),
+                func.count(func.distinct(model.connector_id)).label("connector_count"),
+            )
+            .where(*self._host_window_filter(project_id, since, connector_id, search))
+            .group_by(model.host)
+            .order_by(func.sum(model.request_count).desc(), func.sum(model.bytes_received).desc(), model.host)
+            .limit(limit)
+        )
+        result = await self._session.execute(query)
+        return [
+            {**_history_row(None, row), "host": row.host, "connector_count": int(row.connector_count or 0)}
+            for row in result.all()
+        ]
+
+    async def get_host_summary(
+        self,
+        project_id: str,
+        since: datetime,
+        *,
+        connector_id: str | None = None,
+        search: str | None = None,
+    ) -> dict[str, Any]:
+        """How many distinct hosts matched the window and their combined totals."""
+        model = HostMetricsModel
+        query = select(
+            func.count(func.distinct(model.host)).label("host_count"),
+            *_metrics_aggregate_columns(model),
+        ).where(*self._host_window_filter(project_id, since, connector_id, search))
+        row = (await self._session.execute(query)).one()
+        return {**_history_row(None, row), "host_count": int(row.host_count or 0)}
+
+    async def get_host_connector_breakdown(
+        self,
+        project_id: str,
+        since: datetime,
+        hosts: list[str],
+        *,
+        connector_id: str | None = None,
+    ) -> dict[str, list[dict[str, Any]]]:
+        """Each listed host's totals split by the connector that carried the requests."""
+        if not hosts:
+            return {}
+        model = HostMetricsModel
+        query = (
+            select(model.host, model.connector_id, *_metrics_aggregate_columns(model))
+            .where(*self._host_window_filter(project_id, since, connector_id, None))
+            .where(model.host.in_(hosts))
+            .group_by(model.host, model.connector_id)
+            .order_by(model.host, func.sum(model.request_count).desc())
+        )
+        result = await self._session.execute(query)
+        breakdown: dict[str, list[dict[str, Any]]] = {}
+        for row in result.all():
+            breakdown.setdefault(row.host, []).append({**_history_row(None, row), "connector_id": row.connector_id})
+        return breakdown
+
+    async def get_host_history_aggregated(
+        self,
+        project_id: str,
+        since: datetime,
+        bucket_seconds: int,
+        hosts: list[str],
+        *,
+        connector_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Per-bucket totals for each listed host, with every other host folded into one series.
+
+        One query: rows of a listed host keep their host, the rest are
+        grouped under ``HOST_OVERFLOW`` so the chart can stack the top
+        hosts against the remainder without a second pass. Chronological.
+        """
+        model = HostMetricsModel
+        bucket_epoch, bucket_ts = _bucket_expressions(model, bucket_seconds)
+        series = (
+            case((model.host.in_(hosts), model.host), else_=literal(HOST_OVERFLOW)) if hosts
+            else literal(HOST_OVERFLOW)
+        ).label("series")
+        query = (
+            select(bucket_ts, series, *_metrics_aggregate_columns(model))
+            .where(*self._host_window_filter(project_id, since, connector_id, None))
+            .where(model.granularity <= bucket_seconds)
+            .group_by(bucket_epoch, series)
+            .order_by(bucket_epoch.asc())
+        )
+        result = await self._session.execute(query)
+        return [{**_history_row(row.bucket_ts, row), "host": row.series} for row in result.all()]
+
+    async def compact_host_metrics(
+        self,
+        project_id: str,
+        older_than: datetime,
+        source_granularity: int,
+        target_granularity: int,
+    ) -> int:
+        """Compact every (connector, host) series of a project from source to target granularity.
+
+        One statement for the whole project: the aggregate groups by
+        connector and host as well as by bucket. Returns the number of
+        source rows deleted.
+        """
+        model = HostMetricsModel
+        bucket_epoch, bucket_ts = _bucket_expressions(model, target_granularity)
+        base_filter = [
+            model.project_id == project_id,
+            model.granularity == source_granularity,
+            model.timestamp < older_than,
+        ]
+        query = (
+            select(model.connector_id, model.host, bucket_ts, *_metrics_aggregate_columns(model))
+            .where(*base_filter)
+            .group_by(model.connector_id, model.host, bucket_epoch)
+        )
+        result = await self._session.execute(query)
+        buckets = result.all()
+        if not buckets:
+            return 0
+        rows = [
+            {
+                "project_id": project_id,
+                "connector_id": row.connector_id,
+                "host": row.host,
+                "timestamp": _strip_tz(row.bucket_ts),
+                "request_count": row.request_count,
+                "success_count": row.success_count,
+                "failure_count": row.failure_count,
+                "avg_latency_ms": float(row.avg_latency_ms or 0),
+                "bytes_sent": row.bytes_sent,
+                "bytes_received": row.bytes_received,
+                "granularity": target_granularity,
+            }
+            for row in buckets
+        ]
+        await self._session.execute(insert(HostMetricsModel), rows)
+        del_result = await self._session.execute(delete(model).where(*base_filter))
+        await self._session.flush()
+        return int(del_result.rowcount or 0)  # type: ignore[attr-defined]
+
+    async def delete_host_metrics_older_than(self, project_id: str, older_than: datetime) -> int:
+        """Delete a project's host history older than the timestamp."""
+        model = HostMetricsModel
         result = await self._session.execute(
             delete(model).where(model.project_id == project_id).where(model.timestamp < older_than)
         )

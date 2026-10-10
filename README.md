@@ -16,6 +16,7 @@ A dynamic and flexible proxy manager that acts as an intelligent proxy aggregato
 - **Tunnel Devices**: Routers, TVs, consoles and phones with no proxy settings join a project's pool through a WireGuard or OpenVPN tunnel Octoprox terminates; one config, QR code or profile per device, names resolved at the exit (see [docs/wireguard.md](docs/wireguard.md) and [docs/openvpn.md](docs/openvpn.md))
 - **Health Monitoring**: Automatic health checks with configurable intervals and thresholds
 - **Performance Metrics**: Track latency, success rates, and request counts per proxy
+- **Host Analytics**: A per-project Hosts page showing where the traffic goes: requests, bytes and latency by destination host, split by connector, charted over time (see [docs/metrics.md](docs/metrics.md))
 - **REST API**: Full CRUD operations for managing projects, credentials, connectors, and proxies
 - **Web Dashboard**: React-based UI for monitoring and configuration
 - **Backup & Migration**: Export the entire setup as an encrypted file and restore it on another instance

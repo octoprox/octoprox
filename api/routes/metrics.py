@@ -4,12 +4,13 @@
 """Metrics endpoints."""
 
 from datetime import datetime, timedelta
-from typing import Literal
+from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel
 
 from api.core import utc_now
+from api.core.stats import HOST_OVERFLOW, normalize_host
 from api.db.repository import MetricsRepository
 from api.models.proxy import ProxyStatus
 from api.providers.sdk.strategies import is_dynamic_gateway
@@ -477,3 +478,287 @@ async def get_traffic_split(
         observed_bytes=observed_bytes_total,
         connectors=shares,
     )
+
+
+# ---------------------------------------------------------------------------
+# Hosts: where a project's traffic goes, by destination host and connector.
+
+
+class HostConnectorMetrics(BaseModel):
+    """One connector's part of a host's traffic in the window."""
+    connector_id: str
+    # None when the connector was deleted after the rows were written (they
+    # cascade with it, so this is a flush-window race, not a lasting state).
+    name: str | None = None
+    credential_type: str | None = None
+    request_count: int
+    success_count: int
+    failure_count: int
+    avg_latency_ms: float
+    bytes_sent: int
+    bytes_received: int
+
+
+class HostMetrics(BaseModel):
+    """A destination host's traffic in the window, in total and per connector."""
+    host: str
+    request_count: int
+    success_count: int
+    failure_count: int
+    avg_latency_ms: float
+    bytes_sent: int
+    bytes_received: int
+    # Share of the window's requests and bytes (both directions), 0-100.
+    request_share: float
+    bytes_share: float
+    connectors: list[HostConnectorMetrics]
+
+
+class HostsTotals(BaseModel):
+    """The window's totals over every host that matched."""
+    host_count: int
+    request_count: int
+    success_count: int
+    failure_count: int
+    avg_latency_ms: float
+    bytes_sent: int
+    bytes_received: int
+
+
+class HostsConnector(BaseModel):
+    """A connector of the project, for the filter and the legend."""
+    connector_id: str
+    name: str
+    credential_type: str
+    enabled: bool
+
+
+class HostsResponse(BaseModel):
+    """A project's requested hosts in the window, busiest first."""
+    range: str
+    since: datetime
+    # The row hosts past the per-window cap are folded into, when present.
+    overflow_host: str = HOST_OVERFLOW
+    # Whether per-host counting is on at all (``metrics.hosts.enabled``).
+    enabled: bool
+    # How many hosts the response holds at most; ``totals.host_count`` says
+    # how many matched. Search to reach the rest.
+    limit: int
+    totals: HostsTotals
+    connectors: list[HostsConnector]
+    hosts: list[HostMetrics]
+
+
+class HostSeriesPoint(BaseModel):
+    """One bucket of one host's series."""
+    timestamp: datetime
+    request_count: int
+    success_count: int
+    failure_count: int
+    avg_latency_ms: float
+    bytes_sent: int
+    bytes_received: int
+
+
+class HostSeries(BaseModel):
+    """One host's traffic over time."""
+    host: str
+    points: list[HostSeriesPoint]
+
+
+class HostsHistoryResponse(BaseModel):
+    """The busiest hosts of the window over time, with the rest folded into one series."""
+    range: str
+    since: datetime
+    bucket_seconds: int
+    overflow_host: str = HOST_OVERFLOW
+    series: list[HostSeries]
+
+
+# Bucket width per range for the per-host chart. Every range is bucketed
+# (there are several series), sized to a hundred-odd points each.
+HOST_HISTORY_BUCKETS: dict[str, int] = {
+    "1h": 60,
+    "6h": 300,
+    "24h": 900,
+    "7d": 3600,
+    "30d": 3600 * 6,
+}
+
+MAX_HOSTS_PER_PAGE = 500
+MAX_HOST_SERIES = 12
+
+
+@router.get("/hosts", response_model=HostsResponse)
+async def get_host_metrics(
+    request: Request,
+    project_id: str,
+    range: Literal["1h", "6h", "24h", "7d", "30d"] = Query("24h", alias="range"),
+    connector_id: str | None = Query(None, description="Only traffic carried by this connector"),
+    search: str | None = Query(None, max_length=255, description="Only hosts containing this text"),
+    limit: int = Query(100, ge=1, le=MAX_HOSTS_PER_PAGE),
+) -> HostsResponse:
+    """The hosts a project requested in the window, with totals and a per-connector split.
+
+    Sums the flushed host history (``host_metrics``), which the leader
+    writes every flush interval, so the last minute or so of traffic is
+    not in the numbers yet. A request is the CONNECT tunnel or the plain
+    HTTP exchange; see the metrics docs for what that means under
+    keep-alive. Hosts are returned busiest first, at most ``limit`` of
+    them; ``totals.host_count`` is how many matched in all.
+    """
+    proxy_manager = proxy_manager_of(request)
+
+    project = proxy_manager.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    connectors = {c.id: c for c in proxy_manager.get_connectors_for_project(project_id)}
+    if connector_id is not None and connector_id not in connectors:
+        raise HTTPException(status_code=404, detail="Connector not found in this project")
+
+    delta, _limit, _bucket = RANGE_CONFIG[range]
+    since = utc_now() - delta
+    search = search.strip() if search else None
+    async with proxy_manager._session_factory() as session:
+        repo = MetricsRepository(session)
+        summary = await repo.get_host_summary(project_id, since, connector_id=connector_id, search=search or None)
+        rows = await repo.get_host_totals(
+            project_id, since, connector_id=connector_id, search=search or None, limit=limit
+        )
+        breakdown = await repo.get_host_connector_breakdown(
+            project_id, since, [r["host"] for r in rows], connector_id=connector_id
+        )
+
+    total_requests = summary["request_count"]
+    total_bytes = summary["bytes_sent"] + summary["bytes_received"]
+    hosts: list[HostMetrics] = []
+    for row in rows:
+        host_bytes = row["bytes_sent"] + row["bytes_received"]
+        per_connector = []
+        for part in breakdown.get(row["host"], []):
+            connector = connectors.get(part["connector_id"])
+            per_connector.append(HostConnectorMetrics(
+                connector_id=part["connector_id"],
+                name=connector.name if connector else None,
+                credential_type=connector.credential_type if connector else None,
+                request_count=part["request_count"],
+                success_count=part["success_count"],
+                failure_count=part["failure_count"],
+                avg_latency_ms=round(part["avg_latency_ms"], 2),
+                bytes_sent=part["bytes_sent"],
+                bytes_received=part["bytes_received"],
+            ))
+        hosts.append(HostMetrics(
+            host=row["host"],
+            request_count=row["request_count"],
+            success_count=row["success_count"],
+            failure_count=row["failure_count"],
+            avg_latency_ms=round(row["avg_latency_ms"], 2),
+            bytes_sent=row["bytes_sent"],
+            bytes_received=row["bytes_received"],
+            request_share=round(row["request_count"] / total_requests * 100, 2) if total_requests else 0.0,
+            bytes_share=round(host_bytes / total_bytes * 100, 2) if total_bytes else 0.0,
+            connectors=per_connector,
+        ))
+
+    return HostsResponse(
+        range=range,
+        since=since,
+        enabled=proxy_manager._settings.host_metrics_enabled,
+        limit=limit,
+        totals=HostsTotals(
+            host_count=summary["host_count"],
+            request_count=summary["request_count"],
+            success_count=summary["success_count"],
+            failure_count=summary["failure_count"],
+            avg_latency_ms=round(summary["avg_latency_ms"], 2),
+            bytes_sent=summary["bytes_sent"],
+            bytes_received=summary["bytes_received"],
+        ),
+        connectors=[
+            HostsConnector(
+                connector_id=c.id, name=c.name, credential_type=c.credential_type, enabled=c.enabled
+            )
+            for c in sorted(connectors.values(), key=lambda c: c.name.lower())
+        ],
+        hosts=hosts,
+    )
+
+
+@router.get("/hosts/history", response_model=HostsHistoryResponse)
+async def get_host_metrics_history(
+    request: Request,
+    project_id: str,
+    range: Literal["1h", "6h", "24h", "7d", "30d"] = Query("24h", alias="range"),
+    connector_id: str | None = Query(None, description="Only traffic carried by this connector"),
+    top: int = Query(8, ge=1, le=MAX_HOST_SERIES, description="How many hosts get a series of their own"),
+    hosts: str | None = Query(
+        None, max_length=4096,
+        description="Comma-separated hosts to chart instead of the busiest ones",
+    ),
+) -> HostsHistoryResponse:
+    """The busiest hosts of the window over time, every other host folded into one series.
+
+    ``top`` hosts by requests (or the ``hosts`` named) get a series each, in
+    fixed buckets sized to the range; the remainder is one series under
+    ``overflow_host``. Series are ordered busiest first, the remainder last,
+    and each carries every bucket of the window with zeros where the host
+    was quiet, so they stack without gaps.
+    """
+    proxy_manager = proxy_manager_of(request)
+
+    project = proxy_manager.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    if connector_id is not None and all(
+        c.id != connector_id for c in proxy_manager.get_connectors_for_project(project_id)
+    ):
+        raise HTTPException(status_code=404, detail="Connector not found in this project")
+
+    delta, _limit, _bucket = RANGE_CONFIG[range]
+    bucket_seconds = HOST_HISTORY_BUCKETS[range]
+    since = utc_now() - delta
+    async with proxy_manager._session_factory() as session:
+        repo = MetricsRepository(session)
+        if hosts:
+            # The stored form (normalize_host), each host once, in the order given.
+            named = (normalize_host(part) for part in hosts.split(","))
+            chosen = list(dict.fromkeys(h for h in named if h is not None))[:MAX_HOST_SERIES]
+        else:
+            chosen = [
+                r["host"] for r in await repo.get_host_totals(project_id, since, connector_id=connector_id, limit=top)
+            ]
+        rows = await repo.get_host_history_aggregated(
+            project_id, since, bucket_seconds, chosen, connector_id=connector_id
+        )
+
+    # Every series gets every bucket, so the chart stacks cleanly.
+    timestamps = sorted({row["timestamp"] for row in rows})
+    by_series: dict[str, dict[datetime, dict[str, Any]]] = {host: {} for host in chosen}
+    for row in rows:
+        by_series.setdefault(row["host"], {})[row["timestamp"]] = row
+    order = [*chosen, *(h for h in by_series if h not in chosen)]
+    series: list[HostSeries] = []
+    for host in order:
+        points = by_series.get(host, {})
+        if not points and host not in chosen:
+            continue
+        series.append(HostSeries(
+            host=host,
+            points=[
+                HostSeriesPoint(
+                    timestamp=ts,
+                    request_count=p.get("request_count", 0),
+                    success_count=p.get("success_count", 0),
+                    failure_count=p.get("failure_count", 0),
+                    avg_latency_ms=round(float(p.get("avg_latency_ms", 0.0)), 2),
+                    bytes_sent=p.get("bytes_sent", 0),
+                    bytes_received=p.get("bytes_received", 0),
+                )
+                for ts in timestamps
+                for p in [points.get(ts, {})]
+            ],
+        ))
+
+    return HostsHistoryResponse(range=range, since=since, bucket_seconds=bucket_seconds, series=series)

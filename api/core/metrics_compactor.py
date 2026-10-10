@@ -191,6 +191,19 @@ class MetricsCompactor:
                 await session.commit()
                 total += count
 
+            # Host metrics carry the project too: one pass per project
+            # compacts every (connector, host) series at once.
+            async with self._session_factory() as session:
+                repo = MetricsRepository(session)
+                count = await repo.compact_host_metrics(
+                    project_id=project_id,
+                    older_than=cutoff,
+                    source_granularity=source_gran,
+                    target_granularity=target_gran,
+                )
+                await session.commit()
+                total += count
+
         return total
 
     async def _apply_retention(
@@ -222,6 +235,7 @@ class MetricsCompactor:
                 project_id, cutoff
             )
             total += await repo.delete_tunnel_peer_metrics_older_than(project_id, cutoff)
+            total += await repo.delete_host_metrics_older_than(project_id, cutoff)
             await session.commit()
 
         return total

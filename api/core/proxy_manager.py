@@ -53,7 +53,7 @@ from api.core.signals import (
     tunnel_encrypted_dns_blocked,
     tunnel_name_unresolved,
 )
-from api.core.stats import MetricDelta, TunnelPeerMetricDelta
+from api.core.stats import HOST_OVERFLOW, MetricDelta, TunnelPeerMetricDelta, normalize_host
 from api.core.system_snapshotter import SystemSnapshotter
 from api.core.traffic_limiter import TrafficLimiter, TrafficMeter
 from api.core.workers import WorkerName
@@ -195,6 +195,11 @@ class ProxyManager:
         # read them through ``tunnel_peer_metrics``.
         self._pending_tunnel_peer_deltas: dict[str, TunnelPeerMetricDelta] = {}
         self._tunnel_peer_totals: dict[str, TunnelPeerMetricDelta] = {}
+        # Per destination host under a connector, keyed by (project_id,
+        # connector_id, host). No in-memory totals: the Hosts page reads the
+        # flushed history. The ceiling on named hosts, when one is set, is
+        # applied as the window is flushed (see ``_fold_host_tail``).
+        self._pending_host_deltas: dict[tuple[str, str, str], MetricDelta] = {}
         self._running = False
         self._tasks: list[asyncio.Task[None]] = []
         # Builds what this instance publishes about itself on the heartbeat.
@@ -399,6 +404,7 @@ class ProxyManager:
             self._forget_connector_routing_state(connector_id)
             self._traffic_limiter.forget_local(connector_id)
             self._pending_connector_deltas.pop(connector_id, None)
+            self._drop_pending_host_deltas(connector_id=connector_id)
             return
         await self.reload_connector(connector_id)
 
@@ -437,6 +443,7 @@ class ProxyManager:
         # Never flush a delta for a row that is gone: it would recreate the
         # Redis hash the owner just cleared.
         self._pending_project_deltas.pop(project_id, None)
+        self._drop_pending_host_deltas(project_id=project_id)
 
     async def _evict_proxy_from_cache(self, proxy_id: str) -> None:
         if proxy_id in self._proxies:
@@ -557,10 +564,11 @@ class ProxyManager:
         bytes_sent: int,
         bytes_received: int,
         peer_id: str | None = None,
+        target_host: str | None = None,
     ) -> None:
         """Handle request completed signal from ProxyServer."""
         await self._handle_request_stats(
-            proxy_id, project_id, success, latency_ms, bytes_sent, bytes_received, peer_id
+            proxy_id, project_id, success, latency_ms, bytes_sent, bytes_received, peer_id, target_host
         )
 
     async def _on_tunnel_name_unresolved(self, sender: object, peer_id: str) -> None:
@@ -638,6 +646,7 @@ class ProxyManager:
         bytes_sent: int,
         bytes_received: int,
         peer_id: str | None = None,
+        target_host: str | None = None,
     ) -> None:
         """Handle request statistics update (internal implementation).
 
@@ -645,7 +654,8 @@ class ProxyManager:
         nothing else. The hot path makes zero Redis calls (except the
         rate-limiter check below, which is correctness-critical and
         only opt-in). A request from a tunnel device (``peer_id``) is
-        counted on the device as well.
+        counted on the device as well, and one with a known destination
+        (``target_host``) on the host under its connector.
 
         In-memory counters on ``Proxy`` / ``Project`` are intentionally
         NOT bumped here. The local instance would otherwise be ahead of
@@ -666,6 +676,11 @@ class ProxyManager:
                 self._pending_connector_deltas.setdefault(connector.id, MetricDelta()).add_request(
                     success, latency_ms, bytes_sent, bytes_received,
                 )
+                host = self._host_series(target_host)
+                if host is not None:
+                    self._pending_host_deltas.setdefault((project_id, connector.id, host), MetricDelta()).add_request(
+                        success, latency_ms, bytes_sent, bytes_received,
+                    )
                 # Bytes reported while the transfer ran are already counted;
                 # these are the remainder (see TrafficMeter.finish).
                 if self._traffic_limiter.record(connector.id, bytes_sent, bytes_received):
@@ -701,12 +716,18 @@ class ProxyManager:
         peer_id: str | None,
         bytes_sent: int,
         bytes_received: int,
+        target_host: str | None = None,
     ) -> None:
         """A running transfer reports bytes so far: bytes only, the request is counted at its end."""
         if proxy_id in self._proxies:
             self._pending_proxy_deltas.setdefault(proxy_id, MetricDelta()).add_bytes(bytes_sent, bytes_received)
         if connector_id in self._connectors:
             self._pending_connector_deltas.setdefault(connector_id, MetricDelta()).add_bytes(bytes_sent, bytes_received)
+            host = self._host_series(target_host)
+            if host is not None:
+                self._pending_host_deltas.setdefault((project_id, connector_id, host), MetricDelta()).add_bytes(
+                    bytes_sent, bytes_received
+                )
         if project_id in self._projects:
             self._pending_project_deltas.setdefault(project_id, MetricDelta()).add_bytes(bytes_sent, bytes_received)
         if peer_id is not None:
@@ -714,13 +735,77 @@ class ProxyManager:
                 bytes_sent, bytes_received
             )
 
-    def traffic_meter(self, proxy: Proxy, project_id: str, peer_id: str | None = None) -> TrafficMeter:
+    def _host_series(self, target_host: str | None) -> str | None:
+        """The host row a request or its bytes count under, or None when they count on no host.
+
+        None when host metrics are off or the destination is unknown. Every
+        host is counted here, one rule for every project; a ceiling on named
+        hosts, when one is set, is applied to the whole window at flush
+        time, so it keeps the busiest hosts rather than the first seen.
+        """
+        if not self._settings.host_metrics_enabled:
+            return None
+        return normalize_host(target_host)
+
+    def _fold_host_tail(
+        self, host_deltas: dict[tuple[str, str, str], MetricDelta]
+    ) -> dict[tuple[str, str, str], MetricDelta]:
+        """Keep each project's busiest ``host_metrics_max_hosts`` hosts named; fold the rest into one row.
+
+        Hosts are ranked by requests in the window across the project's
+        connectors, bytes breaking ties, so a target hit a thousand times
+        is named ahead of a thousand one-off domains whatever order they
+        arrived in. The tail's requests and bytes stay in the totals under
+        ``HOST_OVERFLOW``, per connector. With no ceiling (0) the window is
+        returned as it is.
+        """
+        limit = self._settings.host_metrics_max_hosts
+        if limit <= 0 or not host_deltas:
+            return host_deltas
+        volume: dict[tuple[str, str], tuple[int, int]] = {}
+        for (project_id, _connector_id, host), delta in host_deltas.items():
+            if host == HOST_OVERFLOW:
+                continue
+            requests, size = volume.get((project_id, host), (0, 0))
+            volume[(project_id, host)] = (
+                requests + delta.request_count, size + delta.bytes_sent + delta.bytes_received,
+            )
+        by_project: dict[str, list[tuple[str, tuple[int, int]]]] = {}
+        for (project_id, host), rank in volume.items():
+            by_project.setdefault(project_id, []).append((host, rank))
+        named: set[tuple[str, str]] = set()
+        for project_id, hosts in by_project.items():
+            if len(hosts) <= limit:
+                named.update((project_id, host) for host, _rank in hosts)
+                continue
+            hosts.sort(key=lambda entry: entry[1], reverse=True)
+            named.update((project_id, host) for host, _rank in hosts[:limit])
+        # Fresh deltas throughout: the input's objects are never aliased, so
+        # folding cannot write other hosts' counts into a caller's delta.
+        folded: dict[tuple[str, str, str], MetricDelta] = {}
+        for (project_id, connector_id, host), delta in host_deltas.items():
+            key = (project_id, connector_id, host if (project_id, host) in named else HOST_OVERFLOW)
+            folded.setdefault(key, MetricDelta()).merge(delta)
+        return folded
+
+    def _drop_pending_host_deltas(self, *, project_id: str | None = None, connector_id: str | None = None) -> None:
+        """Forget un-flushed host deltas of a project or a connector that is gone."""
+        for key in [
+            k for k in self._pending_host_deltas
+            if (project_id is not None and k[0] == project_id) or (connector_id is not None and k[1] == connector_id)
+        ]:
+            del self._pending_host_deltas[key]
+
+    def traffic_meter(
+        self, proxy: Proxy, project_id: str, peer_id: str | None = None, target_host: str | None = None
+    ) -> TrafficMeter:
         """A meter for one transfer through ``proxy``; the server feeds it as bytes flow.
 
         ``peer_id`` is the tunnel device the transfer belongs to, when it
         came through a tunnel: its bytes are then counted on the device too.
+        ``target_host`` is the destination, so they are counted on the host too.
         """
-        return self._traffic_limiter.meter(proxy.id, project_id, proxy.connector_id, peer_id)
+        return self._traffic_limiter.meter(proxy.id, project_id, proxy.connector_id, peer_id, target_host)
 
     def tunnel_peer_metrics(self, peer_id: str) -> TunnelPeerMetricDelta:
         """A tunnel device's totals as this instance sees them: history, Redis window and flushed deltas.
@@ -897,6 +982,7 @@ class ProxyManager:
                 self._projects.pop(pid, None)
                 self._project_strategies.pop(pid, None)
                 self._pending_project_deltas.pop(pid, None)
+                self._drop_pending_host_deltas(project_id=pid)
         for pid, fresh in projects.items():
             existing = self._projects.get(pid)
             if existing is None:
@@ -922,6 +1008,7 @@ class ProxyManager:
                 self._forget_connector_routing_state(cid)
                 self._traffic_limiter.forget_local(cid)
                 self._pending_connector_deltas.pop(cid, None)
+                self._drop_pending_host_deltas(connector_id=cid)
         self._connectors.update(connectors)
 
         # Proxies - patch in place to keep request counters, status, and
@@ -981,6 +1068,7 @@ class ProxyManager:
             await self._redis_client.reset_proxy_metrics(proxy_id)
         for project_id in old_project_ids:
             await self._redis_client.reset_project_metrics(project_id)
+            await self._redis_client.reset_host_metrics_for_project(project_id)
             await self._redis_client.clear_mitm_requests(project_id)
         await self._rate_limiter.remove_proxies(old_proxy_ids)
 
@@ -994,6 +1082,7 @@ class ProxyManager:
         self._pending_project_deltas.clear()
         self._pending_connector_deltas.clear()
         self._pending_tunnel_peer_deltas.clear()
+        self._pending_host_deltas.clear()
 
         await self.full_reload()
         logger.info(
@@ -1043,6 +1132,7 @@ class ProxyManager:
             and not self._pending_project_deltas
             and not self._pending_connector_deltas
             and not self._pending_tunnel_peer_deltas
+            and not self._pending_host_deltas
         ):
             return False
 
@@ -1050,14 +1140,16 @@ class ProxyManager:
         project_deltas = self._pending_project_deltas
         connector_deltas = self._pending_connector_deltas
         tunnel_peer_deltas = self._pending_tunnel_peer_deltas
+        host_deltas = self._fold_host_tail(self._pending_host_deltas)
         self._pending_proxy_deltas = {}
         self._pending_project_deltas = {}
         self._pending_connector_deltas = {}
         self._pending_tunnel_peer_deltas = {}
+        self._pending_host_deltas = {}
 
         try:
             await self._redis_client.flush_metric_deltas(
-                proxy_deltas, project_deltas, connector_deltas, tunnel_peer_deltas
+                proxy_deltas, project_deltas, connector_deltas, tunnel_peer_deltas, host_deltas
             )
         except Exception:
             logger.warning(
@@ -1072,6 +1164,8 @@ class ProxyManager:
                 self._pending_connector_deltas.setdefault(cid, MetricDelta()).merge(d)
             for peer_id, td in tunnel_peer_deltas.items():
                 self._pending_tunnel_peer_deltas.setdefault(peer_id, TunnelPeerMetricDelta()).merge(td)
+            for host_key, d in host_deltas.items():
+                self._pending_host_deltas.setdefault(host_key, MetricDelta()).merge(d)
             # Still a working cycle: there was a batch, and the retry carries
             # it. Only an empty buffer counts as idle.
             return True
@@ -1458,6 +1552,7 @@ class ProxyManager:
             await self._redis_client.delete_proxy_status(proxy_id)
             await self._redis_client.reset_proxy_metrics(proxy_id)
         await self._redis_client.reset_project_metrics(project_id)
+        await self._redis_client.reset_host_metrics_for_project(project_id)
         await self._redis_client.clear_mitm_requests(project_id)
 
         # Clean up rate limiter state (in-memory + Redis quarantine keys)
@@ -1466,6 +1561,7 @@ class ProxyManager:
         # Remove from cache
         del self._projects[project_id]
         self._pending_project_deltas.pop(project_id, None)
+        self._drop_pending_host_deltas(project_id=project_id)
         if project_id in self._project_strategies:
             del self._project_strategies[project_id]
 
@@ -1777,6 +1873,7 @@ class ProxyManager:
         # The connector's own metrics hash would otherwise be flushed against
         # a row that no longer exists; its block key and usage go with it.
         await self._redis_client.reset_connector_metrics(connector_id)
+        await self._redis_client.reset_host_metrics_for_connector(connector_id)
         await self._traffic_limiter.forget(connector_id)
 
         # Remove from cache
@@ -1785,6 +1882,7 @@ class ProxyManager:
         # could report progress and re-create the delta for a connector whose
         # row is already gone.
         self._pending_connector_deltas.pop(connector_id, None)
+        self._drop_pending_host_deltas(connector_id=connector_id)
         self._forget_connector_routing_state(connector_id)
         # Also remove associated proxies from cache
         self._proxies.remove_groups([connector_id])

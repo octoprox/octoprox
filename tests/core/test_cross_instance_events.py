@@ -853,3 +853,167 @@ class TestTunnelPeerDeltas:
         await manager._hydrate_from_redis()
         assert manager.tunnel_peer_metrics("device-1") == pending
         await redis_client.reset_tunnel_peer_metrics("device-1")
+
+
+class TestHostDeltas:
+    """Destination hosts ride the pipeline too: pending delta per (project, connector, host), then a Redis hash."""
+
+    async def test_requests_and_progress_count_on_the_host_under_the_connector(
+        self,
+        started_proxy_manager: ProxyManager,
+        redis_client: RedisClient,
+    ) -> None:
+        from api.core.stats import MetricDelta
+        from api.db.redis import HOST_METRICS_KEY
+
+        manager = started_proxy_manager
+        proxy = await _seed_proxy(manager, "hosts")
+        connector_id = proxy.connector_id
+        project_id = manager.get_connector(connector_id).project_id  # type: ignore[union-attr]
+
+        await manager._handle_request_stats(
+            proxy_id=proxy.id, project_id=project_id, success=True, latency_ms=50.0,
+            bytes_sent=10, bytes_received=20, target_host="Shop.Example.com.",
+        )
+        # A running transfer's progress lands on the same host row; a request
+        # with no known destination counts on nothing host-wise.
+        manager._record_traffic_progress(proxy.id, project_id, connector_id, None, 5, 5, "shop.example.com")
+        await manager._handle_request_stats(
+            proxy_id=proxy.id, project_id=project_id, success=False, latency_ms=10.0,
+            bytes_sent=1, bytes_received=1, target_host=None,
+        )
+        key = (project_id, connector_id, "shop.example.com")
+        assert manager._pending_host_deltas == {
+            key: MetricDelta(request_count=1, success_count=1, latency_sum_ms=50.0, bytes_sent=15, bytes_received=25),
+        }
+        # Proxy, connector and project saw both requests regardless.
+        assert manager._pending_connector_deltas[connector_id].request_count == 2
+
+        await manager._flush_pending_metrics()
+        assert manager._pending_host_deltas == {}
+        data = await redis_client.client.hgetall(
+            HOST_METRICS_KEY.format(project_id=project_id, connector_id=connector_id, host="shop.example.com")
+        )
+        assert int(data["request_count"]) == 1 and int(data["bytes_sent"]) == 15
+        assert await redis_client.get_all_host_metrics() == {
+            key: MetricDelta(request_count=1, success_count=1, latency_sum_ms=50.0, bytes_sent=15, bytes_received=25),
+        }
+
+    async def test_every_host_is_named_by_default(
+        self,
+        started_proxy_manager: ProxyManager,
+    ) -> None:
+        manager = started_proxy_manager
+        assert manager._settings.host_metrics_max_hosts == 0
+        proxy = await _seed_proxy(manager, "all")
+        project_id = manager.get_connector(proxy.connector_id).project_id  # type: ignore[union-attr]
+        for i in range(50):
+            await manager._handle_request_stats(
+                proxy_id=proxy.id, project_id=project_id, success=True, latency_ms=1.0,
+                bytes_sent=0, bytes_received=0, target_host=f"h{i}.example.com",
+            )
+        assert len(manager._fold_host_tail(manager._pending_host_deltas)) == 50
+
+    async def test_a_ceiling_keeps_the_busiest_hosts_and_folds_the_rest(
+        self,
+        started_proxy_manager: ProxyManager,
+        redis_client: RedisClient,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from api.core.stats import HOST_OVERFLOW
+
+        manager = started_proxy_manager
+        monkeypatch.setattr(manager._settings, "host_metrics_max_hosts", 2)
+        proxy = await _seed_proxy(manager, "capped")
+        connector_id = proxy.connector_id
+        project_id = manager.get_connector(connector_id).project_id  # type: ignore[union-attr]
+        # Arrival order is not rank: the one-off hosts come first, the busy ones after.
+        for host in ["a.example.com", "b.example.com", "c.example.com", "d.example.com", "d.example.com", "e.example.com", "e.example.com", "e.example.com"]:
+            await manager._handle_request_stats(
+                proxy_id=proxy.id, project_id=project_id, success=True, latency_ms=1.0,
+                bytes_sent=1, bytes_received=1, target_host=host,
+            )
+        # Nothing is folded on the hot path.
+        assert len(manager._pending_host_deltas) == 5
+
+        await manager._flush_pending_metrics()
+        flushed = await redis_client.get_all_host_metrics()
+        counts = {host: d.request_count for (_p, _c, host), d in flushed.items()}
+        assert counts == {"e.example.com": 3, "d.example.com": 2, HOST_OVERFLOW: 3}
+        assert flushed[(project_id, connector_id, HOST_OVERFLOW)].bytes_sent == 3
+
+    async def test_the_ceiling_is_per_project_and_keeps_connectors_apart(
+        self,
+        started_proxy_manager: ProxyManager,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from api.core.stats import HOST_OVERFLOW, MetricDelta
+
+        manager = started_proxy_manager
+        monkeypatch.setattr(manager._settings, "host_metrics_max_hosts", 1)
+        one = MetricDelta(request_count=1, success_count=1)
+        pending = {
+            # Project P: "big" is spread over two connectors (3 requests) and beats "small" (2 on one).
+            ("P", "c1", "big.example.com"): MetricDelta(request_count=1, success_count=1),
+            ("P", "c2", "big.example.com"): MetricDelta(request_count=2, success_count=2),
+            ("P", "c1", "small.example.com"): MetricDelta(request_count=2, success_count=2),
+            ("P", "c2", "tiny.example.com"): one,
+            # Project Q is ranked on its own.
+            ("Q", "c3", "only.example.com"): one,
+        }
+        folded = manager._fold_host_tail(pending)
+        assert {k: d.request_count for k, d in folded.items()} == {
+            ("P", "c1", "big.example.com"): 1,
+            ("P", "c2", "big.example.com"): 2,
+            ("P", "c1", HOST_OVERFLOW): 2,
+            ("P", "c2", HOST_OVERFLOW): 1,
+            ("Q", "c3", "only.example.com"): 1,
+        }
+
+    async def test_disabled_counts_nothing(
+        self,
+        started_proxy_manager: ProxyManager,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        manager = started_proxy_manager
+        monkeypatch.setattr(manager._settings, "host_metrics_enabled", False)
+        proxy = await _seed_proxy(manager, "off")
+        project_id = manager.get_connector(proxy.connector_id).project_id  # type: ignore[union-attr]
+        await manager._handle_request_stats(
+            proxy_id=proxy.id, project_id=project_id, success=True, latency_ms=1.0,
+            bytes_sent=0, bytes_received=0, target_host="a.example.com",
+        )
+        assert manager._pending_host_deltas == {}
+        assert manager._pending_connector_deltas[proxy.connector_id].request_count == 1
+
+    async def test_removing_the_connector_clears_its_host_hashes_and_deltas(
+        self,
+        started_proxy_manager: ProxyManager,
+        redis_client: RedisClient,
+    ) -> None:
+        manager = started_proxy_manager
+        proxy = await _seed_proxy(manager, "cleanup")
+        other = await _seed_proxy(manager, "kept")
+        for p in (proxy, other):
+            project_id = manager.get_connector(p.connector_id).project_id  # type: ignore[union-attr]
+            await manager._handle_request_stats(
+                proxy_id=p.id, project_id=project_id, success=True, latency_ms=1.0,
+                bytes_sent=0, bytes_received=0, target_host="a.example.com",
+            )
+        await manager._flush_pending_metrics()
+        assert len(await redis_client.get_all_host_metrics()) == 2
+        # One more, un-flushed, that must not come back after the removal.
+        project_id = manager.get_connector(proxy.connector_id).project_id  # type: ignore[union-attr]
+        await manager._handle_request_stats(
+            proxy_id=proxy.id, project_id=project_id, success=True, latency_ms=1.0,
+            bytes_sent=0, bytes_received=0, target_host="b.example.com",
+        )
+
+        assert await manager.remove_connector(proxy.connector_id) is True
+        remaining = await redis_client.get_all_host_metrics()
+        assert [c for (_p, c, _h) in remaining] == [other.connector_id]
+        assert all(c != proxy.connector_id for (_p, c, _h) in manager._pending_host_deltas)
+
+        kept_project = manager.get_connector(other.connector_id).project_id  # type: ignore[union-attr]
+        assert await manager.remove_project(kept_project) is True
+        assert await redis_client.get_all_host_metrics() == {}

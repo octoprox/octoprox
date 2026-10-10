@@ -20,6 +20,15 @@ database:
   application_name: "octoprox-dev"
   metrics_flush_interval: 60
 
+metrics:
+  # Per destination host and connector (the Hosts page). Every host is kept
+  # by default. A pool that crawls the open web can switch this off, or set
+  # max_hosts to name only the N busiest hosts per project in each 5-second
+  # window, the rest sharing one "(other)" row.
+  hosts:
+    enabled: true
+    max_hosts: 0
+
 system:
   # Install-wide gauge snapshots behind the admin System trend charts.
   # One row per interval for the whole install; retention alone bounds it.

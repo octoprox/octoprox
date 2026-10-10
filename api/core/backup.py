@@ -43,6 +43,7 @@ from api.db.models import (
     GeoDatabaseBlobModel,
     GeoDatabaseModel,
     GeoSettingsModel,
+    HostMetricsModel,
     IpObservationModel,
     OpenVpnPeerModel,
     OpenVpnSettingsModel,
@@ -98,6 +99,7 @@ _ENTITY_SPECS: tuple[_EntitySpec, ...] = (
     _EntitySpec("proxy_metrics", ProxyMetricsModel, is_metric=True, preserve_id=False),
     _EntitySpec("project_metrics", ProjectMetricsModel, is_metric=True, preserve_id=False),
     _EntitySpec("connector_metrics", ConnectorMetricsModel, is_metric=True, preserve_id=False),
+    _EntitySpec("host_metrics", HostMetricsModel, is_metric=True, preserve_id=False),
     _EntitySpec("provider_descriptors", ProviderDescriptorModel),
     _EntitySpec("provider_audit_log", ProviderAuditModel),
     # IP attribution. Settings and database rows are configuration and always

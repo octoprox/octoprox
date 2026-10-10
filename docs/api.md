@@ -576,6 +576,90 @@ GET /api/v1/projects/{project_id}/metrics/traffic-split?range=1h
 
 `expected_share` (0-100) is what an untargeted request sees right now: every enabled connector with at least one eligible proxy takes `weight / total_weight`. A connector taking nothing has `excluded_reason` set to `disabled`, `traffic_limit` (blocked by its [traffic limit]({{ site.baseurl }}/traffic-limits)) or `no_eligible_proxies`. `observed_share` is the connector's part of the requests in the window, `null` when there were none; `observed_bytes` is its traffic in the window and `cost` what that traffic costs at the connector's price per GB (`null` when unpriced). The observed figures come from the connector's own metrics history, so they survive proxy rotation. The response also carries `observed_bytes` for the whole project.
 
+### Hosts
+
+Where the project's traffic went in a window, by destination host and by the connector that carried it. The numbers come from the flushed host history (see [Metrics]({{ site.baseurl }}/metrics#hosts-where-the-traffic-goes)), so they lag live traffic by up to one flush interval.
+
+```bash
+GET /api/v1/projects/{project_id}/metrics/hosts?range=24h&connector_id=…&search=example&limit=100
+```
+
+`range` is one of `1h`, `6h`, `24h` (default), `7d`, `30d`. `connector_id` keeps only the traffic that connector carried, `search` only hosts containing the text (case-insensitive), and `limit` (1-500, default 100) caps how many hosts come back, busiest first; `totals.host_count` says how many matched in all.
+
+**Response:**
+```json
+{
+  "range": "24h",
+  "since": "2026-10-09T10:00:00",
+  "overflow_host": "(other)",
+  "enabled": true,
+  "limit": 100,
+  "totals": {
+    "host_count": 42,
+    "request_count": 18200,
+    "success_count": 17900,
+    "failure_count": 300,
+    "avg_latency_ms": 212.4,
+    "bytes_sent": 91000000,
+    "bytes_received": 4830000000
+  },
+  "connectors": [
+    { "connector_id": "…", "name": "Oxylabs residential", "credential_type": "oxylabs", "enabled": true }
+  ],
+  "hosts": [
+    {
+      "host": "www.example.com",
+      "request_count": 9100,
+      "success_count": 9050,
+      "failure_count": 50,
+      "avg_latency_ms": 180.2,
+      "bytes_sent": 40000000,
+      "bytes_received": 2900000000,
+      "request_share": 50.0,
+      "bytes_share": 59.73,
+      "connectors": [
+        {
+          "connector_id": "…", "name": "Oxylabs residential", "credential_type": "oxylabs",
+          "request_count": 9100, "success_count": 9050, "failure_count": 50,
+          "avg_latency_ms": 180.2, "bytes_sent": 40000000, "bytes_received": 2900000000
+        }
+      ]
+    }
+  ]
+}
+```
+
+`request_share` and `bytes_share` (0-100) are the host's part of the window's requests and of its bytes both ways. A host named `overflow_host` is where requests to hosts beyond a configured ceiling were folded (see `metrics.hosts.max_hosts` in [Configuration]({{ site.baseurl }}/configuration#host-metrics); it never appears with the default of no ceiling); `enabled` is `false` when per-host counting is switched off, in which case nothing new is recorded. A connector entry whose `name` is `null` was deleted after its rows were written; its rows cascade with it on the next flush.
+
+The busiest hosts over time, for a chart:
+
+```bash
+GET /api/v1/projects/{project_id}/metrics/hosts/history?range=24h&top=8&connector_id=…
+GET /api/v1/projects/{project_id}/metrics/hosts/history?range=24h&hosts=www.example.com,api.example.com
+```
+
+The `top` hosts by requests (1-12, default 8), or the `hosts` named (comma-separated, up to 12), get a series each; every other host is folded into one series under `overflow_host`. Buckets are sized to the range: 1 minute for `1h`, 5 minutes for `6h`, 15 minutes for `24h`, 1 hour for `7d`, 6 hours for `30d`. Every series carries every bucket of the window, with zeros where the host was quiet, so they stack.
+
+**Response:**
+```json
+{
+  "range": "24h",
+  "since": "2026-10-09T10:00:00",
+  "bucket_seconds": 900,
+  "overflow_host": "(other)",
+  "series": [
+    {
+      "host": "www.example.com",
+      "points": [
+        { "timestamp": "2026-10-09T10:00:00", "request_count": 120, "success_count": 119, "failure_count": 1,
+          "avg_latency_ms": 171.0, "bytes_sent": 500000, "bytes_received": 38000000 }
+      ]
+    },
+    { "host": "(other)", "points": [ { "timestamp": "2026-10-09T10:00:00", "request_count": 31, "…": "…" } ] }
+  ]
+}
+```
+
 ### Prometheus Metrics
 
 Export metrics in Prometheus format:
