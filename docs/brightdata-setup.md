@@ -1,7 +1,8 @@
 ---
 layout: docs
-title: BrightData Connector Setup
+title: "Bright Data Proxy Setup"
 nav_id: brightdata-setup
+description: "Use Bright Data residential, mobile, ISP and datacenter proxies through Octoprox: API token, zone settings and connector configuration."
 ---
 
 # BrightData Connector Setup

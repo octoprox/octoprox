@@ -1,7 +1,8 @@
 ---
 layout: docs
-title: Deployment & Scaling
+title: "Deployment and Scaling"
 nav_id: deployment
+description: "Run Octoprox as a single Docker instance or a horizontally scaled cluster behind an L4 load balancer, with Postgres, Redis and tunnel ports."
 ---
 
 # Deployment & Scaling

@@ -1,7 +1,8 @@
 ---
 layout: docs
-title: OpenVPN Devices
+title: "OpenVPN Tunnel Devices"
 nav_id: openvpn
+description: "Connect routers and devices without WireGuard to an Octoprox proxy pool over an OpenVPN tunnel, including TCP on port 443 for networks that block UDP."
 ---
 
 # OpenVPN Devices

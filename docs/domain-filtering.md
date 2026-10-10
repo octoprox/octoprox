@@ -1,7 +1,8 @@
 ---
 layout: docs
-title: Domain Filtering
+title: "Domain Filtering per Connector"
 nav_id: domain-filtering
+description: "Route only certain target domains through a connector with whitelist or blacklist rules, matched hierarchically across subdomains."
 ---
 
 # Domain Filtering

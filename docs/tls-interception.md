@@ -1,7 +1,8 @@
 ---
 layout: docs
-title: TLS Interception
+title: "TLS Interception and Fingerprint Impersonation"
 nav_id: tls-interception
+description: "Decrypt and re-encrypt HTTPS through Octoprox to inspect headers, override User-Agent and impersonate browser TLS fingerprints, configured per project."
 ---
 
 # TLS Interception (MITM)

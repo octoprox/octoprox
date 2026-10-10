@@ -1,7 +1,8 @@
 ---
 layout: docs
-title: Metrics & Request Counting
+title: "Metrics and Request Counting"
 nav_id: metrics
+description: "How Octoprox counts requests, success rates, latency and bytes per proxy and project, and why CONNECT tunnels are counted rather than HTTP requests."
 ---
 
 # Metrics & Request Counting

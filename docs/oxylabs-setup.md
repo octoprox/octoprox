@@ -1,7 +1,8 @@
 ---
 layout: docs
-title: Oxylabs Connector Setup
+title: "Oxylabs Proxy Setup"
 nav_id: oxylabs-setup
+description: "Use Oxylabs residential, mobile, ISP and datacenter proxies through Octoprox: credentials, supported proxy types and connector configuration."
 ---
 
 # Oxylabs Connector Setup

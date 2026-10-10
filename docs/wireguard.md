@@ -1,7 +1,8 @@
 ---
 layout: docs
-title: WireGuard Devices
+title: "WireGuard Tunnel Devices"
 nav_id: wireguard
+description: "Route smart TVs, consoles, phones and whole routers through a proxy pool by connecting them to a WireGuard tunnel that Octoprox terminates."
 ---
 
 # WireGuard Devices

@@ -1,7 +1,8 @@
 ---
 layout: docs
-title: Configuration
+title: "Configuration Reference"
 nav_id: configuration
+description: "Every Octoprox setting: environment variables, per-environment YAML files, authentication, logging, database and Redis connections, and production recommendations."
 ---
 
 # Configuration

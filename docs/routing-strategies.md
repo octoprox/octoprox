@@ -1,7 +1,8 @@
 ---
 layout: docs
-title: Routing Strategies
+title: "Proxy Routing Strategies"
 nav_id: routing-strategies
+description: "Choose how Octoprox distributes requests across proxy pools: round robin, least used, random, sticky sessions and health based, combined with connector weights."
 ---
 
 # Routing Strategies

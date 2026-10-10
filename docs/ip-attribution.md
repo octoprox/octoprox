@@ -1,7 +1,8 @@
 ---
 layout: docs
-title: IP Attribution
+title: "IP Attribution and Exit Verification"
 nav_id: ip-attribution
+description: "How Octoprox verifies where each proxy exit IP really is using MaxMind, DB-IP, IPinfo and IP2Location databases, vendor claims and an echo endpoint."
 ---
 
 # IP Attribution

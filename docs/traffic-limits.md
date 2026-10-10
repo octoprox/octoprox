@@ -1,7 +1,8 @@
 ---
 layout: docs
-title: Traffic Limits & Billing
+title: "Traffic Limits and Proxy Billing"
 nav_id: traffic-limits
+description: "Cap the bytes a connector carries per day, week or month, choose what happens at the limit, and see what each proxy pool costs with a price per GB."
 ---
 
 # Traffic Limits & Billing

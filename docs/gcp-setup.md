@@ -1,7 +1,8 @@
 ---
 layout: docs
-title: GCP Connector Setup
+title: "GCP Connector: Compute Engine Proxy Setup"
 nav_id: gcp-setup
+description: "Set up the GCP connector so Octoprox provisions Compute Engine instances as proxy servers: service account, roles, key file and connector configuration."
 ---
 
 # GCP Connector Setup

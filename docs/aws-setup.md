@@ -1,7 +1,8 @@
 ---
 layout: docs
-title: AWS Connector Setup
+title: "AWS Connector: EC2 Proxy Setup"
 nav_id: aws-setup
+description: "Set up the AWS connector so Octoprox provisions EC2 instances as proxy servers: IAM user, permissions, access keys and connector configuration."
 ---
 
 # AWS Connector Setup

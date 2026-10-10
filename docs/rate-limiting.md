@@ -1,7 +1,8 @@
 ---
 layout: docs
-title: Rate Limiting & Quarantine
+title: "Rate Limiting and Proxy Quarantine"
 nav_id: rate-limiting
+description: "Throttle requests per proxy with a sliding window and automatically quarantine proxies that exceed the limit for a randomised cooldown."
 ---
 
 # Rate Limiting & Quarantine

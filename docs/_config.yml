@@ -1,6 +1,13 @@
 title: Octoprox
-description: A dynamic and flexible proxy manager that acts as an intelligent proxy aggregator
+description: Open source proxy manager - one endpoint over cloud instances, provider sessions, static lists and tunnelled devices, with IP attribution, traffic limits and billing. A self-hosted replacement for Scrapoxy.
+lang: en_US
+logo: /assets/favicon/web-app-manifest-512x512.png
+url: "https://www.octoprox.com"
 baseurl: ""
+
+plugins:
+  - jekyll-sitemap
+  - jekyll-seo-tag
 
 defaults:
   - scope:
@@ -8,6 +15,9 @@ defaults:
       type: "pages"
     values:
       layout: "default"
+      # Extensionless URLs so canonical links and the sitemap match the nav links.
+      permalink: /:basename
+      image: /assets/og-image.png
 
 include:
   - "*.html"

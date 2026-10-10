@@ -1,5 +1,7 @@
 ---
 layout: null
+title: "Octoprox - Dynamic Proxy Manager"
+permalink: /
 ---
 <!DOCTYPE html>
 <html lang="en">
@@ -7,7 +9,7 @@ layout: null
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Octoprox - Dynamic Proxy Manager</title>
-  <meta name="description" content="Open source proxy manager: one endpoint over cloud instances, provider sessions, static lists and tunnelled devices, with IP attribution, traffic limits and billing. A self-hosted replacement for Scrapoxy.">
+  {% seo title=false %}
   <link rel="icon" type="image/svg+xml" href="assets/favicon/favicon.svg">
   <link rel="icon" type="image/png" sizes="96x96" href="assets/favicon/favicon-96x96.png">
   <link rel="apple-touch-icon" sizes="180x180" href="assets/favicon/apple-touch-icon.png">
@@ -143,6 +145,24 @@ layout: null
     .brand { display: inline-flex; align-items: center; flex: none; }
     .logo { max-width: none; flex: none; }
   </style>
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "SoftwareApplication",
+    "name": "Octoprox",
+    "url": "https://www.octoprox.com/",
+    "description": "{{ site.description }}",
+    "applicationCategory": "DeveloperApplication",
+    "applicationSubCategory": "Proxy manager",
+    "operatingSystem": "Linux, Docker",
+    "license": "https://www.apache.org/licenses/LICENSE-2.0",
+    "isAccessibleForFree": true,
+    "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" },
+    "sameAs": ["https://github.com/octoprox/octoprox"],
+    "softwareHelp": { "@type": "CreativeWork", "url": "https://www.octoprox.com/getting-started" },
+    "image": "https://www.octoprox.com/assets/og-image.png"
+  }
+  </script>
 </head>
 <body>
   <header>

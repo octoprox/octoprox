@@ -1,7 +1,8 @@
 ---
 layout: docs
-title: API Reference
+title: "REST API Reference"
 nav_id: api
+description: "REST API reference for Octoprox: manage projects, credentials, connectors and proxies, with authentication, request IDs and curl examples for every endpoint."
 ---
 
 # API Reference

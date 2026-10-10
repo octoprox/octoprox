@@ -1,7 +1,8 @@
 ---
 layout: docs
-title: Azure Connector Setup
+title: "Azure Connector: VM Proxy Setup"
 nav_id: azure-setup
+description: "Set up the Azure connector so Octoprox provisions virtual machines as proxy servers: service principal, roles, credentials and connector configuration."
 ---
 
 # Azure Connector Setup

@@ -1,7 +1,8 @@
 ---
 layout: docs
-title: Proxy Providers & the Provider SDK
+title: "Proxy Providers and the Provider SDK"
 nav_id: providers
+description: "Add any proxy vendor to Octoprox as a declarative YAML descriptor from the admin UI, a mounted file or a Python plugin, with no provider class to write."
 ---
 
 # Proxy Providers & the Provider SDK

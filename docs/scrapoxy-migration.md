@@ -1,7 +1,8 @@
 ---
 layout: docs
-title: Migrating from Scrapoxy
+title: "Migrating from Scrapoxy (Scrapoxy Alternative)"
 nav_id: scrapoxy-migration
+description: "Scrapoxy shut down in February 2026. Move to Octoprox, a self-hosted open source alternative: map every Scrapoxy setting to its Octoprox equivalent and update your clients."
 ---
 
 # Migrating from Scrapoxy

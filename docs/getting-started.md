@@ -1,7 +1,8 @@
 ---
 layout: docs
-title: Getting Started
+title: "Getting Started with Docker"
 nav_id: getting-started
+description: "Run Octoprox in minutes with the pre-built Docker image, standalone or as a cluster, or set up a local development environment."
 ---
 
 # Getting Started
