@@ -399,7 +399,7 @@ function PolicyTab() {
   const excluded = allKinds.filter((k) => !policy.default_sources.includes(k))
 
   return (
-    <form onSubmit={(e) => { e.preventDefault(); mutation.mutate(policy) }} className="space-y-4 max-w-4xl">
+    <form onSubmit={(e) => { e.preventDefault(); mutation.mutate(policy) }} className="space-y-4">
       <div className="grid grid-cols-1 @3xl:grid-cols-2 gap-4">
         <Card className="p-5">
           <h3 className="text-sm font-semibold text-fg mb-1">Default source precedence</h3>
