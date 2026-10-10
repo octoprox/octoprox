@@ -41,6 +41,15 @@ CONNECTOR_METRICS_KEY = "connector:metrics:{connector_id}"
 # carries the two name-resolution counters as well (TunnelPeerMetricDelta).
 TUNNEL_PEER_METRICS_KEY = "tunnel_peer:metrics:{peer_id}"
 TUNNEL_PEER_METRICS_SCAN = "tunnel_peer:metrics:*"
+# Per destination host under one connector of one project, the fifth hash in
+# the metrics pipeline (the Hosts page). The host is the last segment so a
+# bracketed IPv6 literal's colons do not break the key apart; the two ids
+# before it are UUIDs and never contain a colon.
+HOST_METRICS_PREFIX = "host:metrics:"
+HOST_METRICS_KEY = HOST_METRICS_PREFIX + "{project_id}:{connector_id}:{host}"
+HOST_METRICS_SCAN = HOST_METRICS_PREFIX + "*"
+HOST_METRICS_PROJECT_SCAN = HOST_METRICS_PREFIX + "{project_id}:*"
+HOST_METRICS_CONNECTOR_SCAN = HOST_METRICS_PREFIX + "*:{connector_id}:*"
 # Set while a connector takes no requests because its traffic limit was
 # reached (api.core.traffic_limiter). The value is the epoch second the
 # current period ends, which is also the key's expiry: a block never
@@ -114,6 +123,7 @@ REDIS_KEY_GROUPS: tuple[tuple[str, str], ...] = (
     ("project:metrics:", "Project metrics"),
     ("connector:metrics:", "Connector metrics"),
     ("tunnel_peer:metrics:", "Tunnel device metrics"),
+    ("host:metrics:", "Host metrics"),
     ("connector:traffic_blocked:", "Traffic limits"),
     ("sticky:", "Sticky bindings"),
     ("session:", "Sessions"),
@@ -131,6 +141,20 @@ REDIS_KEY_GROUPS: tuple[tuple[str, str], ...] = (
 OTHER_KEY_GROUP = "Other"
 
 LEASE_SCAN = "lease:*"
+
+# How many host metrics hashes one pipeline reads or deletes at a time.
+_HOST_METRICS_BATCH = 500
+
+
+def parse_host_metrics_key(key: str | bytes) -> tuple[str, str, str] | None:
+    """(project_id, connector_id, host) from a host metrics key, None for anything else."""
+    text = key if isinstance(key, str) else key.decode()
+    if not text.startswith(HOST_METRICS_PREFIX):
+        return None
+    parts = text[len(HOST_METRICS_PREFIX):].split(":", 2)
+    if len(parts) != 3 or not all(parts):
+        return None
+    return parts[0], parts[1], parts[2]
 
 
 def classify_key(key: str) -> str:
@@ -289,6 +313,7 @@ class RedisClient:
         project_deltas: dict[str, MetricDelta],
         connector_deltas: dict[str, MetricDelta] | None = None,
         tunnel_peer_deltas: dict[str, TunnelPeerMetricDelta] | None = None,
+        host_deltas: dict[tuple[str, str, str], MetricDelta] | None = None,
     ) -> None:
         """Apply batched per-entity metric deltas in a single pipeline.
 
@@ -296,11 +321,19 @@ class RedisClient:
         ``update_proxy_metrics`` / ``update_project_metrics`` but
         carries an aggregate across many requests. Used by the
         periodic flush loop in ``ProxyManager`` so the hot path no
-        longer pays a Redis round-trip per request.
+        longer pays a Redis round-trip per request. ``host_deltas`` is
+        keyed by (project_id, connector_id, host).
         """
         connector_deltas = connector_deltas or {}
         tunnel_peer_deltas = tunnel_peer_deltas or {}
-        if not proxy_deltas and not project_deltas and not connector_deltas and not tunnel_peer_deltas:
+        host_deltas = host_deltas or {}
+        if (
+            not proxy_deltas
+            and not project_deltas
+            and not connector_deltas
+            and not tunnel_peer_deltas
+            and not host_deltas
+        ):
             return
         now = utc_now().isoformat()
         pipe = self.client.pipeline()
@@ -315,6 +348,9 @@ class RedisClient:
             self._pipeline_metric_delta(pipe, key, d, now)
         for peer_id, d in tunnel_peer_deltas.items():
             key = TUNNEL_PEER_METRICS_KEY.format(peer_id=peer_id)
+            self._pipeline_metric_delta(pipe, key, d, now)
+        for (project_id, connector_id, host), d in host_deltas.items():
+            key = HOST_METRICS_KEY.format(project_id=project_id, connector_id=connector_id, host=host)
             self._pipeline_metric_delta(pipe, key, d, now)
         await pipe.execute()
 
@@ -452,6 +488,56 @@ class RedisClient:
     async def reset_tunnel_peer_metrics(self, peer_id: str) -> None:
         """Reset a device's metrics after flushing to Postgres, or when the device goes."""
         await self.client.delete(TUNNEL_PEER_METRICS_KEY.format(peer_id=peer_id))
+
+    # Host metrics: the same hash layout, one per (project, connector, host),
+    # drained by the leader into host_metrics. There can be thousands of
+    # these, so they are read and deleted in pipelined batches rather than
+    # one round trip each.
+    async def get_all_host_metrics(self) -> dict[tuple[str, str, str], MetricDelta]:
+        """Every host metrics hash, keyed by (project_id, connector_id, host)."""
+        keys: list[tuple[str, str, str]] = []
+        async for raw_key in self.client.scan_iter(match=HOST_METRICS_SCAN, count=500):
+            parsed = parse_host_metrics_key(raw_key)
+            if parsed is not None:
+                keys.append(parsed)
+        metrics: dict[tuple[str, str, str], MetricDelta] = {}
+        for start in range(0, len(keys), _HOST_METRICS_BATCH):
+            batch = keys[start:start + _HOST_METRICS_BATCH]
+            pipe = self.client.pipeline()
+            for project_id, connector_id, host in batch:
+                pipe.hgetall(HOST_METRICS_KEY.format(project_id=project_id, connector_id=connector_id, host=host))
+            for key, data in zip(batch, await pipe.execute(), strict=True):
+                m = self._read_metrics_hash(data, MetricDelta)
+                if m:
+                    metrics[key] = m
+        return metrics
+
+    async def reset_host_metrics(self, keys: Iterable[tuple[str, str, str]]) -> None:
+        """Delete the given host metrics hashes after flushing them to Postgres."""
+        names = [
+            HOST_METRICS_KEY.format(project_id=project_id, connector_id=connector_id, host=host)
+            for project_id, connector_id, host in keys
+        ]
+        for start in range(0, len(names), _HOST_METRICS_BATCH):
+            await self.client.delete(*names[start:start + _HOST_METRICS_BATCH])
+
+    async def reset_host_metrics_for_project(self, project_id: str) -> None:
+        """Delete every host metrics hash of a project, when the project goes."""
+        await self._delete_matching(HOST_METRICS_PROJECT_SCAN.format(project_id=project_id))
+
+    async def reset_host_metrics_for_connector(self, connector_id: str) -> None:
+        """Delete every host metrics hash of a connector, when the connector goes."""
+        await self._delete_matching(HOST_METRICS_CONNECTOR_SCAN.format(connector_id=connector_id))
+
+    async def _delete_matching(self, pattern: str) -> None:
+        batch: list[Any] = []
+        async for key in self.client.scan_iter(match=pattern, count=500):
+            batch.append(key)
+            if len(batch) >= _HOST_METRICS_BATCH:
+                await self.client.delete(*batch)
+                batch = []
+        if batch:
+            await self.client.delete(*batch)
 
     @staticmethod
     def _read_metrics_hash[D: MetricDelta](data: dict[str, Any], shape: type[D]) -> D | None:

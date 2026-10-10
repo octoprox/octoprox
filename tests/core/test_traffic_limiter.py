@@ -42,7 +42,7 @@ class Harness:
 
     def __init__(self, redis_client: RedisClient) -> None:
         self.connectors: dict[str, Connector] = {}
-        self.progress: list[tuple[str, str, str, str | None, int, int]] = []
+        self.progress: list[tuple[str, str, str, str | None, int, int, str | None]] = []
         self.totals: dict[str, tuple[int, int]] = {}
         self.loads: list[dict[str, datetime]] = []
         self.events: list[tuple[str, str]] = []
@@ -83,7 +83,7 @@ class TestTrafficMeter:
         assert meter.add_sent(PROGRESS_REPORT_BYTES - 1) is True
         assert harness.progress == []
         meter.add_received(1)
-        assert harness.progress == [("proxy", "project", connector.id, None, PROGRESS_REPORT_BYTES - 1, 1)]
+        assert harness.progress == [("proxy", "project", connector.id, None, PROGRESS_REPORT_BYTES - 1, 1, None)]
         # The reported bytes are counted once: finish returns only what came after.
         meter.add_received(10)
         assert meter.finish() == (0, 10)
@@ -95,7 +95,7 @@ class TestTrafficMeter:
         # On behalf of a tunnel device: the sink learns which, so the device is metered too.
         meter = harness.limiter.meter("proxy", "project", connector.id, "device-1")
         meter.add_sent(5)
-        assert harness.progress == [("proxy", "project", connector.id, "device-1", 5, 0)]
+        assert harness.progress == [("proxy", "project", connector.id, "device-1", 5, 0, None)]
 
     async def test_progress_counts_against_the_limit(self, harness: Harness) -> None:
         connector = harness.add(make_connector({"limit_bytes": 10 * MB, "action": "block"}))

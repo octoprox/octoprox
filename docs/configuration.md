@@ -202,6 +202,26 @@ While a request is being handled, every log line carries `request_id`, and once 
 
 The web UI sends its own ID on every call, so browser-side failures are traceable the same way.
 
+## Host Metrics
+
+Every request is counted against the destination host it was for, under the connector that carried it, for the project's Hosts page (see [Metrics]({{ site.baseurl }}/metrics#hosts-where-the-traffic-goes)). Every host is kept by default. It is the one history table whose size depends on what clients request rather than on how the pool is set up, so an install that crawls the open web has two dials:
+
+```yaml
+metrics:
+  hosts:
+    enabled: true   # false records nothing per host; the Hosts page then stays empty
+    max_hosts: 0    # 0 keeps every host; N names the N busiest per project per 5-second window
+```
+
+| Setting | Description | Default |
+|---------|-------------|---------|
+| `metrics.hosts.enabled` | Count requests and bytes per destination host and connector | `true` |
+| `metrics.hosts.max_hosts` | A ceiling on how many hosts each instance names per project in each 5-second metrics window, busiest by requests first; the rest are folded into a single `(other)` row, so their requests and bytes stay in the totals. `0` keeps every host | `0` |
+
+A ceiling is for pools that crawl: a project that touches a million new domains a day writes a row per domain, and the Hosts page then has to aggregate tens of millions of rows per load. For a pool aimed at a few to a few thousand target sites the table stays small with no ceiling at all.
+
+Both can also be set as `OCTOPROX_HOST_METRICS_ENABLED` and `OCTOPROX_HOST_METRICS_MAX_HOSTS`. Rows follow the project's metrics retention and the same compaction tiers as the other history tables.
+
 ## Database Configuration
 
 Octoprox uses PostgreSQL for persistent storage:

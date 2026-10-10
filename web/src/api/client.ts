@@ -1252,6 +1252,119 @@ export const fetchProjectTrafficSplit = async (projectId: string, range: Traffic
   return response.data
 }
 
+// Hosts: where a project's traffic goes, by destination host and connector.
+
+export type HostsRange = TrafficSplitRange
+
+/** One connector's part of a host's traffic in the window. */
+export interface HostConnectorMetrics {
+  connector_id: string
+  /** Null when the connector was deleted after the rows were written (a flush-window race). */
+  name: string | null
+  credential_type: CredentialType | null
+  request_count: number
+  success_count: number
+  failure_count: number
+  avg_latency_ms: number
+  bytes_sent: number
+  bytes_received: number
+}
+
+export interface HostMetrics {
+  host: string
+  request_count: number
+  success_count: number
+  failure_count: number
+  avg_latency_ms: number
+  bytes_sent: number
+  bytes_received: number
+  /** Share of the window's requests and of its bytes (both directions), 0-100. */
+  request_share: number
+  bytes_share: number
+  connectors: HostConnectorMetrics[]
+}
+
+export interface HostsTotals {
+  host_count: number
+  request_count: number
+  success_count: number
+  failure_count: number
+  avg_latency_ms: number
+  bytes_sent: number
+  bytes_received: number
+}
+
+export interface HostsConnector {
+  connector_id: string
+  name: string
+  credential_type: CredentialType
+  enabled: boolean
+}
+
+export interface HostsResponse {
+  range: HostsRange
+  since: string
+  /** The row hosts past the per-window cap are folded into. */
+  overflow_host: string
+  /** Whether per-host counting is on at all (metrics.hosts.enabled). */
+  enabled: boolean
+  /** How many hosts the response holds at most; totals.host_count says how many matched. */
+  limit: number
+  totals: HostsTotals
+  connectors: HostsConnector[]
+  hosts: HostMetrics[]
+}
+
+export interface HostSeriesPoint {
+  timestamp: string
+  request_count: number
+  success_count: number
+  failure_count: number
+  avg_latency_ms: number
+  bytes_sent: number
+  bytes_received: number
+}
+
+export interface HostSeries {
+  host: string
+  points: HostSeriesPoint[]
+}
+
+export interface HostsHistoryResponse {
+  range: HostsRange
+  since: string
+  bucket_seconds: number
+  overflow_host: string
+  /** Busiest first; the remainder of the hosts last under overflow_host. Every series has every bucket. */
+  series: HostSeries[]
+}
+
+export interface HostsQuery {
+  range: HostsRange
+  connectorId?: string | null
+  search?: string
+  limit?: number
+}
+
+export const fetchProjectHostMetrics = async (projectId: string, query: HostsQuery): Promise<HostsResponse> => {
+  const params: Record<string, string | number> = { range: query.range }
+  if (query.connectorId) params.connector_id = query.connectorId
+  if (query.search) params.search = query.search
+  if (query.limit) params.limit = query.limit
+  const response = await api.get(`/projects/${projectId}/metrics/hosts`, { params })
+  return response.data
+}
+
+export const fetchProjectHostHistory = async (
+  projectId: string, query: { range: HostsRange; connectorId?: string | null; top?: number },
+): Promise<HostsHistoryResponse> => {
+  const params: Record<string, string | number> = { range: query.range }
+  if (query.connectorId) params.connector_id = query.connectorId
+  if (query.top) params.top = query.top
+  const response = await api.get(`/projects/${projectId}/metrics/hosts/history`, { params })
+  return response.data
+}
+
 // Project-scoped Credential API functions
 export const fetchProjectCredentials = async (projectId: string): Promise<CredentialListResponse> => {
   const response = await api.get(`/projects/${projectId}/credentials`)

@@ -291,6 +291,43 @@ class TunnelPeerMetricsModel(Base):
     granularity: Mapped[int] = mapped_column(Integer, default=60, nullable=False)
 
 
+class HostMetricsModel(Base):
+    """Historical per-host metrics: a project's requests by destination host and connector.
+
+    The fifth metrics history table. Each completed request is counted
+    against the host it was for (the CONNECT target or the URL host, lower
+    case) under the connector that carried it, so a project can see where
+    its traffic goes and which connector serves which host. Same shape,
+    flush, compaction tiers and retention as the other four tables. Rows
+    cascade with their connector, as connector_metrics rows do, and with
+    the project.
+    """
+
+    __tablename__ = "host_metrics"
+    __table_args__ = (
+        Index("ix_host_metrics_project_ts", "project_id", "timestamp"),
+        Index("ix_host_metrics_project_granularity_ts", "project_id", "granularity", "timestamp"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    project_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("projects.id", ondelete="CASCADE"), nullable=False
+    )
+    connector_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("connectors.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    host: Mapped[str] = mapped_column(String(255), nullable=False)
+    timestamp: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+
+    request_count: Mapped[int] = mapped_column(Integer, default=0)
+    success_count: Mapped[int] = mapped_column(Integer, default=0)
+    failure_count: Mapped[int] = mapped_column(Integer, default=0)
+    avg_latency_ms: Mapped[float] = mapped_column(Float, default=0.0)
+    bytes_sent: Mapped[int] = mapped_column(BigInteger, default=0)
+    bytes_received: Mapped[int] = mapped_column(BigInteger, default=0)
+    granularity: Mapped[int] = mapped_column(Integer, default=60, nullable=False)
+
+
 class SystemMetricsModel(Base):
     """Periodic install-wide gauge readings, for the admin trend charts.
 

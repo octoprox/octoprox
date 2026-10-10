@@ -5,7 +5,7 @@
 
 from dataclasses import dataclass
 
-from api.core.stats import MetricDelta, TunnelPeerMetricDelta
+from api.core.stats import HOST_OVERFLOW, MetricDelta, TunnelPeerMetricDelta, normalize_host
 
 
 @dataclass
@@ -225,3 +225,29 @@ class TestTunnelPeerMetricDelta:
     def test_older_wire_form_reads_extras_as_zero(self) -> None:
         parsed = TunnelPeerMetricDelta.from_dict({"request_count": "3", "bytes_sent": "9"})
         assert parsed == TunnelPeerMetricDelta(request_count=3, bytes_sent=9)
+
+
+class TestNormalizeHost:
+    """The form a destination is counted under on the Hosts page."""
+
+    def test_folds_case_and_trailing_dot(self) -> None:
+        assert normalize_host("Shop.Example.COM.") == "shop.example.com"
+        assert normalize_host("  api.example.org ") == "api.example.org"
+
+    def test_keeps_address_literals(self) -> None:
+        assert normalize_host("93.184.216.34") == "93.184.216.34"
+        assert normalize_host("[2001:DB8::1]") == "[2001:db8::1]"
+
+    def test_nothing_countable_is_none(self) -> None:
+        assert normalize_host(None) is None
+        assert normalize_host("") is None
+        assert normalize_host("   ") is None
+        assert normalize_host("bad host") is None
+        # Control characters are not hosts either; a NUL would be rejected by
+        # Postgres and abort the flush that carried it.
+        assert normalize_host("evil\x00.example.com") is None
+        assert normalize_host("tab\t.example.com") is None
+
+    def test_overlong_names_fold_into_the_overflow_row(self) -> None:
+        assert normalize_host("a" * 300) == HOST_OVERFLOW
+        assert normalize_host(HOST_OVERFLOW) == HOST_OVERFLOW

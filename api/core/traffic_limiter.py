@@ -69,10 +69,11 @@ PROGRESS_REPORT_BYTES = 1 << 20
 PROGRESS_REPORT_SECONDS = 5.0
 
 # What ProxyManager gives the meter to fold progress into its pending deltas:
-# (proxy_id, project_id, connector_id, peer_id, bytes_sent, bytes_received),
-# where peer_id names the tunnel device the transfer belongs to, or None on
-# the proxy port.
-ProgressSink = Callable[[str, str, str, str | None, int, int], None]
+# (proxy_id, project_id, connector_id, peer_id, bytes_sent, bytes_received,
+# target_host), where peer_id names the tunnel device the transfer belongs
+# to, or None on the proxy port, and target_host is the destination the
+# transfer is for (the host row its bytes count under), or None when unknown.
+ProgressSink = Callable[[str, str, str, str | None, int, int, str | None], None]
 # Loads the flushed period totals: {connector_id: since} -> {connector_id: (sent, received)}.
 TotalsLoader = Callable[[dict[str, datetime]], Awaitable[dict[str, tuple[int, int]]]]
 
@@ -151,7 +152,7 @@ class TrafficMeter:
     """
 
     __slots__ = (
-        "_limiter", "proxy_id", "project_id", "connector_id", "peer_id",
+        "_limiter", "proxy_id", "project_id", "connector_id", "peer_id", "target_host",
         "sent", "received", "_reported_sent", "_reported_received", "_last_report",
     )
 
@@ -162,6 +163,7 @@ class TrafficMeter:
         project_id: str,
         connector_id: str,
         peer_id: str | None = None,
+        target_host: str | None = None,
     ) -> None:
         self._limiter = limiter
         self.proxy_id = proxy_id
@@ -170,6 +172,9 @@ class TrafficMeter:
         # The tunnel device the transfer came from, so its progress is
         # counted on the device as well; None for a proxy-port client.
         self.peer_id = peer_id
+        # The destination the transfer is for, so its progress is counted
+        # on the host as well (the Hosts page); None when not known.
+        self.target_host = target_host
         self.sent = 0
         self.received = 0
         self._reported_sent = 0
@@ -213,7 +218,8 @@ class TrafficMeter:
         self._last_report = time.monotonic()
         if sent or received:
             self._limiter.progress(
-                self.proxy_id, self.project_id, self.connector_id, self.peer_id, sent, received
+                self.proxy_id, self.project_id, self.connector_id, self.peer_id, sent, received,
+                self.target_host,
             )
 
     def finish(self) -> tuple[int, int]:
@@ -346,10 +352,19 @@ class TrafficLimiter:
         return sum(1 for until in self._blocked.values() if until > now)
 
     def meter(
-        self, proxy_id: str, project_id: str, connector_id: str, peer_id: str | None = None
+        self,
+        proxy_id: str,
+        project_id: str,
+        connector_id: str,
+        peer_id: str | None = None,
+        target_host: str | None = None,
     ) -> TrafficMeter:
-        """A fresh meter for one transfer, on behalf of a tunnel device when ``peer_id`` is given."""
-        return TrafficMeter(self, proxy_id, project_id, connector_id, peer_id)
+        """A fresh meter for one transfer, on behalf of a tunnel device when ``peer_id`` is given.
+
+        ``target_host`` is the destination the transfer is for, so its bytes
+        are counted on the host as well as on the proxy, connector and project.
+        """
+        return TrafficMeter(self, proxy_id, project_id, connector_id, peer_id, target_host)
 
     def progress(
         self,
@@ -359,10 +374,11 @@ class TrafficLimiter:
         peer_id: str | None,
         sent: int,
         received: int,
+        target_host: str | None = None,
     ) -> None:
         """A running transfer reports bytes: into the pending deltas, then against the limit."""
         if self.sink is not None:
-            self.sink(proxy_id, project_id, connector_id, peer_id, sent, received)
+            self.sink(proxy_id, project_id, connector_id, peer_id, sent, received, target_host)
         if self.record(connector_id, sent, received):
             self._schedule(self.evaluate(connector_id))
 

@@ -20,11 +20,13 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+import api.core.proxy_server
 from api.core.proxy_server import (
     HOP_BY_HOP_REQUEST_HEADERS,
     HOP_BY_HOP_RESPONSE_HEADERS,
     ProxyServer,
 )
+from api.core.signals import request_completed
 from api.core.traffic_limiter import TrafficMeter
 from api.models.location import LocationTarget
 from api.models.proxy import Proxy, ProxyProtocol
@@ -128,7 +130,9 @@ class _NoLimit:
 def _server(proxy: Proxy) -> ProxyServer:
     manager = MagicMock()
     manager.get_project.return_value = None  # skips exit verification
-    manager.traffic_meter = lambda p, project_id: TrafficMeter(_NoLimit(), p.id, project_id, p.connector_id)  # type: ignore[arg-type]
+    manager.traffic_meter = lambda p, project_id, **kwargs: TrafficMeter(  # type: ignore[arg-type]
+        _NoLimit(), p.id, project_id, p.connector_id, target_host=kwargs.get("target_host")
+    )
     server = ProxyServer(manager)
     server._get_upstream_proxy = AsyncMock(return_value=proxy)  # type: ignore[method-assign]
     return server
@@ -211,6 +215,20 @@ class TestEndToEndHeaders:
         }
         kept = ProxyServer._end_to_end_headers(headers, HOP_BY_HOP_REQUEST_HEADERS)
         assert set(kept) == {"host", "content-length", "transfer-encoding"}
+
+
+class TestCompletionEvent:
+    async def test_completion_names_the_destination_host(self, upstream: _Capture) -> None:
+        # The host of the URL is what the request is counted under on the
+        # Hosts page, and what the meter charges the bytes to as they flow.
+        server = _server(_http_proxy(upstream.port))
+        await _forward(server, "http://ip-api.com:8080/json")
+        publish = api.core.proxy_server.event_bus.publish
+        completed = [c for c in publish.await_args_list if c.args[0] is request_completed]  # type: ignore[attr-defined]
+        assert len(completed) == 1
+        assert completed[0].kwargs["target_host"] == "ip-api.com"
+        assert completed[0].kwargs["project_id"] == "project-1"
+        assert server._get_upstream_proxy.await_args.kwargs["target_host"] == "ip-api.com"  # type: ignore[attr-defined]
 
 
 class TestRoutingKey:
