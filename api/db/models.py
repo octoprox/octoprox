@@ -52,6 +52,67 @@ class UserModel(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now, onupdate=utc_now)
 
 
+class AuthProviderModel(Base):
+    """A sign-in provider the admin has set up (see api.sso): one row per kind.
+
+    The OAuth client this install registered with Google, Microsoft or GitHub.
+    In the database rather than in settings so every instance presents the
+    same client and the admin can change it without a redeploy.
+    """
+
+    __tablename__ = "auth_providers"
+
+    kind: Mapped[str] = mapped_column(String(32), primary_key=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default=text("false"))
+    client_id: Mapped[str] = mapped_column(String(255), nullable=False, default="", server_default="")
+    client_secret: Mapped[str] = mapped_column(Text, nullable=False, default="", server_default="")
+    # Microsoft only: the Entra tenant whose accounts may sign in.
+    tenant_id: Mapped[str] = mapped_column(String(255), nullable=False, default="", server_default="")
+    updated_by: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now, onupdate=utc_now)
+
+
+class AuthIdentityModel(Base):
+    """A provider account a user signs in with: the provider's stable id for it."""
+
+    __tablename__ = "auth_identities"
+    __table_args__ = (
+        Index("ix_auth_identities_provider_subject_unique", "provider", "subject", unique=True),
+        # Also serves lookups by user_id alone, as its leading column.
+        Index("ix_auth_identities_user_provider_unique", "user_id", "provider", unique=True),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    user_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    provider: Mapped[str] = mapped_column(String(32), nullable=False)
+    subject: Mapped[str] = mapped_column(String(255), nullable=False)
+    # What the provider reported when the identity was linked; display only.
+    email: Mapped[str] = mapped_column(String(255), nullable=False, default="", server_default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+    last_login_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
+class ApiTokenModel(Base):
+    """A personal access token: the hash of the secret, never the secret."""
+
+    __tablename__ = "api_tokens"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    user_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    name: Mapped[str] = mapped_column(String(100), nullable=False)
+    token_hash: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    token_prefix: Mapped[str] = mapped_column(String(16), nullable=False)
+    # The admin who issued it on the user's behalf, or the user themselves.
+    created_by: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    last_used_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+
+
 class ProjectModel(Base):
     """SQLAlchemy model for projects (multi-tenancy)."""
 

@@ -319,6 +319,12 @@ Before pointing real traffic at the cluster, edit either compose file:
 
 - Set `OCTOPROX_AUTH_PASSWORD` to something strong (not `admin`).
 - Set `OCTOPROX_JWT_SECRET` to a long random string.
+- Set `OCTOPROX_PUBLIC_URL` to the address users reach the cluster at
+  (for example `https://proxy.example.com`). Invite links and the redirect
+  URIs for sign-in through Google, Microsoft or GitHub are built from it;
+  without it they are built from the Host header nginx forwards, which is
+  right on `localhost:8000` and wrong behind TLS termination or a further
+  load balancer. See [sso.md](sso).
 - Set `OCTOPROX_DB_PASSWORD` (and the matching `POSTGRES_PASSWORD`).
 - Decide whether to expose Postgres (5433) and Redis (6379) on the host -
   for an internet-facing host you almost certainly want to remove those

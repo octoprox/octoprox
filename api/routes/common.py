@@ -15,7 +15,22 @@ if TYPE_CHECKING:
     from api.db.redis import RedisClient
     from api.geo.runtime import GeoRuntime
     from api.openvpn.runtime import OpenVpnRuntime
+    from api.sso import SsoFlow
     from api.wireguard.runtime import WireGuardRuntime
+
+
+def external_base_url(request: Request) -> str:
+    """The URL this install is reached at, for links handed to browsers.
+
+    ``OCTOPROX_PUBLIC_URL`` when set, since behind a load balancer the request's
+    own base URL names the balancer's internal face; otherwise the request's.
+    Never ends in a slash.
+    """
+    from api.core.config import settings
+
+    if settings.public_url:
+        return settings.public_url.rstrip("/")
+    return str(request.base_url).rstrip("/")
 
 
 def proxy_manager_of(request: Request) -> ProxyManager:
@@ -37,6 +52,10 @@ def wireguard_runtime_of(request: Request) -> WireGuardRuntime:
 
 def openvpn_runtime_of(request: Request) -> OpenVpnRuntime:
     return cast("OpenVpnRuntime", request.app.state.openvpn_runtime)
+
+
+def sso_flow_of(request: Request) -> SsoFlow:
+    return cast("SsoFlow", request.app.state.sso_flow)
 
 
 def unique_name_violation(exc: IntegrityError, kind: str, name: str) -> HTTPException:

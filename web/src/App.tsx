@@ -4,6 +4,7 @@
 import { useState, useEffect, useMemo } from 'react'
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
 import SetPassword from './components/SetPassword'
+import SsoComplete from './components/SsoComplete'
 import Login from './components/Login'
 import ProjectSelection from './components/ProjectSelection'
 import RequireAdmin from './components/RequireAdmin'
@@ -25,6 +26,7 @@ import SystemSection from './pages/settings/SystemSection'
 import GeoSection from './pages/settings/GeoSection'
 import WireGuardSection from './pages/settings/WireGuardSection'
 import OpenVpnSection from './pages/settings/OpenVpnSection'
+import SignInSection from './pages/settings/SignInSection'
 import { ProjectProvider } from './contexts/ProjectContext'
 import { AuthProvider, AuthContextValue } from './contexts/AuthContext'
 import { ToastProvider } from './contexts/ToastContext'
@@ -38,6 +40,8 @@ function App() {
       <Routes>
         {/* Unauthenticated route - accessible without login */}
         <Route path="/set-password/:token" element={<SetPassword />} />
+        {/* Where a provider sends the browser back after sign-in */}
+        <Route path="/sso/complete" element={<SsoComplete />} />
         {/* All other routes require authentication */}
         <Route path="/*" element={<AuthenticatedApp />} />
       </Routes>
@@ -128,6 +132,7 @@ function AuthenticatedApp() {
       <Route path="account" element={<AccountSection />} />
       <Route path="appearance" element={<AppearanceSection />} />
       <Route path="users" element={<RequireAdmin><UsersSection /></RequireAdmin>} />
+      <Route path="sign-in" element={<RequireAdmin><SignInSection /></RequireAdmin>} />
       <Route path="backup" element={<RequireAdmin><BackupSection /></RequireAdmin>} />
       <Route path="providers" element={<RequireAdmin><ProvidersSection /></RequireAdmin>} />
       <Route path="geo" element={<RequireAdmin><GeoSection /></RequireAdmin>} />

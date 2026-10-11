@@ -631,3 +631,29 @@ class TestUserInviteFlow:
         )
         assert response.status_code == 201
         assert response.json()["has_password"] is True
+
+
+class TestEmailCase:
+    """Addresses are stored lowercase, so one address is one user whatever the typing."""
+
+    def test_create_lowercases_and_refuses_a_case_variant(self, authenticated_client: TestClient) -> None:
+        created = authenticated_client.post(
+            "/api/v1/users", json={"username": "case1", "email": "Jane.Doe@Example.COM", "password": "pass123"}
+        )
+        assert created.status_code == 201, created.text
+        assert created.json()["email"] == "jane.doe@example.com"
+        duplicate = authenticated_client.post(
+            "/api/v1/users/invite", json={"username": "case2", "email": "JANE.DOE@example.com"}
+        )
+        assert duplicate.status_code == 400
+        assert "already exists" in duplicate.json()["detail"]
+        authenticated_client.request("DELETE", f"/api/v1/users/{created.json()['id']}")
+
+    def test_update_lowercases(self, authenticated_client: TestClient) -> None:
+        user = authenticated_client.post(
+            "/api/v1/users", json={"username": "case3", "email": "", "password": "pass123"}
+        ).json()
+        updated = authenticated_client.patch(f"/api/v1/users/{user['id']}", json={"email": "Case3@Example.com"})
+        assert updated.status_code == 200
+        assert updated.json()["email"] == "case3@example.com"
+        authenticated_client.request("DELETE", f"/api/v1/users/{user['id']}")

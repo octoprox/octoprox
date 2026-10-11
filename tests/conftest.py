@@ -135,6 +135,9 @@ async def db_session(
         await conn.execute(text("TRUNCATE TABLE connectors CASCADE"))
         await conn.execute(text("TRUNCATE TABLE credentials CASCADE"))
         await conn.execute(text("TRUNCATE TABLE projects CASCADE"))
+        await conn.execute(text("TRUNCATE TABLE api_tokens CASCADE"))
+        await conn.execute(text("TRUNCATE TABLE auth_identities CASCADE"))
+        await conn.execute(text("TRUNCATE TABLE auth_providers CASCADE"))
         await conn.execute(text("TRUNCATE TABLE users CASCADE"))
         await conn.execute(text("TRUNCATE TABLE provider_audit_log CASCADE"))
         await conn.execute(text("TRUNCATE TABLE provider_descriptors CASCADE"))
@@ -209,6 +212,7 @@ def app_with_lifespan(test_settings: Settings) -> Any:
     import api.db.session
     import api.main
     import api.routes.auth
+    import api.routes.sso
     import api.routes.system
     from api.db.session import get_async_session_factory
     from api.main import create_app
@@ -221,6 +225,7 @@ def app_with_lifespan(test_settings: Settings) -> Any:
     api.main.settings = test_settings
     api.core.proxy_server.settings = test_settings
     api.routes.auth.settings = test_settings
+    api.routes.sso.settings = test_settings
     api.core.auth.settings = test_settings
     api.db.session.settings = test_settings
     api.routes.system.settings = test_settings

@@ -447,6 +447,15 @@ class Settings(BaseSettings):
     )
 
     # Authentication settings
+    public_url: str = Field(
+        default="",
+        description=(
+            "The URL users reach this install at (scheme and host, no trailing slash), as written into "
+            "invite links and registered with sign-in providers as the redirect URI. Behind a load "
+            "balancer or reverse proxy the request's own Host header names the wrong place; empty "
+            "means use it anyway"
+        ),
+    )
     auth_username: str = Field(default="admin", description="Admin username for initial seed")
     auth_password: str = Field(default="", description="Admin password for initial seed")
     jwt_secret: str = Field(

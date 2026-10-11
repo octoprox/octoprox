@@ -25,6 +25,7 @@ Configuration is loaded from YAML files in the `config/` directory based on the 
 | `OCTOPROX_AUTH_PASSWORD` | Initial admin password (required) | (empty) |
 | `OCTOPROX_JWT_SECRET` | Secret key for JWT token signing | change-me-in-production |
 | `OCTOPROX_JWT_EXPIRY_HOURS` | JWT token expiry in hours | 24 |
+| `OCTOPROX_PUBLIC_URL` | The URL users reach Octoprox at (scheme and host, no trailing slash): written into invite links and registered with sign-in providers as the redirect URI. Needed behind a load balancer or reverse proxy, where the request's own address is the wrong one | (the request's base URL) |
 | `OCTOPROX_TLS_MITM_CA_CERT_PATH` | Path to the MITM CA certificate | data/ca/octoprox-ca.crt |
 | `OCTOPROX_TLS_MITM_CA_KEY_PATH` | Path to the MITM CA private key | data/ca/octoprox-ca.key |
 | `OCTOPROX_PROVIDERS_DIR` | Directory of operator-supplied provider descriptor YAML files | (unset) |
@@ -41,6 +42,8 @@ There are three roles:
 - **Admin** - Full access including user management
 - **Editor** - Can manage projects, proxies, credentials, and connectors (no user management)
 - **Viewer** - Read-only access to all data
+
+Besides a password, a user can sign in with a Google, Microsoft or GitHub account once an admin has set the provider up, and scripts can authenticate with a personal access token instead of a password. See [Single Sign-On and API Tokens](sso).
 
 ### Configuration
 
@@ -64,7 +67,7 @@ OCTOPROX_JWT_SECRET=your-random-secret-key
 
 - **Always set a strong `OCTOPROX_JWT_SECRET`** in production. The default value is insecure.
 - **Never commit credentials** to version control. Use environment variables or `.env` files (which should be gitignored).
-- The `/api/v1/auth/login` and `/api/v1/auth/status` endpoints are always public.
+- The `/api/v1/auth/login` and `/api/v1/auth/status` endpoints are always public, as are the `/api/v1/auth/sso/*` endpoints the browser's sign-in round trip uses.
 - The `/health` endpoint is always public for load balancer health checks.
 - All other API endpoints require authentication.
 

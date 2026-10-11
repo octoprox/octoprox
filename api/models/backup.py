@@ -71,6 +71,9 @@ class BackupPayload(BaseModel):
     """Decrypted contents of a backup: one list of rows per entity."""
 
     users: list[dict[str, Any]] = Field(default_factory=list)
+    auth_identities: list[dict[str, Any]] = Field(default_factory=list)
+    api_tokens: list[dict[str, Any]] = Field(default_factory=list)
+    auth_providers: list[dict[str, Any]] = Field(default_factory=list)
     projects: list[dict[str, Any]] = Field(default_factory=list)
     credentials: list[dict[str, Any]] = Field(default_factory=list)
     connectors: list[dict[str, Any]] = Field(default_factory=list)
@@ -118,6 +121,9 @@ class ImportSummary(BaseModel):
     """
 
     users: int = 0
+    auth_identities: int = 0
+    api_tokens: int = 0
+    auth_providers: int = 0
     projects: int = 0
     credentials: int = 0
     connectors: int = 0

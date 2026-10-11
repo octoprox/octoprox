@@ -37,6 +37,9 @@ from api.core import utc_now
 from api.db.base import Base
 from api.db.geo_repository import mark_blob_rows_deleted
 from api.db.models import (
+    ApiTokenModel,
+    AuthIdentityModel,
+    AuthProviderModel,
     ConnectorExitIpModel,
     ConnectorMetricsModel,
     ConnectorModel,
@@ -93,6 +96,12 @@ class _EntitySpec:
 # FK-safe order: parents before children, metrics last.
 _ENTITY_SPECS: tuple[_EntitySpec, ...] = (
     _EntitySpec("users", UserModel),
+    # Who signs in how: linked provider accounts and personal access tokens
+    # reference users, so they come right after; the providers themselves
+    # are global.
+    _EntitySpec("auth_identities", AuthIdentityModel),
+    _EntitySpec("api_tokens", ApiTokenModel),
+    _EntitySpec("auth_providers", AuthProviderModel),
     _EntitySpec("projects", ProjectModel),
     _EntitySpec("credentials", CredentialModel),
     _EntitySpec("connectors", ConnectorModel),
@@ -353,12 +362,15 @@ class ImportResult:
     old_connector_ids: list[str] = field(default_factory=list)
 
 
-def _resolve_user_conflicts(rows: list[dict[str, Any]], kept: dict[str, Any]) -> list[UserConflict]:
+def _resolve_user_conflicts(
+    rows: list[dict[str, Any]], kept: dict[str, Any], id_map: dict[str, str] | None = None
+) -> list[UserConflict]:
     """Mutate imported user rows so none collide with the kept (current) user.
 
-    Users are referenced by nothing else in the schema, so an imported user
-    whose ``id`` equals the kept user's id simply receives a fresh uuid. A
-    clashing ``username`` is suffixed with ``-imported`` (then ``-imported-2``,
+    An imported user whose ``id`` equals the kept user's id receives a fresh
+    uuid, recorded in ``id_map`` (old to new) so the rows that reference
+    users, linked sign-ins and API tokens, can follow it. A clashing
+    ``username`` is suffixed with ``-imported`` (then ``-imported-2``,
     ``-imported-3``, ... if that is also taken by another imported user). A
     clashing non-empty ``email`` is cleared, because the column carries a
     unique index and there is no meaningful alternative address to invent.
@@ -375,7 +387,10 @@ def _resolve_user_conflicts(rows: list[dict[str, Any]], kept: dict[str, Any]) ->
         email_cleared = False
 
         if row.get("id") == kept["id"]:
-            row["id"] = str(uuid.uuid4())
+            fresh = str(uuid.uuid4())
+            if id_map is not None:
+                id_map[str(row["id"])] = fresh
+            row["id"] = fresh
             new_id = True
 
         if original_username == kept["username"]:
@@ -403,6 +418,44 @@ def _resolve_user_conflicts(rows: list[dict[str, Any]], kept: dict[str, Any]) ->
                 )
             )
     return conflicts
+
+
+async def _follow_kept_user(
+    session: AsyncSession, data: dict[str, Any], kept_id: str, id_map: dict[str, str]
+) -> None:
+    """Keep the kept user's own sign-ins and tokens, and drop imported rows that would collide.
+
+    The kept user's linked sign-ins and tokens survived the wipe with the
+    user. Imported rows that belonged to a user re-identified by
+    :func:`_resolve_user_conflicts` follow it to its new id. Imported rows
+    that would hit a unique index the kept user's rows already occupy (the
+    same provider account, the same token hash) are dropped: they describe
+    the kept user's old self, which is still here.
+    """
+    for row in data.get("auth_identities", []):
+        row["user_id"] = id_map.get(str(row.get("user_id")), row.get("user_id"))
+    for row in data.get("api_tokens", []):
+        row["user_id"] = id_map.get(str(row.get("user_id")), row.get("user_id"))
+
+    kept_identities = (
+        await session.execute(select(AuthIdentityModel).where(AuthIdentityModel.user_id == kept_id))
+    ).scalars().all()
+    taken_subjects = {(i.provider, i.subject) for i in kept_identities}
+    data["auth_identities"] = [
+        row
+        for row in data.get("auth_identities", [])
+        if (row.get("provider"), row.get("subject")) not in taken_subjects and row.get("user_id") != kept_id
+    ]
+    kept_hashes = set(
+        (await session.execute(select(ApiTokenModel.token_hash).where(ApiTokenModel.user_id == kept_id)))
+        .scalars()
+        .all()
+    )
+    data["api_tokens"] = [
+        row
+        for row in data.get("api_tokens", [])
+        if row.get("token_hash") not in kept_hashes and row.get("user_id") != kept_id
+    ]
 
 
 async def replace_all(
@@ -449,6 +502,8 @@ async def replace_all(
     # The WireGuard and OpenVPN identity rows are global too; their peers cascade with projects.
     await session.execute(delete(WireGuardSettingsModel))
     await session.execute(delete(OpenVpnSettingsModel))
+    # Sign-in providers are global; linked sign-ins and tokens cascade with users.
+    await session.execute(delete(AuthProviderModel))
     if keep_user_id is not None:
         await session.execute(delete(UserModel).where(UserModel.id != keep_user_id))
     else:
@@ -458,7 +513,9 @@ async def replace_all(
     data = payload.model_dump()
     user_conflicts: list[UserConflict] = []
     if kept_row is not None:
-        user_conflicts = _resolve_user_conflicts(data["users"], kept_row)
+        id_map: dict[str, str] = {}
+        user_conflicts = _resolve_user_conflicts(data["users"], kept_row, id_map)
+        await _follow_kept_user(session, data, kept_row["id"], id_map)
 
     counts: dict[str, int] = {}
     for spec in _ENTITY_SPECS:
