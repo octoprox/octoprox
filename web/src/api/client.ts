@@ -1582,6 +1582,7 @@ export interface UserAccount {
   role: UserRole
   is_active: boolean
   has_password: boolean
+  sign_in_providers: string[]
   theme_preference: string
   last_login_at: string | null
   created_at: string
@@ -2222,3 +2223,104 @@ export const fetchOpenVpnPeerConfig = async (projectId: string, peerId: string):
   (await api.get(`/projects/${projectId}/openvpn/peers/${peerId}/config`)).data
 export const fetchOpenVpnPeerMetricsHistory = async (projectId: string, peerId: string, range: string): Promise<TunnelPeerMetricsHistoryResponse> =>
   (await api.get(`/projects/${projectId}/openvpn/peers/${peerId}/metrics/history`, { params: { range } })).data
+
+// ---------------------------------------------------------------------------
+// Sign-in providers, linked sign-ins and personal access tokens (docs/sso.md)
+// ---------------------------------------------------------------------------
+
+export type AuthProviderKind = 'google' | 'microsoft' | 'github'
+
+/** What the login page needs to draw a button. Public. */
+export interface PublicSsoProvider {
+  kind: AuthProviderKind
+  label: string
+}
+
+export interface AuthProviderSettings {
+  kind: AuthProviderKind
+  label: string
+  enabled: boolean
+  client_id: string
+  has_client_secret: boolean
+  tenant_id: string
+  redirect_uri: string
+  configured: boolean
+  updated_by: string | null
+  updated_at: string
+}
+
+/** A null secret keeps the stored one. */
+export interface AuthProviderDoc {
+  enabled: boolean
+  client_id: string
+  client_secret: string | null
+  tenant_id?: string
+}
+
+export interface AuthIdentity {
+  id: string
+  provider: AuthProviderKind
+  label: string
+  email: string
+  created_at: string
+  last_login_at: string | null
+}
+
+export interface ApiTokenSummary {
+  id: string
+  name: string
+  token_prefix: string
+  created_by: string | null
+  expires_at: string | null
+  last_used_at: string | null
+  created_at: string
+  expired: boolean
+}
+
+export interface ApiTokenCreate {
+  name: string
+  expires_in_days: number | null
+}
+
+/** The one response that carries the secret. */
+export interface ApiTokenCreated {
+  token: string
+  api_token: ApiTokenSummary
+}
+
+export const fetchSsoProviders = async (): Promise<PublicSsoProvider[]> =>
+  (await api.get('/auth/sso/providers')).data.providers
+
+/** Where a sign-in button sends the browser: a top-level navigation, not an API call. */
+export const ssoStartUrl = (kind: AuthProviderKind): string => `/api/v1/auth/sso/${kind}/start`
+
+/** Trade the one-time code from the callback for the bearer token, and keep it. */
+export const exchangeSsoCode = async (code: string): Promise<LoginResponse> => {
+  const response = await api.post('/auth/sso/exchange', { code })
+  const data = response.data as LoginResponse
+  auth.setToken(data.access_token)
+  return data
+}
+
+export const fetchAuthProviders = async (): Promise<AuthProviderSettings[]> =>
+  (await api.get('/sso/providers')).data.providers
+export const updateAuthProvider = async (kind: AuthProviderKind, doc: AuthProviderDoc): Promise<AuthProviderSettings> =>
+  (await api.put(`/sso/providers/${kind}`, doc)).data
+
+// A user's own tokens and sign-ins live under /me; an admin reaches anyone's by id.
+const tokensBase = (userId?: string) => (userId ? `/users/${userId}/tokens` : '/users/me/tokens')
+const identitiesBase = (userId?: string) => (userId ? `/users/${userId}/identities` : '/users/me/identities')
+
+export const fetchApiTokens = async (userId?: string): Promise<ApiTokenSummary[]> =>
+  (await api.get(tokensBase(userId))).data.tokens
+export const createApiToken = async (data: ApiTokenCreate, userId?: string): Promise<ApiTokenCreated> =>
+  (await api.post(tokensBase(userId), data)).data
+export const deleteApiToken = async (tokenId: string, userId?: string): Promise<void> => {
+  await api.delete(`${tokensBase(userId)}/${tokenId}`)
+}
+
+export const fetchAuthIdentities = async (userId?: string): Promise<AuthIdentity[]> =>
+  (await api.get(identitiesBase(userId))).data.identities
+export const deleteAuthIdentity = async (identityId: string, userId?: string): Promise<void> => {
+  await api.delete(`${identitiesBase(userId)}/${identityId}`)
+}

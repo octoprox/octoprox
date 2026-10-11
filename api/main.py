@@ -55,10 +55,12 @@ from api.routes import (
     projects,
     providers,
     proxies,
+    sso,
     system,
     users,
     wireguard,
 )
+from api.sso import SsoFlow
 from api.tunnel.dataplane import TunnelDataPlane
 from api.wireguard.runtime import WireGuardRuntime
 
@@ -94,6 +96,11 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     # Store redis client for cleanup
     app.state.redis_client = redis_client
+
+    # Sign-in through identity providers: the per-login state lives in Redis
+    # so a login may start on one instance and return on another.
+    sso_flow = SsoFlow(redis_client)
+    app.state.sso_flow = sso_flow
 
     # IP attribution: databases, settings, observation pipeline, preflight.
     geo_runtime = GeoRuntime(settings, session_factory, redis_client)
@@ -202,6 +209,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     await proxy_server.stop()
     await proxy_manager.stop()
     await geo_runtime.stop()
+    await sso_flow.close()
     await redis_client.close()
 
 
@@ -239,6 +247,11 @@ def create_app() -> FastAPI:
 
     # All API routes under /api/v1
     app.include_router(auth.router, prefix="/api/v1", tags=["Auth"])
+    # The sign-in round trip through a provider: public, the browser has no token yet.
+    app.include_router(sso.public_router, prefix="/api/v1", tags=["Auth"])
+    app.include_router(
+        sso.admin_router, prefix="/api/v1", tags=["Sign-in providers"], dependencies=auth_dependency
+    )
     app.include_router(
         projects.router, prefix="/api/v1", tags=["Projects"], dependencies=auth_dependency
     )

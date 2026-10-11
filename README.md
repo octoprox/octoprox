@@ -19,6 +19,7 @@ A dynamic and flexible proxy manager that acts as an intelligent proxy aggregato
 - **Host Analytics**: A per-project Hosts page showing where the traffic goes: requests, bytes and latency by destination host, split by connector, charted over time (see [docs/metrics.md](docs/metrics.md))
 - **REST API**: Full CRUD operations for managing projects, credentials, connectors, and proxies
 - **Web Dashboard**: React-based UI for monitoring and configuration
+- **Single Sign-On & API Tokens**: The people you add sign in with their Google, Microsoft or GitHub account instead of a password; scripts authenticate with personal access tokens (see [docs/sso.md](docs/sso.md))
 - **Backup & Migration**: Export the entire setup as an encrypted file and restore it on another instance
 - **Scrapoxy Replacement**: Scrapoxy was discontinued in February 2026; a step-by-step guide recreates its projects, credentials, connectors and proxy lists in Octoprox, and any vendor it had that Octoprox lacks can be added as a YAML descriptor (see [docs/scrapoxy-migration.md](docs/scrapoxy-migration.md))
 
@@ -372,7 +373,7 @@ Configuration is loaded from YAML files in the `config/` directory based on the 
 
 ### Authentication
 
-Octoprox requires authentication for all web UI and API access. Users must log in with a username and password. On first startup, an admin user is automatically created from `OCTOPROX_AUTH_USERNAME` and `OCTOPROX_AUTH_PASSWORD`.
+Octoprox requires authentication for all web UI and API access. Users sign in with a username and password, or with a Google, Microsoft or GitHub account once an admin has set the provider up; scripts use personal access tokens (see [docs/sso.md](docs/sso.md)). On first startup, an admin user is automatically created from `OCTOPROX_AUTH_USERNAME` and `OCTOPROX_AUTH_PASSWORD`.
 
 There are three roles:
 - **Admin** - Full access including user management
@@ -404,6 +405,7 @@ OCTOPROX_JWT_SECRET=your-random-secret-key
 - The `/api/v1/auth/login` and `/api/v1/auth/status` endpoints are always public.
 - The `/health` endpoint is always public for load balancer health checks.
 - All other API endpoints require authentication.
+- Behind a load balancer or reverse proxy, set `OCTOPROX_PUBLIC_URL` so invite links and sign-in redirects carry the address users reach Octoprox at.
 
 ### Example Configuration
 

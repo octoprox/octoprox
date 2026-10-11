@@ -19,7 +19,7 @@ http://localhost:8000/api/v1/projects
 
 ## Authentication
 
-All API endpoints except `/api/v1/auth/*` and `/health` require a valid JWT token. Mutation endpoints require at least Editor role; user management requires Admin role.
+All API endpoints except `/api/v1/auth/*` and `/health` require a bearer token: either a session token from a login, or a personal access token. Mutation endpoints require at least Editor role; user management requires Admin role.
 
 ### Login
 
@@ -56,6 +56,47 @@ curl -H "Authorization: Bearer eyJhbGciOiJIUzI1NiIs..." \
 ```bash
 GET /api/v1/auth/status
 ```
+
+### Personal Access Tokens
+
+A token (`octo_...`) is sent exactly like a session token and acts as its user with the user's current role; revoking it, or disabling the user, takes effect on the next call. Only a hash is stored, so the secret appears in the create response and nowhere else. See [Single Sign-On and API Tokens]({{ site.baseurl }}/sso#personal-access-tokens).
+
+| Method | Path | Description |
+|---|---|---|
+| GET | `/users/me/tokens` | The caller's tokens: `id`, `name`, `token_prefix`, `expires_at`, `last_used_at`, `expired` |
+| POST | `/users/me/tokens` | Create one from `{name, expires_in_days}` (`expires_in_days` null for no expiry). Returns `{token, api_token}`. Refused (403) when the caller is itself a token |
+| DELETE | `/users/me/tokens/{id}` | Revoke |
+| GET | `/users/{user_id}/tokens` | A user's tokens (admin) |
+| POST | `/users/{user_id}/tokens` | Issue a token on a user's behalf (admin); how a service account gets one |
+| DELETE | `/users/{user_id}/tokens/{id}` | Revoke (admin) |
+
+```bash
+curl -X POST -H "Authorization: Bearer <session token>" -H "Content-Type: application/json" \
+  -d '{"name": "ci", "expires_in_days": 90}' http://localhost:8000/api/v1/users/me/tokens
+# {"token": "octo_...", "api_token": {"id": "...", "name": "ci", "token_prefix": "octo_abcdefg", ...}}
+
+curl -H "Authorization: Bearer octo_..." http://localhost:8000/api/v1/projects
+```
+
+### Sign in with a Provider
+
+The round trip through Google, Microsoft or GitHub is driven by the browser, not by API clients; scripts use a personal access token. These endpoints are public. See [Single Sign-On and API Tokens]({{ site.baseurl }}/sso).
+
+| Method | Path | Description |
+|---|---|---|
+| GET | `/auth/sso/providers` | The enabled providers, `[{kind, label}]`, for the login page |
+| GET | `/auth/sso/{kind}/start` | Redirects the browser to the provider (`kind`: `google`, `microsoft`, `github`) |
+| GET | `/auth/sso/{kind}/callback` | Where the provider sends the browser back. Ends at `/sso/complete?code=...` on success, or at `/?sso_error=...` with a reason |
+| POST | `/auth/sso/exchange` | Trade the one-time `{code}` from the callback for `{access_token, token_type, expires_in}`. Single use, valid for a minute |
+
+The providers themselves are set up by an admin:
+
+| Method | Path | Description |
+|---|---|---|
+| GET | `/sso/providers` | Every provider with `enabled`, `client_id`, `has_client_secret`, `tenant_id`, `configured` and the `redirect_uri` to register |
+| PUT | `/sso/providers/{kind}` | Save `{enabled, client_id, client_secret, tenant_id}`; a null `client_secret` keeps the stored one. Microsoft requires a single tenant ID |
+
+Linked provider accounts are listed and removed under `/users/me/identities` and `/users/{user_id}/identities` (admin), each with `provider`, `email`, `created_at` and `last_login_at`. User responses carry `sign_in_providers`, the kinds linked to the user.
 
 ---
 

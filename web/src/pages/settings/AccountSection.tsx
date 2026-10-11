@@ -5,6 +5,7 @@ import { useEffect, useState } from 'react'
 import { useMutation, useQuery } from '@tanstack/react-query'
 import { fetchCurrentUser, updateSelf, UserSelfUpdate } from '../../api/client'
 import { Page } from '../../components/layout/Page'
+import { ApiTokensPanel, LinkedSignInsPanel } from '../../components/AccessPanels'
 import { Alert, Button, Card, Input, Label, Badge } from '../../components/ui'
 
 export default function AccountSection() {
@@ -60,7 +61,8 @@ export default function AccountSection() {
       {isLoading || !currentUser ? (
         <div className="text-sm text-fg-muted">Loading…</div>
       ) : (
-        <Card className="p-5 max-w-xl">
+        <div className="space-y-4 max-w-xl">
+        <Card className="p-5">
           <form onSubmit={handleSubmit} className="space-y-4">
             {error && <Alert variant="error">{error}</Alert>}
             {success && <Alert variant="success">Account updated</Alert>}
@@ -101,6 +103,9 @@ export default function AccountSection() {
             </div>
           </form>
         </Card>
+        <Card className="p-5"><LinkedSignInsPanel /></Card>
+        <Card className="p-5"><ApiTokensPanel /></Card>
+        </div>
       )}
     </Page>
   )

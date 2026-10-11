@@ -111,6 +111,16 @@ TUNNEL_FAKEIP_TTL_SECONDS = 7 * 86400
 TUNNEL_STATUS_INTERVAL = 10
 TUNNEL_STATUS_TTL_SECONDS = 30
 GEO_PREFLIGHT_KEY = "geo:preflight:{project_id}:{proxy_id}"  # one verdict per proxy, shared by its sessions
+# Sign-in through an identity provider (api.sso). The state key holds what a
+# login that left for the provider needs when the browser comes back: which
+# provider, the nonce and the PKCE verifier. The login code is the one-time
+# code the browser trades for its bearer token on the way back in. Both live
+# in Redis rather than in process memory because the callback may land on a
+# different instance from the one that started the login.
+SSO_STATE_KEY = "sso:state:{state}"
+SSO_STATE_TTL_SECONDS = 600
+SSO_LOGIN_CODE_KEY = "sso:login_code:{code}"
+SSO_LOGIN_CODE_TTL_SECONDS = 60
 
 # Logical grouping of the keyspace, used by the admin system view to report
 # what Redis memory is being spent on. Every prefix written above appears
@@ -136,6 +146,7 @@ REDIS_KEY_GROUPS: tuple[tuple[str, str], ...] = (
     ("wireguard:", "WireGuard"),
     ("openvpn:", "OpenVPN"),
     ("tunnel:", "Tunnel devices"),
+    ("sso:", "Sign-in flows"),
 )
 
 OTHER_KEY_GROUP = "Other"

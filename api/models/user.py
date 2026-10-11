@@ -42,8 +42,13 @@ _EMAIL_RE = re.compile(r"^[a-zA-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-zA-Z0-9-]+(?:\.[a-
 
 
 def _validate_email(v: str) -> str:
-    """Validate email format. Empty string is allowed (email is optional)."""
-    v = v.strip()
+    """Validate email format and lowercase it. Empty string is allowed (email is optional).
+
+    Stored lowercase so an address has one spelling: the unique index is
+    case-sensitive, and a sign-in provider's verified email (always
+    lowercased, see api.sso.identity) must match a user by equality.
+    """
+    v = v.strip().lower()
     if v and not _EMAIL_RE.fullmatch(v):
         raise ValueError("Invalid email address")
     return v
@@ -158,6 +163,8 @@ class UserResponse(BaseModel):
     role: UserRole
     is_active: bool
     has_password: bool
+    # Sign-in providers linked to the user (see api.models.auth), by kind.
+    sign_in_providers: list[str] = Field(default_factory=list)
     theme_preference: str
     last_login_at: datetime | None
     created_at: datetime

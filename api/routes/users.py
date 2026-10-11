@@ -13,11 +13,24 @@ from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.core import utc_now
-from api.core.auth import CurrentUserDep, RequireAdminDep
+from api.core.api_tokens import generate_token
+from api.core.auth import CurrentUser, CurrentUserDep, RequireAdminDep
 from api.core.config import settings
 from api.core.password import hash_password, verify_password
+from api.db.auth_repository import ApiTokenRepository, AuthIdentityRepository
 from api.db.repository import UserRepository
 from api.db.session import get_db
+from api.models.auth import (
+    PROVIDER_LABELS,
+    ApiToken,
+    ApiTokenCreate,
+    ApiTokenCreatedResponse,
+    ApiTokenListResponse,
+    ApiTokenResponse,
+    AuthIdentity,
+    AuthIdentityListResponse,
+    AuthIdentityResponse,
+)
 from api.models.user import (
     InviteResponse,
     User,
@@ -27,6 +40,7 @@ from api.models.user import (
     UserSelfUpdate,
     UserUpdate,
 )
+from api.routes.common import external_base_url
 
 logger = structlog.get_logger()
 
@@ -42,7 +56,7 @@ class UserListResponse(BaseModel):
     users: list[UserResponse]
 
 
-def _to_response(user: User) -> UserResponse:
+def _to_response(user: User, providers: list[str] | None = None) -> UserResponse:
     return UserResponse(
         id=user.id,
         username=user.username,
@@ -50,6 +64,7 @@ def _to_response(user: User) -> UserResponse:
         role=user.role,
         is_active=user.is_active,
         has_password=user.password_hash is not None,
+        sign_in_providers=providers or [],
         theme_preference=user.theme_preference,
         last_login_at=user.last_login_at,
         created_at=user.created_at,
@@ -70,7 +85,7 @@ async def get_self(session: DbDep, user: CurrentUserDep) -> UserResponse:
     if not db_user:
         raise HTTPException(status_code=404, detail="User not found")
 
-    return _to_response(db_user)
+    return _to_response(db_user, await _providers_of(session, db_user.id))
 
 
 @router.patch("/me", response_model=UserResponse)
@@ -110,7 +125,157 @@ async def update_self(
 
     await repo.update(db_user)
 
-    return _to_response(db_user)
+    return _to_response(db_user, await _providers_of(session, db_user.id))
+
+
+# --- Personal access tokens and linked sign-ins ---
+# A user manages their own under /me; an admin manages anyone's under
+# /{user_id}, which is also how a user that only exists to hold tokens (a
+# service account: no password, no email) gets its first one.
+
+
+def _token_response(token: ApiToken) -> ApiTokenResponse:
+    return ApiTokenResponse(
+        id=token.id,
+        name=token.name,
+        token_prefix=token.token_prefix,
+        created_by=token.created_by,
+        expires_at=token.expires_at,
+        last_used_at=token.last_used_at,
+        created_at=token.created_at,
+        expired=token.expired,
+    )
+
+
+def _identity_response(identity: AuthIdentity) -> AuthIdentityResponse:
+    return AuthIdentityResponse(
+        id=identity.id,
+        provider=identity.provider,
+        label=PROVIDER_LABELS[identity.provider],
+        email=identity.email,
+        created_at=identity.created_at,
+        last_login_at=identity.last_login_at,
+    )
+
+
+async def _list_tokens(session: AsyncSession, user_id: str) -> ApiTokenListResponse:
+    tokens = await ApiTokenRepository(session).list_for_user(user_id)
+    return ApiTokenListResponse(tokens=[_token_response(t) for t in tokens])
+
+
+async def _create_token(
+    session: AsyncSession, user_id: str, data: ApiTokenCreate, actor: CurrentUser
+) -> ApiTokenCreatedResponse:
+    secret, token_hash, prefix = generate_token()
+    token = ApiToken(
+        user_id=user_id,
+        name=data.name,
+        token_hash=token_hash,
+        token_prefix=prefix,
+        created_by=actor.username,
+        expires_at=utc_now() + timedelta(days=data.expires_in_days) if data.expires_in_days else None,
+    )
+    await ApiTokenRepository(session).create(token)
+    logger.info("API token created", user_id=user_id, token_id=token.id, name=token.name, by=actor.username)
+    return ApiTokenCreatedResponse(token=secret, api_token=_token_response(token))
+
+
+async def _delete_token(session: AsyncSession, user_id: str, token_id: str, actor: CurrentUser) -> None:
+    if not await ApiTokenRepository(session).delete(user_id, token_id):
+        raise HTTPException(status_code=404, detail="Token not found")
+    logger.info("API token revoked", user_id=user_id, token_id=token_id, by=actor.username)
+
+
+async def _list_identities(session: AsyncSession, user_id: str) -> AuthIdentityListResponse:
+    identities = await AuthIdentityRepository(session).list_for_user(user_id)
+    return AuthIdentityListResponse(identities=[_identity_response(i) for i in identities])
+
+
+async def _delete_identity(session: AsyncSession, user_id: str, identity_id: str, actor: CurrentUser) -> None:
+    if not await AuthIdentityRepository(session).delete(user_id, identity_id):
+        raise HTTPException(status_code=404, detail="Linked sign-in not found")
+    logger.info("Sign-in provider unlinked", user_id=user_id, identity_id=identity_id, by=actor.username)
+
+
+@router.get("/me/tokens", response_model=ApiTokenListResponse)
+async def list_my_tokens(session: DbDep, user: CurrentUserDep) -> ApiTokenListResponse:
+    """The current user's personal access tokens (never the secrets)."""
+    return await _list_tokens(session, user.id)
+
+
+@router.post("/me/tokens", response_model=ApiTokenCreatedResponse, status_code=201)
+async def create_my_token(session: DbDep, data: ApiTokenCreate, user: CurrentUserDep) -> ApiTokenCreatedResponse:
+    """Mint a token for the current user. The secret is in this response and nowhere else."""
+    if user.auth_method == "token":
+        # A leaked token must not be able to breed replacements that outlive its revocation.
+        raise HTTPException(status_code=403, detail="Sign in to the UI or with a password to create tokens")
+    if await UserRepository(session).get_by_id(user.id) is None:
+        raise HTTPException(status_code=404, detail="User not found")
+    return await _create_token(session, user.id, data, user)
+
+
+@router.delete("/me/tokens/{token_id}", status_code=204)
+async def delete_my_token(session: DbDep, token_id: str, user: CurrentUserDep) -> None:
+    """Revoke one of the current user's tokens. Takes effect on the next call made with it."""
+    await _delete_token(session, user.id, token_id, user)
+
+
+@router.get("/me/identities", response_model=AuthIdentityListResponse)
+async def list_my_identities(session: DbDep, user: CurrentUserDep) -> AuthIdentityListResponse:
+    """The provider accounts the current user can sign in with."""
+    return await _list_identities(session, user.id)
+
+
+@router.delete("/me/identities/{identity_id}", status_code=204)
+async def delete_my_identity(session: DbDep, identity_id: str, user: CurrentUserDep) -> None:
+    """Unlink a provider account. Signing in with it again relinks it if the email still matches."""
+    await _delete_identity(session, user.id, identity_id, user)
+
+
+@router.get("/{user_id}/tokens", response_model=ApiTokenListResponse)
+async def list_user_tokens(session: DbDep, user_id: str, _admin: RequireAdminDep) -> ApiTokenListResponse:
+    """A user's tokens (admin only)."""
+    await _require_user(session, user_id)
+    return await _list_tokens(session, user_id)
+
+
+@router.post("/{user_id}/tokens", response_model=ApiTokenCreatedResponse, status_code=201)
+async def create_user_token(
+    session: DbDep, user_id: str, data: ApiTokenCreate, admin: RequireAdminDep
+) -> ApiTokenCreatedResponse:
+    """Mint a token on a user's behalf (admin only); how a service account gets one."""
+    if admin.auth_method == "token":
+        raise HTTPException(status_code=403, detail="Sign in to the UI or with a password to create tokens")
+    await _require_user(session, user_id)
+    return await _create_token(session, user_id, data, admin)
+
+
+@router.delete("/{user_id}/tokens/{token_id}", status_code=204)
+async def delete_user_token(session: DbDep, user_id: str, token_id: str, admin: RequireAdminDep) -> None:
+    """Revoke a user's token (admin only)."""
+    await _delete_token(session, user_id, token_id, admin)
+
+
+@router.get("/{user_id}/identities", response_model=AuthIdentityListResponse)
+async def list_user_identities(session: DbDep, user_id: str, _admin: RequireAdminDep) -> AuthIdentityListResponse:
+    """A user's linked provider accounts (admin only)."""
+    await _require_user(session, user_id)
+    return await _list_identities(session, user_id)
+
+
+@router.delete("/{user_id}/identities/{identity_id}", status_code=204)
+async def delete_user_identity(session: DbDep, user_id: str, identity_id: str, admin: RequireAdminDep) -> None:
+    """Unlink a user's provider account (admin only)."""
+    await _delete_identity(session, user_id, identity_id, admin)
+
+
+async def _providers_of(session: AsyncSession, user_id: str) -> list[str]:
+    return [i.provider.value for i in await AuthIdentityRepository(session).list_for_user(user_id)]
+
+
+async def _require_user(session: AsyncSession, user_id: str) -> None:
+    if await UserRepository(session).get_by_id(user_id) is None:
+        raise HTTPException(status_code=404, detail="User not found")
 
 
 # --- Admin-only endpoints ---
@@ -121,8 +286,9 @@ async def list_users(session: DbDep, _admin: RequireAdminDep) -> UserListRespons
     """List all users (admin only)."""
     repo = UserRepository(session)
     users = await repo.get_all()
+    providers = await AuthIdentityRepository(session).providers_by_user()
 
-    return UserListResponse(total=len(users), users=[_to_response(u) for u in users])
+    return UserListResponse(total=len(users), users=[_to_response(u, providers.get(u.id)) for u in users])
 
 
 @router.post("", response_model=UserResponse, status_code=201)
@@ -156,9 +322,8 @@ async def create_user(
 
 
 def _build_invite_url(request: Request, token: str) -> str:
-    """Build the invite URL from the request's base URL."""
-    base = str(request.base_url).rstrip("/")
-    return f"{base}/set-password/{token}"
+    """Build the invite URL from the install's public URL (or the request's base URL)."""
+    return f"{external_base_url(request)}/set-password/{token}"
 
 
 @router.post("/invite", response_model=InviteResponse, status_code=201)
@@ -236,7 +401,7 @@ async def get_user(
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
 
-    return _to_response(user)
+    return _to_response(user, await _providers_of(session, user.id))
 
 
 @router.patch("/{user_id}", response_model=UserResponse)
@@ -277,7 +442,7 @@ async def update_user(
     await repo.update(user)
 
     logger.info("User updated", user_id=user_id)
-    return _to_response(user)
+    return _to_response(user, await _providers_of(session, user.id))
 
 
 @router.delete("/{user_id}", status_code=204)
