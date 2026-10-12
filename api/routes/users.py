@@ -49,6 +49,19 @@ router = APIRouter(prefix="/users")
 DbDep = Annotated[AsyncSession, Depends(get_db)]
 
 
+def _require_session(user: CurrentUser, action: str) -> None:
+    """Refuse an API-token caller a change to how a human gets in.
+
+    A personal access token proves only possession of the token. It may do
+    what the user's role allows, but not set a password, mint a token or
+    issue a set-password link: a token leaked from a CI log must not be
+    able to create a way in that outlives its own revocation. A session
+    JWT (UI, or a script that logged in with a password) proves the person.
+    """
+    if user.auth_method == "token":
+        raise HTTPException(status_code=403, detail=f"Sign in to the UI or with a password to {action}")
+
+
 class UserListResponse(BaseModel):
     """Response for listing users."""
 
@@ -92,24 +105,30 @@ async def get_self(session: DbDep, user: CurrentUserDep) -> UserResponse:
 async def update_self(
     session: DbDep, data: UserSelfUpdate, user: CurrentUserDep
 ) -> UserResponse:
-    """Update the current user's own profile (email, password)."""
+    """Update the current user's own profile (email, password, theme).
+
+    Setting a password needs a session (see _require_session). If the
+    account has a password, changing it also asks for the current one, so
+    a session left open on a shared machine cannot quietly take the
+    account. If the account has none, there is nothing to ask for: the
+    person is adding a password as a second way in beside the provider,
+    and the session is the proof.
+    """
     repo = UserRepository(session)
     db_user = await repo.get_by_id(user.id)
     if not db_user:
         raise HTTPException(status_code=404, detail="User not found")
 
     if data.password is not None:
-        if not db_user.password_hash:
-            raise HTTPException(
-                status_code=400, detail="Password not set. Please use your invite link first."
-            )
-        if not data.current_password:
-            raise HTTPException(
-                status_code=400, detail="Current password is required to change password"
-            )
-        if not verify_password(data.current_password, db_user.password_hash):
-            raise HTTPException(status_code=400, detail="Current password is incorrect")
-        db_user.password_hash = hash_password(data.password)
+        _require_session(user, "set a password")
+        if db_user.password_hash:
+            if not data.current_password:
+                raise HTTPException(
+                    status_code=400, detail="Current password is required to change password"
+                )
+            if not verify_password(data.current_password, db_user.password_hash):
+                raise HTTPException(status_code=400, detail="Current password is incorrect")
+        db_user.set_password(data.password)
 
     if data.email is not None:
         if data.email and data.email != db_user.email:
@@ -206,9 +225,7 @@ async def list_my_tokens(session: DbDep, user: CurrentUserDep) -> ApiTokenListRe
 @router.post("/me/tokens", response_model=ApiTokenCreatedResponse, status_code=201)
 async def create_my_token(session: DbDep, data: ApiTokenCreate, user: CurrentUserDep) -> ApiTokenCreatedResponse:
     """Mint a token for the current user. The secret is in this response and nowhere else."""
-    if user.auth_method == "token":
-        # A leaked token must not be able to breed replacements that outlive its revocation.
-        raise HTTPException(status_code=403, detail="Sign in to the UI or with a password to create tokens")
+    _require_session(user, "create tokens")
     if await UserRepository(session).get_by_id(user.id) is None:
         raise HTTPException(status_code=404, detail="User not found")
     return await _create_token(session, user.id, data, user)
@@ -244,8 +261,7 @@ async def create_user_token(
     session: DbDep, user_id: str, data: ApiTokenCreate, admin: RequireAdminDep
 ) -> ApiTokenCreatedResponse:
     """Mint a token on a user's behalf (admin only); how a service account gets one."""
-    if admin.auth_method == "token":
-        raise HTTPException(status_code=403, detail="Sign in to the UI or with a password to create tokens")
+    _require_session(admin, "create tokens")
     await _require_user(session, user_id)
     return await _create_token(session, user_id, data, admin)
 
@@ -366,9 +382,10 @@ async def invite_user(
 
 @router.post("/{user_id}/reinvite", response_model=InviteResponse)
 async def reinvite_user(
-    request: Request, session: DbDep, user_id: str, _admin: RequireAdminDep
+    request: Request, session: DbDep, user_id: str, admin: RequireAdminDep
 ) -> InviteResponse:
     """Regenerate an invite link for a user who hasn't set their password (admin only)."""
+    _require_session(admin, "send a set-password link")
     repo = UserRepository(session)
     user = await repo.get_by_id(user_id)
     if not user:
@@ -406,9 +423,11 @@ async def get_user(
 
 @router.patch("/{user_id}", response_model=UserResponse)
 async def update_user(
-    session: DbDep, user_id: str, data: UserUpdate, _admin: RequireAdminDep
+    session: DbDep, user_id: str, data: UserUpdate, admin: RequireAdminDep
 ) -> UserResponse:
-    """Update a user (admin only)."""
+    """Update a user (admin only). Setting a password needs a session, as for /me."""
+    if data.password is not None:
+        _require_session(admin, "set a password")
     repo = UserRepository(session)
     user = await repo.get_by_id(user_id)
     if not user:
@@ -431,7 +450,7 @@ async def update_user(
                 )
         user.email = data.email
     if data.password is not None:
-        user.password_hash = hash_password(data.password)
+        user.set_password(data.password)
     if data.role is not None:
         user.role = data.role
     if data.is_active is not None:

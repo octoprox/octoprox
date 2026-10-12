@@ -139,8 +139,8 @@ export default function UsersPage() {
       enableSorting: false,
       cell: ({ row }) => (
         <div className="flex items-center justify-end gap-0.5">
-          {invitePending(row.original) && (
-            <button onClick={() => reinviteMutation.mutate(row.original.id)} className="p-1 rounded text-fg-subtle hover:text-warning hover:bg-warning-soft" title="Regenerate invite link">
+          {!row.original.has_password && (
+            <button onClick={() => reinviteMutation.mutate(row.original.id)} className="p-1 rounded text-fg-subtle hover:text-warning hover:bg-warning-soft" title={invitePending(row.original) ? 'Regenerate invite link' : 'Link to set a password'}>
               <Send className="w-4 h-4" />
             </button>
           )}
@@ -298,10 +298,10 @@ function UserPanel({ user, isSelf, inviteUrl, onClose, onDelete, onReinvite, onS
       }
     >
       {inviteUrl && <InviteLink url={inviteUrl} />}
-      {!isCreate && invitePending(user!) && !inviteUrl && onReinvite && (
-        <Alert variant="warning" className="flex items-center justify-between gap-3 text-xs">
-          <span>Invite pending. The link expires 7 days after it was created.</span>
-          <Button type="button" variant="outline" size="sm" onClick={onReinvite}><Send className="w-3.5 h-3.5" /> New link</Button>
+      {!isCreate && !user!.has_password && !inviteUrl && onReinvite && (
+        <Alert variant={invitePending(user!) ? 'warning' : 'info'} className="flex items-center justify-between gap-3 text-xs">
+          <span>{invitePending(user!) ? 'Invite pending. The link expires 7 days after it was created.' : 'Signs in through a provider only. A link lets them add a password.'}</span>
+          <Button type="button" variant="outline" size="sm" onClick={onReinvite}><Send className="w-3.5 h-3.5" /> {invitePending(user!) ? 'New link' : 'Set-password link'}</Button>
         </Alert>
       )}
       <form id="user-form" onSubmit={handleSubmit} className="space-y-3">

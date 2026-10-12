@@ -11,6 +11,7 @@ from uuid import uuid4
 from pydantic import BaseModel, Field, field_validator
 
 from api.core import utc_now
+from api.core.password import hash_password
 
 
 class UserRole(str, Enum):
@@ -36,6 +37,18 @@ class User(BaseModel):
     last_login_at: datetime | None = None
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
+
+    def set_password(self, password: str) -> None:
+        """Store a new password and consume any outstanding invite link.
+
+        An invite link exists only to let someone set their first password;
+        once one is set by any route (the link itself, the user in Settings,
+        an admin on the row) the link must stop working, or it would let a
+        stale copy overwrite the password later.
+        """
+        self.password_hash = hash_password(password)
+        self.invite_token = None
+        self.invite_token_expires_at = None
 
 
 _EMAIL_RE = re.compile(r"^[a-zA-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-zA-Z0-9-]+(?:\.[a-zA-Z0-9-]+)*\.[a-zA-Z]{2,}$")

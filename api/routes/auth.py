@@ -15,7 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from api.core import utc_now
 from api.core.api_tokens import looks_like_token
 from api.core.config import settings
-from api.core.password import hash_password, verify_password
+from api.core.password import verify_password
 from api.db.repository import UserRepository
 from api.db.session import get_db
 from api.models.user import SetPasswordRequest, User
@@ -172,9 +172,7 @@ async def set_password(data: SetPasswordRequest, session: DbDep) -> LoginRespons
     if not user.is_active:
         raise HTTPException(status_code=400, detail="Account is disabled")
 
-    user.password_hash = hash_password(data.password)
-    user.invite_token = None
-    user.invite_token_expires_at = None
+    user.set_password(data.password)
     await repo.update(user)
     await repo.touch_last_login(user.id)
 

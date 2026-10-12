@@ -5,6 +5,8 @@
 
 from starlette.testclient import TestClient
 
+from api.core.config import Settings
+
 
 class TestUserCRUD:
     """Tests for admin user CRUD operations."""
@@ -657,3 +659,80 @@ class TestEmailCase:
         assert updated.status_code == 200
         assert updated.json()["email"] == "case3@example.com"
         authenticated_client.request("DELETE", f"/api/v1/users/{user['id']}")
+
+
+class TestSetPasswordWithoutOne:
+    """A user with no password (signed in through a provider or an invite) sets one without a current password."""
+
+    def test_first_password_needs_no_current_then_the_next_does(
+        self, authenticated_client: TestClient, test_settings: Settings
+    ) -> None:
+        from api.routes.auth import create_jwt
+
+        user = authenticated_client.post(
+            "/api/v1/users/invite", json={"username": "sso-only", "email": "sso-only@example.com", "role": "viewer"}
+        ).json()["user"]
+        assert user["has_password"] is False
+        # A session for that user, as a provider sign-in would issue it.
+        token = create_jwt(
+            payload={"sub": "sso-only", "user_id": user["id"], "role": "viewer"},
+            secret=test_settings.jwt_secret,
+            expiry_hours=test_settings.jwt_expiry_hours,
+        )
+        headers = {"Authorization": f"Bearer {token}"}
+
+        first = authenticated_client.patch("/api/v1/users/me", json={"password": "first-pass"}, headers=headers)
+        assert first.status_code == 200, first.text
+        assert first.json()["has_password"] is True
+        assert authenticated_client.post(
+            "/api/v1/auth/login", json={"username": "sso-only", "password": "first-pass"}
+        ).status_code == 200
+
+        again = authenticated_client.patch("/api/v1/users/me", json={"password": "second-pass"}, headers=headers)
+        assert again.status_code == 400
+        assert "Current password" in again.json()["detail"]
+        changed = authenticated_client.patch(
+            "/api/v1/users/me", json={"password": "second-pass", "current_password": "first-pass"}, headers=headers
+        )
+        assert changed.status_code == 200
+        authenticated_client.request("DELETE", f"/api/v1/users/{user['id']}")
+
+    def test_a_token_cannot_set_a_password(self, authenticated_client: TestClient) -> None:
+        user = authenticated_client.post("/api/v1/users/invite", json={"username": "bot-no-pass", "role": "viewer"}).json()["user"]
+        secret = authenticated_client.post(f"/api/v1/users/{user['id']}/tokens", json={"name": "t"}).json()["token"]
+        response = authenticated_client.patch(
+            "/api/v1/users/me", json={"password": "sneaky"}, headers={"Authorization": f"Bearer {secret}"}
+        )
+        assert response.status_code == 403
+        authenticated_client.request("DELETE", f"/api/v1/users/{user['id']}")
+
+    def test_an_admin_token_cannot_set_a_password_or_mint_a_link_either(self, authenticated_client: TestClient) -> None:
+        """The admin routes are not a side door for a leaked admin token."""
+        admin = authenticated_client.post(
+            "/api/v1/users/invite", json={"username": "admin-no-pass", "role": "admin"}
+        ).json()["user"]
+        secret = authenticated_client.post(f"/api/v1/users/{admin['id']}/tokens", json={"name": "t"}).json()["token"]
+        headers = {"Authorization": f"Bearer {secret}"}
+
+        on_self = authenticated_client.patch(f"/api/v1/users/{admin['id']}", json={"password": "sneaky"}, headers=headers)
+        assert on_self.status_code == 403
+        link = authenticated_client.post(f"/api/v1/users/{admin['id']}/reinvite", headers=headers)
+        assert link.status_code == 403
+        # Other admin edits still work from a token.
+        rename = authenticated_client.patch(f"/api/v1/users/{admin['id']}", json={"email": "a@example.com"}, headers=headers)
+        assert rename.status_code == 200, rename.text
+        assert authenticated_client.get("/api/v1/users/me", headers=headers).json()["has_password"] is False
+        authenticated_client.request("DELETE", f"/api/v1/users/{admin['id']}")
+
+    def test_admin_setting_a_password_consumes_the_invite_link(self, authenticated_client: TestClient) -> None:
+        invite = authenticated_client.post("/api/v1/users/invite", json={"username": "invited-then-set", "role": "viewer"}).json()
+        user_id = invite["user"]["id"]
+        link_token = invite["invite_url"].split("/set-password/")[1]
+
+        assert authenticated_client.patch(f"/api/v1/users/{user_id}", json={"password": "by-admin"}).status_code == 200
+        stale = authenticated_client.post("/api/v1/auth/set-password", json={"token": link_token, "password": "hijack"})
+        assert stale.status_code == 404
+        assert authenticated_client.post(
+            "/api/v1/auth/login", json={"username": "invited-then-set", "password": "by-admin"}
+        ).status_code == 200
+        authenticated_client.request("DELETE", f"/api/v1/users/{user_id}")

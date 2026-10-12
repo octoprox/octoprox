@@ -48,10 +48,11 @@ export default function AccountSection() {
     setError(null)
     setSuccess(false)
     if (newPassword && newPassword !== confirmPassword) { setError('Passwords do not match'); return }
-    if (newPassword && !currentPassword) { setError('Current password is required to set a new password'); return }
+    const hasPassword = !!currentUser?.has_password
+    if (newPassword && hasPassword && !currentPassword) { setError('Current password is required to set a new password'); return }
     const data: UserSelfUpdate = {}
     if (currentUser && email !== currentUser.email) data.email = email
-    if (newPassword) { data.password = newPassword; data.current_password = currentPassword }
+    if (newPassword) { data.password = newPassword; if (hasPassword) data.current_password = currentPassword }
     if (Object.keys(data).length === 0) return
     mutation.mutate(data)
   }
@@ -82,11 +83,19 @@ export default function AccountSection() {
               <Input id="profile-email" type="email" value={email} onChange={(e) => setEmail(e.target.value)} autoComplete="email" />
             </div>
 
-            <h3 className="text-[11px] font-semibold uppercase tracking-wider text-fg-subtle pt-2">Change password</h3>
-            <div>
-              <Label htmlFor="current-password">Current password</Label>
-              <Input id="current-password" type="password" value={currentPassword} onChange={(e) => setCurrentPassword(e.target.value)} placeholder="Required to change password" autoComplete="current-password" />
-            </div>
+            <h3 className="text-[11px] font-semibold uppercase tracking-wider text-fg-subtle pt-2">{currentUser.has_password ? 'Change password' : 'Set a password'}</h3>
+            {currentUser.has_password ? (
+              <div>
+                <Label htmlFor="current-password">Current password</Label>
+                <Input id="current-password" type="password" value={currentPassword} onChange={(e) => setCurrentPassword(e.target.value)} placeholder="Required to change password" autoComplete="current-password" />
+              </div>
+            ) : (
+              <p className="text-xs text-fg-muted">
+                {currentUser.sign_in_providers.length > 0
+                  ? 'You sign in through a provider and have no password. Setting one adds a second way in; it does not replace the provider.'
+                  : 'This account has no password yet. Setting one lets you sign in with your username.'}
+              </p>
+            )}
             <div className="grid grid-cols-2 gap-3">
               <div>
                 <Label htmlFor="new-password">New password</Label>

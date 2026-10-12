@@ -64,6 +64,10 @@ Every instance in a cluster shares the per-login state through Redis, so a login
 
 Enabling a provider changes nothing for anyone who already has a password. Both ways in stay available side by side, and a person can use either.
 
+### Adding a password later
+
+A person who signs in through a provider has no password until they want one. They set it under Settings, Account: with no password on the account there is no current password to ask for, the provider session is what proves who they are. From then on the password and the provider are two ways into the same account, and changing the password asks for the current one as usual. An admin can also set a password on the user's row or send a set-password link from the Users table. Neither is possible from a session authenticated by an API token.
+
 ### Linking and unlinking
 
 Settings, Account lists the provider accounts linked to you and lets you unlink one. An admin sees and manages the same under the user's inspector in Settings, Users. Unlinking does not end sessions that are already open, and signing in with that provider again relinks it as long as the verified email still matches.
