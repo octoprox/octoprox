@@ -105,7 +105,7 @@ def judge_level(
     disagree with each other the top-ranked one still decides the value,
     under either rule; ``consensus`` merely leaves the claim open instead of
     flagging it. A project that wants no routing on unsettled evidence uses
-    the ``strict`` location policy, which refuses open claims.
+    the ``confirmed`` assurance level, which refuses open claims.
     """
     ordered: list[LocationCandidate] = []
     for kind in policy.sources:

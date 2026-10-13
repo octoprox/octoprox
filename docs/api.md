@@ -1123,7 +1123,7 @@ All endpoints live under `/api/v1/geo`. Reads need any authenticated user; write
 | GET | `/geo/exits/ips` | One page of distinct exit IPs, most recently seen first, each with first and last sighting, hand-out count and the latest observation's state (proxy, source, vendor claim, resolved country and source, verdict flags, and the same place fields as an observation). Filters: `project_id`, `connector_id`, `ip`, `proxy_id`, `country`, `claimed_country`, `verdict` (the country verdict, as for observations); paging with `limit` (max 1000) and `offset`; `total` in the response |
 | GET | `/geo/status` | Pipeline health: databases, buffered and stored observations, preflight counters |
 
-Projects carry `location_policy` (`warn`, `strict`), `location_preflight` (`off`, `report`, `retry`, `reject`), and the optional overrides `location_sources` (ordered list of `database`, `vendor`, `endpoint`) and `location_conflict_rule` (`consensus`, `first`) on create, update and in responses. On update an empty list or empty string clears an override so the project inherits the install default again.
+Projects carry `location_assurance` (`observe`, `verified`, `confirmed`), `location_preflight` (boolean, whether a session's exit is echoed before its first request), and the optional overrides `location_sources` (ordered list of `database`, `vendor`, `endpoint`) and `location_conflict_rule` (`consensus`, `first`) on create, update and in responses. On update an empty list or empty string clears an override so the project inherits the install default again.
 
 ### Echo
 

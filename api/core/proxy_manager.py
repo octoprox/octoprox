@@ -72,7 +72,7 @@ from api.db.repository import (
     ProjectRepository,
     ProxyRepository,
 )
-from api.geo.models import LocationPolicy, eligible_under_strict
+from api.geo.models import LocationAssurance, eligible_under
 from api.models.connector import (
     DEFAULT_ROUTING_WEIGHT,
     DEFAULT_TRAFFIC_LIMIT_STATUS,
@@ -2065,15 +2065,15 @@ class ProxyManager:
         slots and rows with an unknown place are out; a request is never
         widened to the country.
 
-        Under a ``strict`` location policy the project also refuses proxies
-        whose vendor-declared location is contradicted by attribution, or
-        left open by it (``eligible_under_strict``).
+        Above ``observe`` the project's assurance level also refuses proxies
+        whose vendor-declared location is contradicted by attribution, and
+        under ``confirmed`` ones left open by it (``eligible_under``).
         """
         target = location or None
         wanted = target.country if target else None
         narrowed = target is not None and target.below_country
         project = self._projects.get(project_id)
-        strict = project is not None and project.location_policy == LocationPolicy.STRICT
+        assurance = project.location_assurance if project is not None else LocationAssurance.OBSERVE
         connectors: dict[str, tuple[list[str], bool]] = {}
         for c in self._enabled_connectors(
             project_id, target_host, include_traffic_blocked=include_traffic_blocked
@@ -2090,7 +2090,7 @@ class ProxyManager:
                 continue
             if not include_quarantined and self._rate_limiter.is_quarantined(p.id):
                 continue
-            if strict and not eligible_under_strict(p.metadata):
+            if not eligible_under(assurance, p.metadata):
                 continue
             declared, hide_geo_groups = entry
             if is_dynamic_gateway(p):

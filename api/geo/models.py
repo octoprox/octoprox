@@ -72,22 +72,30 @@ class ConflictRule(StrEnum):
     FIRST = "first"
 
 
-class LocationPolicy(StrEnum):
-    """Per project: what the verdict on a vendor claim does to a proxy.
+class LocationAssurance(StrEnum):
+    """Per project: which verdicts on a claimed location may still serve a request.
 
-    The policy decides eligibility only; which country a proxy is routed on
-    is the source policy's call (``SourcePolicy.sources``) under either value.
-    ``warn`` routes to every proxy and shows the contradictions. ``strict``
-    wants clear evidence: a proxy with a vendor claim is eligible only while
-    the claim is confirmed (or not judged yet), a contradicted pooled session
-    slot is replaced with a fresh session, and an open verdict (the sources
-    disagree, or none knows the IP) keeps the proxy out until a later
-    sighting settles it, unless the country was pinned by hand. See
-    :func:`eligible_under_strict`.
+    One answer for every kind of row. A fixed exit and a pooled session slot
+    carry the verdict attribution wrote on them; a dynamic-sessions gateway
+    carries none, and its verdict is the one preflight reaches for the vendor
+    session rendered for the request. The level decides eligibility and what
+    a preflight verdict does to the request; which country a proxy is routed
+    on is the source policy's call (``SourcePolicy.sources``) under every
+    level.
+
+    ``observe`` serves every verdict and shows it. ``verified`` refuses a
+    contradicted claim and serves an open one (no independent source knows
+    the IP, or they disagree under ``consensus``) on the vendor's word.
+    ``confirmed`` wants clear evidence: only a confirmed claim serves (or one
+    not judged yet), so an open claim is refused until a later sighting
+    settles it, unless the country was pinned by hand. A refused pooled
+    session slot whose claim is contradicted is replaced with a fresh
+    session. See :func:`eligible_under`.
     """
 
-    WARN = "warn"  # keep routing on the resolved location, surface the flag
-    STRICT = "strict"  # only proxies whose claim is confirmed (or unjudged) are eligible
+    OBSERVE = "observe"  # route everywhere, surface the verdicts
+    VERIFIED = "verified"  # a contradicted claim is refused, an open one trusted
+    CONFIRMED = "confirmed"  # only a confirmed (or unjudged) claim serves
 
 
 class LocationVerdict(StrEnum):
@@ -105,17 +113,6 @@ class LocationVerdict(StrEnum):
         if conflict is None:
             return cls.OPEN
         return cls.CONTRADICTED if conflict else cls.CONFIRMED
-
-
-class PreflightMode(StrEnum):
-    """Per project: verify a session's exit location before forwarding the first request."""
-
-    OFF = "off"
-    REPORT = "report"  # record the observation, forward anyway
-    # On a mismatch, re-select another eligible proxy while no explicit sticky
-    # session is bound yet; once one is bound, behave as reject.
-    RETRY = "retry"
-    REJECT = "reject"  # fail the request with 502 when the location does not match
 
 
 class ObservationSource(StrEnum):
@@ -492,24 +489,27 @@ META_LOCATION_CANDIDATES = "location_candidates"  # compact candidate list
 META_LOCATION_CHECKED_AT = "location_checked_at"  # ISO timestamp of the last resolution
 
 
-def eligible_under_strict(metadata: dict[str, Any]) -> bool:
-    """Whether a proxy's vendor claim is clear enough for a ``strict`` project.
+def eligible_under(assurance: LocationAssurance, metadata: dict[str, Any]) -> bool:
+    """Whether the verdict written on a proxy row lets the project route to it.
 
-    Out: a contradicted claim, and an open one (the independent sources
-    disagreed under ``consensus``, or none of them knows the IP). In: a
-    confirmed claim, a proxy that made no claim, and one not judged yet (a
-    slot provisioned seconds ago, before its first health check), so that
-    on-demand provisioning and a fresh pool stay routable. Rows written
-    before the verdict was stored carry only the flag and read as judged by
-    it alone.
+    ``observe`` routes to every row. ``verified`` refuses a contradicted
+    claim only. ``confirmed`` also refuses an open one (the independent
+    sources disagreed under ``consensus``, or none of them knows the IP).
+    Under every level a confirmed claim, a proxy that made no claim, and one
+    not judged yet (a slot provisioned seconds ago, before its first health
+    check) are in, so that on-demand provisioning and a fresh pool stay
+    routable. Rows written before the verdict was stored carry only the flag
+    and read as judged by it alone.
 
     A country an operator pinned by hand is judged like a vendor claim but
     trusted while open: the operator placed that row deliberately, and a
     static list in ranges no database covers would otherwise go dark under
-    ``strict``. A pin the databases agree against is still out.
+    ``confirmed``. A pin the databases agree against is still out.
     """
+    if assurance == LocationAssurance.OBSERVE:
+        return True
     if metadata.get(META_LOCATION_CONFLICT) is True:
         return False
-    if metadata.get(META_LOCATION_VERDICT) != LocationVerdict.OPEN:
+    if assurance == LocationAssurance.VERIFIED or metadata.get(META_LOCATION_VERDICT) != LocationVerdict.OPEN:
         return True
     return metadata.get(META_COUNTRY_SOURCE) == MANUAL_SOURCE

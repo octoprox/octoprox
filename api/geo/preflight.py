@@ -29,9 +29,10 @@ uncached, with nothing to verify unless it asked for a location. Those
 sightings exist for provider accuracy and unique exits: nothing but an echo
 ever sees where a dynamic request went.
 
-This module only produces verdicts. What a mismatch does (forward anyway, try
-another proxy, reject) is the proxy server's call, and what it does to the
-proxy (rotate a vendor session) is the proxy manager's.
+This module only produces verdicts. Whether a verdict refuses the request is
+the project's assurance level (``PreflightVerdict.acceptable``), whether a
+refused request moves to another proxy is the exit verifier's call, and what
+a mismatch does to the proxy (rotate a vendor session) is the attributor's.
 
 Failures of the echo request itself never block traffic: an unreachable echo
 endpoint is an operations problem, not evidence about the proxy.
@@ -51,8 +52,8 @@ from api.geo.models import (
     MANUAL_SOURCE,
     META_COUNTRY_SOURCE,
     IpObservation,
+    LocationAssurance,
     ObservationSource,
-    PreflightMode,
 )
 from api.geo.service import GeoService
 from api.models.location import LocationTarget
@@ -79,8 +80,9 @@ class PreflightVerdict(NamedTuple):
     city when asked). One verdict per level, with the polarity of an
     observation's ``conflict``: True contradicted, False confirmed, None when
     nothing was asked at that level or nothing was observed there. ``ok`` is
-    False only for a confirmed mismatch at some level: an unknown answer
-    never fails the check.
+    False only for a confirmed mismatch at some level; whether an open
+    country verdict passes as well is the assurance level's call
+    (``acceptable``).
     """
 
     ok: bool
@@ -92,6 +94,25 @@ class PreflightVerdict(NamedTuple):
     country_conflict: bool | None = None
     state_conflict: bool | None = None
     city_conflict: bool | None = None
+
+    def acceptable(self, assurance: LocationAssurance) -> bool:
+        """Whether this verdict lets the request through under ``assurance``.
+
+        A contradicted level is refused under every level but ``observe``.
+        ``confirmed`` also refuses an open country: the exit was seen but no
+        independent source could place it, or they disagreed under
+        ``consensus``, so the request would ride on the vendor's word alone.
+        A verdict without an exit (the echo failed) or without a requirement
+        (a sampled sighting) is never a refusal: an echo outage must not
+        become a traffic outage. Below the country an open level passes
+        under every assurance, as it does on a proxy row; with no city-level
+        database loaded there is no verdict there to act on.
+        """
+        if assurance == LocationAssurance.OBSERVE or self.expected is None or self.ip is None:
+            return True
+        if not self.ok:
+            return False
+        return assurance != LocationAssurance.CONFIRMED or self.country_conflict is False
 
     @property
     def failed_levels(self) -> tuple[str, ...]:
@@ -229,7 +250,7 @@ class PreflightChecker:
         session slot applies when something was asked or promised. A fixed
         exit never does: discovery placed it and health checks re-read it.
         """
-        if project.location_preflight == PreflightMode.OFF:
+        if not project.location_preflight:
             return False
         if is_dynamic_gateway(proxy):
             return True
@@ -262,8 +283,8 @@ class PreflightChecker:
         """Verify ``proxy``'s exit against the expected location.
 
         ``proxy`` must carry resolved credentials (the echo request goes
-        through it). Returns a verdict; callers reject only when the project's
-        mode is ``reject`` and ``ok`` is False.
+        through it). Returns a verdict; whether it refuses the request is
+        ``PreflightVerdict.acceptable`` under the project's assurance level.
 
         The expected country is handed to the resolver as the claim, so it
         is judged under the project's source policy and conflict rule
@@ -292,9 +313,9 @@ class PreflightChecker:
         vendor_session = proxy.metadata.get(META_SESSION_ID) if dynamic else None
         rotating = dynamic and not vendor_session
         # Sampling only thins observation. When a location was asked or promised
-        # and the project chose a hard mode, every request is verified: reject
-        # and retry are guarantees, and a sampled guarantee is none.
-        guaranteed = expected is not None and project.location_preflight in (PreflightMode.RETRY, PreflightMode.REJECT)
+        # and the project acts on verdicts, every request is verified: a refusal
+        # is a guarantee, and a sampled guarantee is none.
+        guaranteed = expected is not None and project.location_assurance != LocationAssurance.OBSERVE
         if rotating and not guaranteed and not self._sample_rotating(proxy):
             return SKIP
 
@@ -393,7 +414,7 @@ class PreflightChecker:
                 expected=expected.key if expected else None,
                 observed=observed.key if observed else None,
                 ip=ip,
-                mode=project.location_preflight.value,
+                assurance=project.location_assurance.value,
             )
         if key:
             await self._store(
@@ -422,5 +443,8 @@ class PreflightChecker:
     def rejection_message(verdict: PreflightVerdict) -> str:
         expected = verdict.expected.describe() if verdict.expected else "?"
         observed = verdict.observed.describe() if verdict.observed else "unknown"
+        if verdict.ok:
+            # Refused under ``confirmed``: nothing independent confirmed the country.
+            return f"Exit country not confirmed: requested {expected}, observed {observed} ({verdict.ip})"
         levels = " and ".join(verdict.failed_levels) or "location"
         return f"Exit {levels} mismatch: requested {expected}, observed {observed} ({verdict.ip})"

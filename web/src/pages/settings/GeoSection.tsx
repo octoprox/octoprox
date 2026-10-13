@@ -431,7 +431,7 @@ function PolicyTab() {
             <p className="text-[11px] text-fg-subtle mt-1">Consensus is safer: IP databases lag on residential ranges, so one dissenting database alone should not count against a vendor.</p>
           </div>
           <p className="text-xs text-fg-muted mt-4 border-t border-line pt-3">
-            What a contradicted claim does (ignore, warn, strict) and whether sessions are verified before their first request (off, report, retry, reject) are decided per project, on the project's Location tab, because different projects tolerate different risk.
+            Which verdicts may still serve a request (observe, verified, confirmed) and whether a session's exit is verified before its first request (the preflight switch) are decided per project, on the project's Location tab, because different projects tolerate different risk.
           </p>
         </Card>
 
@@ -486,7 +486,7 @@ function PolicyTab() {
             <div>
               <Label htmlFor="geo-preflight-attempts">Retry attempts</Label>
               <Input id="geo-preflight-attempts" type="number" min={1} max={10} value={policy.preflight_max_attempts} onChange={(e) => update({ preflight_max_attempts: parseInt(e.target.value) || 1 })} />
-              <p className="text-[11px] text-fg-subtle mt-1">Proxies tried in retry mode before a 502.</p>
+              <p className="text-[11px] text-fg-subtle mt-1">Proxies tried when a refused request moves to another one, before a 502.</p>
             </div>
           </div>
 

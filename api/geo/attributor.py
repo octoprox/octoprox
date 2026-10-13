@@ -12,7 +12,8 @@ signals:
 * ``proxy_added``: a manually added proxy of a static connector with no
   country yet gets one request through it to the echo endpoint.
 * ``exit_location_mismatch``: preflight found a proxy exiting somewhere
-  other than expected; the pooled vendor-session slot is rotated.
+  other than expected and the project refused it; the pooled vendor-session
+  slot is rotated.
 
 It reaches the proxy pool through the small :class:`ProxyStore` protocol,
 which the proxy manager satisfies, and resolves each proxy under the source
@@ -33,7 +34,7 @@ from api.geo.models import (
     META_LOCATION_CONFLICT,
     META_LOCATION_VERDICT,
     META_VENDOR_COUNTRY,
-    LocationPolicy,
+    LocationAssurance,
     LocationVerdict,
     ObservationSource,
     SourcePolicy,
@@ -180,7 +181,7 @@ class ProxyAttributor:
             endpoint=endpoint,
             project_id=project_id,
         )
-        if await self._rotate_if_strict(proxy):
+        if await self._rotate_if_refused(proxy):
             return proxy
         if changed:
             await self._proxy_store.update_proxy(proxy)
@@ -191,28 +192,29 @@ class ProxyAttributor:
             )
         return proxy
 
-    async def _rotate_if_strict(self, proxy: Proxy) -> bool:
-        """Replace a pooled session slot whose claim was just contradicted, when its project is strict.
+    async def _rotate_if_refused(self, proxy: Proxy) -> bool:
+        """Replace a pooled session slot whose claim was just contradicted, when its project refuses it.
 
-        A strict project will not route to the slot, and nothing else would
-        ever move it: the vendor keeps the session where it is and the health
-        check keeps confirming the same exit. Removing the row makes the
-        provider sync provision a fresh session in its place. Fixed exits are
-        left alone (the port refresh already drops an exit that left its
-        countries, and a static row is the operator's), and an open verdict
-        is not a contradiction: rotating on missing evidence would churn a
-        pool the databases do not cover, so such a slot waits, ineligible,
-        for a sighting that settles it.
+        Above ``observe`` the project will not route to the slot, and nothing
+        else would ever move it: the vendor keeps the session where it is and
+        the health check keeps confirming the same exit. Removing the row
+        makes the provider sync provision a fresh session in its place. Fixed
+        exits are left alone (the port refresh already drops an exit that
+        left its countries, and a static row is the operator's), and an open
+        verdict is not a contradiction: rotating on missing evidence would
+        churn a pool the databases do not cover, so under ``confirmed`` such
+        a slot waits, ineligible, for a sighting that settles it.
         """
         if self._proxy_store is None or proxy.metadata.get(META_LOCATION_VERDICT) != LocationVerdict.CONTRADICTED:
             return False
         if is_dynamic_gateway(proxy) or not proxy.metadata.get(META_SESSION_ID):
             return False
         project = self._project_of(proxy.connector_id)
-        if project is None or project.location_policy != LocationPolicy.STRICT:
+        if project is None or project.location_assurance == LocationAssurance.OBSERVE:
             return False
         logger.info(
-            "Replacing contradicted vendor session under strict policy",
+            "Replacing contradicted vendor session",
+            assurance=project.location_assurance.value,
             proxy_id=proxy.id,
             project_id=project.id,
             claimed=proxy.metadata.get(META_VENDOR_COUNTRY),
@@ -304,7 +306,7 @@ class ProxyAttributor:
             endpoint=endpoint,
             project_id=self.project_id_for(proxy.connector_id),
         )
-        if await self._rotate_if_strict(proxy):
+        if await self._rotate_if_refused(proxy):
             # The judged row is returned so the caller can show what was found;
             # the slot itself is gone and the sync provisions a fresh one.
             return proxy
@@ -370,7 +372,7 @@ class ProxyAttributor:
                 policy=self.policy_for(proxy.connector_id),
                 endpoint=GeoService.endpoint_place_of(proxy),
             )
-            if await self._rotate_if_strict(proxy):
+            if await self._rotate_if_refused(proxy):
                 continue
             if did_change:
                 changed.append(proxy)

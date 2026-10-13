@@ -34,7 +34,6 @@ from api.geo.models import (
     IpLocation,
     LoadedDatabase,
     LocationCandidate,
-    PreflightMode,
     Resolution,
     SourcePolicy,
     normalize_country,
@@ -194,7 +193,7 @@ def _exit_coverage(manager: ProxyManager, connector: Connector | None) -> ExitCo
     if target is None or not target.dynamic:
         return None
     project = manager.get_project(connector.project_id)
-    preflight_on = project is not None and project.location_preflight != PreflightMode.OFF
+    preflight_on = project is not None and project.location_preflight
     percent = (target.exit_sample_percent or 0) if preflight_on else 0
     return ExitCoverage(preflight_on=preflight_on, sampled_percent=percent)
 

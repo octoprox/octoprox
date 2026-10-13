@@ -28,7 +28,7 @@ from api.db.models import (
     UserModel,
     WireGuardPeerModel,
 )
-from api.geo.models import ConflictRule, GeoSourceKind, LocationPolicy, PreflightMode
+from api.geo.models import ConflictRule, GeoSourceKind, LocationAssurance
 from api.models.connector import Connector
 from api.models.credential import Credential
 from api.models.project import MitmBrowser, MitmEngine, MitmMode, Project
@@ -82,8 +82,8 @@ class ProjectRepository:
             tls_mitm_engine=project.tls_mitm_engine,
             tls_mitm_browser=project.tls_mitm_browser,
             metrics_retention_days=project.metrics_retention_days,
-            location_policy=project.location_policy.value,
-            location_preflight=project.location_preflight.value,
+            location_assurance=project.location_assurance.value,
+            location_preflight=project.location_preflight,
             location_sources=[k.value for k in project.location_sources] if project.location_sources else None,
             location_conflict_rule=project.location_conflict_rule.value if project.location_conflict_rule else None,
             created_at=project.created_at,
@@ -113,8 +113,8 @@ class ProjectRepository:
             model.tls_mitm_engine = project.tls_mitm_engine
             model.tls_mitm_browser = project.tls_mitm_browser
             model.metrics_retention_days = project.metrics_retention_days
-            model.location_policy = project.location_policy.value
-            model.location_preflight = project.location_preflight.value
+            model.location_assurance = project.location_assurance.value
+            model.location_preflight = project.location_preflight
             model.location_sources = (
                 [k.value for k in project.location_sources] if project.location_sources else None
             )
@@ -165,9 +165,9 @@ class ProjectRepository:
             tls_mitm_engine=MitmEngine(model.tls_mitm_engine) if model.tls_mitm_engine else None,
             tls_mitm_browser=MitmBrowser(model.tls_mitm_browser) if model.tls_mitm_browser else None,
             metrics_retention_days=model.metrics_retention_days,
-            # Anything but strict is warn
-            location_policy=LocationPolicy.STRICT if model.location_policy == "strict" else LocationPolicy.WARN,
-            location_preflight=PreflightMode(model.location_preflight or "off"),
+            # Migration 041 wrote a valid level on every row; an unknown value is a bug, not a default.
+            location_assurance=LocationAssurance(model.location_assurance or "observe"),
+            location_preflight=bool(model.location_preflight),
             location_sources=[GeoSourceKind(k) for k in model.location_sources] if model.location_sources else None,
             location_conflict_rule=ConflictRule(model.location_conflict_rule) if model.location_conflict_rule else None,
             created_at=model.created_at,

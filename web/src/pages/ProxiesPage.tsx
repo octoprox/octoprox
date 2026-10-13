@@ -468,13 +468,13 @@ function ProxyPanel({ proxy, connectorType, canMutate, onClose, onRelease, onDel
         {proxy.location_conflict && (
           <div className="flex gap-2 p-2.5 rounded-lg bg-danger-soft text-danger text-xs leading-relaxed">
             <AlertTriangle className="w-3.5 h-3.5 flex-shrink-0 mt-0.5" />
-            <span>The vendor's declared location is contradicted by attribution. A project with a strict location policy skips this proxy, and replaces it when it is a pooled session.</span>
+            <span>The vendor's declared location is contradicted by attribution. A project at the verified or confirmed assurance level skips this proxy, and replaces it when it is a pooled session.</span>
           </div>
         )}
         {!proxy.location_conflict && proxy.location_verdict === 'open' && (
           <div className="flex gap-2 p-2.5 rounded-lg bg-warning-soft text-warning text-xs leading-relaxed">
             <HelpCircle className="w-3.5 h-3.5 flex-shrink-0 mt-0.5" />
-            <span>The vendor's declared location could not be judged: the independent sources disagree, or none of them knows this IP. A project with a strict location policy skips this proxy until a later sighting settles it.</span>
+            <span>The vendor's declared location could not be judged: the independent sources disagree, or none of them knows this IP. A project at the confirmed assurance level skips this proxy until a later sighting settles it; verified serves it on the vendor's word.</span>
           </div>
         )}
         {proxy.location?.city || proxy.location?.region ? <KeyValue label="Place" value={[proxy.location.city, proxy.location.region].filter(Boolean).join(', ')} /> : null}

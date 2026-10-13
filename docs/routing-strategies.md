@@ -130,7 +130,7 @@ Octoprox narrows the project's healthy proxies before the routing strategy runs,
 
 1. Connectors that list countries only serve the countries they list.
 2. A proxy with a known exit country must match exactly. The exit country is what [IP attribution]({{ site.baseurl }}/ip-attribution) resolved for the proxy's exit IP from the local IP databases, the vendor's claim (list-mode entries, known-IP APIs, the country a slot was provisioned for) and the echo endpoint, in the order the attribution policy sets.
-   Under a project's `strict` location policy, a proxy whose vendor-declared country is contradicted by attribution is not eligible at all.
+   Under a project's `verified` or `confirmed` location assurance, a proxy whose vendor-declared country is contradicted by attribution is not eligible at all; `confirmed` also leaves out a claim the sources could not settle.
 3. A proxy with no known country is eligible only through its connector's list.
 4. A residential or mobile pool with **no** countries listed that has no slot group yet for the requested country creates one on the first request: `num_proxies` fresh sessions geo-targeted to that country, ready immediately. Later requests rotate across that group like any other, and the periodic sync keeps it alive. Pools that list countries are provisioned up front and never expand on demand.
 
@@ -165,7 +165,7 @@ Pooled residential slots (fixed pool of sessions) serve the country only: their 
 
 Vendors take US states everywhere and other subdivisions only on Bright Data, and cities everywhere; how well they honour a state or city is what the **Exit locations** pages report per level (see [Provider accuracy]({{ site.baseurl }}/ip-attribution#provider-accuracy)). Verification below the country needs a city-level IP database loaded.
 
-With the project's preflight check set to `reject`, a session whose exit turns out to be somewhere other than the requested country is also rejected with `502 Bad Gateway` (`Exit country mismatch: requested DE, observed FR (...)`; a state or city that fails is named the same way), after one echo request through the selected upstream.
+With the project's preflight check on and its location assurance at `verified` or `confirmed`, a session whose exit turns out to be somewhere other than the requested country is also refused after one echo request through the selected upstream: under `sticky` with `502 Bad Gateway` (`Exit country mismatch: requested DE, observed FR (...)`; a state or city that fails is named the same way), under the other strategies by trying another proxy first. `confirmed` refuses an exit no source can place as well (`Exit country not confirmed`). The combinations are worked through on [Location routing]({{ site.baseurl }}/location-routing).
 
 Requests **without** a `-cc-` suffix are unaffected: they may use any proxy in the project, except the on-demand country groups of *all countries* pools, which keep serving only the clients that asked for that country.
 

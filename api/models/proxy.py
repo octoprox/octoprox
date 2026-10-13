@@ -304,8 +304,8 @@ class ProxyResponse(BaseModel):
     vendor_country: str | None = None
     location_conflict: bool = False
     # confirmed, contradicted or open; None when the vendor claimed nothing
-    # or the exit was not judged yet. A strict project routes only to
-    # confirmed (and unjudged) proxies.
+    # or the exit was not judged yet. Above observe a project refuses a
+    # contradicted proxy; under confirmed it refuses an open one as well.
     location_verdict: LocationVerdict | None = None
     location: dict[str, Any] | None = None
     # State code and city that -st- and -city- routing matches this exit on,

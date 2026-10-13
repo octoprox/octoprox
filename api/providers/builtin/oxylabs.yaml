@@ -60,9 +60,9 @@ connector_fields:
       Only preflight can see where a dynamic request went, by an echo request through the same vendor
       session before the real one. Requests with a -sessid- are checked once per session; this is the
       share of requests without one that are checked. Below 100 the unique-exit figures for that traffic
-      are undercounts; 100 counts every exit at one echo per request. Applies under preflight "report", and
-      to requests that name no country; under "reject" and "retry" every request that names a country is
-      checked regardless.
+      are undercounts; 100 counts every exit at one echo per request. Applies to requests that name no
+      country, and to every request under the "observe" assurance level; above it every request that names
+      a country is checked regardless.
     show_when: { field: connector.session_mode, equals: dynamic }
   - key: num_proxies
     label: Number of proxies

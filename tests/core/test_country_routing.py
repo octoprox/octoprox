@@ -18,7 +18,7 @@ from api.geo.models import (
     META_COUNTRY_SOURCE,
     META_LOCATION_CONFLICT,
     META_LOCATION_VERDICT,
-    LocationPolicy,
+    LocationAssurance,
 )
 from api.models.connector import Connector, ProxyTarget
 from api.models.credential import Credential, CredentialType
@@ -94,14 +94,14 @@ def _healthy(proxy: Proxy) -> Proxy:
     return proxy
 
 
-class TestStrictEligibility:
-    """A strict project routes only where the vendor's claim is confirmed or not judged yet."""
+class TestAssuranceEligibility:
+    """The assurance level decides which row verdicts a project routes to."""
 
     @pytest.fixture
     def manager(self) -> ProxyManager:
         manager = _in_memory_manager()
         manager._projects["project-1"] = Project(
-            id="project-1", name="P", username="p", password="pw", location_policy=LocationPolicy.STRICT,
+            id="project-1", name="P", username="p", password="pw", location_assurance=LocationAssurance.CONFIRMED,
         )
         manager._credentials["cred-static"] = Credential(
             id="cred-static", name="Static", type=CredentialType.STATIC_PROXY_PROVIDER, project_id="project-1", config={},
@@ -128,13 +128,19 @@ class TestStrictEligibility:
     def _ids(self, manager: ProxyManager, location: LocationTarget | None = None) -> set[str]:
         return {p.id for p in manager.get_routable_proxies_for_project("project-1", location=location)}
 
-    def test_strict_routes_on_clear_evidence_only(self, manager: ProxyManager) -> None:
+    def test_confirmed_routes_on_clear_evidence_only(self, manager: ProxyManager) -> None:
         clear = {"confirmed", "unclaimed", "unjudged", "pinned-open"}
         assert self._ids(manager, LocationTarget(country="DE")) == clear
         assert self._ids(manager) == clear  # untargeted requests are filtered the same way
 
-    def test_warn_routes_everywhere(self, manager: ProxyManager) -> None:
-        manager._projects["project-1"].location_policy = LocationPolicy.WARN
+    def test_verified_refuses_contradicted_only(self, manager: ProxyManager) -> None:
+        manager._projects["project-1"].location_assurance = LocationAssurance.VERIFIED
+        assert self._ids(manager, LocationTarget(country="DE")) == {
+            "confirmed", "open", "unclaimed", "unjudged", "pinned-open",
+        }
+
+    def test_observe_routes_everywhere(self, manager: ProxyManager) -> None:
+        manager._projects["project-1"].location_assurance = LocationAssurance.OBSERVE
         assert self._ids(manager, LocationTarget(country="DE")) == {
             "confirmed", "contradicted", "open", "unclaimed", "unjudged", "legacy-flagged", "pinned-open", "pinned-contradicted",
         }

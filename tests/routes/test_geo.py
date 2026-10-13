@@ -283,34 +283,39 @@ class TestProxyAttribution:
             and final["location_conflict"] is False
         )
 
-    def test_project_location_policy_roundtrip(self, authenticated_client: TestClient) -> None:
+    def test_project_location_assurance_roundtrip(self, authenticated_client: TestClient) -> None:
         created = authenticated_client.post(
             "/api/v1/projects",
             json={
-                "name": "strict-p",
-                "username": "strict_user",
+                "name": "confirmed-p",
+                "username": "confirmed_user",
                 "password": "pw",
-                "location_policy": "strict",
-                "location_preflight": "report",
+                "location_assurance": "confirmed",
+                "location_preflight": True,
             },
         )
         assert created.status_code == 201, created.text
         assert (
-            created.json()["location_policy"] == "strict"
-            and created.json()["location_preflight"] == "report"
+            created.json()["location_assurance"] == "confirmed"
+            and created.json()["location_preflight"] is True
         )
         updated = authenticated_client.patch(
-            f"/api/v1/projects/{created.json()['id']}", json={"location_preflight": "reject"}
+            f"/api/v1/projects/{created.json()['id']}", json={"location_preflight": False}
         ).json()
-        assert updated["location_preflight"] == "reject" and updated["location_policy"] == "strict"
+        assert updated["location_preflight"] is False and updated["location_assurance"] == "confirmed"
         listed = authenticated_client.get("/api/v1/projects").json()["projects"]
-        assert any(p["location_policy"] == "strict" for p in listed)
+        assert any(p["location_assurance"] == "confirmed" for p in listed)
         assert (
             authenticated_client.patch(
-                f"/api/v1/projects/{created.json()['id']}", json={"location_policy": "loud"}
+                f"/api/v1/projects/{created.json()['id']}", json={"location_assurance": "strict"}
             ).status_code
             == 422
         )
+        # A fresh project observes, with preflight off.
+        plain = authenticated_client.post(
+            "/api/v1/projects", json={"name": "plain-p", "username": "plain_user", "password": "pw"}
+        ).json()
+        assert plain["location_assurance"] == "observe" and plain["location_preflight"] is False
 
     def test_project_source_policy_override_and_lookup(
         self, authenticated_client: TestClient, tmp_path: Path
@@ -327,7 +332,7 @@ class TestProxyAttribution:
                 "username": "trusting_user",
                 "password": "pw",
                 "location_sources": ["vendor", "vendor", "database"],
-                "location_preflight": "retry",
+                "location_preflight": True,
             },
         )
         assert created.status_code == 201, created.text
@@ -336,7 +341,7 @@ class TestProxyAttribution:
             project["location_sources"] == ["vendor", "database"]
             and project["location_conflict_rule"] is None
         )
-        assert project["location_preflight"] == "retry"
+        assert project["location_preflight"] is True
 
         default = authenticated_client.post(
             "/api/v1/geo/lookup", json={"ip": GB_IP, "claimed_country": "US"}

@@ -155,10 +155,10 @@ export interface Project {
   tls_mitm_engine: string | null
   tls_mitm_browser: string | null
   metrics_retention_days: number
-  /** IP attribution: what a contradicted vendor location does to this project's proxies. */
-  location_policy: LocationPolicy
-  /** IP attribution: verify a session's exit before its first request. */
-  location_preflight: PreflightMode
+  /** IP attribution: which verdicts on a claimed location may still serve a request (observe, verified, confirmed). */
+  location_assurance: LocationAssurance
+  /** IP attribution: verify a session's exit before its first request (one echo per session). */
+  location_preflight: boolean
   /** Source precedence override; null inherits the install default. */
   location_sources: GeoSourceKind[] | null
   /** Conflict rule override; null inherits the install default. */
@@ -167,8 +167,7 @@ export interface Project {
   updated_at: string
 }
 
-export type LocationPolicy = 'warn' | 'strict'
-export type PreflightMode = 'off' | 'report' | 'retry' | 'reject'
+export type LocationAssurance = 'observe' | 'verified' | 'confirmed'
 export type ConflictRule = 'consensus' | 'first'
 
 export interface ProjectSummary extends Project {
@@ -197,8 +196,8 @@ export interface ProjectCreate {
   tls_mitm_engine?: string | null
   tls_mitm_browser?: string | null
   metrics_retention_days?: number
-  location_policy?: LocationPolicy
-  location_preflight?: PreflightMode
+  location_assurance?: LocationAssurance
+  location_preflight?: boolean
   location_sources?: GeoSourceKind[] | null
   location_conflict_rule?: ConflictRule | null
 }
@@ -217,8 +216,8 @@ export interface ProjectUpdate {
   tls_mitm_engine?: string | null
   tls_mitm_browser?: string | null
   metrics_retention_days?: number
-  location_policy?: LocationPolicy
-  location_preflight?: PreflightMode
+  location_assurance?: LocationAssurance
+  location_preflight?: boolean
   /** An empty list clears the override. */
   location_sources?: GeoSourceKind[] | null
   /** An empty string clears the override. */

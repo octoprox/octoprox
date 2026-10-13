@@ -55,16 +55,10 @@ const mitmModeInfo: Record<string, { color: string; icon: typeof Info; text: str
 
 type SettingsTab = 'general' | 'tls' | 'location'
 
-const locationPolicyOptions: RichSelectOption[] = [
-  { value: 'warn', label: 'Warn', description: 'Keep routing to every proxy, on the country attribution resolved for it, and flag contradictions' },
-  { value: 'strict', label: 'Strict', description: 'Route only where the evidence is clear: a proxy whose vendor claim is contradicted or left open is skipped for every request, and a contradicted pooled session is replaced' },
-]
-
-const preflightOptions: RichSelectOption[] = [
-  { value: 'off', label: 'Off', description: 'No check before forwarding' },
-  { value: 'report', label: 'Report', description: 'Verify the exit once per session, record the result, forward anyway' },
-  { value: 'retry', label: 'Retry', description: 'On a mismatch try other eligible proxies first; an already bound explicit session is rejected instead' },
-  { value: 'reject', label: 'Reject', description: 'Verify once per session; answer 502 when the exit is not where the client asked for' },
+const locationAssuranceOptions: RichSelectOption[] = [
+  { value: 'observe', label: 'Observe', description: 'Route to every proxy on the country resolved for it; record verdicts and flag contradictions, refuse nothing' },
+  { value: 'verified', label: 'Verified', description: 'Refuse a contradicted claim; an open one serves on the vendor\'s word. A contradicted pooled session is replaced' },
+  { value: 'confirmed', label: 'Confirmed', description: 'Serve only a claim the databases confirm; an open one waits until a later sighting settles it. Needs an IP database loaded' },
 ]
 
 /** Named source orders, so the form stays a select rather than a drag list. */
@@ -114,8 +108,8 @@ export function ProjectForm({ project, onSave, error, formId }: ProjectFormProps
     tls_mitm_engine: project?.tls_mitm_engine ?? null,
     tls_mitm_browser: project?.tls_mitm_browser ?? null,
     metrics_retention_days: project?.metrics_retention_days ?? 90,
-    location_policy: project?.location_policy ?? 'warn',
-    location_preflight: project?.location_preflight ?? 'off',
+    location_assurance: project?.location_assurance ?? 'observe',
+    location_preflight: project?.location_preflight ?? false,
     location_sources: project?.location_sources ?? undefined,
     location_conflict_rule: project?.location_conflict_rule ?? undefined,
   })
@@ -239,17 +233,19 @@ export function ProjectForm({ project, onSave, error, formId }: ProjectFormProps
       {activeTab === 'location' && (
         <div className="space-y-3">
           <div>
-            <Label className="text-xs">Contradicted vendor locations</Label>
-            <RichSelect options={locationPolicyOptions} value={formData.location_policy ?? 'warn'} onChange={(v) => setFormData({ ...formData, location_policy: v as ProjectCreate['location_policy'] })} />
+            <Label className="text-xs">Location assurance</Label>
+            <RichSelect options={locationAssuranceOptions} value={formData.location_assurance ?? 'observe'} onChange={(v) => setFormData({ ...formData, location_assurance: v as ProjectCreate['location_assurance'] })} />
             <p className="mt-1 text-xs text-fg-subtle">
-              Proxy rows only: pooled residential and mobile slots, and fixed exits (static, ISP, datacenter, list and cloud proxies), which attribution judges from health checks and discovery. Dynamic-sessions gateways carry no verdict, since each request gets its own vendor session; preflight is the only check that reaches them.
+              Which verdicts on a claimed location may still serve a request, for every row kind. Fixed exits (static, ISP, datacenter, list and cloud proxies) and pooled residential and mobile slots are judged by health checks and discovery, and the verdict is written on the row. Dynamic-sessions gateways carry no row verdict, since each request gets its own vendor session, so only preflight judges them: for a dynamic connector the level does nothing unless preflight is on.
             </p>
           </div>
           <div>
-            <Label className="text-xs">Preflight check</Label>
-            <RichSelect options={preflightOptions} value={formData.location_preflight ?? 'off'} onChange={(v) => setFormData({ ...formData, location_preflight: v as ProjectCreate['location_preflight'] })} />
+            <label className="flex items-center gap-2 text-[13px]">
+              <input type="checkbox" checked={formData.location_preflight ?? false} onChange={(e) => setFormData({ ...formData, location_preflight: e.target.checked })} className="w-4 h-4" />
+              Preflight check: verify a session's exit before its first request (one echo per session)
+            </label>
             <p className="mt-1 text-xs text-fg-subtle">
-              Session rows only: pooled residential and mobile slots, and dynamic-sessions gateways. Fixed exits (static, ISP, datacenter, list and cloud proxies) are placed by discovery and re-read by every health check, so they are never preflighted.
+              Session rows only: pooled residential and mobile slots, and dynamic-sessions gateways. Fixed exits (static, ISP, datacenter, list and cloud proxies) are placed by discovery and re-read by every health check, so they are never preflighted. Must be on for verified or confirmed to act on dynamic-sessions connectors, and for either to verify a pooled session's exit per request rather than per health check.
             </p>
           </div>
           <div className="grid grid-cols-2 gap-3">
@@ -276,16 +272,16 @@ export function ProjectForm({ project, onSave, error, formId }: ProjectFormProps
             const defaults = geo?.settings
             const sources: GeoSourceKind[] = formData.location_sources?.length ? formData.location_sources : defaults?.default_sources ?? ['database', 'vendor', 'endpoint']
             const rule: ConflictRule = formData.location_conflict_rule || defaults?.default_conflict_rule || 'consensus'
-            const policy = formData.location_policy ?? 'warn'
+            const assurance = formData.location_assurance ?? 'observe'
             const inherited = !formData.location_sources?.length || !formData.location_conflict_rule
             const noDatabases = geo !== undefined && geo.databases_loaded.length === 0
-            const rows = locationExamples(sources, rule, policy)
+            const rows = locationExamples(sources, rule, assurance)
             return (
               <div className="rounded-lg border border-line bg-surface-raised/50 p-3 text-xs leading-relaxed text-fg-muted space-y-2">
                 <div className="font-medium text-fg">How this behaves</div>
                 <p>
                   A residential slot provisioned for Germany, so the vendor claims DE, judged by two databases (MaxMind ranked above DB-IP) and a plain IP echo.
-                  Sources: <span className="text-fg">{sources.join(', ')}</span>; rule: <span className="text-fg">{rule}</span>; policy: <span className="text-fg">{policy}</span>
+                  Sources: <span className="text-fg">{sources.join(', ')}</span>; rule: <span className="text-fg">{rule}</span>; level: <span className="text-fg">{assurance}</span>
                   {inherited && defaults && <span> (inherited parts from Settings → IP attribution)</span>}.
                 </p>
                 <table className="w-full">
@@ -293,7 +289,7 @@ export function ProjectForm({ project, onSave, error, formId }: ProjectFormProps
                     <tr className="text-left text-fg-subtle">
                       <th className="pr-2 font-medium">Evidence</th>
                       <th className="pr-2 font-medium">Verdict</th>
-                      <th className="font-medium">Under {policy}</th>
+                      <th className="font-medium">Under {assurance}</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -307,11 +303,14 @@ export function ProjectForm({ project, onSave, error, formId }: ProjectFormProps
                   </tbody>
                 </table>
                 <p>
-                  <span className="text-fg">Preflight ({formData.location_preflight ?? 'off'}):</span>{' '}
-                  {preflightExample(formData.location_preflight ?? 'off', formData.routing_strategy ?? 'round_robin', defaults?.preflight_max_attempts ?? 3)}
+                  <span className="text-fg">Preflight ({formData.location_preflight ? 'on' : 'off'}):</span>{' '}
+                  {preflightExample(formData.location_preflight ?? false, assurance, formData.routing_strategy ?? 'round_robin', defaults?.preflight_max_attempts ?? 3)}
                 </p>
-                {policy === 'strict' && noDatabases && (
-                  <p className="text-warning">No IP database is loaded, so every vendor claim is open and strict will route to nothing that carries one. Load a database under Settings → IP attribution first.</p>
+                {assurance !== 'observe' && !formData.location_preflight && (
+                  <p className="text-warning">Preflight is off, so {assurance} acts on pooled residential and mobile slots only through the health check verdict on the row, and not at all on dynamic-sessions connectors. Turn preflight on to verify a session's exit before its first request.</p>
+                )}
+                {assurance === 'confirmed' && noDatabases && (
+                  <p className="text-warning">No IP database is loaded, so every vendor claim is open and confirmed will route to nothing that carries one. Load a database under Settings → IP attribution first.</p>
                 )}
               </div>
             )
@@ -319,7 +318,7 @@ export function ProjectForm({ project, onSave, error, formId }: ProjectFormProps
           <div className="flex gap-2 p-3 rounded-lg border border-line bg-surface-raised/50 text-xs leading-relaxed text-fg-muted">
             <MapPin className="w-4 h-4 flex-shrink-0 mt-0.5" />
             <span>
-              Attribution compares each exit IP against the local IP databases and the echo endpoint (Settings → IP attribution). Routing uses the country the top-ranked source with an answer resolved, under either conflict rule; the rule only decides the flag. A proxy whose vendor-declared country is contradicted is flagged; <strong>strict</strong> routes only to proxies whose claim is confirmed, so it needs IP databases loaded, and it replaces a contradicted pooled session. A country pinned by hand on a static proxy is trusted while the databases cannot judge it. Dynamic-sessions gateways are never flagged, so neither setting touches them. Preflight verifies a session's exit before its first request is forwarded, at the cost of one extra round trip per session; <strong>retry</strong> moves to another proxy on a mismatch and <strong>reject</strong> answers 502. A misplaced vendor session is rotated either way.
+              Attribution compares each exit IP against the local IP databases and the echo endpoint (Settings → IP attribution). Routing uses the country the top-ranked source with an answer resolved, under either conflict rule; the rule only decides the flag. The assurance level then says which verdicts may still serve, and applies the same way to the verdict written on a proxy row and to the one preflight reaches for a request: <strong>observe</strong> refuses nothing and only records, <strong>verified</strong> refuses a contradicted claim, <strong>confirmed</strong> refuses an open one as well, so it needs IP databases loaded; a country pinned by hand on a static proxy is trusted while open. Preflight is the switch that verifies a session's exit before its first request, at the cost of one echo per session; it is the only check that reaches a dynamic-sessions gateway. Whether a refused request moves to another proxy is the routing strategy's call: every strategy but sticky tries other eligible proxies, up to the install-wide attempt limit, then 502; a sticky session was promised one exit, so it fails fast with 502. A misplaced pooled vendor session is rotated either way.
             </span>
           </div>
         </div>

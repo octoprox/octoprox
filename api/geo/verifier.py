@@ -4,12 +4,15 @@
 """Decides what to forward through when preflight disagrees with the selection.
 
 The proxy server hands the verifier the upstream it picked; the verifier
-returns the upstream to use or a rejection. Under ``retry`` it asks the
-:class:`ProxySelector` for another eligible proxy, excluding the ones that
-failed, unless the project's routing strategy says the session must stay put
-(sticky sessions were promised one exit). What a mismatch does *to* the proxy
-is not decided here: the verifier emits ``exit_location_mismatch`` and the
-attributor reacts.
+returns the upstream to use or a rejection. Whether a verdict refuses the
+request is the project's assurance level (``observe`` never refuses).
+Whether a refused request may move is the routing strategy's call: the
+verifier asks the :class:`ProxySelector` for another eligible proxy,
+excluding the ones that failed, up to ``preflight_max_attempts``, unless the
+strategy says the session must stay put (sticky sessions were promised one
+exit), in which case the request fails at once. What a mismatch does *to*
+the proxy is not decided here: the verifier emits ``exit_location_mismatch``
+and the attributor reacts.
 """
 
 from __future__ import annotations
@@ -21,7 +24,6 @@ import structlog
 
 from api.core.event_bus import event_bus
 from api.core.signals import exit_location_mismatch
-from api.geo.models import PreflightMode
 from api.geo.preflight import PreflightChecker
 from api.models.location import LocationTarget
 from api.models.project import Project
@@ -81,19 +83,17 @@ class ExitVerifier:
         back to the selector on a retry so a dynamic-sessions row keeps the
         same vendor session.
 
-        Anything but a confirmed mismatch lets the request through: an echo
-        outage must never become a traffic outage.
+        An echo outage never refuses anything: a verdict without an exit lets
+        the request through under every level.
         """
         if not PreflightChecker.applies(project, location, proxy):
             return ExitDecision(proxy)
-        mode = project.location_preflight
+        assurance = project.location_assurance
         # A session-less request on a dynamic gateway retries by re-rendering:
         # selecting the same row again mints a fresh vendor session, so the
         # row is not excluded and the strategy's promise about rows holds.
         rerender = is_dynamic_gateway(proxy) and not session_id
-        can_retry = mode == PreflightMode.RETRY and (
-            rerender or self._proxy_selector.strategy_for_project(project.id).allows_exit_reselection(session_id)
-        )
+        can_retry = rerender or self._proxy_selector.strategy_for_project(project.id).allows_exit_reselection(session_id)
         excluded: set[str] = set()
         attempts = 0
         while True:
@@ -103,17 +103,22 @@ class ExitVerifier:
             except Exception as exc:
                 logger.warning("Preflight check errored", proxy_id=proxy.id, error=str(exc))
                 return ExitDecision(proxy)
-            if verdict.ok or mode == PreflightMode.REPORT:
+            if verdict.acceptable(assurance):
                 return ExitDecision(proxy)
-            await event_bus.publish(
-                exit_location_mismatch,
-                self,
-                proxy_id=proxy.id,
-                project_id=project.id,
-                expected=verdict.expected.key if verdict.expected else "",
-                observed=verdict.observed.key if verdict.observed else None,
-                ip=verdict.ip,
-            )
+            if not verdict.ok:
+                # A contradicted exit: the attributor rotates a pooled vendor
+                # session. An open one (refused under ``confirmed``) is not a
+                # contradiction, and rotating on missing evidence would churn a
+                # pool the databases do not cover for sessions just as unknown.
+                await event_bus.publish(
+                    exit_location_mismatch,
+                    self,
+                    proxy_id=proxy.id,
+                    project_id=project.id,
+                    expected=verdict.expected.key if verdict.expected else "",
+                    observed=verdict.observed.key if verdict.observed else None,
+                    ip=verdict.ip,
+                )
             if can_retry and attempts < self._preflight_checker.max_attempts:
                 if not rerender:
                     excluded.add(proxy.id)

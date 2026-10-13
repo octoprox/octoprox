@@ -4,7 +4,7 @@
 /**
  * The worked example under a project's Location settings: how one pooled
  * residential slot provisioned for Germany fares under the chosen source
- * order, conflict rule and policy. Pure, so the form only renders it.
+ * order, conflict rule and assurance level. Pure, so the form only renders it.
  *
  * The cases are the ones docs/location-routing.md walks through: two
  * databases (MaxMind ranked above DB-IP) that agree with the vendor, agree
@@ -13,7 +13,7 @@
  * echo that reports a country counts as one more independent source.
  */
 
-import type { ConflictRule, GeoSourceKind, LocationPolicy, PreflightMode } from '../api/client'
+import type { ConflictRule, GeoSourceKind, LocationAssurance } from '../api/client'
 
 export type Verdict = 'confirmed' | 'contradicted' | 'open'
 
@@ -23,7 +23,7 @@ export interface ExampleRow {
   /** Country routing matches -cc- against; null when the row has no country. */
   routedAs: string | null
   verdict: Verdict
-  /** What the policy does with the row. */
+  /** What the assurance level does with the row. */
   outcome: string
 }
 
@@ -52,40 +52,41 @@ function verdictOf(rule: ConflictRule, maxmind: string | null, dbip: string | nu
   return maxmind === VENDOR ? 'confirmed' : 'contradicted'
 }
 
-function outcomeOf(policy: LocationPolicy, verdict: Verdict, routed: string | null): string {
-  if (policy === 'strict') {
-    if (verdict === 'confirmed') return 'routed to'
-    if (verdict === 'contradicted') return 'skipped; the slot is replaced with a fresh session'
-    return 'skipped until a later sighting settles the claim'
-  }
+function outcomeOf(assurance: LocationAssurance, verdict: Verdict, routed: string | null): string {
+  // The refusals first: above observe a contradicted claim never serves, and
+  // confirmed refuses an open one as well. Everything else is routed as usual.
+  if (assurance !== 'observe' && verdict === 'contradicted') return 'skipped; the slot is replaced with a fresh session'
+  if (assurance === 'confirmed' && verdict === 'open') return 'skipped until a later sighting settles the claim'
   if (routed === null) return 'routed to, only through the connector\'s country list'
-  const flag = verdict === 'contradicted' ? ', flagged' : verdict === 'open' ? ', marked open' : ''
-  return `routed to as ${routed}${flag}`
+  if (verdict === 'contradicted') return `routed to as ${routed}, flagged`
+  if (verdict === 'open') {
+    return assurance === 'verified' && routed === VENDOR ? `routed to as ${routed} on the vendor's word` : `routed to as ${routed}, marked open`
+  }
+  return `routed to as ${routed}`
 }
 
-export function locationExamples(sources: GeoSourceKind[], rule: ConflictRule, policy: LocationPolicy): ExampleRow[] {
+export function locationExamples(sources: GeoSourceKind[], rule: ConflictRule, assurance: LocationAssurance): ExampleRow[] {
   return CASES.map(({ case: name, maxmind, dbip }) => {
     const routed = routedAs(sources, maxmind)
     const verdict = verdictOf(rule, maxmind, dbip)
     const evidence = maxmind ? `MaxMind ${maxmind}, DB-IP ${dbip}` : 'no answer'
-    return { case: name, evidence, routedAs: routed, verdict, outcome: outcomeOf(policy, verdict, routed) }
+    return { case: name, evidence, routedAs: routed, verdict, outcome: outcomeOf(assurance, verdict, routed) }
   })
 }
 
 /** One sentence on what preflight does to a -cc-de request through the example slot. */
-export function preflightExample(mode: PreflightMode, strategy: string, maxAttempts: number): string {
-  switch (mode) {
-    case 'off':
-      return 'No echo before forwarding. The slot\'s location is whatever the last health check found, so a session that moved since then is trusted until the next check.'
-    case 'report':
-      return 'One echo through the slot per session, cached for the session TTL. The result is recorded for provider accuracy; the request is forwarded even when the exit is somewhere else.'
-    case 'retry': {
-      const sticky = strategy === 'sticky'
-      return sticky
-        ? `One echo per session. A request with a -sessid- is rejected with 502 when the exit is somewhere else, since sticky promised it one exit; a request without one moves to another proxy, up to ${maxAttempts} in all. The misplaced slot is replaced.`
-        : `One echo per session. When the exit is somewhere else the request moves to another eligible proxy, up to ${maxAttempts} in all, then 502. The misplaced slot is replaced.`
-    }
-    case 'reject':
-      return 'One echo per session. When the exit is somewhere else the request gets 502 naming the mismatch, and the misplaced slot is replaced. A client keeps the same answer for that session until the TTL passes.'
+export function preflightExample(on: boolean, assurance: LocationAssurance, strategy: string, maxAttempts: number): string {
+  if (!on) {
+    return 'No echo before forwarding. The slot\'s location is whatever the last health check found, so a session that moved since then is trusted until the next check.'
   }
+  if (assurance === 'observe') {
+    return 'One echo through the slot per session, cached for the session TTL. The result is recorded for provider accuracy; the request is forwarded even when the exit is somewhere else.'
+  }
+  const misplaced = assurance === 'confirmed'
+    ? 'When the exit is somewhere else, or no database can place it,'
+    : 'When the exit is somewhere else,'
+  if (strategy === 'sticky') {
+    return `One echo per session. ${misplaced} a request with a -sessid- is refused with 502 at once, since sticky promised it one exit; a request without one moves to another eligible proxy, up to ${maxAttempts} in all. A misplaced slot is replaced.`
+  }
+  return `One echo per session. ${misplaced} the request moves to another eligible proxy, up to ${maxAttempts} in all, then 502. A misplaced slot is replaced.`
 }

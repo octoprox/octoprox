@@ -140,8 +140,8 @@ class ProjectModel(Base):
     metrics_retention_days: Mapped[int] = mapped_column(Integer, default=90)
     # IP attribution: what a contradicted vendor location does to a proxy, and
     # whether a session's exit is verified before its first request.
-    location_policy: Mapped[str] = mapped_column(String(10), nullable=False, default="warn", server_default="warn")
-    location_preflight: Mapped[str] = mapped_column(String(10), nullable=False, default="off", server_default="off")
+    location_assurance: Mapped[str] = mapped_column(String(10), nullable=False, default="observe", server_default="observe")
+    location_preflight: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
     # Null inherits the install default from geo_settings.
     location_sources: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
     location_conflict_rule: Mapped[str | None] = mapped_column(String(10), nullable=True)
