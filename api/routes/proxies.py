@@ -11,6 +11,7 @@ from pydantic import BaseModel
 
 from api.core.auth import RequireEditorDep
 from api.geo.models import (
+    MANUAL_SOURCE,
     META_COUNTRY_SOURCE,
     META_LOCATION,
     META_LOCATION_CONFLICT,
@@ -18,7 +19,6 @@ from api.geo.models import (
     META_VENDOR_COUNTRY,
     ObservationSource,
 )
-from api.geo.service import MANUAL_SOURCE
 from api.models.credential import CredentialType
 from api.models.location import set_manual_location
 from api.models.proxy import Proxy, ProxyCreate, ProxyProtocol, ProxyResponse, ProxyUpdate

@@ -48,12 +48,13 @@ import structlog
 from api.core.signals import exit_ip_changed
 from api.db.redis import GEO_PREFLIGHT_KEY, RedisClient
 from api.geo.models import (
+    MANUAL_SOURCE,
     META_COUNTRY_SOURCE,
     IpObservation,
     ObservationSource,
     PreflightMode,
 )
-from api.geo.service import MANUAL_SOURCE, GeoService
+from api.geo.service import GeoService
 from api.models.location import LocationTarget
 from api.models.project import Project
 from api.models.proxy import Proxy

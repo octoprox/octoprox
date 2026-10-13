@@ -9,6 +9,7 @@ import pytest
 
 from api.core.config import Settings
 from api.geo.models import (
+    MANUAL_SOURCE,
     META_COUNTRY_SOURCE,
     META_LOCATION,
     META_LOCATION_CANDIDATES,
@@ -21,7 +22,7 @@ from api.geo.models import (
     SourcePolicy,
 )
 from api.geo.observations import ObservationRecorder
-from api.geo.service import MANUAL_SOURCE, GeoService
+from api.geo.service import GeoService
 from api.geo.settings import GeoSettingsStore
 from api.geo.store import GeoDatabaseStore
 from api.models.location import LocationTarget
