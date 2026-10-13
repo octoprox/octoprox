@@ -82,7 +82,8 @@ class LocationPolicy(StrEnum):
     the claim is confirmed (or not judged yet), a contradicted pooled session
     slot is replaced with a fresh session, and an open verdict (the sources
     disagree, or none knows the IP) keeps the proxy out until a later
-    sighting settles it. See :func:`eligible_under_strict`.
+    sighting settles it, unless the country was pinned by hand. See
+    :func:`eligible_under_strict`.
     """
 
     WARN = "warn"  # keep routing on the resolved location, surface the flag
@@ -469,7 +470,8 @@ class LoadedDatabase(BaseModel):
 
 META_VENDOR_COUNTRY = "vendor_country"  # what the vendor claimed for this exit
 META_ENDPOINT_COUNTRY = "endpoint_country"  # what a third-party discovery or echo endpoint reported for this exit
-META_COUNTRY_SOURCE = "country_source"  # GeoSourceKind that produced metadata.country
+META_COUNTRY_SOURCE = "country_source"  # GeoSourceKind that produced metadata.country, or MANUAL_SOURCE
+MANUAL_SOURCE = "manual"  # META_COUNTRY_SOURCE value for a country an operator set by hand
 # The same one level down. What routing reads (``state_code``, ``city``) is
 # what attribution resolved, with its source; the vendor's and the endpoint's
 # own words are kept apart so the claim can be judged.
@@ -500,7 +502,14 @@ def eligible_under_strict(metadata: dict[str, Any]) -> bool:
     on-demand provisioning and a fresh pool stay routable. Rows written
     before the verdict was stored carry only the flag and read as judged by
     it alone.
+
+    A country an operator pinned by hand is judged like a vendor claim but
+    trusted while open: the operator placed that row deliberately, and a
+    static list in ranges no database covers would otherwise go dark under
+    ``strict``. A pin the databases agree against is still out.
     """
     if metadata.get(META_LOCATION_CONFLICT) is True:
         return False
-    return metadata.get(META_LOCATION_VERDICT) != LocationVerdict.OPEN
+    if metadata.get(META_LOCATION_VERDICT) != LocationVerdict.OPEN:
+        return True
+    return metadata.get(META_COUNTRY_SOURCE) == MANUAL_SOURCE

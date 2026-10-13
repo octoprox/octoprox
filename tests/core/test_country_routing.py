@@ -13,7 +13,13 @@ from api.core.config import Settings
 from api.core.proxy_manager import ProxyManager
 from api.core.proxy_server import ProxyServer
 from api.db.redis import RedisClient
-from api.geo.models import META_LOCATION_CONFLICT, META_LOCATION_VERDICT, LocationPolicy
+from api.geo.models import (
+    MANUAL_SOURCE,
+    META_COUNTRY_SOURCE,
+    META_LOCATION_CONFLICT,
+    META_LOCATION_VERDICT,
+    LocationPolicy,
+)
 from api.models.connector import Connector, ProxyTarget
 from api.models.credential import Credential, CredentialType
 from api.models.location import LocationTarget, normalize_country_list
@@ -111,6 +117,9 @@ class TestStrictEligibility:
             "unclaimed": {META_LOCATION_CONFLICT: False},
             "unjudged": {},
             "legacy-flagged": {META_LOCATION_CONFLICT: True},  # judged before the verdict was stored
+            # A country pinned by hand is trusted while open, not when the databases agree against it.
+            "pinned-open": {META_COUNTRY_SOURCE: MANUAL_SOURCE, META_LOCATION_CONFLICT: False, META_LOCATION_VERDICT: "open"},
+            "pinned-contradicted": {META_COUNTRY_SOURCE: MANUAL_SOURCE, META_LOCATION_CONFLICT: True, META_LOCATION_VERDICT: "contradicted"},
         }
         for name, metadata in rows.items():
             manager._proxies[name] = _healthy(Proxy(id=name, host=name, port=1, connector_id="conn", metadata={"country": "DE", **metadata}))
@@ -120,13 +129,15 @@ class TestStrictEligibility:
         return {p.id for p in manager.get_routable_proxies_for_project("project-1", location=location)}
 
     def test_strict_routes_on_clear_evidence_only(self, manager: ProxyManager) -> None:
-        clear = {"confirmed", "unclaimed", "unjudged"}
+        clear = {"confirmed", "unclaimed", "unjudged", "pinned-open"}
         assert self._ids(manager, LocationTarget(country="DE")) == clear
         assert self._ids(manager) == clear  # untargeted requests are filtered the same way
 
     def test_warn_routes_everywhere(self, manager: ProxyManager) -> None:
         manager._projects["project-1"].location_policy = LocationPolicy.WARN
-        assert self._ids(manager, LocationTarget(country="DE")) == {"confirmed", "contradicted", "open", "unclaimed", "unjudged", "legacy-flagged"}
+        assert self._ids(manager, LocationTarget(country="DE")) == {
+            "confirmed", "contradicted", "open", "unclaimed", "unjudged", "legacy-flagged", "pinned-open", "pinned-contradicted",
+        }
 
 
 class TestEligibilityRules:

@@ -241,6 +241,9 @@ export function ProjectForm({ project, onSave, error, formId }: ProjectFormProps
           <div>
             <Label className="text-xs">Contradicted vendor locations</Label>
             <RichSelect options={locationPolicyOptions} value={formData.location_policy ?? 'warn'} onChange={(v) => setFormData({ ...formData, location_policy: v as ProjectCreate['location_policy'] })} />
+            <p className="mt-1 text-xs text-fg-subtle">
+              Proxy rows only: pooled residential and mobile slots, and fixed exits (static, ISP, datacenter, list and cloud proxies), which attribution judges from health checks and discovery. Dynamic-sessions gateways carry no verdict, since each request gets its own vendor session; preflight is the only check that reaches them.
+            </p>
           </div>
           <div>
             <Label className="text-xs">Preflight check</Label>
@@ -316,7 +319,7 @@ export function ProjectForm({ project, onSave, error, formId }: ProjectFormProps
           <div className="flex gap-2 p-3 rounded-lg border border-line bg-surface-raised/50 text-xs leading-relaxed text-fg-muted">
             <MapPin className="w-4 h-4 flex-shrink-0 mt-0.5" />
             <span>
-              Attribution compares each exit IP against the local IP databases and the echo endpoint (Settings → IP attribution). Routing uses the country the top-ranked source with an answer resolved, under either conflict rule; the rule only decides the flag. A proxy whose vendor-declared country is contradicted is flagged; <strong>strict</strong> routes only to proxies whose claim is confirmed, so it needs IP databases loaded, and it replaces a contradicted pooled session. Dynamic-sessions gateways are never flagged, so neither setting touches them. Preflight verifies a session's exit before its first request is forwarded, at the cost of one extra round trip per session; <strong>retry</strong> moves to another proxy on a mismatch and <strong>reject</strong> answers 502. A misplaced vendor session is rotated either way.
+              Attribution compares each exit IP against the local IP databases and the echo endpoint (Settings → IP attribution). Routing uses the country the top-ranked source with an answer resolved, under either conflict rule; the rule only decides the flag. A proxy whose vendor-declared country is contradicted is flagged; <strong>strict</strong> routes only to proxies whose claim is confirmed, so it needs IP databases loaded, and it replaces a contradicted pooled session. A country pinned by hand on a static proxy is trusted while the databases cannot judge it. Dynamic-sessions gateways are never flagged, so neither setting touches them. Preflight verifies a session's exit before its first request is forwarded, at the cost of one extra round trip per session; <strong>retry</strong> moves to another proxy on a mismatch and <strong>reject</strong> answers 502. A misplaced vendor session is rotated either way.
             </span>
           </div>
         </div>

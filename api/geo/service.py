@@ -29,6 +29,7 @@ from api.core import utc_now
 from api.core.config import Settings
 from api.geo.models import (
     JUDGEMENT_SOURCE,
+    MANUAL_SOURCE,
     META_CITY,
     META_CITY_SOURCE,
     META_COUNTRY_SOURCE,
@@ -74,7 +75,6 @@ from api.providers.sdk.strategies import (
 
 logger = structlog.get_logger()
 
-MANUAL_SOURCE = "manual"
 
 # Metadata keys apply_observation may change, compared to decide whether the caller must persist.
 _TRACKED_KEYS = (

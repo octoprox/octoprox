@@ -74,7 +74,7 @@ The policy reads the verdict on the row. It does not look at the request, so it 
 **Strict.** Routing wants clear evidence. A row with a vendor claim is eligible only while the claim is **confirmed** (or not judged yet: a slot provisioned seconds ago, before its first health check, is routable so that on-demand provisioning works). Two kinds of row are refused:
 
 * A **contradicted** row is skipped, and when it is a pooled session slot it is also removed, so the provider sync provisions a fresh session in its place. A fixed exit is only skipped: the port refresh already drops an exit that left the connector's countries, and a static row is the operator's to fix.
-* An **open** row is skipped until a later sighting settles the claim. It is not replaced: rotating on missing evidence would churn a pool the databases do not cover, at the vendor's price, for sessions just as unknown as the last.
+* An **open** row is skipped until a later sighting settles the claim. It is not replaced: rotating on missing evidence would churn a pool the databases do not cover, at the vendor's price, for sessions just as unknown as the last. The exception is a country an operator pinned by hand on a static proxy: it is judged like a vendor claim, but trusted while open, since the operator placed that row deliberately. A pin the databases agree against is still skipped.
 
 So under `strict` with the table above, only the first row is routed to. The third and fourth rows wait; the second is replaced. Rows without a claim (untargeted slots, cloud instances, static proxies with no country set) are never judged and stay eligible. `strict` does not change what a row is routed on, only whether it is routed to at all.
 
