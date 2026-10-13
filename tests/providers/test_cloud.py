@@ -5,6 +5,7 @@
 
 import sys
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -871,3 +872,225 @@ class TestAWSProviderSessions:
         provider = AWSProvider(aws_connector, _credential({"auth_mode": "host_role"}))
 
         assert provider._get_boto3_clients() == (None, None)
+
+
+class TestGCPProviderCredentials:
+    """How the GCP provider turns a credential's auth mode into google-auth credentials."""
+
+    @pytest.fixture
+    def gcp_auth(self, monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
+        mocks = SimpleNamespace(
+            default=MagicMock(return_value=("host-creds", "host-project")),
+            from_info=MagicMock(return_value="key-creds"),
+            impersonated=MagicMock(return_value="impersonated-creds"),
+            instances_client=MagicMock(side_effect=lambda credentials: ("instances", credentials)),
+        )
+        monkeypatch.setattr("google.auth.default", mocks.default)
+        monkeypatch.setattr("google.oauth2.service_account.Credentials.from_service_account_info", mocks.from_info)
+        monkeypatch.setattr("google.auth.impersonated_credentials.Credentials", mocks.impersonated)
+        monkeypatch.setattr("google.cloud.compute_v1.InstancesClient", mocks.instances_client)
+        return mocks
+
+    @staticmethod
+    def _credential(config: dict[str, Any]) -> Credential:
+        return Credential(id="gcp-cred", name="GCP", type=CredentialType.GCP, project_id="p", config=config)
+
+    def test_key_mode_uses_stored_key(self, gcp_connector: Connector, gcp_auth: SimpleNamespace) -> None:
+        key = '{"type": "service_account", "project_id": "test"}'
+        provider = GCPProvider(gcp_connector, self._credential({"auth_mode": "service_account_key", "service_account_json": key, "project_id": "test"}))
+
+        client = provider._get_compute_client()
+
+        gcp_auth.from_info.assert_called_once_with(
+            {"type": "service_account", "project_id": "test"},
+            scopes=["https://www.googleapis.com/auth/cloud-platform"],
+        )
+        gcp_auth.default.assert_not_called()
+        assert client == ("instances", "key-creds")
+        assert provider._gcp_credentials == "key-creds"
+
+    def test_legacy_config_without_auth_mode_uses_stored_key(
+        self, gcp_connector: Connector, gcp_credential: Credential, gcp_auth: SimpleNamespace
+    ) -> None:
+        GCPProvider(gcp_connector, gcp_credential)._get_compute_client()
+
+        gcp_auth.from_info.assert_called_once()
+        gcp_auth.default.assert_not_called()
+
+    def test_host_identity_uses_application_default_credentials(
+        self, gcp_connector: Connector, gcp_auth: SimpleNamespace
+    ) -> None:
+        provider = GCPProvider(gcp_connector, self._credential({"auth_mode": "host_identity"}))
+
+        client = provider._get_compute_client()
+
+        gcp_auth.default.assert_called_once_with(scopes=["https://www.googleapis.com/auth/cloud-platform"])
+        gcp_auth.from_info.assert_not_called()
+        assert client == ("instances", "host-creds")
+
+    def test_host_identity_ignores_leftover_key(self, gcp_connector: Connector, gcp_auth: SimpleNamespace) -> None:
+        provider = GCPProvider(gcp_connector, self._credential({"auth_mode": "host_identity", "service_account_json": "{}"}))
+
+        provider._get_compute_client()
+
+        gcp_auth.from_info.assert_not_called()
+        gcp_auth.default.assert_called_once()
+
+    def test_key_mode_without_key_never_uses_host_identity(
+        self, gcp_connector: Connector, gcp_auth: SimpleNamespace
+    ) -> None:
+        provider = GCPProvider(gcp_connector, self._credential({"auth_mode": "service_account_key"}))
+
+        with pytest.raises(ValueError, match="service_account_key mode"):
+            provider._get_compute_client()
+        gcp_auth.default.assert_not_called()
+
+    def test_impersonation_wraps_the_base_identity(self, gcp_connector: Connector, gcp_auth: SimpleNamespace) -> None:
+        provider = GCPProvider(
+            gcp_connector,
+            self._credential({"auth_mode": "host_identity", "impersonate_service_account": "octoprox@target.iam.gserviceaccount.com"}),
+        )
+
+        client = provider._get_compute_client()
+
+        gcp_auth.impersonated.assert_called_once_with(
+            source_credentials="host-creds",
+            target_principal="octoprox@target.iam.gserviceaccount.com",
+            target_scopes=["https://www.googleapis.com/auth/cloud-platform"],
+        )
+        assert client == ("instances", "impersonated-creds")
+        assert provider._gcp_credentials == "impersonated-creds"
+
+    def test_client_is_cached(self, gcp_connector: Connector, gcp_auth: SimpleNamespace) -> None:
+        provider = GCPProvider(gcp_connector, self._credential({"auth_mode": "host_identity"}))
+
+        first = provider._get_compute_client()
+        second = provider._get_compute_client()
+
+        assert first == second
+        assert gcp_auth.default.call_count == 1
+
+
+class TestAzureProviderCredentials:
+    """How the Azure provider turns a credential's auth mode into an azure-identity credential."""
+
+    @pytest.fixture
+    def azure_sdk(self, monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
+        host = MagicMock(name="host-credential")
+        host.get_token.return_value = SimpleNamespace(token="host-jwt")
+        mocks = SimpleNamespace(
+            host=host,
+            default=MagicMock(return_value=host),
+            secret=MagicMock(return_value="secret-credential"),
+            assertion=MagicMock(return_value="federated-credential"),
+            compute=MagicMock(side_effect=lambda credential, subscription: ("compute", credential, subscription)),
+            network=MagicMock(side_effect=lambda credential, subscription: ("network", credential, subscription)),
+        )
+        monkeypatch.setattr("azure.identity.DefaultAzureCredential", mocks.default)
+        monkeypatch.setattr("azure.identity.ClientSecretCredential", mocks.secret)
+        monkeypatch.setattr("azure.identity.ClientAssertionCredential", mocks.assertion)
+        monkeypatch.setattr("azure.mgmt.compute.ComputeManagementClient", mocks.compute)
+        monkeypatch.setattr("azure.mgmt.network.NetworkManagementClient", mocks.network)
+        return mocks
+
+    @staticmethod
+    def _credential(config: dict[str, Any]) -> Credential:
+        return Credential(id="azure-cred", name="Azure", type=CredentialType.AZURE, project_id="p", config=config)
+
+    def test_secret_mode_uses_stored_secret(self, azure_connector: Connector, azure_sdk: SimpleNamespace) -> None:
+        provider = AzureProvider(
+            azure_connector,
+            self._credential({"auth_mode": "client_secret", "tenant_id": "t", "client_id": "c", "client_secret": "s"}),
+        )
+
+        compute, network = provider._get_azure_clients()
+
+        azure_sdk.secret.assert_called_once_with(tenant_id="t", client_id="c", client_secret="s")
+        azure_sdk.default.assert_not_called()
+        # The subscription comes from the connector, as before.
+        assert compute == ("compute", "secret-credential", "sub-12345")
+        assert network == ("network", "secret-credential", "sub-12345")
+
+    def test_legacy_config_without_auth_mode_uses_stored_secret(
+        self, azure_connector: Connector, azure_credential: Credential, azure_sdk: SimpleNamespace
+    ) -> None:
+        AzureProvider(azure_connector, azure_credential)._get_azure_clients()
+
+        azure_sdk.secret.assert_called_once()
+        azure_sdk.default.assert_not_called()
+
+    def test_host_identity_uses_default_chain(self, azure_connector: Connector, azure_sdk: SimpleNamespace) -> None:
+        provider = AzureProvider(azure_connector, self._credential({"auth_mode": "host_identity"}))
+
+        compute, _ = provider._get_azure_clients()
+
+        azure_sdk.default.assert_called_once_with()
+        azure_sdk.secret.assert_not_called()
+        assert compute == ("compute", azure_sdk.host, "sub-12345")
+
+    def test_host_identity_can_pick_a_user_assigned_identity(
+        self, azure_connector: Connector, azure_sdk: SimpleNamespace
+    ) -> None:
+        identity = "11111111-2222-3333-4444-555555555555"
+        provider = AzureProvider(
+            azure_connector, self._credential({"auth_mode": "host_identity", "managed_identity_client_id": identity})
+        )
+
+        provider._get_azure_clients()
+
+        azure_sdk.default.assert_called_once_with(
+            managed_identity_client_id=identity, workload_identity_client_id=identity
+        )
+
+    def test_host_identity_ignores_leftover_secret(self, azure_connector: Connector, azure_sdk: SimpleNamespace) -> None:
+        provider = AzureProvider(
+            azure_connector,
+            self._credential({"auth_mode": "host_identity", "tenant_id": "t", "client_id": "c", "client_secret": "stale"}),
+        )
+
+        provider._get_azure_clients()
+
+        azure_sdk.secret.assert_not_called()
+
+    def test_secret_mode_without_secret_never_uses_host_identity(
+        self, azure_connector: Connector, azure_sdk: SimpleNamespace
+    ) -> None:
+        provider = AzureProvider(azure_connector, self._credential({"auth_mode": "client_secret", "tenant_id": "t"}))
+
+        with pytest.raises(ValueError, match="client_secret mode"):
+            provider._get_azure_clients()
+        azure_sdk.default.assert_not_called()
+
+    def test_federation_exchanges_the_host_token_for_the_target_app(
+        self, azure_connector: Connector, azure_sdk: SimpleNamespace
+    ) -> None:
+        provider = AzureProvider(
+            azure_connector,
+            self._credential(
+                {
+                    "auth_mode": "host_identity",
+                    "target_tenant_id": "customer-tenant",
+                    "target_client_id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+                }
+            ),
+        )
+
+        compute, _ = provider._get_azure_clients()
+
+        azure_sdk.assertion.assert_called_once()
+        kwargs = azure_sdk.assertion.call_args.kwargs
+        assert kwargs["tenant_id"] == "customer-tenant"
+        assert kwargs["client_id"] == "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+        # The assertion callback hands azure-identity a fresh host token each time.
+        assert kwargs["func"]() == "host-jwt"
+        azure_sdk.host.get_token.assert_called_with("api://AzureADTokenExchange/.default")
+        assert compute == ("compute", "federated-credential", "sub-12345")
+
+    def test_clients_are_cached(self, azure_connector: Connector, azure_sdk: SimpleNamespace) -> None:
+        provider = AzureProvider(azure_connector, self._credential({"auth_mode": "host_identity"}))
+
+        first = provider._get_azure_clients()
+        second = provider._get_azure_clients()
+
+        assert first == second
+        assert azure_sdk.default.call_count == 1

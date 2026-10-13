@@ -13,7 +13,13 @@ from __future__ import annotations
 from typing import Any
 
 from api.models.connector import validate_connector_config
-from api.models.credential import AWSAuthMode, CredentialType, validate_credential_config
+from api.models.credential import (
+    AWSAuthMode,
+    AzureAuthMode,
+    CredentialType,
+    GCPAuthMode,
+    validate_credential_config,
+)
 from api.providers.sdk.descriptor import Condition, FieldSpec, OptionSpec
 
 
@@ -92,7 +98,34 @@ AWS_CREDENTIAL_FIELDS = [
     ),
 ]
 
+_GCP_USES_KEY = Condition(field="credential.auth_mode", equals=GCPAuthMode.SERVICE_ACCOUNT_KEY.value)
+
 GCP_CREDENTIAL_FIELDS = [
+    FieldSpec(
+        key="auth_mode",
+        label="Authentication",
+        type="select",
+        required=True,
+        default=GCPAuthMode.SERVICE_ACCOUNT_KEY.value,
+        options=[
+            OptionSpec(
+                value=GCPAuthMode.SERVICE_ACCOUNT_KEY.value,
+                label="Service account key",
+                description="A service account JSON key, stored encrypted.",
+            ),
+            OptionSpec(
+                value=GCPAuthMode.HOST_IDENTITY.value,
+                label="Host identity",
+                description="The service account Octoprox runs as (attached service account, Workload Identity). Nothing is stored.",
+            ),
+        ],
+        help="Host identity needs no stored secrets and is the recommended choice when Octoprox runs on GCP.",
+        details=(
+            "With Host identity, Application Default Credentials are used: the service account "
+            "attached to the GCE VM or GKE workload, Workload Identity, or the file named by "
+            "GOOGLE_APPLICATION_CREDENTIALS on the Octoprox host. See the GCP setup guide."
+        ),
+    ),
     FieldSpec(
         key="service_account_json",
         label="Service account JSON",
@@ -100,16 +133,86 @@ GCP_CREDENTIAL_FIELDS = [
         secret=True,
         required=True,
         placeholder="Paste service account JSON here",
+        show_when=_GCP_USES_KEY,
     ),
-    FieldSpec(key="project_id", label="Project ID", required=True),
+    FieldSpec(key="project_id", label="Project ID", required=True, show_when=_GCP_USES_KEY),
+    FieldSpec(
+        key="impersonate_service_account",
+        label="Service account to impersonate",
+        placeholder="octoprox@customer-project.iam.gserviceaccount.com",
+        help="Optional. Octoprox mints short-lived tokens for this service account and provisions Compute Engine as it.",
+        details=(
+            "Use this to provision in a project the base identity has no roles in. The base "
+            "identity needs roles/iam.serviceAccountTokenCreator on the target service account; "
+            "the target carries the Compute Engine roles."
+        ),
+    ),
 ]
 
+_AZURE_USES_SECRET = Condition(field="credential.auth_mode", equals=AzureAuthMode.CLIENT_SECRET.value)
+_AZURE_USES_HOST = Condition(field="credential.auth_mode", equals=AzureAuthMode.HOST_IDENTITY.value)
+
 AZURE_CREDENTIAL_FIELDS = [
-    FieldSpec(key="subscription_id", label="Subscription ID", required=True),
-    FieldSpec(key="tenant_id", label="Tenant ID", required=True),
-    FieldSpec(key="client_id", label="Client ID", required=True),
-    FieldSpec(key="client_secret", label="Client secret", type="password", secret=True, required=True),
-    FieldSpec(key="key_vault_name", label="Key vault name"),
+    FieldSpec(
+        key="auth_mode",
+        label="Authentication",
+        type="select",
+        required=True,
+        default=AzureAuthMode.CLIENT_SECRET.value,
+        options=[
+            OptionSpec(
+                value=AzureAuthMode.CLIENT_SECRET.value,
+                label="Client secret",
+                description="A service principal's client secret, stored encrypted.",
+            ),
+            OptionSpec(
+                value=AzureAuthMode.HOST_IDENTITY.value,
+                label="Host identity",
+                description="The managed identity or workload identity Octoprox runs with. Nothing is stored.",
+            ),
+        ],
+        help="Host identity needs no stored secrets and is the recommended choice when Octoprox runs on Azure.",
+        details=(
+            "With Host identity, azure-identity's default chain is used: AKS workload identity, "
+            "a system- or user-assigned managed identity, or AZURE_* environment variables on "
+            "the Octoprox host. See the Azure setup guide."
+        ),
+    ),
+    FieldSpec(key="subscription_id", label="Subscription ID", required=True, show_when=_AZURE_USES_SECRET),
+    FieldSpec(key="tenant_id", label="Tenant ID", required=True, show_when=_AZURE_USES_SECRET),
+    FieldSpec(key="client_id", label="Client ID", required=True, show_when=_AZURE_USES_SECRET),
+    FieldSpec(
+        key="client_secret",
+        label="Client secret",
+        type="password",
+        secret=True,
+        required=True,
+        show_when=_AZURE_USES_SECRET,
+    ),
+    FieldSpec(key="key_vault_name", label="Key vault name", show_when=_AZURE_USES_SECRET),
+    FieldSpec(
+        key="managed_identity_client_id",
+        label="User-assigned identity client ID",
+        show_when=_AZURE_USES_HOST,
+        help="Optional. Leave empty for a system-assigned identity or when the host already sets AZURE_CLIENT_ID.",
+    ),
+    FieldSpec(
+        key="target_tenant_id",
+        label="Target tenant ID",
+        show_when=_AZURE_USES_HOST,
+        help="Optional. Tenant of an app registration that trusts the host identity through a federated credential.",
+    ),
+    FieldSpec(
+        key="target_client_id",
+        label="Target app (client) ID",
+        show_when=_AZURE_USES_HOST,
+        help="Optional. Octoprox exchanges the host identity's token for this app's token and provisions VMs as it.",
+        details=(
+            "Use this to provision in another Entra tenant. The app registration in that tenant "
+            "needs a federated credential whose subject is the host identity's principal ID, and "
+            "its service principal carries the role assignment."
+        ),
+    ),
 ]
 
 COUNTRIES_FIELD = FieldSpec(

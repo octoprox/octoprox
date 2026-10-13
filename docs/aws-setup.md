@@ -111,7 +111,7 @@ Use this when the proxies should live in a different AWS account from the one Oc
 
 Credential config: `{"auth_mode": "host_role", "role_arn": "arn:aws:iam::222222222222:role/octoprox-proxies", "external_id": "acme-7f3b9c"}`.
 
-One Octoprox installation can hold one such credential per customer or environment account, all backed by the same host role.
+The host role is the IAM role attached to the Octoprox instance, task or pod in account A, and it never changes. For each additional AWS account you want to provision in, create a role there with the same trust policy, allow the host role to assume it, and add an Octoprox credential naming it; there is no limit on how many.
 
 ### 1.4 Option C: IAM user access keys
 

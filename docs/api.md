@@ -203,6 +203,8 @@ An AWS credential can also carry no secrets at all. With `"auth_mode": "host_rol
 }
 ```
 
+GCP and Azure credentials have the same shape. `"auth_mode": "host_identity"` uses the service account, managed identity or workload identity of the host and stores nothing; the defaults `service_account_key` and `client_secret` keep the stored-secret behaviour. GCP may add `impersonate_service_account` in either mode; Azure host mode may add `target_tenant_id` and `target_client_id` for an app registration federated to the host identity. See the [GCP](gcp-setup) and [Azure](azure-setup) setup guides.
+
 **Credential Types:** `aws`, `gcp`, `azure`, `static`
 
 ### Get Credential

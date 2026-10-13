@@ -515,3 +515,182 @@ class TestAWSCredentialAuthModes:
             "negate": False,
         }
         assert fields["external_id"]["show_when"]["field"] == "credential.role_arn"
+
+
+class TestGCPCredentialAuthModes:
+    """GCP credentials: stored service account key, the host identity, and impersonation."""
+
+    KEY = '{"type": "service_account", "project_id": "test"}'
+
+    @staticmethod
+    def _create(client: TestClient, project_id: str, config: dict[str, Any]) -> Any:
+        return client.post(
+            f"/api/v1/projects/{project_id}/credentials",
+            json={"name": f"gcp-{len(str(config))}", "type": "gcp", "config": config},
+        )
+
+    def test_service_account_key_is_the_default_mode(
+        self, authenticated_client: TestClient, created_project: dict[str, Any]
+    ) -> None:
+        response = self._create(
+            authenticated_client, created_project["id"], {"service_account_json": self.KEY, "project_id": "test"}
+        )
+
+        assert response.status_code == 201
+        assert response.json()["config"]["auth_mode"] == "service_account_key"
+
+    def test_host_identity_stores_no_secrets(
+        self, authenticated_client: TestClient, created_project: dict[str, Any]
+    ) -> None:
+        response = self._create(
+            authenticated_client,
+            created_project["id"],
+            {"auth_mode": "host_identity", "service_account_json": self.KEY, "project_id": "stale"},
+        )
+
+        assert response.status_code == 201
+        assert response.json()["config"] == {"auth_mode": "host_identity"}
+
+    def test_host_identity_with_impersonation(
+        self, authenticated_client: TestClient, created_project: dict[str, Any]
+    ) -> None:
+        response = self._create(
+            authenticated_client,
+            created_project["id"],
+            {"auth_mode": "host_identity", "impersonate_service_account": " octoprox@customer.iam.gserviceaccount.com "},
+        )
+
+        assert response.status_code == 201
+        assert response.json()["config"] == {
+            "auth_mode": "host_identity",
+            "impersonate_service_account": "octoprox@customer.iam.gserviceaccount.com",
+        }
+
+    def test_key_mode_requires_the_key(
+        self, authenticated_client: TestClient, created_project: dict[str, Any]
+    ) -> None:
+        response = self._create(authenticated_client, created_project["id"], {"auth_mode": "service_account_key", "project_id": "p"})
+
+        assert response.status_code == 422
+        assert "service_account_json" in response.json()["detail"]
+
+    def test_rejects_malformed_impersonation_target(
+        self, authenticated_client: TestClient, created_project: dict[str, Any]
+    ) -> None:
+        response = self._create(
+            authenticated_client,
+            created_project["id"],
+            {"auth_mode": "host_identity", "impersonate_service_account": "projects/x/serviceAccounts/y"},
+        )
+
+        assert response.status_code == 422
+        assert "impersonate_service_account" in response.json()["detail"]
+
+
+class TestAzureCredentialAuthModes:
+    """Azure credentials: stored client secret, the host identity, and tenant federation."""
+
+    GUID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+
+    @staticmethod
+    def _create(client: TestClient, project_id: str, config: dict[str, Any]) -> Any:
+        return client.post(
+            f"/api/v1/projects/{project_id}/credentials",
+            json={"name": f"azure-{len(str(config))}", "type": "azure", "config": config},
+        )
+
+    def test_client_secret_is_the_default_mode(
+        self, authenticated_client: TestClient, created_project: dict[str, Any]
+    ) -> None:
+        response = self._create(
+            authenticated_client,
+            created_project["id"],
+            {"subscription_id": "s", "tenant_id": "t", "client_id": "c", "client_secret": "x"},
+        )
+
+        assert response.status_code == 201
+        assert response.json()["config"]["auth_mode"] == "client_secret"
+
+    def test_host_identity_stores_no_secrets(
+        self, authenticated_client: TestClient, created_project: dict[str, Any]
+    ) -> None:
+        response = self._create(
+            authenticated_client,
+            created_project["id"],
+            {"auth_mode": "host_identity", "tenant_id": "t", "client_id": "c", "client_secret": "stale"},
+        )
+
+        assert response.status_code == 201
+        assert response.json()["config"] == {"auth_mode": "host_identity"}
+
+    def test_host_identity_with_federated_target(
+        self, authenticated_client: TestClient, created_project: dict[str, Any]
+    ) -> None:
+        response = self._create(
+            authenticated_client,
+            created_project["id"],
+            {
+                "auth_mode": "host_identity",
+                "managed_identity_client_id": self.GUID,
+                "target_tenant_id": "customer.onmicrosoft.com",
+                "target_client_id": self.GUID,
+            },
+        )
+
+        assert response.status_code == 201
+        assert response.json()["config"] == {
+            "auth_mode": "host_identity",
+            "managed_identity_client_id": self.GUID,
+            "target_tenant_id": "customer.onmicrosoft.com",
+            "target_client_id": self.GUID,
+        }
+
+    def test_federation_needs_both_target_fields(
+        self, authenticated_client: TestClient, created_project: dict[str, Any]
+    ) -> None:
+        response = self._create(
+            authenticated_client, created_project["id"], {"auth_mode": "host_identity", "target_client_id": self.GUID}
+        )
+
+        assert response.status_code == 422
+        assert "set together" in response.json()["detail"]
+
+    def test_rejects_non_guid_target_client_id(
+        self, authenticated_client: TestClient, created_project: dict[str, Any]
+    ) -> None:
+        response = self._create(
+            authenticated_client,
+            created_project["id"],
+            {"auth_mode": "host_identity", "target_tenant_id": "t", "target_client_id": "octoprox-app"},
+        )
+
+        assert response.status_code == 422
+        assert "target_client_id" in response.json()["detail"]
+
+    def test_host_only_fields_are_rejected_in_secret_mode(
+        self, authenticated_client: TestClient, created_project: dict[str, Any]
+    ) -> None:
+        response = self._create(
+            authenticated_client,
+            created_project["id"],
+            {
+                "auth_mode": "client_secret",
+                "subscription_id": "s", "tenant_id": "t", "client_id": "c", "client_secret": "x",
+                "target_tenant_id": "t2", "target_client_id": self.GUID,
+            },
+        )
+
+        assert response.status_code == 422
+        assert "host_identity mode" in response.json()["detail"]
+
+    def test_secret_mode_requires_the_secret(
+        self, authenticated_client: TestClient, created_project: dict[str, Any]
+    ) -> None:
+        response = self._create(
+            authenticated_client,
+            created_project["id"],
+            {"auth_mode": "client_secret", "subscription_id": "s", "tenant_id": "t", "client_id": "c"},
+        )
+
+        assert response.status_code == 422
+        assert "client_secret" in response.json()["detail"]

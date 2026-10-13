@@ -31,6 +31,11 @@ class CredentialType(str, Enum):
 
 # --- Typed Config Models for Validation ---
 
+def _blank_to_none(value: str | None) -> str | None:
+    """Strip an optional field; empty or whitespace-only becomes None."""
+    return (value or "").strip() or None
+
+
 class StaticProxyProviderConfig(BaseModel):
     """Configuration for Static Proxy Provider credentials."""
     username: str | None = None
@@ -91,13 +96,13 @@ class AWSCredentialConfig(BaseModel):
             self.access_key = None
             self.secret_key = None
 
-        self.role_arn = (self.role_arn or "").strip() or None
+        self.role_arn = _blank_to_none(self.role_arn)
         if self.role_arn is not None and not AWS_ROLE_ARN_PATTERN.match(self.role_arn):
             raise ValueError(
                 'role_arn must be an IAM role ARN such as arn:aws:iam::123456789012:role/octoprox'
             )
 
-        self.external_id = (self.external_id or "").strip() or None
+        self.external_id = _blank_to_none(self.external_id)
         if self.external_id is not None:
             if self.role_arn is None:
                 raise ValueError('external_id requires role_arn')
@@ -106,49 +111,147 @@ class AWSCredentialConfig(BaseModel):
         return self
 
 
+class GCPAuthMode(str, Enum):
+    """How a GCP credential obtains its base identity.
+
+    ``SERVICE_ACCOUNT_KEY`` stores a service account JSON key.
+    ``HOST_IDENTITY`` stores nothing and uses Application Default
+    Credentials: the service account attached to the GCE VM or GKE workload,
+    Workload Identity, or GOOGLE_APPLICATION_CREDENTIALS. Either mode may
+    then impersonate another service account, which is how a customer grants
+    access to their project without issuing a key.
+    """
+    SERVICE_ACCOUNT_KEY = "service_account_key"
+    HOST_IDENTITY = "host_identity"
+
+
+# name@project.iam.gserviceaccount.com, or the default
+# 123456789-compute@developer.gserviceaccount.com
+GCP_SERVICE_ACCOUNT_EMAIL_PATTERN = re.compile(r"^[a-z0-9-]+@[a-z0-9.-]+\.gserviceaccount\.com$")
+
+
 class GCPCredentialConfig(BaseModel):
-    """Configuration for GCP credentials."""
-    service_account_json: str
-    project_id: str
+    """Configuration for GCP credentials.
+
+    ``service_account_json`` and ``project_id`` are required in
+    ``service_account_key`` mode and dropped in ``host_identity`` mode.
+    ``impersonate_service_account`` is optional in both modes.
+    """
+    model_config = ConfigDict(use_enum_values=True, validate_default=True)
+
+    auth_mode: GCPAuthMode = GCPAuthMode.SERVICE_ACCOUNT_KEY
+    service_account_json: str | None = None
+    project_id: str | None = None
+    impersonate_service_account: str | None = None
 
     @model_validator(mode='after')
     def validate_required_fields(self) -> 'GCPCredentialConfig':
-        """Ensure required fields are not empty and service_account_json is valid JSON."""
-        if not self.service_account_json or not self.service_account_json.strip():
-            raise ValueError('service_account_json is required and cannot be empty')
-        if not self.project_id or not self.project_id.strip():
-            raise ValueError('project_id is required and cannot be empty')
+        """Check the fields the selected auth mode needs and normalise the rest."""
+        if self.auth_mode == GCPAuthMode.SERVICE_ACCOUNT_KEY:
+            if not self.service_account_json or not self.service_account_json.strip():
+                raise ValueError('service_account_json is required and cannot be empty')
+            if not self.project_id or not self.project_id.strip():
+                raise ValueError('project_id is required and cannot be empty')
+            self.project_id = self.project_id.strip()
 
-        # Validate that service_account_json is valid JSON
-        try:
-            parsed = json.loads(self.service_account_json)
-            if not isinstance(parsed, dict):
-                raise ValueError('service_account_json must be a valid JSON object')
-        except json.JSONDecodeError as e:
-            raise ValueError(f'service_account_json contains invalid JSON: {e}') from None
+            # Validate that service_account_json is valid JSON
+            try:
+                parsed = json.loads(self.service_account_json)
+                if not isinstance(parsed, dict):
+                    raise ValueError('service_account_json must be a valid JSON object')
+            except json.JSONDecodeError as e:
+                raise ValueError(f'service_account_json contains invalid JSON: {e}') from None
+        else:
+            self.service_account_json = None
+            self.project_id = None
 
+        self.impersonate_service_account = _blank_to_none(self.impersonate_service_account)
+        if (
+            self.impersonate_service_account is not None
+            and not GCP_SERVICE_ACCOUNT_EMAIL_PATTERN.match(self.impersonate_service_account)
+        ):
+            raise ValueError(
+                'impersonate_service_account must be a service account email such as '
+                'octoprox@my-project.iam.gserviceaccount.com'
+            )
         return self
 
 
+class AzureAuthMode(str, Enum):
+    """How an Azure credential obtains its base identity.
+
+    ``CLIENT_SECRET`` stores a service principal's client secret.
+    ``HOST_IDENTITY`` stores nothing and uses the managed identity or
+    workload identity of the host Octoprox runs on. In host mode the
+    credential may also name an app registration in another tenant that
+    trusts the host identity through a federated credential, which is how a
+    customer grants access without issuing a secret.
+    """
+    CLIENT_SECRET = "client_secret"
+    HOST_IDENTITY = "host_identity"
+
+
+AZURE_GUID_PATTERN = re.compile(r"^[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}$")
+# A tenant GUID or a verified domain such as customer.onmicrosoft.com; the
+# character set is the one azure-identity's validate_tenant_id accepts.
+AZURE_TENANT_ID_PATTERN = re.compile(r"^[A-Za-z0-9.-]+$")
+
+
 class AzureCredentialConfig(BaseModel):
-    """Configuration for Azure credentials."""
-    subscription_id: str
-    tenant_id: str
-    client_id: str
-    client_secret: str
+    """Configuration for Azure credentials.
+
+    The service principal fields are required in ``client_secret`` mode and
+    dropped in ``host_identity`` mode. ``managed_identity_client_id`` and the
+    ``target_*`` federation fields only apply in ``host_identity`` mode.
+    """
+    model_config = ConfigDict(use_enum_values=True, validate_default=True)
+
+    auth_mode: AzureAuthMode = AzureAuthMode.CLIENT_SECRET
+    subscription_id: str | None = None
+    tenant_id: str | None = None
+    client_id: str | None = None
+    client_secret: str | None = None
     key_vault_name: str | None = None
+    managed_identity_client_id: str | None = None
+    target_tenant_id: str | None = None
+    target_client_id: str | None = None
 
     @model_validator(mode='after')
     def validate_required_fields(self) -> 'AzureCredentialConfig':
-        """Ensure required fields are not empty."""
-        if not self.subscription_id or not self.subscription_id.strip():
-            raise ValueError('subscription_id is required and cannot be empty')
-        if not self.tenant_id or not self.tenant_id.strip():
-            raise ValueError('tenant_id is required and cannot be empty')
-        if not self.client_id or not self.client_id.strip():
-            raise ValueError('client_id is required and cannot be empty')
-        if not self.client_secret or not self.client_secret.strip():
-            raise ValueError('client_secret is required and cannot be empty')
+        """Check the fields the selected auth mode needs and normalise the rest."""
+        self.managed_identity_client_id = _blank_to_none(self.managed_identity_client_id)
+        self.target_tenant_id = _blank_to_none(self.target_tenant_id)
+        self.target_client_id = _blank_to_none(self.target_client_id)
+
+        if self.auth_mode == AzureAuthMode.CLIENT_SECRET:
+            for key in ("subscription_id", "tenant_id", "client_id", "client_secret"):
+                value = _blank_to_none(getattr(self, key))
+                if value is None:
+                    raise ValueError(f'{key} is required and cannot be empty')
+                setattr(self, key, value)
+            if self.managed_identity_client_id or self.target_tenant_id or self.target_client_id:
+                raise ValueError(
+                    'managed_identity_client_id, target_tenant_id and target_client_id '
+                    'only apply in host_identity mode'
+                )
+            return self
+
+        self.subscription_id = None
+        self.tenant_id = None
+        self.client_id = None
+        self.client_secret = None
+        self.key_vault_name = None
+
+        if self.managed_identity_client_id is not None and not AZURE_GUID_PATTERN.match(
+            self.managed_identity_client_id
+        ):
+            raise ValueError('managed_identity_client_id must be a client ID GUID')
+        if (self.target_tenant_id is None) != (self.target_client_id is None):
+            raise ValueError('target_tenant_id and target_client_id must be set together')
+        if self.target_tenant_id is not None and not AZURE_TENANT_ID_PATTERN.match(self.target_tenant_id):
+            raise ValueError('target_tenant_id must be a tenant ID GUID or a tenant domain')
+        if self.target_client_id is not None and not AZURE_GUID_PATTERN.match(self.target_client_id):
+            raise ValueError('target_client_id must be an application (client) ID GUID')
         return self
 
 

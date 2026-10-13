@@ -9,6 +9,7 @@ Actual implementations require the 'cloud' optional dependencies.
 
 import asyncio
 import base64
+import json
 import re
 import secrets
 import string
@@ -19,7 +20,7 @@ from typing import Any
 import structlog
 
 from api.models.connector import Connector
-from api.models.credential import AWSAuthMode, Credential
+from api.models.credential import AWSAuthMode, AzureAuthMode, Credential, GCPAuthMode
 from api.models.proxy import Proxy, ProxyStatus
 from api.providers.base import ProxyProvider
 
@@ -27,6 +28,11 @@ logger = structlog.get_logger()
 
 # Standard proxy port for all cloud providers
 PROXY_PORT = 3128
+
+# OAuth scope the Compute Engine clients request on google-auth credentials.
+_GCP_CLOUD_PLATFORM_SCOPE = "https://www.googleapis.com/auth/cloud-platform"
+# Scope of the host identity token exchanged for a federated app's token.
+_AZURE_TOKEN_EXCHANGE_SCOPE = "api://AzureADTokenExchange/.default"
 
 # Cached Squid setup script template
 _SQUID_SETUP_TEMPLATE: str | None = None
@@ -407,8 +413,12 @@ class GCPProvider(CloudProvider):
     Note: Source image is automatically determined based on machine type.
     Ubuntu 24.04 LTS is used for all instances.
 
-    Credential config (secrets):
-        - service_account_json: GCP service account JSON key (optional, uses default credentials if not provided)
+    Credential config:
+        - auth_mode: "service_account_key" (stored JSON key) or "host_identity"
+          (Application Default Credentials of the host; nothing stored)
+        - service_account_json / project_id: required in service_account_key mode
+        - impersonate_service_account: optional service account impersonated
+          from the base identity through the IAM Credentials API
     """
 
     def __init__(self, connector: Connector, credential: Credential) -> None:
@@ -422,46 +432,67 @@ class GCPProvider(CloudProvider):
 
         self._config = cloud_config
         self._instances_client = None
+        # The google-auth credentials the clients were built with; the
+        # operation poller needs them too.
+        self._gcp_credentials: Any = None
+
+    def _build_credentials(self) -> Any:
+        """Create the google-auth credentials the Compute Engine clients use.
+
+        The base identity comes from the credential's auth mode. If the
+        credential names a service account to impersonate, the returned
+        credentials mint short-lived tokens for it through the IAM
+        Credentials API and refresh them on their own.
+        """
+        import google.auth
+        from google.auth import impersonated_credentials
+        from google.oauth2 import service_account
+
+        cred_config = self.credential.config if self.credential else {}
+        auth_mode = cred_config.get("auth_mode")
+        service_account_json = cred_config.get("service_account_json")
+        scopes = [_GCP_CLOUD_PLATFORM_SCOPE]
+
+        # Configs saved before auth_mode existed carry no mode; they used the
+        # stored key when present and Application Default Credentials otherwise.
+        if auth_mode == GCPAuthMode.HOST_IDENTITY or (auth_mode is None and not service_account_json):
+            base, _ = google.auth.default(scopes=scopes)
+        elif service_account_json:
+            info = json.loads(service_account_json) if isinstance(service_account_json, str) else service_account_json
+            base = service_account.Credentials.from_service_account_info(info, scopes=scopes)  # type: ignore[no-untyped-call]
+        else:
+            # Explicit key mode with no key must never fall through to the
+            # host identity: that would provision in the wrong project.
+            raise ValueError("GCP credential is in service_account_key mode but has no service_account_json")
+
+        target = cred_config.get("impersonate_service_account")
+        if not target:
+            return base
+        logger.debug("Impersonating GCP service account", target=target, connector_id=self.connector.id)
+        return impersonated_credentials.Credentials(  # type: ignore[no-untyped-call]
+            source_credentials=base, target_principal=target, target_scopes=scopes
+        )
 
     def _get_compute_client(self) -> Any:
         """Get or create GCP compute client.
 
-        Note: Client creation involves synchronous file I/O when service account
-        JSON is provided. This is acceptable because it only runs once (cached),
-        and the temp file write is fast. The actual blocking API calls in
-        create_instance/terminate_instance are offloaded via asyncio.to_thread.
+        Resolving the host identity may call the metadata server, so callers
+        on the event loop should run this in a thread.
         """
         try:
             from google.cloud import compute_v1
-
-            if self._instances_client is None:
-                # Check if service account JSON is provided in credentials
-                cred_config = self.credential.config if self.credential else {}
-                service_account_json = cred_config.get("service_account_json")
-                if service_account_json:
-                    import json
-                    import os
-                    import tempfile
-
-                    # Write service account JSON to temp file for authentication
-                    with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
-                        if isinstance(service_account_json, str):
-                            f.write(service_account_json)
-                        else:
-                            json.dump(service_account_json, f)
-                        temp_path = f.name
-
-                    os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = temp_path
-
-                self._instances_client = compute_v1.InstancesClient()  # type: ignore[assignment]
-            return self._instances_client
         except ImportError:
             logger.error("google-cloud-compute not installed. Install with: pip install octoprox[cloud]")
             return None
 
+        if self._instances_client is None:
+            self._gcp_credentials = self._build_credentials()
+            self._instances_client = compute_v1.InstancesClient(credentials=self._gcp_credentials)  # type: ignore[assignment]
+        return self._instances_client
+
     async def create_instance(self) -> Proxy | None:
         """Create a new GCP Compute Engine instance configured as a proxy."""
-        client = self._get_compute_client()
+        client = await asyncio.to_thread(self._get_compute_client)
         if not client:
             return None
 
@@ -547,7 +578,7 @@ class GCPProvider(CloudProvider):
                 zone=self._config.zone,
                 instance_resource=instance,
             )
-            ops_client = ZoneOperationsClient()
+            ops_client = ZoneOperationsClient(credentials=self._gcp_credentials)
             while operation.status != compute_v1.Operation.Status.DONE:
                 _time.sleep(2)
                 operation = ops_client.get(
@@ -594,7 +625,7 @@ class GCPProvider(CloudProvider):
 
     async def terminate_instance(self, instance_id: str) -> bool:
         """Terminate a GCP Compute Engine instance."""
-        client = self._get_compute_client()
+        client = await asyncio.to_thread(self._get_compute_client)
         if not client:
             return False
 
@@ -628,10 +659,14 @@ class AzureProvider(CloudProvider):
     Note: OS image is automatically determined based on VM size.
     Ubuntu 24.04 LTS is used for all instances.
 
-    Credential config (secrets):
-        - client_id: Azure service principal client ID
-        - client_secret: Azure service principal client secret
-        - tenant_id: Azure tenant ID
+    Credential config:
+        - auth_mode: "client_secret" (stored service principal secret) or
+          "host_identity" (managed or workload identity of the host; nothing stored)
+        - tenant_id / client_id / client_secret: required in client_secret mode
+        - managed_identity_client_id: optional, host mode, picks a user-assigned identity
+        - target_tenant_id / target_client_id: optional, host mode, an app
+          registration in another tenant that trusts the host identity through
+          a federated credential
     """
 
     def __init__(self, connector: Connector, credential: Credential) -> None:
@@ -647,6 +682,66 @@ class AzureProvider(CloudProvider):
         self._compute_client = None
         self._network_client = None
 
+    def _build_credential(self) -> Any:
+        """Create the azure-identity credential the management clients use.
+
+        The base identity comes from the credential's auth mode. In host mode
+        the credential may name an app registration in another tenant that
+        trusts the host identity through a federated credential; the host
+        identity's token is then exchanged for that app's token, and
+        azure-identity repeats the exchange whenever the token needs refreshing.
+        """
+        from azure.identity import (
+            ClientAssertionCredential,
+            ClientSecretCredential,
+            DefaultAzureCredential,
+        )
+
+        cred_config = self.credential.config if self.credential else {}
+        auth_mode = cred_config.get("auth_mode")
+        client_id = cred_config.get("client_id")
+        client_secret = cred_config.get("client_secret")
+        tenant_id = cred_config.get("tenant_id")
+        has_secret = bool(client_id and client_secret and tenant_id)
+
+        base: Any
+        # Configs saved before auth_mode existed carry no mode; they used the
+        # stored secret when present and the default chain otherwise.
+        if auth_mode == AzureAuthMode.HOST_IDENTITY or (auth_mode is None and not has_secret):
+            # Default chain: workload identity, managed identity, AZURE_* env vars.
+            kwargs: dict[str, Any] = {}
+            identity_client_id = cred_config.get("managed_identity_client_id")
+            if identity_client_id:
+                kwargs = {
+                    "managed_identity_client_id": identity_client_id,
+                    "workload_identity_client_id": identity_client_id,
+                }
+            base = DefaultAzureCredential(**kwargs)
+        elif has_secret:
+            base = ClientSecretCredential(tenant_id=str(tenant_id), client_id=str(client_id), client_secret=str(client_secret))
+        else:
+            # Explicit secret mode with no secret must never fall through to
+            # the host identity: that would provision in the wrong tenant.
+            raise ValueError("Azure credential is in client_secret mode but has no tenant_id/client_id/client_secret")
+
+        target_client_id = cred_config.get("target_client_id")
+        if not target_client_id:
+            return base
+        target_tenant_id = cred_config.get("target_tenant_id")
+        if not target_tenant_id:
+            raise ValueError("Azure credential names target_client_id without target_tenant_id")
+        logger.debug(
+            "Federating Azure host identity into target app",
+            target_tenant_id=target_tenant_id,
+            target_client_id=target_client_id,
+            connector_id=self.connector.id,
+        )
+
+        def host_assertion() -> str:
+            return str(base.get_token(_AZURE_TOKEN_EXCHANGE_SCOPE).token)
+
+        return ClientAssertionCredential(tenant_id=str(target_tenant_id), client_id=str(target_client_id), func=host_assertion)
+
     def _get_azure_clients(self) -> tuple[Any, Any]:
         """Get or create Azure clients."""
         try:
@@ -654,39 +749,23 @@ class AzureProvider(CloudProvider):
             from azure.mgmt.network import NetworkManagementClient
 
             if self._compute_client is None:
-                # Check if service principal credentials are provided
-                cred_config = self.credential.config if self.credential else {}
-                client_id = cred_config.get("client_id")
-                client_secret = cred_config.get("client_secret")
-                tenant_id = cred_config.get("tenant_id")
-
-                azure_credential: Any
-                if client_id and client_secret and tenant_id:
-                    from azure.identity import ClientSecretCredential
-
-                    azure_credential = ClientSecretCredential(
-                        tenant_id=tenant_id,
-                        client_id=client_id,
-                        client_secret=client_secret,
-                    )
-                else:
-                    # Fall back to default credentials
-                    from azure.identity import DefaultAzureCredential
-
-                    azure_credential = DefaultAzureCredential()
-
-                self._compute_client = ComputeManagementClient(  # type: ignore[assignment]
-                    azure_credential, self._config.subscription_id
-                )
-                self._network_client = NetworkManagementClient(  # type: ignore[assignment]
-                    azure_credential, self._config.subscription_id
-                )
-            return self._compute_client, self._network_client
+                # azure-identity is a separate package from azure-mgmt-*;
+                # _build_credential imports it, so keep it under this guard.
+                azure_credential = self._build_credential()
         except ImportError:
             logger.error(
                 "Azure SDK not installed. Install with: pip install octoprox[cloud]"
             )
             return None, None
+
+        if self._compute_client is None:
+            self._compute_client = ComputeManagementClient(  # type: ignore[assignment]
+                azure_credential, self._config.subscription_id
+            )
+            self._network_client = NetworkManagementClient(  # type: ignore[assignment]
+                azure_credential, self._config.subscription_id
+            )
+        return self._compute_client, self._network_client
 
     async def create_instance(self) -> Proxy | None:
         """Create a new Azure VM configured as a proxy."""
