@@ -43,7 +43,10 @@ def test_default_registry_contents(registry: ProviderRegistry) -> None:
 
 
 def test_code_type_validation_delegates_to_pydantic(registry: ProviderRegistry) -> None:
-    assert registry.validate_credential_config("aws", {"access_key": "a", "secret_key": "s"}) == {"access_key": "a", "secret_key": "s"}
+    validated = registry.validate_credential_config("aws", {"access_key": "a", "secret_key": "s"})
+    assert validated == {"auth_mode": "access_keys", "access_key": "a", "secret_key": "s"}
+    # The defaulted mode is stored as a plain string, not the enum member.
+    assert type(validated["auth_mode"]) is str
     with pytest.raises(ValueError):
         registry.validate_credential_config("aws", {"access_key": "", "secret_key": "s"})
     assert registry.validate_connector_config("static_proxy_provider", {"anything": 1}) == {}

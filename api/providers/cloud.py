@@ -9,6 +9,7 @@ Actual implementations require the 'cloud' optional dependencies.
 
 import asyncio
 import base64
+import re
 import secrets
 import string
 from abc import abstractmethod
@@ -18,7 +19,7 @@ from typing import Any
 import structlog
 
 from api.models.connector import Connector
-from api.models.credential import Credential
+from api.models.credential import AWSAuthMode, Credential
 from api.models.proxy import Proxy, ProxyStatus
 from api.providers.base import ProxyProvider
 
@@ -123,6 +124,32 @@ class CloudProvider(ProxyProvider):
         ...
 
 
+def _assumed_role_provider(fetcher: Any) -> Any:
+    """botocore credential provider that yields refreshable credentials from ``fetcher``.
+
+    Holds only the fetcher, so the provider does not keep the session-building
+    scope alive for as long as the session exists.
+    """
+    from botocore.credentials import (  # type: ignore[import-untyped]
+        CredentialProvider,
+        DeferredRefreshableCredentials,
+    )
+
+    class AssumedRoleProvider(CredentialProvider):  # type: ignore[misc]
+        METHOD = "assume-role"
+
+        def __init__(self, fetcher: Any) -> None:
+            super().__init__()
+            self._fetcher = fetcher
+
+        def load(self) -> Any:
+            return DeferredRefreshableCredentials(
+                refresh_using=self._fetcher.fetch_credentials, method=self.METHOD
+            )
+
+    return AssumedRoleProvider(fetcher)
+
+
 class AWSProvider(CloudProvider):
     """AWS EC2-based proxy provider.
 
@@ -139,9 +166,12 @@ class AWSProvider(CloudProvider):
     Note: AMI is automatically determined based on region and instance type.
     Ubuntu 24.04 LTS is used for all instances.
 
-    Credential config (secrets):
-        - access_key: AWS access key ID
-        - secret_key: AWS secret access key
+    Credential config:
+        - auth_mode: "access_keys" (stored IAM user keys) or "host_role" (the
+          identity of the host Octoprox runs on; nothing stored)
+        - access_key / secret_key: required in access_keys mode
+        - role_arn: optional role assumed with sts:AssumeRole from the base identity
+        - external_id: optional ExternalId for that AssumeRole call
     """
 
     def __init__(self, connector: Connector, credential: Credential) -> None:
@@ -157,38 +187,91 @@ class AWSProvider(CloudProvider):
         self._ec2_client = None
         self._ec2_resource = None
 
+    def _role_session_name(self) -> str:
+        """sts:AssumeRole session name: ``octoprox-<credential id>``, within AWS limits."""
+        raw = f"octoprox-{self.credential.id if self.credential else 'default'}"
+        return re.sub(r"[^\w+=,.@-]", "-", raw)[:64]
+
+    def _build_session(self, boto3: Any) -> Any:
+        """Create the boto3 session the EC2 clients are made from.
+
+        The base identity comes from the credential's auth mode. If the
+        credential names a role, the returned session carries botocore's
+        refreshable assume-role credentials, so every request is signed with
+        a live session token and re-assumes the role before expiry.
+        """
+        cred_config = self.credential.config if self.credential else {}
+        region = self._config.region
+        auth_mode = cred_config.get("auth_mode")
+        access_key = cred_config.get("access_key")
+        secret_key = cred_config.get("secret_key")
+
+        # Configs saved before auth_mode existed carry no mode; they used the
+        # stored keys when present and the host chain otherwise.
+        has_keys = bool(access_key and secret_key)
+        if auth_mode == AWSAuthMode.HOST_ROLE or (auth_mode is None and not has_keys):
+            # Default credential chain: instance profile, task role, pod
+            # identity, environment variables, shared config.
+            base = boto3.Session(region_name=region)
+        elif has_keys:
+            base = boto3.Session(
+                aws_access_key_id=access_key,
+                aws_secret_access_key=secret_key,
+                region_name=region,
+            )
+        else:
+            # Explicit access_keys mode with no keys must never fall through
+            # to the host identity: that would provision in the wrong account.
+            raise ValueError("AWS credential is in access_keys mode but has no access_key/secret_key")
+
+        role_arn = cred_config.get("role_arn")
+        if not role_arn:
+            return base
+
+        import botocore.session  # type: ignore[import-untyped]
+        from botocore.credentials import AssumeRoleCredentialFetcher
+        from botocore.exceptions import NoCredentialsError  # type: ignore[import-untyped]
+
+        source_credentials = base.get_credentials()
+        if source_credentials is None:
+            raise NoCredentialsError()
+
+        extra_args: dict[str, Any] = {"RoleSessionName": self._role_session_name()}
+        external_id = cred_config.get("external_id")
+        if external_id:
+            extra_args["ExternalId"] = external_id
+        logger.debug("Assuming AWS role", role_arn=role_arn, connector_id=self.connector.id)
+        fetcher = AssumeRoleCredentialFetcher(
+            client_creator=base.client,
+            source_credentials=source_credentials,
+            role_arn=role_arn,
+            extra_args=extra_args,
+        )
+        assumed_session = botocore.session.Session()
+        # Put the assumed role at the head of the session's credential chain.
+        # The resolver is botocore's extension point for custom credential
+        # sources, so no private session state is touched.
+        resolver = assumed_session.get_component("credential_provider")
+        resolver.insert_before("env", _assumed_role_provider(fetcher))
+        return boto3.Session(botocore_session=assumed_session, region_name=region)
+
     def _get_boto3_clients(self) -> tuple[Any, Any]:
-        """Get or create boto3 clients."""
+        """Get or create boto3 clients.
+
+        Resolving the base identity may call the instance metadata service,
+        so callers on the event loop should run this in a thread.
+        """
         try:
             import boto3  # type: ignore[import-untyped]
-
-            if self._ec2_client is None:
-                # Get credentials from credential config
-                cred_config = self.credential.config if self.credential else {}
-                access_key = cred_config.get("access_key")
-                secret_key = cred_config.get("secret_key")
-
-                if access_key and secret_key:
-                    self._ec2_client = boto3.client(
-                        "ec2",
-                        region_name=self._config.region,
-                        aws_access_key_id=access_key,
-                        aws_secret_access_key=secret_key,
-                    )
-                    self._ec2_resource = boto3.resource(
-                        "ec2",
-                        region_name=self._config.region,
-                        aws_access_key_id=access_key,
-                        aws_secret_access_key=secret_key,
-                    )
-                else:
-                    # Fall back to default credentials (env vars, IAM role, etc.)
-                    self._ec2_client = boto3.client("ec2", region_name=self._config.region)
-                    self._ec2_resource = boto3.resource("ec2", region_name=self._config.region)
-            return self._ec2_client, self._ec2_resource
         except ImportError:
             logger.error("boto3 not installed. Install with: pip install octoprox[cloud]")
             return None, None
+
+        if self._ec2_client is None:
+            session = self._build_session(boto3)
+            self._ec2_client = session.client("ec2")
+            self._ec2_resource = session.resource("ec2")
+        return self._ec2_client, self._ec2_resource
 
     async def create_instance(self) -> Proxy | None:
         """Create a new EC2 instance configured as a proxy."""
@@ -210,7 +293,7 @@ class AWSProvider(CloudProvider):
             instance_name=self._config.instance_name,
         )
 
-        _, ec2_resource = self._get_boto3_clients()
+        _, ec2_resource = await asyncio.to_thread(self._get_boto3_clients)
         if not ec2_resource:
             return None
 
@@ -294,7 +377,7 @@ class AWSProvider(CloudProvider):
 
     async def terminate_instance(self, instance_id: str) -> bool:
         """Terminate an EC2 instance."""
-        ec2_client, _ = self._get_boto3_clients()
+        ec2_client, _ = await asyncio.to_thread(self._get_boto3_clients)
         if not ec2_client:
             return False
 

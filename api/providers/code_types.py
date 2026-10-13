@@ -13,8 +13,8 @@ from __future__ import annotations
 from typing import Any
 
 from api.models.connector import validate_connector_config
-from api.models.credential import CredentialType, validate_credential_config
-from api.providers.sdk.descriptor import FieldSpec
+from api.models.credential import AWSAuthMode, CredentialType, validate_credential_config
+from api.providers.sdk.descriptor import Condition, FieldSpec, OptionSpec
 
 
 def _credential_validator(type_id: str) -> Any:
@@ -36,9 +36,60 @@ STATIC_CREDENTIAL_FIELDS = [
     FieldSpec(key="password", label="Default password", type="password", secret=True),
 ]
 
+_AWS_USES_ACCESS_KEYS = Condition(field="credential.auth_mode", equals=AWSAuthMode.ACCESS_KEYS.value)
+
 AWS_CREDENTIAL_FIELDS = [
-    FieldSpec(key="access_key", label="Access key", required=True),
-    FieldSpec(key="secret_key", label="Secret key", type="password", secret=True, required=True),
+    FieldSpec(
+        key="auth_mode",
+        label="Authentication",
+        type="select",
+        required=True,
+        default=AWSAuthMode.ACCESS_KEYS.value,
+        options=[
+            OptionSpec(
+                value=AWSAuthMode.ACCESS_KEYS.value,
+                label="Access keys",
+                description="An IAM user's access key and secret key, stored encrypted.",
+            ),
+            OptionSpec(
+                value=AWSAuthMode.HOST_ROLE.value,
+                label="Host IAM role",
+                description="The identity Octoprox runs with (instance profile, task role, pod identity). Nothing is stored.",
+            ),
+        ],
+        help="Host IAM role needs no stored secrets and is the recommended choice when Octoprox runs on AWS.",
+        details=(
+            "With Host IAM role, boto3's default credential chain is used: the EC2 instance "
+            "profile, ECS task role, EKS pod identity or IRSA, or AWS_ACCESS_KEY_ID style "
+            "environment variables on the Octoprox host. See the AWS setup guide."
+        ),
+    ),
+    FieldSpec(key="access_key", label="Access key", required=True, show_when=_AWS_USES_ACCESS_KEYS),
+    FieldSpec(
+        key="secret_key",
+        label="Secret key",
+        type="password",
+        secret=True,
+        required=True,
+        show_when=_AWS_USES_ACCESS_KEYS,
+    ),
+    FieldSpec(
+        key="role_arn",
+        label="Role to assume",
+        placeholder="arn:aws:iam::123456789012:role/octoprox",
+        help="Optional. Octoprox assumes this role with sts:AssumeRole and provisions EC2 with its temporary credentials.",
+        details=(
+            "Use this to run in a different account than the one the credentials above belong to, "
+            "or to keep the base identity free of EC2 permissions. The role's trust policy must "
+            "allow the base identity to assume it."
+        ),
+    ),
+    FieldSpec(
+        key="external_id",
+        label="External ID",
+        show_when=Condition(field="credential.role_arn"),
+        help="Optional. Sent as ExternalId when assuming the role; set it if the role's trust policy requires one.",
+    ),
 ]
 
 GCP_CREDENTIAL_FIELDS = [

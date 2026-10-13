@@ -182,8 +182,23 @@ Content-Type: application/json
   "name": "AWS Production",
   "type": "aws",
   "config": {
+    "auth_mode": "access_keys",
     "access_key": "AKIAIOSFODNN7EXAMPLE",
     "secret_key": "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
+  }
+}
+```
+
+An AWS credential can also carry no secrets at all. With `"auth_mode": "host_role"` Octoprox uses the identity of the host it runs on (EC2 instance profile, ECS task role, EKS pod identity or `AWS_*` environment variables). Either mode may add `role_arn` and an optional `external_id` to assume a role with `sts:AssumeRole` before touching EC2. See the [AWS setup guide](aws-setup) for the IAM side.
+
+```json
+{
+  "name": "AWS Customer Account",
+  "type": "aws",
+  "config": {
+    "auth_mode": "host_role",
+    "role_arn": "arn:aws:iam::123456789012:role/octoprox-proxies",
+    "external_id": "acme-7f3b9c"
   }
 }
 ```

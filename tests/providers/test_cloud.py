@@ -3,7 +3,14 @@
 
 """Tests for cloud provider classes."""
 
+import sys
+from datetime import UTC, datetime, timedelta
+from typing import Any
+from unittest.mock import MagicMock
+
 import pytest
+from botocore.credentials import Credentials, DeferredRefreshableCredentials
+from botocore.exceptions import NoCredentialsError
 
 from api.models.connector import (
     AWSConnectorConfig,
@@ -594,3 +601,273 @@ class TestBuildSquidSetupScript:
         script_none = build_squid_setup_script(None, None)
         script_default = build_squid_setup_script()
         assert script_none == script_default
+
+
+
+class _FakeSession:
+    """Stands in for boto3.Session: records its kwargs and hands back tagged clients."""
+
+    def __init__(self, sts: MagicMock, **kwargs: Any) -> None:
+        self.kwargs = kwargs
+        self._sts = sts
+
+    def client(self, name: str, **kwargs: Any) -> Any:
+        if name == "sts":
+            self._sts.created_with = kwargs
+            return self._sts
+        return ("client", name, self.kwargs)
+
+    def resource(self, name: str) -> Any:
+        return ("resource", name, self.kwargs)
+
+    def get_credentials(self) -> Credentials | None:
+        if "aws_access_key_id" in self.kwargs:
+            return Credentials(self.kwargs["aws_access_key_id"], self.kwargs["aws_secret_access_key"])
+        return self.kwargs.get("host_credentials")
+
+
+class _FakeBoto3:
+    """Minimal boto3 module: Session() plus one shared STS mock."""
+
+    def __init__(self) -> None:
+        self.sessions: list[_FakeSession] = []
+        self.sts = MagicMock()
+        self.sts.assume_role.return_value = {
+            "Credentials": {
+                "AccessKeyId": "ASIATEMPKEY",
+                "SecretAccessKey": "tempsecret",
+                "SessionToken": "temptoken",
+                "Expiration": datetime.now(UTC) + timedelta(hours=1),
+            }
+        }
+        # What the default chain finds on the host; None means nothing.
+        self.host_credentials: Credentials | None = Credentials("AKIAHOST", "hostsecret")
+
+    def Session(self, **kwargs: Any) -> _FakeSession:  # noqa: N802 - mirrors boto3's name
+        if "aws_access_key_id" not in kwargs and "botocore_session" not in kwargs:
+            kwargs = {**kwargs, "host_credentials": self.host_credentials}
+        session = _FakeSession(self.sts, **kwargs)
+        self.sessions.append(session)
+        return session
+
+
+def _credential(config: dict[str, Any], credential_id: str = "test-aws-credential") -> Credential:
+    return Credential(
+        id=credential_id,
+        name="AWS",
+        type=CredentialType.AWS,
+        project_id="test-project",
+        config=config,
+    )
+
+
+def _assumed_credentials(fake_boto3: _FakeBoto3) -> Any:
+    """The refreshable credentials carried by the session the EC2 clients were made from."""
+    assumed = fake_boto3.sessions[-1]
+    return assumed.kwargs["botocore_session"].get_credentials()
+
+
+class TestAWSProviderSessions:
+    """How the AWS provider turns a credential's auth mode into boto3 clients."""
+
+    @pytest.fixture
+    def fake_boto3(self, monkeypatch: pytest.MonkeyPatch) -> _FakeBoto3:
+        fake = _FakeBoto3()
+        monkeypatch.setitem(sys.modules, "boto3", fake)
+        return fake
+
+    def test_access_keys_mode_uses_stored_keys(
+        self, aws_connector: Connector, fake_boto3: _FakeBoto3
+    ) -> None:
+        credential = _credential(
+            {"auth_mode": "access_keys", "access_key": "AKIA", "secret_key": "secret"}
+        )
+        provider = AWSProvider(aws_connector, credential)
+
+        client, resource = provider._get_boto3_clients()
+
+        assert len(fake_boto3.sessions) == 1
+        assert fake_boto3.sessions[0].kwargs == {
+            "aws_access_key_id": "AKIA",
+            "aws_secret_access_key": "secret",
+            "region_name": "us-east-1",
+        }
+        assert client == ("client", "ec2", fake_boto3.sessions[0].kwargs)
+        assert resource == ("resource", "ec2", fake_boto3.sessions[0].kwargs)
+        fake_boto3.sts.assume_role.assert_not_called()
+
+    def test_legacy_config_without_auth_mode_uses_stored_keys(
+        self, aws_connector: Connector, fake_boto3: _FakeBoto3
+    ) -> None:
+        """Credentials saved before auth_mode existed keep working unchanged."""
+        provider = AWSProvider(aws_connector, _credential({"access_key": "AKIA", "secret_key": "s"}))
+
+        provider._get_boto3_clients()
+
+        assert fake_boto3.sessions[0].kwargs["aws_access_key_id"] == "AKIA"
+
+    def test_access_keys_mode_without_keys_never_uses_host_identity(
+        self, aws_connector: Connector, fake_boto3: _FakeBoto3
+    ) -> None:
+        """An explicit access_keys credential with no keys fails instead of provisioning as the host."""
+        provider = AWSProvider(aws_connector, _credential({"auth_mode": "access_keys"}))
+
+        with pytest.raises(ValueError, match="access_keys mode"):
+            provider._get_boto3_clients()
+        assert fake_boto3.sessions == []
+
+    def test_host_role_mode_uses_default_credential_chain(
+        self, aws_connector: Connector, fake_boto3: _FakeBoto3
+    ) -> None:
+        provider = AWSProvider(aws_connector, _credential({"auth_mode": "host_role"}))
+
+        provider._get_boto3_clients()
+
+        assert "aws_access_key_id" not in fake_boto3.sessions[0].kwargs
+        assert fake_boto3.sessions[0].kwargs["region_name"] == "us-east-1"
+        fake_boto3.sts.assume_role.assert_not_called()
+
+    def test_host_role_mode_ignores_leftover_keys(
+        self, aws_connector: Connector, fake_boto3: _FakeBoto3
+    ) -> None:
+        provider = AWSProvider(
+            aws_connector,
+            _credential({"auth_mode": "host_role", "access_key": "stale", "secret_key": "stale"}),
+        )
+
+        provider._get_boto3_clients()
+
+        assert "aws_access_key_id" not in fake_boto3.sessions[0].kwargs
+
+    def test_role_arn_is_assumed_from_base_identity(
+        self, aws_connector: Connector, fake_boto3: _FakeBoto3
+    ) -> None:
+        credential = _credential(
+            {
+                "auth_mode": "access_keys",
+                "access_key": "AKIA",
+                "secret_key": "secret",
+                "role_arn": "arn:aws:iam::123456789012:role/octoprox",
+                "external_id": "corp-42",
+            }
+        )
+        provider = AWSProvider(aws_connector, credential)
+
+        client, _ = provider._get_boto3_clients()
+
+        # Building the session makes no network call; the first use does.
+        fake_boto3.sts.assume_role.assert_not_called()
+        base, assumed = fake_boto3.sessions
+        assert base.kwargs["aws_access_key_id"] == "AKIA"
+        assert assumed.kwargs["region_name"] == "us-east-1"
+        assert client == ("client", "ec2", assumed.kwargs)
+
+        credentials = _assumed_credentials(fake_boto3)
+        assert isinstance(credentials, DeferredRefreshableCredentials)
+        frozen = credentials.get_frozen_credentials()
+
+        fake_boto3.sts.assume_role.assert_called_once_with(
+            RoleArn="arn:aws:iam::123456789012:role/octoprox",
+            RoleSessionName="octoprox-test-aws-credential",
+            ExternalId="corp-42",
+        )
+        # The STS call itself was signed with the base identity.
+        assert fake_boto3.sts.created_with["aws_access_key_id"] == "AKIA"
+        assert (frozen.access_key, frozen.secret_key, frozen.token) == ("ASIATEMPKEY", "tempsecret", "temptoken")
+
+    def test_host_role_assuming_a_role_uses_host_identity_for_sts(
+        self, aws_connector: Connector, fake_boto3: _FakeBoto3
+    ) -> None:
+        credential = _credential(
+            {"auth_mode": "host_role", "role_arn": "arn:aws:iam::123456789012:role/octoprox"}
+        )
+        provider = AWSProvider(aws_connector, credential)
+
+        provider._get_boto3_clients()
+        _assumed_credentials(fake_boto3).get_frozen_credentials()
+
+        kwargs = fake_boto3.sts.assume_role.call_args.kwargs
+        assert "ExternalId" not in kwargs
+        assert fake_boto3.sts.created_with["aws_access_key_id"] == "AKIAHOST"
+
+    def test_assumed_credentials_are_cached_until_refresh_is_due(
+        self, aws_connector: Connector, fake_boto3: _FakeBoto3
+    ) -> None:
+        credential = _credential(
+            {"auth_mode": "host_role", "role_arn": "arn:aws:iam::123456789012:role/octoprox"}
+        )
+        provider = AWSProvider(aws_connector, credential)
+        provider._get_boto3_clients()
+        credentials = _assumed_credentials(fake_boto3)
+
+        credentials.get_frozen_credentials()
+        credentials.get_frozen_credentials()
+
+        assert fake_boto3.sts.assume_role.call_count == 1
+
+    def test_assumed_credentials_refresh_when_inside_the_mandatory_window(
+        self, aws_connector: Connector, fake_boto3: _FakeBoto3
+    ) -> None:
+        fake_boto3.sts.assume_role.return_value["Credentials"]["Expiration"] = datetime.now(UTC) + timedelta(minutes=5)
+        credential = _credential(
+            {"auth_mode": "host_role", "role_arn": "arn:aws:iam::123456789012:role/octoprox"}
+        )
+        provider = AWSProvider(aws_connector, credential)
+        provider._get_boto3_clients()
+        credentials = _assumed_credentials(fake_boto3)
+
+        credentials.get_frozen_credentials()
+        credentials.get_frozen_credentials()
+
+        assert fake_boto3.sts.assume_role.call_count == 2
+
+    def test_role_without_host_identity_fails_clearly(
+        self, aws_connector: Connector, fake_boto3: _FakeBoto3
+    ) -> None:
+        fake_boto3.host_credentials = None
+        credential = _credential(
+            {"auth_mode": "host_role", "role_arn": "arn:aws:iam::123456789012:role/octoprox"}
+        )
+        provider = AWSProvider(aws_connector, credential)
+
+        with pytest.raises(NoCredentialsError):
+            provider._get_boto3_clients()
+
+    def test_clients_are_cached(self, aws_connector: Connector, fake_boto3: _FakeBoto3) -> None:
+        provider = AWSProvider(aws_connector, _credential({"auth_mode": "host_role"}))
+
+        first = provider._get_boto3_clients()
+        second = provider._get_boto3_clients()
+
+        assert first == second
+        assert len(fake_boto3.sessions) == 1
+
+    def test_role_session_name_is_sanitised_and_bounded(self, aws_connector: Connector) -> None:
+        provider = AWSProvider(aws_connector, _credential({}, credential_id="has space/and:colon" + "x" * 80))
+
+        name = provider._role_session_name()
+
+        assert name.startswith("octoprox-has-space-and-colon")
+        assert len(name) == 64
+
+    def test_assume_role_failure_propagates(
+        self, aws_connector: Connector, fake_boto3: _FakeBoto3
+    ) -> None:
+        """A rejected AssumeRole surfaces to the auto scaler instead of being swallowed."""
+        fake_boto3.sts.assume_role.side_effect = RuntimeError("AccessDenied: not authorized to assume")
+        credential = _credential(
+            {"auth_mode": "host_role", "role_arn": "arn:aws:iam::123456789012:role/octoprox"}
+        )
+        provider = AWSProvider(aws_connector, credential)
+        provider._get_boto3_clients()
+
+        with pytest.raises(RuntimeError, match="AccessDenied"):
+            _assumed_credentials(fake_boto3).get_frozen_credentials()
+
+    def test_missing_boto3_returns_no_clients(
+        self, aws_connector: Connector, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setitem(sys.modules, "boto3", None)
+        provider = AWSProvider(aws_connector, _credential({"auth_mode": "host_role"}))
+
+        assert provider._get_boto3_clients() == (None, None)

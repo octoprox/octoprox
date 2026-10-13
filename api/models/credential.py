@@ -10,12 +10,13 @@ comes from a provider descriptor and is validated by the registry.
 """
 
 import json
+import re
 from datetime import datetime
 from enum import Enum
 from typing import Any
 from uuid import uuid4
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from api.core import utc_now
 
@@ -36,18 +37,72 @@ class StaticProxyProviderConfig(BaseModel):
     password: str | None = None
 
 
+class AWSAuthMode(str, Enum):
+    """How an AWS credential obtains its base identity.
+
+    ``ACCESS_KEYS`` stores an IAM user's key pair. ``HOST_ROLE`` stores nothing
+    and uses the identity of the environment Octoprox runs in (EC2 instance
+    profile, ECS task role, EKS pod identity, or the AWS_* environment
+    variables). Either mode may then assume a role (``role_arn``), which is
+    how customers grant access to an account without handing out long-lived
+    keys.
+    """
+    ACCESS_KEYS = "access_keys"
+    HOST_ROLE = "host_role"
+
+
+# arn:aws:iam::123456789012:role/path/Name (also aws-cn, aws-us-gov partitions);
+# the path is zero or more non-empty segments, so "role//x" and "role/x/" are rejected
+AWS_ROLE_ARN_PATTERN = re.compile(r"^arn:aws(-[a-z]+)*:iam::\d{12}:role/(?:[\w+=,.@-]+/)*[\w+=,.@-]+$")
+# ExternalId as accepted by sts:AssumeRole
+AWS_EXTERNAL_ID_PATTERN = re.compile(r"^[\w+=,.@:/-]{2,1224}$")
+
+
 class AWSCredentialConfig(BaseModel):
-    """Configuration for AWS credentials."""
-    access_key: str
-    secret_key: str
+    """Configuration for AWS credentials.
+
+    ``access_key``/``secret_key`` are required in ``access_keys`` mode and
+    dropped in ``host_role`` mode so a stale key pair never lingers in the
+    stored config. ``role_arn`` is optional in both modes; ``external_id``
+    only makes sense alongside it.
+    """
+    # Store the plain string so the config dict stays JSON-native. The default
+    # is only converted when validate_default is on; without it an omitted
+    # auth_mode would dump as the enum member.
+    model_config = ConfigDict(use_enum_values=True, validate_default=True)
+
+    auth_mode: AWSAuthMode = AWSAuthMode.ACCESS_KEYS
+    access_key: str | None = None
+    secret_key: str | None = None
+    role_arn: str | None = None
+    external_id: str | None = None
 
     @model_validator(mode='after')
     def validate_required_fields(self) -> 'AWSCredentialConfig':
-        """Ensure required fields are not empty."""
-        if not self.access_key or not self.access_key.strip():
-            raise ValueError('access_key is required and cannot be empty')
-        if not self.secret_key or not self.secret_key.strip():
-            raise ValueError('secret_key is required and cannot be empty')
+        """Check the fields the selected auth mode needs and normalise the rest."""
+        if self.auth_mode == AWSAuthMode.ACCESS_KEYS:
+            if not self.access_key or not self.access_key.strip():
+                raise ValueError('access_key is required and cannot be empty')
+            if not self.secret_key or not self.secret_key.strip():
+                raise ValueError('secret_key is required and cannot be empty')
+            self.access_key = self.access_key.strip()
+            self.secret_key = self.secret_key.strip()
+        else:
+            self.access_key = None
+            self.secret_key = None
+
+        self.role_arn = (self.role_arn or "").strip() or None
+        if self.role_arn is not None and not AWS_ROLE_ARN_PATTERN.match(self.role_arn):
+            raise ValueError(
+                'role_arn must be an IAM role ARN such as arn:aws:iam::123456789012:role/octoprox'
+            )
+
+        self.external_id = (self.external_id or "").strip() or None
+        if self.external_id is not None:
+            if self.role_arn is None:
+                raise ValueError('external_id requires role_arn')
+            if not AWS_EXTERNAL_ID_PATTERN.match(self.external_id):
+                raise ValueError('external_id contains characters AWS does not accept')
         return self
 
 

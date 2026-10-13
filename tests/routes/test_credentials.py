@@ -367,3 +367,151 @@ class TestCredentialRoleAccess:
         )
         assert response.status_code == 403
 
+
+
+class TestAWSCredentialAuthModes:
+    """AWS credentials: stored access keys, the host's IAM role, and role assumption."""
+
+    @staticmethod
+    def _create(client: TestClient, project_id: str, config: dict[str, Any]) -> Any:
+        return client.post(
+            f"/api/v1/projects/{project_id}/credentials",
+            json={"name": f"aws-{len(str(config))}", "type": "aws", "config": config},
+        )
+
+    def test_access_keys_is_the_default_mode(
+        self, authenticated_client: TestClient, created_project: dict[str, Any]
+    ) -> None:
+        """A config without auth_mode (as saved by older versions) is treated as access keys."""
+        response = self._create(
+            authenticated_client,
+            created_project["id"],
+            {"access_key": "AKIAIOSFODNN7EXAMPLE", "secret_key": "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"},
+        )
+
+        assert response.status_code == 201
+        assert response.json()["config"]["auth_mode"] == "access_keys"
+
+    def test_host_role_stores_no_secrets(
+        self, authenticated_client: TestClient, created_project: dict[str, Any]
+    ) -> None:
+        response = self._create(authenticated_client, created_project["id"], {"auth_mode": "host_role"})
+
+        assert response.status_code == 201
+        assert response.json()["config"] == {"auth_mode": "host_role"}
+
+    def test_host_role_with_assumed_role(
+        self, authenticated_client: TestClient, created_project: dict[str, Any]
+    ) -> None:
+        response = self._create(
+            authenticated_client,
+            created_project["id"],
+            {
+                "auth_mode": "host_role",
+                "role_arn": " arn:aws:iam::123456789012:role/octoprox-proxies ",
+                "external_id": "acme-7f3b9c",
+            },
+        )
+
+        assert response.status_code == 201
+        assert response.json()["config"] == {
+            "auth_mode": "host_role",
+            "role_arn": "arn:aws:iam::123456789012:role/octoprox-proxies",
+            "external_id": "acme-7f3b9c",
+        }
+
+    def test_access_keys_with_assumed_role(
+        self, authenticated_client: TestClient, created_project: dict[str, Any]
+    ) -> None:
+        response = self._create(
+            authenticated_client,
+            created_project["id"],
+            {
+                "auth_mode": "access_keys",
+                "access_key": "AKIAIOSFODNN7EXAMPLE",
+                "secret_key": "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+                "role_arn": "arn:aws-us-gov:iam::123456789012:role/path/to/octoprox",
+            },
+        )
+
+        assert response.status_code == 201
+        assert response.json()["config"]["role_arn"] == "arn:aws-us-gov:iam::123456789012:role/path/to/octoprox"
+
+    def test_access_keys_mode_requires_both_keys(
+        self, authenticated_client: TestClient, created_project: dict[str, Any]
+    ) -> None:
+        response = self._create(
+            authenticated_client,
+            created_project["id"],
+            {"auth_mode": "access_keys", "access_key": "AKIAIOSFODNN7EXAMPLE"},
+        )
+
+        assert response.status_code == 422
+        assert "secret_key" in response.json()["detail"]
+
+    def test_rejects_malformed_role_arn(
+        self, authenticated_client: TestClient, created_project: dict[str, Any]
+    ) -> None:
+        response = self._create(
+            authenticated_client,
+            created_project["id"],
+            {"auth_mode": "host_role", "role_arn": "arn:aws:iam::123456789012:user/not-a-role"},
+        )
+
+        assert response.status_code == 422
+        assert "role_arn" in response.json()["detail"]
+
+    def test_rejects_external_id_without_role(
+        self, authenticated_client: TestClient, created_project: dict[str, Any]
+    ) -> None:
+        response = self._create(
+            authenticated_client,
+            created_project["id"],
+            {"auth_mode": "host_role", "external_id": "acme"},
+        )
+
+        assert response.status_code == 422
+        assert "external_id requires role_arn" in response.json()["detail"]
+
+    def test_rejects_unknown_auth_mode(
+        self, authenticated_client: TestClient, created_project: dict[str, Any]
+    ) -> None:
+        response = self._create(authenticated_client, created_project["id"], {"auth_mode": "magic"})
+
+        assert response.status_code == 422
+
+    def test_switching_to_host_role_drops_stored_keys(
+        self, authenticated_client: TestClient, created_project: dict[str, Any]
+    ) -> None:
+        project_id = created_project["id"]
+        created = self._create(
+            authenticated_client,
+            project_id,
+            {"access_key": "AKIAIOSFODNN7EXAMPLE", "secret_key": "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"},
+        )
+        assert created.status_code == 201
+
+        # The UI omits hidden fields; the server must not keep the old keys either way.
+        response = authenticated_client.patch(
+            f"/api/v1/projects/{project_id}/credentials/{created.json()['id']}",
+            json={"config": {"auth_mode": "host_role", "access_key": "AKIAIOSFODNN7EXAMPLE", "secret_key": "x"}},
+        )
+
+        assert response.status_code == 200
+        assert response.json()["config"] == {"auth_mode": "host_role"}
+
+    def test_catalog_describes_the_auth_mode_field(self, authenticated_client: TestClient) -> None:
+        response = authenticated_client.get("/api/v1/providers")
+        assert response.status_code == 200
+        aws = next(p for p in response.json()["providers"] if p["id"] == "aws")
+        fields = {f["key"]: f for f in aws["credential_fields"]}
+
+        assert [o["value"] for o in fields["auth_mode"]["options"]] == ["access_keys", "host_role"]
+        assert fields["auth_mode"]["default"] == "access_keys"
+        assert fields["secret_key"]["show_when"] == {
+            "field": "credential.auth_mode",
+            "equals": "access_keys",
+            "in": None,
+            "negate": False,
+        }
+        assert fields["external_id"]["show_when"]["field"] == "credential.role_arn"
