@@ -100,6 +100,12 @@ def judge_level(
       disagree with the claim. Independent sources that disagree among
       themselves set ``disagreement`` and leave the claim unjudged.
     * ``first``: the highest-precedence independent answer disagrees with the claim.
+
+    The rule decides the verdict only, never the winner. When the databases
+    disagree with each other the top-ranked one still decides the value,
+    under either rule; ``consensus`` merely leaves the claim open instead of
+    flagging it. A project that wants no routing on unsettled evidence uses
+    the ``strict`` location policy, which refuses open claims.
     """
     ordered: list[LocationCandidate] = []
     for kind in policy.sources:

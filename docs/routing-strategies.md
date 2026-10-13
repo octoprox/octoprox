@@ -134,7 +134,7 @@ Octoprox narrows the project's healthy proxies before the routing strategy runs,
 3. A proxy with no known country is eligible only through its connector's list.
 4. A residential or mobile pool with **no** countries listed that has no slot group yet for the requested country creates one on the first request: `num_proxies` fresh sessions geo-targeted to that country, ready immediately. Later requests rotate across that group like any other, and the periodic sync keeps it alive. Pools that list countries are provisioned up front and never expand on demand.
 
-If nothing in the project serves the requested country, the request is rejected with `502 Bad Gateway`. Octoprox never silently falls back to another country.
+If nothing in the project serves the requested country, the request is rejected with `502 Bad Gateway`. Octoprox never silently falls back to another country. What happens when a proxy's exit turns out not to be where it should, and how that differs between pooled sessions, dynamic sessions and fixed exits, is worked through on [Location routing]({{ site.baseurl }}/location-routing).
 
 ## State and City Routing
 

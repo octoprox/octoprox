@@ -21,8 +21,14 @@ def db(origin: str, country: str | None, **location: object) -> LocationCandidat
 
 class TestWinner:
     def test_database_wins_by_default(self) -> None:
-        result = resolve([db("mm", "GB"), vendor_candidate(LocationTarget.reported("US")), endpoint_candidate(LocationTarget.reported("US"))], SourcePolicy())  # type: ignore[list-item]
+        result = resolve([db("mm", "GB"), vendor_candidate(LocationTarget.reported("US")), endpoint_candidate(LocationTarget.reported("GB"))], SourcePolicy())  # type: ignore[list-item]
         assert result.resolved_country == "GB" and result.resolved_source == GeoSourceKind.DATABASE and result.resolved_origin == "mm"
+
+    def test_database_wins_while_the_independent_sources_disagree(self) -> None:
+        # Database GB, echo US: under consensus the claim is open, and the top-ranked source still decides the value.
+        result = resolve([db("mm", "GB"), vendor_candidate(LocationTarget.reported("US")), endpoint_candidate(LocationTarget.reported("US"))], SourcePolicy())  # type: ignore[list-item]
+        assert result.country_conflict is None
+        assert result.resolved_country == "GB" and result.resolved_source == GeoSourceKind.DATABASE
 
     def test_source_order_is_policy(self) -> None:
         policy = SourcePolicy(sources=[GeoSourceKind.VENDOR, GeoSourceKind.DATABASE])
@@ -176,3 +182,41 @@ class TestObservedCountry:
         result = resolve([vendor_candidate(LocationTarget.reported("US"))], SourcePolicy())  # type: ignore[list-item]
         assert result.resolved_country == "US" and result.observed_country is None and result.country_conflict is None
         assert resolve([], SourcePolicy()).observed_country is None
+
+
+class TestOpenClaimRouting:
+    """Disagreeing databases leave the claim open under consensus; the value never depends on the rule."""
+
+    def _disagreeing(self) -> list[LocationCandidate]:
+        return [db("mm", "GB"), db("dbip", "FR"), vendor_candidate(LocationTarget.reported("US"))]  # type: ignore[list-item]
+
+    def test_consensus_leaves_the_claim_open_and_routes_on_the_top_database(self) -> None:
+        result = resolve(self._disagreeing(), SourcePolicy())
+        assert result.country_conflict is None
+        assert result.resolved_country == "GB" and result.resolved_source == GeoSourceKind.DATABASE
+        assert result.observed_country == "GB"
+
+    def test_first_flags_on_the_same_evidence_it_routes_on(self) -> None:
+        result = resolve(self._disagreeing(), SourcePolicy(conflict_rule=ConflictRule.FIRST))
+        assert result.country_conflict is True and result.resolved_country == "GB"
+
+    def test_vendor_first_routes_on_the_claim_whatever_the_verdict(self) -> None:
+        policy = SourcePolicy(sources=[GeoSourceKind.VENDOR, GeoSourceKind.DATABASE])
+        assert resolve(self._disagreeing(), policy).resolved_country == "US"
+        contradicted = resolve([db("mm", "GB"), db("dbip", "GB"), vendor_candidate(LocationTarget.reported("US"))], policy)  # type: ignore[list-item]
+        assert contradicted.country_conflict is True and contradicted.resolved_country == "US"
+
+    def test_disagreement_without_a_claim_keeps_the_top_answer(self) -> None:
+        result = resolve([db("mm", "GB"), db("dbip", "FR")], SourcePolicy())
+        assert result.country_conflict is None and result.resolved_country == "GB"
+
+    def test_applies_below_the_country(self) -> None:
+        candidates = [
+            db("mm", "US", region="New York", state_code="NY", city="New York"),
+            db("dbip", "US", region="New Jersey", state_code="NJ", city="Newark"),
+            vendor_candidate(LocationTarget(country="US", state="NJ", city="newark")),
+        ]
+        result = resolve(candidates, SourcePolicy())  # type: ignore[arg-type]
+        assert result.country_conflict is False and result.resolved_country == "US"
+        assert result.state_conflict is None and result.resolved_state == "NY"
+        assert result.city_conflict is None and result.resolved_city == "new_york"

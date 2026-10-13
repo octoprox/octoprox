@@ -39,6 +39,7 @@ from api.geo.models import (
     META_LOCATION_CANDIDATES,
     META_LOCATION_CHECKED_AT,
     META_LOCATION_CONFLICT,
+    META_LOCATION_VERDICT,
     META_STATE,
     META_STATE_SOURCE,
     META_VENDOR_CITY,
@@ -48,6 +49,7 @@ from api.geo.models import (
     GeoSettings,
     IpObservation,
     LocationCandidate,
+    LocationVerdict,
     ObservationSource,
     Resolution,
     SourcePolicy,
@@ -85,6 +87,7 @@ _TRACKED_KEYS = (
     META_CITY_SOURCE,
     META_LOCATION,
     META_LOCATION_CONFLICT,
+    META_LOCATION_VERDICT,
     META_LOCATION_CANDIDATES,
     META_DISCOVERED_IP,
 )
@@ -409,6 +412,11 @@ class GeoService:
         else:
             proxy.metadata.pop(META_LOCATION, None)
         proxy.metadata[META_LOCATION_CONFLICT] = resolution.country_conflict is True
+        verdict = LocationVerdict.of(resolution.country_conflict, resolution.claimed_country)
+        if verdict is None:
+            proxy.metadata.pop(META_LOCATION_VERDICT, None)
+        else:
+            proxy.metadata[META_LOCATION_VERDICT] = verdict.value
         proxy.metadata[META_LOCATION_CANDIDATES] = resolution.compact_candidates()
         proxy.metadata[META_LOCATION_CHECKED_AT] = utc_now().isoformat()
         return resolution, self._snapshot(proxy) != before

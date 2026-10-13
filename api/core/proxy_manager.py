@@ -72,7 +72,7 @@ from api.db.repository import (
     ProjectRepository,
     ProxyRepository,
 )
-from api.geo.models import META_LOCATION_CONFLICT, LocationPolicy
+from api.geo.models import LocationPolicy, eligible_under_strict
 from api.models.connector import (
     DEFAULT_ROUTING_WEIGHT,
     DEFAULT_TRAFFIC_LIMIT_STATUS,
@@ -2066,7 +2066,8 @@ class ProxyManager:
         widened to the country.
 
         Under a ``strict`` location policy the project also refuses proxies
-        whose vendor-declared location is contradicted by attribution.
+        whose vendor-declared location is contradicted by attribution, or
+        left open by it (``eligible_under_strict``).
         """
         target = location or None
         wanted = target.country if target else None
@@ -2089,7 +2090,7 @@ class ProxyManager:
                 continue
             if not include_quarantined and self._rate_limiter.is_quarantined(p.id):
                 continue
-            if strict and p.metadata.get(META_LOCATION_CONFLICT) is True:
+            if strict and not eligible_under_strict(p.metadata):
                 continue
             declared, hide_geo_groups = entry
             if is_dynamic_gateway(p):

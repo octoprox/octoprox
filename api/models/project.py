@@ -81,7 +81,7 @@ class Project(BaseModel):
     # IP attribution: what a contradicted vendor location does to a proxy of
     # this project, and whether a session's exit is verified before its first
     # request is forwarded (see docs/ip-attribution.md).
-    location_policy: LocationPolicy = LocationPolicy.OFF
+    location_policy: LocationPolicy = LocationPolicy.WARN
     location_preflight: PreflightMode = PreflightMode.OFF
     # Which evidence decides a proxy's country and when a vendor counts as
     # contradicted. None inherits the install default (GeoSettings).
@@ -156,7 +156,7 @@ class ProjectCreate(BaseModel):
     tls_mitm_engine: MitmEngine | None = None
     tls_mitm_browser: MitmBrowser | None = None
     metrics_retention_days: int = 90
-    location_policy: LocationPolicy = LocationPolicy.OFF
+    location_policy: LocationPolicy = LocationPolicy.WARN
     location_preflight: PreflightMode = PreflightMode.OFF
     location_sources: list[GeoSourceKind] | None = None
     location_conflict_rule: ConflictRule | None = None
@@ -234,7 +234,7 @@ class ProjectResponse(BaseModel):
     tls_mitm_engine: MitmEngine | None
     tls_mitm_browser: MitmBrowser | None
     metrics_retention_days: int
-    location_policy: LocationPolicy = LocationPolicy.OFF
+    location_policy: LocationPolicy = LocationPolicy.WARN
     location_preflight: PreflightMode = PreflightMode.OFF
     location_sources: list[GeoSourceKind] | None = None
     location_conflict_rule: ConflictRule | None = None
@@ -258,7 +258,7 @@ class ProjectSummary(BaseModel):
     tls_mitm_mode: MitmMode = MitmMode.OFF
     tls_mitm_engine: MitmEngine | None = None
     tls_mitm_browser: MitmBrowser | None = None
-    location_policy: LocationPolicy = LocationPolicy.OFF
+    location_policy: LocationPolicy = LocationPolicy.WARN
     location_preflight: PreflightMode = PreflightMode.OFF
     location_sources: list[GeoSourceKind] | None = None
     location_conflict_rule: ConflictRule | None = None

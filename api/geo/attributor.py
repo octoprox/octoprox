@@ -31,6 +31,10 @@ from api.core.event_bus import event_bus
 from api.core.signals import exit_ip_changed, exit_ip_observed, exit_location_mismatch, proxy_added
 from api.geo.models import (
     META_LOCATION_CONFLICT,
+    META_LOCATION_VERDICT,
+    META_VENDOR_COUNTRY,
+    LocationPolicy,
+    LocationVerdict,
     ObservationSource,
     SourcePolicy,
 )
@@ -176,6 +180,8 @@ class ProxyAttributor:
             endpoint=endpoint,
             project_id=project_id,
         )
+        if await self._rotate_if_strict(proxy):
+            return proxy
         if changed:
             await self._proxy_store.update_proxy(proxy)
         if isinstance(previous, str) and previous and previous != ip:
@@ -184,6 +190,36 @@ class ProxyAttributor:
                 exit_ip_changed, self, proxy_id=proxy.id, project_id=project_id, old_ip=previous, new_ip=ip
             )
         return proxy
+
+    async def _rotate_if_strict(self, proxy: Proxy) -> bool:
+        """Replace a pooled session slot whose claim was just contradicted, when its project is strict.
+
+        A strict project will not route to the slot, and nothing else would
+        ever move it: the vendor keeps the session where it is and the health
+        check keeps confirming the same exit. Removing the row makes the
+        provider sync provision a fresh session in its place. Fixed exits are
+        left alone (the port refresh already drops an exit that left its
+        countries, and a static row is the operator's), and an open verdict
+        is not a contradiction: rotating on missing evidence would churn a
+        pool the databases do not cover, so such a slot waits, ineligible,
+        for a sighting that settles it.
+        """
+        if self._proxy_store is None or proxy.metadata.get(META_LOCATION_VERDICT) != LocationVerdict.CONTRADICTED:
+            return False
+        if is_dynamic_gateway(proxy) or not proxy.metadata.get(META_SESSION_ID):
+            return False
+        project = self._project_of(proxy.connector_id)
+        if project is None or project.location_policy != LocationPolicy.STRICT:
+            return False
+        logger.info(
+            "Replacing contradicted vendor session under strict policy",
+            proxy_id=proxy.id,
+            project_id=project.id,
+            claimed=proxy.metadata.get(META_VENDOR_COUNTRY),
+            resolved=proxy.country,
+        )
+        await self._proxy_store.remove_proxy(proxy.id)
+        return True
 
     async def _on_exit_ip_observed(
         self,
@@ -268,6 +304,10 @@ class ProxyAttributor:
             endpoint=endpoint,
             project_id=self.project_id_for(proxy.connector_id),
         )
+        if await self._rotate_if_strict(proxy):
+            # The judged row is returned so the caller can show what was found;
+            # the slot itself is gone and the sync provisions a fresh one.
+            return proxy
         await self._proxy_store.update_proxy(proxy)
         logger.info("Recorded exit location", proxy_id=proxy_id, ip=ip, country=proxy.country)
         return proxy
@@ -330,6 +370,8 @@ class ProxyAttributor:
                 policy=self.policy_for(proxy.connector_id),
                 endpoint=GeoService.endpoint_place_of(proxy),
             )
+            if await self._rotate_if_strict(proxy):
+                continue
             if did_change:
                 changed.append(proxy)
         if changed:

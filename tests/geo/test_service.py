@@ -13,6 +13,7 @@ from api.geo.models import (
     META_LOCATION,
     META_LOCATION_CANDIDATES,
     META_LOCATION_CONFLICT,
+    META_LOCATION_VERDICT,
     META_VENDOR_COUNTRY,
     ExitJudgement,
     GeoSourceKind,
@@ -76,6 +77,32 @@ class TestApplyObservation:
         proxy = _proxy(**{META_VENDOR_COUNTRY: "gb"})
         resolution, _ = geo_service.apply_observation(proxy, GB_IP, source=ObservationSource.DISCOVERY)
         assert not resolution.country_conflict and proxy.metadata[META_LOCATION_CONFLICT] is False
+
+    async def test_verdict_is_stored_on_the_row(self, geo_service: GeoService) -> None:
+        confirmed = _proxy(**{META_VENDOR_COUNTRY: "gb"})
+        geo_service.apply_observation(confirmed, GB_IP, source=ObservationSource.DISCOVERY)
+        assert confirmed.metadata[META_LOCATION_VERDICT] == "confirmed"
+
+        contradicted = _proxy(**{META_GEO_COUNTRY: "US"})
+        geo_service.apply_observation(contradicted, GB_IP, source=ObservationSource.DISCOVERY)
+        assert contradicted.metadata[META_LOCATION_VERDICT] == "contradicted"
+
+        # No database knows the IP and the echo reported no country: nothing independent judged the claim.
+        unjudgeable = _proxy(**{META_GEO_COUNTRY: "US"})
+        geo_service.apply_observation(unjudgeable, UNKNOWN_IP, source=ObservationSource.DISCOVERY)
+        assert unjudgeable.metadata[META_LOCATION_VERDICT] == "open"
+        assert unjudgeable.metadata[META_LOCATION_CONFLICT] is False
+
+        unclaimed = _proxy()
+        geo_service.apply_observation(unclaimed, GB_IP, source=ObservationSource.DISCOVERY)
+        assert META_LOCATION_VERDICT not in unclaimed.metadata and unclaimed.metadata[META_LOCATION_CONFLICT] is False
+
+    async def test_verdict_change_counts_as_a_change(self, geo_service: GeoService) -> None:
+        proxy = _proxy(**{META_GEO_COUNTRY: "GB"})
+        geo_service.apply_observation(proxy, UNKNOWN_IP, source=ObservationSource.DISCOVERY)
+        assert proxy.metadata[META_LOCATION_VERDICT] == "open"
+        _, changed = geo_service.apply_observation(proxy, GB_IP, source=ObservationSource.DISCOVERY)
+        assert changed and proxy.metadata[META_LOCATION_VERDICT] == "confirmed"
 
     async def test_unknown_ip_falls_back_to_endpoint_then_vendor(self, geo_service: GeoService) -> None:
         proxy = _proxy()

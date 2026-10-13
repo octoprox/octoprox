@@ -537,7 +537,7 @@ DELETE /api/v1/projects/{project_id}/proxies/{proxy_id}
 
 ### Proxy location fields
 
-Every proxy response carries the outcome of [IP attribution]({{ site.baseurl }}/ip-attribution): `country` (what routing uses), `country_source` (`database`, `vendor`, `endpoint` or `manual`), `vendor_country` (what the vendor claimed), `location_conflict` (the claim is contradicted), `location` (region, `state_code`, city, coordinates, ASN and anonymity flags from the databases, when any covers the IP), and `state_code`, `state_source`, `city` and `city_source` (the state and city routing matches on: pinned by hand, or resolved under the source policy from the databases, the vendor's word and the echo endpoint like the country). Setting `country` by hand pins it as `manual`: attribution then verifies the exit against it instead of overwriting it.
+Every proxy response carries the outcome of [IP attribution]({{ site.baseurl }}/ip-attribution): `country` (what routing uses), `country_source` (`database`, `vendor`, `endpoint` or `manual`), `vendor_country` (what the vendor claimed), `location_conflict` (the claim is contradicted), `location_verdict` (`confirmed`, `contradicted` or `open`; null when nothing was claimed or the exit was not judged yet), `location` (region, `state_code`, city, coordinates, ASN and anonymity flags from the databases, when any covers the IP), and `state_code`, `state_source`, `city` and `city_source` (the state and city routing matches on: pinned by hand, or resolved under the source policy from the databases, the vendor's word and the echo endpoint like the country). Setting `country` by hand pins it as `manual`: attribution then verifies the exit against it instead of overwriting it.
 
 ---
 
@@ -1106,7 +1106,7 @@ All endpoints live under `/api/v1/geo`. Reads need any authenticated user; write
 | GET | `/geo/exits/ips` | One page of distinct exit IPs, most recently seen first, each with first and last sighting, hand-out count and the latest observation's state (proxy, source, vendor claim, resolved country and source, verdict flags, and the same place fields as an observation). Filters: `project_id`, `connector_id`, `ip`, `proxy_id`, `country`, `claimed_country`, `verdict` (the country verdict, as for observations); paging with `limit` (max 1000) and `offset`; `total` in the response |
 | GET | `/geo/status` | Pipeline health: databases, buffered and stored observations, preflight counters |
 
-Projects carry `location_policy` (`off`, `warn`, `strict`), `location_preflight` (`off`, `report`, `retry`, `reject`), and the optional overrides `location_sources` (ordered list of `database`, `vendor`, `endpoint`) and `location_conflict_rule` (`consensus`, `first`) on create, update and in responses. On update an empty list or empty string clears an override so the project inherits the install default again.
+Projects carry `location_policy` (`warn`, `strict`), `location_preflight` (`off`, `report`, `retry`, `reject`), and the optional overrides `location_sources` (ordered list of `database`, `vendor`, `endpoint`) and `location_conflict_rule` (`consensus`, `first`) on create, update and in responses. On update an empty list or empty string clears an override so the project inherits the install default again.
 
 ### Echo
 

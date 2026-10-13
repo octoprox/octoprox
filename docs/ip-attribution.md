@@ -158,24 +158,24 @@ Three kinds of evidence exist for an exit IP:
 * **vendor**: what the proxy vendor claimed (a country in its proxy list or known-IP API, or the country a slot was provisioned for);
 * **endpoint**: what the echo endpoint reported when requested through the proxy, for endpoints that know geography.
 
-A source policy is an ordered list of these kinds plus a conflict rule. The first kind with an answer decides the proxy's country. "Database only" is `[database]`, "prefer the vendor, fall back to databases" is `[vendor, database]`, and so on. A kind left out never decides, but still counts as evidence about the vendor.
+A source policy is an ordered list of these kinds plus a conflict rule. The first kind with an answer decides the proxy's country. "Database only" is `[database]`, "prefer the vendor, fall back to databases" is `[vendor, database]`, and so on. A kind left out never decides, but still counts as evidence about the vendor. The conflict rule below never changes this: when the databases disagree with each other the top-ranked one still decides, and the rule only decides whether the vendor is flagged.
 
 The install has a default policy (Settings → IP attribution → Policy & echo). Each project may override the source order and the conflict rule on its Location tab; a proxy is always resolved under the policy of the project that owns its connector. None of the kinds costs a request of its own: vendor claims arrive with the vendor's proxy list or slot provisioning, and the echo endpoint is the same request discovery and health checks already make to learn the exit IP.
 
 **Conflict rule** says when a vendor claim counts as contradicted:
 
-* `consensus` (default): every independent source agrees with each other and all of them disagree with the vendor. Databases lag on residential ranges, so a single dissenting database is not evidence against a vendor; independent sources that disagree among themselves leave the claim *open* instead: no verdict, so the vendor is neither cleared nor blamed. A claim no independent source can judge at all, an IP no loaded database knows, is open for the same reason.
+* `consensus` (default): every independent source agrees with each other and all of them disagree with the vendor. Databases lag on residential ranges, so a single dissenting database is not evidence against a vendor; independent sources that disagree among themselves leave the claim *open* instead: no verdict, so the vendor is neither cleared nor blamed. A claim no independent source can judge at all, an IP no loaded database knows, is open for the same reason. An open claim changes nothing about routing: the row keeps the country the top-ranked source resolved, and only the `strict` location policy treats an open claim as a reason not to route there.
 * `first`: the top-ranked independent source disagrees with the vendor.
 
 A missing vendor claim never conflicts. A country set by hand on a proxy stays the routing country and is treated as the claim to verify.
 
 ## Per-project policy
 
-Each project chooses how strict to be (project settings → Location):
+Each project chooses how strict to be (project settings → Location). [Location routing]({{ site.baseurl }}/location-routing) walks the combinations of these settings with the routing strategy and the kind of proxy row, with examples.
 
 | Setting | Values | Effect |
 |---------|--------|--------|
-| `location_policy` | `off`, `warn`, `strict` | `strict` makes proxies with a contradicted vendor location ineligible for the project's requests. `warn` only flags them. |
+| `location_policy` | `warn`, `strict` | What the verdict on a vendor location does to a proxy's *eligibility*. `warn` keeps routing to every proxy, on the country attribution resolved, and shows the verdict. `strict` routes only to proxies whose claim is confirmed (or not judged yet): a contradicted pooled session slot is removed and replaced by the provider sync, a contradicted fixed exit is skipped, and an open claim (sources disagree, or none knows the IP) is skipped until a later sighting settles it, so `strict` needs at least one database loaded. Neither changes which country the proxy is routed on: that is `location_sources`. Dynamic-sessions gateways are never judged. Worked examples: [Location routing]({{ site.baseurl }}/location-routing). |
 | `location_preflight` | `off`, `report`, `retry`, `reject` | Verify a session's exit before its first request is forwarded (below). |
 | `location_sources` | ordered list of `database`, `vendor`, `endpoint`, or null | Which source decides this project's proxies' country; null inherits the install default. |
 | `location_conflict_rule` | `consensus`, `first`, or null | When a vendor claim counts as contradicted; null inherits the install default. |

@@ -165,7 +165,8 @@ class ProjectRepository:
             tls_mitm_engine=MitmEngine(model.tls_mitm_engine) if model.tls_mitm_engine else None,
             tls_mitm_browser=MitmBrowser(model.tls_mitm_browser) if model.tls_mitm_browser else None,
             metrics_retention_days=model.metrics_retention_days,
-            location_policy=LocationPolicy(model.location_policy or "off"),
+            # Anything but strict is warn
+            location_policy=LocationPolicy.STRICT if model.location_policy == "strict" else LocationPolicy.WARN,
             location_preflight=PreflightMode(model.location_preflight or "off"),
             location_sources=[GeoSourceKind(k) for k in model.location_sources] if model.location_sources else None,
             location_conflict_rule=ConflictRule(model.location_conflict_rule) if model.location_conflict_rule else None,

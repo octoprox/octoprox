@@ -14,6 +14,7 @@ from api.geo.models import (
     META_COUNTRY_SOURCE,
     META_LOCATION,
     META_LOCATION_CONFLICT,
+    META_LOCATION_VERDICT,
     META_VENDOR_COUNTRY,
     ObservationSource,
 )
@@ -116,6 +117,7 @@ def _proxy_to_response(
         country_source=proxy.metadata.get(META_COUNTRY_SOURCE),
         vendor_country=proxy.metadata.get(META_VENDOR_COUNTRY),
         location_conflict=bool(proxy.metadata.get(META_LOCATION_CONFLICT)),
+        location_verdict=proxy.metadata.get(META_LOCATION_VERDICT),
         location=proxy.metadata.get(META_LOCATION) if isinstance(proxy.metadata.get(META_LOCATION), dict) else None,
         state_code=proxy.state_code,
         state_source=proxy.state_source,

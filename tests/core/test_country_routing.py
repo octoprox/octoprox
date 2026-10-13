@@ -13,6 +13,7 @@ from api.core.config import Settings
 from api.core.proxy_manager import ProxyManager
 from api.core.proxy_server import ProxyServer
 from api.db.redis import RedisClient
+from api.geo.models import META_LOCATION_CONFLICT, META_LOCATION_VERDICT, LocationPolicy
 from api.models.connector import Connector, ProxyTarget
 from api.models.credential import Credential, CredentialType
 from api.models.location import LocationTarget, normalize_country_list
@@ -85,6 +86,47 @@ def _in_memory_manager() -> ProxyManager:
 def _healthy(proxy: Proxy) -> Proxy:
     proxy.status = ProxyStatus.HEALTHY
     return proxy
+
+
+class TestStrictEligibility:
+    """A strict project routes only where the vendor's claim is confirmed or not judged yet."""
+
+    @pytest.fixture
+    def manager(self) -> ProxyManager:
+        manager = _in_memory_manager()
+        manager._projects["project-1"] = Project(
+            id="project-1", name="P", username="p", password="pw", location_policy=LocationPolicy.STRICT,
+        )
+        manager._credentials["cred-static"] = Credential(
+            id="cred-static", name="Static", type=CredentialType.STATIC_PROXY_PROVIDER, project_id="project-1", config={},
+        )
+        manager._connectors["conn"] = Connector(
+            id="conn", name="C", credential_id="cred-static",
+            credential_type=CredentialType.STATIC_PROXY_PROVIDER, project_id="project-1",
+        )
+        rows = {
+            "confirmed": {META_LOCATION_CONFLICT: False, META_LOCATION_VERDICT: "confirmed"},
+            "contradicted": {META_LOCATION_CONFLICT: True, META_LOCATION_VERDICT: "contradicted"},
+            "open": {META_LOCATION_CONFLICT: False, META_LOCATION_VERDICT: "open"},
+            "unclaimed": {META_LOCATION_CONFLICT: False},
+            "unjudged": {},
+            "legacy-flagged": {META_LOCATION_CONFLICT: True},  # judged before the verdict was stored
+        }
+        for name, metadata in rows.items():
+            manager._proxies[name] = _healthy(Proxy(id=name, host=name, port=1, connector_id="conn", metadata={"country": "DE", **metadata}))
+        return manager
+
+    def _ids(self, manager: ProxyManager, location: LocationTarget | None = None) -> set[str]:
+        return {p.id for p in manager.get_routable_proxies_for_project("project-1", location=location)}
+
+    def test_strict_routes_on_clear_evidence_only(self, manager: ProxyManager) -> None:
+        clear = {"confirmed", "unclaimed", "unjudged"}
+        assert self._ids(manager, LocationTarget(country="DE")) == clear
+        assert self._ids(manager) == clear  # untargeted requests are filtered the same way
+
+    def test_warn_routes_everywhere(self, manager: ProxyManager) -> None:
+        manager._projects["project-1"].location_policy = LocationPolicy.WARN
+        assert self._ids(manager, LocationTarget(country="DE")) == {"confirmed", "contradicted", "open", "unclaimed", "unjudged", "legacy-flagged"}
 
 
 class TestEligibilityRules:

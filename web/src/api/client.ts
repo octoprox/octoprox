@@ -167,7 +167,7 @@ export interface Project {
   updated_at: string
 }
 
-export type LocationPolicy = 'off' | 'warn' | 'strict'
+export type LocationPolicy = 'warn' | 'strict'
 export type PreflightMode = 'off' | 'report' | 'retry' | 'reject'
 export type ConflictRule = 'consensus' | 'first'
 
@@ -253,6 +253,7 @@ export interface Proxy {
   vendor_country: string | null
   /** Attribution contradicts the vendor's claim (see the project's location policy). */
   location_conflict: boolean
+  location_verdict: 'confirmed' | 'contradicted' | 'open' | null
   /** Full record from the IP databases, when any covers the exit IP. */
   location: IpLocation | null
   /** State code and city that -st- and -city- routing matches this exit on, each with its source. */

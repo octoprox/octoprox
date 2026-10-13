@@ -73,11 +73,37 @@ class ConflictRule(StrEnum):
 
 
 class LocationPolicy(StrEnum):
-    """Per project: what a contradicted vendor claim does to a proxy."""
+    """Per project: what the verdict on a vendor claim does to a proxy.
 
-    OFF = "off"  # ignore conflicts
-    WARN = "warn"  # keep routing, surface the flag
-    STRICT = "strict"  # flagged proxies are not eligible for this project's requests
+    The policy decides eligibility only; which country a proxy is routed on
+    is the source policy's call (``SourcePolicy.sources``) under either value.
+    ``warn`` routes to every proxy and shows the contradictions. ``strict``
+    wants clear evidence: a proxy with a vendor claim is eligible only while
+    the claim is confirmed (or not judged yet), a contradicted pooled session
+    slot is replaced with a fresh session, and an open verdict (the sources
+    disagree, or none knows the IP) keeps the proxy out until a later
+    sighting settles it. See :func:`eligible_under_strict`.
+    """
+
+    WARN = "warn"  # keep routing on the resolved location, surface the flag
+    STRICT = "strict"  # only proxies whose claim is confirmed (or unjudged) are eligible
+
+
+class LocationVerdict(StrEnum):
+    """How a vendor claim fared against the independent evidence, as stored on the row."""
+
+    CONFIRMED = "confirmed"
+    CONTRADICTED = "contradicted"
+    OPEN = "open"  # no independent answer, or the independent sources disagreed under consensus
+
+    @classmethod
+    def of(cls, conflict: bool | None, claimed: str | None) -> LocationVerdict | None:
+        """The verdict for one level, None when nothing was claimed there."""
+        if claimed is None:
+            return None
+        if conflict is None:
+            return cls.OPEN
+        return cls.CONTRADICTED if conflict else cls.CONFIRMED
 
 
 class PreflightMode(StrEnum):
@@ -458,6 +484,23 @@ META_ENDPOINT_CITY = "endpoint_city"
 META_LOCATION = "location"  # IpLocation dump from the databases
 # META_MANUAL_LOCATION (api.models.location): region code and city an operator
 # pinned by hand on a static proxy; routing prefers them to the databases.
-META_LOCATION_CONFLICT = "location_conflict"  # bool, see ConflictRule
+META_LOCATION_CONFLICT = "location_conflict"  # bool: the country claim is contradicted; present once judged
+META_LOCATION_VERDICT = "location_verdict"  # LocationVerdict for the country claim; absent when nothing was claimed
 META_LOCATION_CANDIDATES = "location_candidates"  # compact candidate list
 META_LOCATION_CHECKED_AT = "location_checked_at"  # ISO timestamp of the last resolution
+
+
+def eligible_under_strict(metadata: dict[str, Any]) -> bool:
+    """Whether a proxy's vendor claim is clear enough for a ``strict`` project.
+
+    Out: a contradicted claim, and an open one (the independent sources
+    disagreed under ``consensus``, or none of them knows the IP). In: a
+    confirmed claim, a proxy that made no claim, and one not judged yet (a
+    slot provisioned seconds ago, before its first health check), so that
+    on-demand provisioning and a fresh pool stay routable. Rows written
+    before the verdict was stored carry only the flag and read as judged by
+    it alone.
+    """
+    if metadata.get(META_LOCATION_CONFLICT) is True:
+        return False
+    return metadata.get(META_LOCATION_VERDICT) != LocationVerdict.OPEN

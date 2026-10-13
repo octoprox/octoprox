@@ -4,7 +4,7 @@
 import { useState, useRef, useMemo, useCallback, useEffect } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { ColumnDef, VisibilityState } from '@tanstack/react-table'
-import { Plus, Trash2, Upload, Lock, ShieldOff, MapPin, AlertTriangle } from 'lucide-react'
+import { Plus, Trash2, Upload, Lock, ShieldOff, MapPin, AlertTriangle, HelpCircle } from 'lucide-react'
 import {
   fetchProjectProxies, fetchProjectConnectors, createProjectProxy, updateProjectProxy, deleteProjectProxy,
   unquarantineProjectProxy, uploadProjectProxies, locateProjectProxy, Proxy, ProxyCreate, ProxyUpdate, ProxyUploadResponse, CredentialType,
@@ -127,9 +127,10 @@ export default function ProxiesPage() {
         const code = getValue<string>()
         if (!code) return <span className="text-fg-subtle">-</span>
         return (
-          <span className="inline-flex items-center gap-1 font-mono text-xs font-medium" title={row.original.location_conflict ? `Vendor claimed ${row.original.vendor_country ?? '?'}; attribution says ${code}` : row.original.country_source ? `From ${row.original.country_source}` : undefined}>
+          <span className="inline-flex items-center gap-1 font-mono text-xs font-medium" title={row.original.location_conflict ? `Vendor claimed ${row.original.vendor_country ?? '?'}; attribution says ${code}` : row.original.location_verdict === 'open' ? `Vendor claimed ${row.original.vendor_country ?? '?'}; the independent sources disagree or none knows the IP, so the claim is open` : row.original.country_source ? `From ${row.original.country_source}` : undefined}>
             {code}
             {row.original.location_conflict && <AlertTriangle className="w-3 h-3 text-danger" />}
+            {!row.original.location_conflict && row.original.location_verdict === 'open' && <HelpCircle className="w-3 h-3 text-warning" />}
           </span>
         )
       },
@@ -467,7 +468,13 @@ function ProxyPanel({ proxy, connectorType, canMutate, onClose, onRelease, onDel
         {proxy.location_conflict && (
           <div className="flex gap-2 p-2.5 rounded-lg bg-danger-soft text-danger text-xs leading-relaxed">
             <AlertTriangle className="w-3.5 h-3.5 flex-shrink-0 mt-0.5" />
-            <span>The vendor's declared location is contradicted by attribution. Projects with a strict location policy skip this proxy.</span>
+            <span>The vendor's declared location is contradicted by attribution. A project with a strict location policy skips this proxy, and replaces it when it is a pooled session.</span>
+          </div>
+        )}
+        {!proxy.location_conflict && proxy.location_verdict === 'open' && (
+          <div className="flex gap-2 p-2.5 rounded-lg bg-warning-soft text-warning text-xs leading-relaxed">
+            <HelpCircle className="w-3.5 h-3.5 flex-shrink-0 mt-0.5" />
+            <span>The vendor's declared location could not be judged: the independent sources disagree, or none of them knows this IP. A project with a strict location policy skips this proxy until a later sighting settles it.</span>
           </div>
         )}
         {proxy.location?.city || proxy.location?.region ? <KeyValue label="Place" value={[proxy.location.city, proxy.location.region].filter(Boolean).join(', ')} /> : null}

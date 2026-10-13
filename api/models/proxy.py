@@ -11,6 +11,7 @@ from uuid import uuid4
 from pydantic import BaseModel, Field, field_validator
 
 from api.core import utc_now
+from api.geo.models import LocationVerdict
 from api.models.location import (
     META_MANUAL_LOCATION,
     LocationTarget,
@@ -302,6 +303,10 @@ class ProxyResponse(BaseModel):
     country_source: str | None = None
     vendor_country: str | None = None
     location_conflict: bool = False
+    # confirmed, contradicted or open; None when the vendor claimed nothing
+    # or the exit was not judged yet. A strict project routes only to
+    # confirmed (and unjudged) proxies.
+    location_verdict: LocationVerdict | None = None
     location: dict[str, Any] | None = None
     # State code and city that -st- and -city- routing matches this exit on,
     # each with its source: manual when pinned by hand, else the attribution
