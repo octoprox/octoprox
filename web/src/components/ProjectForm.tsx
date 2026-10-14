@@ -6,9 +6,10 @@ import { useQuery } from '@tanstack/react-query'
 import { Eye, EyeOff, Info, AlertTriangle, Shield, MapPin } from 'lucide-react'
 import { ProjectCreate, ProjectUpdate, ProjectSummary, downloadCaCertificate, fetchGeoSettings } from '../api/client'
 import type { ConflictRule, ContradictedAction, UnknownAction } from '../api/client'
-import { locationExamples, preflightExample } from './locationExamples'
+import { locationExamples, scenarioSteps, ROW_KIND_FACTS } from './locationExamples'
+import type { RowKind, Ask } from './locationExamples'
 import { RichSelect, RichSelectOption } from './RichSelect'
-import { Button, Input, Select, Textarea, Label, Alert, Inspector, Tabs, InfoTip } from './ui'
+import { Button, Input, Select, Textarea, Label, Alert, Inspector, Tabs, Segmented, InfoTip } from './ui'
 
 const engineOptions: RichSelectOption[] = [
   { value: 'curl_cffi', label: 'curl_cffi', description: 'C/libcurl - mature, Chrome-grade fingerprinting' },
@@ -106,6 +107,11 @@ export function ProjectForm({ project, onSave, error, formId }: ProjectFormProps
   })
   const [showPassword, setShowPassword] = useState(false)
   const [activeTab, setActiveTab] = useState<SettingsTab>('general')
+  // The worked example: what the operator has and what a client asks for.
+  const [exampleKind, setExampleKind] = useState<RowKind>('pooled')
+  const [exampleAsk, setExampleAsk] = useState<Ask>('country')
+  const [exampleSession, setExampleSession] = useState(true)
+  const [exampleDeclared, setExampleDeclared] = useState(true)
 
   const handleModeChange = (mode: string) => {
     const updates: Partial<ProjectCreate> = { tls_mitm_mode: mode }
@@ -270,10 +276,35 @@ export function ProjectForm({ project, onSave, error, formId }: ProjectFormProps
             return (
               <div className="rounded-lg border border-line bg-surface-raised/50 p-3 text-xs leading-relaxed text-fg-muted space-y-2">
                 <div className="font-medium text-fg">How this behaves</div>
+                <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+                  <span className="inline-flex items-center gap-2"><span className="text-fg-subtle">Proxies</span>
+                    <Segmented<RowKind> size="sm" value={exampleKind} onChange={setExampleKind} options={[{ value: 'fixed', label: 'Fixed exits' }, { value: 'pooled', label: 'Pooled slots' }, { value: 'dynamic', label: 'Dynamic sessions' }]} />
+                  </span>
+                  <span className="inline-flex items-center gap-2"><span className="text-fg-subtle">Client asks for</span>
+                    <Segmented<Ask> size="sm" value={exampleAsk} onChange={setExampleAsk} options={[{ value: 'none', label: 'Nothing' }, { value: 'country', label: 'A country' }, { value: 'place', label: 'A state or city' }]} />
+                  </span>
+                  <label className="inline-flex items-center gap-1.5"><input type="checkbox" className="w-3.5 h-3.5" checked={exampleSession} onChange={(e) => setExampleSession(e.target.checked)} />Client session (-sessid-)</label>
+                  <label className="inline-flex items-center gap-1.5"><input type="checkbox" className="w-3.5 h-3.5" checked={exampleDeclared} onChange={(e) => setExampleDeclared(e.target.checked)} />Connector declares countries</label>
+                </div>
                 <p>
-                  A residential slot provisioned for Germany, so the vendor claims DE, judged by two databases (MaxMind ranked above DB-IP) and a plain IP echo.
-                  The databases decide the country where they know the IP; the vendor fills in where they do not.
-                  Rule: <span className="text-fg">{rule}</span>{inherited && defaults && <span> (inherited from Settings → IP attribution)</span>}; contradicted: <span className="text-fg">{contradicted}</span>; unknown: <span className="text-fg">{unknown}</span>.
+                  Settings in play: rule <span className="text-fg">{rule}</span>{inherited && defaults && <span> (inherited)</span>}, contradicted <span className="text-fg">{contradicted}</span>, unknown <span className="text-fg">{unknown}</span>, preflight <span className="text-fg">{formData.location_preflight ? 'on' : 'off'}</span>, strategy <span className="text-fg">{formData.routing_strategy ?? 'round_robin'}</span>.
+                </p>
+                <dl className="space-y-1.5">
+                  {scenarioSteps({
+                    kind: exampleKind, ask: exampleAsk, session: exampleSession, declared: exampleDeclared,
+                    preflight: formData.location_preflight ?? false, contradicted, unknown,
+                    strategy: formData.routing_strategy ?? 'round_robin', maxAttempts: defaults?.preflight_max_attempts ?? 3,
+                  }).map((step) => (
+                    <div key={step.title} className={step.warn ? 'text-warning' : undefined}>
+                      <dt className="inline font-medium text-fg">{step.title}: </dt>
+                      <dd className="inline">{step.text}</dd>
+                    </div>
+                  ))}
+                </dl>
+                {exampleKind !== 'dynamic' && (
+                <>
+                <p className="text-fg-subtle">
+                  The verdict on a row, for a {exampleKind === 'pooled' ? 'slot provisioned for Germany' : 'fixed exit the vendor lists in Germany'} judged by two databases (MaxMind ranked above DB-IP) and a plain IP echo:
                 </p>
                 <table className="w-full">
                   <thead>
@@ -293,10 +324,31 @@ export function ProjectForm({ project, onSave, error, formId }: ProjectFormProps
                     ))}
                   </tbody>
                 </table>
-                <p>
-                  <span className="text-fg">Preflight ({formData.location_preflight ? 'on' : 'off'}):</span>{' '}
-                  {preflightExample(formData.location_preflight ?? false, contradicted, unknown, formData.routing_strategy ?? 'round_robin', defaults?.preflight_max_attempts ?? 3)}
-                </p>
+                </>
+                )}
+                <details className="pt-1">
+                  <summary className="cursor-pointer text-fg-subtle">What matters for which proxies</summary>
+                  <table className="w-full mt-1.5">
+                    <thead>
+                      <tr className="text-left text-fg-subtle">
+                        <th className="pr-2 font-medium"></th>
+                        <th className="pr-2 font-medium">Fixed exits</th>
+                        <th className="pr-2 font-medium">Pooled slots</th>
+                        <th className="font-medium">Dynamic sessions</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {ROW_KIND_FACTS.map((fact) => (
+                        <tr key={fact.topic} className="align-top border-t border-line/60">
+                          <td className="pr-2 py-1 text-fg">{fact.topic}</td>
+                          <td className="pr-2 py-1">{fact.fixed}</td>
+                          <td className="pr-2 py-1">{fact.pooled}</td>
+                          <td className="py-1">{fact.dynamic}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </details>
                 {refuses && !formData.location_preflight && (
                   <p className="text-warning">Preflight is off, so refusing the proxy acts on pooled residential and mobile slots only through the health check verdict on the row, and does nothing for dynamic-sessions connectors, whose requests carry no row verdict. Turn preflight on to verify a session's exit before its first request.</p>
                 )}
