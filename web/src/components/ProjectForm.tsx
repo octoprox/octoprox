@@ -8,7 +8,7 @@ import { ProjectCreate, ProjectUpdate, ProjectSummary, downloadCaCertificate, fe
 import type { ConflictRule, ContradictedAction, UnknownAction } from '../api/client'
 import { locationExamples, preflightExample } from './locationExamples'
 import { RichSelect, RichSelectOption } from './RichSelect'
-import { Button, Input, Select, Textarea, Label, Alert, Inspector, Tabs } from './ui'
+import { Button, Input, Select, Textarea, Label, Alert, Inspector, Tabs, InfoTip } from './ui'
 
 const engineOptions: RichSelectOption[] = [
   { value: 'curl_cffi', label: 'curl_cffi', description: 'C/libcurl - mature, Chrome-grade fingerprinting' },
@@ -224,34 +224,38 @@ export function ProjectForm({ project, onSave, error, formId }: ProjectFormProps
       {activeTab === 'location' && (
         <div className="space-y-3">
           <div>
-            <Label className="text-xs">Databases contradict the vendor</Label>
+            <Label className="text-xs">
+              <span className="inline-flex items-center gap-1.5">
+                <span>Databases contradict the vendor</span>
+                <InfoTip label="About contradicted claims">The independent sources (IP databases, echo endpoint) agree with each other and put the exit somewhere other than the vendor claims. Applies to the verdict on a proxy row and to a preflight verdict alike.</InfoTip>
+              </span>
+            </Label>
             <RichSelect options={contradictedOptions} value={formData.location_contradicted ?? 'evidence'} onChange={(v) => setFormData({ ...formData, location_contradicted: v as ContradictedAction })} />
-            <p className="mt-1 text-xs text-fg-subtle">
-              The independent sources (the IP databases, the echo endpoint) agree with each other and say the exit is somewhere other than the vendor claims.
-            </p>
           </div>
           <div>
-            <Label className="text-xs">No database knows the exit</Label>
+            <Label className="text-xs">
+              <span className="inline-flex items-center gap-1.5">
+                <span>No database knows the exit</span>
+                <InfoTip label="About unknown exits">Nothing independent places the exit: no database knows the IP, or the databases disagree under the consensus rule. Fixed exits and pooled slots are judged by health checks; a dynamic-sessions gateway only by preflight, so for dynamic connectors this acts only with preflight on.</InfoTip>
+              </span>
+            </Label>
             <RichSelect options={unknownOptions} value={formData.location_unknown ?? 'vendor'} onChange={(v) => setFormData({ ...formData, location_unknown: v as UnknownAction })} />
-            <p className="mt-1 text-xs text-fg-subtle">
-              Nothing independent places the exit: no database knows the IP, or the databases disagree with each other under the consensus rule. Both decisions apply to every row kind. Fixed exits (static, ISP, datacenter, list and cloud proxies) and pooled residential and mobile slots are judged by health checks and discovery, and the verdict is written on the row. Dynamic-sessions gateways carry no row verdict, since each request gets its own vendor session, so only preflight judges them: for a dynamic connector a refusal does nothing unless preflight is on.
-            </p>
           </div>
           <div>
-            <label className="flex items-center gap-2 text-[13px]">
+            <label className="inline-flex items-center gap-2 text-[13px]">
               <input type="checkbox" checked={formData.location_preflight ?? false} onChange={(e) => setFormData({ ...formData, location_preflight: e.target.checked })} className="w-4 h-4" />
-              Preflight check: verify a session's exit before its first request (one echo per session)
+              <span>Preflight check</span>
+              <InfoTip label="About preflight">One echo through the selected upstream before a session's first request, when the client names a place; always on a dynamic-sessions gateway. Fixed exits are never preflighted. Needed for the decisions above to reach dynamic connectors, and to catch a pooled session that moved between health checks.</InfoTip>
             </label>
-            <p className="mt-1 text-xs text-fg-subtle">
-              Session rows only: pooled residential and mobile slots, and dynamic-sessions gateways. Fixed exits (static, ISP, datacenter, list and cloud proxies) are placed by discovery and re-read by every health check, so they are never preflighted. Must be on for a refusal to reach dynamic-sessions connectors, and to verify a pooled session's exit per request rather than per health check.
-            </p>
           </div>
           <div>
-            <Label className="text-xs">Vendor contradicted when</Label>
+            <Label className="text-xs">
+              <span className="inline-flex items-center gap-1.5">
+                <span>Vendor contradicted when</span>
+                <InfoTip label="About the conflict rule">What a disagreement between databases means for the verdict. The routing value is always the databases in their priority, then the echo endpoint, then the vendor filling what nothing independent answered; a claim confirmed under Any routes on the agreeing database.</InfoTip>
+              </span>
+            </Label>
             <RichSelect options={conflictOptions} value={formData.location_conflict_rule || 'inherit'} onChange={(v) => setFormData({ ...formData, location_conflict_rule: (v === 'inherit' ? (project ? '' : null) : v) as ProjectCreate['location_conflict_rule'] })} />
-            <p className="mt-1 text-xs text-fg-subtle">
-              The rule decides what a disagreement between databases is. The routing value is the databases in their priority, then the echo endpoint, then the vendor filling only what nothing independent answered; a claim confirmed under any is routed on the agreeing database's answer, and a contradicted one carries the vendor's claim only when you route on the vendor's claim above.
-            </p>
           </div>
           {(() => {
             const defaults = geo?.settings
@@ -308,7 +312,7 @@ export function ProjectForm({ project, onSave, error, formId }: ProjectFormProps
           <div className="flex gap-2 p-3 rounded-lg border border-line bg-surface-raised/50 text-xs leading-relaxed text-fg-muted">
             <MapPin className="w-4 h-4 flex-shrink-0 mt-0.5" />
             <span>
-              Attribution compares each exit IP against the local IP databases and the echo endpoint (Settings → IP attribution). The routing value is the databases in their priority, then the echo, then the vendor filling only what nothing independent answered; a contradicted level carries the vendor's claim only under <strong>route on the vendor's claim</strong>. Whatever the decisions, a proxy whose resolved country lies outside its connector's declared countries is never routed to, and a row not judged yet is always eligible. The two decisions above say what happens to the verdicts that remain, and apply the same way to the verdict written on a proxy row and to the one preflight reaches for a request. <strong>Refuse the proxy</strong> for an unknown exit needs an IP database loaded, since without one every claim is open. A country pinned by hand is the operator's word: trusted while open, shown as contradicted and kept unless you <strong>refuse the proxy</strong>, since attribution never overwrites a pin. Preflight is the switch that verifies a session's exit before its first request, at the cost of one echo per session; it is the only check that reaches a dynamic-sessions gateway. At preflight, when the client named a place, a contradicted exit is refused unless you route on the vendor's claim, and an exit nobody can place is refused when unknown exits are refused. When the client named no place, a pooled slot is not checked at all: the client has no expectation, and the slot's own claim is judged on the row by every sighting of its exit. A dynamic gateway is: <strong>refuse the proxy</strong> holds the vendor to the exact country it rendered, <strong>route on the evidence</strong> holds the exit to the connector's declared countries, and <strong>route on the vendor's claim</strong> checks placement only. Whether a refused request moves to another proxy is the routing strategy's call: every strategy but sticky tries other eligible proxies, up to the install-wide attempt limit, then 502; a sticky session was promised one exit, so it fails fast with 502. Only <strong>refuse the proxy</strong> on a contradiction replaces a misplaced pooled vendor session; the other two keep it.
+              The routing value is the databases in their priority, then the echo endpoint, then the vendor's claim where nothing independent answers; the two decisions above say what a contradicted or an open claim does, on the row and at preflight alike. A proxy outside its connector's declared countries is never routed to, a row not judged yet always is, and a hand-pinned country is kept unless you <strong>refuse the proxy</strong> on a contradiction. Refusing unknown exits needs an IP database loaded. Whether a refused request moves is the routing strategy's call: a sticky session fails fast with 502, the other strategies try another proxy up to the install-wide attempt limit. Only <strong>refuse the proxy</strong> on a contradiction replaces a misplaced pooled vendor session.
             </span>
           </div>
         </div>
