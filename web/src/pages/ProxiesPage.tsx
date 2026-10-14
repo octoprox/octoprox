@@ -468,13 +468,19 @@ function ProxyPanel({ proxy, connectorType, canMutate, onClose, onRelease, onDel
         {proxy.location_conflict && (
           <div className="flex gap-2 p-2.5 rounded-lg bg-danger-soft text-danger text-xs leading-relaxed">
             <AlertTriangle className="w-3.5 h-3.5 flex-shrink-0 mt-0.5" />
-            <span>The vendor's declared location is contradicted by attribution. A project at the verified or confirmed assurance level skips this proxy, and replaces it when it is a pooled session.</span>
+            <span>The vendor's declared location is contradicted by attribution. A project set to refuse the proxy on a contradiction skips it, and replaces it when it is a pooled session; one set to route on the evidence routes to it on the real place; one set to route on the vendor's claim routes to it on the claimed place and keeps the flag.</span>
+          </div>
+        )}
+        {proxy.outside_declared_countries && (
+          <div className="flex gap-2 p-2.5 rounded-lg bg-warning-soft text-warning text-xs leading-relaxed">
+            <AlertTriangle className="w-3.5 h-3.5 flex-shrink-0 mt-0.5" />
+            <span>The exit is outside the connector's declared countries, so routing never uses this proxy. It is kept, not replaced: only a project set to refuse the proxy on a contradiction spends a fresh session. Widen the connector's countries, or wait for the vendor to move the exit.</span>
           </div>
         )}
         {!proxy.location_conflict && proxy.location_verdict === 'open' && (
           <div className="flex gap-2 p-2.5 rounded-lg bg-warning-soft text-warning text-xs leading-relaxed">
             <HelpCircle className="w-3.5 h-3.5 flex-shrink-0 mt-0.5" />
-            <span>The vendor's declared location could not be judged: the independent sources disagree, or none of them knows this IP. A project at the confirmed assurance level skips this proxy until a later sighting settles it; verified serves it on the vendor's word.</span>
+            <span>The vendor's declared location could not be judged: the independent sources disagree, or none of them knows this IP. A project set to refuse the proxy for an unknown exit skips it until a later sighting places it; one set to trust the vendor serves it on the vendor's word.</span>
           </div>
         )}
         {proxy.location?.city || proxy.location?.region ? <KeyValue label="Place" value={[proxy.location.city, proxy.location.region].filter(Boolean).join(', ')} /> : null}

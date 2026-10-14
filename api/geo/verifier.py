@@ -5,7 +5,7 @@
 
 The proxy server hands the verifier the upstream it picked; the verifier
 returns the upstream to use or a rejection. Whether a verdict refuses the
-request is the project's assurance level (``observe`` never refuses).
+request is the project's two location decisions (``PreflightVerdict.acceptable``).
 Whether a refused request may move is the routing strategy's call: the
 verifier asks the :class:`ProxySelector` for another eligible proxy,
 excluding the ones that failed, up to ``preflight_max_attempts``, unless the
@@ -48,6 +48,10 @@ class ProxySelector(Protocol):
 
     def strategy_for_project(self, project_id: str) -> RoutingStrategy: ...
 
+    def declared_countries(self, connector_id: str) -> list[str]: ...
+
+    def get_proxy(self, proxy_id: str) -> Proxy | None: ...
+
 
 @dataclass(frozen=True)
 class ExitDecision:
@@ -88,7 +92,7 @@ class ExitVerifier:
         """
         if not PreflightChecker.applies(project, location, proxy):
             return ExitDecision(proxy)
-        assurance = project.location_assurance
+        rules = project.location_rules
         # A session-less request on a dynamic gateway retries by re-rendering:
         # selecting the same row again mints a fresh vendor session, so the
         # row is not excluded and the strategy's promise about rows holds.
@@ -98,27 +102,37 @@ class ExitVerifier:
         attempts = 0
         while True:
             attempts += 1
+            allowed = self._proxy_selector.declared_countries(proxy.connector_id)
             try:
-                verdict = await self._preflight_checker.check(project, proxy, session_id=session_id, requested=location)
+                verdict = await self._preflight_checker.check(
+                    project, proxy, session_id=session_id, requested=location, allowed=allowed
+                )
             except Exception as exc:
                 logger.warning("Preflight check errored", proxy_id=proxy.id, error=str(exc))
                 return ExitDecision(proxy)
-            if verdict.acceptable(assurance):
+            if not rerender and self._proxy_selector.get_proxy(proxy.id) is None:
+                # The slot left the pool while it was being checked: its own
+                # sighting judged it out under ``refuse``, or a health check or
+                # the provider sync removed it meanwhile. The request's own
+                # place may have matched, but the slot is gone: drop the verdict
+                # just cached for it and treat the pick as refused.
+                await self._preflight_checker.invalidate(project.id, proxy.id)
+                verdict = verdict._replace(ok=False, replaced=True)
+            elif verdict.acceptable(rules, allowed):
                 return ExitDecision(proxy)
-            if not verdict.ok:
-                # A contradicted exit: the attributor rotates a pooled vendor
-                # session. An open one (refused under ``confirmed``) is not a
-                # contradiction, and rotating on missing evidence would churn a
-                # pool the databases do not cover for sessions just as unknown.
-                await event_bus.publish(
-                    exit_location_mismatch,
-                    self,
-                    proxy_id=proxy.id,
-                    project_id=project.id,
-                    expected=verdict.expected.key if verdict.expected else "",
-                    observed=verdict.observed.key if verdict.observed else None,
-                    ip=verdict.ip,
-                )
+            # Every refusal is announced. The signal is a record of the
+            # refusal only: what the exit does to a pooled vendor session
+            # was decided by the sighting preflight published for it
+            # (``exit_ip_observed``, see ``PreflightChecker.check``).
+            await event_bus.publish(
+                exit_location_mismatch,
+                self,
+                proxy_id=proxy.id,
+                project_id=project.id,
+                expected=verdict.expected.key if verdict.expected else "",
+                observed=verdict.observed.key if verdict.observed else None,
+                ip=verdict.ip,
+            )
             if can_retry and attempts < self._preflight_checker.max_attempts:
                 if not rerender:
                     excluded.add(proxy.id)
@@ -132,4 +146,6 @@ class ExitVerifier:
                     )
                     proxy = replacement
                     continue
-            return ExitDecision(None, PreflightChecker.rejection_message(verdict))
+            if verdict.replaced:
+                return ExitDecision(None, "Proxy replaced while it was being checked")
+            return ExitDecision(None, PreflightChecker.rejection_message(verdict, rules, allowed))

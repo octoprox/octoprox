@@ -13,6 +13,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 from api.geo.models import (
+    VALUE_PRECEDENCE,
     ConflictRule,
     GeoSourceKind,
     IpLocation,
@@ -91,43 +92,50 @@ def judge_level(
 ) -> LevelVerdict:
     """Resolve one level (country, state or city) of an IP's place.
 
-    The winner is the first candidate, in ``policy.sources`` order, with an
-    answer at this level. The claim is the vendor's answer. The observed
-    value is the first independent answer in that order, so it can never be
-    the claim. ``conflict`` follows ``policy.conflict_rule``:
+    The winner is the first candidate, in ``VALUE_PRECEDENCE`` order (the
+    databases, then the echo endpoint, then the vendor), with an answer at
+    this level. The claim is the vendor's answer. The observed value is the
+    first independent answer, so it can never be the claim. ``conflict``
+    follows ``policy.conflict_rule``:
 
     * ``consensus``: every independent source agrees and all of them
       disagree with the claim. Independent sources that disagree among
       themselves set ``disagreement`` and leave the claim unjudged.
     * ``first``: the highest-precedence independent answer disagrees with the claim.
+    * ``any``: no independent answer agrees with the claim; one agreeing
+      confirms it, and the value is then that agreeing answer, so a confirmed
+      claim is never routed on a country its own verdict disagrees with.
 
-    The rule decides the verdict only, never the winner. When the databases
-    disagree with each other the top-ranked one still decides the value,
-    under either rule; ``consensus`` merely leaves the claim open instead of
-    flagging it. A project that wants no routing on unsettled evidence uses
-    the ``confirmed`` assurance level, which refuses open claims.
+    Otherwise the rule decides the verdict only, never the winner: when the
+    databases disagree with each other the top-ranked one decides the value,
+    and ``consensus`` merely leaves the claim open instead of flagging it. A
+    project that wants no routing on unsettled evidence refuses open claims
+    (``UnknownAction.REFUSE``). A contradicted claim carries the independent
+    answer here, always: a project that routes contradictions on the vendor
+    (``ContradictedAction.VENDOR``) applies that choice when it writes the
+    row, so a resolution never reports a claim as what was resolved.
     """
     ordered: list[LocationCandidate] = []
-    for kind in policy.sources:
+    for kind in VALUE_PRECEDENCE:
         ordered.extend(c for c in candidates if c.source == kind and value_of(c))
-    # Sources the policy left out still count as evidence about the claim, so
-    # keep them for the verdict, after the ones the policy ranks.
-    ranked_ids = {id(c) for c in ordered}
-    evidence = ordered + [c for c in candidates if id(c) not in ranked_ids and value_of(c)]
 
     winner = ordered[0] if ordered else None
-    claimed = next((value_of(c) for c in evidence if c.source == GeoSourceKind.VENDOR), None)
-    independent = [c for c in evidence if c.source != GeoSourceKind.VENDOR]
+    claimed = next((value_of(c) for c in ordered if c.source == GeoSourceKind.VENDOR), None)
+    independent = [c for c in ordered if c.source != GeoSourceKind.VENDOR]
     values = {value_of(c) for c in independent}
     disagreement = len(values) > 1
-    observed = next((c for c in ordered if c.source != GeoSourceKind.VENDOR), None)
-    if observed is None and independent:
-        observed = independent[0]
+    observed = independent[0] if independent else None
 
     conflict: bool | None = None
     if claimed is not None and independent:
         if policy.conflict_rule == ConflictRule.CONSENSUS:
             conflict = None if disagreement else claimed not in values
+        elif policy.conflict_rule == ConflictRule.ANY:
+            conflict = claimed not in values
+            if not conflict:
+                # The agreeing source is both what routing uses and what was observed:
+                # a confirmed claim must never report an observation that contradicts it.
+                winner = observed = next(c for c in independent if value_of(c) == claimed)
         else:
             conflict = value_of(observed) != claimed if observed else None
     return LevelVerdict(

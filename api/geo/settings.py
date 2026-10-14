@@ -94,5 +94,5 @@ class GeoSettingsStore:
             await session.commit()
         self._settings = settings
         self._from_database = True
-        logger.info("Geo settings saved", updated_by=updated_by, sources=[s.value for s in settings.default_sources])
+        logger.info("Geo settings saved", updated_by=updated_by, conflict_rule=settings.default_conflict_rule.value)
         return settings

@@ -5,7 +5,7 @@ import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { Eye, EyeOff, Info, AlertTriangle, Shield, MapPin } from 'lucide-react'
 import { ProjectCreate, ProjectUpdate, ProjectSummary, downloadCaCertificate, fetchGeoSettings } from '../api/client'
-import type { ConflictRule, GeoSourceKind } from '../api/client'
+import type { ConflictRule, ContradictedAction, UnknownAction } from '../api/client'
 import { locationExamples, preflightExample } from './locationExamples'
 import { RichSelect, RichSelectOption } from './RichSelect'
 import { Button, Input, Select, Textarea, Label, Alert, Inspector, Tabs } from './ui'
@@ -55,32 +55,23 @@ const mitmModeInfo: Record<string, { color: string; icon: typeof Info; text: str
 
 type SettingsTab = 'general' | 'tls' | 'location'
 
-const locationAssuranceOptions: RichSelectOption[] = [
-  { value: 'observe', label: 'Observe', description: 'Route to every proxy on the country resolved for it; record verdicts and flag contradictions, refuse nothing' },
-  { value: 'verified', label: 'Verified', description: 'Refuse a contradicted claim; an open one serves on the vendor\'s word. A contradicted pooled session is replaced' },
-  { value: 'confirmed', label: 'Confirmed', description: 'Serve only a claim the databases confirm; an open one waits until a later sighting settles it. Needs an IP database loaded' },
+const contradictedOptions: RichSelectOption[] = [
+  { value: 'evidence', label: 'Route on the evidence', description: 'Route the proxy on where the databases or the echo put the exit; the vendor\'s claim is shown as contradicted' },
+  { value: 'vendor', label: 'Route on the vendor\'s claim', description: 'Route the proxy on the claimed place anyway and only show the contradiction' },
+  { value: 'refuse', label: 'Refuse the proxy', description: 'Skip the proxy; a pooled session slot is replaced with a fresh session' },
 ]
 
-/** Named source orders, so the form stays a select rather than a drag list. */
-const sourcePresets: { value: string; label: string; description: string; sources: string[] | null }[] = [
-  { value: 'inherit', label: 'Install default', description: 'Follow Settings → IP attribution', sources: null },
-  { value: 'database', label: 'Databases only', description: 'Only the local IP databases decide; a proxy no database knows has no country. The vendor and the echo only judge the claim', sources: ['database'] },
-  { value: 'database,endpoint', label: 'Databases, then echo', description: 'The vendor never decides. The echo endpoint fills in where no database knows the IP, and only when it reports a country', sources: ['database', 'endpoint'] },
-  { value: 'database,vendor,endpoint', label: 'Databases decide, vendor flagged', description: 'Databases override the vendor; the vendor fills in only where no database knows the IP, then the echo if it reports a country. When the databases disagree with each other the top-ranked one decides', sources: ['database', 'vendor', 'endpoint'] },
-  { value: 'vendor,database,endpoint', label: 'Vendor decides, databases flag', description: 'Route on the vendor\'s word; the databases and the echo only judge it and flag contradictions', sources: ['vendor', 'database', 'endpoint'] },
+const unknownOptions: RichSelectOption[] = [
+  { value: 'vendor', label: 'Trust the vendor', description: 'Route the proxy on the vendor\'s word while nothing independent places the exit' },
+  { value: 'refuse', label: 'Refuse the proxy', description: 'Skip the proxy until a later sighting places the exit. Needs an IP database loaded' },
 ]
 
 const conflictOptions: RichSelectOption[] = [
   { value: 'inherit', label: 'Install default', description: 'Follow Settings → IP attribution' },
-  { value: 'consensus', label: 'Consensus', description: 'Every independent source agrees with each other and disagrees with the vendor. While they disagree among themselves the claim is open: no flag, and the top-ranked source still decides the country' },
-  { value: 'first', label: 'First', description: 'The top-ranked independent source disagrees with the vendor. The rule decides the flag only, never which country routing uses' },
+  { value: 'consensus', label: 'Consensus', description: 'Every independent source agrees with each other and disagrees with the vendor. While they disagree among themselves the claim is open: no flag, and the row is routed on the vendor\'s word when unknown exits are trusted, on the top-ranked database when they are refused' },
+  { value: 'first', label: 'First', description: 'The top-ranked independent source disagrees with the vendor; the others are not consulted for the flag' },
+  { value: 'any', label: 'Any', description: 'One independent source agreeing with the vendor confirms the claim, and routing uses that source\'s answer; none agreeing is a contradiction. Never leaves a claim open while a database answers' },
 ]
-
-function presetFor(sources: string[] | null | undefined): string {
-  if (!sources || sources.length === 0) return 'inherit'
-  const key = sources.join(',')
-  return sourcePresets.some((p) => p.value === key) ? key : 'custom'
-}
 
 interface ProjectFormProps {
   project?: ProjectSummary
@@ -108,9 +99,9 @@ export function ProjectForm({ project, onSave, error, formId }: ProjectFormProps
     tls_mitm_engine: project?.tls_mitm_engine ?? null,
     tls_mitm_browser: project?.tls_mitm_browser ?? null,
     metrics_retention_days: project?.metrics_retention_days ?? 90,
-    location_assurance: project?.location_assurance ?? 'observe',
+    location_contradicted: project?.location_contradicted ?? 'evidence',
+    location_unknown: project?.location_unknown ?? 'vendor',
     location_preflight: project?.location_preflight ?? false,
-    location_sources: project?.location_sources ?? undefined,
     location_conflict_rule: project?.location_conflict_rule ?? undefined,
   })
   const [showPassword, setShowPassword] = useState(false)
@@ -233,10 +224,17 @@ export function ProjectForm({ project, onSave, error, formId }: ProjectFormProps
       {activeTab === 'location' && (
         <div className="space-y-3">
           <div>
-            <Label className="text-xs">Location assurance</Label>
-            <RichSelect options={locationAssuranceOptions} value={formData.location_assurance ?? 'observe'} onChange={(v) => setFormData({ ...formData, location_assurance: v as ProjectCreate['location_assurance'] })} />
+            <Label className="text-xs">Databases contradict the vendor</Label>
+            <RichSelect options={contradictedOptions} value={formData.location_contradicted ?? 'evidence'} onChange={(v) => setFormData({ ...formData, location_contradicted: v as ContradictedAction })} />
             <p className="mt-1 text-xs text-fg-subtle">
-              Which verdicts on a claimed location may still serve a request, for every row kind. Fixed exits (static, ISP, datacenter, list and cloud proxies) and pooled residential and mobile slots are judged by health checks and discovery, and the verdict is written on the row. Dynamic-sessions gateways carry no row verdict, since each request gets its own vendor session, so only preflight judges them: for a dynamic connector the level does nothing unless preflight is on.
+              The independent sources (the IP databases, the echo endpoint) agree with each other and say the exit is somewhere other than the vendor claims.
+            </p>
+          </div>
+          <div>
+            <Label className="text-xs">No database knows the exit</Label>
+            <RichSelect options={unknownOptions} value={formData.location_unknown ?? 'vendor'} onChange={(v) => setFormData({ ...formData, location_unknown: v as UnknownAction })} />
+            <p className="mt-1 text-xs text-fg-subtle">
+              Nothing independent places the exit: no database knows the IP, or the databases disagree with each other under the consensus rule. Both decisions apply to every row kind. Fixed exits (static, ISP, datacenter, list and cloud proxies) and pooled residential and mobile slots are judged by health checks and discovery, and the verdict is written on the row. Dynamic-sessions gateways carry no row verdict, since each request gets its own vendor session, so only preflight judges them: for a dynamic connector a refusal does nothing unless preflight is on.
             </p>
           </div>
           <div>
@@ -245,51 +243,40 @@ export function ProjectForm({ project, onSave, error, formId }: ProjectFormProps
               Preflight check: verify a session's exit before its first request (one echo per session)
             </label>
             <p className="mt-1 text-xs text-fg-subtle">
-              Session rows only: pooled residential and mobile slots, and dynamic-sessions gateways. Fixed exits (static, ISP, datacenter, list and cloud proxies) are placed by discovery and re-read by every health check, so they are never preflighted. Must be on for verified or confirmed to act on dynamic-sessions connectors, and for either to verify a pooled session's exit per request rather than per health check.
+              Session rows only: pooled residential and mobile slots, and dynamic-sessions gateways. Fixed exits (static, ISP, datacenter, list and cloud proxies) are placed by discovery and re-read by every health check, so they are never preflighted. Must be on for a refusal to reach dynamic-sessions connectors, and to verify a pooled session's exit per request rather than per health check.
             </p>
           </div>
-          <div className="grid grid-cols-2 gap-3">
-            <div>
-              <Label className="text-xs">Which source decides</Label>
-              <RichSelect
-                options={[
-                  ...sourcePresets.map((p) => ({ value: p.value, label: p.label, description: p.description })),
-                  ...(presetFor(formData.location_sources) === 'custom' ? [{ value: 'custom', label: 'Custom', description: (formData.location_sources ?? []).join(', ') }] : []),
-                ]}
-                value={presetFor(formData.location_sources)}
-                onChange={(v) => {
-                  const preset = sourcePresets.find((p) => p.value === v)
-                  if (preset) setFormData({ ...formData, location_sources: (preset.sources ?? []) as ProjectCreate['location_sources'] })
-                }}
-              />
-            </div>
-            <div>
-              <Label className="text-xs">Vendor contradicted when</Label>
-              <RichSelect options={conflictOptions} value={formData.location_conflict_rule || 'inherit'} onChange={(v) => setFormData({ ...formData, location_conflict_rule: (v === 'inherit' ? (project ? '' : null) : v) as ProjectCreate['location_conflict_rule'] })} />
-            </div>
+          <div>
+            <Label className="text-xs">Vendor contradicted when</Label>
+            <RichSelect options={conflictOptions} value={formData.location_conflict_rule || 'inherit'} onChange={(v) => setFormData({ ...formData, location_conflict_rule: (v === 'inherit' ? (project ? '' : null) : v) as ProjectCreate['location_conflict_rule'] })} />
+            <p className="mt-1 text-xs text-fg-subtle">
+              The rule decides what a disagreement between databases is. The routing value is the databases in their priority, then the echo endpoint, then the vendor filling only what nothing independent answered; a claim confirmed under any is routed on the agreeing database's answer, and a contradicted one carries the vendor's claim only when you route on the vendor's claim above.
+            </p>
           </div>
           {(() => {
             const defaults = geo?.settings
-            const sources: GeoSourceKind[] = formData.location_sources?.length ? formData.location_sources : defaults?.default_sources ?? ['database', 'vendor', 'endpoint']
             const rule: ConflictRule = formData.location_conflict_rule || defaults?.default_conflict_rule || 'consensus'
-            const assurance = formData.location_assurance ?? 'observe'
-            const inherited = !formData.location_sources?.length || !formData.location_conflict_rule
+            const contradicted: ContradictedAction = formData.location_contradicted ?? 'evidence'
+            const unknown: UnknownAction = formData.location_unknown ?? 'vendor'
+            const inherited = !formData.location_conflict_rule
             const noDatabases = geo !== undefined && geo.databases_loaded.length === 0
-            const rows = locationExamples(sources, rule, assurance)
+            const noCityDatabase = geo !== undefined && !noDatabases && !geo.databases_loaded.some((d) => d.kind === 'city')
+            const rows = locationExamples(rule, contradicted, unknown)
+            const refuses = contradicted === 'refuse' || unknown === 'refuse'
             return (
               <div className="rounded-lg border border-line bg-surface-raised/50 p-3 text-xs leading-relaxed text-fg-muted space-y-2">
                 <div className="font-medium text-fg">How this behaves</div>
                 <p>
                   A residential slot provisioned for Germany, so the vendor claims DE, judged by two databases (MaxMind ranked above DB-IP) and a plain IP echo.
-                  Sources: <span className="text-fg">{sources.join(', ')}</span>; rule: <span className="text-fg">{rule}</span>; level: <span className="text-fg">{assurance}</span>
-                  {inherited && defaults && <span> (inherited parts from Settings → IP attribution)</span>}.
+                  The databases decide the country where they know the IP; the vendor fills in where they do not.
+                  Rule: <span className="text-fg">{rule}</span>{inherited && defaults && <span> (inherited from Settings → IP attribution)</span>}; contradicted: <span className="text-fg">{contradicted}</span>; unknown: <span className="text-fg">{unknown}</span>.
                 </p>
                 <table className="w-full">
                   <thead>
                     <tr className="text-left text-fg-subtle">
                       <th className="pr-2 font-medium">Evidence</th>
                       <th className="pr-2 font-medium">Verdict</th>
-                      <th className="font-medium">Under {assurance}</th>
+                      <th className="font-medium">Outcome</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -304,13 +291,16 @@ export function ProjectForm({ project, onSave, error, formId }: ProjectFormProps
                 </table>
                 <p>
                   <span className="text-fg">Preflight ({formData.location_preflight ? 'on' : 'off'}):</span>{' '}
-                  {preflightExample(formData.location_preflight ?? false, assurance, formData.routing_strategy ?? 'round_robin', defaults?.preflight_max_attempts ?? 3)}
+                  {preflightExample(formData.location_preflight ?? false, contradicted, unknown, formData.routing_strategy ?? 'round_robin', defaults?.preflight_max_attempts ?? 3)}
                 </p>
-                {assurance !== 'observe' && !formData.location_preflight && (
-                  <p className="text-warning">Preflight is off, so {assurance} acts on pooled residential and mobile slots only through the health check verdict on the row, and not at all on dynamic-sessions connectors. Turn preflight on to verify a session's exit before its first request.</p>
+                {refuses && !formData.location_preflight && (
+                  <p className="text-warning">Preflight is off, so refusing the proxy acts on pooled residential and mobile slots only through the health check verdict on the row, and does nothing for dynamic-sessions connectors, whose requests carry no row verdict. Turn preflight on to verify a session's exit before its first request.</p>
                 )}
-                {assurance === 'confirmed' && noDatabases && (
-                  <p className="text-warning">No IP database is loaded, so every vendor claim is open and confirmed will route to nothing that carries one. Load a database under Settings → IP attribution first.</p>
+                {unknown === 'refuse' && noCityDatabase && (
+                  <p className="text-warning">No loaded database knows states or cities, so every -st- or -city- request is refused as not confirmed under this setting. Load a city-level database under Settings → IP attribution, or trust the vendor for unknown exits.</p>
+                )}
+                {unknown === 'refuse' && noDatabases && (
+                  <p className="text-warning">No IP database is loaded, so nothing independent places any exit: every judged row is skipped under this setting, whether the vendor claimed a place for it or not. Load a database under Settings → IP attribution first.</p>
                 )}
               </div>
             )
@@ -318,7 +308,7 @@ export function ProjectForm({ project, onSave, error, formId }: ProjectFormProps
           <div className="flex gap-2 p-3 rounded-lg border border-line bg-surface-raised/50 text-xs leading-relaxed text-fg-muted">
             <MapPin className="w-4 h-4 flex-shrink-0 mt-0.5" />
             <span>
-              Attribution compares each exit IP against the local IP databases and the echo endpoint (Settings → IP attribution). Routing uses the country the top-ranked source with an answer resolved, under either conflict rule; the rule only decides the flag. The assurance level then says which verdicts may still serve, and applies the same way to the verdict written on a proxy row and to the one preflight reaches for a request: <strong>observe</strong> refuses nothing and only records, <strong>verified</strong> refuses a contradicted claim, <strong>confirmed</strong> refuses an open one as well, so it needs IP databases loaded; a country pinned by hand on a static proxy is trusted while open. Preflight is the switch that verifies a session's exit before its first request, at the cost of one echo per session; it is the only check that reaches a dynamic-sessions gateway. Whether a refused request moves to another proxy is the routing strategy's call: every strategy but sticky tries other eligible proxies, up to the install-wide attempt limit, then 502; a sticky session was promised one exit, so it fails fast with 502. A misplaced pooled vendor session is rotated either way.
+              Attribution compares each exit IP against the local IP databases and the echo endpoint (Settings → IP attribution). The routing value is the databases in their priority, then the echo, then the vendor filling only what nothing independent answered; a contradicted level carries the vendor's claim only under <strong>route on the vendor's claim</strong>. Whatever the decisions, a proxy whose resolved country lies outside its connector's declared countries is never routed to, and a row not judged yet is always eligible. The two decisions above say what happens to the verdicts that remain, and apply the same way to the verdict written on a proxy row and to the one preflight reaches for a request. <strong>Refuse the proxy</strong> for an unknown exit needs an IP database loaded, since without one every claim is open. A country pinned by hand is the operator's word: trusted while open, shown as contradicted and kept unless you <strong>refuse the proxy</strong>, since attribution never overwrites a pin. Preflight is the switch that verifies a session's exit before its first request, at the cost of one echo per session; it is the only check that reaches a dynamic-sessions gateway. At preflight, when the client named a place, a contradicted exit is refused unless you route on the vendor's claim, and an exit nobody can place is refused when unknown exits are refused. When the client named no place, a pooled slot is not checked at all: the client has no expectation, and the slot's own claim is judged on the row by every sighting of its exit. A dynamic gateway is: <strong>refuse the proxy</strong> holds the vendor to the exact country it rendered, <strong>route on the evidence</strong> holds the exit to the connector's declared countries, and <strong>route on the vendor's claim</strong> checks placement only. Whether a refused request moves to another proxy is the routing strategy's call: every strategy but sticky tries other eligible proxies, up to the install-wide attempt limit, then 502; a sticky session was promised one exit, so it fails fast with 502. Only <strong>refuse the proxy</strong> on a contradiction replaces a misplaced pooled vendor session; the other two keep it.
             </span>
           </div>
         </div>

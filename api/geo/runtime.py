@@ -26,6 +26,7 @@ import structlog
 from api.core.config import Settings
 from api.core.event_bus import event_bus
 from api.core.signals import geo_database_changed
+from api.core.tasks import spawn_held
 from api.core.workers import WorkerName
 from api.db.redis import RedisClient
 from api.db.session import SessionFactory
@@ -86,6 +87,7 @@ class GeoRuntime:
         self.proxy_attributor = ProxyAttributor(self.geo_service, settings)
         self.extraction_rules = EchoExtractionRules(self.geo_service)
         self._tasks: list[asyncio.Task[None]] = []
+        self._passes: set[asyncio.Task[Any]] = set()
 
     # --- lifecycle -----------------------------------------------------------------
 
@@ -113,12 +115,38 @@ class GeoRuntime:
         """A scheduled download stored a new build: re-judge every proxy with it, once, here on the leader."""
         await self.proxy_attributor.reattribute_all()
 
+    def reattribute_later(self, project_id: str | None = None, *, inheriting_rule_only: bool = False) -> None:
+        """Re-judge every row, or one project's rows, without holding the request that asked.
+
+        Used after a database changed, after the install's default conflict
+        rule changed (then only for projects that inherit it), and after a
+        project's location decisions or rule changed: a row's value and
+        verdict were written under the settings of the time, and a sighting
+        of an unchanged exit is not re-applied. Passes never interleave: the
+        attributor runs one at a time, whatever asked for them, and nothing
+        is cancelled mid-way, since a pass judges rows in memory as it goes
+        and persists them at the end. The task is held here, apart from the
+        periodic loops, so it is neither collected before it runs nor left
+        behind at shutdown, and a finished pass is forgotten.
+        """
+
+        spawn_held(
+            self._passes,
+            self.proxy_attributor.reattribute_all(project_id=project_id, inheriting_rule_only=inheriting_rule_only),
+            name="reattribute",
+            project_id=project_id,
+        )
+
     async def resync(self) -> None:
         """Reload hook: re-read settings and databases on the periodic full reload."""
         await self.geo_service.resync()
 
     async def stop(self) -> None:
         """Stop the loops, hand the last observations to Redis, close the readers."""
+        # A re-judgement pass persists at its end; cancelling it would discard what it judged.
+        passes = list(self._passes)
+        if passes:
+            await asyncio.gather(*passes, return_exceptions=True)
         await self.proxy_attributor.stop()
         self.preflight_checker.stop()
         self.observation_recorder.stop()

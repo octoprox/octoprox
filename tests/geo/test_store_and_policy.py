@@ -113,14 +113,18 @@ class TestSettingsSeed:
         assert seeded.echo_timeout_seconds == 7
 
     def test_geo_defaults_override(self) -> None:
-        settings = Settings(geo_policy_defaults={"default_sources": ["vendor", "database"], "default_conflict_rule": "first"})  # type: ignore[call-arg]
+        settings = Settings(geo_policy_defaults={"default_conflict_rule": "first"})  # type: ignore[call-arg]
         seeded = defaults_from_config(settings)
-        assert seeded.default_policy.sources == [GeoSourceKind.VENDOR, GeoSourceKind.DATABASE]
         assert seeded.default_policy.conflict_rule.value == "first"
 
     def test_invalid_defaults_fall_back(self) -> None:
-        settings = Settings(geo_policy_defaults={"default_sources": []})  # type: ignore[call-arg]
-        assert defaults_from_config(settings).default_sources[0] == GeoSourceKind.DATABASE
+        settings = Settings(geo_policy_defaults={"default_conflict_rule": "loud"})  # type: ignore[call-arg]
+        assert defaults_from_config(settings).default_conflict_rule.value == "consensus"
+
+    def test_retired_source_order_is_ignored(self) -> None:
+        # A config file from before migration 042 may still list an order; it no longer means anything.
+        settings = Settings(geo_policy_defaults={"default_sources": ["vendor", "database"]})  # type: ignore[call-arg]
+        assert defaults_from_config(settings).default_conflict_rule.value == "consensus"
 
     async def test_store_without_database_keeps_seed(self) -> None:
         settings = Settings(instance_id="x")  # type: ignore[call-arg]

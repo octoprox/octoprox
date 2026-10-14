@@ -55,6 +55,7 @@ from api.core.signals import (
 )
 from api.core.stats import HOST_OVERFLOW, MetricDelta, TunnelPeerMetricDelta, normalize_host
 from api.core.system_snapshotter import SystemSnapshotter
+from api.core.tasks import spawn_held
 from api.core.traffic_limiter import TrafficLimiter, TrafficMeter
 from api.core.workers import WorkerName
 from api.db.redis import (
@@ -72,7 +73,8 @@ from api.db.repository import (
     ProjectRepository,
     ProxyRepository,
 )
-from api.geo.models import LocationAssurance, eligible_under
+from api.geo.models import LocationRules, eligible_under
+from api.geo.service import GeoService
 from api.models.connector import (
     DEFAULT_ROUTING_WEIGHT,
     DEFAULT_TRAFFIC_LIMIT_STATUS,
@@ -86,7 +88,7 @@ from api.models.project import Project
 from api.models.proxy import Proxy, ProxyStatus
 from api.providers.registry import ProviderRegistry, ProviderType, get_provider_registry
 from api.providers.sdk.provider import DescriptorProvider
-from api.providers.sdk.strategies import META_GEO_COUNTRY, is_dynamic_gateway
+from api.providers.sdk.strategies import META_DISCOVERED_IP, META_GEO_COUNTRY, is_dynamic_gateway
 from api.providers.store import ProviderStore
 from api.strategies import ProxyGroup, StickySessionStrategy, get_strategy
 
@@ -95,6 +97,10 @@ if TYPE_CHECKING:
     from api.strategies.base import RoutingStrategy
 
 logger = structlog.get_logger()
+
+
+# Delays before each attempt of a deferred proxy removal's storage cleanup.
+REMOVE_RETRY_DELAYS: tuple[float, ...] = (0.0, 1.0, 5.0)
 
 
 class ProxyManager:
@@ -186,6 +192,7 @@ class ProxyManager:
         # dicts in a single Redis pipeline and announces the same
         # deltas on Pub/Sub so peers can update without polling.
         self._pending_proxy_deltas: dict[str, MetricDelta] = {}
+        self._background_tasks: set[asyncio.Task[None]] = set()
         self._pending_project_deltas: dict[str, MetricDelta] = {}
         self._pending_connector_deltas: dict[str, MetricDelta] = {}
         # Tunnel devices are not cached here (each tunnel protocol keeps its
@@ -845,6 +852,7 @@ class ProxyManager:
             with contextlib.suppress(asyncio.CancelledError):
                 await task
         self._tasks.clear()
+        await self.wait_for_background()
 
         # Release the EventBus distributed transport - it holds a reference
         # to the redis client, which the lifespan is about to close.
@@ -2065,15 +2073,20 @@ class ProxyManager:
         slots and rows with an unknown place are out; a request is never
         widened to the country.
 
-        Above ``observe`` the project's assurance level also refuses proxies
-        whose vendor-declared location is contradicted by attribution, and
-        under ``confirmed`` ones left open by it (``eligible_under``).
+        A row the vendor placed in a declared country but which the evidence
+        puts outside the connector's declared countries is never used,
+        whatever was asked. A row that made no claim (a static proxy, a cloud
+        instance) is bound by the list only for a request that names a
+        country. The project's location rules then refuse rows by the
+        verdicts attribution wrote on them
+        (``eligible_under``), at the country for every request and at the
+        state or city when the request names one.
         """
         target = location or None
         wanted = target.country if target else None
         narrowed = target is not None and target.below_country
         project = self._projects.get(project_id)
-        assurance = project.location_assurance if project is not None else LocationAssurance.OBSERVE
+        rules = project.location_rules if project is not None else LocationRules()
         connectors: dict[str, tuple[list[str], bool]] = {}
         for c in self._enabled_connectors(
             project_id, target_host, include_traffic_blocked=include_traffic_blocked
@@ -2090,9 +2103,11 @@ class ProxyManager:
                 continue
             if not include_quarantined and self._rate_limiter.is_quarantined(p.id):
                 continue
-            if not eligible_under(assurance, p.metadata):
-                continue
             declared, hide_geo_groups = entry
+            if GeoService.outside_declared_countries(p, declared):
+                continue
+            if not eligible_under(rules, p.metadata, target):
+                continue
             if is_dynamic_gateway(p):
                 # The connector-level allow-list was applied above; the row itself has no country.
                 if narrowed and target is not None and not self._serves_location(p.connector_id, target):
@@ -2331,6 +2346,11 @@ class ProxyManager:
             if self._rate_limiter.is_quarantined(p.id)
         )
 
+    def declared_countries(self, connector_id: str) -> list[str]:
+        """The countries a connector declares; empty when it declares none."""
+        connector = self._connectors.get(connector_id)
+        return list(connector.countries) if connector is not None else []
+
     async def select_proxy_for_project(
         self,
         project_id: str,
@@ -2474,8 +2494,19 @@ class ProxyManager:
         )
         await event_bus.publish(proxy_changed, self, entity_id=proxy.id, op="added")
 
-    async def update_proxy(self, proxy: Proxy) -> None:
-        """Update a proxy in the pool (persists to Postgres)."""
+    async def update_proxy(self, proxy: Proxy, *, deferred: bool = False) -> None:
+        """Update a proxy in the pool (persists to Postgres).
+
+        With ``deferred`` the write runs in a task the manager holds rather
+        than being awaited: a preflight sighting judges a row on the request
+        path and must not pay for its persistence. The in-memory row is the
+        object itself, already current. A row removed before the write runs
+        is left removed (``update_proxies``).
+        """
+        if deferred and self._running:
+            self._run_later(self.update_proxies([proxy]), f"update-proxy-{proxy.id}")
+            return
+        # Stopping: nothing would wait for a scheduled write, so it runs here.
         await self.update_proxies([proxy])
 
     async def update_proxies(self, proxies: list[Proxy]) -> None:
@@ -2489,16 +2520,23 @@ class ProxyManager:
             await session.commit()
 
         for proxy in proxies:
+            if proxy.id not in self._proxies:
+                # Removed while the write was pending (a rotation, the provider sync): stays removed.
+                logger.info("Skipped update of a removed proxy", proxy_id=proxy.id)
+                continue
             self._proxies[proxy.id] = proxy
             logger.info("Updated proxy", proxy_id=proxy.id, host=proxy.host)
             await event_bus.publish(proxy_changed, self, entity_id=proxy.id, op="updated")
 
-    async def remove_proxy(self, proxy_id: str) -> bool:
+    async def remove_proxy(self, proxy_id: str, *, deferred: bool = False) -> bool:
         """Remove a proxy from the pool (deletes from Postgres).
 
-        Emits proxy_removed signal after successful removal.
-        Also cleans up Redis data (status and metrics) to prevent
-        foreign key violations in the metrics flusher.
+        The row leaves the in-memory pool at once, so routing never picks it
+        again. Its storage (the Postgres row, the Redis status and metrics,
+        the rate limiter state) is cleaned up and ``proxy_removed`` emitted
+        either here or, with ``deferred``, in a task that does not hold the
+        caller: a preflight sighting that judges a slot out runs on the
+        request path and must not pay for the cleanup.
         """
         if proxy_id not in self._proxies:
             return False
@@ -2506,31 +2544,86 @@ class ProxyManager:
         proxy = self._proxies[proxy_id]
         connector_id = proxy.connector_id
 
-        async with self._session_factory() as session:
-            repo = ProxyRepository(session)
-            await repo.delete(proxy_id)
-            await session.commit()
+        def forget() -> None:
+            self._proxies.pop(proxy_id, None)
+            self._pending_proxy_deltas.pop(proxy_id, None)
 
-        # Clean up Redis data to prevent metrics flusher from trying to insert
-        # metrics for a deleted proxy (which would cause foreign key violations)
-        await self._redis_client.delete_proxy_status(proxy_id)
-        await self._redis_client.reset_proxy_metrics(proxy_id)
+        deleted = False
 
-        # Clean up rate limiter state (in-memory + Redis quarantine key)
-        await self._rate_limiter.remove_proxy(proxy_id)
+        async def clean_storage() -> None:
+            nonlocal deleted
+            if not deleted:
+                async with self._session_factory() as session:
+                    repo = ProxyRepository(session)
+                    await repo.delete(proxy_id)
+                    await session.commit()
+                deleted = True
 
-        del self._proxies[proxy_id]
-        self._pending_proxy_deltas.pop(proxy_id, None)
-        logger.info("Removed proxy", proxy_id=proxy_id)
+            # Clean up Redis data to prevent metrics flusher from trying to insert
+            # metrics for a deleted proxy (which would cause foreign key violations)
+            await self._redis_client.delete_proxy_status(proxy_id)
+            await self._redis_client.reset_proxy_metrics(proxy_id)
 
-        await event_bus.publish(proxy_removed,
-            self,
-            proxy_id=proxy_id,
-            connector_id=connector_id,
-        )
-        await event_bus.publish(proxy_changed, self, entity_id=proxy_id, op="removed")
+            # Clean up rate limiter state (in-memory + Redis quarantine key)
+            await self._rate_limiter.remove_proxy(proxy_id)
 
+        async def announce() -> None:
+            logger.info("Removed proxy", proxy_id=proxy_id)
+            await event_bus.publish(proxy_removed,
+                self,
+                proxy_id=proxy_id,
+                connector_id=connector_id,
+            )
+            await event_bus.publish(proxy_changed, self, entity_id=proxy_id, op="removed")
+
+        if deferred and self._running:
+            # Out of routing now; the storage work does not hold the caller.
+            forget()
+
+            async def later() -> None:
+                # A transient storage error must not strand the slot: retry while the
+                # pool is running. If the Postgres row was never deleted, put the row
+                # back so memory agrees, and forget its last exit so the next sighting
+                # judges it afresh and rotates it again. If it was deleted, the row
+                # stays removed whatever else failed; the Redis leftovers are harmless.
+                for attempt, delay in enumerate(REMOVE_RETRY_DELAYS):
+                    if delay and self._running:
+                        await asyncio.sleep(delay)
+                    try:
+                        await clean_storage()
+                        break
+                    except Exception as exc:
+                        if attempt + 1 < len(REMOVE_RETRY_DELAYS) and self._running:
+                            logger.warning("Deferred proxy removal failed, retrying", proxy_id=proxy_id, attempt=attempt + 1, error=str(exc))
+                            continue
+                        if deleted:
+                            logger.warning("Deferred proxy removal: row deleted, Redis cleanup left behind", proxy_id=proxy_id, error=str(exc))
+                            break
+                        proxy.metadata.pop(META_DISCOVERED_IP, None)
+                        self._proxies.setdefault(proxy_id, proxy)
+                        logger.error("Deferred proxy removal failed; the row is back in the pool until its next sighting", proxy_id=proxy_id, error=str(exc))
+                        await event_bus.publish(proxy_changed, self, entity_id=proxy_id, op="updated")
+                        return
+                await announce()
+
+            self._run_later(later(), f"remove-proxy-{proxy_id}")
+            return True
+        # Storage first, so a failed delete leaves memory and Postgres agreeing.
+        await clean_storage()
+        forget()
+        await announce()
         return True
+
+    async def wait_for_background(self) -> None:
+        """Let deferred proxy writes and removals land; Postgres must agree with memory before a restart."""
+        pending = list(self._background_tasks)
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+        self._background_tasks.clear()
+
+    def _run_later(self, coro: Coroutine[Any, Any, None], name: str) -> None:
+        """Run ``coro`` as a task the manager holds, so it is neither collected early nor silently lost."""
+        spawn_held(self._background_tasks, coro, name=name)
 
     def set_strategy(self, strategy_name: str) -> None:
         """Change the routing strategy."""

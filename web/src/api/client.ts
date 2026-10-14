@@ -155,20 +155,37 @@ export interface Project {
   tls_mitm_engine: string | null
   tls_mitm_browser: string | null
   metrics_retention_days: number
-  /** IP attribution: which verdicts on a claimed location may still serve a request (observe, verified, confirmed). */
-  location_assurance: LocationAssurance
+  /** IP attribution: what to do when the independent sources agree against the vendor's claim. */
+  location_contradicted: ContradictedAction
+  /** IP attribution: what to do when nothing independent places the exit. */
+  location_unknown: UnknownAction
   /** IP attribution: verify a session's exit before its first request (one echo per session). */
   location_preflight: boolean
-  /** Source precedence override; null inherits the install default. */
-  location_sources: GeoSourceKind[] | null
   /** Conflict rule override; null inherits the install default. */
   location_conflict_rule: ConflictRule | null
   created_at: string
   updated_at: string
 }
 
-export type LocationAssurance = 'observe' | 'verified' | 'confirmed'
-export type ConflictRule = 'consensus' | 'first'
+/**
+ * The databases and the echo agree against the vendor's claim: route the proxy
+ * on the evidence (where they put the exit), route on the vendor's claim anyway
+ * and only show the contradiction, or refuse the proxy (and replace it when it
+ * is a pooled session slot).
+ */
+export type ContradictedAction = 'evidence' | 'vendor' | 'refuse'
+/**
+ * Nothing independent places the exit (no database knows the IP, or they
+ * disagree with each other under consensus): route on the vendor's word, or
+ * refuse the proxy until a later sighting places it.
+ */
+export type UnknownAction = 'vendor' | 'refuse'
+/**
+ * What a disagreement between databases is: consensus leaves the claim open,
+ * first lets the top-priority database judge, any confirms the claim when any
+ * database agrees with the vendor (routing then uses the agreeing answer).
+ */
+export type ConflictRule = 'consensus' | 'first' | 'any'
 
 export interface ProjectSummary extends Project {
   credential_count: number
@@ -196,9 +213,9 @@ export interface ProjectCreate {
   tls_mitm_engine?: string | null
   tls_mitm_browser?: string | null
   metrics_retention_days?: number
-  location_assurance?: LocationAssurance
+  location_contradicted?: ContradictedAction
+  location_unknown?: UnknownAction
   location_preflight?: boolean
-  location_sources?: GeoSourceKind[] | null
   location_conflict_rule?: ConflictRule | null
 }
 
@@ -216,10 +233,9 @@ export interface ProjectUpdate {
   tls_mitm_engine?: string | null
   tls_mitm_browser?: string | null
   metrics_retention_days?: number
-  location_assurance?: LocationAssurance
+  location_contradicted?: ContradictedAction
+  location_unknown?: UnknownAction
   location_preflight?: boolean
-  /** An empty list clears the override. */
-  location_sources?: GeoSourceKind[] | null
   /** An empty string clears the override. */
   location_conflict_rule?: ConflictRule | '' | null
 }
@@ -253,6 +269,11 @@ export interface Proxy {
   /** Attribution contradicts the vendor's claim (see the project's location policy). */
   location_conflict: boolean
   location_verdict: 'confirmed' | 'contradicted' | 'open' | null
+  /** How a claimed state or city fared; null when none was claimed. */
+  state_verdict: 'confirmed' | 'contradicted' | 'open' | null
+  city_verdict: 'confirmed' | 'contradicted' | 'open' | null
+  /** The evidence puts the exit outside the connector's declared countries: skipped for every request, kept. */
+  outside_declared_countries: boolean
   /** Full record from the IP databases, when any covers the exit IP. */
   location: IpLocation | null
   /** State code and city that -st- and -city- routing matches this exit on, each with its source. */
@@ -288,14 +309,19 @@ export interface IpLocation {
 
 export type GeoSourceKind = 'database' | 'vendor' | 'endpoint'
 
+/**
+ * How a vendor's claim is judged for one project. The routing value is the
+ * databases in their priority, then the echo, then the vendor filling the gap,
+ * unless `contradicted` is `vendor`, in which case a contradicted level carries
+ * the claim.
+ */
 export interface SourcePolicy {
-  sources: GeoSourceKind[]
   conflict_rule: ConflictRule
+  contradicted: ContradictedAction
 }
 
 /** Install-wide attribution settings (one typed row). Projects inherit the default_* judgement. */
 export interface GeoSettingsDoc {
-  default_sources: GeoSourceKind[]
   default_conflict_rule: ConflictRule
   echo_url: string
   echo_ip_path: string

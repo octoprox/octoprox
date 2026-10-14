@@ -11,13 +11,13 @@ from __future__ import annotations
 
 from datetime import datetime
 from enum import StrEnum
-from typing import Any, Literal
+from typing import Any, Literal, NamedTuple
 from uuid import uuid4
 
 from pydantic import BaseModel, Field, field_validator
 
 from api.core import utc_now
-from api.models.location import slugify_place
+from api.models.location import META_MANUAL_LOCATION, LocationTarget, slugify_place
 
 
 class GeoVendor(StrEnum):
@@ -70,32 +70,52 @@ class ConflictRule(StrEnum):
     CONSENSUS = "consensus"
     # The winning independent answer disagrees with the vendor.
     FIRST = "first"
+    # Any independent source agreeing with the vendor confirms it; none agreeing contradicts it.
+    ANY = "any"
 
 
-class LocationAssurance(StrEnum):
-    """Per project: which verdicts on a claimed location may still serve a request.
+class ContradictedAction(StrEnum):
+    """Per project: what to do when the independent sources agree against the vendor's claim.
 
-    One answer for every kind of row. A fixed exit and a pooled session slot
-    carry the verdict attribution wrote on them; a dynamic-sessions gateway
-    carries none, and its verdict is the one preflight reaches for the vendor
-    session rendered for the request. The level decides eligibility and what
-    a preflight verdict does to the request; which country a proxy is routed
-    on is the source policy's call (``SourcePolicy.sources``) under every
-    level.
-
-    ``observe`` serves every verdict and shows it. ``verified`` refuses a
-    contradicted claim and serves an open one (no independent source knows
-    the IP, or they disagree under ``consensus``) on the vendor's word.
-    ``confirmed`` wants clear evidence: only a confirmed claim serves (or one
-    not judged yet), so an open claim is refused until a later sighting
-    settles it, unless the country was pinned by hand. A refused pooled
-    session slot whose claim is contradicted is replaced with a fresh
-    session. See :func:`eligible_under`.
+    ``evidence`` routes the proxy on where the databases or the echo put the
+    exit. ``vendor`` routes it on the claim anyway and only shows the
+    contradiction. ``refuse`` skips the proxy, and replaces it when it is a
+    pooled session slot. At preflight, when the client named a place, a
+    contradicted exit is refused unless the vendor is trusted; when the
+    client named nothing, ``evidence`` holds the exit to the connector's
+    declared countries, ``refuse`` to the vendor's exact promise.
     """
 
-    OBSERVE = "observe"  # route everywhere, surface the verdicts
-    VERIFIED = "verified"  # a contradicted claim is refused, an open one trusted
-    CONFIRMED = "confirmed"  # only a confirmed (or unjudged) claim serves
+    EVIDENCE = "evidence"
+    VENDOR = "vendor"
+    REFUSE = "refuse"
+
+
+class UnknownAction(StrEnum):
+    """Per project: what to do when nothing independent places the exit.
+
+    An open verdict: no database knows the IP, or the databases disagree
+    with each other under ``consensus``. ``vendor`` routes on the vendor's
+    word; ``refuse`` skips the proxy until a later sighting places it, and
+    refuses a preflighted request at every level the client named that
+    nothing independent could place.
+    """
+
+    VENDOR = "vendor"
+    REFUSE = "refuse"
+
+
+class LocationRules(NamedTuple):
+    """A project's two location decisions, read together by routing and preflight.
+
+    A country pinned by hand is the operator's word: never open, never
+    overwritten by attribution, and refused only when the project refuses
+    contradictions outright. A row not judged yet is always eligible. See
+    :func:`eligible_under` and ``PreflightVerdict.acceptable``.
+    """
+
+    contradicted: ContradictedAction = ContradictedAction.EVIDENCE
+    unknown: UnknownAction = UnknownAction.VENDOR
 
 
 class LocationVerdict(StrEnum):
@@ -222,11 +242,13 @@ class Resolution(BaseModel):
     * ``claimed_country``: what was promised. The vendor's claim for the
       exit, or the place a request required when preflight verifies it.
     * ``observed_country``: what independent evidence found. The first
-      database or endpoint answer in policy order; None when only the
-      vendor had an opinion. This is what verification compares against.
-    * ``resolved_country``: what routing uses. The first candidate in
-      ``policy.sources`` order with an answer, which the policy may let be
-      the claim itself when it ranks the vendor first or nothing else knows.
+      database or endpoint answer; None when only the vendor had an
+      opinion. This is what verification compares against.
+    * ``resolved_country``: the independent answer. The first candidate in
+      ``VALUE_PRECEDENCE`` order with an answer, which is the claim itself
+      only when nothing independent knows. It is what observations record;
+      what a row routes on is this unless the project chose the claim for a
+      contradicted or an open level (``GeoService._attribute``).
 
     ``country_conflict`` judges the claim by the independent evidence under
     the conflict rule, never by ``resolved_country``.
@@ -266,47 +288,39 @@ class Resolution(BaseModel):
         ]
 
 
-def dedupe_sources(value: list[GeoSourceKind]) -> list[GeoSourceKind]:
-    """Order-preserving dedupe of a source list; at least one source must remain."""
-    seen: list[GeoSourceKind] = []
-    for kind in value:
-        if kind not in seen:
-            seen.append(kind)
-    if not seen:
-        raise ValueError("at least one source is required")
-    return seen
+# The routing value, by precedence: the databases (in their own priority),
+# then the echo endpoint, then the vendor's claim filling what nothing
+# independent answered. Fixed: trust in the vendor is ``ContradictedAction``'s
+# business, never the value's.
+VALUE_PRECEDENCE: tuple[GeoSourceKind, ...] = (GeoSourceKind.DATABASE, GeoSourceKind.ENDPOINT, GeoSourceKind.VENDOR)
 
 
 class SourcePolicy(BaseModel):
-    """How the three kinds of evidence combine for one project.
+    """How a vendor's claim is judged for one project, and what a contradiction does to the routing value.
 
-    The install keeps a default (``GeoSettings.default_policy``); a project may
-    override either field on its own row.
+    The install keeps a default rule (``GeoSettings.default_policy``); a
+    project may override it on its own row. ``contradicted`` is the
+    project's :class:`ContradictedAction`: under ``vendor`` a contradicted
+    level carries the claim as its routing value instead of the evidence.
+    ``unknown`` is its :class:`UnknownAction`: under ``vendor`` an open level
+    carries the claim too, whether no source placed the exit or the sources
+    disagreed, so "trust the vendor where nothing is settled" means the same
+    on the row as it does for routing.
     """
 
-    # Precedence when sources answer differently. The first kind with an answer wins.
-    sources: list[GeoSourceKind] = Field(
-        default_factory=lambda: [GeoSourceKind.DATABASE, GeoSourceKind.VENDOR, GeoSourceKind.ENDPOINT]
-    )
     conflict_rule: ConflictRule = ConflictRule.CONSENSUS
-
-    @field_validator("sources")
-    @classmethod
-    def _sources(cls, value: list[GeoSourceKind]) -> list[GeoSourceKind]:
-        return dedupe_sources(value)
+    contradicted: ContradictedAction = ContradictedAction.EVIDENCE
+    unknown: UnknownAction = UnknownAction.VENDOR
 
 
 class GeoSettings(BaseModel):
     """Install-wide attribution settings, edited in the admin panel.
 
     One typed row (``geo_settings``); the config file's ``geo.defaults`` seeds
-    it on a fresh install. Judgement (which source wins, when the vendor is
-    contradicted) lives here only as the default projects inherit.
+    it on a fresh install. Judgement (when the vendor is contradicted) lives
+    here only as the default projects inherit.
     """
 
-    default_sources: list[GeoSourceKind] = Field(
-        default_factory=lambda: [GeoSourceKind.DATABASE, GeoSourceKind.VENDOR, GeoSourceKind.ENDPOINT]
-    )
     default_conflict_rule: ConflictRule = ConflictRule.CONSENSUS
     # Echo endpoint requested through proxies to learn their exit IP. Becomes
     # the default for health checks, discovery, exit lookups and preflight.
@@ -330,14 +344,9 @@ class GeoSettings(BaseModel):
     # last seen; 0 keeps them forever.
     exit_ip_retention_days: int = Field(default=0, ge=0)
 
-    @field_validator("default_sources")
-    @classmethod
-    def _sources(cls, value: list[GeoSourceKind]) -> list[GeoSourceKind]:
-        return dedupe_sources(value)
-
     @property
     def default_policy(self) -> SourcePolicy:
-        return SourcePolicy(sources=list(self.default_sources), conflict_rule=self.default_conflict_rule)
+        return SourcePolicy(conflict_rule=self.default_conflict_rule)
 
 
 class GeoDatabaseRecord(BaseModel):
@@ -476,6 +485,8 @@ META_STATE = "state_code"
 META_CITY = "city"
 META_STATE_SOURCE = "state_source"
 META_CITY_SOURCE = "city_source"
+META_STATE_VERDICT = "state_verdict"  # how a claimed state fared: confirmed, contradicted, open
+META_CITY_VERDICT = "city_verdict"
 META_VENDOR_STATE = "vendor_state"
 META_VENDOR_CITY = "vendor_city"
 META_ENDPOINT_STATE = "endpoint_state"
@@ -489,27 +500,70 @@ META_LOCATION_CANDIDATES = "location_candidates"  # compact candidate list
 META_LOCATION_CHECKED_AT = "location_checked_at"  # ISO timestamp of the last resolution
 
 
-def eligible_under(assurance: LocationAssurance, metadata: dict[str, Any]) -> bool:
-    """Whether the verdict written on a proxy row lets the project route to it.
+INDEPENDENT_SOURCES = (GeoSourceKind.DATABASE.value, GeoSourceKind.ENDPOINT.value)
 
-    ``observe`` routes to every row. ``verified`` refuses a contradicted
-    claim only. ``confirmed`` also refuses an open one (the independent
-    sources disagreed under ``consensus``, or none of them knows the IP).
-    Under every level a confirmed claim, a proxy that made no claim, and one
-    not judged yet (a slot provisioned seconds ago, before its first health
-    check) are in, so that on-demand provisioning and a fresh pool stay
-    routable. Rows written before the verdict was stored carry only the flag
-    and read as judged by it alone.
 
-    A country an operator pinned by hand is judged like a vendor claim but
-    trusted while open: the operator placed that row deliberately, and a
-    static list in ranges no database covers would otherwise go dark under
-    ``confirmed``. A pin the databases agree against is still out.
+def eligible_under(rules: LocationRules, metadata: dict[str, Any], target: LocationTarget | None = None) -> bool:
+    """Whether the verdicts written on a proxy row let the project route to it for ``target``.
+
+    The country is judged for every request. A state or city is judged only
+    when ``target`` names one, since nothing else matches on it, and only
+    when the row carries a value or a pin at that level: a dynamic-sessions
+    gateway has none (the vendor renders the place per request and preflight
+    judges it) and a fixed exit without one fails ``Proxy.location_matches``
+    anyway. A row not judged yet (a slot provisioned seconds ago, before its
+    first health check) is in, so that on-demand provisioning and a fresh
+    pool stay routable. Rows written before the verdict was stored carry
+    only the flag and read as judged by it alone.
+
+    A contradicted level is refused under ``ContradictedAction.REFUSE``, and
+    under ``EVIDENCE`` when its routing value is a value the vendor supplied
+    rather than the evidence, since routing on the evidence is then
+    impossible. A pin is the exception: the operator placed that row
+    deliberately and attribution never overwrites it, so it is refused only
+    under ``REFUSE`` and shown as contradicted otherwise. An open level, and
+    a judged row that nothing independent could place, are refused under
+    ``UnknownAction.REFUSE``, except a pin, which is never open.
     """
-    if assurance == LocationAssurance.OBSERVE:
-        return True
-    if metadata.get(META_LOCATION_CONFLICT) is True:
+    judged = META_LOCATION_CHECKED_AT in metadata or META_LOCATION_CONFLICT in metadata
+    verdict = metadata.get(META_LOCATION_VERDICT)
+    if judged and not _level_eligible(
+        rules,
+        contradicted=metadata.get(META_LOCATION_CONFLICT) is True or verdict == LocationVerdict.CONTRADICTED,
+        open_=verdict == LocationVerdict.OPEN,
+        pinned=metadata.get(META_COUNTRY_SOURCE) == MANUAL_SOURCE,
+        placed=metadata.get(META_COUNTRY_SOURCE) in INDEPENDENT_SOURCES or verdict == LocationVerdict.CONFIRMED,
+    ):
         return False
-    if assurance == LocationAssurance.VERIFIED or metadata.get(META_LOCATION_VERDICT) != LocationVerdict.OPEN:
+    if target is None:
         return True
-    return metadata.get(META_COUNTRY_SOURCE) == MANUAL_SOURCE
+    manual = metadata.get(META_MANUAL_LOCATION)
+    pins = manual if isinstance(manual, dict) else {}
+    for asked, key, source_key, verdict_key in (
+        (target.state, META_STATE, META_STATE_SOURCE, META_STATE_VERDICT),
+        (target.city, META_CITY, META_CITY_SOURCE, META_CITY_VERDICT),
+    ):
+        pinned = bool(pins.get(key))
+        if not asked or (key not in metadata and not pinned):
+            continue
+        level_verdict = metadata.get(verdict_key)
+        if not _level_eligible(
+            rules,
+            contradicted=level_verdict == LocationVerdict.CONTRADICTED,
+            open_=level_verdict == LocationVerdict.OPEN,
+            pinned=pinned,
+            placed=metadata.get(source_key) in INDEPENDENT_SOURCES or level_verdict == LocationVerdict.CONFIRMED,
+        ):
+            return False
+    return True
+
+
+def _level_eligible(rules: LocationRules, *, contradicted: bool, open_: bool, pinned: bool, placed: bool) -> bool:
+    """One level of a judged row against the project's rules."""
+    if contradicted:
+        if rules.contradicted == ContradictedAction.REFUSE:
+            return False
+        # The evidence placed the exit; routing on it needs the value to be the
+        # evidence's. A pin is the operator's deliberate placement and stays.
+        return rules.contradicted == ContradictedAction.VENDOR or placed or pinned
+    return not (rules.unknown == UnknownAction.REFUSE and not pinned and (open_ or not placed))

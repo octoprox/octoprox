@@ -30,19 +30,13 @@ class TestWinner:
         assert result.country_conflict is None
         assert result.resolved_country == "GB" and result.resolved_source == GeoSourceKind.DATABASE
 
-    def test_source_order_is_policy(self) -> None:
-        policy = SourcePolicy(sources=[GeoSourceKind.VENDOR, GeoSourceKind.DATABASE])
-        result = resolve([db("mm", "GB"), vendor_candidate(LocationTarget.reported("US"))], policy)  # type: ignore[list-item]
-        assert result.resolved_country == "US" and result.resolved_source == GeoSourceKind.VENDOR
-
     def test_falls_through_when_first_source_has_no_answer(self) -> None:
         result = resolve([db("mm", None), vendor_candidate(LocationTarget.reported("US"))], SourcePolicy())  # type: ignore[list-item]
         assert result.resolved_country == "US" and result.resolved_source == GeoSourceKind.VENDOR
 
-    def test_excluded_source_never_wins(self) -> None:
-        policy = SourcePolicy(sources=[GeoSourceKind.DATABASE])
-        result = resolve([vendor_candidate(LocationTarget.reported("US"))], policy)  # type: ignore[list-item]
-        assert result.resolved_country is None and result.resolved_source is None
+    def test_vendor_never_outranks_independent_evidence(self) -> None:
+        result = resolve([endpoint_candidate(LocationTarget.reported("GB")), vendor_candidate(LocationTarget.reported("US"))], SourcePolicy())  # type: ignore[list-item]
+        assert result.resolved_country == "GB" and result.resolved_source == GeoSourceKind.ENDPOINT
 
     def test_database_priority_order_is_input_order(self) -> None:
         result = resolve([db("first", "GB"), db("second", "FR")], SourcePolicy())
@@ -75,19 +69,14 @@ class TestConflict:
         result = resolve([db("mm", "GB"), db("dbip", "US"), vendor_candidate(LocationTarget.reported("US"))], policy)  # type: ignore[list-item]
         assert result.country_conflict
 
-    def test_first_rule_uses_independent_source_even_when_vendor_ranks_first(self) -> None:
-        policy = SourcePolicy(conflict_rule=ConflictRule.FIRST, sources=[GeoSourceKind.VENDOR, GeoSourceKind.DATABASE])
+    def test_first_rule_judges_by_the_top_independent_source(self) -> None:
+        policy = SourcePolicy(conflict_rule=ConflictRule.FIRST)
         result = resolve([db("mm", "GB"), vendor_candidate(LocationTarget.reported("US"))], policy)  # type: ignore[list-item]
-        assert result.resolved_country == "US" and result.country_conflict
+        assert result.resolved_country == "GB" and result.country_conflict
 
     def test_agreeing_vendor_is_not_flagged(self) -> None:
         result = resolve([db("mm", "US"), vendor_candidate(LocationTarget.reported("us"))], SourcePolicy())  # type: ignore[list-item]
         assert result.country_conflict is False and result.claimed_country == "US"
-
-    def test_excluded_sources_still_count_as_evidence(self) -> None:
-        policy = SourcePolicy(sources=[GeoSourceKind.VENDOR])
-        result = resolve([db("mm", "GB"), vendor_candidate(LocationTarget.reported("US"))], policy)  # type: ignore[list-item]
-        assert result.resolved_country == "US" and result.country_conflict
 
 
 class TestLocation:
@@ -154,18 +143,12 @@ class TestPlace:
         reversed_first = resolve([disagreeing[1], disagreeing[0], claim], SourcePolicy(conflict_rule=ConflictRule.FIRST))  # type: ignore[list-item]
         assert reversed_first.city_conflict is True
 
-    def test_policy_may_let_the_claim_win_routing(self) -> None:
-        # No database knows the city: under the default policy the vendor's city is what routing gets.
+    def test_vendor_fills_a_level_nothing_independent_knows(self) -> None:
+        # No database knows the city: the vendor's city is what routing gets, with its source recorded.
         result = resolve([db("a", "US", state_code="NY"), vendor_candidate(LocationTarget(country="US", city="buffalo"))], SourcePolicy())  # type: ignore[list-item]
         assert result.resolved_city == "buffalo" and result.resolved_city_source == GeoSourceKind.VENDOR
         assert result.resolved_state == "NY" and result.resolved_state_source == GeoSourceKind.DATABASE
         assert result.observed_city is None and result.city_conflict is None
-        # A policy without the vendor never routes on its word.
-        strict = resolve(
-            [db("a", "US", state_code="NY"), vendor_candidate(LocationTarget(country="US", city="buffalo"))],  # type: ignore[list-item]
-            SourcePolicy(sources=[GeoSourceKind.DATABASE, GeoSourceKind.ENDPOINT]),
-        )
-        assert strict.resolved_city is None
 
     def test_judge_level_directly(self) -> None:
         verdict = judge_level([db("a", "GB", city="London"), endpoint_candidate(LocationTarget(country="GB", city="london"))], SourcePolicy(), lambda c: c.city)  # type: ignore[list-item]
@@ -173,10 +156,9 @@ class TestPlace:
 
 
 class TestObservedCountry:
-    def test_observed_is_the_independent_answer_even_when_the_vendor_wins(self) -> None:
-        policy = SourcePolicy(sources=[GeoSourceKind.VENDOR, GeoSourceKind.DATABASE])
-        result = resolve([db("mm", "GB"), vendor_candidate(LocationTarget.reported("US"))], policy)  # type: ignore[list-item]
-        assert result.resolved_country == "US" and result.observed_country == "GB" and result.country_conflict
+    def test_observed_is_the_independent_answer(self) -> None:
+        result = resolve([db("mm", "GB"), vendor_candidate(LocationTarget.reported("US"))], SourcePolicy())  # type: ignore[list-item]
+        assert result.resolved_country == "GB" and result.observed_country == "GB" and result.country_conflict
 
     def test_observed_is_none_without_independent_evidence(self) -> None:
         result = resolve([vendor_candidate(LocationTarget.reported("US"))], SourcePolicy())  # type: ignore[list-item]
@@ -199,12 +181,6 @@ class TestOpenClaimRouting:
     def test_first_flags_on_the_same_evidence_it_routes_on(self) -> None:
         result = resolve(self._disagreeing(), SourcePolicy(conflict_rule=ConflictRule.FIRST))
         assert result.country_conflict is True and result.resolved_country == "GB"
-
-    def test_vendor_first_routes_on_the_claim_whatever_the_verdict(self) -> None:
-        policy = SourcePolicy(sources=[GeoSourceKind.VENDOR, GeoSourceKind.DATABASE])
-        assert resolve(self._disagreeing(), policy).resolved_country == "US"
-        contradicted = resolve([db("mm", "GB"), db("dbip", "GB"), vendor_candidate(LocationTarget.reported("US"))], policy)  # type: ignore[list-item]
-        assert contradicted.country_conflict is True and contradicted.resolved_country == "US"
 
     def test_disagreement_without_a_claim_keeps_the_top_answer(self) -> None:
         result = resolve([db("mm", "GB"), db("dbip", "FR")], SourcePolicy())

@@ -383,55 +383,24 @@ function PolicyTab() {
   if (isLoading || !policy) return <p className="text-sm text-fg-muted">Loading…</p>
 
   const update = (patch: Partial<GeoSettingsDoc>) => setDraft({ ...policy, ...patch })
-  const move = (kind: GeoSourceKind, direction: -1 | 1) => {
-    const sources = [...policy.default_sources]
-    const index = sources.indexOf(kind)
-    const target = index + direction
-    if (index < 0 || target < 0 || target >= sources.length) return
-    sources.splice(index, 1); sources.splice(target, 0, kind)
-    update({ default_sources: sources })
-  }
-  const toggle = (kind: GeoSourceKind) => {
-    const sources = policy.default_sources.includes(kind) ? policy.default_sources.filter((s) => s !== kind) : [...policy.default_sources, kind]
-    if (sources.length > 0) update({ default_sources: sources })
-  }
-  const allKinds: GeoSourceKind[] = ['database', 'vendor', 'endpoint']
-  const excluded = allKinds.filter((k) => !policy.default_sources.includes(k))
 
   return (
     <form onSubmit={(e) => { e.preventDefault(); mutation.mutate(policy) }} className="space-y-4">
       <div className="grid grid-cols-1 @3xl:grid-cols-2 gap-4">
         <Card className="p-5">
-          <h3 className="text-sm font-semibold text-fg mb-1">Default source precedence</h3>
-          <p className="text-xs text-fg-muted mb-3">The first source with an answer decides a proxy's country. Sources left out never decide, but still count as evidence when judging the vendor. Projects can override this on their Location tab.</p>
-          <ol className="space-y-1.5">
-            {policy.default_sources.map((kind, i) => (
-              <li key={kind} className="flex items-center gap-2 rounded-lg border border-line px-3 py-2 text-sm">
-                <span className="w-5 text-xs text-fg-subtle tabular-nums">{i + 1}.</span>
-                <span className="flex-1 min-w-0">{SOURCE_LABELS[kind]}</span>
-                <Button type="button" variant="ghost" size="sm" onClick={() => move(kind, -1)} disabled={i === 0}>↑</Button>
-                <Button type="button" variant="ghost" size="sm" onClick={() => move(kind, 1)} disabled={i === policy.default_sources.length - 1}>↓</Button>
-                <Button type="button" variant="ghost" size="sm" onClick={() => toggle(kind)} disabled={policy.default_sources.length === 1}>Exclude</Button>
-              </li>
-            ))}
-            {excluded.map((kind) => (
-              <li key={kind} className="flex items-center gap-2 rounded-lg border border-dashed border-line px-3 py-2 text-sm text-fg-muted">
-                <span className="w-5" />
-                <span className="flex-1">{SOURCE_LABELS[kind]} <span className="text-xs text-fg-subtle">(excluded)</span></span>
-                <Button type="button" variant="ghost" size="sm" onClick={() => toggle(kind)}>Include</Button>
-              </li>
-            ))}
-          </ol>
-          <div className="mt-4">
+          <h3 className="text-sm font-semibold text-fg mb-1">Judging the vendor</h3>
+          <p className="text-xs text-fg-muted mb-3">The routing value is always the local IP databases in their priority, then the echo endpoint, then the vendor filling only what nothing independent answered. The rule below decides when a vendor claim counts as contradicted; projects can override it on their Location tab.</p>
+          <div>
             <Label htmlFor="geo-conflict">When is a vendor claim contradicted? (default)</Label>
             <Select id="geo-conflict" value={policy.default_conflict_rule} onChange={(e) => update({ default_conflict_rule: e.target.value as GeoSettingsDoc['default_conflict_rule'] })}>
               <option value="consensus">Consensus: every independent source agrees, and disagrees with the vendor</option>
               <option value="first">First: the top-ranked independent source disagrees with the vendor</option>
+              <option value="any">Any: one independent source agreeing with the vendor confirms the claim; none agreeing contradicts it</option>
             </Select>
-            <p className="text-[11px] text-fg-subtle mt-1">Consensus is safer: IP databases lag on residential ranges, so one dissenting database alone should not count against a vendor.</p>
+            <p className="text-[11px] text-fg-subtle mt-1">Consensus is safer: IP databases lag on residential ranges, so one dissenting database alone should not count against a vendor. Any is the most forgiving: a claim confirmed by one source is routed on that source's answer, and it never leaves a claim open while a database answers.</p>
           </div>
           <p className="text-xs text-fg-muted mt-4 border-t border-line pt-3">
-            Which verdicts may still serve a request (observe, verified, confirmed) and whether a session's exit is verified before its first request (the preflight switch) are decided per project, on the project's Location tab, because different projects tolerate different risk.
+            What a verdict does to routing is decided per project, on the project's Location tab, because different projects tolerate different risk: what to do when the databases contradict the vendor (route on the evidence, route on the vendor's claim, or refuse the proxy), what to do when no database knows the exit (trust the vendor, or refuse the proxy), and whether a session's exit is verified before its first request (the preflight switch).
           </p>
         </Card>
 

@@ -12,13 +12,16 @@ from pydantic import BaseModel
 from api.core.auth import RequireEditorDep
 from api.geo.models import (
     MANUAL_SOURCE,
+    META_CITY_VERDICT,
     META_COUNTRY_SOURCE,
     META_LOCATION,
     META_LOCATION_CONFLICT,
     META_LOCATION_VERDICT,
+    META_STATE_VERDICT,
     META_VENDOR_COUNTRY,
     ObservationSource,
 )
+from api.geo.service import GeoService
 from api.models.credential import CredentialType
 from api.models.location import set_manual_location
 from api.models.proxy import Proxy, ProxyCreate, ProxyProtocol, ProxyResponse, ProxyUpdate
@@ -90,8 +93,10 @@ def _proxy_to_response(
     connector_enabled: bool = True,
     quarantined: bool = False,
     quarantine_remaining_seconds: float = 0.0,
+    connector_countries: list[str] | None = None,
 ) -> ProxyResponse:
     """Convert a Proxy to ProxyResponse."""
+    outside = GeoService.outside_declared_countries(proxy, connector_countries or [])
     return ProxyResponse(
         id=proxy.id,
         host=proxy.host,
@@ -118,6 +123,9 @@ def _proxy_to_response(
         vendor_country=proxy.metadata.get(META_VENDOR_COUNTRY),
         location_conflict=bool(proxy.metadata.get(META_LOCATION_CONFLICT)),
         location_verdict=proxy.metadata.get(META_LOCATION_VERDICT),
+        state_verdict=proxy.metadata.get(META_STATE_VERDICT),
+        city_verdict=proxy.metadata.get(META_CITY_VERDICT),
+        outside_declared_countries=outside,
         location=proxy.metadata.get(META_LOCATION) if isinstance(proxy.metadata.get(META_LOCATION), dict) else None,
         state_code=proxy.state_code,
         state_source=proxy.state_source,
@@ -158,6 +166,7 @@ async def list_proxies(request: Request, project_id: str) -> ProxyListResponse:
         connector_enabled = connector.enabled if connector else True
         responses.append(_proxy_to_response(
             p, connector_name, connector_enabled,
+            connector_countries=connector.countries if connector else None,
             quarantined=rate_limiter.is_quarantined(p.id),
             quarantine_remaining_seconds=rate_limiter.get_quarantine_remaining(p.id),
         ))
@@ -228,7 +237,7 @@ async def create_proxy(
     # Update connector proxy count
     connector.proxy_count += 1
 
-    return _proxy_to_response(proxy, connector.name, connector.enabled)
+    return _proxy_to_response(proxy, connector.name, connector.enabled, connector_countries=connector.countries)
 
 
 @router.post("/upload", response_model=ProxyUploadResponse, status_code=201)
@@ -326,7 +335,7 @@ async def upload_proxies(
 
         await proxy_manager.add_proxy(proxy)
         connector.proxy_count += 1
-        successful_proxies.append(_proxy_to_response(proxy, connector.name, connector.enabled))
+        successful_proxies.append(_proxy_to_response(proxy, connector.name, connector.enabled, connector_countries=connector.countries))
 
     return ProxyUploadResponse(
         total_lines=len([line for line in lines if line.strip()]),
@@ -352,6 +361,7 @@ async def get_proxy(request: Request, proxy_id: str) -> ProxyResponse:
     rate_limiter = proxy_manager.rate_limiter
     return _proxy_to_response(
         proxy, connector_name, connector_enabled,
+        connector_countries=connector.countries if connector else None,
         quarantined=rate_limiter.is_quarantined(proxy.id),
         quarantine_remaining_seconds=rate_limiter.get_quarantine_remaining(proxy.id),
     )
@@ -405,6 +415,7 @@ async def update_proxy(
     rate_limiter = proxy_manager.rate_limiter
     return _proxy_to_response(
         proxy, connector_name, connector_enabled,
+        connector_countries=connector.countries if connector else None,
         quarantined=rate_limiter.is_quarantined(proxy.id),
         quarantine_remaining_seconds=rate_limiter.get_quarantine_remaining(proxy.id),
     )
@@ -448,6 +459,7 @@ async def locate_proxy(request: Request, proxy_id: str, _guard: RequireEditorDep
         updated,
         connector.name if connector else None,
         connector.enabled if connector else True,
+        connector_countries=connector.countries if connector else None,
         quarantined=rate_limiter.is_quarantined(updated.id),
         quarantine_remaining_seconds=rate_limiter.get_quarantine_remaining(updated.id),
     )

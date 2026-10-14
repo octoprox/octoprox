@@ -30,7 +30,6 @@ from api.geo.models import (
     GeoDatabaseRecord,
     GeoDatabaseSource,
     GeoSettings,
-    GeoSourceKind,
     GeoVendor,
     IpObservation,
     ObservationSource,
@@ -67,17 +66,12 @@ async def _connectors(session: AsyncSession, *ids: str) -> None:
 class TestGeoSettings:
     async def test_save_and_overwrite_single_row(self, db_session: AsyncSession) -> None:
         repo = GeoSettingsRepository(db_session)
-        first = GeoSettings(
-            echo_url="https://echo.example/ip", default_sources=[GeoSourceKind.VENDOR]
-        )
+        first = GeoSettings(echo_url="https://echo.example/ip")
         await repo.save(first, updated_by="admin")
         await db_session.commit()
         stored = await repo.get()
         assert stored is not None and stored.echo_url == "https://echo.example/ip"
-        assert (
-            stored.default_sources == [GeoSourceKind.VENDOR]
-            and stored.default_conflict_rule == ConflictRule.CONSENSUS
-        )
+        assert stored.default_conflict_rule == ConflictRule.CONSENSUS
 
         await repo.save(
             first.model_copy(
@@ -91,7 +85,7 @@ class TestGeoSettings:
             and again.default_conflict_rule == ConflictRule.FIRST
             and again.preflight_max_attempts == 5
         )
-        assert again.default_policy.sources == [GeoSourceKind.VENDOR]
+        assert again.default_policy.conflict_rule == ConflictRule.FIRST
 
 
 class TestGeoDatabases:

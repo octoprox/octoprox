@@ -554,7 +554,7 @@ DELETE /api/v1/projects/{project_id}/proxies/{proxy_id}
 
 ### Proxy location fields
 
-Every proxy response carries the outcome of [IP attribution]({{ site.baseurl }}/ip-attribution): `country` (what routing uses), `country_source` (`database`, `vendor`, `endpoint` or `manual`), `vendor_country` (what the vendor claimed), `location_conflict` (the claim is contradicted), `location_verdict` (`confirmed`, `contradicted` or `open`; null when nothing was claimed or the exit was not judged yet), `location` (region, `state_code`, city, coordinates, ASN and anonymity flags from the databases, when any covers the IP), and `state_code`, `state_source`, `city` and `city_source` (the state and city routing matches on: pinned by hand, or resolved under the source policy from the databases, the vendor's word and the echo endpoint like the country). Setting `country` by hand pins it as `manual`: attribution then verifies the exit against it instead of overwriting it.
+Every proxy response carries the outcome of [IP attribution]({{ site.baseurl }}/ip-attribution): `country` (what routing uses), `country_source` (`database`, `vendor`, `endpoint` or `manual`), `vendor_country` (what the vendor claimed), `location_conflict` (the claim is contradicted), `location_verdict` (`confirmed`, `contradicted` or `open`; null when nothing was claimed or the exit was not judged yet), `location` (region, `state_code`, city, coordinates, ASN and anonymity flags from the databases, when any covers the IP), `state_code`, `state_source`, `city` and `city_source` (the state and city routing matches on: pinned by hand, or resolved from the databases, then the echo endpoint, then the vendor's word, like the country), and `state_verdict` and `city_verdict` (how a claimed state or city fared, with the same values as `location_verdict`). Setting `country` by hand pins it as `manual`: attribution then verifies the exit against it instead of overwriting it.
 
 ---
 
@@ -1106,7 +1106,7 @@ All endpoints live under `/api/v1/geo`. Reads need any authenticated user; write
 
 | Method | Path | Purpose |
 |--------|------|---------|
-| GET | `/geo/settings` | Install-wide settings (default source policy, echo endpoint, preflight, retention), whether an admin saved them, databases loaded on this instance |
+| GET | `/geo/settings` | Install-wide settings (default conflict rule, echo endpoint, preflight, retention), whether an admin saved them, databases loaded on this instance |
 | PUT | `/geo/settings` | Replace the settings (body: the `settings` object). Applies to every instance |
 | GET | `/geo/databases` | Every database: stored rows plus config-file entries, with `loaded_here` and `load_error` |
 | POST | `/geo/databases` | Upload a file (`multipart/form-data`: `file`, optional `name`, `priority`, `enabled`). Validated before it is stored; proxies are re-attributed |
@@ -1115,7 +1115,7 @@ All endpoints live under `/api/v1/geo`. Reads need any authenticated user; write
 | PATCH | `/geo/databases/{id}` | Change `name`, `enabled`, `priority`, `update_url`, `update_interval_hours`, `update_auth` |
 | POST | `/geo/databases/{id}/refresh` | Download a scheduled database now |
 | DELETE | `/geo/databases/{id}` | Remove a stored database everywhere |
-| POST | `/geo/lookup` | `{ip, claimed_country?, claimed_state?, claimed_city?, project_id?}`: each database's answer and how the default policy, or the project's, resolves the IP at every level, judging the optional claim as a vendor's would be |
+| POST | `/geo/lookup` | `{ip, claimed_country?, claimed_state?, claimed_city?, project_id?}`: each database's answer and how the IP resolves at every level, judging the optional claim as a vendor's would be under the default conflict rule, or the project's |
 | POST | `/geo/reattribute` | `{connector_id?}`: re-run attribution offline for every proxy with a known exit IP; returns `{updated}` |
 | GET | `/geo/observations` | One page of observations, newest first, with `total` for paging. Filters apply on the server and mirror the table's columns: `connector_id`, `proxy_id`, `project_id`, `source`, `ip` (exact), `claimed_country`, `resolved_country`, `verdict` (`contradicted`, `open`, `confirmed`, `no_claim`: the country verdict; the state and city verdicts come back per row and do not move the label); paging with `limit` (max 1000) and `offset`. Each row also carries the place below the country: `claimed_state`, `claimed_city`, `resolved_state`, `resolved_city`, and one verdict per level, `country_conflict`, `state_conflict`, `city_conflict` (true contradicted, false confirmed, null no verdict) |
 | GET | `/geo/accuracy` | Per connector, over the distinct exit IPs last seen in the window: `exits`, then `country`, `state` and `city`, each `{claimed, confirmed, contradicted, open, accuracy}`. `open` is a claim without a verdict: for the country one that independent sources disagreed about, counted against `accuracy` (confirmed over claimed); for the state and city one no city-level database could judge, counted in neither (`accuracy` is confirmed over confirmed plus contradicted). `breakdown` lists the contradicted pairs as `{level, claimed, observed, exits}` (`project_id`, `connector_id`, `days`) |
@@ -1123,7 +1123,7 @@ All endpoints live under `/api/v1/geo`. Reads need any authenticated user; write
 | GET | `/geo/exits/ips` | One page of distinct exit IPs, most recently seen first, each with first and last sighting, hand-out count and the latest observation's state (proxy, source, vendor claim, resolved country and source, verdict flags, and the same place fields as an observation). Filters: `project_id`, `connector_id`, `ip`, `proxy_id`, `country`, `claimed_country`, `verdict` (the country verdict, as for observations); paging with `limit` (max 1000) and `offset`; `total` in the response |
 | GET | `/geo/status` | Pipeline health: databases, buffered and stored observations, preflight counters |
 
-Projects carry `location_assurance` (`observe`, `verified`, `confirmed`), `location_preflight` (boolean, whether a session's exit is echoed before its first request), and the optional overrides `location_sources` (ordered list of `database`, `vendor`, `endpoint`) and `location_conflict_rule` (`consensus`, `first`) on create, update and in responses. On update an empty list or empty string clears an override so the project inherits the install default again.
+Projects carry `location_contradicted` (`evidence`, `vendor`, `refuse`: what to do when the independent sources agree against the vendor's claim), `location_unknown` (`vendor`, `refuse`: what to do when nothing independent places the exit), `location_preflight` (boolean, whether a session's exit is echoed before its first request), and the optional override `location_conflict_rule` (`consensus`, `first`, `any`) on create, update and in responses. On update an empty string clears the override so the project inherits the install default again. There is no source order: the routing value is always the databases, then the echo endpoint, then the vendor.
 
 ### Echo
 

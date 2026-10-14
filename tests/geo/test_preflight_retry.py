@@ -12,7 +12,7 @@ import pytest
 
 from api.core.config import Settings
 from api.core.signals import exit_location_mismatch
-from api.geo.models import LocationAssurance
+from api.geo.models import ContradictedAction, LocationRules, UnknownAction
 from api.geo.observations import ObservationRecorder
 from api.geo.preflight import PreflightChecker
 from api.geo.service import GeoService
@@ -65,12 +65,21 @@ def _proxy(host: str) -> Proxy:
     )
 
 
-def _project(assurance: LocationAssurance = LocationAssurance.VERIFIED, preflight: bool = True) -> Project:
-    return Project(id="proj", name="P", username="u", password="p", location_assurance=assurance, location_preflight=preflight)
+TRUSTING = LocationRules(ContradictedAction.VENDOR, UnknownAction.VENDOR)
+VERIFYING = LocationRules(ContradictedAction.REFUSE, UnknownAction.VENDOR)
+STRICT = LocationRules(ContradictedAction.REFUSE, UnknownAction.REFUSE)
+
+
+def _project(rules: LocationRules = VERIFYING, preflight: bool = True) -> Project:
+    return Project(
+        id="proj", name="P", username="u", password="p", location_preflight=preflight,
+        location_contradicted=rules.contradicted, location_unknown=rules.unknown,
+    )
 
 
 def _selector(strategy: str = "round_robin", picks: list[Proxy | None] | None = None) -> MagicMock:
     selector = MagicMock()
+    selector.get_proxy = MagicMock(side_effect=lambda proxy_id: _proxy(proxy_id))  # every slot is still in the pool
     selector.strategy_for_project = MagicMock(return_value=get_strategy(strategy))
     selector.select_proxy_for_project = AsyncMock(side_effect=picks if picks is not None else [None])
     return selector
@@ -159,9 +168,9 @@ class TestVerify:
         assert not decision.rejected
         assert selector.select_proxy_for_project.await_args.kwargs["exclude"] == frozenset({"gw"})
 
-    async def test_observe_forwards_without_a_mismatch_signal(self, checker: PreflightChecker, mismatches: Mismatches) -> None:
+    async def test_trusting_rules_forward_without_a_mismatch_signal(self, checker: PreflightChecker, mismatches: Mismatches) -> None:
         selector = _selector(picks=[_proxy("gb")])
-        decision = await ExitVerifier(checker, selector).verify(_project(LocationAssurance.OBSERVE), _proxy("us"), session_id=None, location=LocationTarget(country="GB"), target_host="x")
+        decision = await ExitVerifier(checker, selector).verify(_project(TRUSTING), _proxy("us"), session_id=None, location=LocationTarget(country="GB"), target_host="x")
         assert not decision.rejected and decision.proxy is not None and decision.proxy.id == "us"
         assert mismatches.events == [] and checker.checks == 1
         selector.select_proxy_for_project.assert_not_called()
@@ -179,20 +188,20 @@ class TestVerify:
         assert not decision.rejected and decision.proxy is not None and decision.proxy.id == "us"
         assert checker.checks == 0
 
-    async def test_confirmed_refuses_an_open_country_without_rotating(self, checker: PreflightChecker, mismatches: Mismatches) -> None:
+    async def test_refusing_unknown_exits_refuses_an_open_country_without_rotating(self, checker: PreflightChecker, mismatches: Mismatches) -> None:
         """An exit no source can place is refused under confirmed, moved when the strategy allows, and never rotated."""
         use_echo_by_proxy(checker._geo_service, {"unknown": ("203.0.113.9", ""), "gb": (GB_IP, "GB")})
         selector = _selector(picks=[_proxy("gb")])
-        decision = await ExitVerifier(checker, selector).verify(_project(LocationAssurance.CONFIRMED), _proxy("unknown"), session_id=None, location=LocationTarget(country="GB"), target_host="x")
+        decision = await ExitVerifier(checker, selector).verify(_project(STRICT), _proxy("unknown"), session_id=None, location=LocationTarget(country="GB"), target_host="x")
         assert not decision.rejected and decision.proxy is not None and decision.proxy.id == "gb"
         assert selector.select_proxy_for_project.await_args.kwargs["exclude"] == frozenset({"unknown"})
-        assert mismatches.events == []  # open is not a contradiction: no slot is rotated
+        assert len(mismatches.events) == 1  # the refusal is announced; nothing rotates on missing evidence
         # Under sticky with a session there is nowhere to go: refused outright, naming the open country.
         selector = _selector("sticky", picks=[_proxy("gb")])
-        decision = await ExitVerifier(checker, selector).verify(_project(LocationAssurance.CONFIRMED), _proxy("unknown"), session_id="sess", location=LocationTarget(country="GB"), target_host="x")
+        decision = await ExitVerifier(checker, selector).verify(_project(STRICT), _proxy("unknown"), session_id="sess", location=LocationTarget(country="GB"), target_host="x")
         assert decision.rejected and (decision.rejection or "").startswith("Exit country not confirmed: requested GB, observed unknown")
-        # The same exit passes under verified.
-        decision = await ExitVerifier(checker, _selector()).verify(_project(LocationAssurance.VERIFIED), _proxy("unknown"), session_id="sess", location=LocationTarget(country="GB"), target_host="x")
+        # The same exit passes where unknown exits are trusted.
+        decision = await ExitVerifier(checker, _selector()).verify(_project(VERIFYING), _proxy("unknown"), session_id="sess", location=LocationTarget(country="GB"), target_host="x")
         assert not decision.rejected
 
 
@@ -203,3 +212,27 @@ class TestStrategyHook:
     def test_sticky_refuses_for_sessions(self) -> None:
         assert StickySessionStrategy().allows_exit_reselection(None)
         assert not StickySessionStrategy().allows_exit_reselection("sess")
+
+
+class TestRemovedSlot:
+    async def test_slot_removed_by_its_own_sighting_does_not_serve_the_request(self, checker: PreflightChecker, mismatches: Mismatches) -> None:
+        """The echo matched the client's place, but the sighting judged the slot out of the pool: moved or 502, never forwarded."""
+        gone = _proxy("gb")  # the echo lands in GB, as the client asked
+        gone.id = "gone"
+        selector = _selector(picks=[_proxy("gb")])
+        selector.get_proxy = MagicMock(side_effect=lambda proxy_id: None if proxy_id == "gone" else _proxy(proxy_id))
+        dropped: list[str] = []
+
+        async def invalidate(project_id: str, proxy_id: str) -> None:
+            dropped.append(proxy_id)
+
+        checker.invalidate = invalidate  # type: ignore[method-assign]
+        decision = await ExitVerifier(checker, selector).verify(_project(), gone, session_id=None, location=LocationTarget(country="GB"), target_host="x")
+        # Moved to the replacement the selector offered, and the stale verdict for the removed slot was dropped.
+        assert not decision.rejected and decision.proxy is not None and decision.proxy.id == "gb"
+        assert dropped == ["gone"] and selector.select_proxy_for_project.await_count == 1
+        # Under sticky with a session there is nowhere to go.
+        sticky = _selector("sticky")
+        sticky.get_proxy = MagicMock(return_value=None)
+        decision = await ExitVerifier(checker, sticky).verify(_project(), gone, session_id="s", location=LocationTarget(country="GB"), target_host="x")
+        assert decision.rejected and (decision.rejection or "").startswith("Proxy replaced")

@@ -140,10 +140,10 @@ class ProjectModel(Base):
     metrics_retention_days: Mapped[int] = mapped_column(Integer, default=90)
     # IP attribution: what a contradicted vendor location does to a proxy, and
     # whether a session's exit is verified before its first request.
-    location_assurance: Mapped[str] = mapped_column(String(10), nullable=False, default="observe", server_default="observe")
+    location_contradicted: Mapped[str] = mapped_column(String(10), nullable=False, default="evidence", server_default="evidence")
+    location_unknown: Mapped[str] = mapped_column(String(10), nullable=False, default="vendor", server_default="vendor")
     location_preflight: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
     # Null inherits the install default from geo_settings.
-    location_sources: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
     location_conflict_rule: Mapped[str | None] = mapped_column(String(10), nullable=True)
 
     version: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
@@ -609,7 +609,6 @@ class GeoSettingsModel(Base):
     __tablename__ = "geo_settings"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
-    default_sources: Mapped[list[str]] = mapped_column(JSON, default=list)
     default_conflict_rule: Mapped[str] = mapped_column(String(10), nullable=False, default="consensus")
     echo_url: Mapped[str] = mapped_column(String(2048), nullable=False)
     echo_ip_path: Mapped[str] = mapped_column(String(255), nullable=False, default="ip")

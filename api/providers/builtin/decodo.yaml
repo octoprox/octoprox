@@ -72,8 +72,10 @@ connector_fields:
       session before the real one. Requests with a -sessid- are checked once per session; this is the
       share of requests without one that are checked. Below 100 the unique-exit figures for that traffic
       are undercounts; 100 counts every exit at one echo per request. Applies to requests that name no
-      country, and to every request under the "observe" assurance level; above it every request that names
-      a country is checked regardless.
+      country: on a connector with a country list a sampled exit outside the list is refused and an
+      unsampled one goes unseen, unless the project refuses contradictions or unknown exits, which verify
+      every one; 100 makes the list a full guarantee.
+      A request that names a country is checked every time unless the decisions can refuse nothing.
     show_when: { field: connector.session_mode, equals: dynamic }
   - key: num_proxies
     label: Number of proxies

@@ -8,15 +8,15 @@ from enum import Enum
 from typing import Literal
 from uuid import uuid4
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, model_validator
 
 from api.core import utc_now
 from api.geo.models import (
     ConflictRule,
-    GeoSourceKind,
-    LocationAssurance,
+    ContradictedAction,
+    LocationRules,
     SourcePolicy,
-    dedupe_sources,
+    UnknownAction,
 )
 
 
@@ -46,11 +46,6 @@ class MitmBrowser(str, Enum):
     RANDOM = "random"
 
 
-def _normalize_sources(value: list[GeoSourceKind] | None) -> list[GeoSourceKind] | None:
-    """Deduplicate in order; an empty list means "no override"."""
-    return dedupe_sources(value) if value else None
-
-
 class Project(BaseModel):
     """Represents a project for multi-tenancy."""
 
@@ -77,14 +72,14 @@ class Project(BaseModel):
     # Metrics settings
     metrics_retention_days: int = 90  # 0 = keep forever
 
-    # IP attribution: which verdicts on a claimed location may still serve a
-    # request of this project, and whether a session's exit is verified before
-    # its first request is forwarded (see docs/location-routing.md).
-    location_assurance: LocationAssurance = LocationAssurance.OBSERVE
+    # IP attribution: what a contradicted vendor claim and an exit nothing
+    # independent places do to a proxy of this project, and whether a
+    # session's exit is verified before its first request when the client
+    # named a place, or always on a dynamic gateway (see docs/location-routing.md).
+    location_contradicted: ContradictedAction = ContradictedAction.EVIDENCE
+    location_unknown: UnknownAction = UnknownAction.VENDOR
     location_preflight: bool = False
-    # Which evidence decides a proxy's country and when a vendor counts as
-    # contradicted. None inherits the install default (GeoSettings).
-    location_sources: list[GeoSourceKind] | None = None
+    # When a vendor counts as contradicted. None inherits the install default (GeoSettings).
     location_conflict_rule: ConflictRule | None = None
 
     # Aggregate statistics (persists across proxy rotation)
@@ -123,20 +118,23 @@ class Project(BaseModel):
         self.tls_mitm_engine = other.tls_mitm_engine
         self.tls_mitm_browser = other.tls_mitm_browser
         self.metrics_retention_days = other.metrics_retention_days
-        self.location_assurance = other.location_assurance
+        self.location_contradicted = other.location_contradicted
+        self.location_unknown = other.location_unknown
         self.location_preflight = other.location_preflight
-        self.location_sources = other.location_sources
         self.location_conflict_rule = other.location_conflict_rule
         self.created_at = other.created_at
         self.updated_at = other.updated_at
 
+    @property
+    def location_rules(self) -> LocationRules:
+        return LocationRules(self.location_contradicted, self.location_unknown)
+
     def source_policy(self, default: SourcePolicy) -> SourcePolicy:
-        """This project's source policy: its own overrides on top of the install default."""
-        if self.location_sources is None and self.location_conflict_rule is None:
-            return default
+        """This project's source policy: its own conflict rule on top of the install default, plus its location decisions."""
         return SourcePolicy(
-            sources=list(self.location_sources) if self.location_sources else list(default.sources),
             conflict_rule=self.location_conflict_rule or default.conflict_rule,
+            contradicted=self.location_contradicted,
+            unknown=self.location_unknown,
         )
 
 
@@ -155,15 +153,10 @@ class ProjectCreate(BaseModel):
     tls_mitm_engine: MitmEngine | None = None
     tls_mitm_browser: MitmBrowser | None = None
     metrics_retention_days: int = 90
-    location_assurance: LocationAssurance = LocationAssurance.OBSERVE
+    location_contradicted: ContradictedAction = ContradictedAction.EVIDENCE
+    location_unknown: UnknownAction = UnknownAction.VENDOR
     location_preflight: bool = False
-    location_sources: list[GeoSourceKind] | None = None
     location_conflict_rule: ConflictRule | None = None
-
-    @field_validator("location_sources")
-    @classmethod
-    def _sources(cls, value: list[GeoSourceKind] | None) -> list[GeoSourceKind] | None:
-        return _normalize_sources(value)
 
     @model_validator(mode="after")
     def validate_mitm_fields(self) -> "ProjectCreate":
@@ -202,19 +195,11 @@ class ProjectUpdate(BaseModel):
     tls_mitm_engine: MitmEngine | None = None
     tls_mitm_browser: MitmBrowser | None = None
     metrics_retention_days: int | None = None
-    location_assurance: LocationAssurance | None = None
+    location_contradicted: ContradictedAction | None = None
+    location_unknown: UnknownAction | None = None
     location_preflight: bool | None = None
-    # An empty list clears the override (inherit the install default).
-    location_sources: list[GeoSourceKind] | None = None
-    # "" clears the override.
+    # "" clears the override (inherit the install default).
     location_conflict_rule: ConflictRule | Literal[""] | None = None
-
-    @field_validator("location_sources")
-    @classmethod
-    def _sources(cls, value: list[GeoSourceKind] | None) -> list[GeoSourceKind] | None:
-        if value == []:
-            return []
-        return _normalize_sources(value)
 
 
 class ProjectResponse(BaseModel):
@@ -233,9 +218,9 @@ class ProjectResponse(BaseModel):
     tls_mitm_engine: MitmEngine | None
     tls_mitm_browser: MitmBrowser | None
     metrics_retention_days: int
-    location_assurance: LocationAssurance = LocationAssurance.OBSERVE
+    location_contradicted: ContradictedAction = ContradictedAction.EVIDENCE
+    location_unknown: UnknownAction = UnknownAction.VENDOR
     location_preflight: bool = False
-    location_sources: list[GeoSourceKind] | None = None
     location_conflict_rule: ConflictRule | None = None
     created_at: datetime
     updated_at: datetime
@@ -257,9 +242,9 @@ class ProjectSummary(BaseModel):
     tls_mitm_mode: MitmMode = MitmMode.OFF
     tls_mitm_engine: MitmEngine | None = None
     tls_mitm_browser: MitmBrowser | None = None
-    location_assurance: LocationAssurance = LocationAssurance.OBSERVE
+    location_contradicted: ContradictedAction = ContradictedAction.EVIDENCE
+    location_unknown: UnknownAction = UnknownAction.VENDOR
     location_preflight: bool = False
-    location_sources: list[GeoSourceKind] | None = None
     location_conflict_rule: ConflictRule | None = None
     credential_count: int = 0
     connector_count: int = 0

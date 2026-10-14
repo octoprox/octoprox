@@ -13,7 +13,6 @@ GB_IP = "81.2.69.160"
 
 
 DEFAULT_SETTINGS = {
-    "default_sources": ["database", "vendor", "endpoint"],
     "default_conflict_rule": "consensus",
 }
 
@@ -43,7 +42,7 @@ class TestAccess:
         assert viewer_client.get("/api/v1/geo/databases").status_code == 200
         assert (
             viewer_client.put(
-                "/api/v1/geo/settings", json={"default_sources": ["database"]}
+                "/api/v1/geo/settings", json={"default_conflict_rule": "first"}
             ).status_code
             == 403
         )
@@ -56,13 +55,12 @@ class TestAccess:
 class TestSettings:
     def test_defaults_then_save(self, authenticated_client: TestClient) -> None:
         current = authenticated_client.get("/api/v1/geo/settings").json()
-        assert set(current["settings"]["default_sources"]) <= {"database", "vendor", "endpoint"}
+        assert current["settings"]["default_conflict_rule"] in {"consensus", "first"}
         assert current["settings"]["echo_url"].startswith("https://")
 
         body = dict(current["settings"])
         body.update(
             {
-                "default_sources": ["vendor", "database"],
                 "default_conflict_rule": "first",
                 "echo_url": "https://echo.example/ip",
                 "preflight_max_attempts": 4,
@@ -71,14 +69,14 @@ class TestSettings:
         saved = authenticated_client.put("/api/v1/geo/settings", json=body)
         assert saved.status_code == 200, saved.text
         assert saved.json()["from_database"] is True
-        assert saved.json()["settings"]["default_sources"] == ["vendor", "database"]
+        assert saved.json()["settings"]["default_conflict_rule"] == "first"
         assert saved.json()["settings"]["preflight_max_attempts"] == 4
 
         again = authenticated_client.get("/api/v1/geo/settings").json()
         assert again["settings"]["echo_url"] == "https://echo.example/ip"
 
     def test_invalid_settings(self, authenticated_client: TestClient) -> None:
-        response = authenticated_client.put("/api/v1/geo/settings", json={"default_sources": []})
+        response = authenticated_client.put("/api/v1/geo/settings", json={"default_conflict_rule": "loud"})
         assert response.status_code == 422
         response = authenticated_client.put(
             "/api/v1/geo/settings", json={"preflight_max_attempts": 0}
@@ -283,39 +281,47 @@ class TestProxyAttribution:
             and final["location_conflict"] is False
         )
 
-    def test_project_location_assurance_roundtrip(self, authenticated_client: TestClient) -> None:
+    def test_project_location_decisions_roundtrip(self, authenticated_client: TestClient) -> None:
         created = authenticated_client.post(
             "/api/v1/projects",
             json={
-                "name": "confirmed-p",
-                "username": "confirmed_user",
+                "name": "strict-p",
+                "username": "strict_user",
                 "password": "pw",
-                "location_assurance": "confirmed",
+                "location_contradicted": "refuse",
+                "location_unknown": "refuse",
                 "location_preflight": True,
             },
         )
         assert created.status_code == 201, created.text
-        assert (
-            created.json()["location_assurance"] == "confirmed"
-            and created.json()["location_preflight"] is True
-        )
+        body = created.json()
+        assert body["location_contradicted"] == "refuse" and body["location_unknown"] == "refuse"
+        assert body["location_preflight"] is True
         updated = authenticated_client.patch(
-            f"/api/v1/projects/{created.json()['id']}", json={"location_preflight": False}
+            f"/api/v1/projects/{body['id']}", json={"location_preflight": False, "location_contradicted": "vendor"}
         ).json()
-        assert updated["location_preflight"] is False and updated["location_assurance"] == "confirmed"
+        assert updated["location_preflight"] is False
+        assert updated["location_contradicted"] == "vendor" and updated["location_unknown"] == "refuse"
         listed = authenticated_client.get("/api/v1/projects").json()["projects"]
-        assert any(p["location_assurance"] == "confirmed" for p in listed)
+        assert any(p["location_unknown"] == "refuse" for p in listed)
         assert (
             authenticated_client.patch(
-                f"/api/v1/projects/{created.json()['id']}", json={"location_assurance": "strict"}
+                f"/api/v1/projects/{body['id']}", json={"location_contradicted": "strict"}
             ).status_code
             == 422
         )
-        # A fresh project observes, with preflight off.
+        assert (
+            authenticated_client.patch(
+                f"/api/v1/projects/{body['id']}", json={"location_unknown": "evidence"}
+            ).status_code
+            == 422
+        )
+        # A fresh project routes on the evidence, trusts the vendor where nothing is known, preflight off.
         plain = authenticated_client.post(
             "/api/v1/projects", json={"name": "plain-p", "username": "plain_user", "password": "pw"}
         ).json()
-        assert plain["location_assurance"] == "observe" and plain["location_preflight"] is False
+        assert plain["location_contradicted"] == "evidence" and plain["location_unknown"] == "vendor"
+        assert plain["location_preflight"] is False
 
     def test_project_source_policy_override_and_lookup(
         self, authenticated_client: TestClient, tmp_path: Path
@@ -331,16 +337,13 @@ class TestProxyAttribution:
                 "name": "trusting-p",
                 "username": "trusting_user",
                 "password": "pw",
-                "location_sources": ["vendor", "vendor", "database"],
+                "location_conflict_rule": "first",
                 "location_preflight": True,
             },
         )
         assert created.status_code == 201, created.text
         project = created.json()
-        assert (
-            project["location_sources"] == ["vendor", "database"]
-            and project["location_conflict_rule"] is None
-        )
+        assert project["location_conflict_rule"] == "first" and "location_sources" not in project
         assert project["location_preflight"] is True
 
         default = authenticated_client.post(
@@ -348,23 +351,16 @@ class TestProxyAttribution:
         ).json()
         assert (
             default["resolution"]["resolved_country"] == "GB"
-            and default["policy"]["sources"][0] == "database"
+            and default["policy"]["conflict_rule"] == "consensus"
         )
         scoped = authenticated_client.post(
             "/api/v1/geo/lookup",
             json={"ip": GB_IP, "claimed_country": "US", "project_id": project["id"]},
         ).json()
-        assert scoped["resolution"]["resolved_country"] == "US" and scoped["policy"]["sources"] == [
-            "vendor",
-            "database",
-        ]
+        # The value is the database's under either rule; the project's rule travels with the lookup.
+        assert scoped["resolution"]["resolved_country"] == "GB" and scoped["policy"]["conflict_rule"] == "first"
         assert scoped["resolution"]["country_conflict"] is True
 
-        cleared = authenticated_client.patch(
-            f"/api/v1/projects/{project['id']}",
-            json={"location_sources": [], "location_conflict_rule": "first"},
-        ).json()
-        assert cleared["location_sources"] is None and cleared["location_conflict_rule"] == "first"
         reset = authenticated_client.patch(
             f"/api/v1/projects/{project['id']}", json={"location_conflict_rule": ""}
         ).json()

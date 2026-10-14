@@ -890,3 +890,101 @@ class TestProxyManager:
         assert result is not None
         assert result.id != assigned_id
 
+
+class TestDeferredWrites:
+    """A judged row is persisted or removed off the request path, and lands before a stop."""
+
+    @pytest.fixture
+    async def proxy_manager(
+        self,
+        db_session_factory: async_sessionmaker[AsyncSession],
+        redis_client: RedisClient,
+        test_settings: Settings,
+        db_session: AsyncSession,  # Required to ensure tables are cleaned up
+    ) -> ProxyManager:
+        manager = ProxyManager(session_factory=db_session_factory, redis_client=redis_client, settings=test_settings)
+        await manager._load_from_database()
+        await manager._hydrate_from_redis()
+        manager._running = True  # deferral is for a running pool; a stopping one writes inline
+        return manager
+
+    async def test_deferred_work_runs_inline_once_stopping(self, proxy_manager: ProxyManager) -> None:
+        proxy = await self._chain(proxy_manager, "deferred-stopping")
+        proxy_manager._running = False
+        proxy.metadata["country"] = "GB"
+        await proxy_manager.update_proxy(proxy, deferred=True)
+        assert not proxy_manager._background_tasks  # written inline, nothing scheduled
+        assert await proxy_manager.remove_proxy(proxy.id, deferred=True)
+        assert not proxy_manager._background_tasks
+        await proxy_manager._load_from_database()
+        assert proxy_manager.get_proxy(proxy.id) is None
+
+    async def _chain(self, proxy_manager: ProxyManager, name: str) -> Proxy:
+        project = Project(name=name, username=name, password="pass")
+        await proxy_manager.add_project(project)
+        credential = Credential(name=name, type=CredentialType.STATIC_PROXY_PROVIDER, project_id=project.id, config={})
+        await proxy_manager.add_credential(credential)
+        connector = Connector(
+            name=name, credential_id=credential.id, credential_type=CredentialType.STATIC_PROXY_PROVIDER,
+            project_id=project.id, config={},
+        )
+        await proxy_manager.add_connector(connector)
+        proxy = Proxy(host="deferred.example.com", port=8080, protocol=ProxyProtocol.HTTP, connector_id=connector.id)
+        await proxy_manager.add_proxy(proxy)
+        return proxy
+
+    async def test_deferred_update_lands_after_the_drain(self, proxy_manager: ProxyManager) -> None:
+        proxy = await self._chain(proxy_manager, "deferred-update")
+        proxy.metadata["country"] = "GB"
+        await proxy_manager.update_proxy(proxy, deferred=True)
+        assert proxy_manager._background_tasks  # scheduled, not awaited
+        await proxy_manager.wait_for_background()
+        assert not proxy_manager._background_tasks
+        await proxy_manager._load_from_database()
+        reloaded = proxy_manager.get_proxy(proxy.id)
+        assert reloaded is not None and reloaded.metadata["country"] == "GB"
+
+    async def test_deferred_removal_leaves_routing_at_once_and_storage_after(self, proxy_manager: ProxyManager) -> None:
+        proxy = await self._chain(proxy_manager, "deferred-remove")
+        assert await proxy_manager.remove_proxy(proxy.id, deferred=True)
+        assert proxy_manager.get_proxy(proxy.id) is None  # out of routing immediately
+        await proxy_manager.wait_for_background()
+        await proxy_manager._load_from_database()
+        assert proxy_manager.get_proxy(proxy.id) is None  # and gone from Postgres
+
+    async def test_deferred_update_of_a_removed_row_is_skipped(self, proxy_manager: ProxyManager) -> None:
+        proxy = await self._chain(proxy_manager, "deferred-zombie")
+        proxy.metadata["country"] = "GB"
+        await proxy_manager.update_proxy(proxy, deferred=True)
+        assert await proxy_manager.remove_proxy(proxy.id)
+        await proxy_manager.wait_for_background()
+        await proxy_manager._load_from_database()
+        assert proxy_manager.get_proxy(proxy.id) is None  # the pending write did not resurrect it
+
+    async def test_deferred_removal_restores_the_row_only_when_nothing_was_deleted(
+        self, proxy_manager: ProxyManager, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from unittest.mock import AsyncMock
+
+        import api.core.proxy_manager as module
+
+        monkeypatch.setattr(module, "REMOVE_RETRY_DELAYS", (0.0, 0.0))
+        # The Postgres delete fails every time: the row comes back, with its last exit forgotten so the next sighting re-judges it.
+        proxy = await self._chain(proxy_manager, "deferred-restore")
+        proxy.metadata["discovered_ip"] = "198.51.100.7"
+        monkeypatch.setattr(module.ProxyRepository, "delete", AsyncMock(side_effect=RuntimeError("postgres down")))
+        assert await proxy_manager.remove_proxy(proxy.id, deferred=True)
+        assert proxy_manager.get_proxy(proxy.id) is None
+        await proxy_manager.wait_for_background()
+        restored = proxy_manager.get_proxy(proxy.id)
+        assert restored is proxy and "discovered_ip" not in restored.metadata
+        monkeypatch.undo()
+        monkeypatch.setattr(module, "REMOVE_RETRY_DELAYS", (0.0, 0.0))
+        # The delete succeeds and only the Redis cleanup fails: the row stays removed.
+        other = await self._chain(proxy_manager, "deferred-redis")
+        monkeypatch.setattr(proxy_manager._redis_client, "delete_proxy_status", AsyncMock(side_effect=RuntimeError("redis down")))
+        assert await proxy_manager.remove_proxy(other.id, deferred=True)
+        await proxy_manager.wait_for_background()
+        assert proxy_manager.get_proxy(other.id) is None
+        await proxy_manager._load_from_database()
+        assert proxy_manager.get_proxy(other.id) is None

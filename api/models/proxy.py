@@ -304,9 +304,15 @@ class ProxyResponse(BaseModel):
     vendor_country: str | None = None
     location_conflict: bool = False
     # confirmed, contradicted or open; None when the vendor claimed nothing
-    # or the exit was not judged yet. Above observe a project refuses a
-    # contradicted proxy; under confirmed it refuses an open one as well.
+    # or the exit was not judged yet. The project's location decisions say
+    # what a contradicted or an open claim does to the row.
     location_verdict: LocationVerdict | None = None
+    state_verdict: LocationVerdict | None = None
+    city_verdict: LocationVerdict | None = None
+    # The vendor placed the exit in one of the connector's declared countries
+    # and the evidence puts it outside them: routing skips the row for every
+    # request, and a pooled slot is kept rather than replaced.
+    outside_declared_countries: bool = False
     location: dict[str, Any] | None = None
     # State code and city that -st- and -city- routing matches this exit on,
     # each with its source: manual when pinned by hand, else the attribution

@@ -16,6 +16,7 @@ from api.geo.models import (
     META_LOCATION_CONFLICT,
     META_LOCATION_VERDICT,
     META_VENDOR_COUNTRY,
+    ConflictRule,
     ExitJudgement,
     GeoSourceKind,
     ObservationSource,
@@ -137,24 +138,20 @@ class TestApplyObservation:
         assert first and not second
         assert geo_service.observation_recorder.pending == 2  # observations are always recorded
 
-    async def test_policy_excluding_databases(self, geo_service: GeoService) -> None:
-        geo_service.settings_store._settings = geo_service.settings.model_copy(
-            update={"default_sources": [GeoSourceKind.VENDOR, GeoSourceKind.ENDPOINT]}
-        )
-        proxy = _proxy(**{META_GEO_COUNTRY: "US"})
-        resolution, _ = geo_service.apply_observation(proxy, GB_IP, source=ObservationSource.DISCOVERY)
-        assert resolution.resolved_country == "US" and resolution.resolved_source == GeoSourceKind.VENDOR
-        # The database still counts as evidence against the claim.
-        assert resolution.country_conflict
-
     async def test_explicit_policy_argument(self, geo_service: GeoService) -> None:
-        vendor_first = SourcePolicy(sources=[GeoSourceKind.VENDOR, GeoSourceKind.DATABASE])
-        trusting = _proxy(**{META_GEO_COUNTRY: "US"})
-        resolution, _ = geo_service.apply_observation(trusting, GB_IP, source=ObservationSource.DISCOVERY, policy=vendor_first)
-        assert resolution.resolved_country == "US" and resolution.resolved_source == GeoSourceKind.VENDOR and resolution.country_conflict
+        # The database says GB and the echo FR: under consensus the claim is left open, under first it is judged.
+        first = SourcePolicy(conflict_rule=ConflictRule.FIRST)
+        judged = _proxy(**{META_GEO_COUNTRY: "US"})
+        resolution, _ = geo_service.apply_observation(
+            judged, GB_IP, source=ObservationSource.DISCOVERY, policy=first, endpoint=LocationTarget.reported("FR")
+        )
+        assert resolution.resolved_country == "GB" and resolution.resolved_source == GeoSourceKind.DATABASE
+        assert resolution.country_conflict is True
         other = _proxy(**{META_GEO_COUNTRY: "US"})
-        resolution2, _ = geo_service.apply_observation(other, GB_IP, source=ObservationSource.DISCOVERY)
-        assert resolution2.resolved_country == "GB" and resolution2.resolved_source == GeoSourceKind.DATABASE
+        resolution2, _ = geo_service.apply_observation(
+            other, GB_IP, source=ObservationSource.DISCOVERY, endpoint=LocationTarget.reported("FR")
+        )
+        assert resolution2.resolved_country == "GB" and resolution2.country_conflict is None
 
     async def test_rejudge_records_a_judgement_not_a_sighting(self, geo_service: GeoService) -> None:
         proxy = _proxy(**{META_GEO_COUNTRY: "US"})

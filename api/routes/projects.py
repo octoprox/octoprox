@@ -5,6 +5,7 @@
 
 from pathlib import Path
 
+import structlog
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
@@ -19,7 +20,9 @@ from api.models.project import (
     ProjectSummary,
     ProjectUpdate,
 )
-from api.routes.common import proxy_manager_of
+from api.routes.common import geo_runtime_of, proxy_manager_of
+
+logger = structlog.get_logger()
 
 router = APIRouter(prefix="/projects")
 
@@ -58,9 +61,9 @@ def _project_to_response(
         tls_mitm_engine=project.tls_mitm_engine,
         tls_mitm_browser=project.tls_mitm_browser,
         metrics_retention_days=project.metrics_retention_days,
-        location_assurance=project.location_assurance,
+        location_contradicted=project.location_contradicted,
+        location_unknown=project.location_unknown,
         location_preflight=project.location_preflight,
-        location_sources=project.location_sources,
         location_conflict_rule=project.location_conflict_rule,
         created_at=project.created_at,
         updated_at=project.updated_at,
@@ -89,9 +92,9 @@ def _project_to_summary(
         tls_mitm_mode=project.tls_mitm_mode,
         tls_mitm_engine=project.tls_mitm_engine,
         tls_mitm_browser=project.tls_mitm_browser,
-        location_assurance=project.location_assurance,
+        location_contradicted=project.location_contradicted,
+        location_unknown=project.location_unknown,
         location_preflight=project.location_preflight,
-        location_sources=project.location_sources,
         location_conflict_rule=project.location_conflict_rule,
         credential_count=credential_count,
         connector_count=connector_count,
@@ -170,9 +173,9 @@ async def create_project(
         tls_mitm_engine=project_data.tls_mitm_engine,
         tls_mitm_browser=project_data.tls_mitm_browser,
         metrics_retention_days=project_data.metrics_retention_days,
-        location_assurance=project_data.location_assurance,
+        location_contradicted=project_data.location_contradicted,
+        location_unknown=project_data.location_unknown,
         location_preflight=project_data.location_preflight,
-        location_sources=project_data.location_sources,
         location_conflict_rule=project_data.location_conflict_rule,
     )
 
@@ -224,6 +227,7 @@ async def update_project(
             )
 
     # Update fields
+    judgement_before = (project.location_contradicted, project.location_unknown, project.location_conflict_rule)
     if project_data.name is not None:
         project.name = project_data.name
     if project_data.description is not None:
@@ -250,12 +254,12 @@ async def update_project(
         project.tls_mitm_browser = project_data.tls_mitm_browser
     if project_data.metrics_retention_days is not None:
         project.metrics_retention_days = project_data.metrics_retention_days
-    if project_data.location_assurance is not None:
-        project.location_assurance = project_data.location_assurance
+    if project_data.location_contradicted is not None:
+        project.location_contradicted = project_data.location_contradicted
+    if project_data.location_unknown is not None:
+        project.location_unknown = project_data.location_unknown
     if project_data.location_preflight is not None:
         project.location_preflight = project_data.location_preflight
-    if project_data.location_sources is not None:
-        project.location_sources = project_data.location_sources or None
     if project_data.location_conflict_rule is not None:
         project.location_conflict_rule = project_data.location_conflict_rule or None
 
@@ -283,6 +287,15 @@ async def update_project(
             )
 
     await proxy_manager.update_project(project)
+    if (project.location_contradicted, project.location_unknown, project.location_conflict_rule) != judgement_before:
+        # The rows were judged under the old decisions: re-judge them before answering,
+        # so routing is consistent the moment the save is confirmed. One project's rows
+        # are judged in memory and written once, so this is quick.
+        try:
+            await geo_runtime_of(request).proxy_attributor.reattribute_all(project_id=project_id)
+        except Exception as exc:
+            # The save is committed; the rows catch up on the next sighting or re-judgement.
+            logger.warning("Re-judging the project's rows after a settings change failed", project_id=project_id, error=str(exc))
 
     credentials = proxy_manager.get_credentials_for_project(project_id)
     connectors = proxy_manager.get_connectors_for_project(project_id)

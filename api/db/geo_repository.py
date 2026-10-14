@@ -134,13 +134,11 @@ class GeoSettingsRepository:
         if model is None:
             return None
         values: dict[str, Any] = {name: getattr(model, name) for name in self._COLUMNS}
-        values["default_sources"] = list(model.default_sources or [])
         return GeoSettings(**values)
 
     async def save(self, settings: GeoSettings, updated_by: str | None = None) -> None:
         values: dict[str, Any] = {name: getattr(settings, name) for name in self._COLUMNS}
         values["default_conflict_rule"] = settings.default_conflict_rule.value
-        values["default_sources"] = [kind.value for kind in settings.default_sources]
         values["updated_by"] = updated_by
         values["updated_at"] = utc_now()
         statement = pg_insert(GeoSettingsModel).values(id=1, **values)

@@ -21,6 +21,7 @@ Callers persist the proxy when ``apply_observation`` reports a change.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import Any
 
 import structlog
@@ -32,6 +33,7 @@ from api.geo.models import (
     MANUAL_SOURCE,
     META_CITY,
     META_CITY_SOURCE,
+    META_CITY_VERDICT,
     META_COUNTRY_SOURCE,
     META_ENDPOINT_CITY,
     META_ENDPOINT_COUNTRY,
@@ -43,17 +45,21 @@ from api.geo.models import (
     META_LOCATION_VERDICT,
     META_STATE,
     META_STATE_SOURCE,
+    META_STATE_VERDICT,
     META_VENDOR_CITY,
     META_VENDOR_COUNTRY,
     META_VENDOR_STATE,
+    ContradictedAction,
     ExitJudgement,
     GeoSettings,
+    GeoSourceKind,
     IpObservation,
     LocationCandidate,
     LocationVerdict,
     ObservationSource,
     Resolution,
     SourcePolicy,
+    UnknownAction,
     normalize_country,
 )
 from api.geo.observations import ObservationRecorder
@@ -83,11 +89,13 @@ _TRACKED_KEYS = (
     META_VENDOR_COUNTRY,
     META_STATE,
     META_STATE_SOURCE,
+    META_STATE_VERDICT,
     META_CITY,
     META_CITY_SOURCE,
     META_LOCATION,
     META_LOCATION_CONFLICT,
     META_LOCATION_VERDICT,
+    META_CITY_VERDICT,
     META_LOCATION_CANDIDATES,
     META_DISCOVERED_IP,
 )
@@ -183,6 +191,7 @@ class GeoService:
         policy: SourcePolicy | None = None,
         claimed: LocationTarget | None = None,
         endpoint: LocationTarget | None = None,
+        candidates: Sequence[LocationCandidate] | None = None,
     ) -> Resolution:
         """Resolve one IP from the databases plus whatever the caller learned.
 
@@ -190,9 +199,11 @@ class GeoService:
         proxy pass its project's policy. ``claimed`` is what was promised
         about the exit at any level (the vendor's word, or the place a
         request required); ``endpoint`` what an independent endpoint
-        requested through the proxy reported.
+        requested through the proxy reported. ``candidates`` is what the
+        databases said about ``ip`` when the caller looked it up already,
+        so one lookup serves two claims.
         """
-        candidates = self.attribute(ip)
+        candidates = list(candidates) if candidates is not None else self.attribute(ip)
         vendor = vendor_candidate(claimed)
         if vendor is not None:
             candidates.append(vendor)
@@ -211,6 +222,20 @@ class GeoService:
             if code:
                 return code
         return None
+
+    @classmethod
+    def outside_declared_countries(cls, proxy: Proxy, declared: Sequence[str]) -> bool:
+        """Whether a row the vendor placed in a declared country now resolves outside the connector's list.
+
+        Routing never uses such a row, whatever the project decided, and
+        the proxy response flags it. A row that made no claim is bound by
+        the list only for a request that names a country, so it is never
+        outside it here; nor is a row whose country an operator pinned, the
+        more deliberate of two operator inputs.
+        """
+        if proxy.metadata.get(META_COUNTRY_SOURCE) == MANUAL_SOURCE:
+            return False
+        return bool(declared) and proxy.country is not None and proxy.country not in declared and cls.claimed_country_of(proxy) is not None
 
     @classmethod
     def claimed_place_of(cls, proxy: Proxy) -> LocationTarget | None:
@@ -254,17 +279,24 @@ class GeoService:
         policy: SourcePolicy | None = None,
         endpoint: LocationTarget | None = None,
         project_id: str | None = None,
+        session_id: str | None = None,
+        candidates: Sequence[LocationCandidate] | None = None,
     ) -> tuple[Resolution, bool]:
         """Resolve ``ip`` for ``proxy``, write the result to its metadata and record the sighting.
 
         ``policy`` is the owning project's source policy (default: the
         install's); ``endpoint`` is what the endpoint requested through the
-        proxy reported about the exit, if any. Returns the resolution and
-        whether any persisted field changed, so the caller knows whether to
-        write the proxy.
+        proxy reported about the exit, if any; ``session_id`` is the client
+        session the sighting served, when one did. Returns the resolution
+        and whether any persisted field changed, so the caller knows whether
+        to write the proxy.
         """
-        resolution, changed = self._attribute(proxy, ip, policy=policy, endpoint=endpoint)
-        self.record(self._observation(proxy, ip, resolution, source=source, project_id=project_id, endpoint=endpoint))
+        resolution, changed = self._attribute(proxy, ip, policy=policy, endpoint=endpoint, candidates=candidates)
+        self.record(
+            self._observation(
+                proxy, ip, resolution, source=source, project_id=project_id, endpoint=endpoint, session_id=session_id,
+            )
+        )
         self._log_conflict(proxy, ip, resolution, source.value)
         return resolution, changed
 
@@ -312,6 +344,7 @@ class GeoService:
         endpoint: LocationTarget | None = None,
         project_id: str | None = None,
         session_id: str | None = None,
+        candidates: Sequence[LocationCandidate] | None = None,
     ) -> Resolution:
         """Resolve ``ip`` seen behind ``proxy`` and record the sighting without touching the row.
 
@@ -319,7 +352,9 @@ class GeoService:
         session, not to the row, so the row's country, location and conflict
         flag are left alone while accuracy and unique exits still learn of it.
         """
-        resolution = self.resolve_ip(ip, policy=policy, claimed=self.claimed_place_of(proxy), endpoint=endpoint)
+        resolution = self.resolve_ip(
+            ip, policy=policy, claimed=self.claimed_place_of(proxy), endpoint=endpoint, candidates=candidates
+        )
         self.record(
             self._observation(
                 proxy, ip, resolution, source=source, project_id=project_id, endpoint=endpoint, session_id=session_id,
@@ -371,33 +406,58 @@ class GeoService:
         *,
         policy: SourcePolicy | None,
         endpoint: LocationTarget | None,
+        candidates: Sequence[LocationCandidate] | None = None,
     ) -> tuple[Resolution, bool]:
         """Resolve ``ip`` for ``proxy`` and write the result to its metadata.
 
         The claim is read off the proxy (see ``claimed_place_of``). A country,
         state or city set by hand is kept as the routing value and treated as
         the claim to verify when the vendor made none. Otherwise routing gets
-        what the policy resolved at each level, with its source. Returns the
-        resolution and whether any persisted field changed.
+        the independent answer at each level, with its source, except that a
+        project routing contradictions on the vendor
+        (``ContradictedAction.VENDOR``) gets the claim itself where the
+        evidence contradicted it. Returns the resolution and whether any
+        persisted field changed.
         """
+        policy = policy or self.default_policy
         vendor_country = self.claimed_country_of(proxy)
         manual = proxy.metadata.get(META_COUNTRY_SOURCE) == MANUAL_SOURCE
         pinned = proxy.manual_location
-        resolution = self.resolve_ip(ip, policy=policy, claimed=self.claimed_place_of(proxy), endpoint=endpoint)
+        resolution = self.resolve_ip(
+            ip, policy=policy, claimed=self.claimed_place_of(proxy), endpoint=endpoint, candidates=candidates
+        )
+        contradicted_on_claim = policy.contradicted == ContradictedAction.VENDOR
+        open_on_claim = policy.unknown == UnknownAction.VENDOR
+
+        def routed(
+            resolved: str | None, source: GeoSourceKind | None, conflict: bool | None, claimed: str | None
+        ) -> tuple[str | None, GeoSourceKind | None]:
+            """The routing value for one level: the evidence, or the claim where the project chose it.
+
+            A contradicted level carries the claim under ``vendor`` for
+            contradictions; an open one (nothing placed it, or the sources
+            disagreed) carries the claim under ``vendor`` for unknowns, so a
+            slot the databases cannot settle is not routed on whichever
+            database happens to rank first.
+            """
+            if claimed and ((contradicted_on_claim and conflict) or (open_on_claim and conflict is None)):
+                return claimed, GeoSourceKind.VENDOR
+            return resolved, source
 
         before = self._snapshot(proxy)
         proxy.display_host = ip
         proxy.metadata[META_DISCOVERED_IP] = ip
         if vendor_country:
             proxy.metadata[META_VENDOR_COUNTRY] = vendor_country
-        if resolution.resolved_country and not manual:
-            proxy.metadata[META_COUNTRY] = resolution.resolved_country
-            proxy.metadata[META_COUNTRY_SOURCE] = (
-                resolution.resolved_source.value if resolution.resolved_source else None
-            )
-        for key, source_key, pin, value, source in (
-            (META_STATE, META_STATE_SOURCE, pinned.get("state_code"), resolution.resolved_state, resolution.resolved_state_source),
-            (META_CITY, META_CITY_SOURCE, pinned.get("city"), resolution.resolved_city, resolution.resolved_city_source),
+        country, country_source = routed(
+            resolution.resolved_country, resolution.resolved_source, resolution.country_conflict, resolution.claimed_country
+        )
+        if country and not manual:
+            proxy.metadata[META_COUNTRY] = country
+            proxy.metadata[META_COUNTRY_SOURCE] = country_source.value if country_source else None
+        for key, source_key, pin, (value, source) in (
+            (META_STATE, META_STATE_SOURCE, pinned.get("state_code"), routed(resolution.resolved_state, resolution.resolved_state_source, resolution.state_conflict, resolution.claimed_state)),
+            (META_CITY, META_CITY_SOURCE, pinned.get("city"), routed(resolution.resolved_city, resolution.resolved_city_source, resolution.city_conflict, resolution.claimed_city)),
         ):
             if pin:
                 continue  # the pin is the routing value; attribution only verifies it
@@ -412,11 +472,16 @@ class GeoService:
         else:
             proxy.metadata.pop(META_LOCATION, None)
         proxy.metadata[META_LOCATION_CONFLICT] = resolution.country_conflict is True
-        verdict = LocationVerdict.of(resolution.country_conflict, resolution.claimed_country)
-        if verdict is None:
-            proxy.metadata.pop(META_LOCATION_VERDICT, None)
-        else:
-            proxy.metadata[META_LOCATION_VERDICT] = verdict.value
+        for key, conflict, claimed in (
+            (META_LOCATION_VERDICT, resolution.country_conflict, resolution.claimed_country),
+            (META_STATE_VERDICT, resolution.state_conflict, resolution.claimed_state),
+            (META_CITY_VERDICT, resolution.city_conflict, resolution.claimed_city),
+        ):
+            verdict = LocationVerdict.of(conflict, claimed)
+            if verdict is None:
+                proxy.metadata.pop(key, None)
+            else:
+                proxy.metadata[key] = verdict.value
         proxy.metadata[META_LOCATION_CANDIDATES] = resolution.compact_candidates()
         proxy.metadata[META_LOCATION_CHECKED_AT] = utc_now().isoformat()
         return resolution, self._snapshot(proxy) != before

@@ -17,13 +17,15 @@ from api.geo.models import (
     META_LOCATION_CONFLICT,
     META_LOCATION_VERDICT,
     META_VENDOR_COUNTRY,
+    ConflictRule,
+    ContradictedAction,
     ExitJudgement,
-    GeoSourceKind,
-    LocationAssurance,
     ObservationSource,
     SourcePolicy,
+    UnknownAction,
 )
 from api.geo.observations import ObservationRecorder
+from api.geo.preflight import PreflightChecker, PreflightVerdict
 from api.geo.service import GeoService
 from api.geo.settings import GeoSettingsStore
 from api.geo.store import GeoDatabaseStore
@@ -84,7 +86,7 @@ class FakeStore:
                 name="T",
                 username="t",
                 password="pw",
-                location_sources=[GeoSourceKind.VENDOR, GeoSourceKind.DATABASE],
+                location_conflict_rule=ConflictRule.FIRST,
             ),
         }
         self.connectors: dict[str, Connector] = {
@@ -285,7 +287,7 @@ class TestObservations:
             await attributor.stop()
         assert proxy.country == "GB" and proxy.metadata[META_LOCATION_CONFLICT] is True
         assert proxy.metadata[META_VENDOR_COUNTRY] == "US"
-        store.update_proxy.assert_awaited_once_with(proxy)
+        store.update_proxy.assert_awaited_once_with(proxy, deferred=False)
         # The observation carries the owning project, so project-scoped views can filter on it.
         observation = geo_service.observation_recorder._buffer[-1]
         assert observation.project_id == "p" and observation.connector_id == "oxy"
@@ -384,57 +386,107 @@ class TestObservations:
         default = store.add(_proxy(id="d", connector_id="oxy", metadata={META_GEO_COUNTRY: "US"}))
         attributor = await _attributor(geo_service, store)
         try:
-            assert attributor.policy_for("trusting-c") == SourcePolicy(
-                sources=[GeoSourceKind.VENDOR, GeoSourceKind.DATABASE]
-            )
+            assert attributor.policy_for("trusting-c") == SourcePolicy(conflict_rule=ConflictRule.FIRST)
             assert attributor.policy_for("oxy") == geo_service.default_policy
             assert attributor.policy_for("unknown") == geo_service.default_policy
             await attributor.observe(trusting.id, GB_IP, source=ObservationSource.DISCOVERY)
             await attributor.observe(default.id, GB_IP, source=ObservationSource.DISCOVERY)
         finally:
             await attributor.stop()
-        assert trusting.country == "US" and trusting.metadata[META_LOCATION_CONFLICT] is True
-        assert default.country == "GB"
+        # The value is the database's under either rule; the rule only judges the claim.
+        assert trusting.country == "GB" and trusting.metadata[META_LOCATION_CONFLICT] is True
+        assert default.country == "GB" and default.metadata[META_LOCATION_CONFLICT] is True
 
 
 class TestMismatch:
-    async def test_vendor_session_is_rotated(self, geo_service: GeoService) -> None:
+    async def test_mismatch_signal_only_logs(self, geo_service: GeoService) -> None:
+        """What a misplaced exit does to a slot is decided by its sighting, not by the refusal."""
         store = FakeStore()
         proxy = store.add(_proxy(connector_id="oxy", metadata={META_SESSION_ID: "abc"}))
-        attributor = await _attributor(geo_service, store)
-        try:
-            await exit_location_mismatch.send_async(
-                None, proxy_id=proxy.id, project_id="p", expected="GB", observed="US", ip=ECHO_IP
-            )
-        finally:
-            await attributor.stop()
-        store.remove_proxy.assert_awaited_once_with(proxy.id)
-        store.update_proxy.assert_not_awaited()
-
-    async def test_dynamic_gateway_is_left_alone(self, geo_service: GeoService) -> None:
-        store = FakeStore()
         gateway = store.add(_proxy(connector_id="oxy", metadata={META_DYNAMIC_SESSIONS: "true", META_SESSION_ID: "probe"}))
         attributor = await _attributor(geo_service, store)
         try:
-            await exit_location_mismatch.send_async(
-                None, proxy_id=gateway.id, project_id="p", expected="GB", observed="US", ip=ECHO_IP
-            )
+            for target in (proxy.id, gateway.id, "gone"):
+                await exit_location_mismatch.send_async(
+                    None, proxy_id=target, project_id="p", expected="GB", observed="US", ip=ECHO_IP
+                )
         finally:
             await attributor.stop()
         store.remove_proxy.assert_not_awaited()
         store.update_proxy.assert_not_awaited()
         assert META_LOCATION_CONFLICT not in gateway.metadata
 
-    async def test_unknown_proxy_is_ignored(self, geo_service: GeoService) -> None:
+
+class TestPreflightSighting:
+    """Preflight's echo through a pooled slot is a sighting of the slot, applied like a health check's."""
+
+    def _slot(self, store: FakeStore, **metadata: object) -> Proxy:
+        return store.add(_proxy(connector_id="oxy", metadata={META_SESSION_ID: "abc", META_GEO_COUNTRY: "US", **metadata}))
+
+    async def test_sighting_writes_the_row_and_records_once(self, geo_service: GeoService) -> None:
         store = FakeStore()
+        slot = self._slot(store)
         attributor = await _attributor(geo_service, store)
         try:
-            await exit_location_mismatch.send_async(
-                None, proxy_id="gone", project_id="p", expected="GB", observed="US", ip=ECHO_IP
-            )
+            await exit_ip_observed.send_async(None, proxy_id=slot.id, ip=GB_IP, source="preflight", endpoint_country=None)
+            # The same exit seen again by the next session's preflight is not re-applied.
+            await exit_ip_observed.send_async(None, proxy_id=slot.id, ip=GB_IP, source="preflight", endpoint_country=None)
         finally:
             await attributor.stop()
-        store.update_proxy.assert_not_awaited()
+        # Judged against the slot's own claim (US), routed on the evidence (GB), flagged.
+        assert slot.country == "GB" and slot.metadata[META_LOCATION_VERDICT] == "contradicted"
+        # The row is persisted off the request path: the pool schedules the write.
+        store.update_proxy.assert_awaited_once_with(slot, deferred=True)
+        store.remove_proxy.assert_not_awaited()
+        # Both sessions are recorded as sightings (last-seen, hand-outs); only the first wrote the row.
+        assert geo_service.observation_recorder.pending == 2
+        recorded = geo_service.observation_recorder._buffer[-1]
+        assert recorded.source == ObservationSource.PREFLIGHT and recorded.claimed_country == "US" and recorded.country_conflict
+
+    async def test_refusing_project_replaces_the_slot_at_once(self, geo_service: GeoService) -> None:
+        store = FakeStore()
+        store.projects["p"].location_contradicted = ContradictedAction.REFUSE
+        slot = self._slot(store)
+        attributor = await _attributor(geo_service, store)
+        try:
+            await exit_ip_observed.send_async(None, proxy_id=slot.id, ip=GB_IP, source="preflight", endpoint_country=None)
+        finally:
+            await attributor.stop()
+        # Out of the pool at once; the storage cleanup does not hold the request.
+        store.remove_proxy.assert_awaited_once_with(slot.id, deferred=True)
+
+    async def test_checker_hands_the_slot_to_the_attributor_before_caching(self, geo_service: GeoService) -> None:
+        """End to end: one echo updates the row, records one observation and leaves a fresh verdict cached."""
+        store = FakeStore()
+        slot = self._slot(store, **{META_DISCOVERED_IP: GB_IP, META_LOCATION_CONFLICT: False, META_LOCATION_VERDICT: "confirmed"})
+        attributor = await _attributor(geo_service, store)
+        stored: dict[str, str] = {}
+        dropped: list[str] = []
+
+        async def store_verdict(key: str, verdict: PreflightVerdict, ttl: int) -> None:
+            stored[key] = verdict.to_json()
+
+        async def invalidate(project_id: str, proxy_id: str) -> None:
+            dropped.append(proxy_id)
+            stored.clear()
+
+        checker = PreflightChecker(geo_service, None)
+        checker._store = store_verdict  # type: ignore[method-assign]
+        checker.invalidate = invalidate  # type: ignore[method-assign]
+        checker.start()
+        project = Project(id="p", name="P", username="u", password="pw", location_preflight=True)
+        try:
+            verdict = await checker.check(project, slot, session_id="s", requested=LocationTarget(country="US"))
+        finally:
+            checker.stop()
+            await attributor.stop()
+        # The stub echo answers ECHO_IP with country DE: the exit moved and is contradicted either way.
+        assert not verdict.ok and verdict.observed == LocationTarget(country="DE") and verdict.country_conflict is True
+        # The row was re-judged by the same echo, its stale cache dropped, and only then the fresh verdict stored.
+        assert slot.country == "DE" and slot.metadata[META_DISCOVERED_IP] == ECHO_IP
+        assert slot.metadata[META_LOCATION_VERDICT] == "contradicted"
+        assert dropped == [slot.id] and len(stored) == 1
+        assert geo_service.observation_recorder.pending == 1
 
 
 class TestReattribute:
@@ -507,22 +559,44 @@ class TestRefusedRotation:
     def _slot(self, store: FakeStore, **metadata: object) -> Proxy:
         return store.add(_proxy(connector_id="oxy", metadata={META_SESSION_ID: "abc", META_GEO_COUNTRY: "US", **metadata}))
 
-    @pytest.mark.parametrize("assurance", [LocationAssurance.VERIFIED, LocationAssurance.CONFIRMED])
-    async def test_contradicted_slot_is_replaced(self, geo_service: GeoService, assurance: LocationAssurance) -> None:
+    @pytest.mark.parametrize("unknown", list(UnknownAction))
+    async def test_contradicted_slot_is_replaced(self, geo_service: GeoService, unknown: UnknownAction) -> None:
         store = FakeStore()
-        store.projects["p"].location_assurance = assurance
+        store.projects["p"].location_contradicted = ContradictedAction.REFUSE
+        store.projects["p"].location_unknown = unknown
         slot = self._slot(store)
         attributor = await _attributor(geo_service, store)
         try:
             await attributor.observe(slot.id, GB_IP, source=ObservationSource.HEALTH_CHECK)
         finally:
             await attributor.stop()
-        store.remove_proxy.assert_awaited_once_with(slot.id)
+        store.remove_proxy.assert_awaited_once_with(slot.id, deferred=False)
         store.update_proxy.assert_not_awaited()
+
+    async def test_slot_judged_before_the_project_refused_is_replaced_by_the_re_judgement(self, geo_service: GeoService) -> None:
+        # Judged contradicted while the project routed on the evidence, so it
+        # stayed. The project now refuses contradictions: a repeat sighting of
+        # the same exit changes nothing, the re-judgement the settings change
+        # triggers is what replaces the slot.
+        store = FakeStore()
+        store.projects["p"].location_contradicted = ContradictedAction.EVIDENCE
+        slot = self._slot(store)
+        attributor = await _attributor(geo_service, store)
+        try:
+            await attributor.observe(slot.id, GB_IP, source=ObservationSource.HEALTH_CHECK)
+            store.remove_proxy.assert_not_awaited()
+            store.projects["p"].location_contradicted = ContradictedAction.REFUSE
+            await attributor.observe(slot.id, GB_IP, source=ObservationSource.HEALTH_CHECK)
+            store.remove_proxy.assert_not_awaited()
+            await attributor.reattribute_all(project_id="p")
+        finally:
+            await attributor.stop()
+        store.remove_proxy.assert_awaited_once_with(slot.id, deferred=True)
 
     async def test_open_verdict_waits_for_evidence(self, geo_service: GeoService) -> None:
         store = FakeStore()
-        store.projects["p"].location_assurance = LocationAssurance.CONFIRMED
+        store.projects["p"].location_contradicted = ContradictedAction.REFUSE
+        store.projects["p"].location_unknown = UnknownAction.REFUSE
         slot = self._slot(store)
         attributor = await _attributor(geo_service, store)
         try:
@@ -534,8 +608,10 @@ class TestRefusedRotation:
         store.update_proxy.assert_awaited_once()
         assert slot.metadata[META_LOCATION_VERDICT] == "open" and slot.metadata[META_LOCATION_CONFLICT] is False
 
-    async def test_observing_project_keeps_the_slot(self, geo_service: GeoService) -> None:
+    @pytest.mark.parametrize("contradicted", [ContradictedAction.EVIDENCE, ContradictedAction.VENDOR])
+    async def test_routing_project_keeps_the_slot(self, geo_service: GeoService, contradicted: ContradictedAction) -> None:
         store = FakeStore()
+        store.projects["p"].location_contradicted = contradicted
         slot = self._slot(store)
         attributor = await _attributor(geo_service, store)
         try:
@@ -543,11 +619,14 @@ class TestRefusedRotation:
         finally:
             await attributor.stop()
         store.remove_proxy.assert_not_awaited()
-        assert slot.metadata[META_LOCATION_VERDICT] == "contradicted" and slot.country == "GB"
+        # Routed on the evidence, or on the claim when the vendor is trusted; flagged either way.
+        expected_country = "GB" if contradicted == ContradictedAction.EVIDENCE else "US"
+        assert slot.metadata[META_LOCATION_VERDICT] == "contradicted" and slot.country == expected_country
 
     async def test_fixed_exit_is_flagged_not_replaced(self, geo_service: GeoService) -> None:
         store = FakeStore()
-        store.projects["p"].location_assurance = LocationAssurance.CONFIRMED
+        store.projects["p"].location_contradicted = ContradictedAction.REFUSE
+        store.projects["p"].location_unknown = UnknownAction.REFUSE
         fixed = store.add(_proxy(connector_id="oxy", metadata={META_VENDOR_COUNTRY: "US"}))
         attributor = await _attributor(geo_service, store)
         try:
@@ -559,7 +638,8 @@ class TestRefusedRotation:
 
     async def test_reattribution_replaces_contradicted_slots(self, geo_service: GeoService) -> None:
         store = FakeStore()
-        store.projects["p"].location_assurance = LocationAssurance.CONFIRMED
+        store.projects["p"].location_contradicted = ContradictedAction.REFUSE
+        store.projects["p"].location_unknown = UnknownAction.REFUSE
         slot = self._slot(store, **{META_DISCOVERED_IP: GB_IP})
         kept = store.add(_proxy(connector_id="oxy", metadata={META_SESSION_ID: "ok", META_GEO_COUNTRY: "GB", META_DISCOVERED_IP: GB_IP}))
         attributor = await _attributor(geo_service, store)
@@ -568,13 +648,14 @@ class TestRefusedRotation:
         finally:
             await attributor.stop()
         assert scanned == 2 and changed == 1
-        store.remove_proxy.assert_awaited_once_with(slot.id)
+        store.remove_proxy.assert_awaited_once_with(slot.id, deferred=True)
         store.update_proxies.assert_awaited_once_with([kept])
         assert kept.metadata[META_LOCATION_VERDICT] == "confirmed"
 
     async def test_manual_locate_replaces_a_contradicted_slot(self, geo_service: GeoService) -> None:
         store = FakeStore()
-        store.projects["p"].location_assurance = LocationAssurance.CONFIRMED
+        store.projects["p"].location_contradicted = ContradictedAction.REFUSE
+        store.projects["p"].location_unknown = UnknownAction.REFUSE
         slot = self._slot(store)
         # The echo reports a GB exit for a slot provisioned for US: contradicted.
         attributor = await _attributor(geo_service, store, payload={"ip": GB_IP})
@@ -582,5 +663,45 @@ class TestRefusedRotation:
             assert await attributor.enrich(slot.id, source=ObservationSource.MANUAL) is slot
         finally:
             await attributor.stop()
-        store.remove_proxy.assert_awaited_once_with(slot.id)
+        store.remove_proxy.assert_awaited_once_with(slot.id, deferred=False)
         store.update_proxy.assert_not_awaited()
+
+    async def test_a_health_check_sighting_is_persisted_inline(self, geo_service: GeoService) -> None:
+        store = FakeStore()
+        slot = self._slot(store)
+        attributor = await _attributor(geo_service, store)
+        try:
+            await attributor.observe(slot.id, GB_IP, source=ObservationSource.HEALTH_CHECK)
+        finally:
+            await attributor.stop()
+        store.update_proxy.assert_awaited_once_with(slot, deferred=False)
+
+
+class TestOutsideTheDeclaredCountries:
+    """A pooled slot outside the connector's declared countries is skipped by routing, never replaced here."""
+
+    async def test_slot_outside_the_list_is_kept(self, geo_service: GeoService) -> None:
+        store = FakeStore()
+        store.connectors["oxy"] = store.connectors["oxy"].model_copy(update={"config": {"countries": ["US"]}})
+        slot = store.add(_proxy(connector_id="oxy", metadata={META_SESSION_ID: "abc", META_GEO_COUNTRY: "US"}))
+        attributor = await _attributor(geo_service, store)
+        try:
+            # Routed on the evidence (GB) under the default decision: outside the connector's US, so
+            # routing skips it; replacing it would spend a session on every sighting a wrong database makes.
+            await attributor.observe(slot.id, GB_IP, source=ObservationSource.HEALTH_CHECK)
+        finally:
+            await attributor.stop()
+        store.remove_proxy.assert_not_awaited()
+        assert slot.country == "GB"
+
+    async def test_slot_inside_the_list_is_kept(self, geo_service: GeoService) -> None:
+        store = FakeStore()
+        store.connectors["oxy"] = store.connectors["oxy"].model_copy(update={"config": {"countries": ["US", "GB"]}})
+        slot = store.add(_proxy(connector_id="oxy", metadata={META_SESSION_ID: "abc", META_GEO_COUNTRY: "US"}))
+        attributor = await _attributor(geo_service, store)
+        try:
+            await attributor.observe(slot.id, GB_IP, source=ObservationSource.HEALTH_CHECK)
+        finally:
+            await attributor.stop()
+        store.remove_proxy.assert_not_awaited()
+        assert slot.country == "GB"

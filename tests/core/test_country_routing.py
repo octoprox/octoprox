@@ -13,13 +13,7 @@ from api.core.config import Settings
 from api.core.proxy_manager import ProxyManager
 from api.core.proxy_server import ProxyServer
 from api.db.redis import RedisClient
-from api.geo.models import (
-    MANUAL_SOURCE,
-    META_COUNTRY_SOURCE,
-    META_LOCATION_CONFLICT,
-    META_LOCATION_VERDICT,
-    LocationAssurance,
-)
+from api.geo.models import UnknownAction
 from api.models.connector import Connector, ProxyTarget
 from api.models.credential import Credential, CredentialType
 from api.models.location import LocationTarget, normalize_country_list
@@ -94,58 +88,6 @@ def _healthy(proxy: Proxy) -> Proxy:
     return proxy
 
 
-class TestAssuranceEligibility:
-    """The assurance level decides which row verdicts a project routes to."""
-
-    @pytest.fixture
-    def manager(self) -> ProxyManager:
-        manager = _in_memory_manager()
-        manager._projects["project-1"] = Project(
-            id="project-1", name="P", username="p", password="pw", location_assurance=LocationAssurance.CONFIRMED,
-        )
-        manager._credentials["cred-static"] = Credential(
-            id="cred-static", name="Static", type=CredentialType.STATIC_PROXY_PROVIDER, project_id="project-1", config={},
-        )
-        manager._connectors["conn"] = Connector(
-            id="conn", name="C", credential_id="cred-static",
-            credential_type=CredentialType.STATIC_PROXY_PROVIDER, project_id="project-1",
-        )
-        rows = {
-            "confirmed": {META_LOCATION_CONFLICT: False, META_LOCATION_VERDICT: "confirmed"},
-            "contradicted": {META_LOCATION_CONFLICT: True, META_LOCATION_VERDICT: "contradicted"},
-            "open": {META_LOCATION_CONFLICT: False, META_LOCATION_VERDICT: "open"},
-            "unclaimed": {META_LOCATION_CONFLICT: False},
-            "unjudged": {},
-            "legacy-flagged": {META_LOCATION_CONFLICT: True},  # judged before the verdict was stored
-            # A country pinned by hand is trusted while open, not when the databases agree against it.
-            "pinned-open": {META_COUNTRY_SOURCE: MANUAL_SOURCE, META_LOCATION_CONFLICT: False, META_LOCATION_VERDICT: "open"},
-            "pinned-contradicted": {META_COUNTRY_SOURCE: MANUAL_SOURCE, META_LOCATION_CONFLICT: True, META_LOCATION_VERDICT: "contradicted"},
-        }
-        for name, metadata in rows.items():
-            manager._proxies[name] = _healthy(Proxy(id=name, host=name, port=1, connector_id="conn", metadata={"country": "DE", **metadata}))
-        return manager
-
-    def _ids(self, manager: ProxyManager, location: LocationTarget | None = None) -> set[str]:
-        return {p.id for p in manager.get_routable_proxies_for_project("project-1", location=location)}
-
-    def test_confirmed_routes_on_clear_evidence_only(self, manager: ProxyManager) -> None:
-        clear = {"confirmed", "unclaimed", "unjudged", "pinned-open"}
-        assert self._ids(manager, LocationTarget(country="DE")) == clear
-        assert self._ids(manager) == clear  # untargeted requests are filtered the same way
-
-    def test_verified_refuses_contradicted_only(self, manager: ProxyManager) -> None:
-        manager._projects["project-1"].location_assurance = LocationAssurance.VERIFIED
-        assert self._ids(manager, LocationTarget(country="DE")) == {
-            "confirmed", "open", "unclaimed", "unjudged", "pinned-open",
-        }
-
-    def test_observe_routes_everywhere(self, manager: ProxyManager) -> None:
-        manager._projects["project-1"].location_assurance = LocationAssurance.OBSERVE
-        assert self._ids(manager, LocationTarget(country="DE")) == {
-            "confirmed", "contradicted", "open", "unclaimed", "unjudged", "legacy-flagged", "pinned-open", "pinned-contradicted",
-        }
-
-
 class TestEligibilityRules:
     """Which proxies a -cc- request may use."""
 
@@ -184,7 +126,10 @@ class TestEligibilityRules:
         return {p.id for p in manager.get_routable_proxies_for_project("project-1", location=location)}
 
     def test_no_country_returns_everything(self, manager: ProxyManager) -> None:
+        # px-us-ca made no vendor claim, so the connector's list binds it only for a named country:
+        # it serves untargeted traffic, and never -cc-us, since its resolved country is CA.
         assert self._ids(manager) == {"px-uk-1", "px-fr", "px-de", "px-unknown", "px-us-ca"}
+        assert "px-us-ca" not in self._ids(manager, LocationTarget(country="US"))
 
     def test_connector_list_covers_unlabelled_proxies(self, manager: ProxyManager) -> None:
         assert self._ids(manager, LocationTarget(country="GB")) == {"px-uk-1"}
@@ -550,6 +495,14 @@ class TestPlaceRouting:
     def test_gateway_serves_only_what_it_can_say(self, manager: ProxyManager) -> None:
         # Oxylabs names US states; England has no name on record and nothing else is there.
         assert self._ids(manager, LocationTarget(country="GB", state="ENG")) == set()
+        assert self._ids(manager, LocationTarget(country="DE", city="berlin")) == {"gw"}
+
+    def test_refusing_unknown_exits_judges_only_rows_that_carry_a_place(self, manager: ProxyManager) -> None:
+        # The gateway row carries no state or city: the vendor renders the place
+        # per request and preflight judges it. A fixed exit whose place is known
+        # matches as before; one without a place is out by the match alone.
+        manager._projects["project-1"].location_unknown = UnknownAction.REFUSE
+        assert self._ids(manager, LocationTarget(country="US", state="NY")) == {"px-ny", "px-pinned", "gw"}
         assert self._ids(manager, LocationTarget(country="DE", city="berlin")) == {"gw"}
 
     async def test_select_renders_the_place_and_never_provisions(self, manager: ProxyManager) -> None:

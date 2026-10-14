@@ -288,19 +288,6 @@ class GeoStatusResponse(BaseModel):
 # --- helpers ---------------------------------------------------------------------------------
 
 
-def _reattribute_later(request: Request) -> None:
-    """Kick off an offline re-attribution without holding the request."""
-    runtime = geo_runtime_of(request)
-
-    async def run() -> None:
-        try:
-            await runtime.proxy_attributor.reattribute_all()
-        except Exception as exc:
-            logger.warning("Re-attribution after database change failed", error=str(exc))
-
-    asyncio.create_task(run())
-
-
 def _response(
     runtime: GeoRuntime, record: GeoDatabaseRecord, stored_ids: set[str] | None = None
 ) -> GeoDatabaseResponse:
@@ -396,9 +383,13 @@ async def put_settings(
 ) -> GeoSettingsResponse:
     """Replace the install-wide attribution settings (admin). Reaches every instance."""
     runtime = geo_runtime_of(request)
+    rule_before = runtime.settings_store.settings.default_conflict_rule
     await runtime.settings_store.save(body, updated_by=admin.username)
     await event_bus.publish(geo_settings_changed, None, entity_id="default", op="updated")
     logger.info("Geo settings updated", admin=admin.username)
+    if body.default_conflict_rule != rule_before:
+        # Verdicts were written under the old rule; every row that inherits the default is re-judged.
+        runtime.reattribute_later(inheriting_rule_only=True)
     return await get_settings(request, admin)
 
 
@@ -458,7 +449,7 @@ async def upload_database(
     await session.commit()
     await runtime.database_store.apply_record(record, raw)
     await runtime.publish_database_changed(record.id, "added")
-    _reattribute_later(request)
+    runtime.reattribute_later()
     logger.info(
         "IP database uploaded",
         database_id=record.id,
@@ -499,7 +490,7 @@ async def add_database_from_url(
         raise HTTPException(
             status_code=400, detail=f"Download failed: {refreshed.last_update_error}"
         )
-    _reattribute_later(request)
+    runtime.reattribute_later()
     logger.info(
         "IP database registered from URL",
         database_id=record.id,
@@ -542,7 +533,7 @@ async def update_database(
     await runtime.database_store.apply_record(record)
     await runtime.publish_database_changed(record.id, "updated")
     if body.enabled is not None or body.priority is not None:
-        _reattribute_later(request)
+        runtime.reattribute_later()
     return _response(runtime, record)
 
 
@@ -563,7 +554,7 @@ async def refresh_database(
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     if refreshed.last_update_error:
         raise HTTPException(status_code=502, detail=refreshed.last_update_error)
-    _reattribute_later(request)
+    runtime.reattribute_later()
     return _response(runtime, refreshed)
 
 
@@ -586,7 +577,7 @@ async def delete_database(
     await session.commit()
     runtime.database_store.remove(database_id)
     await runtime.publish_database_changed(database_id, "removed")
-    _reattribute_later(request)
+    runtime.reattribute_later()
     logger.info(
         "IP database deleted", database_id=database_id, name=record.name, admin=admin.username
     )
