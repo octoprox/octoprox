@@ -15,6 +15,7 @@ import {
 } from '../../api/client'
 import { Page } from '../../components/layout/Page'
 import { useTheme } from '../../contexts/ThemeContext'
+import { useTimeRange } from '../../contexts/TimeRangeContext'
 import { formatBytes, parseApiDate, relativeTime } from '../../utils/format'
 import { Alert, Badge, Button, Card, CardHeader, KeyValue, Segmented } from '../../components/ui'
 import { cn } from '../../utils/cn'
@@ -959,7 +960,7 @@ type TrendPoint = Record<string, number | null> & { time: number }
  * which describe whichever instance answered.
  */
 function TrendsSection() {
-  const [range, setRange] = useState<SystemHistoryRange>('24h')
+  const [range, setRange] = useTimeRange(SYSTEM_HISTORY_RANGES)
   const { data, isLoading } = useQuery({
     queryKey: ['system-history', range],
     queryFn: () => fetchSystemHistory(range),

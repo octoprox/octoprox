@@ -14,10 +14,12 @@ import {
   RoutingConfig, RateLimitConfig, TrafficConfig, TrafficPeriod, TrafficLimitAction, TrafficLimitStatus, TRAFFIC_DEFAULTS, BYTES_PER_GB,
   Credential, CredentialDetail,
   connectorWeight, DEFAULT_ROUTING_WEIGHT, MAX_ROUTING_WEIGHT, fetchProjectTrafficSplit, ConnectorTrafficShare,
+  HISTORY_RANGES,
 } from '../api/client'
 import { TrafficSplitPanel, formatShare } from '../components/TrafficSplit'
 import { ACTION_LABEL, ConnectorTrafficSection, TrafficStatusBadge, TrafficUsageBar } from '../components/ConnectorTraffic'
 import { useProject } from '../contexts/ProjectContext'
+import { useTimeRange } from '../contexts/TimeRangeContext'
 import { useAuth } from '../contexts/AuthContext'
 import { useToast } from '../contexts/ToastContext'
 import { useProviders } from '../hooks/useProviders'
@@ -127,9 +129,10 @@ export default function ConnectorsPage() {
 
   const connectors = connectorsData?.connectors ?? []
   // Same query the Traffic split panel uses (shared cache), so the Weight column shows the panel's numbers.
+  const [splitRange] = useTimeRange(HISTORY_RANGES)
   const { data: trafficSplit } = useQuery({
-    queryKey: ['traffic-split', selectedProjectId, '1h'],
-    queryFn: () => fetchProjectTrafficSplit(selectedProjectId!, '1h'),
+    queryKey: ['traffic-split', selectedProjectId, splitRange],
+    queryFn: () => fetchProjectTrafficSplit(selectedProjectId!, splitRange),
     enabled: !!selectedProjectId && connectors.length > 1,
     refetchInterval: 15000,
   })

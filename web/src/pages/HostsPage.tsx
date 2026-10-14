@@ -11,9 +11,11 @@ import {
 import { ChevronDown, ChevronRight, Search, Target } from 'lucide-react'
 import {
   fetchProjectHostMetrics, fetchProjectHostHistory,
-  HostMetrics, HostsRange, HostsResponse, HostsHistoryResponse,
+  HostMetrics, HostsResponse, HostsHistoryResponse,
+  HISTORY_RANGES,
 } from '../api/client'
 import { useProject } from '../contexts/ProjectContext'
+import { TIME_RANGE_MS, formatRangeTick, useTimeRange } from '../contexts/TimeRangeContext'
 import { useTheme } from '../contexts/ThemeContext'
 import { bytesShort, compact, formatBytes, parseApiDate, plural } from '../utils/format'
 import { DataTable } from '../components/DataTable'
@@ -21,10 +23,6 @@ import { Page, EmptyState } from '../components/layout/Page'
 import { ProviderLogo } from '../components/ProviderLogo'
 import { Alert, Card, CardHeader, InfoTip, Input, Segmented, Select } from '../components/ui'
 
-const RANGES: HostsRange[] = ['1h', '6h', '24h', '7d', '30d']
-const RANGE_DURATION_MS: Record<HostsRange, number> = {
-  '1h': 3_600_000, '6h': 6 * 3_600_000, '24h': 24 * 3_600_000, '7d': 7 * 24 * 3_600_000, '30d': 30 * 24 * 3_600_000,
-}
 /** How many hosts get a series of their own in the chart; the rest stack as one. */
 const TOP_SERIES = 8
 /** How many hosts the table loads; the header says when there are more and search reaches them. */
@@ -39,12 +37,6 @@ const METRIC_OPTIONS: { value: Metric; label: string }[] = [
 // One hue per series position, fixed so the chart, the bars and the table dots agree.
 const SERIES_COLORS = ['#2563eb', '#16a34a', '#ea580c', '#9333ea', '#0d9488', '#db2777', '#ca8a04', '#0ea5e9', '#dc2626', '#4f46e5', '#65a30d', '#f97316']
 const OVERFLOW_COLOR = '#94a3b8'
-
-function formatTickByRange(epoch: number, range: HostsRange): string {
-  const d = new Date(epoch)
-  if (range === '7d' || range === '30d') return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
-  return d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })
-}
 
 function formatShare(v: number): string {
   if (v === 0) return '0%'
@@ -90,7 +82,7 @@ export default function HostsPage() {
   const navigate = useNavigate()
   const { selectedProjectId, selectedProject } = useProject()
   const { isDark } = useTheme()
-  const [range, setRange] = useState<HostsRange>('24h')
+  const [range, setRange] = useTimeRange(HISTORY_RANGES)
   const [connectorId, setConnectorId] = useState<string>('')
   const [metric, setMetric] = useState<Metric>('requests')
   const [search, setSearch] = useState('')
@@ -128,7 +120,7 @@ export default function HostsPage() {
 
   const chartData = useMemo(() => buildChartData(history, metric), [history, metric])
   const seriesHosts = useMemo(() => history?.series.map((s) => s.host) ?? [], [history])
-  const timeDomain = useMemo(() => { const now = Date.now(); return [now - RANGE_DURATION_MS[range], now] }, [range])
+  const timeDomain = useMemo(() => { const now = Date.now(); return [now - TIME_RANGE_MS[range], now] }, [range])
 
   // The busiest hosts as bars, from the same (search-narrowed) list as the table and
   // the totals, so the three agree; the header names the search when one is on.
@@ -265,7 +257,7 @@ export default function HostsPage() {
               ))}
             </Select>
           )}
-          <Segmented options={RANGES.map((r) => ({ value: r, label: r }))} value={range} onChange={setRange} />
+          <Segmented options={HISTORY_RANGES.map((r) => ({ value: r, label: r }))} value={range} onChange={setRange} />
         </>
       }
     >
@@ -309,7 +301,7 @@ export default function HostsPage() {
                 <ResponsiveContainer width="100%" height={260}>
                   <AreaChart data={chartData} margin={{ top: 8, right: 8, left: metric === 'bytes' ? 4 : -12, bottom: 0 }}>
                     <CartesianGrid strokeDasharray="2 4" stroke={gridColor} vertical={false} />
-                    <XAxis dataKey="time" type="number" scale="time" domain={timeDomain} tickFormatter={(v: number) => formatTickByRange(v, range)} tick={{ fontSize: 11, fill: tickColor }} axisLine={false} tickLine={false} minTickGap={48} />
+                    <XAxis dataKey="time" type="number" scale="time" domain={timeDomain} tickFormatter={(v: number) => formatRangeTick(v, range)} tick={{ fontSize: 11, fill: tickColor }} axisLine={false} tickLine={false} minTickGap={48} />
                     <YAxis allowDecimals={false} tick={{ fontSize: 11, fill: tickColor }} axisLine={false} tickLine={false} tickFormatter={(v: number) => (metric === 'requests' ? compact(v) : bytesShort(v))} width={metric === 'bytes' ? 64 : undefined} />
                     <Tooltip
                       labelFormatter={(v: number) => new Date(v).toLocaleString()}

@@ -13,7 +13,7 @@ import {
 import { useToast } from '../../contexts/ToastContext'
 import { DataTable } from '../../components/DataTable'
 import { Page, EmptyState } from '../../components/layout/Page'
-import { ACCURACY_RANGES, AccuracyRow, ProviderAccuracyPanel } from '../../components/geo/ProviderAccuracyPanel'
+import { AccuracyRow, ProviderAccuracyPanel, accuracyDays, useAccuracyRange } from '../../components/geo/ProviderAccuracyPanel'
 import { AccuracyDetailsInspector } from '../../components/geo/AccuracyDetails'
 import { ObservationsPanel } from '../../components/geo/ObservationsPanel'
 import { ExitIpsPanel } from '../../components/geo/ExitIpsPanel'
@@ -45,9 +45,9 @@ const VENDOR_LABELS: Record<string, string> = {
 export default function GeoSection() {
   const [tab, setTab] = useState<Tab>('databases')
   const { data: status } = useQuery({ queryKey: ['geo-status'], queryFn: fetchGeoStatus, refetchInterval: 30_000 })
-  const [range, setRange] = useState<(typeof ACCURACY_RANGES)[number]['value']>('30d')
+  const [range] = useAccuracyRange()
   const [inspecting, setInspecting] = useState<AccuracyRow | null>(null)
-  const days = ACCURACY_RANGES.find((r) => r.value === range)?.days ?? 30
+  const days = accuracyDays(range)
 
   return (
     <Page
@@ -77,7 +77,7 @@ export default function GeoSection() {
       />
       {tab === 'databases' && <DatabasesTab />}
       {tab === 'policy' && <PolicyTab />}
-      {tab === 'accuracy' && <ProviderAccuracyPanel range={range} onRangeChange={setRange} onInspect={setInspecting} inspecting={inspecting?.connector_id ?? null} />}
+      {tab === 'accuracy' && <ProviderAccuracyPanel onInspect={setInspecting} inspecting={inspecting?.connector_id ?? null} />}
       {tab === 'exits' && <ExitIpsPanel />}
       {tab === 'observations' && <ObservationsPanel />}
     </Page>

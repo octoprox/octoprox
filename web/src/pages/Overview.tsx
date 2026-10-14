@@ -9,8 +9,10 @@ import { Settings, Check, Loader, Power, AlertTriangle } from 'lucide-react'
 import {
   fetchProjectMetrics, fetchProjectScalingMetrics, fetchProjectMetricsHistory, fetchProjectConnectors,
   updateProject, MetricsSnapshot, ProjectUpdate,
+  HISTORY_RANGES, HistoryRange,
 } from '../api/client'
 import { useProject } from '../contexts/ProjectContext'
+import { TIME_RANGE_MS, formatRangeTick, useTimeRange } from '../contexts/TimeRangeContext'
 import { useAuth } from '../contexts/AuthContext'
 import { useTheme } from '../contexts/ThemeContext'
 import { useToast } from '../contexts/ToastContext'
@@ -25,15 +27,9 @@ import { TrafficSplitPanel, totalSpend } from '../components/TrafficSplit'
 import { PERIOD_LABEL, TrafficUsageBar, describeUsage } from '../components/ConnectorTraffic'
 import { Badge, Button, Card, CardHeader, KeyValue, Segmented } from '../components/ui'
 
-const TIME_RANGES = ['1h', '6h', '24h', '7d', '30d'] as const
-type TimeRange = (typeof TIME_RANGES)[number]
-
 // Gap thresholds per range: 2x the expected interval between points.
-const GAP_THRESHOLD_MS: Record<TimeRange, number> = {
+const GAP_THRESHOLD_MS: Record<HistoryRange, number> = {
   '1h': 120_000, '6h': 120_000, '24h': 120_000, '7d': 2 * 3600_000, '30d': 2 * 6 * 3600_000,
-}
-const RANGE_DURATION_MS: Record<TimeRange, number> = {
-  '1h': 3_600_000, '6h': 6 * 3_600_000, '24h': 24 * 3_600_000, '7d': 7 * 24 * 3_600_000, '30d': 30 * 24 * 3_600_000,
 }
 
 type ChartPoint = {
@@ -46,14 +42,8 @@ type ChartPoint = {
   bytes_received: number | null
 }
 
-function formatTickByRange(epoch: number, range: TimeRange): string {
-  const d = new Date(epoch)
-  if (range === '7d' || range === '30d') return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
-  return d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })
-}
-
 /** Snapshots → chart points, inserting null markers so lines break across gaps. */
-function buildChartData(snapshots: MetricsSnapshot[], range: TimeRange): ChartPoint[] {
+function buildChartData(snapshots: MetricsSnapshot[], range: HistoryRange): ChartPoint[] {
   if (snapshots.length === 0) return []
   const threshold = GAP_THRESHOLD_MS[range]
   const points: ChartPoint[] = []
@@ -121,7 +111,7 @@ export default function Overview() {
   const { canMutate } = useAuth()
   const { isDark } = useTheme()
   const toast = useToast()
-  const [range, setRange] = useState<TimeRange>('24h')
+  const [range, setRange] = useTimeRange(HISTORY_RANGES)
   const [routingOpen, setRoutingOpen] = useState(false)
   const [locations, setLocations] = useState<LocationSummary | null>(null)
   const [projectPanelOpen, setProjectPanelOpen] = useState(false)
@@ -179,7 +169,7 @@ export default function Overview() {
   const snapshots = history?.snapshots ?? []
   const totals = useMemo(() => computeTotals(snapshots), [snapshots])
   const chartData = useMemo(() => buildChartData(snapshots, range), [snapshots, range])
-  const timeDomain = useMemo(() => { const now = Date.now(); return [now - RANGE_DURATION_MS[range], now] }, [range])
+  const timeDomain = useMemo(() => { const now = Date.now(); return [now - TIME_RANGE_MS[range], now] }, [range])
   const sparks = useMemo(() => ({
     requests: sample(snapshots.map((s) => s.request_count)),
     successes: sample(snapshots.map((s) => s.success_count)),
@@ -219,7 +209,7 @@ export default function Overview() {
       subtitle={selectedProject ? `Pool health and traffic for ${selectedProject.name}` : undefined}
       actions={
         <>
-          <Segmented options={TIME_RANGES.map((r) => ({ value: r, label: r }))} value={range} onChange={setRange} />
+          <Segmented options={HISTORY_RANGES.map((r) => ({ value: r, label: r }))} value={range} onChange={setRange} />
           {canMutate && selectedProject && (
             <Button variant="outline" size="sm" onClick={() => { updateMutation.reset(); setProjectPanelOpen(true) }}>
               <Settings className="w-3.5 h-3.5" /> Edit project
@@ -309,7 +299,7 @@ export default function Overview() {
               <ResponsiveContainer width="100%" height={240}>
                 <AreaChart data={chartData} margin={{ top: 8, right: 8, left: -12, bottom: 0 }}>
                   <CartesianGrid strokeDasharray="2 4" stroke={gridColor} vertical={false} />
-                  <XAxis dataKey="time" type="number" scale="time" domain={timeDomain} tickFormatter={(v: number) => formatTickByRange(v, range)} tick={{ fontSize: 11, fill: tickColor }} axisLine={false} tickLine={false} minTickGap={48} />
+                  <XAxis dataKey="time" type="number" scale="time" domain={timeDomain} tickFormatter={(v: number) => formatRangeTick(v, range)} tick={{ fontSize: 11, fill: tickColor }} axisLine={false} tickLine={false} minTickGap={48} />
                   <YAxis allowDecimals={false} tick={{ fontSize: 11, fill: tickColor }} axisLine={false} tickLine={false} />
                   <Tooltip labelFormatter={(v: number) => new Date(v).toLocaleString()} contentStyle={tooltipStyle} />
                   <Area connectNulls={false} type="monotone" dataKey="request_count" name="Requests" stroke={C.requests} strokeWidth={2} fill={C.requests} fillOpacity={0.08} />
@@ -329,7 +319,7 @@ export default function Overview() {
                 <ResponsiveContainer width="100%" height={110}>
                   <AreaChart data={chartData} margin={{ top: 6, right: 4, left: -20, bottom: 0 }}>
                     <CartesianGrid strokeDasharray="2 4" stroke={gridColor} vertical={false} />
-                    <XAxis dataKey="time" type="number" scale="time" domain={timeDomain} tickFormatter={(v: number) => formatTickByRange(v, range)} tick={{ fontSize: 10, fill: tickColor }} axisLine={false} tickLine={false} minTickGap={48} />
+                    <XAxis dataKey="time" type="number" scale="time" domain={timeDomain} tickFormatter={(v: number) => formatRangeTick(v, range)} tick={{ fontSize: 10, fill: tickColor }} axisLine={false} tickLine={false} minTickGap={48} />
                     <YAxis tick={{ fontSize: 10, fill: tickColor }} axisLine={false} tickLine={false} tickFormatter={(v: number) => `${Math.round(v)}`} />
                     <Tooltip labelFormatter={(v: number) => new Date(v).toLocaleString()} formatter={(v: number) => [`${Math.round(v)} ms`, 'Latency']} contentStyle={tooltipStyle} />
                     <Area connectNulls={false} type="monotone" dataKey="avg_latency_ms" name="Latency" stroke={C.latency} strokeWidth={2} fill={C.latency} fillOpacity={0.08} />
@@ -345,7 +335,7 @@ export default function Overview() {
                 <ResponsiveContainer width="100%" height={110}>
                   <AreaChart data={chartData} margin={{ top: 6, right: 4, left: -8, bottom: 0 }}>
                     <CartesianGrid strokeDasharray="2 4" stroke={gridColor} vertical={false} />
-                    <XAxis dataKey="time" type="number" scale="time" domain={timeDomain} tickFormatter={(v: number) => formatTickByRange(v, range)} tick={{ fontSize: 10, fill: tickColor }} axisLine={false} tickLine={false} minTickGap={48} />
+                    <XAxis dataKey="time" type="number" scale="time" domain={timeDomain} tickFormatter={(v: number) => formatRangeTick(v, range)} tick={{ fontSize: 10, fill: tickColor }} axisLine={false} tickLine={false} minTickGap={48} />
                     <YAxis tick={{ fontSize: 10, fill: tickColor }} axisLine={false} tickLine={false} tickFormatter={(v: number) => bytesShort(v)} width={56} />
                     <Tooltip labelFormatter={(v: number) => new Date(v).toLocaleString()} formatter={(v: number) => formatBytes(v)} contentStyle={tooltipStyle} />
                     <Area connectNulls={false} type="monotone" dataKey="bytes_sent" name="Sent" stroke={C.sent} strokeWidth={2} fill={C.sent} fillOpacity={0.08} />

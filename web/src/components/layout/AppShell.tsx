@@ -19,6 +19,8 @@ import { useTheme } from '../../contexts/ThemeContext'
 import { useNavigationGuardContext } from '../../contexts/NavigationGuardContext'
 import { fetchProjectMetrics, fetchProjectScalingMetrics } from '../../api/client'
 import { popSettingsOrigin, setSettingsOrigin } from '../../utils/settingsOrigin'
+import { HelpMenu } from '../HelpMenu'
+import { navItemBase, navItemCollapsed, navItemExpanded, navItemIdle } from './navStyles'
 import { cn } from '../../utils/cn'
 
 const COLLAPSED_KEY = 'octoprox_sidebar_collapsed'
@@ -193,6 +195,7 @@ export default function AppShell({ onLogout }: { onLogout: () => void }) {
           {!inSettings && (
             <NavButton icon={<SettingsIcon />} label="Settings" collapsed={collapsed} onClick={enterSettings} />
           )}
+          <HelpMenu collapsed={collapsed} />
           <div className={cn('flex items-center gap-2.5', collapsed ? 'justify-center py-1' : 'px-1 py-1.5')}>
             <div className="w-7 h-7 rounded-full bg-primary-soft text-primary-soft-fg flex items-center justify-center text-[11px] font-semibold flex-none uppercase" title={authStatus?.username ?? ''}>
               {(authStatus?.username ?? '?').slice(0, 2)}
@@ -266,10 +269,6 @@ function NavGroup({ label, collapsed, first }: { label: string; collapsed: boole
   )
 }
 
-const navItemBase = 'flex items-center gap-2.5 rounded-md text-[13.5px] transition-colors whitespace-nowrap [&>svg]:w-4 [&>svg]:h-4 [&>svg]:flex-none'
-const navItemCollapsed = 'justify-center w-10 h-10 [&>svg]:w-5 [&>svg]:h-5'
-const navItemExpanded = 'h-[34px] px-2.5'
-
 function NavItem({ to, icon, label, collapsed }: { to: string; icon: ReactNode; label: string; collapsed: boolean }) {
   const guard = useNavigationGuardContext()
   const routerNavigate = useNavigate()
@@ -304,7 +303,7 @@ function NavButton({ icon, label, collapsed, onClick }: { icon: ReactNode; label
       type="button"
       onClick={onClick}
       title={collapsed ? label : undefined}
-      className={cn(navItemBase, collapsed ? navItemCollapsed : cn(navItemExpanded, 'w-full'), 'text-fg-muted hover:bg-surface-raised hover:text-fg')}
+      className={cn(navItemBase, collapsed ? navItemCollapsed : cn(navItemExpanded, 'w-full'), navItemIdle)}
     >
       {icon}
       {!collapsed && <span className="truncate">{label}</span>}

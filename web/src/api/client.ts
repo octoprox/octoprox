@@ -1241,7 +1241,10 @@ export const fetchProjectMetricsHistory = async (projectId: string, range: strin
   return response.data
 }
 
-export type TrafficSplitRange = '1h' | '6h' | '24h' | '7d' | '30d'
+/** The windows project, connector, device and host history serve; the shared time range narrows to these. */
+export const HISTORY_RANGES = ['1h', '6h', '24h', '7d', '30d'] as const
+export type HistoryRange = (typeof HISTORY_RANGES)[number]
+export type TrafficSplitRange = HistoryRange
 
 export interface ConnectorTrafficShare {
   connector_id: string

@@ -14,10 +14,12 @@ import {
   fetchWireGuardPeerConfig, fetchWireGuardPeerMetricsHistory, fetchWireGuardPeers,
   rotateOpenVpnPeerCertificate, rotateWireGuardPeerKeys, updateOpenVpnPeer, updateWireGuardPeer,
   OpenVpnPeer, TunnelPeerMetrics, TunnelPeerMetricsHistoryResponse, TunnelPeerMetricsSnapshot, WireGuardPeer, WireGuardPeerUpdate,
+  HISTORY_RANGES,
 } from '../api/client'
 import { useProject } from '../contexts/ProjectContext'
 import { useAuth } from '../contexts/AuthContext'
 import { useTheme } from '../contexts/ThemeContext'
+import { formatRangeTick, useTimeRange } from '../contexts/TimeRangeContext'
 import { useToast } from '../contexts/ToastContext'
 import { DataTable } from '../components/DataTable'
 import { Page, EmptyState } from '../components/layout/Page'
@@ -669,18 +671,10 @@ function DevicePanel({ device, serverConfigured, canMutate, onClose, onDelete, o
   )
 }
 
-type ChartRange = '24h' | '7d' | '30d'
-const CHART_RANGES: ChartRange[] = ['24h', '7d', '30d']
 type ChartSeries = 'bytes' | 'connections' | 'by_address'
 const SERIES: { value: ChartSeries; label: string }[] = [
   { value: 'bytes', label: 'Bytes' }, { value: 'connections', label: 'Connections' }, { value: 'by_address', label: 'Name resolution' },
 ]
-
-function tick(epoch: number, range: ChartRange): string {
-  const d = new Date(epoch)
-  if (range === '24h') return d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })
-  return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
-}
 
 function toPoints(snapshots: TunnelPeerMetricsSnapshot[]) {
   return snapshots.map((s) => ({
@@ -695,7 +689,7 @@ function toPoints(snapshots: TunnelPeerMetricsSnapshot[]) {
 /** What the pool relayed for the device: totals and a history chart, from the device's own metrics. */
 function DeviceTrafficSection({ device, adapter, projectId }: { device: Device; adapter: Adapter; projectId: string }) {
   const { isDark } = useTheme()
-  const [range, setRange] = useState<ChartRange>('24h')
+  const [range, setRange] = useTimeRange(HISTORY_RANGES)
   const [series, setSeries] = useState<ChartSeries>('bytes')
   const { data: history } = useQuery({
     queryKey: ['tunnel-device-history', device.protocol, projectId, device.id, range],
@@ -731,7 +725,7 @@ function DeviceTrafficSection({ device, adapter, projectId }: { device: Device; 
           <span className="text-xs text-fg-muted tabular-nums">{formatValue(rangeTotal)} over {range}</span>
           <div className="flex items-center gap-2">
             <Segmented options={SERIES} value={series} onChange={setSeries} size="sm" />
-            <Segmented options={CHART_RANGES.map((r) => ({ value: r, label: r }))} value={range} onChange={setRange} size="sm" />
+            <Segmented options={HISTORY_RANGES.map((r) => ({ value: r, label: r }))} value={range} onChange={setRange} size="sm" />
           </div>
         </div>
         {points.length === 0 ? (
@@ -740,7 +734,7 @@ function DeviceTrafficSection({ device, adapter, projectId }: { device: Device; 
           <ResponsiveContainer width="100%" height={90}>
             <AreaChart data={points} margin={{ top: 4, right: 4, left: -8, bottom: 0 }}>
               <CartesianGrid strokeDasharray="2 4" stroke={gridColor} vertical={false} />
-              <XAxis dataKey="time" type="number" scale="time" domain={['dataMin', 'dataMax']} tickFormatter={(v: number) => tick(v, range)} tick={{ fontSize: 10, fill: tickColor }} axisLine={false} tickLine={false} minTickGap={40} />
+              <XAxis dataKey="time" type="number" scale="time" domain={['dataMin', 'dataMax']} tickFormatter={(v: number) => formatRangeTick(v, range)} tick={{ fontSize: 10, fill: tickColor }} axisLine={false} tickLine={false} minTickGap={40} />
               <YAxis tick={{ fontSize: 10, fill: tickColor }} axisLine={false} tickLine={false} tickFormatter={(v: number) => (series === 'bytes' ? formatBytes(v) : String(v))} width={52} allowDecimals={false} />
               <Tooltip labelFormatter={(v: number) => new Date(v).toLocaleString()} formatter={(v: number) => [formatValue(v), seriesLabel]} contentStyle={tooltipStyle} />
               <Area type="monotone" dataKey={series} name={seriesLabel} stroke={lineColor} strokeWidth={2} fill={lineColor} fillOpacity={0.08} />

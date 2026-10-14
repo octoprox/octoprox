@@ -28,6 +28,7 @@ import WireGuardSection from './pages/settings/WireGuardSection'
 import OpenVpnSection from './pages/settings/OpenVpnSection'
 import SignInSection from './pages/settings/SignInSection'
 import { ProjectProvider } from './contexts/ProjectContext'
+import { TimeRangeProvider } from './contexts/TimeRangeContext'
 import { AuthProvider, AuthContextValue } from './contexts/AuthContext'
 import { ToastProvider } from './contexts/ToastContext'
 import { NavigationGuardProvider } from './contexts/NavigationGuardContext'
@@ -145,6 +146,7 @@ function AuthenticatedApp() {
   return (
     <AuthProvider value={authContextValue}>
       <ProjectProvider>
+        <TimeRangeProvider>
         <ToastProvider>
           <NavigationGuardProvider>
           <Routes>
@@ -178,6 +180,7 @@ function AuthenticatedApp() {
           </Routes>
           </NavigationGuardProvider>
         </ToastProvider>
+        </TimeRangeProvider>
       </ProjectProvider>
     </AuthProvider>
   )

@@ -13,9 +13,11 @@ import { RotateCcw } from 'lucide-react'
 import {
   Connector, MetricsSnapshot, TrafficPeriod, TrafficUsage,
   fetchConnectorMetricsHistory, resetConnectorTraffic,
+  HISTORY_RANGES,
 } from '../api/client'
 import { formatBytesDecimal, formatDateTime, formatMoney, parseApiDate } from '../utils/format'
 import { useTheme } from '../contexts/ThemeContext'
+import { formatRangeTick, useTimeRange } from '../contexts/TimeRangeContext'
 import { useToast } from '../contexts/ToastContext'
 import { Badge, ConfirmDialog, InspectorSection, KeyValue, Segmented } from './ui'
 
@@ -96,15 +98,6 @@ export function TrafficStatusBadge({ usage }: { usage: TrafficUsage }) {
   return null
 }
 
-type ChartRange = '24h' | '7d' | '30d'
-const CHART_RANGES: ChartRange[] = ['24h', '7d', '30d']
-
-function tick(epoch: number, range: ChartRange): string {
-  const d = new Date(epoch)
-  if (range === '24h') return d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })
-  return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
-}
-
 function toPoints(snapshots: MetricsSnapshot[]) {
   return snapshots.map((s) => ({
     time: parseApiDate(s.timestamp)?.getTime() ?? 0,
@@ -118,7 +111,7 @@ export function ConnectorTrafficSection({ connector, projectId, canMutate }: { c
   const queryClient = useQueryClient()
   const toast = useToast()
   const { isDark } = useTheme()
-  const [range, setRange] = useState<ChartRange>('7d')
+  const [range, setRange] = useTimeRange(HISTORY_RANGES)
   const [confirmReset, setConfirmReset] = useState(false)
   const usage = connector.traffic_usage
 
@@ -177,7 +170,7 @@ export function ConnectorTrafficSection({ connector, projectId, canMutate }: { c
       <div className="pt-1">
         <div className="flex items-center justify-between mb-1">
           <span className="text-xs text-fg-muted tabular-nums">{formatBytesDecimal(rangeBytes)} over {range}</span>
-          <Segmented options={CHART_RANGES.map((r) => ({ value: r, label: r }))} value={range} onChange={setRange} size="sm" />
+          <Segmented options={HISTORY_RANGES.map((r) => ({ value: r, label: r }))} value={range} onChange={setRange} size="sm" />
         </div>
         {points.length === 0 ? (
           <p className="text-fg-subtle text-xs text-center h-[90px] flex items-center justify-center">No traffic in this range</p>
@@ -185,7 +178,7 @@ export function ConnectorTrafficSection({ connector, projectId, canMutate }: { c
           <ResponsiveContainer width="100%" height={90}>
             <AreaChart data={points} margin={{ top: 4, right: 4, left: -8, bottom: 0 }}>
               <CartesianGrid strokeDasharray="2 4" stroke={gridColor} vertical={false} />
-              <XAxis dataKey="time" type="number" scale="time" domain={['dataMin', 'dataMax']} tickFormatter={(v: number) => tick(v, range)} tick={{ fontSize: 10, fill: tickColor }} axisLine={false} tickLine={false} minTickGap={40} />
+              <XAxis dataKey="time" type="number" scale="time" domain={['dataMin', 'dataMax']} tickFormatter={(v: number) => formatRangeTick(v, range)} tick={{ fontSize: 10, fill: tickColor }} axisLine={false} tickLine={false} minTickGap={40} />
               <YAxis tick={{ fontSize: 10, fill: tickColor }} axisLine={false} tickLine={false} tickFormatter={(v: number) => formatBytesDecimal(v, 0)} width={52} />
               <Tooltip labelFormatter={(v: number) => new Date(v).toLocaleString()} formatter={(v: number) => [formatBytesDecimal(v), 'Traffic']} contentStyle={tooltipStyle} />
               <Area type="monotone" dataKey="bytes" name="Traffic" stroke={lineColor} strokeWidth={2} fill={lineColor} fillOpacity={0.08} />

@@ -1,14 +1,12 @@
 // Copyright 2026 Octoprox Authors
 // SPDX-License-Identifier: Apache-2.0
 
-import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { ConnectorTrafficShare, TrafficSplitRange, TrafficSplitResponse, fetchProjectTrafficSplit } from '../api/client'
+import { ConnectorTrafficShare, HISTORY_RANGES, TrafficSplitResponse, fetchProjectTrafficSplit } from '../api/client'
+import { useTimeRange } from '../contexts/TimeRangeContext'
 import { formatBytesDecimal, formatMoney } from '../utils/format'
 import { ProviderLogo } from './ProviderLogo'
 import { Card, CardHeader, InfoTip, Segmented } from './ui'
-
-const RANGES: TrafficSplitRange[] = ['1h', '6h', '24h', '7d', '30d']
 
 // One hue per connector position, cycling. Fixed palette so the bar and the rows agree.
 const SWATCHES = ['bg-primary', 'bg-success', 'bg-warning', 'bg-purple-500', 'bg-orange-500', 'bg-sky-500', 'bg-pink-500', 'bg-teal-500']
@@ -62,7 +60,7 @@ interface TrafficSplitPanelProps {
 }
 
 export function TrafficSplitPanel({ projectId, variant = 'card', onOpenConnector, className }: TrafficSplitPanelProps) {
-  const [range, setRange] = useState<TrafficSplitRange>('1h')
+  const [range, setRange] = useTimeRange(HISTORY_RANGES)
   const { data: split, isError, error } = useQuery({
     queryKey: ['traffic-split', projectId, range],
     queryFn: () => fetchProjectTrafficSplit(projectId, range),
@@ -75,7 +73,7 @@ export function TrafficSplitPanel({ projectId, variant = 'card', onOpenConnector
     : isError
       ? <p className="text-xs text-danger py-3">Could not load the traffic split{error instanceof Error && error.message ? `: ${error.message}` : ''}.</p>
       : <p className="text-xs text-fg-muted py-3">Loading…</p>
-  const rangePicker = <Segmented options={RANGES.map((r) => ({ value: r, label: r }))} value={range} onChange={setRange} size="sm" />
+  const rangePicker = <Segmented options={HISTORY_RANGES.map((r) => ({ value: r, label: r }))} value={range} onChange={setRange} size="sm" />
 
   if (variant === 'inline') {
     return (

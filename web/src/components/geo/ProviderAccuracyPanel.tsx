@@ -6,6 +6,7 @@ import { useQuery } from '@tanstack/react-query'
 import { ColumnDef } from '@tanstack/react-table'
 import { CheckCircle2, PanelRightOpen } from 'lucide-react'
 import { fetchGeoAccuracy, fetchGeoExits, fetchProjects, ConnectorAccuracy, ConnectorExits, LevelAccuracy } from '../../api/client'
+import { useTimeRange } from '../../contexts/TimeRangeContext'
 import { DataTable } from '../DataTable'
 import { EmptyState } from '../layout/Page'
 import { Card, Segmented, Select } from '../ui'
@@ -24,6 +25,16 @@ export const ACCURACY_RANGES = [
   { value: '90d', label: '90d', days: 90 },
 ] as const
 type Range = (typeof ACCURACY_RANGES)[number]['value']
+const ACCURACY_RANGE_VALUES = ACCURACY_RANGES.map((r) => r.value)
+
+/** The shared time range narrowed to the daily windows claim statistics come in. */
+export function useAccuracyRange() {
+  return useTimeRange(ACCURACY_RANGE_VALUES)
+}
+
+export function accuracyDays(range: Range): number {
+  return ACCURACY_RANGES.find((r) => r.value === range)?.days ?? 30
+}
 
 const EMPTY_LEVEL: LevelAccuracy = { claimed: 0, confirmed: 0, contradicted: 0, open: 0, accuracy: null }
 
@@ -36,19 +47,14 @@ const EMPTY_LEVEL: LevelAccuracy = { claimed: 0, confirmed: 0, contradicted: 0, 
  * hosting it passes `onInspect` and shows the details in its panel slot; the
  * table itself keeps only what fits in a row.
  */
-export function ProviderAccuracyPanel({ projectId, range, onRangeChange, onInspect, inspecting }: {
+export function ProviderAccuracyPanel({ projectId, onInspect, inspecting }: {
   projectId?: string
-  /** Controlled range, so the details panel can name the window it shows. */
-  range?: Range
-  onRangeChange?: (range: Range) => void
   onInspect?: (row: AccuracyRow) => void
   /** Connector id whose details are open, to mark its row. */
   inspecting?: string | null
 }) {
-  const [ownRange, setOwnRange] = useState<Range>('30d')
-  const activeRange = range ?? ownRange
-  const setRange = onRangeChange ?? setOwnRange
-  const days = ACCURACY_RANGES.find((r) => r.value === activeRange)?.days ?? 30
+  const [range, setRange] = useAccuracyRange()
+  const days = accuracyDays(range)
   const [projectFilter, setProjectFilter] = useState('')
   const scope = projectId ?? (projectFilter || undefined)
   const { data, isLoading } = useQuery({
@@ -194,7 +200,7 @@ export function ProviderAccuracyPanel({ projectId, range, onRangeChange, onInspe
               {(projects?.projects ?? []).map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
             </Select>
           )}
-          <Segmented options={ACCURACY_RANGES.map((r) => ({ value: r.value, label: r.label }))} value={activeRange} onChange={setRange} size="sm" />
+          <Segmented options={ACCURACY_RANGES.map((r) => ({ value: r.value, label: r.label }))} value={range} onChange={setRange} size="sm" />
         </div>
       </div>
       <Card className="p-0 overflow-hidden">
