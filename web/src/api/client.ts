@@ -163,6 +163,8 @@ export interface Project {
   location_preflight: boolean
   /** Conflict rule override; null inherits the install default. */
   location_conflict_rule: ConflictRule | null
+  /** Km from a claimed city that still confirms it (0 compares names only); null inherits the install default. */
+  location_city_radius_km: number | null
   created_at: string
   updated_at: string
 }
@@ -217,6 +219,7 @@ export interface ProjectCreate {
   location_unknown?: UnknownAction
   location_preflight?: boolean
   location_conflict_rule?: ConflictRule | null
+  location_city_radius_km?: number | null
 }
 
 export interface ProjectUpdate {
@@ -238,6 +241,8 @@ export interface ProjectUpdate {
   location_preflight?: boolean
   /** An empty string clears the override. */
   location_conflict_rule?: ConflictRule | '' | null
+  /** An empty string clears the override. */
+  location_city_radius_km?: number | '' | null
 }
 
 export interface Proxy {
@@ -318,11 +323,15 @@ export type GeoSourceKind = 'database' | 'vendor' | 'endpoint'
 export interface SourcePolicy {
   conflict_rule: ConflictRule
   contradicted: ContradictedAction
+  /** Km from a claimed city that still confirms it; takes effect once a GeoNames file is loaded. */
+  city_radius_km: number
 }
 
 /** Install-wide attribution settings (one typed row). Projects inherit the default_* judgement. */
 export interface GeoSettingsDoc {
   default_conflict_rule: ConflictRule
+  /** Km from a claimed city that still confirms it, for projects without their own; needs a GeoNames file. */
+  default_city_radius_km: number
   echo_url: string
   echo_ip_path: string
   echo_country_path: string | null
@@ -427,6 +436,12 @@ export interface GeoResolution {
   /** One verdict per level: true contradicted, false confirmed, null no verdict. */
   country_conflict: boolean | null
   location: IpLocation | null
+  claimed_city: string | null
+  observed_city: string | null
+  resolved_city: string | null
+  city_conflict: boolean | null
+  /** Km between the observed and the claimed city, when both could be placed. */
+  city_distance_km: number | null
 }
 
 export interface GeoLookupResponse {
@@ -603,8 +618,8 @@ export const addGeoDatabaseFromUrl = async (data: GeoDatabaseFromUrl): Promise<G
 export const updateGeoDatabase = async (id: string, data: GeoDatabaseUpdate): Promise<GeoDatabase> => (await api.patch(`/geo/databases/${id}`, data)).data
 export const refreshGeoDatabase = async (id: string): Promise<GeoDatabase> => (await api.post(`/geo/databases/${id}/refresh`)).data
 export const deleteGeoDatabase = async (id: string): Promise<void> => { await api.delete(`/geo/databases/${id}`) }
-export const lookupGeoIp = async (ip: string, claimedCountry?: string, projectId?: string): Promise<GeoLookupResponse> =>
-  (await api.post('/geo/lookup', { ip, claimed_country: claimedCountry || null, project_id: projectId || null })).data
+export const lookupGeoIp = async (ip: string, claimedCountry?: string, projectId?: string, claimedCity?: string): Promise<GeoLookupResponse> =>
+  (await api.post('/geo/lookup', { ip, claimed_country: claimedCountry || null, claimed_city: claimedCity || null, project_id: projectId || null })).data
 export const reattributeProxies = async (connectorId?: string): Promise<{ scanned: number; updated: number }> =>
   (await api.post('/geo/reattribute', { connector_id: connectorId ?? null })).data
 export type ObservationVerdict = 'contradicted' | 'open' | 'confirmed' | 'no_claim'

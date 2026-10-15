@@ -145,6 +145,8 @@ class ProjectModel(Base):
     location_preflight: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
     # Null inherits the install default from geo_settings.
     location_conflict_rule: Mapped[str | None] = mapped_column(String(10), nullable=True)
+    # Km from a claimed city that still confirms it; null inherits geo_settings.default_city_radius_km.
+    location_city_radius_km: Mapped[float | None] = mapped_column(Float, nullable=True)
 
     version: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
 
@@ -640,6 +642,7 @@ class GeoSettingsModel(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
     default_conflict_rule: Mapped[str] = mapped_column(String(10), nullable=False, default="consensus")
+    default_city_radius_km: Mapped[float] = mapped_column(Float, nullable=False, default=25.0, server_default="25")
     echo_url: Mapped[str] = mapped_column(String(2048), nullable=False)
     echo_ip_path: Mapped[str] = mapped_column(String(255), nullable=False, default="ip")
     echo_country_path: Mapped[str | None] = mapped_column(String(255), nullable=True)

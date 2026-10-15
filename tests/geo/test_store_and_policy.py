@@ -7,18 +7,22 @@ import hashlib
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
 from api.core.config import Settings
 from api.db.geo_repository import GeoDatabaseRepository
 from api.geo.models import (
+    DEFAULT_CITY_RADIUS_KM,
     GeoDatabaseKind,
     GeoDatabaseRecord,
     GeoDatabaseSource,
+    GeoSettings,
     GeoSourceKind,
     GeoVendor,
 )
 from api.geo.settings import GeoSettingsStore, defaults_from_config
 from api.geo.store import GeoDatabaseStore, path_database_id
+from api.models.project import Project
 from tests.geo.test_readers import IPINFO_RECORD, MAXMIND_RECORD, write_mmdb
 
 
@@ -130,3 +134,28 @@ class TestSettingsSeed:
         settings = Settings(instance_id="x")  # type: ignore[call-arg]
         store = GeoSettingsStore(settings, None)
         assert (await store.load()) == store.settings and not store.from_database
+
+
+class TestCityRadiusPolicy:
+    def test_install_default_reaches_the_default_policy(self) -> None:
+        assert GeoSettings().default_policy.city_radius_km == DEFAULT_CITY_RADIUS_KM
+        assert GeoSettings(default_city_radius_km=40).default_policy.city_radius_km == 40
+
+    def test_seeded_from_the_config_file(self) -> None:
+        settings = Settings(geo_policy_defaults={"default_city_radius_km": 10})  # type: ignore[call-arg]
+        assert defaults_from_config(settings).default_policy.city_radius_km == 10
+
+    def test_out_of_range_radius_is_refused(self) -> None:
+        with pytest.raises(ValidationError):
+            GeoSettings(default_city_radius_km=-1)
+        with pytest.raises(ValidationError):
+            Project(name="p", username="u", password="x", location_city_radius_km=10_000)
+
+    def test_project_inherits_or_overrides_the_radius(self) -> None:
+        default = GeoSettings(default_city_radius_km=30).default_policy
+        inheriting = Project(name="p", username="u", password="x")
+        assert inheriting.source_policy(default).city_radius_km == 30
+        stricter = Project(name="p", username="u", password="x", location_city_radius_km=5)
+        assert stricter.source_policy(default).city_radius_km == 5
+        names_only = Project(name="p", username="u", password="x", location_city_radius_km=0)
+        assert names_only.source_policy(default).city_radius_km == 0

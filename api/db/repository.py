@@ -87,6 +87,7 @@ class ProjectRepository:
             location_unknown=project.location_unknown.value,
             location_preflight=project.location_preflight,
             location_conflict_rule=project.location_conflict_rule.value if project.location_conflict_rule else None,
+            location_city_radius_km=project.location_city_radius_km,
             created_at=project.created_at,
             updated_at=project.updated_at,
         )
@@ -120,6 +121,7 @@ class ProjectRepository:
             model.location_conflict_rule = (
                 project.location_conflict_rule.value if project.location_conflict_rule else None
             )
+            model.location_city_radius_km = project.location_city_radius_km
             model.updated_at = utc_now()
             await self._session.flush()
         return project
@@ -169,6 +171,7 @@ class ProjectRepository:
             location_unknown=UnknownAction(model.location_unknown or "vendor"),
             location_preflight=bool(model.location_preflight),
             location_conflict_rule=ConflictRule(model.location_conflict_rule) if model.location_conflict_rule else None,
+            location_city_radius_km=model.location_city_radius_km,
             created_at=model.created_at,
             updated_at=model.updated_at,
         )

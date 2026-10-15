@@ -34,7 +34,13 @@ const VENDOR_LABELS: Record<string, string> = {
   dbip: 'DB-IP',
   ipinfo: 'IPinfo',
   ip2location: 'IP2Location',
+  geonames: 'GeoNames',
   other: 'Other',
+}
+
+// What a file answers; a GeoNames file answers no IP, it places cities.
+const KIND_LABELS: Record<string, string> = {
+  places: 'City coordinates',
 }
 
 /**
@@ -138,7 +144,7 @@ function DatabasesTab() {
       ),
     },
     { accessorKey: 'vendor', header: 'Vendor', size: 110, cell: ({ getValue }) => VENDOR_LABELS[getValue<string>()] ?? getValue<string>() },
-    { accessorKey: 'kind', header: 'Answers', size: 100, cell: ({ getValue }) => <span className="capitalize">{getValue<string>()}</span> },
+    { accessorKey: 'kind', header: 'Answers', size: 100, cell: ({ getValue }) => KIND_LABELS[getValue<string>()] ?? <span className="capitalize">{getValue<string>()}</span> },
     {
       accessorKey: 'source', header: 'Source', size: 110,
       cell: ({ row }) => row.original.source === 'path' ? <span title={row.original.path ?? ''}>Config file</span> : row.original.source === 'url' ? 'Scheduled download' : 'Uploaded',
@@ -194,14 +200,14 @@ function DatabasesTab() {
           <div className="flex items-center flex-wrap gap-x-2 gap-y-1 min-w-0">
             <Database className="w-4 h-4 text-fg-muted flex-none" />
             <h3 className="text-sm font-semibold text-fg">Installed databases</h3>
-            <span className="text-xs text-fg-subtle">Consulted lowest priority first. The first database with a country answers. Load one geolocation file per vendor: a city file already answers country.</span>
+            <span className="text-xs text-fg-subtle">Consulted lowest priority first. The first database with a country answers. Load one geolocation file per vendor: a city file already answers country. A GeoNames file answers no IP: it places claimed cities, so a city claim can be confirmed within the radius set under Policy &amp; echo.</span>
           </div>
           <Button variant="outline" size="sm" onClick={() => reattributeMutation.mutate()} disabled={reattributeMutation.isPending} title="Re-run attribution for every proxy with a known exit IP, offline">
             <RefreshCw className={cn('w-3.5 h-3.5', reattributeMutation.isPending && 'animate-spin')} /> Re-attribute proxies
           </Button>
         </div>
         {!isLoading && (databases ?? []).length === 0 ? (
-          <EmptyState icon={<Database className="w-5 h-5" />} title="No IP databases" description="Upload a MaxMind, DB-IP, IPinfo or IP2Location file, or register a vendor download URL. Until then attribution uses vendor claims and the echo endpoint only." />
+          <EmptyState icon={<Database className="w-5 h-5" />} title="No IP databases" description="Upload a MaxMind, DB-IP, IPinfo or IP2Location file, or register a vendor download URL. Until then attribution uses vendor claims and the echo endpoint only. Add a GeoNames cities file to judge city claims by distance." />
         ) : (
           <DataTable columns={columns} data={databases ?? []} getRowId={(d) => d.id} enableColumnFilters={false} defaultPageSize={20} />
         )}
@@ -250,13 +256,13 @@ function UploadCard({ onDone }: { onDone: () => void }) {
         <h3 className="text-sm font-semibold text-fg">Upload a database file</h3>
       </div>
       <p className="text-xs text-fg-muted mb-4">
-        Any mmdb file (MaxMind GeoIP2 and GeoLite2, DB-IP, IPinfo, IP2Location DB1 and DB9) or an IP2Location BIN file. The file is validated, stored, and distributed to every instance.
+        Any mmdb file (MaxMind GeoIP2 and GeoLite2, DB-IP, IPinfo, IP2Location DB1 and DB9), an IP2Location BIN file, or a GeoNames cities file (.zip or .txt) for city coordinates. The file is validated, stored, and distributed to every instance.
       </p>
       <form onSubmit={(e) => { e.preventDefault(); if (file) mutation.mutate() }} className="flex-1 flex flex-col gap-3">
         {error && <Alert variant="error">{error}</Alert>}
         <div>
           <Label htmlFor="geo-upload-file">File</Label>
-          <input id="geo-upload-file" ref={fileRef} type="file" accept=".mmdb,.BIN,.bin" onChange={(e) => setFile(e.target.files?.[0] ?? null)} className="block w-full text-sm text-fg-muted file:mr-3 file:rounded-md file:border-0 file:bg-surface-raised file:px-3 file:py-1.5 file:text-xs file:font-medium file:text-fg" />
+          <input id="geo-upload-file" ref={fileRef} type="file" accept=".mmdb,.BIN,.bin,.zip,.txt" onChange={(e) => setFile(e.target.files?.[0] ?? null)} className="block w-full text-sm text-fg-muted file:mr-3 file:rounded-md file:border-0 file:bg-surface-raised file:px-3 file:py-1.5 file:text-xs file:font-medium file:text-fg" />
         </div>
         <div className="grid grid-cols-[minmax(0,1fr)_100px] gap-3">
           <div>
@@ -284,7 +290,8 @@ const URL_PRESETS: { label: string; url: string; hint: string; auth: 'basic' | '
   { label: 'DB-IP City Lite', url: 'https://download.db-ip.com/free/dbip-city-lite-{YYYY}-{MM}.mmdb.gz', hint: 'Country, region, city and coordinates; supersedes DB-IP Country Lite. {YYYY} and {MM} are filled in on each run, falling back to the previous month until DB-IP publishes the new file; no credentials', auth: 'none', interval: 720 },
   { label: 'DB-IP ASN Lite', url: 'https://download.db-ip.com/free/dbip-asn-lite-{YYYY}-{MM}.mmdb.gz', hint: 'ASN and organisation only; fills in what a geolocation file lacks. {YYYY} and {MM} are filled in on each run, falling back to the previous month until DB-IP publishes the new file; no credentials', auth: 'none', interval: 720 },
   { label: 'IPinfo country + ASN', url: 'https://ipinfo.io/data/free/country_asn.mmdb?token=', hint: 'Append your IPinfo token to the URL', auth: 'none', interval: 24 },
-  { label: 'Custom URL', url: '', hint: 'Any HTTPS URL serving an mmdb, .mmdb.gz or .tar.gz containing one. {YYYY} and {MM} are filled in on each run for vendors that name files by month.', auth: 'none', interval: 24 },
+  { label: 'GeoNames cities500 (city coordinates)', url: 'https://download.geonames.org/export/dump/cities500.zip', hint: 'Answers no IP: places claimed cities so the city radius can confirm a neighbouring one. Every place over 500 people and every administrative seat, about 236k places, ~35 MB in memory per instance. cities1000, cities5000, cities15000 or one country (BR.zip) work too; no credentials. CC BY 4.0', auth: 'none', interval: 720 },
+  { label: 'Custom URL', url: '', hint: 'Any HTTPS URL serving an mmdb, .mmdb.gz or .tar.gz containing one, or a GeoNames .zip. {YYYY} and {MM} are filled in on each run for vendors that name files by month.', auth: 'none', interval: 24 },
 ]
 
 function FromUrlCard({ onDone }: { onDone: () => void }) {
@@ -399,6 +406,14 @@ function PolicyTab() {
             </Select>
             <p className="text-[11px] text-fg-subtle mt-1">Consensus is safer: IP databases lag on residential ranges, so one dissenting database alone should not count against a vendor. Any is the most forgiving: a claim confirmed by one source is routed on that source's answer, and it never leaves a claim open while a database answers.</p>
           </div>
+          <div className="mt-4">
+            <Label htmlFor="geo-city-radius">City radius (km, default)</Label>
+            <Input id="geo-city-radius" type="number" min={0} max={500} step={1} className="w-32" value={policy.default_city_radius_km} onChange={(e) => update({ default_city_radius_km: Math.min(500, Math.max(0, parseFloat(e.target.value) || 0)) })} />
+            <p className="text-[11px] text-fg-subtle mt-1">
+              How far from the claimed city an independent answer may place the exit and still confirm a city claim: a database that puts a São Paulo exit in Diadema, 15 km from the centre, confirms it at 25 km. 0 compares city names only. Projects can set their own on their Location tab.
+              {data && !data.databases_loaded.some((d) => d.kind === 'places') && <span className="text-warning"> No GeoNames file is loaded, so cities are compared by name until one is added on the Databases tab.</span>}
+            </p>
+          </div>
           <p className="text-xs text-fg-muted mt-4 border-t border-line pt-3">
             What a verdict does to routing is decided per project, on the project's Location tab, because different projects tolerate different risk: what to do when the databases contradict the vendor (route on the evidence, route on the vendor's claim, or refuse the proxy), what to do when no database knows the exit (trust the vendor, or refuse the proxy), and whether a session's exit is verified before its first request (the preflight switch).
           </p>
@@ -491,26 +506,33 @@ function PolicyTab() {
 function LookupCard() {
   const [ip, setIp] = useState('')
   const [claimed, setClaimed] = useState('')
+  const [claimedCity, setClaimedCity] = useState('')
   const [result, setResult] = useState<GeoLookupResponse | null>(null)
   const mutation = useMutation({
-    mutationFn: () => lookupGeoIp(ip.trim(), claimed.trim() || undefined),
+    // The city field is disabled without a country but keeps its text, so it is sent only with one.
+    mutationFn: () => lookupGeoIp(ip.trim(), claimed.trim() || undefined, undefined, (claimed.trim() && claimedCity.trim()) || undefined),
     onSuccess: setResult,
   })
+  const resolution = result?.resolution
   return (
     <Card className="p-5">
       <div className="flex items-center gap-2 mb-1">
         <Search className="w-4 h-4 text-fg-muted" />
         <h3 className="text-sm font-semibold text-fg">Test an IP</h3>
       </div>
-      <p className="text-xs text-fg-muted mb-3">See what every loaded database says and how the default source policy resolves it, optionally against a vendor claim. A project's own policy is tested from the API with its project id.</p>
+      <p className="text-xs text-fg-muted mb-3">See what every loaded database says and how the default source policy resolves it, optionally against a vendor claim: a country, and a city to see the city radius at work. A project's own policy is tested from the API with its project id.</p>
       <div className="flex flex-wrap items-end gap-3">
         <div className="flex-1 min-w-[200px]">
           <Label htmlFor="geo-lookup-ip">IP address</Label>
           <Input id="geo-lookup-ip" className="font-mono text-sm" value={ip} onChange={(e) => setIp(e.target.value)} placeholder="203.0.113.7" />
         </div>
-        <div className="w-56">
+        <div className="w-40">
           <Label htmlFor="geo-lookup-claim">Vendor claims</Label>
-          <Input id="geo-lookup-claim" className="font-mono text-sm" value={claimed} onChange={(e) => setClaimed(e.target.value.toUpperCase())} placeholder="Optional, e.g. GB" maxLength={2} />
+          <Input id="geo-lookup-claim" className="font-mono text-sm" value={claimed} onChange={(e) => setClaimed(e.target.value.toUpperCase())} placeholder="Optional, e.g. BR" maxLength={2} />
+        </div>
+        <div className="w-48">
+          <Label htmlFor="geo-lookup-city">City</Label>
+          <Input id="geo-lookup-city" className="font-mono text-sm" value={claimedCity} onChange={(e) => setClaimedCity(e.target.value)} placeholder="Optional, e.g. sao_paulo" disabled={!claimed.trim()} title={claimed.trim() ? undefined : 'Claim a country first'} />
         </div>
         <Button type="button" size="sm" onClick={() => mutation.mutate()} disabled={!ip.trim() || mutation.isPending}>{mutation.isPending ? 'Looking up…' : 'Look up'}</Button>
       </div>
@@ -527,6 +549,20 @@ function LookupCard() {
             {result.resolution.country_conflict === null && result.resolution.claimed_country && <Badge color="yellow">claim open: no independent answer, or sources disagree</Badge>}
             {result.databases_loaded === 0 && <span className="text-xs text-warning">No databases loaded.</span>}
           </div>
+          {resolution?.claimed_city && (
+            <div className="flex items-center gap-2 flex-wrap">
+              <span className="text-fg-muted">City</span>
+              <span className="font-mono">{resolution.claimed_city}</span>
+              <span className="text-fg-muted">claimed,</span>
+              <span className="font-mono">{resolution.observed_city ?? 'nothing independent'}</span>
+              <span className="text-fg-muted">observed</span>
+              {resolution.city_distance_km !== null && <span className="text-xs text-fg-subtle tabular-nums">{resolution.city_distance_km} km apart</span>}
+              {resolution.city_conflict === true && <Badge color="red">contradicted</Badge>}
+              {resolution.city_conflict === false && <Badge color="green">confirmed</Badge>}
+              {resolution.city_conflict === null && <Badge color="yellow">open</Badge>}
+              <span className="text-xs text-fg-subtle">radius {result.policy.city_radius_km} km</span>
+            </div>
+          )}
           {result.candidates.length > 0 && (
             <table className="w-full text-xs">
               <thead className="text-fg-subtle text-left"><tr><th className="py-1 pr-3 font-medium">Source</th><th className="py-1 pr-3 font-medium">Country</th><th className="py-1 font-medium">Details</th></tr></thead>

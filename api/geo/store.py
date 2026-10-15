@@ -14,7 +14,8 @@ Two sources of databases:
   copied; a changed file on disk is picked up on the periodic re-sync.
 
 Lookups iterate the enabled readers in priority order and never block on I/O
-beyond a page fault.
+beyond a page fault. GeoNames files ride the same rows, blobs and signals but
+answer no IP: they place cities for :meth:`GeoDatabaseStore.locate_city`.
 """
 
 from __future__ import annotations
@@ -38,12 +39,17 @@ from api.geo.models import (
     LoadedDatabase,
     LocationCandidate,
 )
-from api.geo.readers import GeoDatabaseError, GeoReader, inspect_file, open_reader
+from api.geo.places import Point
+from api.geo.readers import GeoDatabaseError, GeoNamesReader, GeoReader, inspect_file, open_reader
 
 logger = structlog.get_logger()
 
 
-_EXTENSIONS = {GeoDatabaseFormat.MMDB: "mmdb", GeoDatabaseFormat.IP2LOCATION_BIN: "BIN"}
+_EXTENSIONS = {
+    GeoDatabaseFormat.MMDB: "mmdb",
+    GeoDatabaseFormat.IP2LOCATION_BIN: "BIN",
+    GeoDatabaseFormat.GEONAMES: "geonames",
+}
 
 
 @dataclass
@@ -123,7 +129,7 @@ class GeoDatabaseStore:
         """
         candidates: list[LocationCandidate] = []
         for entry in self._ordered():
-            if not entry.record.enabled:
+            if not entry.record.enabled or isinstance(entry.reader, GeoNamesReader):
                 continue
             location = entry.reader.lookup(ip)
             if location is None:
@@ -138,13 +144,27 @@ class GeoDatabaseStore:
             )
         return candidates
 
+    @property
+    def places_loaded(self) -> bool:
+        """Whether an enabled GeoNames file is open, so city claims can be judged by distance."""
+        return any(e.record.enabled and isinstance(e.reader, GeoNamesReader) for e in self._entries.values())
+
+    def locate_city(self, country: str | None, state: str | None, city: str | None) -> Point | None:
+        """Where ``city`` (a slug) in ``country`` is, from the first enabled GeoNames file that knows it."""
+        for entry in self._ordered():
+            if entry.record.enabled and isinstance(entry.reader, GeoNamesReader):
+                point = entry.reader.locate(country, state, city)
+                if point is not None:
+                    return point
+        return None
+
     # --- sync ----------------------------------------------------------------------
 
     async def sync_all(self) -> int:
         """Open every enabled database from Postgres and the config; close the rest."""
         async with self._lock:
             records: dict[str, GeoDatabaseRecord] = {}
-            for record in self._config_records():
+            for record in await self._config_records():
                 records[record.id] = record
             listed = self._session_factory is None
             if self._session_factory is not None:
@@ -203,7 +223,7 @@ class GeoDatabaseStore:
 
     # --- helpers -------------------------------------------------------------------
 
-    def _config_records(self) -> list[GeoDatabaseRecord]:
+    async def _config_records(self) -> list[GeoDatabaseRecord]:
         records: list[GeoDatabaseRecord] = []
         for item in self._config_databases:
             path = str(item.get("path") or "").strip()
@@ -226,7 +246,8 @@ class GeoDatabaseStore:
                 records.append(cached[1])
                 continue
             try:
-                info = inspect_file(path)
+                # Off the event loop: hashing an mmdb takes a moment, parsing a GeoNames table seconds.
+                info = await asyncio.to_thread(inspect_file, path)
             except GeoDatabaseError as exc:
                 self._load_errors[database_id] = str(exc)
                 logger.warning("Configured IP database unreadable", path=path, error=str(exc))

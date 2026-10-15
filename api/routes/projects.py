@@ -79,6 +79,7 @@ def _project_to_response(
         location_unknown=project.location_unknown,
         location_preflight=project.location_preflight,
         location_conflict_rule=project.location_conflict_rule,
+        location_city_radius_km=project.location_city_radius_km,
         created_at=project.created_at,
         updated_at=project.updated_at,
         credential_count=credential_count,
@@ -110,6 +111,7 @@ def _project_to_summary(
         location_unknown=project.location_unknown,
         location_preflight=project.location_preflight,
         location_conflict_rule=project.location_conflict_rule,
+        location_city_radius_km=project.location_city_radius_km,
         credential_count=credential_count,
         connector_count=connector_count,
         proxy_count=proxy_count,
@@ -191,6 +193,7 @@ async def create_project(
         location_unknown=project_data.location_unknown,
         location_preflight=project_data.location_preflight,
         location_conflict_rule=project_data.location_conflict_rule,
+        location_city_radius_km=project_data.location_city_radius_km,
     )
 
     await proxy_manager.add_project(project)
@@ -298,7 +301,9 @@ async def update_project(
             )
 
     # Update fields
-    judgement_before = (project.location_contradicted, project.location_unknown, project.location_conflict_rule)
+    judgement_before = (
+        project.location_contradicted, project.location_unknown, project.location_conflict_rule, project.location_city_radius_km
+    )
     if project_data.name is not None:
         project.name = project_data.name
     if project_data.description is not None:
@@ -333,6 +338,9 @@ async def update_project(
         project.location_preflight = project_data.location_preflight
     if project_data.location_conflict_rule is not None:
         project.location_conflict_rule = project_data.location_conflict_rule or None
+    if project_data.location_city_radius_km is not None:
+        radius = project_data.location_city_radius_km
+        project.location_city_radius_km = None if radius == "" else radius
 
     # Clear fields that don't apply to the current MITM mode and validate
     if project.tls_mitm_mode in (MitmMode.OFF, MitmMode.PLAIN):
@@ -358,7 +366,10 @@ async def update_project(
             )
 
     await proxy_manager.update_project(project)
-    if (project.location_contradicted, project.location_unknown, project.location_conflict_rule) != judgement_before:
+    judgement_after = (
+        project.location_contradicted, project.location_unknown, project.location_conflict_rule, project.location_city_radius_km
+    )
+    if judgement_after != judgement_before:
         # The rows were judged under the old decisions: re-judge them before answering,
         # so routing is consistent the moment the save is confirmed. One project's rows
         # are judged in memory and written once, so this is quick.

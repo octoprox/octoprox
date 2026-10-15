@@ -547,6 +547,20 @@ class TestReattribute:
         finally:
             await attributor.stop()
 
+    async def test_a_changed_default_re_judges_only_the_projects_inheriting_it(self, geo_service: GeoService) -> None:
+        store = FakeStore()  # "p" inherits everything, "trusting" overrides the conflict rule
+        store.add(_proxy(id="inherits", connector_id="oxy", metadata={META_DISCOVERED_IP: GB_IP}))
+        store.add(_proxy(id="overrides", connector_id="trusting-c", metadata={META_DISCOVERED_IP: GB_IP}))
+        attributor = await _attributor(geo_service, store)
+        try:
+            assert (await attributor.reattribute_all(inheriting=["location_conflict_rule"]))[0] == 1
+            assert (await attributor.reattribute_all(inheriting=["location_city_radius_km"]))[0] == 2
+            store.projects["trusting"].location_city_radius_km = 5
+            assert (await attributor.reattribute_all(inheriting=["location_conflict_rule", "location_city_radius_km"]))[0] == 1
+            assert (await attributor.reattribute_all())[0] == 2
+        finally:
+            await attributor.stop()
+
     async def test_without_store(self, geo_service: GeoService) -> None:
         attributor = ProxyAttributor(geo_service, _settings())
         assert await attributor.reattribute_all() == (0, 0)

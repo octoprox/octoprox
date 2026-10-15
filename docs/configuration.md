@@ -125,13 +125,13 @@ The `proxy.geo_lookup` endpoint seeds the echo endpoint of the [IP attribution](
 
 ### IP Attribution
 
-The install-wide settings (default conflict rule, echo endpoint, preflight, retention) are edited in Settings → IP attribution and stored in the database; projects may override the conflict rule. The config file describes this process and seeds a fresh install:
+The install-wide settings (default conflict rule and city radius, echo endpoint, preflight, retention) are edited in Settings → IP attribution and stored in the database; projects may override the conflict rule and the city radius. The config file describes this process and seeds a fresh install:
 
 | Option | Description | Default |
 |--------|-------------|---------|
 | `geo.cache_dir` | Where this instance caches IP database files fetched from Postgres | data/geo |
-| `geo.databases` | Operator-managed database files: list of `{path, name, priority, enabled}` entries loaded at startup | [] |
-| `geo.defaults` | Initial settings for a fresh install: `default_conflict_rule`, `echo_url`, `echo_ip_path`, `echo_country_path`, `echo_state_path`, `echo_city_path`, `echo_timeout_seconds`, `health_check_attribution`, `preflight_session_ttl_seconds`, `preflight_max_attempts`, `observation_retention_days`, `exit_ip_retention_days` | built-in |
+| `geo.databases` | Operator-managed database files: list of `{path, name, priority, enabled}` entries loaded at startup; a GeoNames table (zipped or `.txt`) may be listed too | [] |
+| `geo.defaults` | Initial settings for a fresh install: `default_conflict_rule`, `default_city_radius_km`, `echo_url`, `echo_ip_path`, `echo_country_path`, `echo_state_path`, `echo_city_path`, `echo_timeout_seconds`, `health_check_attribution`, `preflight_session_ttl_seconds`, `preflight_max_attempts`, `observation_retention_days`, `exit_ip_retention_days` | built-in |
 | `geo.echo.enabled` | Serve the public `/echo` endpoint on this instance | true |
 | `geo.echo.trusted_proxies` | CIDRs of load balancers whose `X-Forwarded-For` the `/echo` endpoint trusts for the client IP | [] |
 | `geo.observations.publish_interval_seconds` | How often buffered IP observations are pushed to Redis | 5 |

@@ -28,6 +28,7 @@ from api.core.signals import geo_settings_changed
 from api.db.geo_repository import GeoDatabaseRepository, ObservationRepository
 from api.db.session import get_db
 from api.geo.models import (
+    GeoDatabaseKind,
     GeoDatabaseRecord,
     GeoDatabaseSource,
     GeoSettings,
@@ -383,13 +384,21 @@ async def put_settings(
 ) -> GeoSettingsResponse:
     """Replace the install-wide attribution settings (admin). Reaches every instance."""
     runtime = geo_runtime_of(request)
-    rule_before = runtime.settings_store.settings.default_conflict_rule
+    before = runtime.settings_store.settings
     await runtime.settings_store.save(body, updated_by=admin.username)
     await event_bus.publish(geo_settings_changed, None, entity_id="default", op="updated")
     logger.info("Geo settings updated", admin=admin.username)
-    if body.default_conflict_rule != rule_before:
-        # Verdicts were written under the old rule; every row that inherits the default is re-judged.
-        runtime.reattribute_later(inheriting_rule_only=True)
+    inherited = [
+        field
+        for field, changed in (
+            ("location_conflict_rule", body.default_conflict_rule != before.default_conflict_rule),
+            ("location_city_radius_km", body.default_city_radius_km != before.default_city_radius_km),
+        )
+        if changed
+    ]
+    if inherited:
+        # Verdicts were written under the old defaults; every row that inherits one of them is re-judged.
+        runtime.reattribute_later(inheriting=inherited)
     return await get_settings(request, admin)
 
 
@@ -641,7 +650,8 @@ async def lookup(request: Request, body: LookupRequest, _user: CurrentUserDep) -
         resolution=resolution,
         policy=policy,
         candidates=[_lookup_candidate(c) for c in resolution.candidates],
-        databases_loaded=len(runtime.database_store.loaded),
+        # IP databases only: a GeoNames file answers no IP.
+        databases_loaded=sum(1 for d in runtime.database_store.loaded if d.kind != GeoDatabaseKind.PLACES),
     )
 
 

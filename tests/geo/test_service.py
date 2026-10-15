@@ -29,6 +29,7 @@ from api.geo.store import GeoDatabaseStore
 from api.models.location import LocationTarget
 from api.models.proxy import Proxy
 from api.providers.sdk.strategies import META_COUNTRY, META_DISCOVERED_IP, META_GEO_COUNTRY
+from tests.geo.test_places import write_geonames
 from tests.geo.test_readers import MAXMIND_RECORD, write_mmdb
 
 GB_IP = "81.2.69.160"
@@ -229,3 +230,44 @@ class TestResolvedPlaceOnTheRow:
         geo_service.apply_observation(pinned, GB_IP, source=ObservationSource.DISCOVERY)
         assert pinned.city_slug == "manchester" and pinned.city_source == "manual"
         assert geo_service.observation_recorder._buffer[-1].city_conflict is True  # the pin is verified, not obeyed blindly
+
+
+@pytest.fixture
+async def geo_service_with_places(tmp_path: Path) -> GeoService:
+    """The London database plus a GeoNames file that places Croydon, 13 km from the database's London."""
+    db = write_mmdb(tmp_path / "city.mmdb", "GeoLite2-City", {"81.2.69.0/24": MAXMIND_RECORD})
+    gazetteer = write_geonames(tmp_path / "cities500.zip", zipped=True)
+    database_store = GeoDatabaseStore(None, tmp_path / "cache", [{"path": str(db)}, {"path": str(gazetteer)}])
+    await database_store.sync_all()
+    settings = _settings()
+    return GeoService(settings, database_store, GeoSettingsStore(settings, None), ObservationRecorder(None))
+
+
+class TestCityRadius:
+    async def test_a_claim_confirmed_by_distance_is_routed_on_the_claim(self, geo_service_with_places: GeoService) -> None:
+        proxy = _proxy(vendor_country="GB", vendor_city="croydon")
+        resolution, _ = geo_service_with_places.apply_observation(proxy, GB_IP, source=ObservationSource.DISCOVERY)
+        assert resolution.city_conflict is False and resolution.city_distance_km == pytest.approx(13.2, abs=0.3)
+        # The observation keeps what the database said; the row routes a -city-croydon request to it.
+        observation = geo_service_with_places.observation_recorder._buffer[-1]
+        assert (observation.claimed_city, observation.resolved_city, observation.city_conflict) == ("croydon", "london", False)
+        assert proxy.city_slug == "croydon" and proxy.city_source == "database" and proxy.metadata["city_verdict"] == "confirmed"
+
+    async def test_a_stricter_project_contradicts_the_same_claim(self, geo_service_with_places: GeoService) -> None:
+        proxy = _proxy(vendor_country="GB", vendor_city="croydon")
+        resolution, _ = geo_service_with_places.apply_observation(
+            proxy, GB_IP, source=ObservationSource.DISCOVERY, policy=SourcePolicy(city_radius_km=5)
+        )
+        assert resolution.city_conflict is True
+        assert proxy.city_slug == "london" and proxy.metadata["city_verdict"] == "contradicted"
+
+    async def test_without_a_places_file_cities_are_compared_by_name(self, geo_service: GeoService) -> None:
+        # The database named London, so the claim could share its point; without a file no distance is judged at all.
+        resolution = geo_service.resolve_ip(GB_IP, claimed=LocationTarget(country="GB", city="london"))
+        assert resolution.city_conflict is False and resolution.city_distance_km is None
+        assert geo_service.resolve_ip(GB_IP, claimed=LocationTarget(country="GB", city="croydon")).city_conflict is True
+
+    async def test_preflight_resolution_uses_the_places_file(self, geo_service_with_places: GeoService) -> None:
+        claimed = LocationTarget(country="GB", city="croydon")
+        assert geo_service_with_places.resolve_ip(GB_IP, claimed=claimed).city_conflict is False
+        assert geo_service_with_places.resolve_ip(GB_IP, claimed=claimed, policy=SourcePolicy(city_radius_km=0)).city_conflict is True

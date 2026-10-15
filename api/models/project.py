@@ -5,13 +5,14 @@
 
 from datetime import datetime
 from enum import Enum
-from typing import Literal
+from typing import Annotated, Literal
 from uuid import uuid4
 
 from pydantic import BaseModel, Field, model_validator
 
 from api.core import utc_now
 from api.geo.models import (
+    MAX_CITY_RADIUS_KM,
     ConflictRule,
     ContradictedAction,
     LocationRules,
@@ -81,6 +82,9 @@ class Project(BaseModel):
     location_preflight: bool = False
     # When a vendor counts as contradicted. None inherits the install default (GeoSettings).
     location_conflict_rule: ConflictRule | None = None
+    # How far from a claimed city an answer may be and still confirm it, in km;
+    # 0 compares names only. None inherits the install default (GeoSettings).
+    location_city_radius_km: float | None = Field(default=None, ge=0, le=MAX_CITY_RADIUS_KM)
 
     # Aggregate statistics (persists across proxy rotation)
     request_count: int = 0
@@ -122,6 +126,7 @@ class Project(BaseModel):
         self.location_unknown = other.location_unknown
         self.location_preflight = other.location_preflight
         self.location_conflict_rule = other.location_conflict_rule
+        self.location_city_radius_km = other.location_city_radius_km
         self.created_at = other.created_at
         self.updated_at = other.updated_at
 
@@ -130,11 +135,12 @@ class Project(BaseModel):
         return LocationRules(self.location_contradicted, self.location_unknown)
 
     def source_policy(self, default: SourcePolicy) -> SourcePolicy:
-        """This project's source policy: its own conflict rule on top of the install default, plus its location decisions."""
+        """This project's source policy: its own conflict rule and city radius on top of the install default, plus its location decisions."""
         return SourcePolicy(
             conflict_rule=self.location_conflict_rule or default.conflict_rule,
             contradicted=self.location_contradicted,
             unknown=self.location_unknown,
+            city_radius_km=default.city_radius_km if self.location_city_radius_km is None else self.location_city_radius_km,
         )
 
 
@@ -157,6 +163,7 @@ class ProjectCreate(BaseModel):
     location_unknown: UnknownAction = UnknownAction.VENDOR
     location_preflight: bool = False
     location_conflict_rule: ConflictRule | None = None
+    location_city_radius_km: float | None = Field(default=None, ge=0, le=MAX_CITY_RADIUS_KM)
 
     @model_validator(mode="after")
     def validate_mitm_fields(self) -> "ProjectCreate":
@@ -200,6 +207,8 @@ class ProjectUpdate(BaseModel):
     location_preflight: bool | None = None
     # "" clears the override (inherit the install default).
     location_conflict_rule: ConflictRule | Literal[""] | None = None
+    # "" clears the override (inherit the install default).
+    location_city_radius_km: Annotated[float, Field(ge=0, le=MAX_CITY_RADIUS_KM)] | Literal[""] | None = None
 
 
 class ProjectResponse(BaseModel):
@@ -222,6 +231,7 @@ class ProjectResponse(BaseModel):
     location_unknown: UnknownAction = UnknownAction.VENDOR
     location_preflight: bool = False
     location_conflict_rule: ConflictRule | None = None
+    location_city_radius_km: float | None = None
     created_at: datetime
     updated_at: datetime
     # Aggregated stats (populated by API)
@@ -246,6 +256,7 @@ class ProjectSummary(BaseModel):
     location_unknown: UnknownAction = UnknownAction.VENDOR
     location_preflight: bool = False
     location_conflict_rule: ConflictRule | None = None
+    location_city_radius_km: float | None = None
     credential_count: int = 0
     connector_count: int = 0
     proxy_count: int = 0

@@ -201,7 +201,9 @@ class GeoService:
         request required); ``endpoint`` what an independent endpoint
         requested through the proxy reported. ``candidates`` is what the
         databases said about ``ip`` when the caller looked it up already,
-        so one lookup serves two claims.
+        so one lookup serves two claims. A city claim is judged by the
+        policy's radius only while a GeoNames file is loaded; without one,
+        cities are compared by name.
         """
         candidates = list(candidates) if candidates is not None else self.attribute(ip)
         vendor = vendor_candidate(claimed)
@@ -210,7 +212,8 @@ class GeoService:
         independent = endpoint_candidate(endpoint)
         if independent is not None:
             candidates.append(independent)
-        return resolve(candidates, policy or self.default_policy)
+        store = self._database_store
+        return resolve(candidates, policy or self.default_policy, store.locate_city if store.places_loaded else None)
 
     # --- applying to proxies -------------------------------------------------------
 
@@ -416,8 +419,9 @@ class GeoService:
         the independent answer at each level, with its source, except that a
         project routing contradictions on the vendor
         (``ContradictedAction.VENDOR``) gets the claim itself where the
-        evidence contradicted it. Returns the resolution and whether any
-        persisted field changed.
+        evidence contradicted it, and a confirmed level carries the claim it
+        confirmed. Returns the resolution and whether any persisted field
+        changed.
         """
         policy = policy or self.default_policy
         vendor_country = self.claimed_country_of(proxy)
@@ -438,10 +442,16 @@ class GeoService:
             contradictions; an open one (nothing placed it, or the sources
             disagreed) carries the claim under ``vendor`` for unknowns, so a
             slot the databases cannot settle is not routed on whichever
-            database happens to rank first.
+            database happens to rank first. A confirmed level carries the
+            claim with the source that confirmed it: the same value as the
+            evidence when the names match, and the claimed city when the
+            evidence put the exit in a neighbouring one within the project's
+            radius, so a ``-city-`` request for the claim still reaches it.
             """
             if claimed and ((contradicted_on_claim and conflict) or (open_on_claim and conflict is None)):
                 return claimed, GeoSourceKind.VENDOR
+            if claimed and conflict is False:
+                return claimed, source
             return resolved, source
 
         before = self._snapshot(proxy)

@@ -382,23 +382,26 @@ class ProxyAttributor:
     # --- offline re-attribution --------------------------------------------------------
 
     async def reattribute_all(
-        self, connector_id: str | None = None, project_id: str | None = None, *, inheriting_rule_only: bool = False
+        self, connector_id: str | None = None, project_id: str | None = None, *, inheriting: Sequence[str] = ()
     ) -> tuple[int, int]:
         """Re-run attribution for every proxy with a known exit IP, without any request.
 
         Used after a database is added, refreshed or removed, and for one
-        project after its location decisions or conflict rule changed, since
-        a row's routing value and verdict were written under the settings of
-        the time. Returns how many proxies were re-attributed and how many of
-        them changed as a result. Each records a judgement for its exit,
+        project after its location decisions, conflict rule or city radius
+        changed, since a row's routing value and verdict were written under
+        the settings of the time. ``inheriting`` names the project fields
+        (``location_conflict_rule``, ``location_city_radius_km``) whose
+        install default changed: a project that overrides every one of them
+        is skipped. Returns how many proxies were re-attributed and how many
+        of them changed as a result. Each records a judgement for its exit,
         changed or not; none records a sighting, since nothing was observed.
         """
         if self._proxy_store is None:
             return 0, 0
         async with self._reattribute_lock:
-            return await self._reattribute(connector_id, project_id, inheriting_rule_only)
+            return await self._reattribute(connector_id, project_id, tuple(inheriting))
 
-    async def _reattribute(self, connector_id: str | None, project_id: str | None, inheriting_rule_only: bool) -> tuple[int, int]:
+    async def _reattribute(self, connector_id: str | None, project_id: str | None, inheriting: tuple[str, ...]) -> tuple[int, int]:
         """One pass; ``reattribute_all`` holds the lock so passes never interleave on the same rows."""
         assert self._proxy_store is not None
         changed: list[Proxy] = []
@@ -408,10 +411,10 @@ class ProxyAttributor:
                 continue
             if project_id and self.project_id_for(proxy.connector_id) != project_id:
                 continue
-            if inheriting_rule_only:
+            if inheriting:
                 owner = self._project_of(proxy.connector_id)
-                if owner is not None and owner.location_conflict_rule is not None:
-                    continue  # its own rule did not change
+                if owner is not None and all(getattr(owner, field) is not None for field in inheriting):
+                    continue  # its own settings did not change
             ip = proxy.metadata.get(META_DISCOVERED_IP) or proxy.display_host
             if not isinstance(ip, str) or not is_ip(ip):
                 continue

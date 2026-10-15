@@ -179,3 +179,27 @@ class TestProjectRepository:
         projects = await project_repo.get_all()
         assert len(projects) == len(strategies)
 
+
+    async def test_city_radius_override_round_trip(
+        self,
+        project_repo: ProjectRepository,
+        db_session: AsyncSession,
+    ) -> None:
+        """A project's own city radius is stored; null means it inherits the install default."""
+        project = Project(name="Radius", username="radius", password="pass")
+        await project_repo.create(project)
+        await db_session.commit()
+        stored = await project_repo.get_by_id(project.id)
+        assert stored is not None and stored.location_city_radius_km is None
+
+        project.location_city_radius_km = 7.5
+        await project_repo.update(project)
+        await db_session.commit()
+        stored = await project_repo.get_by_id(project.id)
+        assert stored is not None and stored.location_city_radius_km == 7.5
+
+        project.location_city_radius_km = 0
+        await project_repo.update(project)
+        await db_session.commit()
+        stored = await project_repo.get_by_id(project.id)
+        assert stored is not None and stored.location_city_radius_km == 0

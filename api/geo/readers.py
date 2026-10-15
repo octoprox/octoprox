@@ -8,7 +8,9 @@ IP2Location all publish it, and one memory-mapped reader serves every file.
 What differs per vendor is the *record layout*, so :func:`normalize_record`
 probes each known layout and returns one :class:`IpLocation` whatever the
 vendor. IP2Location's own BIN format gets a second reader when the optional
-``IP2Location`` package is installed.
+``IP2Location`` package is installed. A GeoNames table is the odd one out: it
+answers no IP, only where a city is, and loads through the same pipeline so
+it is uploaded, downloaded and distributed like the rest (``api.geo.places``).
 
 Readers are opened once per database per process and shared; lookups are
 synchronous, sub-millisecond and never touch the network.
@@ -34,6 +36,13 @@ from api.geo.models import (
     GeoVendor,
     IpLocation,
 )
+from api.geo.places import (
+    GEONAMES_ATTRIBUTION,
+    PlaceFileError,
+    PlaceIndex,
+    Point,
+    looks_like_geonames,
+)
 from api.models.location import us_state_code_from_name
 
 logger = structlog.get_logger()
@@ -47,6 +56,7 @@ ATTRIBUTIONS: dict[GeoVendor, str] = {
     GeoVendor.DBIP: "IP Geolocation by DB-IP (https://db-ip.com), licensed under CC BY 4.0.",
     GeoVendor.IPINFO: "IP address data powered by IPinfo (https://ipinfo.io).",
     GeoVendor.IP2LOCATION: "This site or product includes IP2Location LITE data available from https://lite.ip2location.com.",
+    GeoVendor.GEONAMES: GEONAMES_ATTRIBUTION,
 }
 
 
@@ -435,11 +445,51 @@ class Ip2LocationBinReader:
             close()
 
 
+# --- GeoNames ----------------------------------------------------------------------------------
+
+
+class GeoNamesReader:
+    """A GeoNames table loaded as a :class:`PlaceIndex`. Answers no IP: ``lookup`` is always None."""
+
+    def __init__(self, path: str | Path) -> None:
+        self._path = Path(path)
+        try:
+            self._index = PlaceIndex.from_file(self._path)
+        except (PlaceFileError, OSError) as exc:
+            raise GeoDatabaseError(f"Not a readable GeoNames file: {exc}") from exc
+        sha256, size = _sha256_and_size(self._path)
+        self._info = DatabaseInfo(
+            format=GeoDatabaseFormat.GEONAMES,
+            database_type=f"GeoNames {self._index.table}",
+            vendor=GeoVendor.GEONAMES,
+            kind=GeoDatabaseKind.PLACES,
+            build_epoch=self._index.modified,
+            record_count=len(self._index),
+            ip_version=0,
+            description="City coordinates",
+            size_bytes=size,
+            sha256=sha256,
+        )
+
+    @property
+    def info(self) -> DatabaseInfo:
+        return self._info
+
+    def lookup(self, ip: str) -> IpLocation | None:
+        return None
+
+    def locate(self, country: str | None, state: str | None, city: str | None) -> Point | None:
+        return self._index.locate(country, state, city)
+
+    def close(self) -> None:
+        return None
+
+
 # --- opening -----------------------------------------------------------------------------------
 
 
 def sniff_format(path: str | Path) -> GeoDatabaseFormat:
-    """Tell mmdb from IP2Location BIN by content, falling back to the extension."""
+    """Tell mmdb, IP2Location BIN and a GeoNames table apart by content, falling back to the extension."""
     file_path = Path(path)
     try:
         with file_path.open("rb") as handle:
@@ -449,9 +499,11 @@ def sniff_format(path: str | Path) -> GeoDatabaseFormat:
         raise GeoDatabaseError(f"Cannot read {file_path}: {exc}") from exc
     if MMDB_METADATA_MARKER in tail:
         return GeoDatabaseFormat.MMDB
+    if looks_like_geonames(file_path):
+        return GeoDatabaseFormat.GEONAMES
     if file_path.suffix.lower() == ".bin":
         return GeoDatabaseFormat.IP2LOCATION_BIN
-    raise GeoDatabaseError("Unrecognised database file: expected an mmdb or IP2Location BIN file")
+    raise GeoDatabaseError("Unrecognised database file: expected an mmdb, an IP2Location BIN or a GeoNames file")
 
 
 def open_reader(path: str | Path, fmt: GeoDatabaseFormat | None = None) -> GeoReader:
@@ -459,6 +511,8 @@ def open_reader(path: str | Path, fmt: GeoDatabaseFormat | None = None) -> GeoRe
     resolved = fmt or sniff_format(path)
     if resolved == GeoDatabaseFormat.MMDB:
         return MmdbReader(path)
+    if resolved == GeoDatabaseFormat.GEONAMES:
+        return GeoNamesReader(path)
     return Ip2LocationBinReader(path)
 
 

@@ -86,6 +86,12 @@ class TestGeoSettings:
             and again.preflight_max_attempts == 5
         )
         assert again.default_policy.conflict_rule == ConflictRule.FIRST
+        assert again.default_city_radius_km == 25
+
+        await repo.save(again.model_copy(update={"default_city_radius_km": 40.0}))
+        await db_session.commit()
+        radius = await repo.get()
+        assert radius is not None and radius.default_policy.city_radius_km == 40.0
 
 
 class TestGeoDatabases:

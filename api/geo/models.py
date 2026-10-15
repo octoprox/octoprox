@@ -27,6 +27,7 @@ class GeoVendor(StrEnum):
     DBIP = "dbip"
     IPINFO = "ipinfo"
     IP2LOCATION = "ip2location"
+    GEONAMES = "geonames"
     OTHER = "other"
 
 
@@ -37,12 +38,14 @@ class GeoDatabaseKind(StrEnum):
     CITY = "city"
     ASN = "asn"
     ANONYMOUS = "anonymous"
+    PLACES = "places"
     UNKNOWN = "unknown"
 
 
 class GeoDatabaseFormat(StrEnum):
     MMDB = "mmdb"
     IP2LOCATION_BIN = "ip2location_bin"
+    GEONAMES = "geonames"
 
 
 class GeoDatabaseSource(StrEnum):
@@ -149,6 +152,13 @@ class ObservationSource(StrEnum):
 # all attribution needs.
 DEFAULT_ECHO_URL = "https://httpbin.org/ip"
 DEFAULT_ECHO_IP_PATH = "origin"
+
+# How far from the claimed city an independent answer may place the exit and
+# still confirm a city claim, once a GeoNames file is loaded. 25 km takes in
+# the municipalities around a large city (Diadema, Guarulhos and Osasco are
+# about 15 km from São Paulo's centre) without reaching the next real one.
+DEFAULT_CITY_RADIUS_KM = 25.0
+MAX_CITY_RADIUS_KM = 500.0
 
 
 def normalize_country(value: Any) -> str | None:
@@ -279,6 +289,7 @@ class Resolution(BaseModel):
     resolved_city: str | None = None
     resolved_city_source: GeoSourceKind | None = None
     city_conflict: bool | None = None
+    city_distance_km: float | None = None
 
     def compact_candidates(self) -> list[dict[str, Any]]:
         """Short form stored in proxy metadata: no nested location records."""
@@ -305,12 +316,16 @@ class SourcePolicy(BaseModel):
     ``unknown`` is its :class:`UnknownAction`: under ``vendor`` an open level
     carries the claim too, whether no source placed the exit or the sources
     disagreed, so "trust the vendor where nothing is settled" means the same
-    on the row as it does for routing.
+    on the row as it does for routing. ``city_radius_km`` is how close an
+    independent answer must put the exit to the claimed city to confirm it
+    when the names differ; 0 compares names only, and so does any radius
+    while no GeoNames file is loaded to place the claimed city.
     """
 
     conflict_rule: ConflictRule = ConflictRule.CONSENSUS
     contradicted: ContradictedAction = ContradictedAction.EVIDENCE
     unknown: UnknownAction = UnknownAction.VENDOR
+    city_radius_km: float = DEFAULT_CITY_RADIUS_KM
 
 
 class GeoSettings(BaseModel):
@@ -322,6 +337,9 @@ class GeoSettings(BaseModel):
     """
 
     default_conflict_rule: ConflictRule = ConflictRule.CONSENSUS
+    # How far from the claimed city an answer may be and still confirm it;
+    # projects may set their own. Takes effect once a GeoNames file is loaded.
+    default_city_radius_km: float = Field(default=DEFAULT_CITY_RADIUS_KM, ge=0, le=MAX_CITY_RADIUS_KM)
     # Echo endpoint requested through proxies to learn their exit IP. Becomes
     # the default for health checks, discovery, exit lookups and preflight.
     echo_url: str = DEFAULT_ECHO_URL
@@ -346,7 +364,7 @@ class GeoSettings(BaseModel):
 
     @property
     def default_policy(self) -> SourcePolicy:
-        return SourcePolicy(conflict_rule=self.default_conflict_rule)
+        return SourcePolicy(conflict_rule=self.default_conflict_rule, city_radius_km=self.default_city_radius_km)
 
 
 class GeoDatabaseRecord(BaseModel):

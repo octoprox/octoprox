@@ -7,6 +7,7 @@ from pathlib import Path
 
 from starlette.testclient import TestClient
 
+from tests.geo.test_places import write_geonames
 from tests.geo.test_readers import IPINFO_RECORD, MAXMIND_RECORD, write_mmdb
 
 GB_IP = "81.2.69.160"
@@ -14,6 +15,7 @@ GB_IP = "81.2.69.160"
 
 DEFAULT_SETTINGS = {
     "default_conflict_rule": "consensus",
+    "default_city_radius_km": 25,
 }
 
 
@@ -82,6 +84,19 @@ class TestSettings:
             "/api/v1/geo/settings", json={"preflight_max_attempts": 0}
         )
         assert response.status_code == 422
+        for radius in (-1, 501):
+            response = authenticated_client.put("/api/v1/geo/settings", json={"default_city_radius_km": radius})
+            assert response.status_code == 422
+
+    def test_city_radius_round_trip(self, authenticated_client: TestClient) -> None:
+        _clear(authenticated_client)
+        body = authenticated_client.get("/api/v1/geo/settings").json()["settings"]
+        assert body["default_city_radius_km"] == 25
+        body["default_city_radius_km"] = 12.5
+        saved = authenticated_client.put("/api/v1/geo/settings", json=body)
+        assert saved.status_code == 200, saved.text
+        assert authenticated_client.get("/api/v1/geo/settings").json()["settings"]["default_city_radius_km"] == 12.5
+        _clear(authenticated_client)
 
 
 class TestDatabases:
@@ -166,6 +181,51 @@ class TestDatabases:
             lookup["resolution"]["resolved_country"] == "DE" and lookup["resolution"]["country_conflict"] is None
         )
         assert [c["country"] for c in lookup["candidates"]] == ["DE", "GB"]
+
+    def test_geonames_file_judges_city_claims_by_distance(
+        self, authenticated_client: TestClient, tmp_path: Path
+    ) -> None:
+        _clear(authenticated_client)
+        city = write_mmdb(tmp_path / "GeoLite2-City.mmdb", "GeoLite2-City", {"81.2.69.0/24": MAXMIND_RECORD})
+        assert _upload(authenticated_client, city).status_code == 201
+        claim = {"ip": GB_IP, "claimed_country": "GB", "claimed_city": "Croydon"}
+        before = authenticated_client.post("/api/v1/geo/lookup", json=claim).json()["resolution"]
+        assert before["city_conflict"] is True and before["city_distance_km"] is None  # names only
+
+        response = _upload(authenticated_client, write_geonames(tmp_path / "cities500.zip", zipped=True))
+        assert response.status_code == 201, response.text
+        record = response.json()
+        assert (record["vendor"], record["kind"], record["format"]) == ("geonames", "places", "geonames")
+        assert record["database_type"] == "GeoNames cities500" and "GeoNames" in record["attribution"]
+        assert record["loaded_here"] is True and record["name"] == "cities500"
+
+        lookup = authenticated_client.post("/api/v1/geo/lookup", json=claim).json()
+        # The places file answers no IP; it places the claimed city, 13 km from the database's London.
+        assert len(lookup["candidates"]) == 2 and lookup["policy"]["city_radius_km"] == 25
+        assert lookup["resolution"]["city_conflict"] is False
+        assert 12 < lookup["resolution"]["city_distance_km"] < 14.5
+
+        project = authenticated_client.post(
+            "/api/v1/projects",
+            json={"name": "strict-city", "username": "strict_city", "password": "pw", "location_city_radius_km": 5},
+        )
+        assert project.status_code == 201, project.text
+        assert project.json()["location_city_radius_km"] == 5
+        scoped = authenticated_client.post("/api/v1/geo/lookup", json={**claim, "project_id": project.json()["id"]}).json()
+        assert scoped["policy"]["city_radius_km"] == 5 and scoped["resolution"]["city_conflict"] is True
+
+        cleared = authenticated_client.patch(f"/api/v1/projects/{project.json()['id']}", json={"location_city_radius_km": ""})
+        assert cleared.status_code == 200 and cleared.json()["location_city_radius_km"] is None
+        inheriting = authenticated_client.post("/api/v1/geo/lookup", json={**claim, "project_id": project.json()["id"]}).json()
+        assert inheriting["policy"]["city_radius_km"] == 25 and inheriting["resolution"]["city_conflict"] is False
+        assert authenticated_client.patch(
+            f"/api/v1/projects/{project.json()['id']}", json={"location_city_radius_km": -3}
+        ).status_code == 422
+
+        assert authenticated_client.delete(f"/api/v1/geo/databases/{record['id']}").status_code == 204
+        after = authenticated_client.post("/api/v1/geo/lookup", json=claim).json()["resolution"]
+        assert after["city_conflict"] is True
+        _clear(authenticated_client)
 
     def test_rejects_junk(self, authenticated_client: TestClient, tmp_path: Path) -> None:
         junk = tmp_path / "junk.mmdb"

@@ -110,6 +110,7 @@ class GeoSettingsRepository:
 
     _COLUMNS = (
         "default_conflict_rule",
+        "default_city_radius_km",
         "echo_url",
         "echo_ip_path",
         "echo_country_path",

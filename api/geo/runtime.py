@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-from collections.abc import Coroutine
+from collections.abc import Coroutine, Sequence
 from typing import Any
 
 import structlog
@@ -115,11 +115,12 @@ class GeoRuntime:
         """A scheduled download stored a new build: re-judge every proxy with it, once, here on the leader."""
         await self.proxy_attributor.reattribute_all()
 
-    def reattribute_later(self, project_id: str | None = None, *, inheriting_rule_only: bool = False) -> None:
+    def reattribute_later(self, project_id: str | None = None, *, inheriting: Sequence[str] = ()) -> None:
         """Re-judge every row, or one project's rows, without holding the request that asked.
 
         Used after a database changed, after the install's default conflict
-        rule changed (then only for projects that inherit it), and after a
+        rule or city radius changed (then only for projects that inherit one
+        of them, named by ``inheriting``), and after a
         project's location decisions or rule changed: a row's value and
         verdict were written under the settings of the time, and a sighting
         of an unchanged exit is not re-applied. Passes never interleave: the
@@ -132,7 +133,7 @@ class GeoRuntime:
 
         spawn_held(
             self._passes,
-            self.proxy_attributor.reattribute_all(project_id=project_id, inheriting_rule_only=inheriting_rule_only),
+            self.proxy_attributor.reattribute_all(project_id=project_id, inheriting=inheriting),
             name="reattribute",
             project_id=project_id,
         )

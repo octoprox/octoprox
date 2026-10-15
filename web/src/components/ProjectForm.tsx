@@ -104,6 +104,7 @@ export function ProjectForm({ project, onSave, error, formId }: ProjectFormProps
     location_unknown: project?.location_unknown ?? 'vendor',
     location_preflight: project?.location_preflight ?? false,
     location_conflict_rule: project?.location_conflict_rule ?? undefined,
+    location_city_radius_km: project?.location_city_radius_km ?? undefined,
   })
   const [showPassword, setShowPassword] = useState(false)
   const [activeTab, setActiveTab] = useState<SettingsTab>('general')
@@ -263,13 +264,33 @@ export function ProjectForm({ project, onSave, error, formId }: ProjectFormProps
             </Label>
             <RichSelect options={conflictOptions} value={formData.location_conflict_rule || 'inherit'} onChange={(v) => setFormData({ ...formData, location_conflict_rule: (v === 'inherit' ? (project ? '' : null) : v) as ProjectCreate['location_conflict_rule'] })} />
           </div>
+          <div>
+            <Label className="text-xs">
+              <span className="inline-flex items-center gap-1.5">
+                <span>City radius (km)</span>
+                <InfoTip label="About the city radius">How far from the claimed city an independent answer may place the exit and still confirm a city claim, so a database naming a neighbouring municipality (Diadema for São Paulo) is not a contradiction. 0 compares city names only. Needs a GeoNames file loaded under Settings, IP attribution; without one cities are compared by name.</InfoTip>
+              </span>
+            </Label>
+            <Input
+              type="number" min={0} max={500} step={1} className="w-40"
+              value={formData.location_city_radius_km ?? ''}
+              placeholder={`Install default (${geo?.settings.default_city_radius_km ?? 25})`}
+              onChange={(e) => {
+                // Empty inherits: an edit sends '' to clear the override, a new project sends null.
+                const value = e.target.value === '' ? (project ? '' : null) : Math.min(500, Math.max(0, parseFloat(e.target.value) || 0))
+                setFormData({ ...formData, location_city_radius_km: value as ProjectCreate['location_city_radius_km'] })
+              }}
+            />
+            <p className="text-xs text-fg-subtle mt-1">Empty follows the install default; a smaller radius is stricter.</p>
+          </div>
           {(() => {
             const defaults = geo?.settings
             const rule: ConflictRule = formData.location_conflict_rule || defaults?.default_conflict_rule || 'consensus'
             const contradicted: ContradictedAction = formData.location_contradicted ?? 'evidence'
             const unknown: UnknownAction = formData.location_unknown ?? 'vendor'
             const inherited = !formData.location_conflict_rule
-            const noDatabases = geo !== undefined && geo.databases_loaded.length === 0
+            // A GeoNames file ('places') answers no IP, so it does not count as a database here.
+            const noDatabases = geo !== undefined && !geo.databases_loaded.some((d) => d.kind !== 'places')
             const noCityDatabase = geo !== undefined && !noDatabases && !geo.databases_loaded.some((d) => d.kind === 'city')
             const rows = locationExamples(rule, contradicted, unknown)
             const refuses = contradicted === 'refuse' || unknown === 'refuse'
