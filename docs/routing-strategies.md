@@ -95,6 +95,8 @@ Proxy-Authorization: Basic base64(my-project-sessid-abc456:password)
 
 A single project can hold connectors that exit from different countries. Instead of maintaining one project per location, clients choose the country per request by embedding a country code in the proxy authentication username, the same way session IDs work.
 
+The project's **Connect** page builds the username for any country, state, city and session, and shows which connectors would serve it; see [Connecting clients]({{ site.baseurl }}/connecting).
+
 **Format:** `<username>-cc-<iso_code>`
 
 The code is a two-letter ISO 3166-1 alpha-2 country code and is case-insensitive. `uk` is accepted as an alias of `gb`, the ISO code for the United Kingdom, wherever a country is entered: in this suffix, in a connector's country settings and on a manually added proxy. Anything else (`-cc-usa`) is answered with `400 Bad Request` rather than routed.

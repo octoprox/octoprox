@@ -158,6 +158,43 @@ Content-Type: application/json
 DELETE /api/v1/projects/{project_id}
 ```
 
+### Connect
+
+What a client sends to use the project's proxy for a place and session, and where it would go. This is what the [Connect page]({{ site.baseurl }}/connecting) shows. Every query parameter is optional:
+
+```bash
+GET /api/v1/projects/{project_id}/connect?country=us&state=ny&city=New%20York&sessid=job-1
+```
+
+The username is composed from the project's and the parameters, then read by the parser the proxy listener uses, so the normalised form and any refusal are exactly what a client would get:
+
+```json
+{
+  "endpoint": {"host": null, "port": 8080},
+  "username": "myuser-cc-us-st-ny-city-new_york-sessid-job-1",
+  "sessid": "job-1",
+  "location": {"country": "US", "state": "NY", "city": "new_york"},
+  "error": null,
+  "routes": [
+    {"connector_id": "...", "connector_name": "ISP static", "dynamic": false, "on_demand": false, "proxies": 2, "share": 0.75},
+    {"connector_id": "...", "connector_name": "Residential", "dynamic": true, "on_demand": false, "proxies": 1, "share": 0.25}
+  ],
+  "countries": ["DE", "US"],
+  "any_country": false,
+  "places": [{"country": "US", "state": "NY", "city": "new_york", "proxies": 2}]
+}
+```
+
+| Field | Meaning |
+|-------|---------|
+| `endpoint` | Where clients reach the proxy: `OCTOPROX_PROXY_PUBLIC_HOST` and `OCTOPROX_PROXY_PUBLIC_PORT`, else `null` (the host the web UI is reached at) and `server.proxy_port` |
+| `username` | The username to send, normalised; as composed when it cannot be read |
+| `error` | The proxy's `400` message for the username, or `null`. A value containing a reserved delimiter (or forming one with the dash before or after it), or a session ID with a colon, is refused here too |
+| `routes` | The enabled connectors a request with the username would reach now, with the routable proxies of each and the expected share of requests by weight. `dynamic` marks a dynamic-sessions gateway, `on_demand` an "All countries" pool that would create sessions for the country on the first request. Empty means the proxy would refuse the request: `502`, or `429` while the proxies that could serve it are rate limited, or the traffic-limit status (`509` by default) while their connectors are over their limit. No destination is known, so domain filters are not applied |
+| `countries` | Countries the project serves: every connector's declared list and the known country of every healthy exit |
+| `any_country` | A country outside `countries` is served too: a dynamic-sessions connector or residential pool lists no countries |
+| `places` | States and cities healthy fixed exits are known to be in, busiest first, at most 200 |
+
 ---
 
 ## Credentials

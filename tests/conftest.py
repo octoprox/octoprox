@@ -212,6 +212,7 @@ def app_with_lifespan(test_settings: Settings) -> Any:
     import api.db.session
     import api.main
     import api.routes.auth
+    import api.routes.projects
     import api.routes.sso
     import api.routes.system
     from api.db.session import get_async_session_factory
@@ -225,6 +226,7 @@ def app_with_lifespan(test_settings: Settings) -> Any:
     api.main.settings = test_settings
     api.core.proxy_server.settings = test_settings
     api.routes.auth.settings = test_settings
+    api.routes.projects.settings = test_settings
     api.routes.sso.settings = test_settings
     api.core.auth.settings = test_settings
     api.db.session.settings = test_settings

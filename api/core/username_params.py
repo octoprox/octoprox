@@ -53,6 +53,7 @@ __all__ = [
     "LOCATION_NEEDS_COUNTRY",
     "AuthResult",
     "UsernameParams",
+    "format_username_params",
     "parse_proxy_username",
     "parse_username_params",
 ]
@@ -164,6 +165,29 @@ def parse_username_params(raw_username: str) -> UsernameParams:
     if error is None and location.below_country and country is None:
         error = LOCATION_NEEDS_COUNTRY
     return UsernameParams(username, values["sessid"], location or None, error)
+
+
+def format_username_params(username: str, sessid: str | None, location: LocationTarget | None) -> str:
+    """The proxy username for ``username`` with these routing parameters, the inverse of the parser.
+
+    Normalised values in the spelling the docs use: lower-case country and
+    state codes, the city slug, then the session.
+
+    Examples:
+        ('myuser', None, None) -> 'myuser'
+        ('myuser', 'job-1', LocationTarget('US', 'NY', 'new_york')) -> 'myuser-cc-us-st-ny-city-new_york-sessid-job-1'
+    """
+    parts = [username]
+    if location is not None:
+        if location.country:
+            parts.append(f"{COUNTRY_SEPARATOR}{location.country.lower()}")
+        if location.state:
+            parts.append(f"{STATE_SEPARATOR}{location.state.lower()}")
+        if location.city:
+            parts.append(f"{CITY_SEPARATOR}{location.city}")
+    if sessid:
+        parts.append(f"{SESSID_SEPARATOR}{sessid}")
+    return "".join(parts)
 
 
 def parse_proxy_username(raw_username: str) -> tuple[str, str | None]:

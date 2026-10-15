@@ -3,6 +3,7 @@
 
 """Configuration management for Octoprox."""
 
+import ipaddress
 import os
 import uuid
 from functools import lru_cache
@@ -168,6 +169,22 @@ class Settings(BaseSettings):
     host: str = Field(default="0.0.0.0")
     api_port: int = Field(default=8000)
     proxy_port: int = Field(default=8080)
+    # Where clients reach the proxy listener, as written into the URLs the
+    # Connect page generates. Behind a load balancer or a NAT mapping the
+    # listener's own address and port are not the ones clients use.
+    proxy_public_host: str = Field(
+        default="",
+        description=(
+            "Hostname or IP address clients reach the proxy at, without a scheme or port. "
+            "Empty means the host the browser reached the web UI at"
+        ),
+    )
+    proxy_public_port: int | None = Field(
+        default=None,
+        ge=1,
+        le=65535,
+        description="Port clients reach the proxy at, when it is published on another port than proxy_port; empty means proxy_port",
+    )
 
     # Environment
     env: str = Field(default="development")
@@ -294,6 +311,18 @@ class Settings(BaseSettings):
         v = v.lower()
         if v not in LOG_FORMATS:
             raise ValueError(f"log_format must be one of: {', '.join(LOG_FORMATS)}")
+        return v
+
+    @field_validator("proxy_public_host")
+    @classmethod
+    def _check_proxy_public_host(cls, v: str) -> str:
+        # A bare host: "proxy.example.com:8080" would end up as ...:8080:8080 in every generated URL.
+        v = v.strip().strip("[]")
+        try:
+            ipaddress.ip_address(v)
+        except ValueError:
+            if any(ch in v for ch in " /:\\@?#"):
+                raise ValueError("proxy_public_host is a hostname or IP address without a scheme or port") from None
         return v
 
     @property

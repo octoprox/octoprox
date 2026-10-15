@@ -10,6 +10,7 @@ Emits proxy lifecycle signals (proxy_added, proxy_removed, proxy_status_changed)
 import asyncio
 import contextlib
 import json
+from collections import Counter
 from collections.abc import Awaitable, Callable, Coroutine, Mapping, Sequence
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
@@ -75,6 +76,7 @@ from api.db.repository import (
 )
 from api.geo.models import LocationRules, eligible_under
 from api.geo.service import GeoService
+from api.models.connect import ConnectPlace, ConnectRoute
 from api.models.connector import (
     DEFAULT_ROUTING_WEIGHT,
     DEFAULT_TRAFFIC_LIMIT_STATUS,
@@ -88,7 +90,12 @@ from api.models.project import Project
 from api.models.proxy import Proxy, ProxyStatus
 from api.providers.registry import ProviderRegistry, ProviderType, get_provider_registry
 from api.providers.sdk.provider import DescriptorProvider
-from api.providers.sdk.strategies import META_DISCOVERED_IP, META_GEO_COUNTRY, is_dynamic_gateway
+from api.providers.sdk.strategies import (
+    META_DISCOVERED_IP,
+    META_GEO_COUNTRY,
+    META_SESSION_ID,
+    is_dynamic_gateway,
+)
 from api.providers.store import ProviderStore
 from api.strategies import ProxyGroup, StickySessionStrategy, get_strategy
 
@@ -2139,11 +2146,7 @@ class ProxyManager:
         arrive through the cross-instance change feed.
         """
         provisioned = False
-        for connector in self._enabled_connectors(project_id, target_host):
-            if not self._accepts_request_country(connector):
-                continue
-            if self._has_geo_group(connector.id, country):
-                continue
+        for connector in self._on_demand_pools(project_id, target_host, country):
             lock = self._geo_provision_locks.setdefault((connector.id, country), asyncio.Lock())
             async with lock:
                 if self._has_geo_group(connector.id, country):
@@ -2200,6 +2203,13 @@ class ProxyManager:
 
     def _has_geo_group(self, connector_id: str, country: str) -> bool:
         return any(p.metadata.get(META_GEO_COUNTRY) == country for p in self._proxies.for_connector(connector_id))
+
+    def _on_demand_pools(self, project_id: str, target_host: str | None, country: str) -> list[Connector]:
+        """The "All countries" pools that would provision a slot group for ``country`` now: those holding none yet."""
+        return [
+            c for c in self._enabled_connectors(project_id, target_host)
+            if self._accepts_request_country(c) and not self._has_geo_group(c.id, country)
+        ]
 
     async def _wait_for_geo_group(self, connector_id: str, country: str, timeout: float = 3.0) -> None:
         """Poll the local cache until a peer's slot group for ``country`` shows up (or timeout)."""
@@ -2350,6 +2360,78 @@ class ProxyManager:
         """The countries a connector declares; empty when it declares none."""
         connector = self._connectors.get(connector_id)
         return list(connector.countries) if connector is not None else []
+
+    def route_preview(self, project_id: str, location: LocationTarget | None) -> list[ConnectRoute]:
+        """The connectors a request for ``location`` would be spread over now, whatever its destination.
+
+        The eligibility ``select_proxy_for_project`` applies, counted per
+        connector with each connector's expected share by routing weight;
+        nothing is selected or provisioned. When nothing serves a country,
+        the "All countries" pools that would provision a slot group for it
+        within the request are listed instead, marked ``on_demand``. No
+        destination is known here, so a connector whose domain filter would
+        refuse a given host still counts.
+        """
+        target = location or None
+        by_connector: dict[str, list[Proxy]] = {}
+        for proxy in self.get_routable_proxies_for_project(project_id, None, target):
+            by_connector.setdefault(proxy.connector_id, []).append(proxy)
+        wanted = target.country if target is not None and not target.below_country and not by_connector else None
+        if wanted is not None:
+            connectors = self._on_demand_pools(project_id, None, wanted)
+        else:
+            connectors = [c for c in self._enabled_connectors(project_id) if c.id in by_connector]
+        total = sum(max(c.weight, 1) for c in connectors)
+        return [
+            ConnectRoute(
+                connector_id=c.id,
+                connector_name=c.name,
+                dynamic=any(is_dynamic_gateway(p) for p in by_connector.get(c.id, ())),
+                on_demand=wanted is not None,
+                proxies=len(by_connector.get(c.id, ())),
+                share=max(c.weight, 1) / total,
+            )
+            for c in connectors
+        ]
+
+    def served_places(self, project_id: str, limit: int = 200) -> tuple[list[str], bool, list[ConnectPlace]]:
+        """What a client of the project can ask for now: ``(countries, any_country, places)``.
+
+        Hints for choosing a place, not a promise; ``route_preview`` says
+        whether a given place is served. Countries are every enabled
+        connector's declared list and the known country of every healthy
+        exit. ``any_country`` is set when a country nobody lists is served
+        as well: a dynamic gateway with no allow-list renders any, and an
+        "All countries" pool provisions any on demand. Places are the states
+        and cities healthy fixed exits are known to be in, busiest first, at
+        most ``limit``; vendor sessions are left out, since their exit moves
+        and a dynamic gateway renders any city it is asked for.
+        """
+        countries: set[str] = set()
+        any_country = False
+        for connector in self._enabled_connectors(project_id):
+            countries.update(connector.countries)
+            any_country = any_country or self._accepts_request_country(connector)
+        places: Counter[tuple[str, str | None, str | None]] = Counter()
+        for proxy in self.get_healthy_proxies_for_project(project_id):
+            if is_dynamic_gateway(proxy):
+                any_country = any_country or not self.declared_countries(proxy.connector_id)
+                continue
+            country = proxy.country
+            if country is None:
+                continue
+            countries.add(country)
+            state, city = proxy.state_code, proxy.city_slug
+            if (state or city) and not proxy.metadata.get(META_SESSION_ID):
+                places[(country, state, city)] += 1
+        return (
+            sorted(countries),
+            any_country,
+            [
+                ConnectPlace(country=country, state=state, city=city, proxies=count)
+                for (country, state, city), count in places.most_common(limit)
+            ],
+        )
 
     async def select_proxy_for_project(
         self,

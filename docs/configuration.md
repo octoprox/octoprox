@@ -26,6 +26,8 @@ Configuration is loaded from YAML files in the `config/` directory based on the 
 | `OCTOPROX_JWT_SECRET` | Secret key for JWT token signing | change-me-in-production |
 | `OCTOPROX_JWT_EXPIRY_HOURS` | JWT token expiry in hours | 24 |
 | `OCTOPROX_PUBLIC_URL` | The URL users reach Octoprox at (scheme and host, no trailing slash): written into invite links and registered with sign-in providers as the redirect URI. Needed behind a load balancer or reverse proxy, where the request's own address is the wrong one | (the request's base URL) |
+| `OCTOPROX_PROXY_PUBLIC_HOST` | The hostname or IP address clients reach the proxy at, without a scheme or port: shown on the [Connect page]({{ site.baseurl }}/connecting) and in its examples. Needed when the proxy is published under another name than the web UI | (the host the browser reached the web UI at) |
+| `OCTOPROX_PROXY_PUBLIC_PORT` | The port clients reach the proxy at, when a load balancer or NAT publishes it on another port than `server.proxy_port` | (`server.proxy_port`) |
 | `OCTOPROX_TLS_MITM_CA_CERT_PATH` | Path to the MITM CA certificate | data/ca/octoprox-ca.crt |
 | `OCTOPROX_TLS_MITM_CA_KEY_PATH` | Path to the MITM CA private key | data/ca/octoprox-ca.key |
 | `OCTOPROX_PROVIDERS_DIR` | Directory of operator-supplied provider descriptor YAML files | (unset) |
@@ -102,6 +104,8 @@ tls_mitm:
 | `server.host` | Host address to bind to | 0.0.0.0 |
 | `server.api_port` | Port for the REST API and web UI | 8000 |
 | `server.proxy_port` | Port for the proxy server | 8080 |
+| `server.proxy_public_host` | Host clients reach the proxy at, as shown on the Connect page (`OCTOPROX_PROXY_PUBLIC_HOST`) | (empty) |
+| `server.proxy_public_port` | Port clients reach the proxy at (`OCTOPROX_PROXY_PUBLIC_PORT`) | (empty) |
 
 ### Proxy Configuration
 

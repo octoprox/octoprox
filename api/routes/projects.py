@@ -3,6 +3,7 @@
 
 """Project management endpoints."""
 
+import re
 from pathlib import Path
 
 import structlog
@@ -12,6 +13,15 @@ from pydantic import BaseModel
 
 from api.core.auth import RequireEditorDep
 from api.core.config import settings
+from api.core.username_params import (
+    CITY_SEPARATOR,
+    COUNTRY_SEPARATOR,
+    SESSID_SEPARATOR,
+    STATE_SEPARATOR,
+    format_username_params,
+    parse_username_params,
+)
+from api.models.connect import ConnectEndpoint, ConnectInfo, ConnectLocation
 from api.models.project import (
     MitmMode,
     Project,
@@ -25,6 +35,10 @@ from api.routes.common import geo_runtime_of, proxy_manager_of
 logger = structlog.get_logger()
 
 router = APIRouter(prefix="/projects")
+
+_SEPARATORS = (COUNTRY_SEPARATOR, STATE_SEPARATOR, CITY_SEPARATOR, SESSID_SEPARATOR)
+# Every reserved delimiter in a string, overlapping ones included: "-sessid-st-ny" holds two.
+_DELIMITERS = re.compile("(?=" + "|".join(re.escape(separator) for separator in _SEPARATORS) + ")")
 
 
 class ProjectListResponse(BaseModel):
@@ -203,6 +217,64 @@ async def get_project(request: Request, project_id: str) -> ProjectResponse:
         connector_count=len(connectors),
         proxy_count=len(proxies),
         healthy_proxy_count=len(healthy_proxies),
+    )
+
+
+@router.get("/{project_id}/connect", response_model=ConnectInfo)
+async def get_connect_info(
+    request: Request,
+    project_id: str,
+    country: str | None = None,
+    state: str | None = None,
+    city: str | None = None,
+    sessid: str | None = None,
+) -> ConnectInfo:
+    """How a client reaches the project's proxy, for the place and session it asks for.
+
+    The username is composed from the project's and the parameters, then
+    read by the parser the proxy listener uses, so the normalised form and
+    any refusal are exactly what a client would get. ``routes`` lists the
+    connectors a request with that username would reach now.
+    """
+    proxy_manager = proxy_manager_of(request)
+    project = proxy_manager.get_project(project_id)
+    if project is None:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    values = [
+        (separator, value.strip())
+        for separator, value in zip(_SEPARATORS, (country, state, city, sessid), strict=True)
+        if value and value.strip()
+    ]
+    composed = project.username + "".join(f"{separator}{value}" for separator, value in values)
+    params = parse_username_params(composed)
+    error = params.location_error
+    if params.username != project.username:
+        error = "The project username contains a reserved delimiter (-cc-, -st-, -city- or -sessid-), so the proxy cannot read it"
+    elif len(_DELIMITERS.findall(composed, len(project.username))) != len(values):
+        # Only the delimiters put there may follow the username: a value holding one, or
+        # forming one with the dash before or after it ("st-ny" after -sessid- reads as
+        # -st-ny), would be read as another parameter.
+        error = "A value cannot contain -cc-, -st-, -city- or -sessid-, including one formed with the dash before or after it"
+    elif params.sessid and ":" in params.sessid:
+        # Basic auth splits user and password at the first colon.
+        error = "A session ID cannot contain a colon"
+    location = params.location
+    countries, any_country, places = proxy_manager.served_places(project_id)
+
+    return ConnectInfo(
+        endpoint=ConnectEndpoint(
+            host=settings.proxy_public_host or None,
+            port=settings.proxy_public_port or settings.proxy_port,
+        ),
+        username=composed if error else format_username_params(project.username, params.sessid, location),
+        sessid=params.sessid,
+        location=ConnectLocation(country=location.country, state=location.state, city=location.city) if location else None,
+        error=error,
+        routes=[] if error else proxy_manager.route_preview(project_id, location),
+        countries=countries,
+        any_country=any_country,
+        places=places,
     )
 
 

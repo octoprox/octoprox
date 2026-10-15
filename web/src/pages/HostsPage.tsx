@@ -1,7 +1,7 @@
 // Copyright 2026 Octoprox Authors
 // SPDX-License-Identifier: Apache-2.0
 
-import { useEffect, useMemo, useState } from 'react'
+import { useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import { ColumnDef } from '@tanstack/react-table'
@@ -15,6 +15,7 @@ import {
   HISTORY_RANGES,
 } from '../api/client'
 import { useProject } from '../contexts/ProjectContext'
+import { useDebounced } from '../hooks/useDebounced'
 import { TIME_RANGE_MS, formatRangeTick, useTimeRange } from '../contexts/TimeRangeContext'
 import { useTheme } from '../contexts/ThemeContext'
 import { bytesShort, compact, formatBytes, parseApiDate, plural } from '../utils/format'
@@ -42,16 +43,6 @@ function formatShare(v: number): string {
   if (v === 0) return '0%'
   if (v < 1) return '<1%'
   return `${v < 10 ? v.toFixed(1) : Math.round(v)}%`
-}
-
-/** Wait for typing to pause before the value is used (for the server-side host search). */
-function useDebounced<T>(value: T, delayMs: number): T {
-  const [debounced, setDebounced] = useState(value)
-  useEffect(() => {
-    const handle = setTimeout(() => setDebounced(value), delayMs)
-    return () => clearTimeout(handle)
-  }, [value, delayMs])
-  return debounced
 }
 
 type ChartPoint = { time: number } & Record<string, number>

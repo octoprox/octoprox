@@ -1171,6 +1171,53 @@ export const deleteProject = async (id: string, confirmation: string): Promise<v
   await api.delete(`/projects/${id}`, { data: { confirmation } })
 }
 
+/** One connector a request with the generated username would reach now. */
+export interface ConnectRoute {
+  connector_id: string
+  connector_name: string
+  /** Dynamic sessions: the place is rendered into a fresh vendor session per request. */
+  dynamic: boolean
+  /** Nothing serves the country yet: this pool provisions a slot group for it on the first request. */
+  on_demand: boolean
+  proxies: number
+  /** Expected share of requests by routing weight, 0..1. */
+  share: number
+}
+
+/** A state or city some of the project's fixed exits are known to be in. */
+export interface ConnectPlace {
+  country: string
+  state: string | null
+  city: string | null
+  proxies: number
+}
+
+export interface ConnectInfo {
+  /** host is null when no public host is configured: use the host the UI was reached at. */
+  endpoint: { host: string | null; port: number }
+  /** Canonical when it parses, as composed when it does not. */
+  username: string
+  sessid: string | null
+  location: { country: string | null; state: string | null; city: string | null } | null
+  /** The proxy's 400 message for this username, or null. */
+  error: string | null
+  routes: ConnectRoute[]
+  countries: string[]
+  /** A country outside `countries` is served too. */
+  any_country: boolean
+  places: ConnectPlace[]
+}
+
+export interface ConnectParams {
+  country?: string
+  state?: string
+  city?: string
+  sessid?: string
+}
+
+export const fetchConnectInfo = async (projectId: string, params: ConnectParams): Promise<ConnectInfo> =>
+  (await api.get(`/projects/${projectId}/connect`, { params })).data
+
 // Project-scoped Proxy API functions
 export const fetchProjectProxies = async (projectId: string): Promise<ProxyListResponse> => {
   const response = await api.get(`/projects/${projectId}/proxies`)

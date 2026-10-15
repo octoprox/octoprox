@@ -9,6 +9,7 @@ from api.core.username_params import (
     LOCATION_INVALID_STATE,
     LOCATION_NEEDS_COUNTRY,
     UsernameParams,
+    format_username_params,
     parse_proxy_username,
     parse_username_params,
 )
@@ -153,3 +154,24 @@ class TestParseUsernameParams:
 
     def test_empty_state_and_city_values_are_absent(self) -> None:
         assert parse_username_params("myuser-cc-us-st--city-") == UsernameParams("myuser", None, LocationTarget(country="US"))
+
+
+class TestFormatUsernameParams:
+    """format_username_params is the inverse of the parser, in the spelling the docs use."""
+
+    def test_plain_username(self) -> None:
+        assert format_username_params("myuser", None, None) == "myuser"
+
+    def test_place_then_session_in_lower_case(self) -> None:
+        location = LocationTarget(country="US", state="NY", city="new_york")
+        assert format_username_params("myuser", "job-1", location) == "myuser-cc-us-st-ny-city-new_york-sessid-job-1"
+        assert format_username_params("myuser", None, LocationTarget(country="DE", city="berlin")) == "myuser-cc-de-city-berlin"
+
+    def test_round_trip(self) -> None:
+        for raw in ("myuser-cc-gb-st-eng", "myuser-sessid-a-b-c", "my-user-cc-us-city-los_angeles-sessid-x"):
+            params = parse_username_params(raw)
+            assert format_username_params(params.username, params.sessid, params.location) == raw
+
+    def test_normalises_what_the_client_typed(self) -> None:
+        params = parse_username_params("myuser-sessid-s1-city-New York-st-US-NY-cc-us")
+        assert format_username_params(params.username, params.sessid, params.location) == "myuser-cc-us-st-ny-city-new_york-sessid-s1"

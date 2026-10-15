@@ -6,7 +6,11 @@
 import uuid
 from typing import Any
 
+import pytest
 from starlette.testclient import TestClient
+
+from api.core.config import Settings
+from api.core.username_params import LOCATION_INVALID_COUNTRY, LOCATION_NEEDS_COUNTRY
 
 
 class TestProjectEndpoints:
@@ -276,3 +280,63 @@ class TestProjectRoleAccess:
         )
         assert response.status_code == 201
 
+
+
+class TestConnectInfo:
+    """GET /projects/{id}/connect: the username for a place and session, read as the proxy reads it."""
+
+    def _get(self, client: TestClient, project: dict[str, Any], **params: str) -> dict[str, Any]:
+        response = client.get(f"/api/v1/projects/{project['id']}/connect", params=params)
+        assert response.status_code == 200
+        return response.json()
+
+    def test_plain_username_and_default_endpoint(
+        self, authenticated_client: TestClient, created_project: dict[str, Any], test_settings: Settings
+    ) -> None:
+        data = self._get(authenticated_client, created_project)
+        assert data["username"] == created_project["username"]
+        assert data["location"] is None and data["sessid"] is None and data["error"] is None
+        assert data["endpoint"] == {"host": None, "port": test_settings.proxy_port}
+        assert data["routes"] == [] and data["places"] == [] and data["countries"] == []
+        assert data["any_country"] is False
+
+    def test_configured_endpoint(
+        self,
+        authenticated_client: TestClient,
+        created_project: dict[str, Any],
+        test_settings: Settings,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(test_settings, "proxy_public_host", "proxy.example.com")
+        monkeypatch.setattr(test_settings, "proxy_public_port", 18080)
+        data = self._get(authenticated_client, created_project)
+        assert data["endpoint"] == {"host": "proxy.example.com", "port": 18080}
+
+    def test_place_and_session_are_normalised(
+        self, authenticated_client: TestClient, created_project: dict[str, Any]
+    ) -> None:
+        data = self._get(authenticated_client, created_project, country="uk", state="ENG", city="City of London", sessid=" job-1 ")
+        assert data["username"] == f"{created_project['username']}-cc-gb-st-eng-city-london-sessid-job-1"
+        assert data["location"] == {"country": "GB", "state": "ENG", "city": "london"}
+        assert data["sessid"] == "job-1" and data["error"] is None
+
+    def test_refusals_are_the_proxy_messages(
+        self, authenticated_client: TestClient, created_project: dict[str, Any]
+    ) -> None:
+        username = created_project["username"]
+        data = self._get(authenticated_client, created_project, state="ny")
+        assert data["error"] == LOCATION_NEEDS_COUNTRY and data["username"] == f"{username}-st-ny"
+        assert self._get(authenticated_client, created_project, country="usa")["error"] == LOCATION_INVALID_COUNTRY
+        assert "cannot contain -cc-" in self._get(authenticated_client, created_project, sessid="a-cc-de")["error"]
+        assert "cannot contain -cc-" in self._get(authenticated_client, created_project, country="us", city="x-sessid-y")["error"]
+        # A delimiter formed with the dash around a value: "-sessid-st-ny" would read as state NY with no session.
+        assert "cannot contain -cc-" in self._get(authenticated_client, created_project, country="us", sessid="st-ny")["error"]
+        assert "cannot contain -cc-" in self._get(authenticated_client, created_project, country="us", city="paris-st", sessid="1")["error"]
+        # At the end of the username nothing follows, so a trailing "-cc" is only part of the session ID.
+        data = self._get(authenticated_client, created_project, sessid="job-cc")
+        assert data["error"] is None and data["username"] == f"{username}-sessid-job-cc"
+        data = self._get(authenticated_client, created_project, sessid="a:b")
+        assert data["error"] == "A session ID cannot contain a colon" and data["routes"] == []
+
+    def test_viewer_can_read_it(self, viewer_client: TestClient) -> None:
+        assert viewer_client.get("/api/v1/projects/non-existent-id/connect").status_code == 404

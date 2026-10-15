@@ -17,6 +17,7 @@ import CredentialsPage from './pages/CredentialsPage'
 import InspectorPage from './pages/InspectorPage'
 import LocationsPage from './pages/LocationsPage'
 import DevicesPage from './pages/DevicesPage'
+import ConnectPage from './pages/ConnectPage'
 import AccountSection from './pages/settings/AccountSection'
 import AppearanceSection from './pages/settings/AppearanceSection'
 import UsersSection from './pages/settings/UsersSection'
@@ -169,6 +170,7 @@ function AuthenticatedApp() {
               <Route path="proxies" element={<ProxiesPage />} />
               <Route path="connectors" element={<ConnectorsPage />} />
               <Route path="credentials" element={<CredentialsPage />} />
+              <Route path="connect" element={<ConnectPage />} />
               <Route path="mitm-inspector" element={<InspectorPage />} />
               <Route path="locations" element={<LocationsPage />} />
               <Route path="devices" element={<DevicesPage />} />

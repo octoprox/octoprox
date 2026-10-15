@@ -26,6 +26,7 @@ const PAGE_DOCS: Record<string, DocLink[]> = {
   proxies: [{ title: 'Rate limiting and quarantine', path: 'rate-limiting' }, { title: 'Location routing', path: 'location-routing' }],
   connectors: [{ title: 'Providers and connectors', path: 'providers' }, { title: 'Traffic limits and billing', path: 'traffic-limits' }, { title: 'Domain filtering', path: 'domain-filtering' }],
   credentials: [{ title: 'Providers and credentials', path: 'providers' }],
+  connect: [{ title: 'Connecting clients', path: 'connecting' }, { title: 'Country, state and city routing', path: 'routing-strategies#country-routing' }],
   'mitm-inspector': [{ title: 'TLS interception', path: 'tls-interception' }],
   locations: [{ title: 'IP attribution and exit verification', path: 'ip-attribution' }],
   devices: [{ title: 'WireGuard devices', path: 'wireguard' }, { title: 'OpenVPN devices', path: 'openvpn' }],

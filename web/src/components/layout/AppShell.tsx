@@ -7,7 +7,7 @@ import { useQuery } from '@tanstack/react-query'
 import {
   BarChart3, Server, Link2, Key, Eye, Settings as SettingsIcon, LogOut, ChevronLeft, ChevronRight,
   ChevronsUpDown, FolderOpen, ArrowLeft, User as UserIcon, Palette, Users as UsersIcon, DatabaseBackup, Puzzle,
-  Activity, Globe, Router, ShieldCheck, Target, LogIn,
+  Activity, Globe, Router, ShieldCheck, Target, LogIn, Plug,
 } from 'lucide-react'
 import octoproxLogo from '../../assets/logos/octoprox_horizontal.svg'
 import octoproxLogoDark from '../../assets/logos/octoprox_horizontal_dark.svg'
@@ -30,6 +30,7 @@ const PAGE_TITLES: Record<string, string> = {
   proxies: 'Proxies',
   connectors: 'Connectors',
   credentials: 'Credentials',
+  connect: 'Connect',
   'mitm-inspector': 'MITM Inspector',
   locations: 'Exit locations',
   devices: 'Devices',
@@ -182,6 +183,7 @@ export default function AppShell({ onLogout }: { onLogout: () => void }) {
               <NavItem to={`${base}/connectors`} icon={<Link2 />} label="Connectors" collapsed={collapsed} />
               <NavItem to={`${base}/credentials`} icon={<Key />} label="Credentials" collapsed={collapsed} />
               <NavGroup label="Tools" collapsed={collapsed} />
+              <NavItem to={`${base}/connect`} icon={<Plug />} label="Connect" collapsed={collapsed} />
               <NavItem to={`${base}/locations`} icon={<Globe />} label="Exit locations" collapsed={collapsed} />
               <NavItem to={`${base}/mitm-inspector`} icon={<Eye />} label="MITM Inspector" collapsed={collapsed} />
               <NavGroup label="Tunnels" collapsed={collapsed} />
