@@ -26,7 +26,15 @@ from python_socks.async_.asyncio import Proxy as SocksProxy
 
 from api.core.config import settings
 from api.core.event_bus import event_bus
-from api.core.signals import request_completed, request_rejected
+from api.core.failure_log import (
+    FailureKind,
+    RequestFailure,
+    RequestInfo,
+    build_failure,
+    classify_upstream_error,
+    set_request_info,
+)
+from api.core.signals import request_completed, request_failed, request_rejected
 from api.core.traffic_limiter import TrafficMeter
 from api.core.username_params import AuthResult, parse_username_params
 from api.geo.verifier import ExitVerifier
@@ -73,6 +81,14 @@ HOP_BY_HOP_RESPONSE_HEADERS = frozenset({
 # Names a peer may list in its Connection header that we refuse to drop
 # regardless, because they frame the message rather than the hop.
 BODY_FRAMING_HEADERS = frozenset({"content-length", "transfer-encoding", "trailer", "host"})
+
+
+class _ClientClosedError(ConnectionError):
+    """The client went away before its request body was sent; logged as the client's doing."""
+
+
+class _ClientStalledError(TimeoutError):
+    """The client stopped sending its request body; answered as a timeout, logged as the client's doing."""
 
 
 class ProxyServer:
@@ -275,30 +291,65 @@ class ProxyServer:
         if await self._proxy_manager.are_all_proxies_quarantined(
             project_id, target_host, session_id, location
         ):
-            await self._send_error(
-                client_writer, 429, "Too Many Requests",
-                "All proxies are temporarily rate-limited. Retry later.",
-            )
+            message = "All proxies are temporarily rate-limited. Retry later."
+            await self._send_error(client_writer, 429, "Too Many Requests", message)
             await event_bus.publish(request_rejected,
                 self, project_id=project_id, reason="all_proxies_quarantined"
+            )
+            await self._publish_failure(
+                build_failure(project_id, FailureKind.ALL_PROXIES_QUARANTINED, 429, message)
             )
             return
         limit_status = self._proxy_manager.traffic_limit_status(project_id, target_host, location)
         if limit_status is not None:
+            message = "Every connector that could serve this request has reached its traffic limit."
             await self._send_error(
                 client_writer, limit_status, TRAFFIC_LIMIT_REASONS.get(limit_status, "Bandwidth Limit Exceeded"),
-                "Every connector that could serve this request has reached its traffic limit.",
+                message,
                 extra_headers=[TRAFFIC_LIMIT_PROXY_STATUS],
             )
             await event_bus.publish(request_rejected,
                 self, project_id=project_id, reason="traffic_limit_exceeded"
             )
+            await self._publish_failure(
+                build_failure(project_id, FailureKind.TRAFFIC_LIMIT_EXCEEDED, limit_status, message)
+            )
             return
-        await self._send_error(
-            client_writer, 502, "Bad Gateway", self._no_proxy_message(location)
-        )
+        message = self._no_proxy_message(location)
+        await self._send_error(client_writer, 502, "Bad Gateway", message)
         await event_bus.publish(request_rejected,
             self, project_id=project_id, reason="no_proxy_available"
+        )
+        await self._publish_failure(build_failure(project_id, FailureKind.NO_PROXY_AVAILABLE, 502, message))
+
+    async def _publish_failure(self, failure: RequestFailure) -> None:
+        """Hand a failure to the project's failure log."""
+        await event_bus.publish(request_failed, self, failure=failure)
+
+    def _upstream_failure(
+        self, exc: BaseException, project_id: str, proxy: Proxy, latency_ms: float, status: int
+    ) -> RequestFailure:
+        """Describe a request whose upstream leg failed with ``exc`` and was answered ``status``."""
+        if isinstance(exc, _ClientClosedError | _ClientStalledError):
+            kind, upstream_status = FailureKind.CLIENT_CLOSED, None
+        else:
+            kind, upstream_status = classify_upstream_error(exc, proxy)
+        message = str(exc)
+        if not message:
+            if kind is FailureKind.UPSTREAM_TIMEOUT:
+                message = f"No answer from the upstream proxy within {self._timeout:g} seconds"
+            else:
+                message = type(exc).__name__
+        return build_failure(
+            project_id, kind, status, message,
+            proxy=proxy, exc=exc, latency_ms=latency_ms, upstream_status=upstream_status,
+        )
+
+    def _interrupted_failure(self, project_id: str, proxy: Proxy, start_time: float) -> RequestFailure:
+        """A request cancelled before it got going: the server was shutting down."""
+        return build_failure(
+            project_id, FailureKind.INTERRUPTED, 502, "Octoprox stopped while the request was being set up",
+            proxy=proxy, latency_ms=(time.monotonic() - start_time) * 1000,
         )
 
     async def _verify_exit(
@@ -318,8 +369,12 @@ class ProxyServer:
         )
         if not decision.rejected:
             return decision.proxy
-        await self._send_error(client_writer, 502, "Bad Gateway", decision.rejection or "Exit location mismatch")
+        message = decision.rejection or "Exit location mismatch"
+        await self._send_error(client_writer, 502, "Bad Gateway", message)
         await event_bus.publish(request_rejected, self, project_id=project.id, reason="preflight_mismatch")
+        await self._publish_failure(
+            build_failure(project.id, FailureKind.PREFLIGHT_MISMATCH, 502, message, proxy=proxy)
+        )
         return None
 
     async def _connect_via_proxy(
@@ -423,11 +478,21 @@ class ProxyServer:
                 location=location.key if location else None,
             )
 
+            set_request_info(RequestInfo(
+                target=self._target_of(method, target),
+                method=method.upper(),
+                session_id=session_id,
+                location=location.key if location else None,
+            ))
+
             if auth_result.location_error:
                 # A state or city without a country: nothing could serve it
                 # faithfully, and routing it anywhere would be a silent widening.
                 await self._send_error(client_writer, 400, "Bad Request", auth_result.location_error)
                 await event_bus.publish(request_rejected, self, project_id=project_id, reason="invalid_location")
+                await self._publish_failure(
+                    build_failure(project_id, FailureKind.INVALID_LOCATION, 400, auth_result.location_error)
+                )
                 return
 
             if method.upper() == "CONNECT":
@@ -455,6 +520,19 @@ class ProxyServer:
                 await client_writer.wait_closed()
             except Exception:
                 pass
+
+    def _target_of(self, method: str, target: str) -> str:
+        """host:port of a request line's target, for the failure log; the path and query are left out."""
+        if method.upper() == "CONNECT":
+            return target
+        try:
+            host, port, _ = self._parse_http_url(target)
+        except ValueError:
+            # Unparseable (an IPv6 literal without a port...): keep what
+            # precedes the path, never the query or any userinfo.
+            host_port = target.split("://", 1)[-1].split("/", 1)[0].split("?", 1)[0]
+            return host_port.rpartition("@")[2]
+        return f"{host.rpartition('@')[2]}:{port}"
 
     async def _read_headers(self, reader: asyncio.StreamReader) -> dict[str, str]:
         """Read HTTP headers from the stream."""
@@ -592,6 +670,7 @@ class ProxyServer:
         # carries only what the meter has not reported yet.
         meter = self._proxy_manager.traffic_meter(proxy, project.id, peer_id=peer_id, target_host=target_host)
         upstream_writer: asyncio.StreamWriter | None = None
+        failure: RequestFailure | None = None
 
         try:
             # Connect through upstream proxy (handles all protocols)
@@ -627,16 +706,18 @@ class ProxyServer:
                     meter=meter,
                 )
 
-        except TimeoutError:
+        except TimeoutError as e:
             latency_ms = (time.monotonic() - start_time) * 1000
             await self._send_error(
                 client_writer, 504, "Gateway Timeout", "Connection to upstream proxy timed out"
             )
-        except ConnectionRefusedError:
+            failure = self._upstream_failure(e, project.id, proxy, latency_ms, 504)
+        except ConnectionRefusedError as e:
             latency_ms = (time.monotonic() - start_time) * 1000
             await self._send_error(
                 client_writer, 502, "Bad Gateway", "Upstream proxy refused connection"
             )
+            failure = self._upstream_failure(e, project.id, proxy, latency_ms, 502)
         except ConnectionError as e:
             latency_ms = (time.monotonic() - start_time) * 1000
             if client_writer.transport.is_closing():
@@ -645,6 +726,7 @@ class ProxyServer:
             else:
                 logger.error("CONNECT error", error=str(e), target=target)
                 await self._send_error(client_writer, 502, "Bad Gateway", str(e))
+                failure = self._upstream_failure(e, project.id, proxy, latency_ms, 502)
         except Exception as e:
             latency_ms = (time.monotonic() - start_time) * 1000
             if client_writer.transport.is_closing():
@@ -653,6 +735,7 @@ class ProxyServer:
             else:
                 logger.error("CONNECT error", error=str(e), target=target)
                 await self._send_error(client_writer, 502, "Bad Gateway", str(e))
+                failure = self._upstream_failure(e, project.id, proxy, latency_ms, 502)
         finally:
             if upstream_writer:
                 upstream_writer.close()
@@ -670,6 +753,9 @@ class ProxyServer:
                     peer_id=peer_id,
                     target_host=target_host,
                 )
+                # Exactly the requests counted as failures above are logged.
+                if not success:
+                    await self._publish_failure(failure or self._interrupted_failure(project.id, proxy, start_time))
             else:
                 # Nothing will report the remainder; hand it over now so the
                 # bytes are not lost with the meter.
@@ -833,6 +919,7 @@ class ProxyServer:
         latency_ms = 0.0
         meter = self._proxy_manager.traffic_meter(proxy, project_id, target_host=parsed_host)
         upstream_writer: asyncio.StreamWriter | None = None
+        failure: RequestFailure | None = None
 
         # Check if this is a SOCKS proxy
         is_socks = proxy.protocol in (ProxyProtocol.SOCKS4, ProxyProtocol.SOCKS5)
@@ -889,12 +976,17 @@ class ProxyServer:
             content_length = int(headers.get("content-length", 0))
             remaining = content_length
             while remaining > 0:
-                chunk = await asyncio.wait_for(
-                    client_reader.read(min(BUFFER_SIZE, remaining)),
-                    timeout=self._timeout,
-                )
+                try:
+                    chunk = await asyncio.wait_for(
+                        client_reader.read(min(BUFFER_SIZE, remaining)),
+                        timeout=self._timeout,
+                    )
+                except TimeoutError as e:
+                    raise _ClientStalledError(
+                        f"The client sent no more of the request body for {self._timeout:g} seconds"
+                    ) from e
                 if not chunk:
-                    raise ConnectionError("Client closed the connection mid-body")
+                    raise _ClientClosedError("Client closed the connection mid-body")
                 remaining -= len(chunk)
                 upstream_writer.write(chunk)
                 await upstream_writer.drain()
@@ -902,11 +994,16 @@ class ProxyServer:
                     # Cut by the connector's traffic limit before any response
                     # was started, so the client can still be told why.
                     status = meter.limit_status
+                    message = "The connector serving this request has reached its traffic limit."
                     await self._send_error(
                         client_writer, status,
                         TRAFFIC_LIMIT_REASONS.get(status, "Bandwidth Limit Exceeded"),
-                        "The connector serving this request has reached its traffic limit.",
+                        message,
                         extra_headers=[TRAFFIC_LIMIT_PROXY_STATUS],
+                    )
+                    failure = build_failure(
+                        project_id, FailureKind.TRAFFIC_LIMIT_EXCEEDED, status, message,
+                        proxy=proxy, latency_ms=(time.monotonic() - start_time) * 1000,
                     )
                     return
 
@@ -975,24 +1072,28 @@ class ProxyServer:
                         # client sees a truncated body and a closed connection.
                         break
 
-        except TimeoutError:
+        except TimeoutError as e:
             latency_ms = (time.monotonic() - start_time) * 1000
             await self._send_error(
                 client_writer, 504, "Gateway Timeout", "Connection to upstream proxy timed out"
             )
-        except ConnectionRefusedError:
+            failure = self._upstream_failure(e, project_id, proxy, latency_ms, 504)
+        except ConnectionRefusedError as e:
             latency_ms = (time.monotonic() - start_time) * 1000
             await self._send_error(
                 client_writer, 502, "Bad Gateway", "Upstream proxy refused connection"
             )
+            failure = self._upstream_failure(e, project_id, proxy, latency_ms, 502)
         except ConnectionError as e:
             latency_ms = (time.monotonic() - start_time) * 1000
             logger.error("HTTP forward error", error=str(e), target=target)
             await self._send_error(client_writer, 502, "Bad Gateway", str(e))
+            failure = self._upstream_failure(e, project_id, proxy, latency_ms, 502)
         except Exception as e:
             latency_ms = (time.monotonic() - start_time) * 1000
             logger.error("HTTP forward error", error=str(e), target=target)
             await self._send_error(client_writer, 502, "Bad Gateway", str(e))
+            failure = self._upstream_failure(e, project_id, proxy, latency_ms, 502)
         finally:
             if upstream_writer:
                 upstream_writer.close()
@@ -1009,6 +1110,8 @@ class ProxyServer:
                     bytes_received=bytes_received,
                     target_host=parsed_host,
                 )
+                if not success:
+                    await self._publish_failure(failure or self._interrupted_failure(project_id, proxy, start_time))
 
     async def _forward_chunked(
         self,

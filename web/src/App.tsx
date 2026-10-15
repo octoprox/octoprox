@@ -11,6 +11,7 @@ import RequireAdmin from './components/RequireAdmin'
 import AppShell from './components/layout/AppShell'
 import Overview from './pages/Overview'
 import HostsPage from './pages/HostsPage'
+import FailuresPage from './pages/FailuresPage'
 import ProxiesPage from './pages/ProxiesPage'
 import ConnectorsPage from './pages/ConnectorsPage'
 import CredentialsPage from './pages/CredentialsPage'
@@ -164,6 +165,7 @@ function AuthenticatedApp() {
               <Route index element={<Navigate to="overview" replace />} />
               <Route path="overview" element={<Overview />} />
               <Route path="hosts" element={<HostsPage />} />
+              <Route path="failures" element={<FailuresPage />} />
               {/* Legacy routes from the previous navigation */}
               <Route path="dashboard" element={<Navigate to="../overview" replace />} />
               <Route path="metrics" element={<Navigate to="../overview" replace />} />

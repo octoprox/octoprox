@@ -26,6 +26,7 @@ import { ProjectLocations, LocationSummary } from '../components/ProjectLocation
 import { TrafficSplitPanel, totalSpend } from '../components/TrafficSplit'
 import { PERIOD_LABEL, TrafficUsageBar, describeUsage } from '../components/ConnectorTraffic'
 import { Badge, Button, Card, CardHeader, KeyValue, Segmented } from '../components/ui'
+import { cn } from '../utils/cn'
 
 // Gap thresholds per range: 2x the expected interval between points.
 const GAP_THRESHOLD_MS: Record<HistoryRange, number> = {
@@ -277,7 +278,7 @@ export default function Overview() {
       <Card className={`grid grid-cols-2 @lg:grid-cols-3 ${spend ? '@5xl:grid-cols-7' : '@5xl:grid-cols-6'} gap-px bg-line overflow-hidden [&>*]:bg-surface`}>
         <Kpi label="Requests" value={compact(totals.requests)} spark={sparks.requests} color={C.requests} />
         <Kpi label="Successes" value={compact(totals.successes)} spark={sparks.successes} color={C.successes} />
-        <Kpi label="Failures" value={compact(totals.failures)} spark={sparks.failures} color={C.failures} />
+        <Kpi label="Failures" value={compact(totals.failures)} spark={sparks.failures} color={C.failures} sub={totals.failures > 0 ? 'See why →' : undefined} onClick={() => navigate(`${base}/failures`)} />
         <Kpi label="Bytes sent" value={bytesShort(totals.bytesSent)} spark={sparks.sent} color={C.sent} />
         <Kpi label="Bytes received" value={bytesShort(totals.bytesReceived)} spark={sparks.received} color={C.received} />
         <Kpi label="Requests / min" value={scaling ? scaling.requests_per_minute.toFixed(1) : '-'} sub={scaling ? `${scaling.rate_per_proxy.toFixed(1)} per proxy` : undefined} />
@@ -486,9 +487,13 @@ function ChartLegend({ items, small }: { items: [string, string][]; small?: bool
   )
 }
 
-function Kpi({ label, value, sub, spark, color }: { label: string; value: string; sub?: string; spark?: number[]; color?: string }) {
+function Kpi({ label, value, sub, spark, color, onClick }: { label: string; value: string; sub?: string; spark?: number[]; color?: string; onClick?: () => void }) {
+  const Tile = onClick ? 'button' : 'div'
   return (
-    <div className="px-3 py-2.5 @lg:px-4 @lg:py-3 flex flex-col gap-1 min-w-0">
+    <Tile
+      {...(onClick ? { type: 'button' as const, onClick } : {})}
+      className={cn('px-3 py-2.5 @lg:px-4 @lg:py-3 flex flex-col gap-1 min-w-0 text-left', onClick && 'hover:!bg-surface-raised transition-colors')}
+    >
       <div className="text-xs text-fg-muted truncate">{label}</div>
       {/* Wrapping drops the sparkline under the value when both do not fit, so a tight tile never truncates the number */}
       <div className="flex items-end justify-between flex-wrap gap-x-2 gap-y-1">
@@ -498,7 +503,7 @@ function Kpi({ label, value, sub, spark, color }: { label: string; value: string
         </div>
         {spark && spark.length > 1 && color && <Sparkline values={spark} color={color} width={48} height={24} />}
       </div>
-    </div>
+    </Tile>
   )
 }
 

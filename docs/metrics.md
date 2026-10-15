@@ -48,6 +48,33 @@ This is the fifth history table (`host_metrics`), with the same flush, compactio
 
 The same counting rules apply here as above: a keep-alive tunnel is one request against its host however many HTTP requests it carried, while its bytes are exact.
 
+## Failures: Why Requests Failed
+
+The **Failures** page (under Overview in the web UI) says what the failure counts are made of. Every request that fails or is refused is logged with what went wrong, what the client was answered, the vendor's own answer when it gave one, the target, the session and location asked for, the tunnel device it came from, and the connector and proxy that carried it. A summary at the top tallies the loaded entries by kind; click a kind to filter the table, and a row to see the entry in full with a note on what that kind usually means.
+
+| Kind | What happened | Client answered |
+|------|---------------|-----------------|
+| Upstream timeout | The upstream proxy did not answer within `proxy.connection.timeout_seconds` | 504 |
+| Proxy unreachable | The connection to the upstream proxy was refused, or its host could not be reached | 502 |
+| Refused by the vendor | The upstream proxy answered the CONNECT (or SOCKS handshake) with an error. For an HTTP upstream the vendor's status is kept: 407 means it rejected the connector's credentials | 502 |
+| Upstream error | The upstream leg failed another way, for example a reset mid-handshake | 502 |
+| Client went away | The client closed the connection, or stopped sending, before sending the whole request body | 502 (504 when it stopped) |
+| Interrupted | Octoprox stopped while the request was being set up | - |
+| No proxy available | No healthy proxy matched the host's domain filters and the requested location | 502 |
+| All proxies quarantined | Every proxy that could serve the request is resting after its rate limit | 429 |
+| Traffic limit reached | The connectors that could serve the request are over their period's traffic | 509 (or as configured) |
+| Wrong exit location | Exit verification found the proxy exiting somewhere other than the requested location | 502 |
+| Invalid location | The username named a state or city without a country | 400 |
+| Intercepted request failed | With [TLS interception]({{ site.baseurl }}/tls-interception), one request inside the connection could not be relayed upstream | 502 |
+
+The first six are exactly the requests Overview counts as failures, so every failure counted there has an entry here. The next five are requests Octoprox refused before using any proxy, which the request metrics do not count at all (a traffic limit that cuts a request already under way is counted). The last is a request inside an intercepted connection; the connection itself is counted, as a success. A connection from a tunnel device is closed rather than answered, so for one the status is what a proxy client would have been told.
+
+Two things are not logged: a request with wrong credentials, which belongs to no project, and a request that went through and got an error status from the target site, which is the site's answer rather than a failure of the pool.
+
+Vendor credentials never reach the log: they are scrubbed from error texts, and the proxy is recorded by host and port. For an intercepted request the URL is kept without its query string, and any URL an error text quotes loses its query too.
+
+The log is built to survive a broken upstream failing everything sent to it. Each instance collects failures for 5 seconds and writes them to Redis in one round trip, so nothing on the request path waits for it. Within that window, failures that differ only in time and session are folded into one entry with a count, so ten thousand identical timeouts are one row reading ×10K. Each project gets at most `failure_log.max_per_window` distinct entries per window on each instance; beyond that, failures are only counted by kind, in one "Not itemised" entry per window. Each project's log keeps its newest `failure_log.max_entries` entries (1,000 by default) for `failure_log.retention_hours` (7 days), and the page loads 500 at a time. See [Configuration]({{ site.baseurl }}/configuration#failure-log) for the settings and [`GET /projects/{id}/failures`]({{ site.baseurl }}/api#failure-log) for the API. Clearing the log on the page does not touch the request counts.
+
 ## Why This Limitation Exists
 
 When HTTPS tunneling is used without TLS interception (MITM disabled), Octoprox creates a raw TCP tunnel between the client and the upstream server. The traffic inside this tunnel is encrypted - the proxy sees only opaque ciphertext and has no way to distinguish where one HTTP request ends and another begins.

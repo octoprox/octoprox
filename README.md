@@ -17,6 +17,7 @@ A dynamic and flexible proxy manager that acts as an intelligent proxy aggregato
 - **Health Monitoring**: Automatic health checks with configurable intervals and thresholds
 - **Performance Metrics**: Track latency, success rates, and request counts per proxy
 - **Host Analytics**: A per-project Hosts page showing where the traffic goes: requests, bytes and latency by destination host, split by connector, charted over time (see [docs/metrics.md](docs/metrics.md))
+- **Failure Log**: A per-project Failures page saying why requests failed or were refused: the vendor's answer, timeouts, unreachable proxies, no proxy for the location, with repeats folded into one entry (see [docs/metrics.md](docs/metrics.md#failures-why-requests-failed))
 - **REST API**: Full CRUD operations for managing projects, credentials, connectors, and proxies
 - **Web Dashboard**: React-based UI for monitoring and configuration
 - **Single Sign-On & API Tokens**: The people you add sign in with their Google, Microsoft or GitHub account instead of a password; scripts authenticate with personal access tokens (see [docs/sso.md](docs/sso.md))

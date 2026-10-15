@@ -47,6 +47,7 @@ from api.routes import (
     connectors,
     credentials,
     echo,
+    failures,
     geo,
     health,
     metrics,
@@ -277,6 +278,9 @@ def create_app() -> FastAPI:
         providers.router, prefix="/api/v1", tags=["Providers"], dependencies=auth_dependency
     )
     app.include_router(mitm.router, prefix="/api/v1", tags=["MITM"], dependencies=auth_dependency)
+    app.include_router(
+        failures.router, prefix="/api/v1", tags=["Failures"], dependencies=auth_dependency
+    )
     app.include_router(
         users.router, prefix="/api/v1", tags=["Users"], dependencies=auth_dependency
     )

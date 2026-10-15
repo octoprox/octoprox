@@ -25,6 +25,7 @@ from api.core.demand_tracker import DemandTracker
 from api.core.domain_filter import is_domain_allowed
 from api.core.entity_index import ConnectorIndex, ProxyIndex
 from api.core.event_bus import EVENT_CHANNEL, RedisPubSubTransport, event_bus
+from api.core.failure_log import FailureLog
 from api.core.health_checker import HealthChecker, IpExtractionRules
 from api.core.job_stats import job_stats
 from api.core.leadership import Lease
@@ -176,6 +177,15 @@ class ProxyManager:
             session_factory, redis_client, settings.instance_id
         )
         self._demand_tracker = DemandTracker(redis_client)
+        # Why requests failed, per project (the Failures page). Connector
+        # names are written into the entries, so a log outlives a rename.
+        self._failure_log = FailureLog(
+            redis_client,
+            settings,
+            connector_name=lambda connector_id: (
+                connector.name if (connector := self._connectors.get(connector_id)) else None
+            ),
+        )
         self._auto_scaler = AutoScaler(self, redis_client, settings.instance_id)
         self._provider_syncer = ProxyProviderSyncer(
             self, redis_client, settings.instance_id, self._provider_registry
@@ -313,6 +323,10 @@ class ProxyManager:
         # Receive peer instances' metric deltas and fold them into local
         # in-memory counters.
         self._spawn(WorkerName.METRIC_DELTA_SUBSCRIBER, self._metric_delta_subscriber_loop())
+
+        # Write the failures this instance saw to the projects' failure logs.
+        if self._failure_log.enabled:
+            self._spawn(WorkerName.FAILURE_LOG_PUBLISHER, self._failure_log.run())
 
         # Subscribe to cross-instance cache-invalidation events.
         self._spawn(WorkerName.CROSS_INSTANCE_SUBSCRIBER, self._cross_instance_subscriber_loop())
@@ -553,6 +567,7 @@ class ProxyManager:
 
         # Also subscribe DemandTracker to request_completed signal
         self._demand_tracker.subscribe_to_signals()
+        self._failure_log.subscribe_to_signals()
         logger.debug("ProxyManager subscribed to signals")
 
     async def _on_health_check_completed(
@@ -853,12 +868,15 @@ class ProxyManager:
 
         self._metrics_flusher.stop()
         self._auto_scaler.stop()
+        self._failure_log.stop()
 
         for task in self._tasks:
             task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await task
         self._tasks.clear()
+        # The proxy server stops first; whatever its last requests logged goes out now.
+        await self._failure_log.publish()
         await self.wait_for_background()
 
         # Release the EventBus distributed transport - it holds a reference
@@ -1085,6 +1103,8 @@ class ProxyManager:
             await self._redis_client.reset_project_metrics(project_id)
             await self._redis_client.reset_host_metrics_for_project(project_id)
             await self._redis_client.clear_mitm_requests(project_id)
+            await self._redis_client.clear_failures(project_id)
+            self._failure_log.forget(project_id)
         await self._rate_limiter.remove_proxies(old_proxy_ids)
 
         for connector_id in old_connector_ids or []:
@@ -1569,6 +1589,7 @@ class ProxyManager:
         await self._redis_client.reset_project_metrics(project_id)
         await self._redis_client.reset_host_metrics_for_project(project_id)
         await self._redis_client.clear_mitm_requests(project_id)
+        await self._redis_client.clear_failures(project_id)
 
         # Clean up rate limiter state (in-memory + Redis quarantine keys)
         await self._rate_limiter.remove_proxies(proxy_ids_to_remove)
@@ -1577,6 +1598,7 @@ class ProxyManager:
         del self._projects[project_id]
         self._pending_project_deltas.pop(project_id, None)
         self._drop_pending_host_deltas(project_id=project_id)
+        self._failure_log.forget(project_id)
         if project_id in self._project_strategies:
             del self._project_strategies[project_id]
 

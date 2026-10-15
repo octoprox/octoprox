@@ -1654,6 +1654,63 @@ export const clearMitmRequests = async (projectId: string): Promise<void> => {
   await api.delete(`/projects/${projectId}/mitm/requests`)
 }
 
+// Failure log types
+
+/** One failure log entry: a failure, or several identical ones folded together within a few seconds. */
+export interface FailureRecord {
+  id: string
+  /** e.g. upstream_timeout, no_proxy_available; 'suppressed' for a tally of failures not logged one by one */
+  kind: string
+  /** What the client was answered (a tunnel device's connection is closed instead). */
+  status: number
+  message: string
+  error_type: string | null
+  method: string | null
+  /** host:port, or the URL without its query for an intercepted request */
+  target: string | null
+  session_id: string | null
+  location: string | null
+  peer_id: string | null
+  peer_name: string | null
+  proxy_id: string | null
+  connector_id: string | null
+  connector_name: string | null
+  /** host:port of the upstream proxy */
+  proxy: string | null
+  /** The vendor's HTTP status when it refused the request. */
+  upstream_status: number | null
+  latency_ms: number | null
+  count: number
+  first_at: string
+  last_at: string
+  /** For a 'suppressed' entry: the failures not logged, by kind. */
+  breakdown: Record<string, number> | null
+}
+
+export interface FailureLogResponse {
+  records: FailureRecord[]
+  next_cursor: string | null
+  total: number
+  enabled: boolean
+  max_entries: number
+  retention_hours: number
+}
+
+export const fetchFailures = async (
+  projectId: string,
+  count: number = 200,
+  cursor?: string | null,
+): Promise<FailureLogResponse> => {
+  const params: Record<string, string | number> = { count }
+  if (cursor) params.cursor = cursor
+  const response = await api.get(`/projects/${projectId}/failures`, { params })
+  return response.data
+}
+
+export const clearFailures = async (projectId: string): Promise<void> => {
+  await api.delete(`/projects/${projectId}/failures`)
+}
+
 // User types
 export interface UserAccount {
   id: string

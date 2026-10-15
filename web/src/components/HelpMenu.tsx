@@ -23,6 +23,7 @@ interface DocLink { title: string; path: string }
 const PAGE_DOCS: Record<string, DocLink[]> = {
   overview: [{ title: 'Metrics and request counting', path: 'metrics' }, { title: 'Routing strategies', path: 'routing-strategies' }],
   hosts: [{ title: 'Hosts: where the traffic goes', path: 'metrics#hosts-where-the-traffic-goes' }],
+  failures: [{ title: 'Failures: why requests failed', path: 'metrics#failures-why-requests-failed' }],
   proxies: [{ title: 'Rate limiting and quarantine', path: 'rate-limiting' }, { title: 'Location routing', path: 'location-routing' }],
   connectors: [{ title: 'Providers and connectors', path: 'providers' }, { title: 'Traffic limits and billing', path: 'traffic-limits' }, { title: 'Domain filtering', path: 'domain-filtering' }],
   credentials: [{ title: 'Providers and credentials', path: 'providers' }],

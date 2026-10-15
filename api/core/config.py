@@ -51,6 +51,12 @@ def _load_yaml_config(config_path: Path) -> dict[str, Any]:
         hosts_cfg = (config_data["metrics"] or {}).get("hosts") or {}
         flat_config["host_metrics_enabled"] = hosts_cfg.get("enabled")
         flat_config["host_metrics_max_hosts"] = hosts_cfg.get("max_hosts")
+    if "failure_log" in config_data:
+        failure_cfg = config_data["failure_log"] or {}
+        flat_config["failure_log_enabled"] = failure_cfg.get("enabled")
+        flat_config["failure_log_max_entries"] = failure_cfg.get("max_entries")
+        flat_config["failure_log_retention_hours"] = failure_cfg.get("retention_hours")
+        flat_config["failure_log_max_per_window"] = failure_cfg.get("max_per_window")
     if "system" in config_data:
         system_cfg = config_data["system"] or {}
         flat_config["system_metrics_interval"] = system_cfg.get("metrics_interval")
@@ -286,6 +292,33 @@ class Settings(BaseSettings):
         description=(
             "How many hosts one instance names per project in each 5-second metrics window, "
             "busiest first; the rest are folded into \"(other)\". 0 keeps every host"
+        ),
+    )
+
+    # The per-project failure log (the Failures page): why requests failed.
+    # One capped Redis stream per project; a burst of identical failures is
+    # folded into one entry, and a window with more distinct failures than
+    # the cap only tallies the rest by kind.
+    failure_log_enabled: bool = Field(
+        default=True,
+        description="Record why requests failed or were refused, per project (the Failures page)",
+    )
+    failure_log_max_entries: int = Field(
+        default=10000,
+        ge=10,
+        description="How many entries each project's failure log keeps, newest first",
+    )
+    failure_log_retention_hours: int = Field(
+        default=168,
+        ge=1,
+        description="How long failure log entries are kept, in hours",
+    )
+    failure_log_max_per_window: int = Field(
+        default=500,
+        ge=1,
+        description=(
+            "How many distinct failures one instance logs per project in each 5-second window; "
+            "beyond that they are only counted by kind"
         ),
     )
 

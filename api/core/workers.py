@@ -36,6 +36,7 @@ class WorkerName(StrEnum):
     FULL_RELOAD = "full_reload"
     METRIC_DELTA_PUBLISHER = "metric_delta_publisher"
     METRIC_DELTA_SUBSCRIBER = "metric_delta_subscriber"
+    FAILURE_LOG_PUBLISHER = "failure_log_publisher"
     CROSS_INSTANCE_SUBSCRIBER = "cross_instance_subscriber"
     GEO_OBSERVATION_PUBLISHER = "geo_observation_publisher"
     GEO_OBSERVATION_FLUSHER = "geo_observation_flusher"
@@ -142,6 +143,10 @@ WORKERS: dict[WorkerName, WorkerInfo] = {
     ),
     WorkerName.METRIC_DELTA_SUBSCRIBER: WorkerInfo(
         "Folds peer instances' metric deltas into local counters",
+    ),
+    WorkerName.FAILURE_LOG_PUBLISHER: WorkerInfo(
+        "Writes the failed requests this instance saw in the last few seconds, folded "
+        "and capped, to each project's failure log in Redis",
     ),
     WorkerName.CROSS_INSTANCE_SUBSCRIBER: WorkerInfo(
         "Applies entity changes published by other instances",

@@ -41,6 +41,14 @@ request_completed = signal("request-completed")
 # Args: project_id (str), reason (str)
 request_rejected = signal("request-rejected")
 
+# Emitted for every request that failed or was refused, describing why, for
+# the project's failure log (api.core.failure_log). Fires alongside
+# request_completed (success=False) or request_rejected, and for a failed
+# request inside an intercepted connection. Local only.
+# Sender: ProxyServer / MitmHandler
+# Args: failure (RequestFailure)
+request_failed = signal("request-failed")
+
 
 # =============================================================================
 # Proxy Lifecycle Signals

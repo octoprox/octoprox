@@ -756,6 +756,60 @@ The `top` hosts by requests (1-12, default 8), or the `hosts` named (comma-separ
 }
 ```
 
+### Failure log
+
+Why the project's requests failed or were refused, newest first (see [Metrics]({{ site.baseurl }}/metrics#failures-why-requests-failed)). Entries appear within about 5 seconds of the failure.
+
+```bash
+GET /api/v1/projects/{project_id}/failures?count=200&cursor=…
+```
+
+`count` is 1-1000 (default 200). `next_cursor` is set when older entries remain; pass it as `cursor` for the next page.
+
+**Response:**
+```json
+{
+  "records": [
+    {
+      "id": "1760526000123-0",
+      "kind": "upstream_rejected",
+      "status": 502,
+      "message": "407 Proxy Authentication Required",
+      "error_type": "ProxyError",
+      "method": "CONNECT",
+      "target": "www.example.com:443",
+      "session_id": "order-1",
+      "location": "US/NY",
+      "peer_id": null,
+      "peer_name": null,
+      "proxy_id": "6f1c…",
+      "connector_id": "a2b9…",
+      "connector_name": "Bright Data residential",
+      "proxy": "brd.superproxy.io:33335",
+      "upstream_status": 407,
+      "latency_ms": 212.4,
+      "count": 37,
+      "first_at": "2026-10-15T10:59:58.120000",
+      "last_at": "2026-10-15T11:00:02.870000",
+      "breakdown": null
+    }
+  ],
+  "next_cursor": null,
+  "total": 1,
+  "enabled": true,
+  "max_entries": 1000,
+  "retention_hours": 168
+}
+```
+
+`kind` is one of `upstream_timeout`, `upstream_unreachable`, `upstream_rejected`, `upstream_error`, `client_closed`, `interrupted` (the failures the request metrics count), `no_proxy_available`, `all_proxies_quarantined`, `traffic_limit_exceeded`, `preflight_mismatch`, `invalid_location` (refused before a proxy was used), `intercepted_request_failed` (one request inside a TLS-intercepted connection), or `suppressed`. `status` is what the client was answered; `upstream_status` is the vendor's HTTP status when an HTTP upstream refused the request. `count` is how many identical failures the entry stands for, between `first_at` and `last_at`; `session_id` is the first one's. A `suppressed` entry stands for failures over the per-window cap that were only counted: its `breakdown` maps kinds to counts, and the request fields are `null`.
+
+```bash
+DELETE /api/v1/projects/{project_id}/failures
+```
+
+Empties the log (editors and admins). The request metrics are not affected, and new failures keep being logged.
+
 ### Prometheus Metrics
 
 Export metrics in Prometheus format:

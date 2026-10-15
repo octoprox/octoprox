@@ -21,6 +21,9 @@ from typing import TYPE_CHECKING
 import h11
 import structlog
 
+from api.core.event_bus import event_bus
+from api.core.failure_log import FailureKind, build_failure
+from api.core.signals import request_failed
 from api.core.tls_cert_manager import TLSCertManager, pop_client_hello
 
 if TYPE_CHECKING:
@@ -285,11 +288,17 @@ class MitmHandler:
 
                 if meter is not None and not meter.allowed:
                     status = meter.limit_status
+                    limit_message = "The connector serving this connection has reached its traffic limit."
+                    await event_bus.publish(request_failed, self, failure=build_failure(
+                        project.id, FailureKind.TRAFFIC_LIMIT_EXCEEDED, status, limit_message, proxy=proxy,
+                        method=request_event.method.decode("ascii"),
+                        target=f"{base_url}{request_event.target.decode('ascii')}".split("?", 1)[0],
+                    ))
                     written = _send_via_h11(
                         conn, client_writer, status,
                         [("Proxy-Status", "octoprox; error=bandwidth_limit_exceeded"),
                          ("Content-Type", "text/plain; charset=utf-8")],
-                        b"The connector serving this connection has reached its traffic limit.",
+                        limit_message.encode(),
                     )
                     with contextlib.suppress(ConnectionResetError, BrokenPipeError, OSError):
                         await client_writer.drain()
@@ -334,6 +343,13 @@ class MitmHandler:
                     ) = await relay.send_request(method, url, forward_headers, body, proxy_url)
                 except Exception as e:
                     logger.debug("MITM upstream request failed", url=url, error=str(e))
+                    # The query string is left out of the log: it is where tokens travel
+                    # (build_failure also cuts it from the error text, which may quote the URL).
+                    await event_bus.publish(request_failed, self, failure=build_failure(
+                        project.id, FailureKind.INTERCEPTED_REQUEST_FAILED, 502, str(e) or type(e).__name__,
+                        proxy=proxy, exc=e, latency_ms=(time.monotonic() - req_start) * 1000,
+                        method=method, target=url.split("?", 1)[0],
+                    ))
                     written = _send_via_h11(conn, client_writer, 502, [], b"")
                     with contextlib.suppress(ConnectionResetError, BrokenPipeError, OSError):
                         await client_writer.drain()

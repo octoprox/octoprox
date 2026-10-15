@@ -230,6 +230,27 @@ A ceiling is for pools that crawl: a project that touches a million new domains 
 
 Both can also be set as `OCTOPROX_HOST_METRICS_ENABLED` and `OCTOPROX_HOST_METRICS_MAX_HOSTS`. Rows follow the project's metrics retention and the same compaction tiers as the other history tables.
 
+## Failure Log
+
+Why requests failed or were refused, per project, for the Failures page (see [Metrics]({{ site.baseurl }}/metrics#failures-why-requests-failed)). Each project's log is one capped Redis stream. Identical failures within a 5-second window are folded into one entry with a count, so a burst costs one entry rather than one per request.
+
+```yaml
+failure_log:
+  enabled: true
+  max_entries: 1000      # per project, newest kept
+  retention_hours: 168
+  max_per_window: 100    # distinct failures per project per 5-second window, per instance
+```
+
+| Setting | Description | Default |
+|---------|-------------|---------|
+| `failure_log.enabled` | Record why requests failed or were refused | `true` |
+| `failure_log.max_entries` | How many entries each project's log keeps, newest first (at least 10) | `1000` |
+| `failure_log.retention_hours` | How long entries are kept; a project whose requests stop failing loses its log this long after the last failure | `168` |
+| `failure_log.max_per_window` | How many distinct failures one instance logs per project in each 5-second window. Beyond that, failures are only counted by kind, in one "not itemised" entry | `100` |
+
+An entry is a few hundred bytes, so the defaults hold under half a megabyte of Redis per project. The settings can also be set as `OCTOPROX_FAILURE_LOG_ENABLED`, `OCTOPROX_FAILURE_LOG_MAX_ENTRIES`, `OCTOPROX_FAILURE_LOG_RETENTION_HOURS` and `OCTOPROX_FAILURE_LOG_MAX_PER_WINDOW`.
+
 ## Database Configuration
 
 Octoprox uses PostgreSQL for persistent storage:

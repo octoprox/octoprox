@@ -37,12 +37,13 @@ function HeadersTable({ headers }: { headers: [string, string][] }) {
   )
 }
 
-function CopyButton({ text }: { text: string }) {
+export function CopyButton({ text, className = 'ml-1.5 align-middle' }: { text: string; className?: string }) {
   const [copied, setCopied] = useState(false)
   return (
     <button
+      type="button"
       onClick={() => { navigator.clipboard.writeText(text); setCopied(true); setTimeout(() => setCopied(false), 1500) }}
-      className="ml-1.5 p-0.5 text-fg-subtle hover:text-fg-muted inline-flex align-middle"
+      className={`p-0.5 text-fg-subtle hover:text-fg-muted inline-flex ${className}`}
       title="Copy to clipboard"
     >
       {copied ? <Check className="w-3 h-3 text-success" /> : <Copy className="w-3 h-3" />}

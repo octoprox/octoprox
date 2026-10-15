@@ -34,6 +34,16 @@ metrics:
     enabled: true
     max_hosts: 0
 
+# The failure log (the Failures page): why requests failed or were refused,
+# per project. A burst of identical failures is folded into one entry; a
+# window with more distinct failures than max_per_window only counts the rest
+# by kind.
+failure_log:
+  enabled: true
+  max_entries: 10000      # per project, newest kept
+  retention_hours: 168
+  max_per_window: 500    # distinct failures per project per 5-second window, per instance
+
 system:
   # Install-wide gauge snapshots behind the admin System trend charts.
   # One row per interval for the whole install; retention alone bounds it.

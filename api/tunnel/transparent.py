@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING
 import structlog
 
 from api.core.event_bus import event_bus
+from api.core.failure_log import RequestInfo, set_request_info
 from api.core.proxy_server import ProxyServer
 from api.core.signals import tunnel_encrypted_dns_blocked, tunnel_name_unresolved
 from api.models.project import MitmMode
@@ -222,6 +223,13 @@ class TransparentProxyServer(ProxyServer):
                 await event_bus.publish(tunnel_name_unresolved, self, peer_id=peer.id)
             session_id = peer.session_id
             location = peer.location
+            set_request_info(RequestInfo(
+                target=f"{target_host}:{dst_port}",
+                session_id=session_id,
+                location=location.key if location else None,
+                peer_id=peer.id,
+                peer_name=peer.name,
+            ))
             logger.debug(
                 "Tunnel connection",
                 peer=peer.name,

@@ -7,7 +7,7 @@ import { useQuery } from '@tanstack/react-query'
 import {
   BarChart3, Server, Link2, Key, Eye, Settings as SettingsIcon, LogOut, ChevronLeft, ChevronRight,
   ChevronsUpDown, FolderOpen, ArrowLeft, User as UserIcon, Palette, Users as UsersIcon, DatabaseBackup, Puzzle,
-  Activity, Globe, Router, ShieldCheck, Target, LogIn, Plug,
+  Activity, Globe, Router, ShieldCheck, Target, LogIn, Plug, AlertTriangle,
 } from 'lucide-react'
 import octoproxLogo from '../../assets/logos/octoprox_horizontal.svg'
 import octoproxLogoDark from '../../assets/logos/octoprox_horizontal_dark.svg'
@@ -27,6 +27,8 @@ const COLLAPSED_KEY = 'octoprox_sidebar_collapsed'
 
 const PAGE_TITLES: Record<string, string> = {
   overview: 'Overview',
+  hosts: 'Hosts',
+  failures: 'Failures',
   proxies: 'Proxies',
   connectors: 'Connectors',
   credentials: 'Credentials',
@@ -178,6 +180,7 @@ export default function AppShell({ onLogout }: { onLogout: () => void }) {
               <NavGroup label="Overview" collapsed={collapsed} first />
               <NavItem to={`${base}/overview`} icon={<BarChart3 />} label="Overview" collapsed={collapsed} />
               <NavItem to={`${base}/hosts`} icon={<Target />} label="Hosts" collapsed={collapsed} />
+              <NavItem to={`${base}/failures`} icon={<AlertTriangle />} label="Failures" collapsed={collapsed} />
               <NavGroup label="Pool" collapsed={collapsed} />
               <NavItem to={`${base}/proxies`} icon={<Server />} label="Proxies" collapsed={collapsed} />
               <NavItem to={`${base}/connectors`} icon={<Link2 />} label="Connectors" collapsed={collapsed} />

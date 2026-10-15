@@ -58,6 +58,9 @@ CONNECTOR_TRAFFIC_BLOCKED_KEY = "connector:traffic_blocked:{connector_id}"
 SESSION_KEY = "session:{session_id}"
 STICKY_BINDING_KEY = "sticky:{project_id}:{session_id}"
 MITM_REQUESTS_KEY = "mitm:requests:{project_id}"
+# Each project's failure log (api.core.failure_log): a capped stream of why
+# requests failed, newest last, trimmed by length and age as it is written.
+FAILURE_LOG_KEY = "failures:{project_id}"
 INSTANCE_REGISTRY_KEY = "instance_registry:{instance_id}"
 INSTANCE_REGISTRY_SCAN = "instance_registry:*"
 # What one instance can see about itself and nobody else can: its runtime,
@@ -138,6 +141,7 @@ REDIS_KEY_GROUPS: tuple[tuple[str, str], ...] = (
     ("sticky:", "Sticky bindings"),
     ("session:", "Sessions"),
     ("mitm:requests:", "MITM captures"),
+    ("failures:", "Failure log"),
     ("instance_registry:", "Instance heartbeats"),
     ("instance_stats:", "Instance snapshots"),
     ("lease:", "Worker leases"),
@@ -671,15 +675,20 @@ class RedisClient:
             List of dicts with stream entry ``id`` plus all field/value pairs.
         """
         key = MITM_REQUESTS_KEY.format(project_id=project_id)
+        return await self._stream_page(key, count, before_id)
 
+    async def _stream_page(self, key: str, count: int, before_id: str | None) -> list[dict[str, str]]:
+        """Newest-first page of a stream, strictly older than ``before_id`` when given."""
         if before_id:
             # Make the bound exclusive by decrementing the sequence number
             parts = before_id.split("-")
             ts_part, seq_part = parts[0], int(parts[1])
             if seq_part > 0:
                 end = f"{ts_part}-{seq_part - 1}"
-            else:
+            elif int(ts_part) > 0:
                 end = f"{int(ts_part) - 1}-18446744073709551615"
+            else:
+                return []  # nothing is older than 0-0
         else:
             end = "+"
 
@@ -695,6 +704,54 @@ class RedisClient:
         """Delete all MITM request records for a project."""
         key = MITM_REQUESTS_KEY.format(project_id=project_id)
         await self.client.delete(key)
+
+    # Failure log operations
+
+    async def append_failures(
+        self,
+        entries: list[tuple[str, dict[str, str]]],
+        *,
+        max_entries: int,
+        retention_seconds: int,
+    ) -> None:
+        """Append (project_id, fields) entries to their projects' failure logs in one round trip.
+
+        Each stream is capped at about ``max_entries``, loses entries older
+        than the retention, and expires whole once nothing has failed for
+        that long.
+        """
+        if not entries:
+            return
+        pipe = self.client.pipeline(transaction=False)
+        for project_id, entry in entries:
+            key = FAILURE_LOG_KEY.format(project_id=project_id)
+            pipe.xadd(key, entry, maxlen=max_entries, approximate=True)  # type: ignore[arg-type]
+        min_id = f"{int(time.time() - retention_seconds) * 1000}-0"
+        for project_id in {project_id for project_id, _ in entries}:
+            key = FAILURE_LOG_KEY.format(project_id=project_id)
+            # Exact: an approximate MINID only drops whole stream nodes, so a
+            # slowly failing project would keep entries past the retention.
+            pipe.xtrim(key, minid=min_id, approximate=False)
+            pipe.expire(key, retention_seconds)
+        await pipe.execute()
+
+    async def get_failures(
+        self,
+        project_id: str,
+        count: int = 200,
+        before_id: str | None = None,
+    ) -> list[dict[str, str]]:
+        """Read a project's failure log, newest first, with the same cursor as the MITM captures."""
+        return await self._stream_page(FAILURE_LOG_KEY.format(project_id=project_id), count, before_id)
+
+    async def count_failures(self, project_id: str) -> int:
+        """How many entries a project's failure log holds."""
+        result: int = await self.client.xlen(FAILURE_LOG_KEY.format(project_id=project_id))
+        return result
+
+    async def clear_failures(self, project_id: str) -> None:
+        """Delete a project's failure log."""
+        await self.client.delete(FAILURE_LOG_KEY.format(project_id=project_id))
 
     # Tunnel peer status, per protocol
 
