@@ -118,6 +118,27 @@ class TestRedisClient:
 
         assert len(all_metrics) == 3
 
+    async def test_many_hashes_among_unrelated_keys(self, redis_client: RedisClient) -> None:
+        """More hashes than one read pipeline holds, scattered through a keyspace of other keys."""
+        pipe = redis_client.client.pipeline(transaction=False)
+        for i in range(2000):
+            pipe.set(f"sticky:project:session-{i}", "proxy")
+        await pipe.execute()
+        proxies = {f"many-proxy-{i}": MetricDelta(request_count=i + 1) for i in range(1200)}
+        await redis_client.flush_metric_deltas(proxies, {})
+        for i in range(1200):
+            await redis_client.set_proxy_status(f"many-proxy-{i}", ProxyStatus.HEALTHY, latency_ms=float(i))
+        # A hash holding only a sighting carries no status and is left out.
+        await redis_client.client.hset("proxy:status:sighting-only", "exit_ip", "203.0.113.7")
+
+        metrics = await redis_client.get_all_proxy_metrics()
+        statuses = await redis_client.get_all_proxy_statuses()
+
+        assert metrics == proxies
+        assert len(statuses) == 1200
+        assert statuses["many-proxy-7"]["status"] == ProxyStatus.HEALTHY
+        assert statuses["many-proxy-7"]["latency_ms"] == 7.0
+
     async def test_reset_proxy_metrics(self, redis_client: RedisClient) -> None:
         """Test resetting proxy metrics."""
         proxy_id = "reset-proxy"

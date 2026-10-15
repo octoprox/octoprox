@@ -16,10 +16,11 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from api.core.config import Settings
+from api.core.leadership import Lease
 from api.core.metrics_flusher import MetricsFlusher
 from api.core.stats import MetricDelta
 from api.db.models import FailureMetricsModel, ProjectMetricsModel
-from api.db.redis import RedisClient, failure_metrics_key
+from api.db.redis import LEASE_KEY, RedisClient, failure_metrics_key
 from api.db.repository import MetricsRepository, ProjectRepository
 from api.models.project import Project
 
@@ -49,6 +50,7 @@ class TestFlushKeepsWhatArrivesMeanwhile:
     async def test_project_and_failure_counts(
         self,
         db_session_factory: async_sessionmaker[AsyncSession],
+        db_session: AsyncSession,
         redis_client: RedisClient,
         test_settings: Settings,
         monkeypatch: pytest.MonkeyPatch,
@@ -58,14 +60,14 @@ class TestFlushKeepsWhatArrivesMeanwhile:
         await redis_client.flush_metric_deltas({}, {project.id: _requests(3)})
         await redis_client.append_failures([], {failure_key: 4}, max_entries=10, retention_seconds=60)
 
-        original = MetricsRepository.save_project_metrics_snapshot
+        original = MetricsRepository.save_project_metrics_snapshots
 
-        async def save_while_a_peer_publishes(self: MetricsRepository, **kwargs: Any) -> bool:
+        async def save_while_a_peer_publishes(self: MetricsRepository, batch: dict[str, MetricDelta]) -> list[str]:
             await redis_client.flush_metric_deltas({}, {project.id: _requests(2)})
             await redis_client.append_failures([], {failure_key: 1}, max_entries=10, retention_seconds=60)
-            return await original(self, **kwargs)
+            return await original(self, batch)
 
-        monkeypatch.setattr(MetricsRepository, "save_project_metrics_snapshot", save_while_a_peer_publishes)
+        monkeypatch.setattr(MetricsRepository, "save_project_metrics_snapshots", save_while_a_peer_publishes)
         flusher = MetricsFlusher(db_session_factory, redis_client, test_settings)
         await flusher._flush_metrics()
 
@@ -99,3 +101,29 @@ class TestFlushKeepsWhatArrivesMeanwhile:
 
         assert await redis_client.get_project_metrics("gone") is None
         assert await redis_client.get_all_failure_metrics() == {}
+
+
+class TestFlushThatLostItsLease:
+    async def test_writes_nothing_and_leaves_the_counts_for_the_new_holder(
+        self,
+        db_session_factory: async_sessionmaker[AsyncSession],
+        db_session: AsyncSession,
+        redis_client: RedisClient,
+        test_settings: Settings,
+    ) -> None:
+        project = await _project(db_session_factory)
+        await redis_client.flush_metric_deltas({}, {project.id: _requests(3)})
+        # Its own name: the test app's flusher holds the real one in this Redis.
+        lease = Lease(redis_client, name="flusher_under_test", owner_id="stalled")
+        assert await lease.try_acquire()
+        try:
+            # The key expired before the stalled holder's next refresh, and a peer took it.
+            await redis_client.client.set(LEASE_KEY.format(name="flusher_under_test"), "peer")
+            await MetricsFlusher(db_session_factory, redis_client, test_settings)._flush_metrics(lease)
+        finally:
+            await lease.release()
+
+        assert await _sum(db_session_factory, ProjectMetricsModel.request_count, ProjectMetricsModel, project.id) == 0
+        left = await redis_client.get_project_metrics(project.id)
+        assert left is not None and left.request_count == 3
+        assert not lease.is_held

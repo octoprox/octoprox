@@ -67,7 +67,7 @@ class MetricsFlusher:
                     await asyncio.sleep(self._interval)
                     if lease.is_held and self._running:
                         with job_stats.track(WorkerName.METRICS_FLUSHER):
-                            await self._flush_metrics()
+                            await self._flush_metrics(lease)
                 except asyncio.CancelledError:
                     logger.info("Metrics flusher stopped")
                     break
@@ -76,16 +76,39 @@ class MetricsFlusher:
         finally:
             await lease.release()
 
-    async def _flush_metrics(self) -> None:
-        """Flush all proxy, project, connector, tunnel device, host and failure metrics from Redis to Postgres."""
-        # Get all metrics from Redis
-        all_proxy_metrics = await self._redis_client.get_all_proxy_metrics()
-        all_project_metrics = await self._redis_client.get_all_project_metrics()
-        all_connector_metrics = await self._redis_client.get_all_connector_metrics()
-        all_tunnel_peer_metrics = await self._redis_client.get_all_tunnel_peer_metrics()
-        all_host_metrics = await self._redis_client.get_all_host_metrics()
-        all_failure_metrics = await self._redis_client.get_all_failure_metrics()
-        all_statuses = await self._redis_client.get_all_proxy_statuses()
+    async def _flush_metrics(self, lease: Lease | None = None) -> None:
+        """Flush all proxy, project, connector, tunnel device, host and failure metrics from Redis to Postgres.
+
+        ``lease`` is confirmed with Redis just before the commit. A flush that
+        outlived its lease is rolled back and leaves Redis as it found it: the
+        new holder flushes the same counts, and two flushes committing them
+        would write them twice. None (a direct call) skips the check.
+        """
+        # Get all metrics from Redis: independent walks, run side by side
+        # rather than one after another.
+        # Nested because gather's typing stops at six awaitables.
+        redis = self._redis_client
+        (
+            (
+                all_proxy_metrics,
+                all_project_metrics,
+                all_connector_metrics,
+                all_tunnel_peer_metrics,
+                all_host_metrics,
+                all_failure_metrics,
+            ),
+            all_statuses,
+        ) = await asyncio.gather(
+            asyncio.gather(
+                redis.get_all_proxy_metrics(),
+                redis.get_all_project_metrics(),
+                redis.get_all_connector_metrics(),
+                redis.get_all_tunnel_peer_metrics(),
+                redis.get_all_host_metrics(),
+                redis.get_all_failure_metrics(),
+            ),
+            redis.get_all_proxy_statuses(),
+        )
 
         if (
             not all_proxy_metrics
@@ -114,49 +137,25 @@ class MetricsFlusher:
         async with self._session_factory() as session:
             repo = MetricsRepository(session)
 
-            for proxy_id, metrics in all_proxy_metrics.items():
-                status_data = all_statuses.get(proxy_id, {})
-                status = status_data.get("status", "unknown")
-                if hasattr(status, "value"):
-                    status = status.value
-                kept = await repo.save_metrics_snapshot(
-                    proxy_id=proxy_id,
-                    request_count=metrics.request_count,
-                    success_count=metrics.success_count,
-                    failure_count=metrics.failure_count,
-                    avg_latency_ms=metrics.avg_latency_ms,
-                    bytes_sent=metrics.bytes_sent,
-                    bytes_received=metrics.bytes_received,
-                    status=status,
-                )
-                if not kept:
-                    logger.warning("Dropping metrics of a proxy that no longer exists", proxy_id=proxy_id)
+            # One lookup and one multi-row insert per table, like the host
+            # rows below: a statement per proxy stretches the flush.
+            statuses: dict[str, str] = {}
+            for proxy_id in all_proxy_metrics:
+                status = all_statuses.get(proxy_id, {}).get("status", "unknown")
+                statuses[proxy_id] = status.value if hasattr(status, "value") else status
+            dropped_proxies = await repo.save_proxy_metrics_snapshots(all_proxy_metrics, statuses)
+            if dropped_proxies:
+                logger.warning("Dropping metrics of proxies that no longer exist", proxy_ids=dropped_proxies)
 
-            for project_id, metrics in all_project_metrics.items():
-                kept = await repo.save_project_metrics_snapshot(
-                    project_id=project_id,
-                    request_count=metrics.request_count,
-                    success_count=metrics.success_count,
-                    failure_count=metrics.failure_count,
-                    avg_latency_ms=metrics.avg_latency_ms,
-                    bytes_sent=metrics.bytes_sent,
-                    bytes_received=metrics.bytes_received,
-                )
-                if not kept:
-                    logger.warning("Dropping metrics of a project that no longer exists", project_id=project_id)
+            dropped_projects = await repo.save_project_metrics_snapshots(all_project_metrics)
+            if dropped_projects:
+                logger.warning("Dropping metrics of projects that no longer exist", project_ids=dropped_projects)
 
-            for connector_id, metrics in all_connector_metrics.items():
-                kept = await repo.save_connector_metrics_snapshot(
-                    connector_id=connector_id,
-                    request_count=metrics.request_count,
-                    success_count=metrics.success_count,
-                    failure_count=metrics.failure_count,
-                    avg_latency_ms=metrics.avg_latency_ms,
-                    bytes_sent=metrics.bytes_sent,
-                    bytes_received=metrics.bytes_received,
+            dropped_connectors = await repo.save_connector_metrics_snapshots(all_connector_metrics)
+            if dropped_connectors:
+                logger.warning(
+                    "Dropping metrics of connectors that no longer exist", connector_ids=dropped_connectors
                 )
-                if not kept:
-                    logger.warning("Dropping metrics of a connector that no longer exists", connector_id=connector_id)
 
             for peer_id, peer_metrics in all_tunnel_peer_metrics.items():
                 kept = await repo.save_tunnel_peer_metrics_snapshot(peer_id, peer_metrics)
@@ -180,6 +179,9 @@ class MetricsFlusher:
                     row_count=len(dropped_failures),
                 )
 
+            if lease is not None and not await lease.confirm():
+                logger.warning("Metrics flush rolled back: the lease could not be confirmed before the commit")
+                return
             await session.commit()
 
         # Subtracted, not deleted: what the instances added since the read

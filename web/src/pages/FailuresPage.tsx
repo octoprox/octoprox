@@ -377,7 +377,7 @@ function WhatFailed({ summary, loading, failed, range, onRange, isDark, kindFilt
       ) : (
         <div className="grid grid-cols-1 @md:grid-cols-[minmax(240px,2fr)_minmax(0,3fr)] gap-x-6 gap-y-4 @md:h-[260px]">
           <div className="flex flex-col gap-3 min-w-0 @md:overflow-y-auto @md:pr-1">
-            <div className="text-[12.5px] text-fg-muted truncate">
+            <div className="text-[12.5px] text-fg-muted truncate flex-none">
               <span className="font-semibold text-fg tabular-nums">{summary.total.toLocaleString()}</span> {plural(summary.total, 'failure', 'failures')} in the last {range}
             </div>
             {groups.map(({ group, kinds }) => (

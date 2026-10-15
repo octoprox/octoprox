@@ -178,6 +178,12 @@ LEASE_SCAN = "lease:*"
 # How many metrics hashes one pipeline reads, drains or deletes at a time.
 _HOST_METRICS_BATCH = 500
 
+# SCAN's COUNT hint for every walk of the keyspace. Without one Redis looks
+# at 10 keys per call, so a MATCH over a busy keyspace (sticky bindings,
+# sessions and preflight verdicts grow with traffic) costs a round trip per
+# 10 keys, and every one of them waits its turn on a loaded event loop.
+SCAN_COUNT = 500
+
 # Takes one flush's counts off a metrics hash (KEYS[1]). ARGV holds triples:
 # field, the amount to add (the flushed amount, negated), and "f" for a float
 # field or "i" for an integer one. Subtracting rather than deleting keeps
@@ -332,7 +338,11 @@ class RedisClient:
     async def get_proxy_status(self, proxy_id: str) -> dict[str, Any] | None:
         """Get proxy health status from Redis."""
         key = PROXY_STATUS_KEY.format(proxy_id=proxy_id)
-        data = await self.client.hgetall(key)  # type: ignore[misc]
+        return self._read_status_hash(await self.client.hgetall(key))  # type: ignore[misc]
+
+    @staticmethod
+    def _read_status_hash(data: dict[str, Any]) -> dict[str, Any] | None:
+        """Decode one proxy status hash, None when it carries no status."""
         # The observation flusher keeps its ``exit_ip`` field in this hash; a
         # hash holding only that (a proxy not yet health-checked, or one whose
         # sighting was flushed after its removal) carries no status.
@@ -348,12 +358,32 @@ class RedisClient:
     async def get_all_proxy_statuses(self) -> dict[str, dict[str, Any]]:
         """Get all proxy statuses from Redis."""
         statuses = {}
-        async for key in self.client.scan_iter(match="proxy:status:*"):
-            proxy_id = key.split(":")[-1]
-            status = await self.get_proxy_status(proxy_id)
+        for key, data in await self._read_hashes("proxy:status:*"):
+            status = self._read_status_hash(data)
             if status:
-                statuses[proxy_id] = status
+                statuses[key.split(":")[-1]] = status
         return statuses
+
+    async def _read_hashes(self, pattern: str) -> list[tuple[str, dict[str, Any]]]:
+        """Every hash whose key matches ``pattern``, as ``(key, fields)``.
+
+        One SCAN walk, then the hashes read in pipelined batches rather than a
+        round trip each: the metrics flusher and every instance's full reload
+        read all proxy, project and connector hashes once a minute. A key that
+        expired or was drained between the walk and the read comes back empty.
+        """
+        keys = [
+            key if isinstance(key, str) else key.decode()
+            async for key in self.client.scan_iter(match=pattern, count=SCAN_COUNT)
+        ]
+        hashes: list[tuple[str, dict[str, Any]]] = []
+        for start in range(0, len(keys), _HOST_METRICS_BATCH):
+            batch = keys[start:start + _HOST_METRICS_BATCH]
+            pipe = self.client.pipeline(transaction=False)
+            for key in batch:
+                pipe.hgetall(key)
+            hashes.extend(zip(batch, await pipe.execute(), strict=True))
+        return hashes
 
     async def get_proxy_exit_ips(self, proxy_ids: Iterable[str]) -> dict[str, str | None]:
         """The last counted exit IP per proxy, None where none is recorded. One round trip."""
@@ -498,11 +528,10 @@ class RedisClient:
     async def get_all_proxy_metrics(self) -> dict[str, MetricDelta]:
         """Get all proxy metrics from Redis."""
         metrics = {}
-        async for key in self.client.scan_iter(match="proxy:metrics:*"):
-            proxy_id = key.split(":")[-1]
-            m = await self.get_proxy_metrics(proxy_id)
+        for key, data in await self._read_hashes("proxy:metrics:*"):
+            m = self._read_metrics_hash(data, MetricDelta)
             if m:
-                metrics[proxy_id] = m
+                metrics[key.split(":")[-1]] = m
         return metrics
 
     async def reset_proxy_metrics(self, proxy_id: str) -> None:
@@ -549,11 +578,10 @@ class RedisClient:
     async def get_all_project_metrics(self) -> dict[str, MetricDelta]:
         """Get all project-level metrics from Redis."""
         metrics = {}
-        async for key in self.client.scan_iter(match="project:metrics:*"):
-            project_id = key.split(":")[-1]
-            m = await self.get_project_metrics(project_id)
+        for key, data in await self._read_hashes("project:metrics:*"):
+            m = self._read_metrics_hash(data, MetricDelta)
             if m:
-                metrics[project_id] = m
+                metrics[key.split(":")[-1]] = m
         return metrics
 
     async def reset_project_metrics(self, project_id: str) -> None:
@@ -571,11 +599,10 @@ class RedisClient:
     async def get_all_connector_metrics(self) -> dict[str, MetricDelta]:
         """Get all connector-level metrics from Redis."""
         metrics = {}
-        async for key in self.client.scan_iter(match="connector:metrics:*"):
-            connector_id = key.split(":")[-1]
-            m = await self.get_connector_metrics(connector_id)
+        for key, data in await self._read_hashes("connector:metrics:*"):
+            m = self._read_metrics_hash(data, MetricDelta)
             if m:
-                metrics[connector_id] = m
+                metrics[key.split(":")[-1]] = m
         return metrics
 
     async def reset_connector_metrics(self, connector_id: str) -> None:
@@ -591,11 +618,10 @@ class RedisClient:
 
     async def get_all_tunnel_peer_metrics(self) -> dict[str, TunnelPeerMetricDelta]:
         metrics = {}
-        async for key in self.client.scan_iter(match=TUNNEL_PEER_METRICS_SCAN):
-            peer_id = (key if isinstance(key, str) else key.decode()).split(":", 2)[2]
-            m = await self.get_tunnel_peer_metrics(peer_id)
+        for key, data in await self._read_hashes(TUNNEL_PEER_METRICS_SCAN):
+            m = self._read_metrics_hash(data, TunnelPeerMetricDelta)
             if m:
-                metrics[peer_id] = m
+                metrics[key.split(":", 2)[2]] = m
         return metrics
 
     async def reset_tunnel_peer_metrics(self, peer_id: str) -> None:
@@ -608,21 +634,12 @@ class RedisClient:
     # one round trip each.
     async def get_all_host_metrics(self) -> dict[tuple[str, str, str], MetricDelta]:
         """Every host metrics hash, keyed by (project_id, connector_id, host)."""
-        keys: list[tuple[str, str, str]] = []
-        async for raw_key in self.client.scan_iter(match=HOST_METRICS_SCAN, count=500):
-            parsed = parse_host_metrics_key(raw_key)
-            if parsed is not None:
-                keys.append(parsed)
         metrics: dict[tuple[str, str, str], MetricDelta] = {}
-        for start in range(0, len(keys), _HOST_METRICS_BATCH):
-            batch = keys[start:start + _HOST_METRICS_BATCH]
-            pipe = self.client.pipeline()
-            for project_id, connector_id, host in batch:
-                pipe.hgetall(HOST_METRICS_KEY.format(project_id=project_id, connector_id=connector_id, host=host))
-            for key, data in zip(batch, await pipe.execute(), strict=True):
-                m = self._read_metrics_hash(data, MetricDelta)
-                if m:
-                    metrics[key] = m
+        for raw_key, data in await self._read_hashes(HOST_METRICS_SCAN):
+            parsed = parse_host_metrics_key(raw_key)
+            m = self._read_metrics_hash(data, MetricDelta)
+            if parsed is not None and m:
+                metrics[parsed] = m
         return metrics
 
     async def reset_host_metrics_for_project(self, project_id: str) -> None:
@@ -635,7 +652,7 @@ class RedisClient:
 
     async def _delete_matching(self, pattern: str) -> None:
         batch: list[Any] = []
-        async for key in self.client.scan_iter(match=pattern, count=500):
+        async for key in self.client.scan_iter(match=pattern, count=SCAN_COUNT):
             batch.append(key)
             if len(batch) >= _HOST_METRICS_BATCH:
                 await self.client.delete(*batch)
@@ -916,7 +933,7 @@ class RedisClient:
     async def get_all_failure_metrics(self) -> dict[FailureCountKey, int]:
         """Every failure count hash, keyed by (project_id, connector_id, kind, upstream_status)."""
         keys: list[FailureCountKey] = []
-        async for raw_key in self.client.scan_iter(match=FAILURE_METRICS_SCAN, count=500):
+        async for raw_key in self.client.scan_iter(match=FAILURE_METRICS_SCAN, count=SCAN_COUNT):
             parsed = parse_failure_metrics_key(raw_key)
             if parsed is not None:
                 keys.append(parsed)
@@ -1054,17 +1071,8 @@ class RedisClient:
 
     async def get_tunnel_peer_status(self, protocol: str) -> list[dict[str, str]]:
         """What every instance carrying a protocol last published, one hash per carrier; [] when none is."""
-        keys = [
-            k if isinstance(k, str) else k.decode()
-            async for k in self.client.scan_iter(match=TUNNEL_PEER_STATUS_SCAN.format(protocol=protocol))
-        ]
-        if not keys:
-            return []
-        pipe = self.client.pipeline()
-        for key in keys:
-            pipe.hgetall(key)
-        results: list[dict[str, str]] = await pipe.execute()
-        return [r for r in results if r]
+        hashes = await self._read_hashes(TUNNEL_PEER_STATUS_SCAN.format(protocol=protocol))
+        return [data for _key, data in hashes if data]
 
 
 @lru_cache

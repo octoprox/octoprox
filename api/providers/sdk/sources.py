@@ -11,10 +11,13 @@
 
 from __future__ import annotations
 
+import ssl
 from collections.abc import Callable
 from dataclasses import dataclass
+from functools import cache
 from typing import Any
 
+import httpcore
 import httpx
 import structlog
 from httpx_socks import AsyncProxyTransport  # type: ignore[import-untyped]
@@ -31,11 +34,48 @@ logger = structlog.get_logger()
 ProxiedClientFactory = Callable[[str, float], httpx.AsyncClient]
 
 
+@cache
+def shared_ssl_context() -> ssl.SSLContext:
+    """The TLS context every client that checks a proxy verifies with.
+
+    httpx builds one per client by default, loading the whole CA bundle each
+    time: milliseconds of CPU on the event loop for every preflight check,
+    IP discovery and health check, which a busy instance runs many times a
+    second. The settings are httpx's own defaults. A context is safe to share
+    across clients and connections as long as none of them enables HTTP/2:
+    httpcore writes each connection's ALPN list onto the context it is given.
+    """
+    return httpx.create_ssl_context()
+
+
+@cache
+def _proxy_ssl_context() -> ssl.SSLContext:
+    """What httpcore verifies an https:// proxy with when given no context: the system CAs plus certifi.
+
+    Not ``shared_ssl_context``, which trusts certifi alone: a proxy whose
+    certificate chains to a CA in the system store would stop verifying.
+    """
+    return httpcore.default_ssl_context()
+
+
+def httpx_proxy(proxy_url: str) -> httpx.Proxy:
+    """An HTTP(S) proxy URL for httpx, an https:// one verified with one shared context.
+
+    httpcore would otherwise build an https:// proxy a fresh context per
+    connection. An http:// proxy takes none: there is no TLS to the proxy.
+    """
+    ssl_context = _proxy_ssl_context() if httpx.URL(proxy_url).scheme == "https" else None
+    return httpx.Proxy(proxy_url, ssl_context=ssl_context)
+
+
 def default_proxied_client_factory(proxy_url: str, timeout: float) -> httpx.AsyncClient:
     """Client that sends every request through ``proxy_url`` (HTTP or SOCKS)."""
+    context = shared_ssl_context()
     if proxy_url.startswith(("socks4://", "socks5://")):
-        return httpx.AsyncClient(transport=AsyncProxyTransport.from_url(proxy_url, rdns=True), timeout=timeout)
-    return httpx.AsyncClient(proxy=proxy_url, timeout=timeout)
+        return httpx.AsyncClient(
+            transport=AsyncProxyTransport.from_url(proxy_url, rdns=True, verify=context), timeout=timeout
+        )
+    return httpx.AsyncClient(proxy=httpx_proxy(proxy_url), verify=context, timeout=timeout)
 
 
 def extract_ip_and_place(

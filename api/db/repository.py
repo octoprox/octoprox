@@ -513,6 +513,10 @@ _MetricsModel = (
     | type[HostMetricsModel]
 )
 
+# How many parent ids one existence lookup of a batch insert carries: well
+# under asyncpg's 32767 bind parameters per statement.
+_PARENT_LOOKUP_BATCH = 10_000
+
 # Where each tunnel protocol keeps its devices: the table a device id is looked
 # up in when its metrics are flushed, and whose ``project_id`` the history row
 # copies. A new tunnel protocol registers its table here and gets history,
@@ -658,6 +662,77 @@ class MetricsRepository:
         ).where(exists().where(parent_exists))
         result = await self._session.execute(insert(model).from_select(columns, source))
         return bool(result.rowcount)  # type: ignore[attr-defined]
+
+    async def save_proxy_metrics_snapshots(
+        self, batch: dict[str, MetricDelta], statuses: dict[str, str]
+    ) -> list[str]:
+        """Insert one row per proxy of a flush window; returns the ids dropped as gone.
+
+        The batch form of ``save_metrics_snapshot``. ``statuses`` holds each
+        proxy's health status; one without is recorded as ``unknown``.
+        """
+        extra = {proxy_id: {"status": statuses.get(proxy_id, "unknown")} for proxy_id in batch}
+        return await self._insert_snapshots(ProxyMetricsModel, ProxyModel, "proxy_id", batch, extra)
+
+    async def save_project_metrics_snapshots(self, batch: dict[str, MetricDelta]) -> list[str]:
+        """Insert one row per project of a flush window; returns the ids dropped as gone."""
+        return await self._insert_snapshots(ProjectMetricsModel, ProjectModel, "project_id", batch)
+
+    async def save_connector_metrics_snapshots(self, batch: dict[str, MetricDelta]) -> list[str]:
+        """Insert one row per connector of a flush window; returns the ids dropped as gone."""
+        return await self._insert_snapshots(ConnectorMetricsModel, ConnectorModel, "connector_id", batch)
+
+    async def _insert_snapshots(
+        self,
+        model: _MetricsModel,
+        parent: type[ProxyModel] | type[ProjectModel] | type[ConnectorModel],
+        key: str,
+        batch: dict[str, MetricDelta],
+        extra: dict[str, dict[str, Any]] | None = None,
+    ) -> list[str]:
+        """Insert a row per entity of ``batch`` whose parent row still exists; returns the ids dropped.
+
+        The batch counterpart of ``_insert_snapshot``, shaped like
+        ``save_host_metrics_snapshots``: one lookup of the parents involved,
+        then a single multi-row insert. A statement per entity is a round trip
+        per proxy on every flush, each one waiting its turn on a busy event
+        loop. The lookup takes the ``FOR KEY SHARE`` lock the inserts' foreign
+        key checks would take anyway, only earlier: a parent cannot be removed
+        between the lookup and the insert and fail the whole flush on its
+        foreign key, as the single-row ``WHERE EXISTS`` form never could. One
+        being removed as the lookup runs is waited for and counted as gone.
+        """
+        if not batch:
+            return []
+        ids = list(batch)
+        known: set[str] = set()
+        for start in range(0, len(ids), _PARENT_LOOKUP_BATCH):
+            result = await self._session.execute(
+                select(parent.id)
+                .where(parent.id.in_(ids[start:start + _PARENT_LOOKUP_BATCH]))
+                .with_for_update(read=True, key_share=True)
+            )
+            known.update(result.scalars().all())
+        now = utc_now()
+        rows = [
+            {
+                key: entity_id,
+                "timestamp": now,
+                "request_count": delta.request_count,
+                "success_count": delta.success_count,
+                "failure_count": delta.failure_count,
+                "avg_latency_ms": delta.avg_latency_ms,
+                "bytes_sent": delta.bytes_sent,
+                "bytes_received": delta.bytes_received,
+                "granularity": 60,
+                **(extra or {}).get(entity_id, {}),
+            }
+            for entity_id, delta in batch.items()
+            if entity_id in known
+        ]
+        if rows:
+            await self._session.execute(insert(model), rows)
+        return [entity_id for entity_id in ids if entity_id not in known]
 
     async def get_metrics_history(
         self,

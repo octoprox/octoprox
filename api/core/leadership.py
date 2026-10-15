@@ -156,6 +156,40 @@ class Lease:
         except asyncio.CancelledError:
             pass
 
+    async def confirm(self) -> bool:
+        """Ask Redis whether this instance still holds the lease, right now.
+
+        ``is_held`` only learns of a loss at the next refresh, and a stalled
+        event loop can delay that refresh past the TTL while a peer takes the
+        lease over. Call this just before an effect that must not happen
+        twice. A failed check counts as not held, but only a lease seen in
+        another holder's hands (or gone) is given up.
+        """
+        if not self._held:
+            return False
+        try:
+            holder = await self._redis.client.get(self._key)
+        except Exception:
+            logger.warning("Lease check failed", name=self._name, exc_info=True)
+            return False
+        if isinstance(holder, bytes):
+            holder = holder.decode()
+        if holder != self._owner_id:
+            logger.warning("Lease lost before a guarded write", name=self._name, holder=holder)
+            self._held = False
+            # The refresh task may be mid-sleep; left alive, it would wake to a
+            # lease re-acquired meanwhile and run beside the new one's task.
+            await self._stop_refreshing()
+            return False
+        return True
+
+    async def _stop_refreshing(self) -> None:
+        if self._refresh_task is not None:
+            self._refresh_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._refresh_task
+            self._refresh_task = None
+
     async def release(self) -> None:
         """Release the lease and stop refreshing.
 
@@ -165,11 +199,7 @@ class Lease:
         if not self._held and self._refresh_task is None:
             return
         self._held = False
-        if self._refresh_task is not None:
-            self._refresh_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await self._refresh_task
-            self._refresh_task = None
+        await self._stop_refreshing()
         try:
             await self._redis.client.eval(  # type: ignore[misc]
                 _RELEASE_SCRIPT, 1, self._key, self._owner_id

@@ -42,6 +42,7 @@ from api.db.redis import (
     INSTANCE_STATS_KEY,
     INSTANCE_TTL_SECONDS,
     LEASE_SCAN,
+    SCAN_COUNT,
     RedisClient,
     classify_key,
 )
@@ -324,7 +325,10 @@ async def collect_redis(redis_client: RedisClient, *, scan_keyspace: bool = True
 async def _collect_leases(redis_client: RedisClient, instance_id: str) -> list[LeaseInfo]:
     """Who currently holds each singleton-worker lease, cluster-wide."""
     client = redis_client.client
-    keys = [k if isinstance(k, str) else k.decode() async for k in client.scan_iter(match=LEASE_SCAN)]
+    keys = [
+        k if isinstance(k, str) else k.decode()
+        async for k in client.scan_iter(match=LEASE_SCAN, count=SCAN_COUNT)
+    ]
     if not keys:
         return []
     pipe = client.pipeline()
@@ -380,7 +384,7 @@ async def _collect_instances(redis_client: RedisClient, instance_id: str) -> lis
     client = redis_client.client
     keys = [
         k if isinstance(k, str) else k.decode()
-        async for k in client.scan_iter(match=INSTANCE_REGISTRY_SCAN)
+        async for k in client.scan_iter(match=INSTANCE_REGISTRY_SCAN, count=SCAN_COUNT)
     ]
     if not keys:
         return []

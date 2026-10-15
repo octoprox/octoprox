@@ -29,11 +29,11 @@ from api.core.event_bus import event_bus
 from api.core.job_stats import job_stats
 from api.core.signals import exit_ip_observed, health_check_completed
 from api.core.workers import WorkerName
-from api.db.redis import INSTANCE_REGISTRY_SCAN, RedisClient
+from api.db.redis import INSTANCE_REGISTRY_SCAN, SCAN_COUNT, RedisClient
 from api.models.connector import Connector
 from api.models.location import LocationTarget
 from api.models.proxy import Proxy, ProxyProtocol, ProxyStatus
-from api.providers.sdk.sources import extract_ip_and_place
+from api.providers.sdk.sources import extract_ip_and_place, httpx_proxy, shared_ssl_context
 from api.providers.sdk.strategies import is_dynamic_gateway
 
 if TYPE_CHECKING:
@@ -200,7 +200,7 @@ class HealthChecker:
         ids: set[str] = {self._instance_id}
         try:
             async for key in self._redis_client.client.scan_iter(
-                match=INSTANCE_REGISTRY_SCAN
+                match=INSTANCE_REGISTRY_SCAN, count=SCAN_COUNT
             ):
                 if isinstance(key, bytes):
                     key = key.decode("utf-8")
@@ -273,16 +273,17 @@ class HealthChecker:
     ) -> dict[str, httpx.AsyncHTTPTransport | AsyncProxyTransport]:
         """Create proxy mounts for httpx client."""
         proxy_url = proxy.url
+        context = shared_ssl_context()
 
         if proxy.protocol in (ProxyProtocol.HTTP, ProxyProtocol.HTTPS):
-            transport = httpx.AsyncHTTPTransport(proxy=proxy_url)
+            transport = httpx.AsyncHTTPTransport(proxy=httpx_proxy(proxy_url), verify=context)
             return {
                 "http://": transport,
                 "https://": transport,
             }
         elif proxy.protocol in (ProxyProtocol.SOCKS4, ProxyProtocol.SOCKS5):
             # rdns: a SOCKS4 proxy gets the check URL's name (4a form) rather than an address resolved here.
-            transport = AsyncProxyTransport.from_url(proxy_url, rdns=True)
+            transport = AsyncProxyTransport.from_url(proxy_url, rdns=True, verify=context)
             return {
                 "http://": transport,
                 "https://": transport,
@@ -362,6 +363,7 @@ class HealthChecker:
             async with httpx.AsyncClient(
                 mounts=mounts,
                 timeout=self._timeout,
+                verify=shared_ssl_context(),
             ) as client:
                 response = await client.get(healthcheck_url)
 

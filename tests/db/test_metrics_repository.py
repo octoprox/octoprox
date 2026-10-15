@@ -5,6 +5,7 @@
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from api.core.stats import MetricDelta
 from api.db.repository import (
     ConnectorRepository,
     CredentialRepository,
@@ -66,6 +67,62 @@ class TestMetricsRepository:
         await session.commit()
 
         return project, credential, connector, proxy
+
+    async def test_batch_snapshots_keep_known_rows_and_report_gone_ones(
+        self,
+        metrics_repo: MetricsRepository,
+        proxy_repo: ProxyRepository,
+        connector_repo: ConnectorRepository,
+        credential_repo: CredentialRepository,
+        project_repo: ProjectRepository,
+        db_session: AsyncSession,
+    ) -> None:
+        """The flusher's batch inserts write a row per known entity and return the ids that are gone."""
+        project, _credential, connector, proxy = await self._create_full_chain(
+            project_repo, credential_repo, connector_repo, proxy_repo, db_session
+        )
+        delta = MetricDelta(
+            request_count=4, success_count=3, failure_count=1, latency_sum_ms=600.0, bytes_sent=50, bytes_received=70
+        )
+
+        dropped = await metrics_repo.save_proxy_metrics_snapshots(
+            {proxy.id: delta, "gone-proxy": delta}, {proxy.id: "healthy"}
+        )
+        assert dropped == ["gone-proxy"]
+        assert await metrics_repo.save_project_metrics_snapshots({project.id: delta, "gone": delta}) == ["gone"]
+        assert await metrics_repo.save_connector_metrics_snapshots({connector.id: delta, "gone": delta}) == ["gone"]
+        await db_session.commit()
+
+        [proxy_row] = await metrics_repo.get_metrics_history(proxy.id)
+        assert (proxy_row["request_count"], proxy_row["avg_latency_ms"], proxy_row["status"]) == (4, 150.0, "healthy")
+        assert (proxy_row["bytes_sent"], proxy_row["bytes_received"]) == (50, 70)
+        [project_row] = await metrics_repo.get_project_metrics_history(project.id)
+        assert (project_row["request_count"], project_row["failure_count"]) == (4, 1)
+        [connector_row] = await metrics_repo.get_connector_metrics_history(connector.id)
+        assert (connector_row["request_count"], connector_row["success_count"]) == (4, 3)
+
+    async def test_a_batch_larger_than_one_parent_lookup(
+        self,
+        metrics_repo: MetricsRepository,
+        proxy_repo: ProxyRepository,
+        connector_repo: ConnectorRepository,
+        credential_repo: CredentialRepository,
+        project_repo: ProjectRepository,
+        db_session: AsyncSession,
+    ) -> None:
+        """Parents are looked up in slices; one found only in the last slice still gets its row."""
+        _project, _credential, connector, _proxy = await self._create_full_chain(
+            project_repo, credential_repo, connector_repo, proxy_repo, db_session
+        )
+        delta = MetricDelta(request_count=1, success_count=1)
+        batch = {f"gone-{i}": delta for i in range(10_500)}
+        batch[connector.id] = delta
+
+        dropped = await metrics_repo.save_connector_metrics_snapshots(batch)
+        await db_session.commit()
+
+        assert len(dropped) == 10_500 and connector.id not in dropped
+        assert len(await metrics_repo.get_connector_metrics_history(connector.id)) == 1
 
     async def test_save_metrics_snapshot(
         self,
