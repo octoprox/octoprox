@@ -4,6 +4,7 @@
 """Redis client for operational data storage."""
 
 import time
+from collections import Counter
 from collections.abc import Iterable
 from dataclasses import fields
 from functools import lru_cache
@@ -11,9 +12,10 @@ from typing import Any
 
 import redis.asyncio as redis
 import structlog
+from redis.commands.core import AsyncScript
 
 from api.core import utc_now
-from api.core.stats import MetricDelta, TunnelPeerMetricDelta
+from api.core.stats import FailureCountKey, MetricDelta, TunnelPeerMetricDelta
 from api.models.proxy import ProxyStatus
 
 logger = structlog.get_logger()
@@ -58,9 +60,24 @@ CONNECTOR_TRAFFIC_BLOCKED_KEY = "connector:traffic_blocked:{connector_id}"
 SESSION_KEY = "session:{session_id}"
 STICKY_BINDING_KEY = "sticky:{project_id}:{session_id}"
 MITM_REQUESTS_KEY = "mitm:requests:{project_id}"
-# Each project's failure log (api.core.failure_log): a capped stream of why
-# requests failed, newest last, trimmed by length and age as it is written.
-FAILURE_LOG_KEY = "failures:{project_id}"
+# Each project's failure log (api.core.failure_log): one capped stream of
+# examples per kind of failure, newest last, trimmed by length and age as it
+# is written, so a flood of one kind never pushes out the rare ones. The
+# appended hash counts the entries each stream has ever been given, which
+# tells the page how many are newer than the ones it shows. A stream without
+# a kind is the single log of the first release; it expires on its own.
+FAILURE_LOG_KEY = "failures:{project_id}:{kind}"
+FAILURE_LOG_APPENDED_KEY = "failures:{project_id}:appended"
+LEGACY_FAILURE_LOG_KEY = "failures:{project_id}"
+# Failure counts by (project, connector, kind, vendor status), the sixth hash
+# in the metrics pipeline: written by each instance's failure log next to its
+# examples, drained by the leader into failure_metrics. "-" stands for no
+# connector (refused before a proxy was chosen) and for no vendor status.
+FAILURE_METRICS_PREFIX = "failure:metrics:"
+FAILURE_METRICS_KEY = FAILURE_METRICS_PREFIX + "{project_id}:{connector_id}:{kind}:{upstream_status}"
+FAILURE_METRICS_SCAN = FAILURE_METRICS_PREFIX + "*"
+FAILURE_METRICS_PROJECT_SCAN = FAILURE_METRICS_PREFIX + "{project_id}:*"
+FAILURE_METRICS_CONNECTOR_SCAN = FAILURE_METRICS_PREFIX + "*:{connector_id}:*"
 INSTANCE_REGISTRY_KEY = "instance_registry:{instance_id}"
 INSTANCE_REGISTRY_SCAN = "instance_registry:*"
 # What one instance can see about itself and nobody else can: its runtime,
@@ -137,6 +154,7 @@ REDIS_KEY_GROUPS: tuple[tuple[str, str], ...] = (
     ("connector:metrics:", "Connector metrics"),
     ("tunnel_peer:metrics:", "Tunnel device metrics"),
     ("host:metrics:", "Host metrics"),
+    ("failure:metrics:", "Failure metrics"),
     ("connector:traffic_blocked:", "Traffic limits"),
     ("sticky:", "Sticky bindings"),
     ("session:", "Sessions"),
@@ -157,8 +175,45 @@ OTHER_KEY_GROUP = "Other"
 
 LEASE_SCAN = "lease:*"
 
-# How many host metrics hashes one pipeline reads or deletes at a time.
+# How many metrics hashes one pipeline reads, drains or deletes at a time.
 _HOST_METRICS_BATCH = 500
+
+# Takes one flush's counts off a metrics hash (KEYS[1]). ARGV holds triples:
+# field, the amount to add (the flushed amount, negated), and "f" for a float
+# field or "i" for an integer one. Subtracting rather than deleting keeps
+# what the instances added between the flusher's read and this drain: it
+# belongs to the next flush. Once the integer counters are back at zero the
+# hash is deleted (a float sum may keep a rounding residue, so floats do not
+# keep it alive). A hash gone since the read (its entity was removed) is left
+# gone, and one with a counter below zero was reset and refilled since the
+# read, so nothing in it can be told apart as the next flush's: it goes.
+_DRAIN_METRICS_SCRIPT = """
+if redis.call('EXISTS', KEYS[1]) == 0 then return 0 end
+local floats = {}
+for i = 1, #ARGV, 3 do
+  if ARGV[i + 2] == 'f' then
+    redis.call('HINCRBYFLOAT', KEYS[1], ARGV[i], ARGV[i + 1])
+    floats[ARGV[i]] = true
+  else
+    redis.call('HINCRBY', KEYS[1], ARGV[i], ARGV[i + 1])
+  end
+end
+local values = redis.call('HGETALL', KEYS[1])
+local left = false
+for i = 1, #values, 2 do
+  local field = values[i]
+  if field ~= 'updated_at' and not floats[field] then
+    local n = tonumber(values[i + 1])
+    if n ~= nil and n < 0 then
+      redis.call('DEL', KEYS[1])
+      return 0
+    end
+    if n ~= nil and n > 0 then left = true end
+  end
+end
+if not left then redis.call('DEL', KEYS[1]) end
+return left and 1 or 0
+"""
 
 
 def parse_host_metrics_key(key: str | bytes) -> tuple[str, str, str] | None:
@@ -170,6 +225,48 @@ def parse_host_metrics_key(key: str | bytes) -> tuple[str, str, str] | None:
     if len(parts) != 3 or not all(parts):
         return None
     return parts[0], parts[1], parts[2]
+
+
+def failure_metrics_key(key: FailureCountKey) -> str:
+    """The Redis hash a failure count is kept in until the leader flushes it."""
+    project_id, connector_id, kind, upstream_status = key
+    return FAILURE_METRICS_KEY.format(
+        project_id=project_id,
+        connector_id=connector_id or "-",
+        kind=kind,
+        upstream_status="-" if upstream_status is None else upstream_status,
+    )
+
+
+def parse_failure_metrics_key(key: str | bytes) -> FailureCountKey | None:
+    """(project_id, connector_id, kind, upstream_status) from a failure metrics key, None for anything else."""
+    text = key if isinstance(key, str) else key.decode()
+    if not text.startswith(FAILURE_METRICS_PREFIX):
+        return None
+    parts = text[len(FAILURE_METRICS_PREFIX):].split(":")
+    if len(parts) != 4 or not all(parts):
+        return None
+    project_id, connector_id, kind, status = parts
+    try:
+        upstream_status = None if status == "-" else int(status)
+    except ValueError:
+        return None
+    return project_id, None if connector_id == "-" else connector_id, kind, upstream_status
+
+
+def _stream_id_order(stream_id: str) -> tuple[int, int]:
+    ms, seq = stream_id.split("-")
+    return int(ms), int(seq)
+
+
+def _stream_id_before(stream_id: str) -> str | None:
+    """The greatest stream ID below ``stream_id``, None below 0-0: an exclusive upper bound."""
+    ms, seq = _stream_id_order(stream_id)
+    if seq > 0:
+        return f"{ms}-{seq - 1}"
+    if ms > 0:
+        return f"{ms - 1}-18446744073709551615"
+    return None
 
 
 def classify_key(key: str) -> str:
@@ -190,6 +287,7 @@ class RedisClient:
     def __init__(self, redis_url: str) -> None:
         self._redis_url = redis_url
         self._client: redis.Redis | None = None
+        self._drain_script: AsyncScript | None = None
 
     async def connect(self) -> None:
         """Connect to Redis."""
@@ -527,15 +625,6 @@ class RedisClient:
                     metrics[key] = m
         return metrics
 
-    async def reset_host_metrics(self, keys: Iterable[tuple[str, str, str]]) -> None:
-        """Delete the given host metrics hashes after flushing them to Postgres."""
-        names = [
-            HOST_METRICS_KEY.format(project_id=project_id, connector_id=connector_id, host=host)
-            for project_id, connector_id, host in keys
-        ]
-        for start in range(0, len(names), _HOST_METRICS_BATCH):
-            await self.client.delete(*names[start:start + _HOST_METRICS_BATCH])
-
     async def reset_host_metrics_for_project(self, project_id: str) -> None:
         """Delete every host metrics hash of a project, when the project goes."""
         await self._delete_matching(HOST_METRICS_PROJECT_SCAN.format(project_id=project_id))
@@ -680,15 +769,10 @@ class RedisClient:
     async def _stream_page(self, key: str, count: int, before_id: str | None) -> list[dict[str, str]]:
         """Newest-first page of a stream, strictly older than ``before_id`` when given."""
         if before_id:
-            # Make the bound exclusive by decrementing the sequence number
-            parts = before_id.split("-")
-            ts_part, seq_part = parts[0], int(parts[1])
-            if seq_part > 0:
-                end = f"{ts_part}-{seq_part - 1}"
-            elif int(ts_part) > 0:
-                end = f"{int(ts_part) - 1}-18446744073709551615"
-            else:
+            before = _stream_id_before(before_id)
+            if before is None:
                 return []  # nothing is older than 0-0
+            end = before
         else:
             end = "+"
 
@@ -709,49 +793,207 @@ class RedisClient:
 
     async def append_failures(
         self,
-        entries: list[tuple[str, dict[str, str]]],
+        entries: list[tuple[str, str, dict[str, str]]],
+        counts: dict[FailureCountKey, int],
         *,
         max_entries: int,
         retention_seconds: int,
     ) -> None:
-        """Append (project_id, fields) entries to their projects' failure logs in one round trip.
+        """Write a window of the failure log, (project_id, kind, fields) examples and counts, in one round trip.
 
-        Each stream is capped at about ``max_entries``, loses entries older
-        than the retention, and expires whole once nothing has failed for
-        that long.
+        Each kind's stream keeps its newest ``max_entries`` entries, loses
+        entries older than the retention, and expires whole once that kind
+        has not failed for that long. The counts go to the metrics hashes
+        the leader flushes into failure_metrics.
         """
-        if not entries:
+        if not entries and not counts:
             return
-        pipe = self.client.pipeline(transaction=False)
-        for project_id, entry in entries:
-            key = FAILURE_LOG_KEY.format(project_id=project_id)
-            pipe.xadd(key, entry, maxlen=max_entries, approximate=True)  # type: ignore[arg-type]
+        # The window's examples are given IDs in the order passed (oldest
+        # first) across every kind, so a page merged from several kinds'
+        # streams reads in time order: auto IDs would restart at -0 in each
+        # stream. An ID another instance has already passed in that stream
+        # (same millisecond, or a clock ahead of ours) is refused; those few
+        # are appended again with an automatic ID, in a second round trip
+        # only when there are any.
+        now_ms = int(time.time() * 1000)
         min_id = f"{int(time.time() - retention_seconds) * 1000}-0"
-        for project_id in {project_id for project_id, _ in entries}:
-            key = FAILURE_LOG_KEY.format(project_id=project_id)
+        # Examples per stream: one HINCRBY each on the appended hash, not one per example.
+        streams: Counter[tuple[str, str]] = Counter()
+        pipe = self.client.pipeline(transaction=False)
+        for seq, (project_id, kind, entry) in enumerate(entries):
+            pipe.xadd(
+                FAILURE_LOG_KEY.format(project_id=project_id, kind=kind), entry,  # type: ignore[arg-type]
+                id=f"{now_ms}-{seq}", maxlen=max_entries, approximate=False,
+            )
+            streams[(project_id, kind)] += 1
+        for (project_id, kind), appended in streams.items():
+            pipe.hincrby(FAILURE_LOG_APPENDED_KEY.format(project_id=project_id), kind, appended)
+        for project_id, kind in streams:
+            key = FAILURE_LOG_KEY.format(project_id=project_id, kind=kind)
             # Exact: an approximate MINID only drops whole stream nodes, so a
-            # slowly failing project would keep entries past the retention.
+            # slowly failing kind would keep entries past the retention.
             pipe.xtrim(key, minid=min_id, approximate=False)
             pipe.expire(key, retention_seconds)
-        await pipe.execute()
+        for project_id in {project_id for project_id, _kind in streams}:
+            pipe.expire(FAILURE_LOG_APPENDED_KEY.format(project_id=project_id), retention_seconds)
+        for count_key, count in counts.items():
+            pipe.hincrby(failure_metrics_key(count_key), "failure_count", count)
+        results = await pipe.execute(raise_on_error=False)
+        # The XADDs come first; anything else failing fails the window.
+        failed = next((r for r in results[len(entries):] if isinstance(r, Exception)), None)
+        if failed is not None:
+            raise failed
+        refused = [
+            entry for entry, result in zip(entries, results[:len(entries)], strict=True) if isinstance(result, Exception)
+        ]
+        if refused:
+            pipe = self.client.pipeline(transaction=False)
+            for project_id, kind, entry in refused:
+                key = FAILURE_LOG_KEY.format(project_id=project_id, kind=kind)
+                pipe.xadd(key, entry, maxlen=max_entries, approximate=False)  # type: ignore[arg-type]
+                # Again: the stream may have been cleared since, and XADD makes it anew without a TTL.
+                pipe.expire(key, retention_seconds)
+            await pipe.execute()
 
     async def get_failures(
         self,
         project_id: str,
+        kinds: list[str],
         count: int = 200,
-        before_id: str | None = None,
+        after: tuple[str, str] | None = None,
     ) -> list[dict[str, str]]:
-        """Read a project's failure log, newest first, with the same cursor as the MITM captures."""
-        return await self._stream_page(FAILURE_LOG_KEY.format(project_id=project_id), count, before_id)
+        """The newest examples across the kinds' streams, each with its stream ``id`` and ``kind``.
 
-    async def count_failures(self, project_id: str) -> int:
-        """How many entries a project's failure log holds."""
-        result: int = await self.client.xlen(FAILURE_LOG_KEY.format(project_id=project_id))
-        return result
+        Entries are ordered by (stream ID, kind), newest first: two streams
+        can hand out the same ID in the same millisecond, and the kind
+        settles which comes first. ``after`` is the (stream ID, kind) of the
+        last entry of the previous page; this page holds what follows it.
+        """
+        bounds: list[tuple[str, str]] = []
+        for kind in kinds:
+            if after is None:
+                bounds.append((kind, "+"))
+                continue
+            after_id, after_kind = after
+            # Same ID, smaller kind: still after the cursor in this order.
+            end = after_id if kind < after_kind else _stream_id_before(after_id)
+            if end is not None:
+                bounds.append((kind, end))
+        if not bounds:
+            return []
+        pipe = self.client.pipeline(transaction=False)
+        for kind, end in bounds:
+            pipe.xrevrange(FAILURE_LOG_KEY.format(project_id=project_id, kind=kind), max=end, min="-", count=count)
+        merged = [
+            (entry_id, kind, entry)
+            for (kind, _end), raw in zip(bounds, await pipe.execute(), strict=True)
+            for entry_id, entry in raw
+        ]
+        merged.sort(key=lambda item: (_stream_id_order(item[0]), item[1]), reverse=True)
+        return [{**entry, "id": entry_id, "kind": kind} for entry_id, kind, entry in merged[:count]]
+
+    async def count_failures(self, project_id: str, kinds: list[str]) -> int:
+        """How many examples the kinds' streams hold."""
+        pipe = self.client.pipeline(transaction=False)
+        for kind in kinds:
+            pipe.xlen(FAILURE_LOG_KEY.format(project_id=project_id, kind=kind))
+        return sum(int(n) for n in await pipe.execute())
+
+    async def failures_appended(self, project_id: str) -> dict[str, int]:
+        """How many examples each kind's stream has been given so far."""
+        raw = await self.client.hgetall(FAILURE_LOG_APPENDED_KEY.format(project_id=project_id))  # type: ignore[misc]
+        return {(k if isinstance(k, str) else k.decode()): int(v) for k, v in raw.items()}
 
     async def clear_failures(self, project_id: str) -> None:
-        """Delete a project's failure log."""
-        await self.client.delete(FAILURE_LOG_KEY.format(project_id=project_id))
+        """Delete a project's failure log: every kind's examples and the appended counts. Counts in history stay."""
+        await self.client.delete(LEGACY_FAILURE_LOG_KEY.format(project_id=project_id))
+        await self._delete_matching(FAILURE_LOG_KEY.format(project_id=project_id, kind="*"))
+
+    # Failure counts, drained by the leader into failure_metrics like the
+    # host metrics hashes, in pipelined batches: read, then the flushed
+    # amount subtracted.
+
+    async def get_all_failure_metrics(self) -> dict[FailureCountKey, int]:
+        """Every failure count hash, keyed by (project_id, connector_id, kind, upstream_status)."""
+        keys: list[FailureCountKey] = []
+        async for raw_key in self.client.scan_iter(match=FAILURE_METRICS_SCAN, count=500):
+            parsed = parse_failure_metrics_key(raw_key)
+            if parsed is not None:
+                keys.append(parsed)
+        counts: dict[FailureCountKey, int] = {}
+        for start in range(0, len(keys), _HOST_METRICS_BATCH):
+            batch = keys[start:start + _HOST_METRICS_BATCH]
+            pipe = self.client.pipeline()
+            for key in batch:
+                pipe.hget(failure_metrics_key(key), "failure_count")
+            for key, value in zip(batch, await pipe.execute(), strict=True):
+                if value is not None and int(value) > 0:
+                    counts[key] = int(value)
+        return counts
+
+    async def drain_flushed_metrics(
+        self,
+        *,
+        proxies: dict[str, MetricDelta],
+        projects: dict[str, MetricDelta],
+        connectors: dict[str, MetricDelta],
+        tunnel_peers: dict[str, TunnelPeerMetricDelta],
+        hosts: dict[tuple[str, str, str], MetricDelta],
+        failures: dict[FailureCountKey, int],
+    ) -> None:
+        """Take what a flush wrote to Postgres off the hashes it was read from.
+
+        Called once the flush transaction has committed, with exactly what
+        was read. Subtracted rather than deleted: the instances keep adding
+        to these hashes while the flush runs, and what they added since the
+        read belongs to the next flush (see ``_DRAIN_METRICS_SCRIPT``). A
+        hash left at zero is deleted. Pipelined in batches, as there can be
+        thousands of host hashes.
+        """
+        drains: list[tuple[str, list[str]]] = []
+        for proxy_id, delta in proxies.items():
+            drains.append((PROXY_METRICS_KEY.format(proxy_id=proxy_id), self._drain_args(delta)))
+        for project_id, delta in projects.items():
+            drains.append((PROJECT_METRICS_KEY.format(project_id=project_id), self._drain_args(delta)))
+        for connector_id, delta in connectors.items():
+            drains.append((CONNECTOR_METRICS_KEY.format(connector_id=connector_id), self._drain_args(delta)))
+        for peer_id, peer_delta in tunnel_peers.items():
+            drains.append((TUNNEL_PEER_METRICS_KEY.format(peer_id=peer_id), self._drain_args(peer_delta)))
+        for (project_id, connector_id, host), delta in hosts.items():
+            key = HOST_METRICS_KEY.format(project_id=project_id, connector_id=connector_id, host=host)
+            drains.append((key, self._drain_args(delta)))
+        for count_key, count in failures.items():
+            drains.append((failure_metrics_key(count_key), ["failure_count", str(-count), "i"]))
+        if self._drain_script is None:
+            self._drain_script = self.client.register_script(_DRAIN_METRICS_SCRIPT)
+        for start in range(0, len(drains), _HOST_METRICS_BATCH):
+            pipe = self.client.pipeline(transaction=False)
+            for name, args in drains[start:start + _HOST_METRICS_BATCH]:
+                await self._drain_script(keys=[name], args=args, client=pipe)
+            await pipe.execute()
+
+    @staticmethod
+    def _drain_args(delta: MetricDelta) -> list[str]:
+        """The drain script's (field, negated amount, kind) triples for one hash's flushed delta."""
+        args: list[str] = []
+        for f in fields(delta):
+            value = getattr(delta, f.name)
+            if not value:
+                continue
+            # Same type test as _pipeline_metric_delta: the field's declared type, not the value's.
+            if f.type is float:
+                args += [f.name, repr(-float(value)), "f"]
+            else:
+                args += [f.name, str(-int(value)), "i"]
+        return args
+
+    async def reset_failure_metrics_for_project(self, project_id: str) -> None:
+        """Delete every failure count hash of a project, when the project goes."""
+        await self._delete_matching(FAILURE_METRICS_PROJECT_SCAN.format(project_id=project_id))
+
+    async def reset_failure_metrics_for_connector(self, connector_id: str) -> None:
+        """Delete every failure count hash of a connector, when the connector goes."""
+        await self._delete_matching(FAILURE_METRICS_CONNECTOR_SCAN.format(connector_id=connector_id))
 
     # Tunnel peer status, per protocol
 

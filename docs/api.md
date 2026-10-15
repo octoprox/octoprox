@@ -758,20 +758,56 @@ The `top` hosts by requests (1-12, default 8), or the `hosts` named (comma-separ
 
 ### Failure log
 
-Why the project's requests failed or were refused, newest first (see [Metrics]({{ site.baseurl }}/metrics#failures-why-requests-failed)). Entries appear within about 5 seconds of the failure.
+Why the project's requests failed or were refused (see [Metrics]({{ site.baseurl }}/metrics#failures-why-requests-failed)). The summary counts every failure from the metrics history; the examples are a sample, kept per kind, that appear within about 5 seconds of the failure.
+
+#### Summary
 
 ```bash
-GET /api/v1/projects/{project_id}/failures?count=200&cursor=…
+GET /api/v1/projects/{project_id}/failures/summary?range=24h
 ```
 
-`count` is 1-1000 (default 200). `next_cursor` is set when older entries remain; pass it as `cursor` for the next page.
+`range` is one of `1h`, `6h`, `24h` (default), `7d`, `30d`. The numbers come from the flushed history, so they trail live traffic by up to one flush interval.
+
+**Response:**
+```json
+{
+  "range": "24h",
+  "since": "2026-10-14T11:00:00",
+  "bucket_seconds": 900,
+  "total": 3750,
+  "kinds": [
+    { "kind": "upstream_rejected", "count": 3097,
+      "upstream_statuses": [ { "status": 407, "count": 2055 }, { "status": 502, "count": 917 } ] },
+    { "kind": "upstream_timeout", "count": 463, "upstream_statuses": [] },
+    { "kind": "no_proxy_available", "count": 190, "upstream_statuses": [] }
+  ],
+  "connectors": [
+    { "connector_id": "a2b9…", "name": "Bright Data residential", "count": 3560 },
+    { "connector_id": null, "name": null, "count": 190 }
+  ],
+  "series": [
+    { "kind": "upstream_rejected", "points": [ { "timestamp": "2026-10-14T11:00:00", "count": 12 } ] }
+  ],
+  "enabled": true
+}
+```
+
+`kinds` and `connectors` are ordered most first; a connector of `null` stands for requests refused before a proxy was chosen. `series` has one entry per kind in the same order, each with every bucket of the window (zeros where it was quiet), so they stack.
+
+#### Examples
+
+```bash
+GET /api/v1/projects/{project_id}/failures?kind=upstream_rejected&count=200&cursor=…
+```
+
+Newest first. `kind` keeps one kind (leave it out for all of them), `count` is 1-1000 (default 200), and `next_cursor` is set when older examples remain; pass it as `cursor` for the next page.
 
 **Response:**
 ```json
 {
   "records": [
     {
-      "id": "1760526000123-0",
+      "id": "1760526000123-0:upstream_rejected",
       "kind": "upstream_rejected",
       "status": 502,
       "message": "407 Proxy Authentication Required",
@@ -790,25 +826,37 @@ GET /api/v1/projects/{project_id}/failures?count=200&cursor=…
       "latency_ms": 212.4,
       "count": 37,
       "first_at": "2026-10-15T10:59:58.120000",
-      "last_at": "2026-10-15T11:00:02.870000",
-      "breakdown": null
+      "last_at": "2026-10-15T11:00:02.870000"
     }
   ],
   "next_cursor": null,
   "total": 1,
+  "appended": 1,
   "enabled": true,
   "max_entries": 1000,
   "retention_hours": 168
 }
 ```
 
-`kind` is one of `upstream_timeout`, `upstream_unreachable`, `upstream_rejected`, `upstream_error`, `client_closed`, `interrupted` (the failures the request metrics count), `no_proxy_available`, `all_proxies_quarantined`, `traffic_limit_exceeded`, `preflight_mismatch`, `invalid_location` (refused before a proxy was used), `intercepted_request_failed` (one request inside a TLS-intercepted connection), or `suppressed`. `status` is what the client was answered; `upstream_status` is the vendor's HTTP status when an HTTP upstream refused the request. `count` is how many identical failures the entry stands for, between `first_at` and `last_at`; `session_id` is the first one's. A `suppressed` entry stands for failures over the per-window cap that were only counted: its `breakdown` maps kinds to counts, and the request fields are `null`.
+`kind` is one of `upstream_timeout`, `upstream_unreachable`, `upstream_rejected`, `upstream_error`, `client_closed`, `interrupted` (the failures the request metrics count), `no_proxy_available`, `all_proxies_quarantined`, `traffic_limit_exceeded`, `preflight_mismatch`, `invalid_location` (refused before a proxy was used), or `intercepted_request_failed` (one request inside a TLS-intercepted connection). `status` is what the client was answered; `upstream_status` is the vendor's HTTP status when an HTTP upstream refused the request. `count` is how many identical failures the example stands for, between `first_at` and `last_at`; `session_id` is the first one's. `total` is how many examples are kept and `max_entries` how many are kept per kind.
+
+`appended` counts the examples ever added (of the kind asked for, or all kinds). To tell how many are newer than a page you loaded, poll the head and subtract:
+
+```bash
+GET /api/v1/projects/{project_id}/failures/head?kind=upstream_rejected
+```
+
+```json
+{ "appended": 1042, "total": 1000 }
+```
+
+#### Clearing
 
 ```bash
 DELETE /api/v1/projects/{project_id}/failures
 ```
 
-Empties the log (editors and admins). The request metrics are not affected, and new failures keep being logged.
+Discards the examples (editors and admins). The counts are part of the metrics history and stay, and new failures keep being recorded.
 
 ### Prometheus Metrics
 

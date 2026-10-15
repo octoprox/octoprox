@@ -296,29 +296,30 @@ class Settings(BaseSettings):
     )
 
     # The per-project failure log (the Failures page): why requests failed.
-    # One capped Redis stream per project; a burst of identical failures is
-    # folded into one entry, and a window with more distinct failures than
-    # the cap only tallies the rest by kind.
+    # Every failure is counted (the failure_metrics history); examples are
+    # kept in one capped Redis stream per project and kind. A burst of
+    # identical failures is folded into one example, and past the per-window
+    # cap failures are only counted.
     failure_log_enabled: bool = Field(
         default=True,
         description="Record why requests failed or were refused, per project (the Failures page)",
     )
     failure_log_max_entries: int = Field(
-        default=10000,
+        default=1000,
         ge=10,
-        description="How many entries each project's failure log keeps, newest first",
+        description="How many examples the failure log keeps of each kind of failure, per project, newest first",
     )
     failure_log_retention_hours: int = Field(
         default=168,
         ge=1,
-        description="How long failure log entries are kept, in hours",
+        description="How long failure log examples are kept, in hours (the counts follow the metrics retention)",
     )
     failure_log_max_per_window: int = Field(
-        default=500,
+        default=100,
         ge=1,
         description=(
-            "How many distinct failures one instance logs per project in each 5-second window; "
-            "beyond that they are only counted by kind"
+            "How many distinct examples of each kind one instance logs per project in each 5-second window; "
+            "beyond that failures are only counted"
         ),
     )
 

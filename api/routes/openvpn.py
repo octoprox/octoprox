@@ -39,7 +39,12 @@ from api.models.tunnel import (
 )
 from api.openvpn import pki
 from api.openvpn.config import client_profile_filename, render_client_profile
-from api.routes.common import openvpn_runtime_of, proxy_manager_of, wireguard_runtime_of
+from api.routes.common import (
+    openvpn_runtime_of,
+    proxy_manager_of,
+    require_project,
+    wireguard_runtime_of,
+)
 from api.routes.metrics import RANGE_CONFIG
 from api.tunnel.peers import NoFreeAddressError
 
@@ -50,11 +55,6 @@ logger = structlog.get_logger()
 
 server_router = APIRouter(prefix="/openvpn")
 router = APIRouter(prefix="/projects/{project_id}/openvpn/peers")
-
-
-def _require_project(request: Request, project_id: str) -> None:
-    if proxy_manager_of(request).get_project(project_id) is None:
-        raise HTTPException(status_code=404, detail="Project not found")
 
 
 def _require_peer(runtime: OpenVpnRuntime, project_id: str, peer_id: str) -> OpenVpnPeer:
@@ -157,7 +157,7 @@ async def rotate_identity(request: Request, admin: RequireAdminDep) -> OpenVpnSe
 
 @router.get("", response_model=OpenVpnPeerListResponse)
 async def list_peers(request: Request, project_id: str) -> OpenVpnPeerListResponse:
-    _require_project(request, project_id)
+    require_project(request, project_id)
     runtime = openvpn_runtime_of(request)
     live = await runtime.peer_statuses()
     peers = runtime.peers.for_project(project_id)
@@ -175,7 +175,7 @@ async def create_peer(
     request: Request, project_id: str, data: OpenVpnPeerCreate, _guard: RequireEditorDep
 ) -> OpenVpnPeerResponse:
     """Register a device: a certificate from the install's CA and the next free address."""
-    _require_project(request, project_id)
+    require_project(request, project_id)
     runtime = openvpn_runtime_of(request)
     try:
         peer = runtime.issue_peer(
@@ -198,7 +198,7 @@ async def create_peer(
 
 @router.get("/{peer_id}", response_model=OpenVpnPeerResponse)
 async def get_peer(request: Request, project_id: str, peer_id: str) -> OpenVpnPeerResponse:
-    _require_project(request, project_id)
+    require_project(request, project_id)
     runtime = openvpn_runtime_of(request)
     peer = _require_peer(runtime, project_id, peer_id)
     return _peer_response(runtime, peer, await runtime.peer_statuses())
@@ -208,7 +208,7 @@ async def get_peer(request: Request, project_id: str, peer_id: str) -> OpenVpnPe
 async def update_peer(
     request: Request, project_id: str, peer_id: str, data: OpenVpnPeerUpdate, _guard: RequireEditorDep
 ) -> OpenVpnPeerResponse:
-    _require_project(request, project_id)
+    require_project(request, project_id)
     runtime = openvpn_runtime_of(request)
     peer = _require_peer(runtime, project_id, peer_id)
     changes = {
@@ -228,7 +228,7 @@ async def update_peer(
 
 @router.delete("/{peer_id}", status_code=204)
 async def delete_peer(request: Request, project_id: str, peer_id: str, _guard: RequireEditorDep) -> None:
-    _require_project(request, project_id)
+    require_project(request, project_id)
     runtime = openvpn_runtime_of(request)
     _require_peer(runtime, project_id, peer_id)
     await runtime.remove_peer(peer_id)
@@ -239,7 +239,7 @@ async def rotate_peer_certificate(
     request: Request, project_id: str, peer_id: str, _guard: RequireEditorDep
 ) -> OpenVpnPeerResponse:
     """A new certificate and key for a device; the profile it has stops working."""
-    _require_project(request, project_id)
+    require_project(request, project_id)
     runtime = openvpn_runtime_of(request)
     peer = _require_peer(runtime, project_id, peer_id)
     updated = runtime.reissue_certificate(peer)
@@ -255,7 +255,7 @@ async def get_peer_metrics_history(
     range: Literal["1h", "6h", "24h", "7d", "30d"] = Query("24h", alias="range"),
 ) -> TunnelPeerMetricsHistoryResponse:
     """The device's own metrics history, same ranges and tiers as the WireGuard devices'."""
-    _require_project(request, project_id)
+    require_project(request, project_id)
     _require_peer(openvpn_runtime_of(request), project_id, peer_id)
     delta, limit, bucket_seconds = RANGE_CONFIG[range]
     since = utc_now() - delta
@@ -275,7 +275,7 @@ async def get_peer_metrics_history(
 @router.get("/{peer_id}/config", response_model=OpenVpnPeerConfigResponse)
 async def get_peer_config(request: Request, project_id: str, peer_id: str) -> OpenVpnPeerConfigResponse:
     """The device's ``.ovpn`` profile. Issued even before the endpoint is set, flagged as such."""
-    _require_project(request, project_id)
+    require_project(request, project_id)
     runtime = openvpn_runtime_of(request)
     peer = _require_peer(runtime, project_id, peer_id)
     server = runtime.settings_store.settings

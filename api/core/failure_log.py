@@ -1,36 +1,35 @@
 # Copyright 2026 Octoprox Authors
 # SPDX-License-Identifier: Apache-2.0
 
-"""The per-project failure log: why requests failed, kept for reading on the Failures page.
+"""The per-project failure log: why requests failed, for the Failures page.
 
 The request metrics count failures; this says what they were. Every request
 the proxy listener or a tunnel device could not complete is described as a
 :class:`RequestFailure` (what kind of failure, what the client was answered,
 the vendor's own answer when there was one, which connector and proxy) and
 published on the ``request_failed`` signal. :class:`FailureLog` collects
-them in memory and writes them to one capped Redis stream per project every
-few seconds, the same shape as the IP observation pipeline: nothing on the
-request path waits for Redis.
+them in memory and every few seconds writes two things to Redis in one
+round trip, the same shape as the IP observation pipeline, so nothing on the
+request path waits for Redis:
 
-Volume is bounded three ways, because a broken upstream fails every request
-sent to it:
+- **Counts.** Every failure is counted by project, connector, kind and the
+  vendor's status, into hashes the leader flushes into the failure_metrics
+  history table like the other metrics. These are complete: the page's
+  summary and chart read them.
+- **Examples.** One capped stream per project and kind, so a flood of one
+  kind never pushes out the rare ones. Within a window, failures that differ
+  only in time and session are folded into one entry with a count; each
+  kind of a project gets at most ``max_per_window`` distinct entries per
+  window on each instance, the rest being counted only. Each stream keeps
+  ``max_entries`` entries for ``retention_hours``.
 
-- Within one window, failures that differ only in time (and session) are
-  folded into one entry with a count, so ten thousand identical timeouts
-  are one line saying x10000.
-- Each project gets at most ``max_per_window`` distinct entries per window on
-  each instance. Past that, failures are only tallied by kind, and the window
-  writes one ``suppressed`` entry carrying the tally.
-- The stream keeps ``max_entries`` entries and ``retention_hours`` of them.
-
-The log is best effort. A window that cannot reach Redis is dropped, not
-retried: it describes failures the metrics have already counted.
+Both are best effort. A window that cannot reach Redis is dropped, not
+retried.
 """
 
 from __future__ import annotations
 
 import asyncio
-import json
 import re
 import socket
 from collections import Counter
@@ -48,6 +47,7 @@ from python_socks import ProxyConnectionError, ProxyError
 from api.core import utc_now
 from api.core.job_stats import job_stats
 from api.core.signals import request_failed
+from api.core.stats import FailureCountKey
 from api.core.workers import WorkerName
 from api.models.proxy import ProxyProtocol
 
@@ -63,8 +63,6 @@ logger = structlog.get_logger()
 FAILURE_LOG_INTERVAL_SECONDS = 5.0
 # Long exception texts (a vendor's HTML error page) are cut here.
 MAX_MESSAGE_CHARS = 500
-# The stream entry kind that carries a window's tally of failures not logged one by one.
-SUPPRESSED = "suppressed"
 # The query of any URL an error text quotes (rnet names the full request URL):
 # it is where tokens travel, so it never reaches the log.
 _URL_QUERY = re.compile(r"(https?://[^\s\"'?#]*)\?[^\s\"']*")
@@ -159,6 +157,10 @@ class RequestFailure:
             self.project_id, self.kind, self.status, self.upstream_status, self.error_type, self.message,
             self.method, self.target, self.location, self.peer_id, self.proxy_id,
         )
+
+    def count_key(self) -> FailureCountKey:
+        """What the failure is counted under in failure_metrics."""
+        return self.project_id, self.connector_id, self.kind.value, self.upstream_status
 
 
 def build_failure(
@@ -293,7 +295,7 @@ class _Entry:
 
 
 class FailureLog:
-    """Per-instance window of failures, and the loop that writes it to the projects' streams."""
+    """Per-instance window of failures, and the loop that writes it to Redis."""
 
     def __init__(
         self,
@@ -311,11 +313,11 @@ class FailureLog:
         self._connector_name = connector_name
         self._interval = interval
         self._pending: dict[tuple[Any, ...], _Entry] = {}
-        self._distinct: Counter[str] = Counter()
-        self._suppressed: dict[str, Counter[str]] = {}
-        self._suppressed_window: dict[str, tuple[datetime, datetime]] = {}
+        # Distinct examples this window, per (project, kind).
+        self._distinct: Counter[tuple[str, str]] = Counter()
+        self._counts: Counter[FailureCountKey] = Counter()
         self._running = False
-        # Entries lost because Redis could not be reached, since start.
+        # Windows lost because Redis could not be reached, since start.
         self.dropped = 0
 
     def subscribe_to_signals(self) -> None:
@@ -326,59 +328,48 @@ class FailureLog:
         self.record(failure)
 
     def record(self, failure: RequestFailure) -> None:
-        """Add one failure to the window. Never blocks."""
+        """Count one failure and keep it as an example unless the window has enough of its kind. Never blocks."""
+        self._counts[failure.count_key()] += 1
         key = failure.coalesce_key()
         entry = self._pending.get(key)
         if entry is not None:
             entry.add(failure)
             return
-        project_id = failure.project_id
-        if self._distinct[project_id] >= self._max_per_window:
-            self._suppressed.setdefault(project_id, Counter())[failure.kind.value] += 1
-            first, _ = self._suppressed_window.get(project_id, (failure.at, failure.at))
-            self._suppressed_window[project_id] = (first, failure.at)
+        slot = (failure.project_id, failure.kind.value)
+        if self._distinct[slot] >= self._max_per_window:
             return
         self._pending[key] = _Entry(failure)
-        self._distinct[project_id] += 1
+        self._distinct[slot] += 1
 
     async def publish(self) -> int:
-        """Write the window to Redis. Returns the number of stream entries written."""
-        if self._redis is None or (not self._pending and not self._suppressed):
+        """Write the window to Redis. Returns the number of examples and counts written."""
+        if self._redis is None or not self._counts:
             return 0
         pending, self._pending = self._pending, {}
-        suppressed, self._suppressed = self._suppressed, {}
-        windows, self._suppressed_window = self._suppressed_window, {}
+        counts, self._counts = self._counts, Counter()
         self._distinct = Counter()
 
-        # Oldest first, so the stream (newest last) reads in the order things happened.
+        # Oldest first, so each stream (newest last) reads in the order things happened.
         ordered = sorted(pending.values(), key=lambda e: e.last_at or e.first.at)
         entries = [
-            (e.first.project_id, e.fields(self._connector_name(e.first.connector_id) if e.first.connector_id else None))
+            (
+                e.first.project_id,
+                e.first.kind.value,
+                e.fields(self._connector_name(e.first.connector_id) if e.first.connector_id else None),
+            )
             for e in ordered
         ]
-        for project_id, tally in suppressed.items():
-            first_at, last_at = windows[project_id]
-            entries.append((project_id, {
-                "kind": SUPPRESSED,
-                "status": "0",
-                "message": (
-                    f"{sum(tally.values())} more failures in this window were tallied but not logged one by one "
-                    f"(over {self._max_per_window} distinct failures)"
-                ),
-                "count": str(sum(tally.values())),
-                "breakdown": json.dumps(dict(tally)),
-                "first_at": first_at.isoformat(),
-                "last_at": last_at.isoformat(),
-            }))
         try:
             await self._redis.append_failures(
-                entries, max_entries=self._max_entries, retention_seconds=self._retention_seconds
+                entries, dict(counts), max_entries=self._max_entries, retention_seconds=self._retention_seconds
             )
         except Exception as exc:
-            self.dropped += len(entries)
-            logger.warning("Writing the failure log failed", error=str(exc), entries=len(entries))
+            self.dropped += 1
+            logger.warning(
+                "Writing the failure log failed", error=str(exc), entries=len(entries), failures=sum(counts.values())
+            )
             return 0
-        return len(entries)
+        return len(entries) + len(counts)
 
     async def run(self) -> None:
         """Publisher loop: every instance runs one."""
@@ -396,11 +387,17 @@ class FailureLog:
                 logger.error("Failure log publisher error", error=str(exc))
 
     def forget(self, project_id: str) -> None:
-        """Drop what the window holds for a project that is gone, so the next write does not recreate its log."""
+        """Drop what the window holds for a project that is gone, so the next write does not recreate its keys."""
         self._pending = {key: e for key, e in self._pending.items() if e.first.project_id != project_id}
-        self._distinct.pop(project_id, None)
-        self._suppressed.pop(project_id, None)
-        self._suppressed_window.pop(project_id, None)
+        self._distinct = Counter({slot: n for slot, n in self._distinct.items() if slot[0] != project_id})
+        self._counts = Counter({key: n for key, n in self._counts.items() if key[0] != project_id})
+
+    def forget_connector(self, connector_id: str) -> None:
+        """Drop the window's counts for a connector that is gone, so the next write does not recreate its hashes.
+
+        Its examples stay: they belong to the project and read as a deleted connector.
+        """
+        self._counts = Counter({key: n for key, n in self._counts.items() if key[1] != connector_id})
 
     def stop(self) -> None:
         self._running = False

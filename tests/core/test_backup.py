@@ -12,6 +12,7 @@ from datetime import datetime
 import pytest
 
 from api.core.backup import (
+    _ENTITY_SPECS,
     BACKUP_FORMAT_VERSION,
     BackupDecryptError,
     BackupIncompatibleError,
@@ -39,6 +40,11 @@ def _sample_payload() -> dict:
         "proxies": [],
         "proxy_metrics": [],
         "project_metrics": [],
+        "host_metrics": [{"project_id": "p1", "connector_id": "c1", "host": "example.com", "request_count": 2}],
+        "failure_metrics": [{"project_id": "p1", "kind": "upstream_timeout", "failure_count": 3}],
+        "openvpn_settings": [{"id": "default", "ca_cert": "-----BEGIN CERTIFICATE-----"}],
+        "openvpn_peers": [{"id": "o1", "project_id": "p1", "name": "laptop"}],
+        "tunnel_peer_metrics": [{"peer_id": "o1", "project_id": "p1", "request_count": 1}],
         "geo_settings": [{"id": 1, "exit_ip_retention_days": 90}],
         "geo_databases": [{"id": "db1", "vendor": "maxmind", "kind": "country"}],
     }
@@ -60,6 +66,12 @@ class TestCryptoRoundTrip:
         out = decrypt_payload(envelope, PASSPHRASE)
         assert out.users == payload["users"]
         assert out.projects == payload["projects"]
+        # A collection the payload model does not name would be dropped here, silently.
+        assert out.host_metrics == payload["host_metrics"]
+        assert out.failure_metrics == payload["failure_metrics"]
+        assert out.openvpn_settings == payload["openvpn_settings"]
+        assert out.openvpn_peers == payload["openvpn_peers"]
+        assert out.tunnel_peer_metrics == payload["tunnel_peer_metrics"]
         assert out.geo_settings == payload["geo_settings"]
         assert out.geo_databases == payload["geo_databases"]
         assert out.geo_database_blobs == []
@@ -84,6 +96,17 @@ class TestCryptoRoundTrip:
 
         with pytest.raises(BackupError):
             read_envelope(b"not a backup at all")
+
+
+class TestEveryEntityTravels:
+    def test_every_exported_entity_has_a_payload_and_a_summary_field(self) -> None:
+        # Export writes every spec; import reads the payload model. A spec
+        # the model does not name is exported and then dropped on import.
+        from api.models.backup import BackupPayload, ImportSummary
+
+        keys = [spec.key for spec in _ENTITY_SPECS]
+        assert [k for k in keys if k not in BackupPayload.model_fields] == []
+        assert [k for k in keys if k not in ImportSummary.model_fields] == []
 
 
 class TestCompatibility:

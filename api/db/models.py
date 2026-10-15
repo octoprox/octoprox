@@ -389,6 +389,36 @@ class HostMetricsModel(Base):
     granularity: Mapped[int] = mapped_column(Integer, default=60, nullable=False)
 
 
+class FailureMetricsModel(Base):
+    """Historical failure counts: a project's failed requests by kind, vendor status and connector.
+
+    The sixth metrics history table, behind the Failures page summary. The
+    failure log keeps examples of failures; this counts every one. A
+    request refused before a proxy was chosen has no connector. Same
+    flush, compaction tiers and retention as the other tables; rows
+    cascade with their connector and with the project.
+    """
+
+    __tablename__ = "failure_metrics"
+    __table_args__ = (
+        Index("ix_failure_metrics_project_ts", "project_id", "timestamp"),
+        Index("ix_failure_metrics_project_granularity_ts", "project_id", "granularity", "timestamp"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    project_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("projects.id", ondelete="CASCADE"), nullable=False
+    )
+    connector_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("connectors.id", ondelete="CASCADE"), nullable=True, index=True
+    )
+    kind: Mapped[str] = mapped_column(String(40), nullable=False)
+    upstream_status: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    timestamp: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+    failure_count: Mapped[int] = mapped_column(Integer, default=0)
+    granularity: Mapped[int] = mapped_column(Integer, default=60, nullable=False)
+
+
 class SystemMetricsModel(Base):
     """Periodic install-wide gauge readings, for the admin trend charts.
 

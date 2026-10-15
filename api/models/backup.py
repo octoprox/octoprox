@@ -81,6 +81,8 @@ class BackupPayload(BaseModel):
     proxy_metrics: list[dict[str, Any]] = Field(default_factory=list)
     project_metrics: list[dict[str, Any]] = Field(default_factory=list)
     connector_metrics: list[dict[str, Any]] = Field(default_factory=list)
+    host_metrics: list[dict[str, Any]] = Field(default_factory=list)
+    failure_metrics: list[dict[str, Any]] = Field(default_factory=list)
     provider_descriptors: list[dict[str, Any]] = Field(default_factory=list)
     provider_audit_log: list[dict[str, Any]] = Field(default_factory=list)
     geo_settings: list[dict[str, Any]] = Field(default_factory=list)
@@ -90,6 +92,9 @@ class BackupPayload(BaseModel):
     connector_exit_ips: list[dict[str, Any]] = Field(default_factory=list)
     wireguard_settings: list[dict[str, Any]] = Field(default_factory=list)
     wireguard_peers: list[dict[str, Any]] = Field(default_factory=list)
+    openvpn_settings: list[dict[str, Any]] = Field(default_factory=list)
+    openvpn_peers: list[dict[str, Any]] = Field(default_factory=list)
+    tunnel_peer_metrics: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class ExportRequest(BaseModel):
@@ -131,6 +136,8 @@ class ImportSummary(BaseModel):
     proxy_metrics: int = 0
     project_metrics: int = 0
     connector_metrics: int = 0
+    host_metrics: int = 0
+    failure_metrics: int = 0
     provider_descriptors: int = 0
     provider_audit_log: int = 0
     geo_settings: int = 0
@@ -140,5 +147,8 @@ class ImportSummary(BaseModel):
     connector_exit_ips: int = 0
     wireguard_settings: int = 0
     wireguard_peers: int = 0
+    openvpn_settings: int = 0
+    openvpn_peers: int = 0
+    tunnel_peer_metrics: int = 0
     kept_current_user: bool = False
     user_conflicts: list[UserConflict] = Field(default_factory=list)

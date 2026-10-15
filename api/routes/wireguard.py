@@ -39,7 +39,12 @@ from api.models.wireguard import (
     WireGuardServerSettingsDoc,
     WireGuardServerSettingsResponse,
 )
-from api.routes.common import openvpn_runtime_of, proxy_manager_of, wireguard_runtime_of
+from api.routes.common import (
+    openvpn_runtime_of,
+    proxy_manager_of,
+    require_project,
+    wireguard_runtime_of,
+)
 from api.routes.metrics import RANGE_CONFIG
 from api.tunnel.peers import NoFreeAddressError
 from api.wireguard import keys
@@ -52,11 +57,6 @@ logger = structlog.get_logger()
 
 server_router = APIRouter(prefix="/wireguard")
 router = APIRouter(prefix="/projects/{project_id}/wireguard/peers")
-
-
-def _require_project(request: Request, project_id: str) -> None:
-    if proxy_manager_of(request).get_project(project_id) is None:
-        raise HTTPException(status_code=404, detail="Project not found")
 
 
 def _require_peer(runtime: WireGuardRuntime, project_id: str, peer_id: str) -> WireGuardPeer:
@@ -165,7 +165,7 @@ async def rotate_server_key(request: Request, admin: RequireAdminDep) -> WireGua
 
 @router.get("", response_model=WireGuardPeerListResponse)
 async def list_peers(request: Request, project_id: str) -> WireGuardPeerListResponse:
-    _require_project(request, project_id)
+    require_project(request, project_id)
     runtime = wireguard_runtime_of(request)
     live = await runtime.peer_statuses()
     peers = runtime.peers.for_project(project_id)
@@ -183,7 +183,7 @@ async def create_peer(
     request: Request, project_id: str, data: WireGuardPeerCreate, _guard: RequireEditorDep
 ) -> WireGuardPeerResponse:
     """Register a device. Without a public key Octoprox generates the pair and keeps it for the config."""
-    _require_project(request, project_id)
+    require_project(request, project_id)
     runtime = wireguard_runtime_of(request)
 
     private_key: str | None
@@ -219,7 +219,7 @@ async def create_peer(
 
 @router.get("/{peer_id}", response_model=WireGuardPeerResponse)
 async def get_peer(request: Request, project_id: str, peer_id: str) -> WireGuardPeerResponse:
-    _require_project(request, project_id)
+    require_project(request, project_id)
     runtime = wireguard_runtime_of(request)
     peer = _require_peer(runtime, project_id, peer_id)
     return _peer_response(runtime, peer, await runtime.peer_statuses())
@@ -229,7 +229,7 @@ async def get_peer(request: Request, project_id: str, peer_id: str) -> WireGuard
 async def update_peer(
     request: Request, project_id: str, peer_id: str, data: WireGuardPeerUpdate, _guard: RequireEditorDep
 ) -> WireGuardPeerResponse:
-    _require_project(request, project_id)
+    require_project(request, project_id)
     runtime = wireguard_runtime_of(request)
     peer = _require_peer(runtime, project_id, peer_id)
 
@@ -252,7 +252,7 @@ async def update_peer(
 
 @router.delete("/{peer_id}", status_code=204)
 async def delete_peer(request: Request, project_id: str, peer_id: str, _guard: RequireEditorDep) -> None:
-    _require_project(request, project_id)
+    require_project(request, project_id)
     runtime = wireguard_runtime_of(request)
     _require_peer(runtime, project_id, peer_id)
     await runtime.remove_peer(peer_id)
@@ -263,7 +263,7 @@ async def rotate_peer_keys(
     request: Request, project_id: str, peer_id: str, _guard: RequireEditorDep
 ) -> WireGuardPeerResponse:
     """New key pair (and preshared key, if it had one) for a device; the old config stops working."""
-    _require_project(request, project_id)
+    require_project(request, project_id)
     runtime = wireguard_runtime_of(request)
     peer = _require_peer(runtime, project_id, peer_id)
     private, public = keys.generate_keypair()
@@ -291,7 +291,7 @@ async def get_peer_metrics_history(
     are what the proxy path relayed for the device, not the tunnel
     interface's counters.
     """
-    _require_project(request, project_id)
+    require_project(request, project_id)
     _require_peer(wireguard_runtime_of(request), project_id, peer_id)
     delta, limit, bucket_seconds = RANGE_CONFIG[range]
     since = utc_now() - delta
@@ -311,7 +311,7 @@ async def get_peer_metrics_history(
 @router.get("/{peer_id}/config", response_model=WireGuardPeerConfigResponse)
 async def get_peer_config(request: Request, project_id: str, peer_id: str) -> WireGuardPeerConfigResponse:
     """The device's wg-quick file. Issued even before the endpoint is set, flagged as such."""
-    _require_project(request, project_id)
+    require_project(request, project_id)
     runtime = wireguard_runtime_of(request)
     peer = _require_peer(runtime, project_id, peer_id)
     server: WireGuardServerSettings = runtime.settings_store.settings

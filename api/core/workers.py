@@ -102,8 +102,9 @@ WORKERS: dict[WorkerName, WorkerInfo] = {
     ),
     WorkerName.METRICS_FLUSHER: WorkerInfo(
         "Turns the Redis request counters (proxies, projects, connectors, tunnel "
-        "devices) into permanent Postgres history rows, then resets them - the "
-        "Redis-to-Postgres half of the metrics pipeline",
+        "devices, hosts, failures) into permanent Postgres history rows, then "
+        "takes what it wrote off them - the Redis-to-Postgres half of the "
+        "metrics pipeline",
         lease=LeaseName.METRICS_FLUSHER,
         lease_label="Metrics flush to Postgres",
     ),

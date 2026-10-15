@@ -77,13 +77,14 @@ class MetricsFlusher:
             await lease.release()
 
     async def _flush_metrics(self) -> None:
-        """Flush all proxy, project, connector, tunnel device and host metrics from Redis to Postgres."""
+        """Flush all proxy, project, connector, tunnel device, host and failure metrics from Redis to Postgres."""
         # Get all metrics from Redis
         all_proxy_metrics = await self._redis_client.get_all_proxy_metrics()
         all_project_metrics = await self._redis_client.get_all_project_metrics()
         all_connector_metrics = await self._redis_client.get_all_connector_metrics()
         all_tunnel_peer_metrics = await self._redis_client.get_all_tunnel_peer_metrics()
         all_host_metrics = await self._redis_client.get_all_host_metrics()
+        all_failure_metrics = await self._redis_client.get_all_failure_metrics()
         all_statuses = await self._redis_client.get_all_proxy_statuses()
 
         if (
@@ -92,6 +93,7 @@ class MetricsFlusher:
             and not all_connector_metrics
             and not all_tunnel_peer_metrics
             and not all_host_metrics
+            and not all_failure_metrics
         ):
             logger.debug("No metrics to flush")
             return
@@ -103,15 +105,12 @@ class MetricsFlusher:
             connector_count=len(all_connector_metrics),
             tunnel_peer_count=len(all_tunnel_peer_metrics),
             host_count=len(all_host_metrics),
+            failure_count_rows=len(all_failure_metrics),
         )
 
-        # Every hash is cleared once the transaction is committed, whether its
-        # row was written or its entity was gone. Clearing inside the loop
+        # Every hash read is drained once the transaction is committed, whether
+        # its row was written or its entity was gone: draining inside the loop
         # would lose a window if a later row made the transaction roll back.
-        flushed_proxies: list[str] = []
-        flushed_projects: list[str] = []
-        flushed_connectors: list[str] = []
-        flushed_tunnel_peers: list[str] = []
         async with self._session_factory() as session:
             repo = MetricsRepository(session)
 
@@ -132,7 +131,6 @@ class MetricsFlusher:
                 )
                 if not kept:
                     logger.warning("Dropping metrics of a proxy that no longer exists", proxy_id=proxy_id)
-                flushed_proxies.append(proxy_id)
 
             for project_id, metrics in all_project_metrics.items():
                 kept = await repo.save_project_metrics_snapshot(
@@ -146,7 +144,6 @@ class MetricsFlusher:
                 )
                 if not kept:
                     logger.warning("Dropping metrics of a project that no longer exists", project_id=project_id)
-                flushed_projects.append(project_id)
 
             for connector_id, metrics in all_connector_metrics.items():
                 kept = await repo.save_connector_metrics_snapshot(
@@ -160,13 +157,11 @@ class MetricsFlusher:
                 )
                 if not kept:
                     logger.warning("Dropping metrics of a connector that no longer exists", connector_id=connector_id)
-                flushed_connectors.append(connector_id)
 
             for peer_id, peer_metrics in all_tunnel_peer_metrics.items():
                 kept = await repo.save_tunnel_peer_metrics_snapshot(peer_id, peer_metrics)
                 if not kept:
                     logger.warning("Dropping metrics of a tunnel device that no longer exists", peer_id=peer_id)
-                flushed_tunnel_peers.append(peer_id)
 
             # One bulk insert for every host row of the window: there can be
             # thousands, and a statement each would stretch the flush.
@@ -178,18 +173,25 @@ class MetricsFlusher:
                     row_count=len(dropped_hosts),
                 )
 
+            dropped_failures = await repo.save_failure_metrics_snapshots(all_failure_metrics)
+            if dropped_failures:
+                logger.warning(
+                    "Dropping failure counts of projects or connectors that no longer exist",
+                    row_count=len(dropped_failures),
+                )
+
             await session.commit()
 
-        for proxy_id in flushed_proxies:
-            await self._redis_client.reset_proxy_metrics(proxy_id)
-        for project_id in flushed_projects:
-            await self._redis_client.reset_project_metrics(project_id)
-        for connector_id in flushed_connectors:
-            await self._redis_client.reset_connector_metrics(connector_id)
-        for peer_id in flushed_tunnel_peers:
-            await self._redis_client.reset_tunnel_peer_metrics(peer_id)
-        if all_host_metrics:
-            await self._redis_client.reset_host_metrics(all_host_metrics.keys())
+        # Subtracted, not deleted: what the instances added since the read
+        # stays in the hashes for the next flush.
+        await self._redis_client.drain_flushed_metrics(
+            proxies=all_proxy_metrics,
+            projects=all_project_metrics,
+            connectors=all_connector_metrics,
+            tunnel_peers=all_tunnel_peer_metrics,
+            hosts=all_host_metrics,
+            failures=all_failure_metrics,
+        )
 
         logger.info(
             "Metrics flush complete",
@@ -198,6 +200,7 @@ class MetricsFlusher:
             connector_count=len(all_connector_metrics),
             tunnel_peer_count=len(all_tunnel_peer_metrics),
             host_count=len(all_host_metrics),
+            failure_count_rows=len(all_failure_metrics),
         )
 
     def stop(self) -> None:

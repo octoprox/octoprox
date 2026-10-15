@@ -232,24 +232,24 @@ Both can also be set as `OCTOPROX_HOST_METRICS_ENABLED` and `OCTOPROX_HOST_METRI
 
 ## Failure Log
 
-Why requests failed or were refused, per project, for the Failures page (see [Metrics]({{ site.baseurl }}/metrics#failures-why-requests-failed)). Each project's log is one capped Redis stream. Identical failures within a 5-second window are folded into one entry with a count, so a burst costs one entry rather than one per request.
+Why requests failed or were refused, per project, for the Failures page (see [Metrics]({{ site.baseurl }}/metrics#failures-why-requests-failed)). Every failure is counted into the `failure_metrics` history table, which follows the project's metrics retention and compaction like the other history tables. Examples of failures are kept in Redis, one capped stream per project and kind; identical failures within a 5-second window are folded into one example with a count.
 
 ```yaml
 failure_log:
   enabled: true
-  max_entries: 1000      # per project, newest kept
+  max_entries: 1000      # examples per project and kind, newest kept
   retention_hours: 168
-  max_per_window: 100    # distinct failures per project per 5-second window, per instance
+  max_per_window: 100    # distinct examples per project and kind per 5-second window, per instance
 ```
 
 | Setting | Description | Default |
 |---------|-------------|---------|
-| `failure_log.enabled` | Record why requests failed or were refused | `true` |
-| `failure_log.max_entries` | How many entries each project's log keeps, newest first (at least 10) | `1000` |
-| `failure_log.retention_hours` | How long entries are kept; a project whose requests stop failing loses its log this long after the last failure | `168` |
-| `failure_log.max_per_window` | How many distinct failures one instance logs per project in each 5-second window. Beyond that, failures are only counted by kind, in one "not itemised" entry | `100` |
+| `failure_log.enabled` | Count failures and keep examples. Off records neither | `true` |
+| `failure_log.max_entries` | How many examples each project keeps of each kind of failure, newest first (at least 10) | `1000` |
+| `failure_log.retention_hours` | How long examples are kept; a kind that stops failing loses its examples this long after the last one. The counts follow the metrics retention instead | `168` |
+| `failure_log.max_per_window` | How many distinct examples of each kind one instance keeps per project in each 5-second window. Beyond that, failures are only counted | `100` |
 
-An entry is a few hundred bytes, so the defaults hold under half a megabyte of Redis per project. The settings can also be set as `OCTOPROX_FAILURE_LOG_ENABLED`, `OCTOPROX_FAILURE_LOG_MAX_ENTRIES`, `OCTOPROX_FAILURE_LOG_RETENTION_HOURS` and `OCTOPROX_FAILURE_LOG_MAX_PER_WINDOW`.
+An example is a few hundred bytes, so a kind that fills its stream at the default takes a few hundred kilobytes of Redis, and a project takes that for each kind it actually sees. Lower `max_entries` on an install with many projects: the counts stay complete whatever it is set to. The settings can also be set as `OCTOPROX_FAILURE_LOG_ENABLED`, `OCTOPROX_FAILURE_LOG_MAX_ENTRIES`, `OCTOPROX_FAILURE_LOG_RETENTION_HOURS` and `OCTOPROX_FAILURE_LOG_MAX_PER_WINDOW`.
 
 ## Database Configuration
 

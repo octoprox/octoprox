@@ -1656,10 +1656,11 @@ export const clearMitmRequests = async (projectId: string): Promise<void> => {
 
 // Failure log types
 
-/** One failure log entry: a failure, or several identical ones folded together within a few seconds. */
+/** One example: a failure, or several identical ones folded together within a few seconds. */
 export interface FailureRecord {
+  /** Stream ID and kind; the cursor for the next (older) page. */
   id: string
-  /** e.g. upstream_timeout, no_proxy_available; 'suppressed' for a tally of failures not logged one by one */
+  /** e.g. upstream_timeout, no_proxy_available */
   kind: string
   /** What the client was answered (a tunnel device's connection is closed instead). */
   status: number
@@ -1683,27 +1684,64 @@ export interface FailureRecord {
   count: number
   first_at: string
   last_at: string
-  /** For a 'suppressed' entry: the failures not logged, by kind. */
-  breakdown: Record<string, number> | null
 }
 
 export interface FailureLogResponse {
   records: FailureRecord[]
   next_cursor: string | null
+  /** Examples the log holds, of the kind asked for or of all kinds. */
   total: number
+  /** Examples ever appended; compare with the head to know how many are newer. */
+  appended: number
   enabled: boolean
+  /** Examples kept per kind. */
   max_entries: number
   retention_hours: number
 }
 
+export interface FailureLogHead {
+  appended: number
+  total: number
+}
+
+export interface FailureKindCount {
+  kind: string
+  count: number
+  /** The vendor's statuses within this kind, most first. */
+  upstream_statuses: { status: number; count: number }[]
+}
+
+export interface FailureSummary {
+  range: HistoryRange
+  since: string
+  bucket_seconds: number
+  total: number
+  kinds: FailureKindCount[]
+  /** connector_id is null for requests refused before a proxy was chosen. */
+  connectors: { connector_id: string | null; name: string | null; count: number }[]
+  /** One per kind seen, most first, each with every bucket of the window. */
+  series: { kind: string; points: { timestamp: string; count: number }[] }[]
+  enabled: boolean
+}
+
 export const fetchFailures = async (
   projectId: string,
-  count: number = 200,
-  cursor?: string | null,
+  { kind, count = 200, cursor }: { kind?: string | null; count?: number; cursor?: string | null } = {},
 ): Promise<FailureLogResponse> => {
   const params: Record<string, string | number> = { count }
+  if (kind) params.kind = kind
   if (cursor) params.cursor = cursor
   const response = await api.get(`/projects/${projectId}/failures`, { params })
+  return response.data
+}
+
+export const fetchFailureHead = async (projectId: string, kind?: string | null): Promise<FailureLogHead> => {
+  const response = await api.get(`/projects/${projectId}/failures/head`, { params: kind ? { kind } : {} })
+  return response.data
+}
+
+export const fetchFailureSummary = async (projectId: string, range: HistoryRange): Promise<FailureSummary> => {
+  const response = await api.get(`/projects/${projectId}/failures/summary`, { params: { range } })
   return response.data
 }
 

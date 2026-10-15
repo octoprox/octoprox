@@ -130,6 +130,7 @@ async def db_session(
         await conn.execute(text("TRUNCATE TABLE proxy_metrics CASCADE"))
         await conn.execute(text("TRUNCATE TABLE connector_metrics CASCADE"))
         await conn.execute(text("TRUNCATE TABLE host_metrics CASCADE"))
+        await conn.execute(text("TRUNCATE TABLE failure_metrics CASCADE"))
         await conn.execute(text("TRUNCATE TABLE system_metrics CASCADE"))
         await conn.execute(text("TRUNCATE TABLE proxies CASCADE"))
         await conn.execute(text("TRUNCATE TABLE connectors CASCADE"))

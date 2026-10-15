@@ -16,6 +16,11 @@ HOST_OVERFLOW = "(other)"
 # and is folded into the overflow row rather than truncated into a lookalike.
 MAX_HOST_LENGTH = 255
 
+# What one failure count is kept under (the failure_metrics table): project,
+# connector (None when no proxy was chosen), kind, and the vendor's HTTP
+# status when it refused the request (else None).
+type FailureCountKey = tuple[str, str | None, str, int | None]
+
 
 def normalize_host(host: str | None) -> str | None:
     """The form a destination host is counted under, or None for nothing countable.

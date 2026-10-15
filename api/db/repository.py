@@ -10,11 +10,12 @@ from sqlalchemy import case, delete, exists, func, insert, literal, or_, select,
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.core import utc_now
-from api.core.stats import HOST_OVERFLOW, MetricDelta, TunnelPeerMetricDelta
+from api.core.stats import HOST_OVERFLOW, FailureCountKey, MetricDelta, TunnelPeerMetricDelta
 from api.db.models import (
     ConnectorMetricsModel,
     ConnectorModel,
     CredentialModel,
+    FailureMetricsModel,
     HostMetricsModel,
     OpenVpnPeerModel,
     ProjectMetricsModel,
@@ -535,7 +536,7 @@ def _cumulative_total_columns(model: _MetricsModel) -> list[Any]:
 
 
 def _bucket_expressions(
-    model: _MetricsModel | type[SystemMetricsModel],
+    model: _MetricsModel | type[SystemMetricsModel] | type[FailureMetricsModel],
     bucket_seconds: int,
 ) -> tuple[Any, Any]:
     """Build bucket-epoch and bucket-timestamp expressions for time bucketing.
@@ -1556,6 +1557,138 @@ class MetricsRepository:
     async def delete_host_metrics_older_than(self, project_id: str, older_than: datetime) -> int:
         """Delete a project's host history older than the timestamp."""
         model = HostMetricsModel
+        result = await self._session.execute(
+            delete(model).where(model.project_id == project_id).where(model.timestamp < older_than)
+        )
+        return int(result.rowcount or 0)  # type: ignore[attr-defined]
+
+    # Failure counts: a project's failed requests by kind, vendor status and connector.
+
+    async def save_failure_metrics_snapshots(self, batch: dict[FailureCountKey, int]) -> list[FailureCountKey]:
+        """Insert one row per (project, connector, kind, vendor status) of a flush window; returns the keys dropped.
+
+        A count whose project is gone, or whose connector is gone or belongs
+        to another project, is dropped rather than failing the flush.
+        """
+        if not batch:
+            return []
+        project_ids = {project_id for project_id, _connector, _kind, _status in batch}
+        connector_ids = {connector_id for _project, connector_id, _kind, _status in batch if connector_id}
+        result = await self._session.execute(select(ProjectModel.id).where(ProjectModel.id.in_(project_ids)))
+        known_projects = set(result.scalars().all())
+        known_connectors: dict[str, str] = {}
+        if connector_ids:
+            result = await self._session.execute(
+                select(ConnectorModel.id, ConnectorModel.project_id).where(ConnectorModel.id.in_(connector_ids))
+            )
+            known_connectors = {row.id: row.project_id for row in result.all()}
+        now = utc_now()
+        rows: list[dict[str, Any]] = []
+        dropped: list[FailureCountKey] = []
+        for key, count in batch.items():
+            project_id, connector_id, kind, upstream_status = key
+            if project_id not in known_projects or (
+                connector_id is not None and known_connectors.get(connector_id) != project_id
+            ):
+                dropped.append(key)
+                continue
+            rows.append({
+                "project_id": project_id,
+                "connector_id": connector_id,
+                "kind": kind,
+                "upstream_status": upstream_status,
+                "timestamp": now,
+                "failure_count": count,
+                "granularity": 60,
+            })
+        if rows:
+            await self._session.execute(insert(FailureMetricsModel), rows)
+        return dropped
+
+    async def get_failure_breakdown(self, project_id: str, since: datetime) -> list[dict[str, Any]]:
+        """A project's failures in the window by kind, vendor status and connector, most first."""
+        model = FailureMetricsModel
+        total = func.sum(model.failure_count).label("failure_count")
+        query = (
+            select(model.kind, model.upstream_status, model.connector_id, total)
+            .where(model.project_id == project_id, model.timestamp >= since)
+            .group_by(model.kind, model.upstream_status, model.connector_id)
+            .order_by(total.desc())
+        )
+        result = await self._session.execute(query)
+        return [
+            {
+                "kind": row.kind,
+                "upstream_status": row.upstream_status,
+                "connector_id": row.connector_id,
+                "failure_count": int(row.failure_count or 0),
+            }
+            for row in result.all()
+        ]
+
+    async def get_failure_history(self, project_id: str, since: datetime, bucket_seconds: int) -> list[dict[str, Any]]:
+        """Per-bucket failure counts of each kind in the window, chronological."""
+        model = FailureMetricsModel
+        bucket_epoch, bucket_ts = _bucket_expressions(model, bucket_seconds)
+        query = (
+            select(bucket_ts, model.kind, func.sum(model.failure_count).label("failure_count"))
+            .where(model.project_id == project_id, model.timestamp >= since, model.granularity <= bucket_seconds)
+            .group_by(bucket_epoch, model.kind)
+            .order_by(bucket_epoch.asc())
+        )
+        result = await self._session.execute(query)
+        return [
+            {"timestamp": _strip_tz(row.bucket_ts), "kind": row.kind, "failure_count": int(row.failure_count or 0)}
+            for row in result.all()
+        ]
+
+    async def compact_failure_metrics(
+        self,
+        project_id: str,
+        older_than: datetime,
+        source_granularity: int,
+        target_granularity: int,
+    ) -> int:
+        """Compact every (connector, kind, vendor status) series of a project; returns source rows deleted."""
+        model = FailureMetricsModel
+        bucket_epoch, bucket_ts = _bucket_expressions(model, target_granularity)
+        base_filter = [
+            model.project_id == project_id,
+            model.granularity == source_granularity,
+            model.timestamp < older_than,
+        ]
+        query = (
+            select(
+                model.connector_id, model.kind, model.upstream_status, bucket_ts,
+                func.sum(model.failure_count).label("failure_count"),
+            )
+            .where(*base_filter)
+            .group_by(model.connector_id, model.kind, model.upstream_status, bucket_epoch)
+        )
+        result = await self._session.execute(query)
+        buckets = result.all()
+        if not buckets:
+            return 0
+        rows = [
+            {
+                "project_id": project_id,
+                "connector_id": row.connector_id,
+                "kind": row.kind,
+                "upstream_status": row.upstream_status,
+                "timestamp": _strip_tz(row.bucket_ts),
+                "failure_count": int(row.failure_count or 0),
+                "granularity": target_granularity,
+            }
+            for row in buckets
+        ]
+        await self._session.execute(insert(FailureMetricsModel), rows)
+        del_result = await self._session.execute(delete(model).where(*base_filter))
+        await self._session.flush()
+        return int(del_result.rowcount or 0)  # type: ignore[attr-defined]
+
+    async def delete_failure_metrics_older_than(self, project_id: str, older_than: datetime) -> int:
+        """Delete a project's failure counts older than the timestamp."""
+        model = FailureMetricsModel
         result = await self._session.execute(
             delete(model).where(model.project_id == project_id).where(model.timestamp < older_than)
         )

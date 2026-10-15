@@ -1102,6 +1102,7 @@ class ProxyManager:
         for project_id in old_project_ids:
             await self._redis_client.reset_project_metrics(project_id)
             await self._redis_client.reset_host_metrics_for_project(project_id)
+            await self._redis_client.reset_failure_metrics_for_project(project_id)
             await self._redis_client.clear_mitm_requests(project_id)
             await self._redis_client.clear_failures(project_id)
             self._failure_log.forget(project_id)
@@ -1588,6 +1589,7 @@ class ProxyManager:
             await self._redis_client.reset_proxy_metrics(proxy_id)
         await self._redis_client.reset_project_metrics(project_id)
         await self._redis_client.reset_host_metrics_for_project(project_id)
+        await self._redis_client.reset_failure_metrics_for_project(project_id)
         await self._redis_client.clear_mitm_requests(project_id)
         await self._redis_client.clear_failures(project_id)
 
@@ -1911,6 +1913,7 @@ class ProxyManager:
         # a row that no longer exists; its block key and usage go with it.
         await self._redis_client.reset_connector_metrics(connector_id)
         await self._redis_client.reset_host_metrics_for_connector(connector_id)
+        await self._redis_client.reset_failure_metrics_for_connector(connector_id)
         await self._traffic_limiter.forget(connector_id)
 
         # Remove from cache
@@ -1920,6 +1923,7 @@ class ProxyManager:
         # row is already gone.
         self._pending_connector_deltas.pop(connector_id, None)
         self._drop_pending_host_deltas(connector_id=connector_id)
+        self._failure_log.forget_connector(connector_id)
         self._forget_connector_routing_state(connector_id)
         # Also remove associated proxies from cache
         self._proxies.remove_groups([connector_id])

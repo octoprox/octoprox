@@ -38,6 +38,12 @@ def proxy_manager_of(request: Request) -> ProxyManager:
     return cast("ProxyManager", request.app.state.proxy_manager)
 
 
+def require_project(request: Request, project_id: str) -> None:
+    """404 unless the project exists, for routes nested under one."""
+    if proxy_manager_of(request).get_project(project_id) is None:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+
 def geo_runtime_of(request: Request) -> GeoRuntime:
     return cast("GeoRuntime", request.app.state.geo_runtime)
 

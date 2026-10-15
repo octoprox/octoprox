@@ -2,7 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """Tests for RedisClient."""
-from api.db.redis import RedisClient
+from api.core.stats import MetricDelta, TunnelPeerMetricDelta
+from api.db.redis import HOST_METRICS_KEY, PROJECT_METRICS_KEY, PROXY_METRICS_KEY, RedisClient
 from api.models.proxy import ProxyStatus
 
 
@@ -249,3 +250,97 @@ class TestRedisClient:
 
         metrics = await redis_client.get_project_metrics(project_id)
         assert metrics is None
+
+
+def _requests(n: int, latency_ms: float = 100.0, sent: int = 10) -> MetricDelta:
+    delta = MetricDelta()
+    for _ in range(n):
+        delta.add_request(True, latency_ms, sent, 2 * sent)
+    return delta
+
+
+async def _drain(redis_client: RedisClient, **flushed: dict) -> None:  # type: ignore[type-arg]
+    lists = {"proxies": {}, "projects": {}, "connectors": {}, "tunnel_peers": {}, "hosts": {}, "failures": {}}
+    lists.update(flushed)
+    await redis_client.drain_flushed_metrics(**lists)  # type: ignore[arg-type]
+
+
+class TestDrainFlushedMetrics:
+    """The flusher takes what it wrote off the hashes; what arrived since its read stays."""
+
+    async def test_what_arrived_after_the_read_stays_for_the_next_flush(self, redis_client: RedisClient) -> None:
+        await redis_client.flush_metric_deltas({"p1": _requests(3)}, {"proj": _requests(3)})
+        read_proxies = await redis_client.get_all_proxy_metrics()
+        read_projects = await redis_client.get_all_project_metrics()
+        # Another instance publishes while the flush transaction runs.
+        await redis_client.flush_metric_deltas({"p1": _requests(2, latency_ms=50)}, {"proj": _requests(2)})
+
+        await _drain(redis_client, proxies=read_proxies, projects=read_projects)
+
+        left = await redis_client.get_proxy_metrics("p1")
+        assert left is not None
+        assert (left.request_count, left.success_count, left.failure_count) == (2, 2, 0)
+        assert (left.bytes_sent, left.bytes_received) == (20, 40)
+        assert abs(left.latency_sum_ms - 100.0) < 1e-6
+        project_left = await redis_client.get_project_metrics("proj")
+        assert project_left is not None and project_left.request_count == 2
+
+    async def test_a_fully_drained_hash_is_deleted_despite_float_rounding(self, redis_client: RedisClient) -> None:
+        delta = MetricDelta()
+        for latency in (0.1, 0.2, 0.7, 1e-9):
+            delta.add_request(False, latency)
+        await redis_client.flush_metric_deltas({"p1": delta}, {})
+        read = await redis_client.get_all_proxy_metrics()
+
+        await _drain(redis_client, proxies=read)
+
+        assert not await redis_client.client.exists(PROXY_METRICS_KEY.format(proxy_id="p1"))
+
+    async def test_a_hash_deleted_meanwhile_stays_gone(self, redis_client: RedisClient) -> None:
+        await redis_client.flush_metric_deltas({}, {"proj": _requests(3)})
+        read = await redis_client.get_all_project_metrics()
+        await redis_client.reset_project_metrics("proj")  # the project was deleted
+
+        await _drain(redis_client, projects=read)
+
+        assert not await redis_client.client.exists(PROJECT_METRICS_KEY.format(project_id="proj"))
+
+    async def test_a_hash_reset_and_refilled_meanwhile_is_not_left_below_zero(self, redis_client: RedisClient) -> None:
+        await redis_client.flush_metric_deltas({"p1": _requests(5)}, {})
+        read = await redis_client.get_all_proxy_metrics()
+        await redis_client.reset_proxy_metrics("p1")
+        await redis_client.flush_metric_deltas({"p1": _requests(1)}, {})  # a request still in flight
+
+        await _drain(redis_client, proxies=read)
+
+        assert not await redis_client.client.exists(PROXY_METRICS_KEY.format(proxy_id="p1"))
+
+    async def test_tunnel_device_counters_are_drained_too(self, redis_client: RedisClient) -> None:
+        device = TunnelPeerMetricDelta()
+        device.add_request(True, 10.0)
+        device.by_address = 4
+        await redis_client.flush_metric_deltas({}, {}, tunnel_peer_deltas={"dev": device})
+        read = await redis_client.get_all_tunnel_peer_metrics()
+        later = TunnelPeerMetricDelta()
+        later.encrypted_dns_blocked = 1
+        await redis_client.flush_metric_deltas({}, {}, tunnel_peer_deltas={"dev": later})
+
+        await _drain(redis_client, tunnel_peers=read)
+
+        left = await redis_client.get_tunnel_peer_metrics("dev")
+        assert left is not None
+        assert (left.request_count, left.by_address, left.encrypted_dns_blocked) == (0, 0, 1)
+
+    async def test_many_host_hashes_in_one_drain(self, redis_client: RedisClient) -> None:
+        hosts = {("proj", "conn", f"host{i}.example.com"): _requests(1) for i in range(1200)}
+        await redis_client.flush_metric_deltas({}, {}, host_deltas=hosts)
+        read = await redis_client.get_all_host_metrics()
+        assert len(read) == 1200
+        await redis_client.flush_metric_deltas({}, {}, host_deltas={("proj", "conn", "host7.example.com"): _requests(1)})
+
+        await _drain(redis_client, hosts=read)
+
+        assert await redis_client.get_all_host_metrics() == {("proj", "conn", "host7.example.com"): _requests(1)}
+        assert not await redis_client.client.exists(
+            HOST_METRICS_KEY.format(project_id="proj", connector_id="conn", host="host8.example.com")
+        )

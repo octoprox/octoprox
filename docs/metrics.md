@@ -50,7 +50,10 @@ The same counting rules apply here as above: a keep-alive tunnel is one request 
 
 ## Failures: Why Requests Failed
 
-The **Failures** page (under Overview in the web UI) says what the failure counts are made of. Every request that fails or is refused is logged with what went wrong, what the client was answered, the vendor's own answer when it gave one, the target, the session and location asked for, the tunnel device it came from, and the connector and proxy that carried it. A summary at the top tallies the loaded entries by kind; click a kind to filter the table, and a row to see the entry in full with a note on what that kind usually means.
+The **Failures** page (under Overview in the web UI) says what the failure counts are made of. It has two parts, kept apart on purpose:
+
+- **What failed** counts every failure in the selected time range (1h to 30d, the same range as the other pages), by kind, by the vendor's status when it refused, and by connector, with a chart of the failures over time by kind. The counts come from the metrics history, so they trail live traffic by up to one flush interval (a minute by default) and are complete however many failures there are.
+- **Examples** are a sample of individual failures, newest first: what went wrong, what the client was answered, the vendor's own answer, the target, the session and location asked for, the tunnel device it came from, and the connector and proxy that carried it. Click a kind in the summary to see only its examples, and a row to open the example in full with a note on what that kind usually means. The table does not refresh while you read it: when newer examples have arrived, a button says how many and loads them when clicked, and an opened example stays open.
 
 | Kind | What happened | Client answered |
 |------|---------------|-----------------|
@@ -67,13 +70,18 @@ The **Failures** page (under Overview in the web UI) says what the failure count
 | Invalid location | The username named a state or city without a country | 400 |
 | Intercepted request failed | With [TLS interception]({{ site.baseurl }}/tls-interception), one request inside the connection could not be relayed upstream | 502 |
 
-The first six are exactly the requests Overview counts as failures, so every failure counted there has an entry here. The next five are requests Octoprox refused before using any proxy, which the request metrics do not count at all (a traffic limit that cuts a request already under way is counted). The last is a request inside an intercepted connection; the connection itself is counted, as a success. A connection from a tunnel device is closed rather than answered, so for one the status is what a proxy client would have been told.
+The first six are exactly the requests Overview counts as failures, so the summary's upstream failures match Overview's failure count for the same window, apart from traffic limits that cut a request already under way: Overview counts those too, and the summary lists them with the refusals. The next five are requests Octoprox refused before using any proxy, which the request metrics do not count at all (a traffic limit that cuts a request already under way is the exception). The last is a request inside an intercepted connection; the connection itself is counted, as a success. A connection from a tunnel device is closed rather than answered, so for one the status is what a proxy client would have been told.
 
-Two things are not logged: a request with wrong credentials, which belongs to no project, and a request that went through and got an error status from the target site, which is the site's answer rather than a failure of the pool.
+Two things are not recorded: a request with wrong credentials, which belongs to no project, and a request that went through and got an error status from the target site, which is the site's answer rather than a failure of the pool.
 
 Vendor credentials never reach the log: they are scrubbed from error texts, and the proxy is recorded by host and port. For an intercepted request the URL is kept without its query string, and any URL an error text quotes loses its query too.
 
-The log is built to survive a broken upstream failing everything sent to it. Each instance collects failures for 5 seconds and writes them to Redis in one round trip, so nothing on the request path waits for it. Within that window, failures that differ only in time and session are folded into one entry with a count, so ten thousand identical timeouts are one row reading ×10K. Each project gets at most `failure_log.max_per_window` distinct entries per window on each instance; beyond that, failures are only counted by kind, in one "Not itemised" entry per window. Each project's log keeps its newest `failure_log.max_entries` entries (1,000 by default) for `failure_log.retention_hours` (7 days), and the page loads 500 at a time. See [Configuration]({{ site.baseurl }}/configuration#failure-log) for the settings and [`GET /projects/{id}/failures`]({{ site.baseurl }}/api#failure-log) for the API. Clearing the log on the page does not touch the request counts.
+Both are built to survive a broken upstream failing everything sent to it. Each instance collects failures for 5 seconds and writes them to Redis in one round trip, so nothing on the request path waits for it:
+
+- The **counts** go to hashes that the metrics flusher turns into rows of a sixth history table (`failure_metrics`), with the same compaction tiers and retention as the other five. One row per project, connector, kind and vendor status per flush, whatever the volume.
+- The **examples** go to one capped stream per project and kind, so a flood of one kind never pushes out the examples of a rare one. Within a window, failures that differ only in time and session are folded into one example with a count, so ten thousand identical timeouts are one row reading ×10K. Each kind of a project gets at most `failure_log.max_per_window` distinct examples per window on each instance; beyond that, failures are only counted. Each kind keeps its newest `failure_log.max_entries` examples for `failure_log.retention_hours` (7 days).
+
+See [Configuration]({{ site.baseurl }}/configuration#failure-log) for the settings and [`GET /projects/{id}/failures`]({{ site.baseurl }}/api#failure-log) for the API. Clearing the examples on the page does not touch the counts.
 
 ## Why This Limitation Exists
 
