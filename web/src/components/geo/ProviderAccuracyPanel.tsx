@@ -102,7 +102,7 @@ export function ProviderAccuracyPanel({ projectId, onInspect, inspecting }: {
       ),
     },
     {
-      id: 'accuracy', accessorFn: (r: AccuracyRow) => r.country.accuracy ?? -1, header: () => <HeaderWithTip label="Accuracy" tip={TIPS.accuracy} />, size: 290,
+      id: 'accuracy', accessorFn: (r: AccuracyRow) => r.country.accuracy ?? -1, header: () => <HeaderWithTip label="Accuracy" tip={TIPS.accuracy} />, size: 400,
       cell: ({ row }) => {
         const levels = LEVELS.map((level) => ({ level, acc: row.original[level] })).filter(({ acc }) => acc.claimed > 0)
         if (levels.length === 0) return <span className="text-fg-subtle">no claims</span>
@@ -114,11 +114,12 @@ export function ProviderAccuracyPanel({ projectId, onInspect, inspecting }: {
               return (
                 <div key={level} className="flex items-center gap-2 text-xs" title={title}>
                   <span className="w-12 flex-none uppercase tracking-wide text-[10px] text-fg-subtle">{level}</span>
-                  <div className="h-1.5 w-20 flex-none rounded-full bg-surface-raised overflow-hidden">
+                  {/* The bar repeats the rate, so it gives up room before the counts do. */}
+                  <div className="h-1.5 w-20 min-w-6 shrink rounded-full bg-surface-raised overflow-hidden">
                     {pct != null && <div className={cn('h-full rounded-full', pct >= 95 ? 'bg-success' : pct >= 80 ? 'bg-warning' : 'bg-danger')} style={{ width: `${pct}%` }} />}
                   </div>
                   <span className={cn('tabular-nums w-12 text-right', pct == null ? 'text-fg-subtle' : rateClass(pct))}>{pct == null ? 'open' : `${pct}%`}</span>
-                  <span className="tabular-nums text-fg-subtle truncate">
+                  <span className="tabular-nums text-fg-subtle flex-none whitespace-nowrap">
                     <span className="text-success">{acc.confirmed.toLocaleString()}</span> / <span className="text-danger">{acc.contradicted.toLocaleString()}</span>{acc.open > 0 && <> / {acc.open.toLocaleString()} open</>}
                   </span>
                 </div>

@@ -13,7 +13,8 @@ Three stages, mirroring the request-metrics pipeline:
 3. :class:`ObservationFlusher` (leader only) pops batches off the list,
    bulk-inserts the raw rows, decides which sightings are hand-outs, upserts
    the per-connector exit table the accuracy and exit views read, and applies
-   retention.
+   retention. Each cycle keeps popping while batches come back full, so a
+   backlog is drained rather than outgrowing one batch per interval.
 
 Losing Redis loses at most a few seconds of observations. Nothing on the
 request path waits for a database.
@@ -22,7 +23,9 @@ request path waits for a database.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
+import time
 from collections.abc import Awaitable, Callable
 from datetime import timedelta
 from typing import Any, cast
@@ -43,11 +46,27 @@ logger = structlog.get_logger()
 
 # Standby instances poll this often to see whether the flush lease has freed up.
 _LEASE_RETRY_SECONDS = 30.0
-# Rows popped from Redis per flush cycle. Bounded so one cycle never holds a
-# transaction open for a minute after a traffic burst.
+# Rows popped from Redis per batch, each batch its own transaction. Bounded so
+# no transaction stays open for a minute after a traffic burst.
 FLUSH_BATCH_SIZE = 2000
+# How long one cycle keeps writing batch after batch while they come back full.
+# A backlog clears over a few cycles instead of in one long burst, and the
+# cycle still yields to the next tick.
+DRAIN_BUDGET_SECONDS = 20.0
 # Retention runs at most this often.
 _RETENTION_EVERY = timedelta(hours=1)
+
+
+async def queue_length(redis_client: RedisClient) -> int | None:
+    """Entries every instance has published that the flusher has not popped yet; None when Redis cannot say.
+
+    Sightings, and verdict rewrites after a re-attribution: both wait in the same list.
+    """
+    try:
+        return int(await cast("Awaitable[Any]", redis_client.client.llen(GEO_OBSERVATIONS_KEY)))
+    except Exception as exc:
+        logger.warning("Could not read the IP observation queue length", error=str(exc))
+        return None
 
 
 class ObservationRecorder:
@@ -66,6 +85,10 @@ class ObservationRecorder:
     @property
     def pending(self) -> int:
         return len(self._buffer)
+
+    async def queued(self) -> int | None:
+        """The shared queue's length (see :func:`queue_length`); None without Redis."""
+        return await queue_length(self._redis) if self._redis is not None else None
 
     def record(self, observation: IpObservation | ExitJudgement) -> None:
         """Append one observation or judgement. Never blocks; drops the oldest when the buffer is full.
@@ -252,6 +275,7 @@ class ObservationFlusher:
         instance_id: str,
         *,
         interval: float = 30.0,
+        drain_budget: float = DRAIN_BUDGET_SECONDS,
         retention_days: Callable[[], int] | int = 7,
         exit_ip_retention_days: Callable[[], int] | int = 0,
     ) -> None:
@@ -259,6 +283,13 @@ class ObservationFlusher:
         self._redis = redis_client
         self._instance_id = instance_id
         self._interval = interval
+        self._drain_budget = drain_budget
+        # Set by stop(): a drain in progress ends at the next batch boundary.
+        self._stopping = False
+        # Clear while a drain runs, so shutdown can let the batch in hand commit
+        # (see settle()) rather than cancel it after it was popped off the queue.
+        self._idle = asyncio.Event()
+        self._idle.set()
         self._retention_days = retention_days
         self._exit_ip_retention_days = exit_ip_retention_days
         self._running = False
@@ -274,6 +305,7 @@ class ObservationFlusher:
 
     async def run(self) -> None:
         self._running = True
+        self._stopping = False
         job_stats.declare_interval(WorkerName.GEO_OBSERVATION_FLUSHER, self._interval)
         lease = Lease(self._redis, name=LeaseName.GEO_OBSERVATION_FLUSHER, owner_id=self._instance_id)
         try:
@@ -285,7 +317,7 @@ class ObservationFlusher:
                     await asyncio.sleep(self._interval)
                     if lease.is_held and self._running:
                         with job_stats.track(WorkerName.GEO_OBSERVATION_FLUSHER) as run:
-                            if await self.flush_once() == 0:
+                            if await self.drain(lease) == 0:
                                 run.idle()
                 except asyncio.CancelledError:
                     break
@@ -294,21 +326,64 @@ class ObservationFlusher:
         finally:
             await lease.release()
 
-    async def flush_once(self) -> int:
-        """Drain up to ``FLUSH_BATCH_SIZE`` observations. Returns how many were written."""
+    async def drain(self, lease: Lease | None = None) -> int:
+        """Write batch after batch while they come back full. Returns how many rows were written or judged.
+
+        One batch per cycle would cap the pipeline at ``FLUSH_BATCH_SIZE``
+        per interval: under heavy preflight traffic the queue then grows
+        without bound and every exit lands in the tables later and later.
+        Each batch is still its own transaction. The loop stops at a short
+        batch (the queue is drained), after ``drain_budget`` seconds (the
+        rest waits for the next cycle), once :meth:`stop` was called, or when
+        ``lease`` can no longer be confirmed. The lease is confirmed before
+        every batch, the first included, since hand-outs are only counted
+        right when one instance writes the queue in order.
+        """
+        deadline = time.monotonic() + self._drain_budget
+        written = judged = batches = 0
+        self._idle.clear()
+        try:
+            while not self._stopping and (lease is None or await lease.confirm()):
+                popped, batch_written, batch_judged = await self._flush_batch()
+                written += batch_written
+                judged += batch_judged
+                batches += 1 if popped else 0
+                if popped < FLUSH_BATCH_SIZE or time.monotonic() >= deadline:
+                    break
+        except Exception:
+            # The batches before the failing one are committed; say so next to the error.
+            if batches:
+                logger.warning(
+                    "IP observation flush stopped by an error", count=written, judged=judged, batches=batches
+                )
+            raise
+        finally:
+            self._idle.set()
+        if batches:
+            logger.info(
+                "IP observations flushed",
+                count=written,
+                judged=judged,
+                batches=batches,
+                queued=await queue_length(self._redis),
+            )
+        return written + judged
+
+    async def _flush_batch(self) -> tuple[int, int, int]:
+        """Pop and write one batch. Returns how many entries were popped, written and judged."""
         try:
             raw = await cast("Awaitable[Any]", self._redis.client.lpop(GEO_OBSERVATIONS_KEY, FLUSH_BATCH_SIZE))
         except Exception as exc:
             logger.warning("Could not pop IP observations", error=str(exc))
-            return 0
+            return 0, 0, 0
         if not raw:
             await self._maybe_retain()
-            return 0
+            return 0, 0, 0
         if not isinstance(raw, list):
             raw = [raw]
         observations, judgements = decode_batch(raw)
         if not observations and not judgements:
-            return 0
+            return len(raw), 0, 0
         async with self._session_factory() as session:
             repo = ObservationRepository(session)
             written = await repo.insert_many(observations) if observations else 0
@@ -345,9 +420,8 @@ class ObservationFlusher:
             # The counts are committed; at worst the next sighting of these
             # exits is counted once more. Logged rather than failing the batch.
             logger.warning("Could not record last counted exits", error=str(exc))
-        logger.info("IP observations flushed", count=written, judged=judged)
         await self._maybe_retain()
-        return written + judged
+        return len(raw), written, judged
 
     async def _maybe_retain(self) -> None:
         if utc_now() - self._last_retention < _RETENTION_EVERY:
@@ -372,3 +446,13 @@ class ObservationFlusher:
 
     def stop(self) -> None:
         self._running = False
+        self._stopping = True
+
+    async def settle(self, timeout: float = 10.0) -> None:
+        """After :meth:`stop`, wait (bounded) for a drain in progress to commit its batch in hand.
+
+        Cancelling the task mid-batch would roll back a batch already popped
+        off the queue and lose it.
+        """
+        with contextlib.suppress(TimeoutError):
+            await asyncio.wait_for(self._idle.wait(), timeout)

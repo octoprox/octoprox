@@ -598,6 +598,8 @@ export interface GeoStatus {
   pending_observations: number
   published_observations: number
   dropped_observations: number
+  /** Sightings and verdict rewrites waiting in Redis for the flusher; exit IPs and accuracy lag until they are written. Null when Redis cannot say. */
+  queued_observations: number | null
   stored_observations: number
   preflight_checks: number
   preflight_rejections: number

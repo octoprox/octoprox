@@ -3,6 +3,7 @@
 
 """Tests for the IP attribution repositories and the observation flusher against Postgres."""
 
+import asyncio
 import os
 from datetime import datetime, timedelta
 from typing import Any
@@ -24,6 +25,7 @@ from api.db.repository import (
     CredentialRepository,
     ProjectRepository,
 )
+from api.geo import observations
 from api.geo.models import (
     ConflictRule,
     ExitJudgement,
@@ -491,7 +493,7 @@ class TestFlusher:
         flusher = ObservationFlusher(
             db_session_factory, redis_client, "inst", retention_days=lambda: 7
         )
-        assert await flusher.flush_once() == 3
+        assert await flusher.drain() == 3
         exits, _ = await ObservationRepository(db_session).exit_ips(connector_ids=["conn-1"])
         assert {e["ip"] for e in exits} >= {"81.2.69.160", "81.2.69.161"}
         # The last counted exit went into the proxy's status hash, next to its health fields.
@@ -502,13 +504,13 @@ class TestFlusher:
         # The same exit reported again, by anyone, any time later: one raw row more, no hand-out.
         recorder.record(_observation(ip="81.2.69.161", instance_id="another"))
         await recorder.publish()
-        assert await flusher.flush_once() == 1
+        assert await flusher.drain() == 1
         (row,), _ = await ObservationRepository(db_session).exit_ips(connector_ids=["conn-1"], ip="81.2.69.161")
         assert row["sightings"] == 1
         # A different exit for the same proxy is a hand-out and moves the recorded exit.
         recorder.record(_observation(ip="81.2.69.170"))
         await recorder.publish()
-        assert await flusher.flush_once() == 1
+        assert await flusher.drain() == 1
         (row,), _ = await ObservationRepository(db_session).exit_ips(connector_ids=["conn-1"], ip="81.2.69.170")
         assert row["sightings"] == 1
         assert await redis_client.client.hget("proxy:status:proxy-1", "exit_ip") == "81.2.69.170"
@@ -516,13 +518,13 @@ class TestFlusher:
         recorder.record(ExitJudgement(proxy_id="proxy-1", connector_id="conn-1", ip="81.2.69.170", claimed_country="US", resolved_country="GB", country_conflict=True))
         recorder.record(ExitJudgement(proxy_id="proxy-x", connector_id="gone", ip="81.2.69.170"))  # deleted connector: skipped
         await recorder.publish()
-        assert await flusher.flush_once() == 1  # one verdict rewritten; the skipped judgement is not work done
+        assert await flusher.drain() == 1  # one verdict rewritten; the skipped judgement is not work done
         (row,), _ = await ObservationRepository(db_session).exit_ips(connector_ids=["conn-1"], ip="81.2.69.170")
         assert row["sightings"] == 1 and row["country_conflict"] is True and row["source"] == "reattribute"
         await redis_client.client.delete("proxy:status:proxy-1")
         assert await ObservationRepository(db_session).exit_ips(connector_ids=["gone"]) == ([], 0)
         assert await redis_client.client.llen(GEO_OBSERVATIONS_KEY) == 0
-        assert await flusher.flush_once() == 0
+        assert await flusher.drain() == 0
 
         assert await repo.count() == before + 5  # three sightings, then the repeat and the move
         accuracy = {a["connector_id"]: a for a in await repo.exit_accuracy(connector_ids=["conn-1"])}
@@ -560,7 +562,7 @@ class TestFlusher:
         recorder.record(_observation(proxy_id="proxy-gone", ip="10.0.0.99", source=ObservationSource.HEALTH_CHECK))
         await recorder.publish()
         flusher = ObservationFlusher(db_session_factory, redis_client, "inst", retention_days=lambda: 7)
-        assert await flusher.flush_once() == 5
+        assert await flusher.drain() == 5
         assert not await redis_client.client.exists("proxy:status:proxy-gone")
         rows = {r["ip"]: r for r in (await repo.exit_ips(connector_ids=["conn-1"]))[0]}
         assert rows["10.0.0.7"]["sightings"] == 2  # held before by proxy-7 (1), handed to proxy-9 (+1)
@@ -570,6 +572,78 @@ class TestFlusher:
         assert await redis_client.client.hget("proxy:status:proxy-7", "exit_ip") == "10.0.0.7"
         assert await redis_client.client.hget("proxy:status:proxy-8", "exit_ip") == "10.0.0.80"
         await redis_client.client.delete("proxy:status:proxy-7", "proxy:status:proxy-8", "proxy:status:proxy-9")
+
+    async def test_a_cycle_drains_full_batches_until_the_queue_is_short(
+        self,
+        db_session_factory: async_sessionmaker[AsyncSession],
+        redis_client: RedisClient,
+        db_session: AsyncSession,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """One batch per cycle let a backlog outgrow the flusher; a cycle now writes until a batch comes back short."""
+        await _connectors(db_session, "conn-1")
+        await redis_client.client.delete(GEO_OBSERVATIONS_KEY)
+        monkeypatch.setattr(observations, "FLUSH_BATCH_SIZE", 2)
+        recorder = ObservationRecorder(redis_client)
+        for n in range(5):
+            recorder.record(_observation(proxy_id=None, ip=f"10.1.0.{n}"))
+        await recorder.publish()
+        assert await recorder.queued() == 5
+
+        flusher = ObservationFlusher(db_session_factory, redis_client, "inst", retention_days=lambda: 7)
+        assert await flusher.drain() == 5  # batches of 2, 2 and 1
+        assert await recorder.queued() == 0
+        rows, _ = await ObservationRepository(db_session).exit_ips(connector_ids=["conn-1"], limit=1000)
+        assert {f"10.1.0.{n}" for n in range(5)} <= {r["ip"] for r in rows}
+        assert await flusher.drain() == 0
+
+    async def test_a_drain_stops_at_its_budget_or_a_lost_lease(
+        self,
+        db_session_factory: async_sessionmaker[AsyncSession],
+        redis_client: RedisClient,
+        db_session: AsyncSession,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        await _connectors(db_session, "conn-1")
+        await redis_client.client.delete(GEO_OBSERVATIONS_KEY)
+        monkeypatch.setattr(observations, "FLUSH_BATCH_SIZE", 2)
+        recorder = ObservationRecorder(redis_client)
+        for n in range(8):
+            recorder.record(_observation(proxy_id=None, ip=f"10.2.0.{n}"))
+        await recorder.publish()
+
+        # Out of time after the first batch: the rest waits for the next cycle.
+        no_time = ObservationFlusher(db_session_factory, redis_client, "inst", drain_budget=0, retention_days=lambda: 7)
+        assert await no_time.drain() == 2 and await recorder.queued() == 6
+
+        class LostLease:
+            def __init__(self, held_for: int) -> None:
+                self.held_for = held_for
+
+            async def confirm(self) -> bool:
+                self.held_for -= 1
+                return self.held_for >= 0
+
+        # Another instance holds the lease: not even a first batch is popped.
+        flusher = ObservationFlusher(db_session_factory, redis_client, "inst", retention_days=lambda: 7)
+        assert await flusher.drain(LostLease(0)) == 0  # type: ignore[arg-type]
+        assert await recorder.queued() == 6
+        # Lost after one batch: no more, so the queue is never written twice at once.
+        assert await flusher.drain(LostLease(1)) == 2  # type: ignore[arg-type]
+        assert await recorder.queued() == 4
+
+        class StoppedMidDrain:
+            async def confirm(self) -> bool:
+                flusher.stop()
+                return True
+
+        # Shutdown arrives while a batch is in hand: it is written, then the drain ends.
+        assert await flusher.drain(StoppedMidDrain()) == 2  # type: ignore[arg-type]
+        assert await recorder.queued() == 2
+        assert await flusher.drain() == 0  # a stopped flusher starts no batch
+        assert await recorder.queued() == 2
+        await asyncio.wait_for(flusher.settle(), 1)  # nothing in flight: returns at once
+        await redis_client.client.delete(GEO_OBSERVATIONS_KEY)
 
 
 class TestPlaceAccuracy:

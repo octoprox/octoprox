@@ -451,6 +451,7 @@ class TestObservationsAndStatus:
         status = authenticated_client.get("/api/v1/geo/status").json()
         assert status["databases_total"] >= status["databases_loaded"]
         assert status["preflight_checks"] == 0 and status["stored_observations"] >= 0
+        assert isinstance(status["queued_observations"], int) and status["queued_observations"] >= 0
 
     def test_exits_endpoints(self, authenticated_client: TestClient) -> None:
         summary = authenticated_client.get("/api/v1/geo/exits?days=30").json()

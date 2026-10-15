@@ -155,6 +155,9 @@ class GeoRuntime:
         self.database_updater.stop()
         with contextlib.suppress(Exception):
             await self.observation_recorder.publish()
+        # A drain in progress ends at its next batch boundary; cancelling it
+        # mid-batch would roll back a batch already popped off the queue.
+        await self.observation_flusher.settle()
         for task in self._tasks:
             task.cancel()
             with contextlib.suppress(asyncio.CancelledError):

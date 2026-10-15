@@ -38,6 +38,9 @@ const VENDOR_LABELS: Record<string, string> = {
   other: 'Other',
 }
 
+// Queued sightings past this many are a backlog worth flagging: several full flush batches.
+const QUEUE_BACKLOG = 10_000
+
 // What a file answers; a GeoNames file answers no IP, it places cities.
 const KIND_LABELS: Record<string, string> = {
   places: 'City coordinates',
@@ -51,6 +54,7 @@ const KIND_LABELS: Record<string, string> = {
 export default function GeoSection() {
   const [tab, setTab] = useState<Tab>('databases')
   const { data: status } = useQuery({ queryKey: ['geo-status'], queryFn: fetchGeoStatus, refetchInterval: 30_000 })
+  const queued = status?.queued_observations ?? 0
   const [range] = useAccuracyRange()
   const [inspecting, setInspecting] = useState<AccuracyRow | null>(null)
   const days = accuracyDays(range)
@@ -67,6 +71,11 @@ export default function GeoSection() {
           <Badge color={status.databases_loaded > 0 ? 'green' : 'gray'}>{status.databases_loaded} database{status.databases_loaded === 1 ? '' : 's'} loaded</Badge>
           {Object.keys(status.load_errors).length > 0 && <Badge color="red">{Object.keys(status.load_errors).length} failed to load</Badge>}
           <span className="tabular-nums">{status.stored_observations.toLocaleString()} observations</span>
+          {queued > 0 && (
+            <Badge color={queued >= QUEUE_BACKLOG ? 'yellow' : 'gray'} title="Published by the instances and not written yet: sightings, and verdict rewrites after a re-attribution. Exit IPs, accuracy and the observation log lag until they are.">
+              {queued.toLocaleString()} queued
+            </Badge>
+          )}
         </div>
       )}
     >

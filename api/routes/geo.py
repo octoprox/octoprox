@@ -281,6 +281,10 @@ class GeoStatusResponse(BaseModel):
     pending_observations: int
     published_observations: int
     dropped_observations: int
+    # Published by every instance, not yet written by the flusher (the Redis
+    # queue: sightings, and verdict rewrites after a re-attribution); exit IPs
+    # and accuracy lag until they are. None when Redis cannot say.
+    queued_observations: int | None = None
     stored_observations: int
     preflight_checks: int
     preflight_rejections: int
@@ -875,6 +879,7 @@ async def status(request: Request, session: DbDep, _user: CurrentUserDep) -> Geo
         pending_observations=recorder.pending,
         published_observations=recorder.published,
         dropped_observations=recorder.dropped,
+        queued_observations=await recorder.queued(),
         stored_observations=stored,
         preflight_checks=runtime.preflight_checker.checks,
         preflight_rejections=runtime.preflight_checker.rejections,
