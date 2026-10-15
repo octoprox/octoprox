@@ -9,6 +9,7 @@ import uuid
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Literal
+from urllib.parse import urlsplit
 
 import yaml  # type: ignore[import-untyped]
 from pydantic import Field, field_validator
@@ -171,19 +172,27 @@ class Settings(BaseSettings):
     proxy_port: int = Field(default=8080)
     # Where clients reach the proxy listener, as written into the URLs the
     # Connect page generates. Behind a load balancer or a NAT mapping the
-    # listener's own address and port are not the ones clients use.
-    proxy_public_host: str = Field(
+    # listener's own address and port are not the ones clients use, and a
+    # balancer that terminates TLS in front of it makes it an HTTPS proxy.
+    proxy_public_url: str = Field(
         default="",
         description=(
-            "Hostname or IP address clients reach the proxy at, without a scheme or port. "
-            "Empty means the host the browser reached the web UI at"
+            "The URL clients reach the proxy at: http:// or https://, a host and an optional port, "
+            "such as https://proxy.example.com. Without a port clients use the scheme's default "
+            "(https URLs leave it out; http ones name 80, since curl reads a bare http:// proxy as 1080). "
+            "Empty means http:// on the host the browser reached the web UI at and proxy_port"
         ),
+    )
+    # The 4.6.6 form, read as http://host:port while proxy_public_url is empty.
+    proxy_public_host: str = Field(
+        default="",
+        description="Superseded by proxy_public_url: the host of an http:// proxy URL, used while proxy_public_url is empty",
     )
     proxy_public_port: int | None = Field(
         default=None,
         ge=1,
         le=65535,
-        description="Port clients reach the proxy at, when it is published on another port than proxy_port; empty means proxy_port",
+        description="Superseded by proxy_public_url: the port that goes with proxy_public_host; empty means proxy_port",
     )
 
     # Environment
@@ -324,6 +333,43 @@ class Settings(BaseSettings):
             if any(ch in v for ch in " /:\\@?#"):
                 raise ValueError("proxy_public_host is a hostname or IP address without a scheme or port") from None
         return v
+
+    @field_validator("proxy_public_url")
+    @classmethod
+    def _check_proxy_public_url(cls, v: str) -> str:
+        v = v.strip().rstrip("/")
+        if not v:
+            return v
+        parts = urlsplit(v)
+        try:
+            port = parts.port
+        except ValueError:
+            port = 0
+        if (
+            parts.scheme not in ("http", "https")
+            or not parts.hostname
+            or port == 0
+            or any(ch.isspace() or ch == "\\" for ch in v)
+            or parts.username is not None
+            # Nothing after the host and port: no path, and no query or fragment, not even an empty one.
+            or v[len(parts.scheme) + 3 :] != parts.netloc
+        ):
+            raise ValueError(
+                "proxy_public_url is http:// or https://, a host and an optional port, such as https://proxy.example.com"
+            )
+        return v
+
+    @property
+    def proxy_endpoint(self) -> tuple[Literal["http", "https"], str | None, int | None]:
+        """``(scheme, host, port)`` clients reach the proxy at.
+
+        ``host`` None means the host the browser reached the web UI at;
+        ``port`` None means the scheme's default, which URLs then leave out.
+        """
+        if self.proxy_public_url:
+            parts = urlsplit(self.proxy_public_url)
+            return "https" if parts.scheme == "https" else "http", parts.hostname, parts.port
+        return "http", self.proxy_public_host or None, self.proxy_public_port or self.proxy_port
 
     @property
     def debug(self) -> bool:

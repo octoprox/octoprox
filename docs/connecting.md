@@ -13,16 +13,19 @@ Every project is one proxy endpoint with its own credentials. A client points it
 
 ## Endpoint
 
-Octoprox speaks plain HTTP on its proxy port (`8080` by default, `server.proxy_port`): HTTP requests are forwarded and HTTPS goes through a `CONNECT` tunnel. The proxy URL therefore always starts with `http://`, even when every target is `https://`.
+Octoprox speaks plain HTTP on its proxy port (`8080` by default, `server.proxy_port`): HTTP requests are forwarded and HTTPS goes through a `CONNECT` tunnel. Reached directly, the proxy URL starts with `http://`, even when every target is `https://`.
+
+A load balancer that terminates TLS in front of the proxy port makes it an **HTTPS proxy**: clients use an `https://` proxy URL, and the connection to the proxy, the `Proxy-Authorization` credentials included, is encrypted. The balancer forwards the decrypted stream to the proxy port unchanged (a TCP or TLS stream listener, not an HTTP one, since `CONNECT` tunnels must pass through). curl, Python requests, undici and Chromium (Playwright) all take `https://` proxy URLs, with or without a port; without one they connect to 443.
 
 | What | Value |
 |------|-------|
+| Protocol | HTTP, or HTTPS behind a load balancer that terminates TLS |
 | Host | The address clients reach Octoprox at, usually the host of the web UI |
-| Port | `8080`, or what the load balancer publishes |
+| Port | `8080`, or what the load balancer publishes; may be left out for HTTPS on 443 (curl reads a bare `http://` proxy as port 1080, so an HTTP URL names its port) |
 | Username | The project's username, plus routing parameters |
 | Password | The project's password |
 
-Behind a load balancer or a NAT the proxy may be published under another name or port than the instance listens on. Set `OCTOPROX_PROXY_PUBLIC_HOST` and `OCTOPROX_PROXY_PUBLIC_PORT` (see [Configuration]({{ site.baseurl }}/configuration#environment-variables)) so the Connect page shows the address clients should use; without them it shows the host the browser reached the web UI at and the proxy port.
+Behind a load balancer or a NAT the proxy is published under another address than the instance listens on. Set `OCTOPROX_PROXY_PUBLIC_URL` (see [Configuration]({{ site.baseurl }}/configuration#environment-variables)) to the URL clients should use, for example `https://proxy.example.com` or `https://proxy.example.com:8443`: the Connect page and its examples use it as given, leaving the port out when an `https://` URL has none (an `http://` one without a port gets `80`). Without it the page shows `http://` on the host the browser reached the web UI at and the proxy port.
 
 ## Username parameters
 
@@ -106,6 +109,14 @@ In the URL form the username and password are percent-encoded: a password contai
 ### With TLS interception
 
 When the project's [TLS interception]({{ site.baseurl }}/tls-interception) is on, clients must trust the Octoprox CA. Download it from the Connect page (or `GET /api/v1/projects/ca-certificate`) as `octoprox-ca.crt`, then pass `--cacert octoprox-ca.crt` to curl, `verify="octoprox-ca.crt"` to requests, or `requestTls: { ca: readFileSync('octoprox-ca.crt') }` to undici's `ProxyAgent`. The Connect page adds these to its examples when interception is on.
+
+Behind an HTTPS proxy there are two certificates: the load balancer's, which clients check against their usual roots, and the one interception presents for the site, signed by the Octoprox CA. curl (`--cacert` covers the site only), undici (`requestTls` likewise) and Playwright keep them apart. Python requests does not: it checks both against the one `verify` bundle, so `verify="octoprox-ca.crt"` alone fails on the balancer's certificate. Give it a bundle with both:
+
+```bash
+cat "$(python -m certifi)" octoprox-ca.crt > octoprox-bundle.pem
+```
+
+and pass `verify="octoprox-bundle.pem"` (or set `REQUESTS_CA_BUNDLE` to it). The Connect page's Python example does this when the endpoint is HTTPS.
 
 ## Where a username goes
 

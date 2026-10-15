@@ -11,8 +11,8 @@ import { useDebounced } from '../hooks/useDebounced'
 import { Page } from '../components/layout/Page'
 import { Alert, Button, Card, CardHeader, InfoTip, Input, Label, Segmented, Select, Tabs } from '../components/ui'
 import {
-  COUNTRY_CODES, SNIPPETS, US_STATES, countryLabel, needsEncoding, proxyLine, proxyUrl, randomSessionId, snippet,
-  type ProxyAccess, type SnippetKind,
+  COUNTRY_CODES, SNIPPETS, US_STATES, countryLabel, effectivePort, formatEndpoint, needsEncoding, omitsPort, parseEndpoint,
+  proxyLine, proxyUrl, randomSessionId, snippet, type ProxyAccess, type ProxyEndpoint, type SnippetKind,
 } from '../utils/connect'
 
 const SNIPPET_KEY = 'octoprox_connect_snippet'
@@ -40,24 +40,24 @@ function CopyButton({ text, label = 'Copy' }: { text: string; label?: string }) 
   )
 }
 
-/** One labelled value with a copy button; `copy` is what the clipboard gets when the shown value is masked. */
-function Field({ label, value, copy, extra }: { label: ReactNode; value: string; copy?: string; extra?: ReactNode }) {
+/**
+ * One labelled value with a copy button; `copy` is what the clipboard gets when the shown value is masked,
+ * and `note` a short remark on a line of its own under the value.
+ */
+function Field({ label, value, copy, extra, note }: { label: ReactNode; value: string; copy?: string; extra?: ReactNode; note?: ReactNode }) {
   return (
     <div className="grid grid-cols-[96px_minmax(0,1fr)] gap-x-3 items-center px-4 py-2 border-b border-line last:border-b-0">
       <span className="text-xs text-fg-muted">{label}</span>
       <div className="flex items-center gap-1 min-w-0">
-        <span className="font-mono text-[12.5px] text-fg break-all flex-1 min-w-0">{value}</span>
+        <span className="flex-1 min-w-0">
+          <span className="block font-mono text-[12.5px] text-fg break-all">{value}</span>
+          {note && <span className="block text-xs text-fg-subtle">{note}</span>}
+        </span>
         {extra}
         <CopyButton text={copy ?? value} label={`Copy ${typeof label === 'string' ? label.toLowerCase() : 'value'}`} />
       </div>
     </div>
   )
-}
-
-/** The typed port when it is one a client can use, else null. */
-function validPort(text: string | null): number | null {
-  const port = Number(text)
-  return text !== null && Number.isInteger(port) && port >= 1 && port <= 65535 ? port : null
 }
 
 /** A city slug as words, for prose: `new_york` reads New York. */
@@ -86,8 +86,8 @@ export default function ConnectPage() {
   const [city, setCity] = useState('')
   const [sticky, setSticky] = useState(false)
   const [sessid, setSessid] = useState(() => randomSessionId())
-  const [host, setHost] = useState<string | null>(null)
-  const [port, setPort] = useState<string | null>(null)
+  // The endpoint as typed over the default, or null while it is the default.
+  const [endpointText, setEndpointText] = useState<string | null>(null)
   const [showPassword, setShowPassword] = useState(false)
   const [target, setTarget] = useState(DEFAULT_TARGET)
   const [kind, setKind] = useState<SnippetKind>(() => {
@@ -137,17 +137,20 @@ export default function ConnectPage() {
 
   const strategy = selectedProject.routing_strategy
   const mitm = selectedProject.tls_mitm_mode !== 'off'
-  const defaultHost = info?.endpoint.host ?? window.location.hostname
-  const defaultPort = info?.endpoint.port ?? 8080
+  const defaultEndpoint: ProxyEndpoint = {
+    scheme: info?.endpoint.scheme ?? 'http',
+    host: info?.endpoint.host ?? window.location.hostname,
+    port: info ? info.endpoint.port : 8080,
+  }
+  const typedEndpoint = endpointText === null ? null : parseEndpoint(endpointText)
+  const endpointInvalid = endpointText !== null && typedEndpoint === null
   const access: ProxyAccess = {
-    host: (host ?? defaultHost).trim() || defaultHost,
-    port: validPort(port) ?? defaultPort,
+    ...(typedEndpoint ?? defaultEndpoint),
     username: info?.username ?? selectedProject.username,
     password: selectedProject.password,
     mitm,
   }
   const shown: ProxyAccess = showPassword ? access : { ...access, password: MASK }
-  const endpointEdited = host !== null || port !== null
   const passwordToggle = (
     <button type="button" onClick={() => setShowPassword((v) => !v)} title={showPassword ? 'Hide password' : 'Show password'} className="flex-none p-1 rounded text-fg-subtle hover:text-fg hover:bg-surface-raised">
       {showPassword ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
@@ -253,16 +256,20 @@ export default function ConnectPage() {
             <h2 className="text-[11px] font-semibold uppercase tracking-wider text-fg-subtle flex items-center gap-1.5">
               Proxy endpoint
               <InfoTip label="About the endpoint">{info?.endpoint.host
-                ? 'Set by the administrator (server.proxy_public_host). Edit it here to try another address; nothing is saved.'
-                : 'The host you reached this page at, and the proxy port. An administrator can set the address clients should use with server.proxy_public_host and server.proxy_public_port. Edits here are not saved.'}
+                ? 'Set by the administrator (server.proxy_public_url). Edit it here to try another address, such as https://proxy.example.com:8443; nothing is saved.'
+                : 'The host you reached this page at, over plain HTTP on the proxy port. An administrator sets the address clients should use with server.proxy_public_url, for example https://proxy.example.com behind a load balancer that terminates TLS. Edits here are not saved.'}
               </InfoTip>
             </h2>
-            <div className="grid grid-cols-[minmax(0,1fr)_88px] gap-2">
-              <Input value={host ?? defaultHost} onChange={(e) => setHost(e.target.value)} className={`${CONTROL} font-mono`} aria-label="Proxy host" />
-              <Input value={port ?? String(defaultPort)} onChange={(e) => setPort(e.target.value)} type="number" min={1} max={65535} className={`${CONTROL} font-mono`} aria-label="Proxy port" />
-            </div>
-            {endpointEdited && (
-              <button type="button" onClick={() => { setHost(null); setPort(null) }} className="text-xs text-primary hover:brightness-110">Reset to {defaultHost}:{defaultPort}</button>
+            <Input
+              value={endpointText ?? formatEndpoint(defaultEndpoint)} onChange={(e) => setEndpointText(e.target.value)}
+              className={`${CONTROL} font-mono`} aria-label="Proxy endpoint" aria-invalid={endpointInvalid}
+              placeholder="https://proxy.example.com"
+            />
+            {endpointInvalid && (
+              <p className="text-xs text-warning">Not an address like https://proxy.example.com:8443, so the examples use {formatEndpoint(defaultEndpoint)}.</p>
+            )}
+            {endpointText !== null && (
+              <button type="button" onClick={() => setEndpointText(null)} className="text-xs text-primary hover:brightness-110">Reset to {formatEndpoint(defaultEndpoint)}</button>
             )}
           </div>
         </Card>
@@ -272,12 +279,16 @@ export default function ConnectPage() {
           <Card className="overflow-hidden">
             <div className="px-4 pt-3.5 pb-2.5"><CardHeader title="Credentials" /></div>
             <div className="border-t border-line">
+              <Field label="Protocol" value={access.scheme.toUpperCase()} />
               <Field label="Host" value={access.host} />
-              <Field label="Port" value={String(access.port)} />
+              <Field
+                label="Port" value={String(effectivePort(access))}
+                note={omitsPort(access) ? 'The https default, left out of URLs' : undefined}
+              />
               <Field label="Username" value={access.username} />
               <Field label="Password" value={shown.password} copy={access.password} extra={passwordToggle} />
               <Field label="Proxy URL" value={proxyUrl(shown)} copy={proxyUrl(access)} />
-              <Field label={<span className="inline-flex items-center gap-1">List format <InfoTip label="About the list format">host:port:username:password, the line proxy lists and many scraping tools import.</InfoTip></span>} value={proxyLine(shown)} copy={proxyLine(access)} />
+              <Field label={<span className="inline-flex items-center gap-1">List format <InfoTip label="About the list format">host:port:username:password, the line proxy lists and many scraping tools import.{access.scheme === 'https' ? ' It carries no protocol, so choose HTTPS in the tool.' : ''}</InfoTip></span>} value={proxyLine(shown)} copy={proxyLine(access)} />
             </div>
             {needsEncoding(access) && (
               <p className="px-4 py-2 border-t border-line text-xs text-fg-muted">The proxy URL percent-encodes characters of the username or password that would otherwise break it; clients decode them before sending.</p>

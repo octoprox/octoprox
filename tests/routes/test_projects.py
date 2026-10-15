@@ -296,7 +296,7 @@ class TestConnectInfo:
         data = self._get(authenticated_client, created_project)
         assert data["username"] == created_project["username"]
         assert data["location"] is None and data["sessid"] is None and data["error"] is None
-        assert data["endpoint"] == {"host": None, "port": test_settings.proxy_port}
+        assert data["endpoint"] == {"scheme": "http", "host": None, "port": test_settings.proxy_port}
         assert data["routes"] == [] and data["places"] == [] and data["countries"] == []
         assert data["any_country"] is False
 
@@ -310,7 +310,11 @@ class TestConnectInfo:
         monkeypatch.setattr(test_settings, "proxy_public_host", "proxy.example.com")
         monkeypatch.setattr(test_settings, "proxy_public_port", 18080)
         data = self._get(authenticated_client, created_project)
-        assert data["endpoint"] == {"host": "proxy.example.com", "port": 18080}
+        assert data["endpoint"] == {"scheme": "http", "host": "proxy.example.com", "port": 18080}
+        # A TLS load balancer in front of the listener, on the default port.
+        monkeypatch.setattr(test_settings, "proxy_public_url", "https://proxy.example.com")
+        data = self._get(authenticated_client, created_project)
+        assert data["endpoint"] == {"scheme": "https", "host": "proxy.example.com", "port": None}
 
     def test_place_and_session_are_normalised(
         self, authenticated_client: TestClient, created_project: dict[str, Any]

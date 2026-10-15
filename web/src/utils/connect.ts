@@ -4,13 +4,22 @@
 /**
  * Proxy URLs and client snippets for the Connect page. Pure, so the page only
  * renders them. The proxy listener speaks plain HTTP (forwarding and CONNECT)
- * and authenticates with Basic auth, so every snippet is an http:// proxy with
- * the project's username, routing parameters included, and password.
+ * and authenticates with Basic auth; a load balancer that terminates TLS in
+ * front of it makes it an https:// proxy, which every client here supports.
+ * Every snippet carries the project's username, routing parameters included,
+ * and password.
  */
 
-export interface ProxyAccess {
+export type ProxyScheme = 'http' | 'https'
+
+/** Where clients reach the proxy. `port` null means the scheme's default (see `omitsPort` for URLs). */
+export interface ProxyEndpoint {
+  scheme: ProxyScheme
   host: string
-  port: number
+  port: number | null
+}
+
+export interface ProxyAccess extends ProxyEndpoint {
   username: string
   password: string
   /** The project intercepts TLS, so clients must trust octoprox-ca.crt. */
@@ -18,23 +27,52 @@ export interface ProxyAccess {
 }
 
 export const CA_FILE = 'octoprox-ca.crt'
+const BUNDLE_FILE = 'octoprox-bundle.pem'
+
+const DEFAULT_PORTS: Record<ProxyScheme, number> = { http: 80, https: 443 }
+
+/** The port a client connects to, the scheme's default when the URL names none. */
+export const effectivePort = (e: ProxyEndpoint) => e.port ?? DEFAULT_PORTS[e.scheme]
+
+/**
+ * Whether URLs leave the port out: only for https without one, which every client here
+ * reads as 443. curl reads a bare http:// proxy as port 1080, not 80, so http URLs name it.
+ */
+export const omitsPort = (e: ProxyEndpoint) => e.port === null && e.scheme === 'https'
 
 /** The host as it goes into a URL: an IPv6 literal needs brackets. */
 export const urlHost = (host: string) => (host.includes(':') && !host.startsWith('[') ? `[${host}]` : host)
 
-/** `http://host:port`, without credentials. */
-export const proxyServer = (a: ProxyAccess) => `http://${urlHost(a.host)}:${a.port}`
+/** `host[:port]` as it goes into a URL. */
+const urlAuthority = (e: ProxyEndpoint) => `${urlHost(e.host)}${omitsPort(e) ? '' : `:${effectivePort(e)}`}`
+
+/** `scheme://host[:port]`, without credentials. */
+export const formatEndpoint = (e: ProxyEndpoint) => `${e.scheme}://${urlAuthority(e)}`
 
 /**
- * `http://user:pass@host:port`. The username and password are percent-encoded,
- * since a password with `@`, `:` or `/` would otherwise end the userinfo early;
- * curl, requests, undici and the rest decode them again before sending.
+ * An address typed as `https://proxy.example.com`, `http://10.0.0.5:8080` or
+ * `proxy.example.com:8080` (http assumed), or null when it is not one: a path,
+ * credentials or a port outside 1 to 65535 make it something else.
+ */
+export function parseEndpoint(text: string): ProxyEndpoint | null {
+  const m = /^(?:(https?):\/\/)?(\[[0-9a-f:.]+\]|[^\s:/?#[\]@]+)(?::(\d{1,5}))?\/?$/i.exec(text.trim())
+  if (!m) return null
+  const port = m[3] ? Number(m[3]) : null
+  if (port !== null && (port < 1 || port > 65535)) return null
+  return { scheme: (m[1]?.toLowerCase() ?? 'http') as ProxyScheme, host: m[2].replace(/^\[|\]$/g, ''), port }
+}
+
+/**
+ * `scheme://user:pass@host[:port]`. The username and password are
+ * percent-encoded, since a password with `@`, `:` or `/` would otherwise end
+ * the userinfo early; curl, requests, undici and the rest decode them again
+ * before sending.
  */
 export const proxyUrl = (a: ProxyAccess) =>
-  `http://${encodeURIComponent(a.username)}:${encodeURIComponent(a.password)}@${urlHost(a.host)}:${a.port}`
+  `${a.scheme}://${encodeURIComponent(a.username)}:${encodeURIComponent(a.password)}@${urlAuthority(a)}`
 
-/** The `host:port:username:password` line proxy lists and many scraping tools import. */
-export const proxyLine = (a: ProxyAccess) => `${a.host}:${a.port}:${a.username}:${a.password}`
+/** The `host:port:username:password` line proxy lists and many scraping tools import. It carries no scheme. */
+export const proxyLine = (a: ProxyAccess) => `${a.host}:${effectivePort(a)}:${a.username}:${a.password}`
 
 /** Whether the URL form had to percent-encode anything (worth a note under it). */
 export const needsEncoding = (a: ProxyAccess) =>
@@ -59,21 +97,31 @@ export function snippet(kind: SnippetKind, a: ProxyAccess, target: string): stri
   switch (kind) {
     case 'curl':
       return [
-        `curl --proxy ${sh(proxyServer(a))} \\`,
+        `curl --proxy ${sh(formatEndpoint(a))} \\`,
         `  --proxy-user ${sh(`${a.username}:${a.password}`)} \\`,
         ...(a.mitm ? [`  --cacert ${CA_FILE} \\`] : []),
         `  ${sh(target)}`,
       ].join('\n')
-    case 'python':
+    case 'python': {
+      // requests checks an https proxy's certificate against the same bundle as the site's, so with
+      // interception the bundle needs the usual roots as well as the Octoprox CA.
+      const bundled = a.mitm && a.scheme === 'https'
       return [
         `import requests`,
         ``,
         `proxy = ${lit(proxyUrl(a))}`,
         `proxies = {"http": proxy, "https": proxy}`,
         ``,
-        `response = requests.get(${lit(target)}, proxies=proxies, ${a.mitm ? `verify=${lit(CA_FILE)}, ` : ''}timeout=30)`,
+        ...(bundled
+          ? [
+            `# TLS interception behind an https proxy: requests checks both certificates against one bundle,`,
+            `# so give it the usual roots and the Octoprox CA: cat "$(python -m certifi)" ${CA_FILE} > ${BUNDLE_FILE}`,
+          ]
+          : []),
+        `response = requests.get(${lit(target)}, proxies=proxies, ${a.mitm ? `verify=${lit(bundled ? BUNDLE_FILE : CA_FILE)}, ` : ''}timeout=30)`,
         `print(response.text)`,
       ].join('\n')
+    }
     case 'node':
       return [
         `// npm install undici`,
@@ -92,7 +140,7 @@ export function snippet(kind: SnippetKind, a: ProxyAccess, target: string): stri
         ``,
         `with sync_playwright() as p:`,
         `    browser = p.chromium.launch(proxy={`,
-        `        "server": ${lit(proxyServer(a))},`,
+        `        "server": ${lit(formatEndpoint(a))},`,
         `        "username": ${lit(a.username)},`,
         `        "password": ${lit(a.password)},`,
         `    })`,
@@ -111,7 +159,11 @@ export function snippet(kind: SnippetKind, a: ProxyAccess, target: string): stri
         `export https_proxy=${sh(proxyUrl(a))}`,
         `export http_proxy="$https_proxy"`,
         ...(a.mitm ? [`# TLS interception is on: point clients at ${CA_FILE} (curl --cacert, REQUESTS_CA_BUNDLE, NODE_EXTRA_CA_CERTS)`] : []),
-        `# curl, wget, Python requests and httpx, Go and most CLIs pick these up`,
+        ...(a.mitm && a.scheme === 'https'
+          ? [`# Behind an https proxy REQUESTS_CA_BUNDLE needs the usual roots too: cat "$(python -m certifi)" ${CA_FILE} > ${BUNDLE_FILE}`]
+          : []),
+        // wget does not speak TLS to a proxy, so it is no example for an https one.
+        `# curl, ${a.scheme === 'https' ? '' : 'wget, '}Python requests and httpx, Go and most CLIs pick these up`,
         `curl ${a.mitm ? `--cacert ${CA_FILE} ` : ''}${sh(target)}`,
       ].join('\n')
   }

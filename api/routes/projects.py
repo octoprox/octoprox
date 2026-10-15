@@ -262,11 +262,10 @@ async def get_connect_info(
     location = params.location
     countries, any_country, places = proxy_manager.served_places(project_id)
 
+    scheme, host, port = settings.proxy_endpoint
+
     return ConnectInfo(
-        endpoint=ConnectEndpoint(
-            host=settings.proxy_public_host or None,
-            port=settings.proxy_public_port or settings.proxy_port,
-        ),
+        endpoint=ConnectEndpoint(scheme=scheme, host=host, port=port),
         username=composed if error else format_username_params(project.username, params.sessid, location),
         sessid=params.sessid,
         location=ConnectLocation(country=location.country, state=location.state, city=location.city) if location else None,

@@ -1193,8 +1193,12 @@ export interface ConnectPlace {
 }
 
 export interface ConnectInfo {
-  /** host is null when no public host is configured: use the host the UI was reached at. */
-  endpoint: { host: string | null; port: number }
+  /**
+   * Where clients reach the proxy: https when a load balancer terminates TLS in front of it.
+   * host is null when no public address is configured (use the host the UI was reached at);
+   * port is null when the public URL names none (the scheme's default; https URLs leave it out).
+   */
+  endpoint: { scheme: 'http' | 'https'; host: string | null; port: number | null }
   /** Canonical when it parses, as composed when it does not. */
   username: string
   sessid: string | null

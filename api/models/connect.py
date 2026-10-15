@@ -3,15 +3,20 @@
 
 """What the Connect page shows: how a client reaches a project's proxy, and what the proxy makes of a username."""
 
+from typing import Literal
+
 from pydantic import BaseModel
 
 
 class ConnectEndpoint(BaseModel):
     """Where clients reach the proxy listener."""
 
+    # https when a load balancer terminates TLS in front of the listener.
+    scheme: Literal["http", "https"]
     # None when no public host is configured: the client uses the host it reached the web UI at.
     host: str | None
-    port: int
+    # None when the public URL names no port: clients use the scheme's default, and URLs leave it out.
+    port: int | None
 
 
 class ConnectLocation(BaseModel):

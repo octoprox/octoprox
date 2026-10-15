@@ -156,3 +156,45 @@ class TestProxyPublicHost:
     def test_port_scheme_or_userinfo_is_refused(self, value: str) -> None:
         with pytest.raises(ValidationError):
             Settings(proxy_public_host=value)
+
+
+class TestProxyPublicUrl:
+    """server.proxy_public_url: http or https, a host and an optional port, nothing else."""
+
+    @pytest.mark.parametrize(("value", "stored"), [
+        ("https://proxy.example.com", "https://proxy.example.com"),
+        (" https://proxy.example.com/ ", "https://proxy.example.com"),
+        ("https://proxy.example.com:8443", "https://proxy.example.com:8443"),
+        ("http://203.0.113.7:8080", "http://203.0.113.7:8080"),
+        ("http://[2001:db8::1]:8080", "http://[2001:db8::1]:8080"),
+    ])
+    def test_accepted(self, value: str, stored: str) -> None:
+        assert Settings(proxy_public_url=value).proxy_public_url == stored
+
+    @pytest.mark.parametrize("value", [
+        "proxy.example.com", "socks5://proxy.example.com", "https://", "https://proxy.example.com:0",
+        "https://proxy.example.com:70000", "https://proxy.example.com/path", "https://proxy.example.com?x=1",
+        "https://proxy.example.com#x", "https://user:pw@proxy.example.com", "https://proxy example.com",
+        "https://proxy.example.com?", "https://proxy.example.com#",
+    ])
+    def test_refused(self, value: str) -> None:
+        with pytest.raises(ValidationError):
+            Settings(proxy_public_url=value)
+
+    @staticmethod
+    def _endpoint(**values: object) -> tuple[str, str | None, int | None]:
+        # Every field given, so OCTOPROX_* in the environment cannot leak in.
+        fields = {"proxy_public_url": "", "proxy_public_host": "", "proxy_public_port": None, "proxy_port": 8080}
+        return Settings(**{**fields, **values}).proxy_endpoint  # type: ignore[arg-type]
+
+    def test_endpoint_keeps_the_port_only_when_the_url_names_one(self) -> None:
+        assert self._endpoint(proxy_public_url="https://Proxy.Example.com") == ("https", "proxy.example.com", None)
+        assert self._endpoint(proxy_public_url="https://proxy.example.com:8443") == ("https", "proxy.example.com", 8443)
+        assert self._endpoint(proxy_public_url="http://[2001:db8::1]:8080") == ("http", "2001:db8::1", 8080)
+
+    def test_endpoint_falls_back_to_the_host_and_port_settings_then_the_listener(self) -> None:
+        assert self._endpoint(proxy_public_host="proxy.example.com", proxy_public_port=18080) == ("http", "proxy.example.com", 18080)
+        assert self._endpoint(proxy_public_host="proxy.example.com") == ("http", "proxy.example.com", 8080)
+        assert self._endpoint() == ("http", None, 8080)
+        # The URL wins over the 4.6.6 pair.
+        assert self._endpoint(proxy_public_url="https://lb.example.com", proxy_public_host="proxy.example.com") == ("https", "lb.example.com", None)

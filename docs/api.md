@@ -170,7 +170,7 @@ The username is composed from the project's and the parameters, then read by the
 
 ```json
 {
-  "endpoint": {"host": null, "port": 8080},
+  "endpoint": {"scheme": "https", "host": "proxy.example.com", "port": null},
   "username": "myuser-cc-us-st-ny-city-new_york-sessid-job-1",
   "sessid": "job-1",
   "location": {"country": "US", "state": "NY", "city": "new_york"},
@@ -187,7 +187,7 @@ The username is composed from the project's and the parameters, then read by the
 
 | Field | Meaning |
 |-------|---------|
-| `endpoint` | Where clients reach the proxy: `OCTOPROX_PROXY_PUBLIC_HOST` and `OCTOPROX_PROXY_PUBLIC_PORT`, else `null` (the host the web UI is reached at) and `server.proxy_port` |
+| `endpoint` | Where clients reach the proxy, from `OCTOPROX_PROXY_PUBLIC_URL`: `scheme` (`http` or `https`), `host`, and `port`, which is `null` when the URL names none (clients use the scheme's default: 443 for `https`, which URLs then leave out, and 80 for `http`, which they should name, since curl reads a bare `http://` proxy as port 1080). Without the setting: `http`, `host` `null` (the host the web UI is reached at) and `server.proxy_port` |
 | `username` | The username to send, normalised; as composed when it cannot be read |
 | `error` | The proxy's `400` message for the username, or `null`. A value containing a reserved delimiter (or forming one with the dash before or after it), or a session ID with a colon, is refused here too |
 | `routes` | The enabled connectors a request with the username would reach now, with the routable proxies of each and the expected share of requests by weight. `dynamic` marks a dynamic-sessions gateway, `on_demand` an "All countries" pool that would create sessions for the country on the first request. Empty means the proxy would refuse the request: `502`, or `429` while the proxies that could serve it are rate limited, or the traffic-limit status (`509` by default) while their connectors are over their limit. No destination is known, so domain filters are not applied |
