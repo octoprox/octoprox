@@ -15,6 +15,7 @@ import os
 import ssl
 import tempfile
 import threading
+import weakref
 from collections import OrderedDict
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -72,9 +73,12 @@ end
 # ---------------------------------------------------------------------------
 
 # Stores raw ClientHello bytes + record-layer version per TLS connection,
-# keyed by id(SSLObject).  Populated by _tls_msg_callback during start_tls()
+# keyed by its SSLObject.  Populated by _tls_msg_callback during start_tls()
 # and consumed by pop_client_hello() in the MITM handler immediately after.
-_pending_client_hellos: dict[int, tuple[bytes, int]] = {}
+# Weak keys: a handshake that fails (a client rejecting the CA) never reaches
+# the pop, and its entry must go with the connection rather than stay for the
+# life of the process.
+_pending_client_hellos: weakref.WeakKeyDictionary[object, tuple[bytes, int]] = weakref.WeakKeyDictionary()
 _hello_lock = threading.Lock()
 
 
@@ -90,7 +94,7 @@ def _tls_msg_callback(
     # content_type 22 = Handshake, msg_type 1 = ClientHello
     if direction == "read" and content_type == 22 and msg_type == 1:
         with _hello_lock:
-            _pending_client_hellos[id(conn)] = (bytes(data), int(version))  # type: ignore[call-overload]
+            _pending_client_hellos[conn] = (bytes(data), int(version))  # type: ignore[call-overload]
 
 
 def pop_client_hello(ssl_object: object) -> tuple[bytes, int] | None:
@@ -102,7 +106,7 @@ def pop_client_hello(ssl_object: object) -> tuple[bytes, int] | None:
     obtained from ``transport.get_extra_info("ssl_object")``.
     """
     with _hello_lock:
-        return _pending_client_hellos.pop(id(ssl_object), None)
+        return _pending_client_hellos.pop(ssl_object, None)
 
 
 class TLSCertManager:

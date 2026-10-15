@@ -4,13 +4,16 @@
 """Tests for TLSCertManager CA generation and clustered bootstrap."""
 
 import asyncio
+import contextlib
+import gc
+import ssl
 import stat
 from pathlib import Path
 
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes
 
-from api.core.tls_cert_manager import TLSCertManager
+from api.core.tls_cert_manager import TLSCertManager, _pending_client_hellos, pop_client_hello
 from api.db.redis import RedisClient
 
 
@@ -101,3 +104,49 @@ class TestBootstrapCoordination:
         mgr = _mgr(ca_dir)
         await mgr.bootstrap(redis_client, "octoprox-late")
         assert _mem_fingerprint(mgr) == fingerprint
+
+
+def _client_hello_reaches(server_ctx: ssl.SSLContext) -> ssl.SSLObject:
+    """Feed a client's ClientHello to a server-side SSLObject, as start_tls would."""
+    client_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    client_ctx.check_hostname = False
+    client_ctx.verify_mode = ssl.CERT_NONE
+    server_in, server_out, client_in, client_out = (ssl.MemoryBIO() for _ in range(4))
+    server = server_ctx.wrap_bio(server_in, server_out, server_side=True)
+    client = client_ctx.wrap_bio(client_in, client_out, server_hostname="example.com")
+    with contextlib.suppress(ssl.SSLWantReadError):
+        client.do_handshake()
+    server_in.write(client_out.read())
+    with contextlib.suppress(ssl.SSLWantReadError):
+        server.do_handshake()
+    return server
+
+
+def _server_context(tmp_path: Path) -> ssl.SSLContext:
+    mgr = _mgr(tmp_path / "ca")
+    mgr._generate_ca()
+    return mgr.get_server_ssl_context("example.com")
+
+
+class TestClientHelloCapture:
+    def test_the_handshake_hands_its_client_hello_over_once(self, tmp_path: Path) -> None:
+        server = _client_hello_reaches(_server_context(tmp_path))
+
+        hello = pop_client_hello(server)
+        assert hello is not None and hello[0]
+        assert pop_client_hello(server) is None
+
+    def test_a_handshake_nobody_pops_leaves_nothing_behind(self, tmp_path: Path) -> None:
+        server_ctx = _server_context(tmp_path)
+        # Failed handshakes from earlier tests sit in reference cycles; collect
+        # them now so a GC mid-test cannot move the baseline.
+        gc.collect()
+        before = len(_pending_client_hellos)
+        server = _client_hello_reaches(server_ctx)
+        assert len(_pending_client_hellos) == before + 1
+
+        # The client rejected the CA: the handler returned before popping and
+        # the connection is gone.
+        del server
+        gc.collect()
+        assert len(_pending_client_hellos) == before

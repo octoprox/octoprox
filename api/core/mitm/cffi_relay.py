@@ -8,6 +8,7 @@ with browser-grade TLS fingerprints. The target server sees a genuine
 Chrome/Firefox/Safari/Edge TLS fingerprint (JA3/JA4).
 """
 
+import asyncio
 from typing import Any
 
 import structlog
@@ -19,6 +20,19 @@ from api.models.project import MitmBrowser, MitmMode
 logger = structlog.get_logger()
 
 
+async def _close_replaced(session: AsyncSession[Any]) -> None:
+    """Close a session swapped out mid-connection without failing the request.
+
+    Shielded: curl_cffi's ``close()`` suppresses ``CancelledError`` while it
+    waits for its timer task, so a cancel landing there (shutdown cancelling
+    connections) would be lost and the connection would carry on serving.
+    """
+    try:
+        await asyncio.shield(session.close())
+    except Exception:
+        logger.warning("Closing a replaced curl_cffi session failed", exc_info=True)
+
+
 class CffiRelay(ImpersonationRelay):
     """Relay requests via curl_cffi with browser impersonation."""
 
@@ -27,15 +41,24 @@ class CffiRelay(ImpersonationRelay):
         self._session: AsyncSession[Any] | None = None
         self._current_impersonate: MitmBrowser | None = None
 
-    def _get_or_create_session(self, browser: MitmBrowser) -> AsyncSession[Any]:
-        """Get existing session or create a new one if browser changed."""
-        if self._session is None or browser != self._current_impersonate:
-            if self._session is not None:
-                # Can't await close here; old session will be garbage collected
-                self._session = None
-            self._session = AsyncSession(impersonate=browser)  # type: ignore[arg-type]
-            self._current_impersonate = browser
-        return self._session
+    async def _get_or_create_session(self, browser: MitmBrowser) -> AsyncSession[Any]:
+        """Get existing session or create a new one if browser changed.
+
+        The replaced session is closed. Garbage collection never reclaims
+        it: curl_cffi runs a timer task per session that only ``close()``
+        stops, so each dropped session would keep waking the event loop ten
+        times a second for the life of the process. The new session is
+        installed before that close is awaited, so the relay is never seen
+        half-swapped.
+        """
+        session = self._session
+        if session is None or browser != self._current_impersonate:
+            replaced = session
+            session = AsyncSession(impersonate=browser)  # type: ignore[arg-type]
+            self._session, self._current_impersonate = session, browser
+            if replaced is not None:
+                await _close_replaced(replaced)
+        return session
 
     async def send_request(
         self,
@@ -47,7 +70,7 @@ class CffiRelay(ImpersonationRelay):
     ) -> tuple[int, str, list[tuple[str, str]], bytes]:
         """Send request via curl_cffi with browser impersonation."""
         forward_headers, browser = self._prepare_headers(headers)
-        session = self._get_or_create_session(browser)
+        session = await self._get_or_create_session(browser)
 
         response = await session.request(
             method,  # type: ignore[arg-type]

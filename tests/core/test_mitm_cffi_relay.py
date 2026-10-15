@@ -3,7 +3,11 @@
 
 """Tests for CffiRelay."""
 
+import asyncio
+import contextlib
 from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
 
 from api.core.mitm.cffi_relay import CffiRelay
 from api.models.project import MitmBrowser, MitmMode
@@ -130,6 +134,48 @@ class TestCffiRelay:
         """close() should be safe when no session exists."""
         relay = CffiRelay(mode=MitmMode.MATCH_UA)
         await relay.close()  # Should not raise
+
+    async def test_a_browser_switch_closes_the_replaced_session(self) -> None:
+        """curl_cffi keeps a timer task running per session until it is closed."""
+        relay = CffiRelay(mode=MitmMode.MATCH_UA)
+        with patch("api.core.mitm.cffi_relay.AsyncSession", side_effect=lambda **_: AsyncMock()) as session_cls:
+            chrome = await relay._get_or_create_session(MitmBrowser.CHROME)
+            assert await relay._get_or_create_session(MitmBrowser.CHROME) is chrome
+            safari = await relay._get_or_create_session(MitmBrowser.SAFARI)
+
+        chrome.close.assert_awaited_once()
+        safari.close.assert_not_awaited()
+        assert session_cls.call_count == 2
+
+    async def test_a_replaced_session_that_fails_to_close_does_not_fail_the_request(self) -> None:
+        relay = CffiRelay(mode=MitmMode.MATCH_UA)
+        with patch("api.core.mitm.cffi_relay.AsyncSession", side_effect=lambda **_: AsyncMock()):
+            chrome = await relay._get_or_create_session(MitmBrowser.CHROME)
+            chrome.close.side_effect = RuntimeError("curl_multi_cleanup")
+            safari = await relay._get_or_create_session(MitmBrowser.SAFARI)
+
+        assert relay._session is safari
+
+    async def test_a_cancel_during_the_swap_still_cancels(self) -> None:
+        """curl_cffi's close() suppresses CancelledError while it stops its timer task."""
+        relay = CffiRelay(mode=MitmMode.MATCH_UA)
+        timer_stopped = asyncio.Event()
+
+        async def close_like_curl_cffi() -> None:
+            with contextlib.suppress(asyncio.CancelledError):
+                await timer_stopped.wait()
+
+        with patch("api.core.mitm.cffi_relay.AsyncSession", side_effect=lambda **_: AsyncMock()):
+            chrome = await relay._get_or_create_session(MitmBrowser.CHROME)
+            chrome.close.side_effect = close_like_curl_cffi
+            swap = asyncio.create_task(relay._get_or_create_session(MitmBrowser.SAFARI))
+            await asyncio.sleep(0)  # the swap now waits on the old session's close
+            swap.cancel()
+            timer_stopped.set()
+            with pytest.raises(asyncio.CancelledError):
+                await swap
+
+        chrome.close.assert_awaited_once()
 
     async def test_request_body_forwarded(self) -> None:
         """Request body should be forwarded correctly."""
