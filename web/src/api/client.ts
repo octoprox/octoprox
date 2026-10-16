@@ -585,7 +585,9 @@ export interface ExitIpFilters {
 
 export interface ExitIpsPage {
   ips: ExitIp[]
+  /** Counted as for observations: a lower bound when `total_exact` is false. */
   total: number
+  total_exact: boolean
   limit: number
   offset: number
 }
@@ -600,6 +602,7 @@ export interface GeoStatus {
   dropped_observations: number
   /** Sightings and verdict rewrites waiting in Redis for the flusher; exit IPs and accuracy lag until they are written. Null when Redis cannot say. */
   queued_observations: number | null
+  /** The planner's estimate, within a few percent: an exact count would read the whole table. */
   stored_observations: number
   preflight_checks: number
   preflight_rejections: number
@@ -636,17 +639,24 @@ export interface ObservationFilters {
   resolved_country?: string
   verdict?: ObservationVerdict
   conflicts_only?: boolean
+  /** Start the log at this moment (ISO time) instead of now. */
+  until?: string
 }
 
 export interface ObservationsPage {
   observations: IpObservation[]
+  /** Counted no further than 10,000 rows past this page: a lower bound when `total_exact` is false. */
   total: number
+  total_exact: boolean
   limit: number
   offset: number
 }
 
 export const fetchGeoObservations = async (params: ObservationFilters & { limit?: number; offset?: number } = {}): Promise<ObservationsPage> =>
   (await api.get('/geo/observations', { params })).data
+/** Every observation under the filters, counted outright. Slow under filters no index serves; the server gives up after 30 s with a 504. */
+export const countGeoObservations = async (params: ObservationFilters = {}): Promise<number> =>
+  (await api.get('/geo/observations/count', { params })).data.total
 export const fetchGeoAccuracy = async (params: { project_id?: string; connector_id?: string; days?: number } = {}): Promise<GeoAccuracyResponse> =>
   (await api.get('/geo/accuracy', { params })).data
 export const fetchGeoStatus = async (): Promise<GeoStatus> => (await api.get('/geo/status')).data
@@ -654,6 +664,8 @@ export const fetchGeoExits = async (params: { project_id?: string; connector_id?
   (await api.get('/geo/exits', { params })).data
 export const fetchGeoExitIps = async (params: ExitIpFilters & { limit?: number; offset?: number } = {}): Promise<ExitIpsPage> =>
   (await api.get('/geo/exits/ips', { params })).data
+export const countGeoExitIps = async (params: ExitIpFilters = {}): Promise<number> =>
+  (await api.get('/geo/exits/ips/count', { params })).data.total
 
 export interface ProxyListResponse {
   total: number

@@ -713,11 +713,21 @@ class IpObservationModel(Base):
     """
 
     __tablename__ = "ip_observations"
+    # The log reads newest first under one filter at a time, so each index
+    # leads with a filter and then the time: a page is a short read however
+    # rare the value. Built concurrently by migration 046.
+    __table_args__ = (
+        Index("ix_ip_observations_project_observed", "project_id", "observed_at"),
+        Index("ix_ip_observations_connector_observed", "connector_id", "observed_at"),
+        Index("ix_ip_observations_proxy_observed", "proxy_id", "observed_at"),
+        Index("ix_ip_observations_ip_observed", "ip", "observed_at"),
+        Index("ix_ip_observations_contradicted", "observed_at", postgresql_where=text("country_conflict IS TRUE")),
+    )
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
     observed_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, index=True)
-    proxy_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
-    connector_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    proxy_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    connector_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     project_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     session_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     source: Mapped[str] = mapped_column(String(20), nullable=False)

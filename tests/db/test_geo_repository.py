@@ -244,13 +244,15 @@ class TestObservations:
         assert await repo.insert_many(rows) == 3
         await db_session.commit()
 
-        recent, total = await repo.recent(limit=10)
-        assert len(recent) == 3 and total == 3 and recent[0]["ip"]
+        recent, total, exact = await repo.recent(limit=10)
+        assert len(recent) == 3 and total == 3 and exact and recent[0]["ip"]
         assert (await repo.recent(connector_id="conn-2"))[1] == 1
         assert (await repo.recent(conflicts_only=True))[1] == 1
         assert (await repo.recent(proxy_id="proxy-1"))[1] == 2
 
-        assert await repo.count() == 3
+        # The status line reads the planner's estimate, current once the table is analysed.
+        await db_session.execute(text("ANALYZE ip_observations"))
+        assert await repo.estimated_count() == 3
 
     async def test_exit_ips_upsert_summary_and_list(self, db_session: AsyncSession) -> None:
         await _connectors(db_session, "conn-1", "conn-2")
@@ -312,7 +314,7 @@ class TestObservations:
         assert summary["conn-2"]["unique_total"] == 1 and summary["conn-2"]["reused"] == 0
         assert await repo.exit_summary(connector_ids=[]) == []
 
-        rows, total = await repo.exit_ips(connector_ids=["conn-1"])
+        rows, total, _ = await repo.exit_ips(connector_ids=["conn-1"])
         assert total == 3 and [r["ip"] for r in rows][-1] == "10.0.0.2"  # last seen day1; the judgement moved nothing
         by_ip = {r["ip"]: r for r in rows}
         reused = by_ip["10.0.0.1"]
@@ -328,9 +330,12 @@ class TestObservations:
         assert refreshed["proxy_id"] == "proxy-1" and refreshed["last_seen"] == day1 and refreshed["first_seen"] == day1
 
         # Paging and the view's filters.
-        page, total = await repo.exit_ips(connector_ids=["conn-1", "conn-2"], limit=2, offset=2)
+        page, total, _ = await repo.exit_ips(connector_ids=["conn-1", "conn-2"], limit=2, offset=2)
         assert total == 4 and len(page) == 2
-        assert await repo.exit_ips(connector_ids=[]) == ([], 0)
+        assert await repo.exit_ips(connector_ids=[]) == ([], 0, True)
+        assert await repo.count_exit_ips(connector_ids=["conn-1", "conn-2"]) == 4
+        assert await repo.count_exit_ips(connector_ids=[]) == 0
+        assert await repo.count_exit_ips(verdict="contradicted", proxy_id="proxy-1") == 3
         assert (await repo.exit_ips(verdict="confirmed"))[1] == 1
         assert (await repo.exit_ips(verdict="contradicted"))[1] == 3
         assert (await repo.exit_ips(country="fr"))[1] == 1
@@ -356,7 +361,7 @@ class TestObservations:
         late = [_observation(ip="10.0.0.2", observed_at=day1 - timedelta(hours=1), proxy_id="proxy-old")]
         await repo.add_exit_ips(aggregate_exits([(o, True) for o in late]))
         await db_session.commit()
-        (row,), _ = await repo.exit_ips(ip="10.0.0.2", connector_ids=["conn-1"])
+        (row,), _, _ = await repo.exit_ips(ip="10.0.0.2", connector_ids=["conn-1"])
         assert row["sightings"] == 2 and row["proxy_id"] == "proxy-1" and row["first_seen"] == day1 - timedelta(hours=1)
 
         # Retention goes by the last sighting; a judgement does not keep an exit alive.
@@ -367,7 +372,7 @@ class TestObservations:
         # Deleting the connector takes its aggregates with it.
         assert await ConnectorRepository(db_session).delete("conn-1")
         await db_session.commit()
-        assert await repo.exit_ips(connector_ids=["conn-1"]) == ([], 0)
+        assert await repo.exit_ips(connector_ids=["conn-1"]) == ([], 0, True)
         assert await repo.existing_connector_ids({"conn-1", "conn-2", "ghost"}) == {"conn-2"}
 
     async def test_recent_filters_and_pages_on_the_server(self, db_session: AsyncSession) -> None:
@@ -390,21 +395,28 @@ class TestObservations:
 
         # Newest first, paged; the total comes with every page and is the
         # size of the whole match, not of the page.
-        page, total = await repo.recent(connector_id="conn-1", limit=2, offset=0)
-        assert [r["ip"] for r in page] == ["10.0.0.4", "10.0.0.3"] and total == 5
-        page, total = await repo.recent(connector_id="conn-1", limit=2, offset=4)
+        page, total, exact = await repo.recent(connector_id="conn-1", limit=2, offset=0)
+        assert [r["ip"] for r in page] == ["10.0.0.4", "10.0.0.3"] and total == 5 and exact
+        page, total, _ = await repo.recent(connector_id="conn-1", limit=2, offset=4)
         assert [r["ip"] for r in page] == ["10.0.0.0"] and total == 5
-        assert await repo.recent(connector_id="conn-1", limit=2, offset=40) == ([], 0)
+        # Past the end the total is still where the end is, so the pager can step back to it.
+        assert await repo.recent(connector_id="conn-1", limit=2, offset=40) == ([], 5, True)
 
         # The other connector's newer row does not leak into a filtered page,
         # and source and ip filters apply on their own.
-        page, total = await repo.recent(source=ObservationSource.DISCOVERY.value)
+        page, total, _ = await repo.recent(source=ObservationSource.DISCOVERY.value)
         assert total == 1 and page[0]["connector_id"] == "other"
-        page, total = await repo.recent(ip="10.0.0.2")
+        page, total, _ = await repo.recent(ip="10.0.0.2")
         assert total == 1 and page[0]["connector_id"] == "conn-1"
         assert await repo.recent(
             connector_id="conn-1", source=ObservationSource.DISCOVERY.value
-        ) == ([], 0)
+        ) == ([], 0, True)
+
+        # Until starts the log at that moment, and the count follows.
+        page, total, _ = await repo.recent(connector_id="conn-1", until=base + timedelta(minutes=2))
+        assert [r["ip"] for r in page] == ["10.0.0.2", "10.0.0.1", "10.0.0.0"] and total == 3
+        assert await repo.count_matching(connector_id="conn-1") == 5
+        assert await repo.count_matching(connector_id="conn-1", until=base + timedelta(minutes=2)) == 3
 
         # The verdict filter is the label the page shows, built from the claim and the nullable verdict.
         assert (await repo.recent(verdict="contradicted"))[1] == 6  # every fixture row conflicts
@@ -417,13 +429,50 @@ class TestObservations:
             ]
         )
         await db_session.commit()
-        page, total = await repo.recent(verdict="confirmed")
+        page, total, _ = await repo.recent(verdict="confirmed")
         assert total == 1 and page[0]["ip"] == "10.0.2.1"
-        page, total = await repo.recent(verdict="open")
+        page, total, _ = await repo.recent(verdict="open")
         assert total == 1 and page[0]["ip"] == "10.0.2.2"
         assert (await repo.recent(verdict="no_claim"))[1] == 1
         assert (await repo.recent(claimed_country="gb"))[1] == 1
         assert (await repo.recent(resolved_country="GB"))[1] == 9
+
+    async def test_page_totals_stop_counting_past_the_cap(self, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Past the cap the total is a lower bound that slides with the page, so there is always a next page."""
+        monkeypatch.setattr(geo_repository, "COUNT_CAP", 3)
+        repo = ObservationRepository(db_session)
+        base = datetime(2026, 1, 1)
+        await repo.insert_many([_observation(observed_at=base + timedelta(minutes=i), ip=f"10.0.0.{i}") for i in range(8)])
+        await db_session.commit()
+
+        # Eight rows, counted at most three past the page.
+        assert (await repo.recent(limit=2, offset=0))[1:] == (3, False)
+        assert (await repo.recent(limit=2, offset=2))[1:] == (5, False)
+        # Close enough to the end to reach it: exact again.
+        assert (await repo.recent(limit=2, offset=6))[1:] == (8, True)
+        # A short page is the end and needs no count.
+        assert (await repo.recent(limit=5, offset=5))[1:] == (8, True)
+        assert await repo.count_matching() == 8
+
+    async def test_an_exact_count_past_its_time_is_called_off(self, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Counting a filter no index serves reads the table; past the limit it gives up and the session stays usable."""
+        await db_session.execute(
+            text(
+                "INSERT INTO ip_observations (observed_at, source, ip, candidates, instance_id) "
+                "SELECT timestamp '2026-01-01' + g * interval '1 second', 'health_check', '10.0.0.1', '[]', '' "
+                "FROM generate_series(1, 200000) g"
+            )
+        )
+        await db_session.commit()
+        repo = ObservationRepository(db_session)
+        # Work the caller has not committed yet survives the count, finished or called off.
+        await repo.insert_many([_observation()])
+        monkeypatch.setattr(geo_repository, "EXACT_COUNT_TIMEOUT_MS", 1)
+        assert await repo.count_matching(source="discovery") is None
+        monkeypatch.setattr(geo_repository, "EXACT_COUNT_TIMEOUT_MS", 30_000)
+        assert await repo.count_matching(source="discovery") == 1
+        # Neither count leaves its time limit on the transaction.
+        assert (await db_session.execute(text("SHOW statement_timeout"))).scalar() == "0"
 
     async def test_verdict_filter_is_the_country_verdict(self, db_session: AsyncSession) -> None:
         """The verdict label is the country's on both tables; state and city verdicts do not move it."""
@@ -463,7 +512,7 @@ class TestObservations:
         await db_session.commit()
         assert await repo.delete_older_than(utc_now() - timedelta(days=7)) == 1
         await db_session.commit()
-        assert await repo.count() == 1
+        assert await repo.count_matching() == 1
 
 
 @pytest.mark.usefixtures("db_engine")
@@ -478,7 +527,7 @@ class TestFlusher:
         # The flusher annotates the status hash the health checker owns; give proxy-1 one.
         await redis_client.set_proxy_status("proxy-1", ProxyStatus.HEALTHY)
         repo = ObservationRepository(db_session)
-        before = await repo.count()
+        before = await repo.count_matching()
         # Other test modules' apps publish to the same list; start from a clean queue.
         await redis_client.client.delete(GEO_OBSERVATIONS_KEY)
         recorder = ObservationRecorder(redis_client)
@@ -494,7 +543,7 @@ class TestFlusher:
             db_session_factory, redis_client, "inst", retention_days=lambda: 7
         )
         assert await flusher.drain() == 3
-        exits, _ = await ObservationRepository(db_session).exit_ips(connector_ids=["conn-1"])
+        exits, _, _ = await ObservationRepository(db_session).exit_ips(connector_ids=["conn-1"])
         assert {e["ip"] for e in exits} >= {"81.2.69.160", "81.2.69.161"}
         # The last counted exit went into the proxy's status hash, next to its health fields.
         assert await redis_client.client.hget("proxy:status:proxy-1", "exit_ip") == "81.2.69.161"
@@ -505,13 +554,13 @@ class TestFlusher:
         recorder.record(_observation(ip="81.2.69.161", instance_id="another"))
         await recorder.publish()
         assert await flusher.drain() == 1
-        (row,), _ = await ObservationRepository(db_session).exit_ips(connector_ids=["conn-1"], ip="81.2.69.161")
+        (row,), _, _ = await ObservationRepository(db_session).exit_ips(connector_ids=["conn-1"], ip="81.2.69.161")
         assert row["sightings"] == 1
         # A different exit for the same proxy is a hand-out and moves the recorded exit.
         recorder.record(_observation(ip="81.2.69.170"))
         await recorder.publish()
         assert await flusher.drain() == 1
-        (row,), _ = await ObservationRepository(db_session).exit_ips(connector_ids=["conn-1"], ip="81.2.69.170")
+        (row,), _, _ = await ObservationRepository(db_session).exit_ips(connector_ids=["conn-1"], ip="81.2.69.170")
         assert row["sightings"] == 1
         assert await redis_client.client.hget("proxy:status:proxy-1", "exit_ip") == "81.2.69.170"
         # A judgement of that exit travels the same list: verdict rewritten, no log row, no sighting.
@@ -519,14 +568,14 @@ class TestFlusher:
         recorder.record(ExitJudgement(proxy_id="proxy-x", connector_id="gone", ip="81.2.69.170"))  # deleted connector: skipped
         await recorder.publish()
         assert await flusher.drain() == 1  # one verdict rewritten; the skipped judgement is not work done
-        (row,), _ = await ObservationRepository(db_session).exit_ips(connector_ids=["conn-1"], ip="81.2.69.170")
+        (row,), _, _ = await ObservationRepository(db_session).exit_ips(connector_ids=["conn-1"], ip="81.2.69.170")
         assert row["sightings"] == 1 and row["country_conflict"] is True and row["source"] == "reattribute"
         await redis_client.client.delete("proxy:status:proxy-1")
-        assert await ObservationRepository(db_session).exit_ips(connector_ids=["gone"]) == ([], 0)
+        assert await ObservationRepository(db_session).exit_ips(connector_ids=["gone"]) == ([], 0, True)
         assert await redis_client.client.llen(GEO_OBSERVATIONS_KEY) == 0
         assert await flusher.drain() == 0
 
-        assert await repo.count() == before + 5  # three sightings, then the repeat and the move
+        assert await repo.count_matching() == before + 5  # three sightings, then the repeat and the move
         accuracy = {a["connector_id"]: a for a in await repo.exit_accuracy(connector_ids=["conn-1"])}
         assert accuracy["conn-1"]["country"]["claimed"] >= 2
         assert await repo.exit_accuracy(connector_ids=["gone"]) == []
@@ -593,7 +642,7 @@ class TestFlusher:
         flusher = ObservationFlusher(db_session_factory, redis_client, "inst", retention_days=lambda: 7)
         assert await flusher.drain() == 5  # batches of 2, 2 and 1
         assert await recorder.queued() == 0
-        rows, _ = await ObservationRepository(db_session).exit_ips(connector_ids=["conn-1"], limit=1000)
+        rows, _, _ = await ObservationRepository(db_session).exit_ips(connector_ids=["conn-1"], limit=1000)
         assert {f"10.1.0.{n}" for n in range(5)} <= {r["ip"] for r in rows}
         assert await flusher.drain() == 0
 
@@ -682,9 +731,9 @@ class TestPlaceAccuracy:
             ("state", "SCT", "IDF"),
         ]
         # The exit rows carry the place for the views.
-        rows, _ = await repo.exit_ips(connector_ids=["conn-1"], ip="10.1.0.2")
+        rows, _, _ = await repo.exit_ips(connector_ids=["conn-1"], ip="10.1.0.2")
         assert rows[0]["claimed_city"] == "manchester" and rows[0]["resolved_city"] == "london" and rows[0]["city_conflict"] is True
-        page, _ = await repo.recent(connector_id="conn-1", ip="10.1.0.1")
+        page, _, _ = await repo.recent(connector_id="conn-1", ip="10.1.0.1")
         assert page[0]["claimed_state"] == "ENG" and page[0]["state_conflict"] is False
         # A judgement rewrites the place verdict with the rest.
         applied = await repo.apply_judgements([

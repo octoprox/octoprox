@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import tempfile
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any, Literal
 
@@ -25,7 +25,11 @@ from api.core.auth import CurrentUserDep, RequireAdminDep
 from api.core.config import settings
 from api.core.event_bus import event_bus
 from api.core.signals import geo_settings_changed
-from api.db.geo_repository import GeoDatabaseRepository, ObservationRepository
+from api.db.geo_repository import (
+    EXACT_COUNT_TIMEOUT_MS,
+    GeoDatabaseRepository,
+    ObservationRepository,
+)
 from api.db.session import get_db
 from api.geo.models import (
     GeoDatabaseKind,
@@ -135,10 +139,18 @@ class ReattributeResponse(BaseModel):
 
 class ObservationsResponse(BaseModel):
     observations: list[dict[str, Any]]
-    # Rows matching the filters, so the page can offer real paging.
+    # Rows matching the filters, counted no further than 10,000 past this
+    # page; total_exact says whether counting reached the end. Short of it
+    # the total is a lower bound, and /count gives the exact one.
     total: int
+    total_exact: bool
     limit: int
     offset: int
+
+
+class CountResponse(BaseModel):
+    # Every row matching the filters, counted outright.
+    total: int
 
 
 class ClaimBreakdown(BaseModel):
@@ -268,7 +280,9 @@ class ExitIp(BaseModel):
 
 class ExitIpsResponse(BaseModel):
     ips: list[ExitIp]
+    # Counted as for observations: total_exact false makes total a lower bound.
     total: int
+    total_exact: bool
     limit: int
     offset: int
 
@@ -285,6 +299,7 @@ class GeoStatusResponse(BaseModel):
     # queue: sightings, and verdict rewrites after a re-attribution); exit IPs
     # and accuracy lag until they are. None when Redis cannot say.
     queued_observations: int | None = None
+    # The planner's row estimate, within a few percent: an exact count reads the table.
     stored_observations: int
     preflight_checks: int
     preflight_rejections: int
@@ -686,12 +701,24 @@ async def reattribute(
 
 # --- observations and accuracy ---------------------------------------------------------------
 
+Verdict = Literal["contradicted", "open", "confirmed", "no_claim"]
 
-@router.get("/observations", response_model=ObservationsResponse)
-async def observations(
-    request: Request,
-    session: DbDep,
-    _user: CurrentUserDep,
+
+def _naive_utc(value: datetime | None) -> datetime | None:
+    """A query-string time as the tables store it: UTC without an offset. One without an offset already is."""
+    if value is None or value.tzinfo is None:
+        return value
+    return value.astimezone(UTC).replace(tzinfo=None)
+
+
+def _count_timed_out() -> HTTPException:
+    return HTTPException(
+        status_code=504,
+        detail=f"Counting took longer than {EXACT_COUNT_TIMEOUT_MS // 1000} s. Narrow the filters first.",
+    )
+
+
+def _observation_filters(
     connector_id: str | None = None,
     proxy_id: str | None = None,
     project_id: str | None = None,
@@ -699,20 +726,20 @@ async def observations(
     ip: str | None = None,
     claimed_country: str | None = None,
     resolved_country: str | None = None,
-    verdict: Literal["contradicted", "open", "confirmed", "no_claim"] | None = None,
+    verdict: Verdict | None = None,
     conflicts_only: bool = False,
-    limit: int = 100,
-    offset: int = 0,
-) -> ObservationsResponse:
-    """One page of IP observations, newest first, filtered on the server.
+    until: datetime | None = None,
+) -> dict[str, Any]:
+    """The observation log's filters, from the query string.
 
-    The filters mirror the columns of the history table; ``verdict`` is the
-    country badge shown there: ``contradicted``, ``confirmed``, ``open`` (a
-    claim with no verdict) or ``no_claim``. The state and city verdicts are
-    returned per row and do not move the label (``conflicts_only`` is the
-    older spelling of ``verdict=contradicted``).
+    They mirror the columns of the history table; ``verdict`` is the country
+    badge shown there: ``contradicted``, ``confirmed``, ``open`` (a claim with
+    no verdict) or ``no_claim``. The state and city verdicts are returned per
+    row and do not move the label (``conflicts_only`` is the older spelling of
+    ``verdict=contradicted``). ``until`` starts the log at that moment instead
+    of now; a time without an offset is taken as UTC.
     """
-    filters: dict[str, Any] = {
+    return {
         "connector_id": connector_id,
         "proxy_id": (proxy_id or "").strip() or None,
         "project_id": project_id,
@@ -722,10 +749,32 @@ async def observations(
         "resolved_country": (resolved_country or "").strip() or None,
         "verdict": verdict,
         "conflicts_only": conflicts_only,
+        "until": _naive_utc(until),
     }
+
+
+ObservationFiltersDep = Annotated[dict[str, Any], Depends(_observation_filters)]
+
+
+@router.get("/observations", response_model=ObservationsResponse)
+async def observations(
+    request: Request,
+    session: DbDep,
+    _user: CurrentUserDep,
+    filters: ObservationFiltersDep,
+    limit: int = 100,
+    offset: int = 0,
+) -> ObservationsResponse:
+    """One page of IP observations, newest first, filtered on the server.
+
+    The filters are those of :func:`_observation_filters`. The total is
+    counted no further than 10,000 rows past the page, so the page stays a
+    short read at any table size; ``total_exact`` false makes it a lower
+    bound, and ``/observations/count`` is the exact count.
+    """
     limit = max(1, min(limit, 1000))
     offset = max(0, offset)
-    rows, total = await ObservationRepository(session).recent(**filters, limit=limit, offset=offset)
+    rows, total, exact = await ObservationRepository(session).recent(**filters, limit=limit, offset=offset)
     # Names come from the caches, so a deleted connector shows its id only.
     manager = proxy_manager_of(request)
     connectors = {c.id: c.name for c in manager.connectors}
@@ -733,7 +782,22 @@ async def observations(
     for row in rows:
         row["connector_name"] = connectors.get(row["connector_id"]) if row["connector_id"] else None
         row["project_name"] = projects.get(row["project_id"]) if row["project_id"] else None
-    return ObservationsResponse(observations=rows, total=total, limit=limit, offset=offset)
+    return ObservationsResponse(observations=rows, total=total, total_exact=exact, limit=limit, offset=offset)
+
+
+@router.get("/observations/count", response_model=CountResponse)
+async def count_observations(session: DbDep, _user: CurrentUserDep, filters: ObservationFiltersDep) -> CountResponse:
+    """Every observation under the log's filters, counted outright.
+
+    Asked for explicitly, never on the page's refresh: under a project,
+    connector, proxy or IP it is a scan of that filter's index; under the
+    other filters alone it reads the whole table. Past the time limit the
+    count is called off with a 504.
+    """
+    total = await ObservationRepository(session).count_matching(**filters)
+    if total is None:
+        raise _count_timed_out()
+    return CountResponse(total=total)
 
 
 @router.get("/accuracy", response_model=AccuracyResponse)
@@ -809,18 +873,41 @@ async def exits(
     return ExitsResponse(since=since, connectors=result)
 
 
-@router.get("/exits/ips", response_model=ExitIpsResponse)
-async def exit_ips(
+def _exit_ip_filters(
     request: Request,
-    session: DbDep,
-    _user: CurrentUserDep,
     project_id: str | None = None,
     connector_id: str | None = None,
     ip: str | None = None,
     proxy_id: str | None = None,
     country: str | None = None,
     claimed_country: str | None = None,
-    verdict: Literal["contradicted", "open", "confirmed", "no_claim"] | None = None,
+    verdict: Verdict | None = None,
+) -> dict[str, Any]:
+    """The exit IPs view's filters, from the query string; a project becomes its connectors."""
+    wanted: list[str] | None = None
+    if connector_id:
+        wanted = [connector_id]
+    elif project_id:
+        wanted = [c.id for c in proxy_manager_of(request).connectors if c.project_id == project_id]
+    return {
+        "connector_ids": wanted,
+        "ip": (ip or "").strip() or None,
+        "proxy_id": (proxy_id or "").strip() or None,
+        "country": (country or "").strip() or None,
+        "claimed_country": (claimed_country or "").strip() or None,
+        "verdict": verdict,
+    }
+
+
+ExitIpFiltersDep = Annotated[dict[str, Any], Depends(_exit_ip_filters)]
+
+
+@router.get("/exits/ips", response_model=ExitIpsResponse)
+async def exit_ips(
+    request: Request,
+    session: DbDep,
+    _user: CurrentUserDep,
+    filters: ExitIpFiltersDep,
     limit: int = 100,
     offset: int = 0,
 ) -> ExitIpsResponse:
@@ -828,28 +915,15 @@ async def exit_ips(
 
     The unique-exits counterpart of the observation log: one row per connector
     and IP instead of one per sighting. Filters apply on the server;
-    ``verdict`` is the country verdict, as for observations.
+    ``verdict`` is the country verdict, as for observations, and the total is
+    counted as there.
     """
     manager = proxy_manager_of(request)
     connectors = {c.id: c for c in manager.connectors}
     projects = {p.id: p.name for p in manager.projects}
-    wanted: list[str] | None = None
-    if connector_id:
-        wanted = [connector_id]
-    elif project_id:
-        wanted = [c.id for c in connectors.values() if c.project_id == project_id]
     limit = max(1, min(limit, 1000))
     offset = max(0, offset)
-    rows, total = await ObservationRepository(session).exit_ips(
-        connector_ids=wanted,
-        ip=(ip or "").strip() or None,
-        proxy_id=(proxy_id or "").strip() or None,
-        country=(country or "").strip() or None,
-        claimed_country=(claimed_country or "").strip() or None,
-        verdict=verdict,
-        limit=limit,
-        offset=offset,
-    )
+    rows, total, exact = await ObservationRepository(session).exit_ips(**filters, limit=limit, offset=offset)
     ips = []
     for row in rows:
         connector = connectors.get(row["connector_id"])
@@ -861,7 +935,16 @@ async def exit_ips(
                 **row,
             )
         )
-    return ExitIpsResponse(ips=ips, total=total, limit=limit, offset=offset)
+    return ExitIpsResponse(ips=ips, total=total, total_exact=exact, limit=limit, offset=offset)
+
+
+@router.get("/exits/ips/count", response_model=CountResponse)
+async def count_exit_ips(session: DbDep, _user: CurrentUserDep, filters: ExitIpFiltersDep) -> CountResponse:
+    """Every exit IP under the view's filters, counted outright, as for observations."""
+    total = await ObservationRepository(session).count_exit_ips(**filters)
+    if total is None:
+        raise _count_timed_out()
+    return CountResponse(total=total)
 
 
 @router.get("/status", response_model=GeoStatusResponse)
@@ -869,7 +952,7 @@ async def status(request: Request, session: DbDep, _user: CurrentUserDep) -> Geo
     """Pipeline health for the settings page."""
     runtime = geo_runtime_of(request)
     records = await GeoDatabaseRepository(session).get_all()
-    stored = await ObservationRepository(session).count()
+    stored = await ObservationRepository(session).estimated_count()
     recorder = runtime.observation_recorder
     return GeoStatusResponse(
         databases_loaded=len(runtime.database_store.loaded),

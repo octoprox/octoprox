@@ -443,7 +443,14 @@ class TestObservationsAndStatus:
             page["limit"] == 5
             and page["offset"] == 0
             and page["total"] >= len(page["observations"])
+            and page["total_exact"] is True
         )
+        # The exact count takes the same filters; a time with an offset is read as UTC.
+        counted = authenticated_client.get(
+            "/api/v1/geo/observations/count?source=health_check&until=2026-10-16T12:00:00%2B02:00"
+        )
+        assert counted.status_code == 200 and counted.json()["total"] >= 0
+        assert authenticated_client.get("/api/v1/geo/observations/count?verdict=bogus").status_code == 422
         accuracy = authenticated_client.get("/api/v1/geo/accuracy?days=7").json()
         assert isinstance(accuracy["connectors"], list) and accuracy["since"]
         for row in accuracy["connectors"]:
@@ -457,7 +464,8 @@ class TestObservationsAndStatus:
         summary = authenticated_client.get("/api/v1/geo/exits?days=30").json()
         assert isinstance(summary["connectors"], list) and summary["since"]
         ips = authenticated_client.get("/api/v1/geo/exits/ips?connector_id=none&limit=5").json()
-        assert ips == {"ips": [], "total": 0, "limit": 5, "offset": 0}
+        assert ips == {"ips": [], "total": 0, "total_exact": True, "limit": 5, "offset": 0}
+        assert authenticated_client.get("/api/v1/geo/exits/ips/count?connector_id=none").json() == {"total": 0}
         assert authenticated_client.get("/api/v1/geo/exits/ips?verdict=bogus").status_code == 422
         assert authenticated_client.get("/api/v1/geo/exits/ips?project_id=missing").json()["total"] == 0
 

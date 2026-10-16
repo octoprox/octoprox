@@ -5,12 +5,14 @@ import { useEffect, useMemo, useState } from 'react'
 import { useQueries, useQuery } from '@tanstack/react-query'
 import { ColumnDef, ColumnFiltersState } from '@tanstack/react-table'
 import { Globe } from 'lucide-react'
-import { fetchGeoObservations, fetchProjectConnectors, fetchProjects, IpObservation, ObservationFilters, ObservationVerdict } from '../../api/client'
+import { countGeoObservations, fetchGeoObservations, fetchProjectConnectors, fetchProjects, IpObservation, ObservationFilters, ObservationVerdict } from '../../api/client'
+import { useCountAll } from '../../hooks/useCountAll'
 import { DataTable } from '../DataTable'
 import { EmptyState } from '../layout/Page'
 import { Badge, Card, Select } from '../ui'
 import { formatDateTime, relativeTime } from '../../utils/format'
 import { HeaderWithTip, TIPS, VerdictCell, countryVerdict, placeLabel } from './columns'
+import { UntilPicker } from './UntilPicker'
 
 const SOURCE_OPTIONS = ['discovery', 'health_check', 'geo_lookup', 'manual', 'preflight'].map((s) => ({ value: s, label: s.replace('_', ' ') }))
 const VERDICT_OPTIONS: { value: ObservationVerdict; label: string }[] = [
@@ -42,15 +44,19 @@ function toServerFilters(columnFilters: ColumnFiltersState): ObservationFilters 
  *
  * The same header filters as every other table, but the table behind this
  * can hold millions of rows, so the filters and the paging run on the
- * server and the browser only ever holds the page it shows. Scoped to one
- * project when `projectId` is given; across every project, with a project
- * filter and the project shown under the connector, otherwise.
+ * server and the browser only ever holds the page it shows. The server
+ * counts no further than 10,000 rows past the page, so the total can be a
+ * lower bound; counting everything is a separate, explicit request, and
+ * "Until" reaches back in time without paging there. Scoped to one project
+ * when `projectId` is given; across every project, with a project filter
+ * and the project shown under the connector, otherwise.
  */
 export function ObservationsPanel({ projectId }: { projectId?: string }) {
   const [projectFilter, setProjectFilter] = useState('')
   const [columnFilters, setColumnFilters] = useState<ColumnFiltersState>([])
   const [pageIndex, setPageIndex] = useState(0)
   const [pageSize, setPageSize] = useState(50)
+  const [until, setUntil] = useState<string | undefined>()
   const scope = projectId ?? (projectFilter || undefined)
 
   // Typed filters should not fire a request per keystroke.
@@ -60,9 +66,9 @@ export function ObservationsPanel({ projectId }: { projectId?: string }) {
     return () => clearTimeout(handle)
   }, [columnFilters])
   // Any filter change starts from the first page again.
-  useEffect(() => { setPageIndex(0) }, [scope, applied, pageSize])
+  useEffect(() => { setPageIndex(0) }, [scope, applied, pageSize, until])
 
-  const filters: ObservationFilters = { ...applied, project_id: scope }
+  const filters: ObservationFilters = { ...applied, project_id: scope, until }
   const { data, isLoading } = useQuery({
     queryKey: ['geo-observations', filters, pageIndex, pageSize],
     queryFn: () => fetchGeoObservations({ ...filters, limit: pageSize, offset: pageIndex * pageSize }),
@@ -145,17 +151,21 @@ export function ObservationsPanel({ projectId }: { projectId?: string }) {
   ], [projectId, connectorOptions])
 
   const rows = data?.observations ?? []
-  const filtering = columnFilters.length > 0 || (!projectId && !!projectFilter)
+  const totals = useCountAll('geo-observations-count', filters, countGeoObservations, data, rows.length)
+  const filtering = columnFilters.length > 0 || (!projectId && !!projectFilter) || !!until
   return (
     <div className="space-y-3">
       <div className="flex items-center justify-between gap-3 flex-wrap">
-        <p className="text-xs text-fg-muted">Every time an exit IP was seen behind a proxy, newest first. Raw rows follow the retention window set in Settings → IP attribution. Country and IP filters match exactly.</p>
-        {!projectId && (
-          <Select value={projectFilter} onChange={(e) => setProjectFilter(e.target.value)} className="w-44" aria-label="Project">
-            <option value="">All projects</option>
-            {(projects?.projects ?? []).map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
-          </Select>
-        )}
+        <p className="text-xs text-fg-muted">Every time an exit IP was seen behind a proxy, newest first. Raw rows follow the retention window set in Settings → IP attribution. Country and IP filters match exactly; Until shows the log up to an earlier moment.</p>
+        <div className="flex items-center gap-2 flex-wrap">
+          <UntilPicker onChange={setUntil} />
+          {!projectId && (
+            <Select value={projectFilter} onChange={(e) => setProjectFilter(e.target.value)} className="w-44" aria-label="Project">
+              <option value="">All projects</option>
+              {(projects?.projects ?? []).map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+            </Select>
+          )}
+        </div>
       </div>
       <Card className="p-0 overflow-hidden">
         {!isLoading && rows.length === 0 && !filtering ? (
@@ -167,7 +177,13 @@ export function ObservationsPanel({ projectId }: { projectId?: string }) {
             getRowId={(o) => String(o.id)}
             emptyMessage="No observations match the filters."
             manualFiltering={{ columnFilters, onColumnFiltersChange: setColumnFilters }}
-            manualPagination={{ pageIndex, pageSize, total: data?.total ?? rows.length, onPageChange: setPageIndex, onPageSizeChange: setPageSize }}
+            manualPagination={{
+              pageIndex,
+              pageSize,
+              ...totals,
+              onPageChange: setPageIndex,
+              onPageSizeChange: setPageSize,
+            }}
           />
         )}
       </Card>

@@ -54,6 +54,10 @@ export interface ManualPagination {
   pageIndex: number
   pageSize: number
   total: number
+  /** False when the server stopped counting: `total` is then a lower bound, shown with a "+", and there is no last page to go to. */
+  totalExact?: boolean
+  /** Offered beside a lower-bound total: ask the server to count everything. */
+  countAll?: { onCount: () => void; counting: boolean; error?: string }
   onPageChange: (pageIndex: number) => void
   onPageSizeChange: (pageSize: number) => void
 }
@@ -183,6 +187,8 @@ export function DataTable<TData, TValue>({
 
   const pageSize = table.getState().pagination.pageSize
   const totalRows = manualPagination ? manualPagination.total : table.getFilteredRowModel().rows.length
+  const totalExact = manualPagination?.totalExact ?? true
+  const countAll = manualPagination?.countAll
   const visibleColumns = table.getVisibleLeafColumns()
   const visibleColumnCount = visibleColumns.length
   // The table is fixed-layout and fills its container, so without a floor the
@@ -319,11 +325,22 @@ export function DataTable<TData, TValue>({
               <>
                 <span className="whitespace-nowrap">
                   <span className="hidden @sm:inline">Showing </span>
-                  {currentPageIndex * pageSize + 1}-{Math.min((currentPageIndex + 1) * pageSize, totalRows)} of {totalRows}
+                  {(currentPageIndex * pageSize + 1).toLocaleString()}-{Math.min((currentPageIndex + 1) * pageSize, totalRows).toLocaleString()} of {totalRows.toLocaleString()}{totalExact ? '' : '+'}
                   {showColumnFilters && columnFilters.length > 0 && (
                     <span className="text-fg-subtle"> (filtered)</span>
                   )}
                 </span>
+                {!totalExact && countAll && (
+                  <button
+                    onClick={countAll.onCount}
+                    disabled={countAll.counting}
+                    className="text-primary hover:brightness-110 disabled:opacity-60 disabled:cursor-wait"
+                    title="Count every matching row. Under a filter without an index this reads the whole table."
+                  >
+                    {countAll.counting ? 'Counting…' : 'Count all'}
+                  </button>
+                )}
+                {countAll?.error && <span className="text-danger">{countAll.error}</span>}
                 {showColumnFilters && columnFilters.length > 0 && (
                   <button
                     onClick={() => setColumnFilters([])}
@@ -353,9 +370,9 @@ export function DataTable<TData, TValue>({
             <div className="flex items-center gap-1">
               <PagerButton onClick={() => table.setPageIndex(0)} disabled={!table.getCanPreviousPage()} title="First page" className="hidden @sm:block"><ChevronsLeft className="w-4 h-4" /></PagerButton>
               <PagerButton onClick={() => table.previousPage()} disabled={!table.getCanPreviousPage()} title="Previous page"><ChevronLeft className="w-4 h-4" /></PagerButton>
-              <span className="px-1 tabular-nums text-fg">{currentPageIndex + 1}<span className="text-fg-subtle"> / {pageCount}</span></span>
+              <span className="px-1 tabular-nums text-fg">{(currentPageIndex + 1).toLocaleString()}<span className="text-fg-subtle"> / {pageCount.toLocaleString()}{totalExact ? '' : '+'}</span></span>
               <PagerButton onClick={() => table.nextPage()} disabled={!table.getCanNextPage()} title="Next page"><ChevronRight className="w-4 h-4" /></PagerButton>
-              <PagerButton onClick={() => table.setPageIndex(pageCount - 1)} disabled={!table.getCanNextPage()} title="Last page" className="hidden @sm:block"><ChevronsRight className="w-4 h-4" /></PagerButton>
+              <PagerButton onClick={() => table.setPageIndex(pageCount - 1)} disabled={!table.getCanNextPage() || !totalExact} title={totalExact ? 'Last page' : 'Last page (count all first)'} className="hidden @sm:block"><ChevronsRight className="w-4 h-4" /></PagerButton>
             </div>
           </div>
         </div>

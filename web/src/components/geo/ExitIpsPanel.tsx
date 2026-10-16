@@ -5,7 +5,8 @@ import { useEffect, useMemo, useState } from 'react'
 import { useQueries, useQuery } from '@tanstack/react-query'
 import { ColumnDef, ColumnFiltersState } from '@tanstack/react-table'
 import { Network } from 'lucide-react'
-import { fetchGeoExitIps, fetchProjectConnectors, fetchProjects, ExitIp, ExitIpFilters, ObservationVerdict } from '../../api/client'
+import { countGeoExitIps, fetchGeoExitIps, fetchProjectConnectors, fetchProjects, ExitIp, ExitIpFilters, ObservationVerdict } from '../../api/client'
+import { useCountAll } from '../../hooks/useCountAll'
 import { DataTable } from '../DataTable'
 import { EmptyState } from '../layout/Page'
 import { Badge, Card, Select } from '../ui'
@@ -40,8 +41,10 @@ function toServerFilters(columnFilters: ColumnFiltersState): ExitIpFilters {
  *
  * The de-duplicated counterpart of the observation log: one row per connector
  * and IP however often it was seen, so restarts and IP changes do not pile up
- * rows. Filters and paging run on the server. Scoped to one project when
- * `projectId` is given; across every project otherwise.
+ * rows. Filters and paging run on the server, which counts no further than
+ * 10,000 rows past the page; counting everything is an explicit request.
+ * Scoped to one project when `projectId` is given; across every project
+ * otherwise.
  */
 export function ExitIpsPanel({ projectId }: { projectId?: string }) {
   const [projectFilter, setProjectFilter] = useState('')
@@ -133,6 +136,7 @@ export function ExitIpsPanel({ projectId }: { projectId?: string }) {
   ], [projectId, connectorOptions])
 
   const rows = data?.ips ?? []
+  const totals = useCountAll('geo-exit-ips-count', filters, countGeoExitIps, data, rows.length)
   const filtering = columnFilters.length > 0 || (!projectId && !!projectFilter)
   return (
     <div className="space-y-3">
@@ -155,7 +159,13 @@ export function ExitIpsPanel({ projectId }: { projectId?: string }) {
             getRowId={(e) => `${e.connector_id}:${e.ip}`}
             emptyMessage="No exit IPs match the filters."
             manualFiltering={{ columnFilters, onColumnFiltersChange: setColumnFilters }}
-            manualPagination={{ pageIndex, pageSize, total: data?.total ?? rows.length, onPageChange: setPageIndex, onPageSizeChange: setPageSize }}
+            manualPagination={{
+              pageIndex,
+              pageSize,
+              ...totals,
+              onPageChange: setPageIndex,
+              onPageSizeChange: setPageSize,
+            }}
           />
         )}
       </Card>

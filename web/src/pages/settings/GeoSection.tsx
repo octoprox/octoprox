@@ -70,7 +70,7 @@ export default function GeoSection() {
         <div className="flex items-center gap-2 text-xs text-fg-muted">
           <Badge color={status.databases_loaded > 0 ? 'green' : 'gray'}>{status.databases_loaded} database{status.databases_loaded === 1 ? '' : 's'} loaded</Badge>
           {Object.keys(status.load_errors).length > 0 && <Badge color="red">{Object.keys(status.load_errors).length} failed to load</Badge>}
-          <span className="tabular-nums">{status.stored_observations.toLocaleString()} observations</span>
+          <span className="tabular-nums" title="Estimated from the database's statistics, within a few percent">about {status.stored_observations.toLocaleString()} observations</span>
           {queued > 0 && (
             <Badge color={queued >= QUEUE_BACKLOG ? 'yellow' : 'gray'} title="Published by the instances and not written yet: sightings, and verdict rewrites after a re-attribution. Exit IPs, accuracy and the observation log lag until they are.">
               {queued.toLocaleString()} queued
@@ -488,7 +488,7 @@ function PolicyTab() {
             <div>
               <Label htmlFor="geo-retention">Raw observations (days)</Label>
               <Input id="geo-retention" type="number" min={0} value={policy.observation_retention_days} onChange={(e) => update({ observation_retention_days: parseInt(e.target.value) || 0 })} />
-              <p className="text-[11px] text-fg-subtle mt-1">Accuracy totals are kept forever.</p>
+              <p className="text-[11px] text-fg-subtle mt-1">0 keeps raw observations forever. Accuracy totals are kept forever.</p>
             </div>
             <div>
               <Label htmlFor="geo-exit-retention">Exit IPs not seen for (days)</Label>

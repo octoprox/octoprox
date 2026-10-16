@@ -13,6 +13,7 @@ import structlog
 from sqlalchemy import (
     Boolean,
     DateTime,
+    Select,
     String,
     Table,
     and_,
@@ -21,6 +22,7 @@ from sqlalchemy import (
     delete,
     event,
     func,
+    literal_column,
     or_,
     select,
     text,
@@ -32,6 +34,7 @@ from sqlalchemy import (
     cast as cast_sql,
 )
 from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session, SessionTransaction
 
@@ -58,6 +61,14 @@ from api.geo.models import (
 
 logger = structlog.get_logger()
 
+# A page's total is counted no further than this past the page: enough to keep
+# paging without meeting an end, and a short index read however large the
+# history grows. The exact total is a separate count, asked for explicitly.
+COUNT_CAP = 10_000
+# An exact count under a filter no index serves reads the whole table; past
+# this it is called off rather than left to load the database.
+EXACT_COUNT_TIMEOUT_MS = 30_000
+_QUERY_CANCELED = "57014"
 
 
 def _verdict_clauses(m: type[IpObservationModel] | type[ConnectorExitIpModel], verdict: str | None) -> list[Any]:
@@ -378,21 +389,23 @@ class ObservationRepository:
     def _filtered(
         query: Any,
         *,
-        connector_id: str | None,
-        proxy_id: str | None,
-        project_id: str | None,
-        source: str | None,
-        ip: str | None,
-        claimed_country: str | None,
-        resolved_country: str | None,
-        verdict: str | None,
-        conflicts_only: bool,
+        connector_id: str | None = None,
+        proxy_id: str | None = None,
+        project_id: str | None = None,
+        source: str | None = None,
+        ip: str | None = None,
+        claimed_country: str | None = None,
+        resolved_country: str | None = None,
+        verdict: str | None = None,
+        conflicts_only: bool = False,
+        until: datetime | None = None,
     ) -> Any:
         """The observation filters the history page offers, applied server side.
 
         The table can hold millions of rows, so the browser never sees more
         than one page; every filter must therefore narrow the query itself.
-        ``verdict`` is the label the page shows (see :func:`_verdict_clauses`).
+        ``verdict`` is the label the page shows (see :func:`_verdict_clauses`);
+        ``until`` starts the history at that moment instead of now.
         """
         m = IpObservationModel
         if connector_id:
@@ -409,76 +422,101 @@ class ObservationRepository:
             query = query.where(m.claimed_country == claimed_country.upper())
         if resolved_country:
             query = query.where(m.resolved_country == resolved_country.upper())
+        if until is not None:
+            query = query.where(m.observed_at <= until)
         query = query.where(*_verdict_clauses(m, "contradicted" if conflicts_only else verdict))
         return query
 
-    async def recent(
-        self,
-        *,
-        connector_id: str | None = None,
-        proxy_id: str | None = None,
-        project_id: str | None = None,
-        source: str | None = None,
-        ip: str | None = None,
-        claimed_country: str | None = None,
-        resolved_country: str | None = None,
-        verdict: str | None = None,
-        conflicts_only: bool = False,
-        limit: int = 100,
-        offset: int = 0,
-    ) -> tuple[list[dict[str, Any]], int]:
-        """One page of observations, newest first, and the size of the whole match.
+    async def _capped_total(self, matching: Select[Any], *, offset: int, limit: int, found: int) -> tuple[int, bool]:
+        """How many rows ``matching`` selects, counted no further than COUNT_CAP past ``offset``.
 
-        The total rides on every row as ``count(*) OVER ()``, so page and count
-        are one query and always agree. A page past the end has no rows to
-        carry it and reports zero; the caller starts over from the first page.
+        ``found`` is how many rows the page at ``offset`` and ``limit`` held.
+        Returns the total and whether it is exact. Short of exact it is
+        ``offset + COUNT_CAP``, a lower bound that always leaves a next page to
+        offer. A short page is the end, so its rows are the count and nothing
+        is counted. A page past the end (rows aged out under a reader on a
+        deep page) is recounted from the start, so the caller learns where the
+        end is instead of being sent back to the first page.
         """
-        query = self._filtered(
-            select(IpObservationModel, func.count().over().label("total")),
-            connector_id=connector_id,
-            proxy_id=proxy_id,
-            project_id=project_id,
-            source=source,
-            ip=ip,
-            claimed_country=claimed_country,
-            resolved_country=resolved_country,
-            verdict=verdict,
-            conflicts_only=conflicts_only,
+        if found < limit:
+            if found or not offset:
+                return offset + found, True
+        else:
+            window = matching.offset(offset).limit(COUNT_CAP + 1).subquery()
+            seen = int((await self._session.execute(select(func.count()).select_from(window))).scalar_one())
+            if seen > COUNT_CAP:
+                return offset + COUNT_CAP, False
+            if seen or not offset:
+                return offset + seen, True
+        head = matching.limit(offset).subquery()
+        return int((await self._session.execute(select(func.count()).select_from(head))).scalar_one()), True
+
+    async def _exact_total(self, matching: Select[Any]) -> int | None:
+        """How many rows ``matching`` selects, or None when counting ran past EXACT_COUNT_TIMEOUT_MS.
+
+        Under a filter an index serves this is a scan of that index; under any
+        other it reads the table, hence the time limit. The limit is set inside
+        a savepoint that is always rolled back, which undoes it (like SET
+        LOCAL, ``set_config(..., true)`` follows the savepoint) and leaves the
+        caller's transaction as it was, whether the count finished or not.
+        """
+        savepoint = await self._session.begin_nested()
+        try:
+            await self._session.execute(select(func.set_config("statement_timeout", str(EXACT_COUNT_TIMEOUT_MS), True)))
+            total = int((await self._session.execute(select(func.count()).select_from(matching.subquery()))).scalar_one())
+        except DBAPIError as exc:
+            await savepoint.rollback()
+            if getattr(exc.orig, "sqlstate", None) != _QUERY_CANCELED:
+                raise
+            return None
+        await savepoint.rollback()
+        return total
+
+    async def recent(self, *, limit: int = 100, offset: int = 0, **filters: Any) -> tuple[list[dict[str, Any]], int, bool]:
+        """One page of observations, newest first, how many match, and whether that count is exact.
+
+        ``filters`` are those of :meth:`_filtered`. Both the page and the count
+        are short index reads at any table size: the count stops COUNT_CAP rows
+        past the page (see :meth:`_capped_total`) and :meth:`count_matching`
+        is the exact one.
+        """
+        m = IpObservationModel
+        page = self._filtered(select(m), **filters).order_by(m.observed_at.desc(), m.id.desc()).offset(offset).limit(limit)
+        found = (await self._session.execute(page)).scalars().all()
+        total, exact = await self._capped_total(
+            self._filtered(select(literal_column("1")).select_from(m), **filters), offset=offset, limit=limit, found=len(found)
         )
-        query = (
-            query.order_by(IpObservationModel.observed_at.desc(), IpObservationModel.id.desc())
-            .offset(offset)
-            .limit(limit)
-        )
-        result = (await self._session.execute(query)).all()
-        total = int(result[0].total) if result else 0
         rows = [
             {
-                "id": m.id,
-                "observed_at": m.observed_at,
-                "proxy_id": m.proxy_id,
-                "connector_id": m.connector_id,
-                "project_id": m.project_id,
-                "session_id": m.session_id,
-                "source": m.source,
-                "ip": m.ip,
-                "claimed_country": m.claimed_country,
-                "endpoint_country": m.endpoint_country,
-                "resolved_country": m.resolved_country,
-                "resolved_source": m.resolved_source,
-                "country_conflict": m.country_conflict,
-                "claimed_state": m.claimed_state,
-                "claimed_city": m.claimed_city,
-                "resolved_state": m.resolved_state,
-                "resolved_city": m.resolved_city,
-                "state_conflict": m.state_conflict,
-                "city_conflict": m.city_conflict,
-                "candidates": list(m.candidates or []),
-                "instance_id": m.instance_id,
+                "id": o.id,
+                "observed_at": o.observed_at,
+                "proxy_id": o.proxy_id,
+                "connector_id": o.connector_id,
+                "project_id": o.project_id,
+                "session_id": o.session_id,
+                "source": o.source,
+                "ip": o.ip,
+                "claimed_country": o.claimed_country,
+                "endpoint_country": o.endpoint_country,
+                "resolved_country": o.resolved_country,
+                "resolved_source": o.resolved_source,
+                "country_conflict": o.country_conflict,
+                "claimed_state": o.claimed_state,
+                "claimed_city": o.claimed_city,
+                "resolved_state": o.resolved_state,
+                "resolved_city": o.resolved_city,
+                "state_conflict": o.state_conflict,
+                "city_conflict": o.city_conflict,
+                "candidates": list(o.candidates or []),
+                "instance_id": o.instance_id,
             }
-            for m, _total in result
+            for o in found
         ]
-        return rows, total
+        return rows, total, exact
+
+    async def count_matching(self, **filters: Any) -> int | None:
+        """The exact number of observations under ``filters`` (see :meth:`_exact_total`)."""
+        return await self._exact_total(self._filtered(select(literal_column("1")).select_from(IpObservationModel), **filters))
 
     async def exit_accuracy(
         self, *, connector_ids: list[str] | None = None, since: datetime | None = None
@@ -779,8 +817,9 @@ class ObservationRepository:
             for row in result.all()
         ]
 
-    async def exit_ips(
-        self,
+    @staticmethod
+    def _exit_ips_filtered(
+        query: Any,
         *,
         connector_ids: list[str] | None = None,
         ip: str | None = None,
@@ -788,21 +827,15 @@ class ObservationRepository:
         country: str | None = None,
         claimed_country: str | None = None,
         verdict: str | None = None,
-        limit: int = 100,
-        offset: int = 0,
-    ) -> tuple[list[dict[str, Any]], int]:
-        """One page of distinct exit IPs with their latest state, most recently seen first.
+    ) -> Any:
+        """The exit IPs view's filters, applied server side.
 
         ``connector_ids`` is the connectors to show: one, a project's, or None
-        for all (an empty list matches nothing). The other filters mirror the
-        view's columns. Returns the page and the size of the whole match,
-        carried by ``count(*) OVER ()``.
+        for all; the caller answers an empty list itself, since it matches
+        nothing. The other filters mirror the view's columns.
         """
         m = ConnectorExitIpModel
-        query = select(m, func.count().over().label("total"))
         if connector_ids is not None:
-            if not connector_ids:
-                return [], 0
             query = query.where(m.connector_id.in_(connector_ids))
         if ip:
             query = query.where(m.ip == ip)
@@ -812,10 +845,23 @@ class ObservationRepository:
             query = query.where(m.country == country.upper())
         if claimed_country:
             query = query.where(m.claimed_country == claimed_country.upper())
-        query = query.where(*_verdict_clauses(m, verdict))
-        query = query.order_by(m.last_seen.desc(), m.connector_id, m.ip).offset(offset).limit(limit)
-        result = (await self._session.execute(query)).all()
-        total = int(result[0].total) if result else 0
+        return query.where(*_verdict_clauses(m, verdict))
+
+    async def exit_ips(self, *, limit: int = 100, offset: int = 0, **filters: Any) -> tuple[list[dict[str, Any]], int, bool]:
+        """One page of distinct exit IPs with their latest state, most recently seen first.
+
+        ``filters`` are those of :meth:`_exit_ips_filtered`. Returns the page,
+        how many match and whether that count is exact, counted as for
+        observations (see :meth:`_capped_total`).
+        """
+        if filters.get("connector_ids") == []:
+            return [], 0, True
+        m = ConnectorExitIpModel
+        page = self._exit_ips_filtered(select(m), **filters).order_by(m.last_seen.desc(), m.connector_id, m.ip).offset(offset).limit(limit)
+        found = (await self._session.execute(page)).scalars().all()
+        total, exact = await self._capped_total(
+            self._exit_ips_filtered(select(literal_column("1")).select_from(m), **filters), offset=offset, limit=limit, found=len(found)
+        )
         rows = [
             {
                 "connector_id": row.connector_id,
@@ -826,9 +872,15 @@ class ObservationRepository:
                 "country": row.country,
                 **{name: getattr(row, name) for name in self._LATEST_STATE},
             }
-            for row, _total in result
+            for row in found
         ]
-        return rows, total
+        return rows, total, exact
+
+    async def count_exit_ips(self, **filters: Any) -> int | None:
+        """The exact number of exit IPs under ``filters`` (see :meth:`_exact_total`)."""
+        if filters.get("connector_ids") == []:
+            return 0
+        return await self._exact_total(self._exit_ips_filtered(select(literal_column("1")).select_from(ConnectorExitIpModel), **filters))
 
     async def delete_exit_ips_last_seen_before(self, cutoff: datetime) -> int:
         result = await self._session.execute(
@@ -836,6 +888,18 @@ class ObservationRepository:
         )
         return int(result.rowcount or 0)  # type: ignore[attr-defined]
 
-    async def count(self) -> int:
+    async def estimated_count(self) -> int:
+        """Rows in ``ip_observations`` as the planner last measured them.
+
+        Free where ``count(*)`` reads the whole table, and kept current by
+        autovacuum within a few percent. A table never analysed reports -1;
+        that is a new one, counted outright.
+        """
+        result = await self._session.execute(
+            text("SELECT reltuples::bigint FROM pg_class WHERE oid = 'ip_observations'::regclass")
+        )
+        estimate = int(result.scalar() or 0)
+        if estimate >= 0:
+            return estimate
         result = await self._session.execute(text("SELECT count(*) FROM ip_observations"))
         return int(result.scalar() or 0)
