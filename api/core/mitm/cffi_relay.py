@@ -9,15 +9,21 @@ Chrome/Firefox/Safari/Edge TLS fingerprint (JA3/JA4).
 """
 
 import asyncio
+import re
 from typing import Any
 
 import structlog
 from curl_cffi.requests import AsyncSession
+from curl_cffi.requests.exceptions import ProxyError
 
-from api.core.mitm.base import ImpersonationRelay
+from api.core.mitm.base import ImpersonationRelay, UpstreamRefusedError
 from api.models.project import MitmBrowser, MitmMode
 
 logger = structlog.get_logger()
+
+# libcurl's words when the upstream proxy answers the CONNECT with anything
+# but a 2xx; the status is in the text only.
+_TUNNEL_REFUSED = re.compile(r"CONNECT tunnel failed, response (\d{3})")
 
 
 async def _close_replaced(session: AsyncSession[Any]) -> None:
@@ -72,15 +78,21 @@ class CffiRelay(ImpersonationRelay):
         forward_headers, browser = self._prepare_headers(headers)
         session = await self._get_or_create_session(browser)
 
-        response = await session.request(
-            method,  # type: ignore[arg-type]
-            url,
-            headers=forward_headers,
-            data=body,
-            proxy=proxy_url,
-            allow_redirects=False,
-            timeout=30,
-        )
+        try:
+            response = await session.request(
+                method,  # type: ignore[arg-type]
+                url,
+                headers=forward_headers,
+                data=body,
+                proxy=proxy_url,
+                allow_redirects=False,
+                timeout=30,
+            )
+        except ProxyError as e:
+            refused = _TUNNEL_REFUSED.search(str(e))
+            if refused is None:
+                raise
+            raise UpstreamRefusedError(int(refused[1])) from e
 
         # Drop content-encoding - curl_cffi auto-decompresses the body,
         # so forwarding the header would cause browsers to double-decompress.

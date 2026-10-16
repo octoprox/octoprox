@@ -5,8 +5,13 @@
 
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
+from rnet.exceptions import ConnectionError as RnetConnectionError
+
+from api.core.mitm.base import UpstreamRefusedError
 from api.core.mitm.rnet_relay import _IMPERSONATE_MAP, RnetRelay
 from api.models.project import MitmBrowser, MitmMode
+from tests.core.test_mitm_cffi_relay import refusing_proxy
 
 
 class TestRnetRelay:
@@ -171,3 +176,30 @@ class TestRnetRelay:
         # sec-fetch-* and other headers must be preserved
         assert "sec-fetch-dest" in forwarded_lower
         assert "accept" in forwarded_lower
+
+
+class TestUpstreamRefusal:
+    """wreq tells a 407 apart and reports any other refusal without its status."""
+
+    @pytest.mark.parametrize(("status_line", "status"), [
+        (b"HTTP/1.1 407 Proxy Authentication Required", 407),
+        (b"HTTP/1.1 429 Too Many Requests", None),
+        (b"HTTP/1.1 502 Bad Gateway", None),
+    ])
+    async def test_a_refused_tunnel_is_a_refusal(self, status_line: bytes, status: int | None) -> None:
+        relay = RnetRelay(mode=MitmMode.OVERRIDE_UA, browser=MitmBrowser.CHROME)
+        async with refusing_proxy(status_line) as proxy_url:
+            with pytest.raises(UpstreamRefusedError) as refused:
+                await relay.send_request("GET", "https://example.com/", [], None, proxy_url)
+
+        assert refused.value.status == status
+
+    async def test_another_connection_error_is_left_alone(self) -> None:
+        relay = RnetRelay(mode=MitmMode.MATCH_UA)
+        error = RnetConnectionError("is_connect error: connection refused")
+        with patch.object(relay, "_get_or_create_client") as mock_client_factory:
+            mock_client_factory.return_value.request = AsyncMock(side_effect=error)
+            with pytest.raises(RnetConnectionError) as raised:
+                await relay.send_request("GET", "https://example.com/", [], None, "http://proxy:8080")
+
+        assert raised.value is error

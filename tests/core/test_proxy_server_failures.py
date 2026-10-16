@@ -23,6 +23,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from api.core.failure_log import FailureKind, RequestFailure
+from api.core.mitm.base import UpstreamRefusedError
 from api.core.mitm.handler import MitmHandler
 from api.core.proxy_server import ProxyServer
 from api.core.signals import request_completed, request_failed
@@ -112,6 +113,13 @@ async def _exchange(server: ProxyServer, request: str, *, then: bytes = b"") -> 
     return response
 
 
+def _head(response: bytes) -> tuple[str, dict[str, str]]:
+    """The status line and the headers (by lowercase name) of a response."""
+    head = response.split(b"\r\n\r\n", 1)[0].decode()
+    status_line, *lines = head.split("\r\n")
+    return status_line, {name.lower(): value.strip() for name, value in (line.split(":", 1) for line in lines)}
+
+
 @contextlib.asynccontextmanager
 async def _vendor(answer: bytes | None) -> AsyncIterator[int]:
     """An upstream HTTP proxy that answers each CONNECT with ``answer``, or never answers when None."""
@@ -149,7 +157,10 @@ class TestRefused:
         server = await listen(None)
         response = await _exchange(server, f"CONNECT example.com:443 HTTP/1.1\r\n{_auth()}\r\n")
 
-        assert response.startswith(b"HTTP/1.1 502")
+        status_line, headers = _head(response)
+        # The message is in the reason phrase too: CONNECT clients show the status line only.
+        assert status_line.startswith("HTTP/1.1 502 Bad Gateway (No upstream proxy available for ")
+        assert "proxy-status" not in headers
         (failure,) = _failures(publish)
         assert failure.kind is FailureKind.NO_PROXY_AVAILABLE
         assert failure.status == 502
@@ -191,7 +202,14 @@ class TestUpstreamFailures:
             server = await listen(_upstream(port))
             response = await _exchange(server, f"CONNECT example.com:443 HTTP/1.1\r\n{_auth()}\r\n")
 
-        assert response.startswith(b"HTTP/1.1 502")
+        status_line, headers = _head(response)
+        assert status_line == (
+            "HTTP/1.1 502 Bad Gateway (Upstream proxy refused the tunnel: 407 Proxy Authentication Required)"
+        )
+        assert headers["proxy-status"] == "octoprox; error=connection_refused; received-status=407"
+        # The vendor's 407 is about the connector's credentials, not the client's.
+        assert "proxy-authenticate" not in headers
+        assert response.endswith(b"\r\n\r\nUpstream proxy refused the tunnel: 407 Proxy Authentication Required")
         (failure,) = _failures(publish)
         assert failure.kind is FailureKind.UPSTREAM_REJECTED
         assert (failure.status, failure.upstream_status) == (502, 407)
@@ -202,11 +220,25 @@ class TestUpstreamFailures:
         assert failure.latency_ms is not None
         assert [c["success"] for c in _completions(publish)] == [False]
 
+    async def test_a_vendor_rate_limit_stays_a_502(self, listen: Any, publish: AsyncMock) -> None:
+        """One connector throttled is not Octoprox asking the client to slow down: another may serve it."""
+        async with _vendor(b"HTTP/1.1 429 Too Many Requests\r\nRetry-After: 7\r\n\r\n") as port:
+            server = await listen(_upstream(port))
+            response = await _exchange(server, f"CONNECT example.com:443 HTTP/1.1\r\n{_auth()}\r\n")
+
+        status_line, headers = _head(response)
+        assert status_line == "HTTP/1.1 502 Bad Gateway (Upstream proxy refused the tunnel: 429 Too Many Requests)"
+        assert headers["proxy-status"] == "octoprox; error=connection_refused; received-status=429"
+        (failure,) = _failures(publish)
+        assert (failure.kind, failure.status, failure.upstream_status) == (FailureKind.UPSTREAM_REJECTED, 502, 429)
+
     async def test_unreachable_upstream(self, listen: Any, publish: AsyncMock) -> None:
         server = await listen(_upstream(_closed_port()))
         response = await _exchange(server, f"CONNECT example.com:443 HTTP/1.1\r\n{_auth()}\r\n")
 
-        assert response.startswith(b"HTTP/1.1 502")
+        status_line, headers = _head(response)
+        assert status_line.startswith("HTTP/1.1 502 Bad Gateway (")
+        assert headers["proxy-status"] == "octoprox; error=destination_unavailable"
         (failure,) = _failures(publish)
         assert (failure.kind, failure.status) == (FailureKind.UPSTREAM_UNREACHABLE, 502)
 
@@ -215,7 +247,9 @@ class TestUpstreamFailures:
             server = await listen(_upstream(port), timeout=0.3)
             response = await _exchange(server, f"CONNECT example.com:443 HTTP/1.1\r\n{_auth()}\r\n")
 
-        assert response.startswith(b"HTTP/1.1 504")
+        status_line, headers = _head(response)
+        assert status_line == "HTTP/1.1 504 Gateway Timeout (Connection to upstream proxy timed out)"
+        assert headers["proxy-status"] == "octoprox; error=connection_timeout"
         (failure,) = _failures(publish)
         assert (failure.kind, failure.status) == (FailureKind.UPSTREAM_TIMEOUT, 504)
         assert "0.3 seconds" in failure.message
@@ -251,10 +285,27 @@ class TestUpstreamFailures:
             response = await asyncio.wait_for(reader.read(), timeout=5)
             writer.close()
 
-        assert response.startswith(b"HTTP/1.1 504")
+        status_line, headers = _head(response)
+        assert status_line == "HTTP/1.1 504 Gateway Timeout (The client sent no more of the request body for 0.3 seconds)"
+        # The client's own doing is not named as an upstream failure.
+        assert "proxy-status" not in headers
         (failure,) = _failures(publish)
         assert (failure.kind, failure.status) == (FailureKind.CLIENT_CLOSED, 504)
         assert "request body" in failure.message
+
+    async def test_a_response_cut_short_is_not_followed_by_an_error_answer(
+        self, listen: Any, publish: AsyncMock
+    ) -> None:
+        """Once the vendor's status line is relayed, a second status line would land inside its body."""
+        async with _vendor(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nab") as port:
+            server = await listen(_upstream(port))
+            response = await _exchange(server, f"GET http://example.com/ HTTP/1.1\r\n{_auth()}\r\n")
+
+        assert response.startswith(b"HTTP/1.1 200 OK\r\n")
+        assert b"502" not in response
+        assert response.endswith(b"\r\n\r\n5\r\n")
+        assert _failures(publish) == []
+        assert [c["success"] for c in _completions(publish)] == [True]
 
     def test_an_unparseable_target_keeps_neither_query_nor_userinfo(self) -> None:
         server = ProxyServer(MagicMock())
@@ -263,24 +314,32 @@ class TestUpstreamFailures:
         assert server._target_of("GET", "http://user:pw@example.com:8080/a") == "example.com:8080"
 
 
+async def _intercept(request: bytes, error: Exception) -> bytes:
+    """Run ``request`` through an intercepted connection whose relay fails with ``error``; the client's bytes."""
+    reader = asyncio.StreamReader()
+    reader.feed_data(request)
+    reader.feed_eof()
+    writer = MagicMock()
+    writer.transport.get_protocol.return_value = MagicMock()
+    writer.drain = AsyncMock()
+    project = MagicMock(id="project-1", tls_mitm_mode=MitmMode.PLAIN, tls_mitm_engine=None, tls_mitm_browser=None)
+    relay = AsyncMock()
+    relay.send_request.side_effect = error
+
+    with (
+        patch("asyncio.get_running_loop") as loop,
+        patch("api.core.mitm.create_relay", return_value=relay),
+    ):
+        loop.return_value.start_tls = AsyncMock(return_value=MagicMock())
+        await MitmHandler(MagicMock()).handle(reader, writer, "example.com", 443, _upstream(8080), project)
+    return b"".join(c.args[0] for c in writer.write.call_args_list)
+
+
 class TestInterceptedRequests:
     async def test_a_failed_intercepted_request_is_logged_without_its_query(self, publish: AsyncMock) -> None:
-        reader = asyncio.StreamReader()
-        reader.feed_data(b"GET /search?token=abc HTTP/1.1\r\nHost: example.com\r\n\r\n")
-        reader.feed_eof()
-        writer = MagicMock()
-        writer.transport.get_protocol.return_value = MagicMock()
-        writer.drain = AsyncMock()
-        project = MagicMock(id="project-1", tls_mitm_mode=MitmMode.PLAIN, tls_mitm_engine=None, tls_mitm_browser=None)
-        relay = AsyncMock()
-        relay.send_request.side_effect = ConnectionError("upstream failed")
-
-        with (
-            patch("asyncio.get_running_loop") as loop,
-            patch("api.core.mitm.create_relay", return_value=relay),
-        ):
-            loop.return_value.start_tls = AsyncMock(return_value=MagicMock())
-            await MitmHandler(MagicMock()).handle(reader, writer, "example.com", 443, _upstream(8080), project)
+        await _intercept(
+            b"GET /search?token=abc HTTP/1.1\r\nHost: example.com\r\n\r\n", ConnectionError("upstream failed")
+        )
 
         (failure,) = _failures(publish)
         assert failure.kind is FailureKind.INTERCEPTED_REQUEST_FAILED
@@ -289,25 +348,51 @@ class TestInterceptedRequests:
         assert failure.proxy == "127.0.0.1:8080"
 
     async def test_an_error_text_quoting_the_url_loses_its_query(self, publish: AsyncMock) -> None:
-        reader = asyncio.StreamReader()
-        reader.feed_data(b"GET /search?token=abc HTTP/1.1\r\nHost: example.com\r\n\r\n")
-        reader.feed_eof()
-        writer = MagicMock()
-        writer.transport.get_protocol.return_value = MagicMock()
-        writer.drain = AsyncMock()
-        project = MagicMock(id="project-1", tls_mitm_mode=MitmMode.PLAIN, tls_mitm_engine=None, tls_mitm_browser=None)
-        relay = AsyncMock()
-        relay.send_request.side_effect = ConnectionError(
-            'error sending request for url (https://example.com/search?token=abc)'
+        await _intercept(
+            b"GET /search?token=abc HTTP/1.1\r\nHost: example.com\r\n\r\n",
+            ConnectionError('error sending request for url (https://example.com/search?token=abc)'),
         )
-
-        with (
-            patch("asyncio.get_running_loop") as loop,
-            patch("api.core.mitm.create_relay", return_value=relay),
-        ):
-            loop.return_value.start_tls = AsyncMock(return_value=MagicMock())
-            await MitmHandler(MagicMock()).handle(reader, writer, "example.com", 443, _upstream(8080), project)
 
         (failure,) = _failures(publish)
         assert "token" not in failure.message
         assert "https://example.com/search" in failure.message
+
+    async def test_a_vendor_refusal_inside_the_connection_is_answered_with_the_vendors_status(
+        self, publish: AsyncMock
+    ) -> None:
+        response = await _intercept(
+            b"GET /search?token=abc HTTP/1.1\r\nHost: example.com\r\n\r\n", UpstreamRefusedError(429)
+        )
+
+        (failure,) = _failures(publish)
+        assert (failure.kind, failure.status) == (FailureKind.INTERCEPTED_REQUEST_FAILED, 502)
+        assert failure.upstream_status == 429
+        assert failure.message == "Upstream proxy refused the tunnel: 429 Too Many Requests"
+        status_line, headers = _head(response)
+        assert status_line == "HTTP/1.1 502 Bad Gateway (Upstream proxy refused the tunnel: 429 Too Many Requests)"
+        assert headers["proxy-status"] == "octoprox; error=connection_refused; received-status=429"
+        assert response.endswith(b"\r\n\r\nUpstream proxy refused the tunnel: 429 Too Many Requests")
+
+    async def test_any_failure_inside_the_connection_says_what_went_wrong(self, publish: AsyncMock) -> None:
+        response = await _intercept(
+            b"GET / HTTP/1.1\r\nHost: example.com\r\n\r\n",
+            ConnectionError("reset by http://vendor-user:vendor-secret@127.0.0.1:8080"),
+        )
+
+        (failure,) = _failures(publish)
+        assert failure.upstream_status is None
+        status_line, headers = _head(response)
+        assert status_line == "HTTP/1.1 502 Bad Gateway (reset by http://127.0.0.1:8080)"
+        # Only a refusal is named: the other failures of an engine are not told apart.
+        assert "proxy-status" not in headers
+        assert b"vendor-secret" not in response
+
+    async def test_a_failed_head_request_is_answered_without_a_body(self, publish: AsyncMock) -> None:
+        response = await _intercept(b"HEAD / HTTP/1.1\r\nHost: example.com\r\n\r\n", UpstreamRefusedError(429))
+
+        status_line, headers = _head(response)
+        assert status_line == "HTTP/1.1 502 Bad Gateway (Upstream proxy refused the tunnel: 429 Too Many Requests)"
+        assert int(headers["content-length"]) > 0
+        assert response.endswith(b"\r\n\r\n")
+        (failure,) = _failures(publish)
+        assert failure.upstream_status == 429

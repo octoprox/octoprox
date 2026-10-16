@@ -5,7 +5,9 @@
 
 import random
 from abc import ABC, abstractmethod
+from http import HTTPStatus
 
+from api.core.error_response import refusal_message
 from api.core.mitm.browser_detect import DEFAULT_BROWSER, detect_browser
 from api.models.project import MitmBrowser, MitmMode
 
@@ -32,6 +34,25 @@ _CLIENT_HINT_HEADERS = frozenset((
     "sec-ch-ua-bitness",
     "sec-ch-ua-wow64",
 ))
+
+
+class UpstreamRefusedError(Exception):
+    """The upstream proxy answered the relay's CONNECT with an error.
+
+    Raised by a relay that opens its own tunnel through the upstream, so
+    the refusal reads the same whichever engine met it. ``status`` is the
+    vendor's HTTP status, None when the engine does not report it.
+    """
+
+    def __init__(self, status: int | None) -> None:
+        answer = ""
+        if status is not None:
+            try:
+                answer = f"{status} {HTTPStatus(status).phrase}"
+            except ValueError:
+                answer = str(status)
+        super().__init__(refusal_message(answer))
+        self.status = status
 
 
 class MitmRelay(ABC):
@@ -65,6 +86,9 @@ class MitmRelay(ABC):
 
         Returns:
             Tuple of (status_code, reason_phrase, response_headers, response_body).
+
+        Raises:
+            UpstreamRefusedError: The upstream proxy refused the relay's tunnel.
         """
 
     @abstractmethod

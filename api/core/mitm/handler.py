@@ -21,8 +21,14 @@ from typing import TYPE_CHECKING
 import h11
 import structlog
 
+from api.core.error_response import (
+    BANDWIDTH_LIMIT_PROXY_STATUS,
+    reason_phrase,
+    refused_proxy_status,
+)
 from api.core.event_bus import event_bus
 from api.core.failure_log import FailureKind, build_failure
+from api.core.mitm.base import UpstreamRefusedError
 from api.core.signals import request_failed
 from api.core.tls_cert_manager import TLSCertManager, pop_client_hello
 
@@ -296,9 +302,10 @@ class MitmHandler:
                     ))
                     written = _send_via_h11(
                         conn, client_writer, status,
-                        [("Proxy-Status", "octoprox; error=bandwidth_limit_exceeded"),
+                        [("Proxy-Status", BANDWIDTH_LIMIT_PROXY_STATUS),
                          ("Content-Type", "text/plain; charset=utf-8")],
                         limit_message.encode(),
+                        head=request_event.method == b"HEAD",
                     )
                     with contextlib.suppress(ConnectionResetError, BrokenPipeError, OSError):
                         await client_writer.drain()
@@ -343,14 +350,25 @@ class MitmHandler:
                     ) = await relay.send_request(method, url, forward_headers, body, proxy_url)
                 except Exception as e:
                     logger.debug("MITM upstream request failed", url=url, error=str(e))
+                    refused = e if isinstance(e, UpstreamRefusedError) else None
                     # The query string is left out of the log: it is where tokens travel
                     # (build_failure also cuts it from the error text, which may quote the URL).
-                    await event_bus.publish(request_failed, self, failure=build_failure(
+                    failure = build_failure(
                         project.id, FailureKind.INTERCEPTED_REQUEST_FAILED, 502, str(e) or type(e).__name__,
                         proxy=proxy, exc=e, latency_ms=(time.monotonic() - req_start) * 1000,
                         method=method, target=url.split("?", 1)[0],
-                    ))
-                    written = _send_via_h11(conn, client_writer, 502, [], b"")
+                        upstream_status=refused.status if refused else None,
+                    )
+                    await event_bus.publish(request_failed, self, failure=failure)
+                    # The client is answered with the logged text, which build_failure
+                    # has scrubbed of the upstream's credentials.
+                    error_headers = [("Content-Type", "text/plain; charset=utf-8")]
+                    if refused is not None:
+                        error_headers.append(("Proxy-Status", refused_proxy_status(refused.status)))
+                    written = _send_via_h11(
+                        conn, client_writer, 502, error_headers, failure.message.encode(),
+                        reason=reason_phrase("Bad Gateway", failure.message), head=method == "HEAD",
+                    )
                     with contextlib.suppress(ConnectionResetError, BrokenPipeError, OSError):
                         await client_writer.drain()
                     bytes_received += written
@@ -463,16 +481,23 @@ def _send_via_h11(
     status_code: int,
     headers: list[tuple[str, str]],
     body: bytes,
+    reason: str = "",
+    *,
+    head: bool = False,
 ) -> int:
     """Serialize and write a full HTTP/1.1 response via h11.
+
+    ``head`` says the request was a HEAD: the response announces the
+    body's length but carries none, which h11 would refuse to send.
 
     Returns the number of bytes written.
     """
     h11_headers: list[tuple[str, str]] = list(headers)
     h11_headers.append(("content-length", str(len(body))))
 
-    out = conn.send(h11.Response(status_code=status_code, headers=h11_headers)) or b""
-    if body:
+    response = h11.Response(status_code=status_code, headers=h11_headers, reason=reason.encode("ascii"))
+    out = conn.send(response) or b""
+    if body and not head:
         out += conn.send(h11.Data(data=body)) or b""
     out += conn.send(h11.EndOfMessage()) or b""
 

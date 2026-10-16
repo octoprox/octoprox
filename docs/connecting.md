@@ -128,6 +128,16 @@ Below the credentials the Connect page lists the connectors a request with the u
 |----------|---------|
 | `407 Proxy Authentication Required` | No credentials, or the username (without its parameters) and password match no project |
 | `400 Bad Request` | A parameter cannot be read: a country that is not a two-letter code, a state or city without `-cc-`. The body says which |
-| `502 Bad Gateway` | Nothing in the project serves the place asked for, or the exit failed the [preflight check]({{ site.baseurl }}/location-routing). A request is never widened to the country |
+| `502 Bad Gateway` | Nothing in the project serves the place asked for, or the exit failed the [preflight check]({{ site.baseurl }}/location-routing). A request is never widened to the country. Also the upstream proxy could not be reached or refused the tunnel: a vendor's own status, 429 or 407 included, is answered as a 502, since it describes one connector rather than the project and a retry may go through another. A plain `http://` request through an HTTP upstream is not tunnelled, so it gets the vendor's answer as the vendor sent it |
+| `504 Gateway Timeout` | The upstream proxy did not answer in time, or the client stopped sending its request body |
 | `509 Bandwidth Limit Exceeded` | Every connector that could serve the request is over its [traffic limit]({{ site.baseurl }}/traffic-limits); the status is the connector's `limit_status`, 509 by default |
 | `429 Too Many Requests` | Every proxy that could serve the request is [rate limited]({{ site.baseurl }}/rate-limiting) |
+
+Most clients drop the body of a failed `CONNECT` and show only the status line, so the explanation is in the reason phrase as well: requests reports `Tunnel connection failed: 502 Bad Gateway (Upstream proxy refused the tunnel: 429 Too Many Requests)`, httpx and aiohttp the same status line. curl prints only the status code; `curl -v` shows the whole line. A failure on the upstream leg also carries an [RFC 9209](https://www.rfc-editor.org/rfc/rfc9209) `Proxy-Status` header for clients that read the headers of a failed `CONNECT` (aiohttp's `ClientHttpProxyError.headers`):
+
+| `Proxy-Status` | Meaning |
+|----------------|---------|
+| `octoprox; error=connection_refused; received-status=429` | The upstream proxy refused the tunnel. `received-status` is its HTTP status, absent for a SOCKS upstream |
+| `octoprox; error=destination_unavailable` | The upstream proxy could not be reached |
+| `octoprox; error=connection_timeout` | The upstream proxy did not answer in time (with a 504) |
+| `octoprox; error=http_protocol_error` | The upstream leg failed another way, for example a reset mid-handshake |

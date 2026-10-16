@@ -52,6 +52,8 @@ TLS interception inherently creates two separate TLS sessions:
 
 This means the upstream TLS fingerprint (JA3/JA4) is always determined by the relay engine, never by your client. Your client's original fingerprint is not and cannot be passed through.
 
+The engines open their own tunnels through the upstream proxy. A request that cannot be relayed is answered inside the intercepted connection with `502 Bad Gateway`, saying why in the reason phrase and the body. When the upstream proxy refused the tunnel, the response also carries `Proxy-Status: octoprox; error=connection_refused; received-status=<the vendor's status>`. `curl_cffi` reports every status; `rnet` only a 407, so with it any other refusal comes without `received-status`.
+
 ## Protocol Support
 
 When MITM is **disabled**, Octoprox creates a raw TCP tunnel (`CONNECT`) and is completely protocol-agnostic - HTTP/2, HTTP/3 (QUIC), WebSocket, and any other protocol work transparently.

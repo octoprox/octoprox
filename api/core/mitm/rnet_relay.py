@@ -10,12 +10,20 @@ with genuine JA3/JA4 fingerprints.
 
 import structlog
 from rnet import Client, Impersonate, Method
+from rnet.exceptions import ConnectionError as RnetConnectionError
 
-from api.core.mitm.base import ImpersonationRelay
+from api.core.mitm.base import ImpersonationRelay, UpstreamRefusedError
 from api.core.mitm.browser_detect import DEFAULT_BROWSER
 from api.models.project import MitmBrowser, MitmMode
 
 logger = structlog.get_logger()
+
+# wreq's words when the upstream proxy refuses the CONNECT. It tells a 407
+# apart and reports any other status as an unsuccessful tunnel, without it.
+_TUNNEL_REFUSED: dict[str, int | None] = {
+    "proxy authentication required": 407,
+    "unsuccessful tunnel": None,
+}
 
 # Map browser names to rnet Impersonate enum values
 _IMPERSONATE_MAP: dict[MitmBrowser, Impersonate] = {
@@ -76,7 +84,14 @@ class RnetRelay(ImpersonationRelay):
         }
         if body is not None:
             kwargs["body"] = body
-        response = await client.request(rnet_method, url, **kwargs)  # type: ignore[arg-type]
+        try:
+            response = await client.request(rnet_method, url, **kwargs)  # type: ignore[arg-type]
+        except RnetConnectionError as e:
+            text = str(e)
+            for words, status in _TUNNEL_REFUSED.items():
+                if words in text:
+                    raise UpstreamRefusedError(status) from e
+            raise
 
         # rnet response.status is already int
         response_body = await response.bytes()

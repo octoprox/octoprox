@@ -5,10 +5,13 @@
 
 import asyncio
 import contextlib
+from collections.abc import AsyncIterator
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from curl_cffi.requests.exceptions import ProxyError
 
+from api.core.mitm.base import UpstreamRefusedError
 from api.core.mitm.cffi_relay import CffiRelay
 from api.models.project import MitmBrowser, MitmMode
 
@@ -241,3 +244,53 @@ class TestCffiRelay:
         # sec-fetch-* and other headers must be preserved
         assert "sec-fetch-dest" in forwarded_keys
         assert "accept" in forwarded_keys
+
+
+@contextlib.asynccontextmanager
+async def refusing_proxy(status_line: bytes) -> AsyncIterator[str]:
+    """A local upstream proxy that answers every CONNECT with ``status_line``."""
+
+    async def serve(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        while (await reader.readline()) not in (b"\r\n", b"\n", b""):
+            pass
+        writer.write(status_line + b"\r\nContent-Length: 0\r\n\r\n")
+        await writer.drain()
+        writer.close()
+
+    server = await asyncio.start_server(serve, "127.0.0.1", 0)
+    try:
+        yield f"http://vendor-user:vendor-secret@127.0.0.1:{server.sockets[0].getsockname()[1]}"
+    finally:
+        server.close()
+        await server.wait_closed()
+
+
+class TestUpstreamRefusal:
+    """libcurl reports the vendor's status in its error text only; the relay reads it from there."""
+
+    @pytest.mark.parametrize(("status_line", "status"), [
+        (b"HTTP/1.1 429 Too Many Requests", 429),
+        (b"HTTP/1.1 407 Proxy Authentication Required", 407),
+        (b"HTTP/1.1 502 Bad Gateway", 502),
+    ])
+    async def test_a_refused_tunnel_carries_the_vendors_status(self, status_line: bytes, status: int) -> None:
+        relay = CffiRelay(mode=MitmMode.OVERRIDE_UA, browser=MitmBrowser.CHROME)
+        try:
+            async with refusing_proxy(status_line) as proxy_url:
+                with pytest.raises(UpstreamRefusedError) as refused:
+                    await relay.send_request("GET", "https://example.com/", [], None, proxy_url)
+        finally:
+            await relay.close()
+
+        assert refused.value.status == status
+        assert str(refused.value).startswith(f"Upstream proxy refused the tunnel: {status} ")
+
+    async def test_another_proxy_error_is_left_alone(self) -> None:
+        relay = CffiRelay(mode=MitmMode.MATCH_UA)
+        error = ProxyError("Failed to perform, curl: (5) Could not resolve proxy: vendor.invalid", 5)
+        with patch.object(relay, "_get_or_create_session") as mock_session_factory:
+            mock_session_factory.return_value.request = AsyncMock(side_effect=error)
+            with pytest.raises(ProxyError) as raised:
+                await relay.send_request("GET", "https://example.com/", [], None, "http://vendor.invalid:8080")
+
+        assert raised.value is error

@@ -25,6 +25,12 @@ import structlog
 from python_socks.async_.asyncio import Proxy as SocksProxy
 
 from api.core.config import settings
+from api.core.error_response import (
+    BANDWIDTH_LIMIT_PROXY_STATUS,
+    reason_phrase,
+    refusal_message,
+    upstream_proxy_status,
+)
 from api.core.event_bus import event_bus
 from api.core.failure_log import (
     FailureKind,
@@ -54,7 +60,7 @@ BUFFER_SIZE = 65536
 # Reason phrases for the statuses a traffic limit can answer with.
 TRAFFIC_LIMIT_REASONS = {429: "Too Many Requests", 509: "Bandwidth Limit Exceeded"}
 # RFC 9209 Proxy-Status header: the same signal whichever status is configured.
-TRAFFIC_LIMIT_PROXY_STATUS = 'Proxy-Status: octoprox; error=bandwidth_limit_exceeded'
+TRAFFIC_LIMIT_PROXY_STATUS = f"Proxy-Status: {BANDWIDTH_LIMIT_PROXY_STATUS}"
 
 # What a tunnel direction calls per chunk; False means stop the transfer.
 _ByteCounter = Callable[[int], bool] | None
@@ -345,6 +351,27 @@ class ProxyServer:
             proxy=proxy, exc=exc, latency_ms=latency_ms, upstream_status=upstream_status,
         )
 
+    async def _send_upstream_error(
+        self, writer: asyncio.StreamWriter, failure: RequestFailure, phrase: str, message: str | None = None
+    ) -> None:
+        """Answer a request whose upstream leg failed, naming the failure in a Proxy-Status header.
+
+        The client is told ``message``, or else the failure's own text, which
+        build_failure has scrubbed of the upstream's credentials. A client
+        that stalled is told its own doing, not the upstream's. A vendor's
+        refusal is worded as one, so "429 Too Many Requests" under a 502
+        reads as the vendor's answer, not ours.
+        """
+        if message is None or failure.kind is FailureKind.CLIENT_CLOSED:
+            message = failure.message
+        if failure.kind is FailureKind.UPSTREAM_REJECTED:
+            message = refusal_message(message)
+        status = upstream_proxy_status(failure)
+        await self._send_error(
+            writer, failure.status, phrase, message,
+            extra_headers=[f"Proxy-Status: {status}"] if status else None,
+        )
+
     def _interrupted_failure(self, project_id: str, proxy: Proxy, start_time: float) -> RequestFailure:
         """A request cancelled before it got going: the server was shutting down."""
         return build_failure(
@@ -572,14 +599,18 @@ class ProxyServer:
         body: str = "",
         extra_headers: list[str] | None = None,
     ) -> None:
-        """Send an HTTP error response. Silently ignores closed connections."""
+        """Send an HTTP error response. Silently ignores closed connections.
+
+        The body is repeated in the reason phrase: a client that fails a
+        CONNECT shows its caller the status line, not the body.
+        """
         try:
             if writer.is_closing():
                 return
             body_bytes = body.encode("utf-8")
             # Build headers
             headers = [
-                f"HTTP/1.1 {status} {message}",
+                f"HTTP/1.1 {status} {reason_phrase(message, body)}",
                 f"Content-Length: {len(body_bytes)}",
             ]
             if status == 407:
@@ -706,36 +737,43 @@ class ProxyServer:
                     meter=meter,
                 )
 
+        # Once the upstream leg is up (success) the client has been told so,
+        # or is talking to the origin: an error answer would land inside its
+        # tunnel, and the latency already measured is the one to report.
         except TimeoutError as e:
-            latency_ms = (time.monotonic() - start_time) * 1000
-            await self._send_error(
-                client_writer, 504, "Gateway Timeout", "Connection to upstream proxy timed out"
-            )
-            failure = self._upstream_failure(e, project.id, proxy, latency_ms, 504)
+            if not success:
+                latency_ms = (time.monotonic() - start_time) * 1000
+                failure = self._upstream_failure(e, project.id, proxy, latency_ms, 504)
+                await self._send_upstream_error(
+                    client_writer, failure, "Gateway Timeout", "Connection to upstream proxy timed out"
+                )
         except ConnectionRefusedError as e:
-            latency_ms = (time.monotonic() - start_time) * 1000
-            await self._send_error(
-                client_writer, 502, "Bad Gateway", "Upstream proxy refused connection"
-            )
-            failure = self._upstream_failure(e, project.id, proxy, latency_ms, 502)
+            if not success:
+                latency_ms = (time.monotonic() - start_time) * 1000
+                failure = self._upstream_failure(e, project.id, proxy, latency_ms, 502)
+                await self._send_upstream_error(
+                    client_writer, failure, "Bad Gateway", "Upstream proxy refused connection"
+                )
         except ConnectionError as e:
-            latency_ms = (time.monotonic() - start_time) * 1000
             if client_writer.transport.is_closing():
                 client_disconnected = True
                 logger.debug("Client disconnected", target=target)
             else:
                 logger.error("CONNECT error", error=str(e), target=target)
-                await self._send_error(client_writer, 502, "Bad Gateway", str(e))
-                failure = self._upstream_failure(e, project.id, proxy, latency_ms, 502)
+                if not success:
+                    latency_ms = (time.monotonic() - start_time) * 1000
+                    failure = self._upstream_failure(e, project.id, proxy, latency_ms, 502)
+                    await self._send_upstream_error(client_writer, failure, "Bad Gateway")
         except Exception as e:
-            latency_ms = (time.monotonic() - start_time) * 1000
             if client_writer.transport.is_closing():
                 client_disconnected = True
                 logger.debug("Client disconnected", target=target)
             else:
                 logger.error("CONNECT error", error=str(e), target=target)
-                await self._send_error(client_writer, 502, "Bad Gateway", str(e))
-                failure = self._upstream_failure(e, project.id, proxy, latency_ms, 502)
+                if not success:
+                    latency_ms = (time.monotonic() - start_time) * 1000
+                    failure = self._upstream_failure(e, project.id, proxy, latency_ms, 502)
+                    await self._send_upstream_error(client_writer, failure, "Bad Gateway")
         finally:
             if upstream_writer:
                 upstream_writer.close()
@@ -1072,28 +1110,29 @@ class ProxyServer:
                         # client sees a truncated body and a closed connection.
                         break
 
+        # Once the vendor's status line is relayed (success) an error answer
+        # would land inside its response, and the latency already measured
+        # is the one to report: the client sees the response cut short.
         except TimeoutError as e:
-            latency_ms = (time.monotonic() - start_time) * 1000
-            await self._send_error(
-                client_writer, 504, "Gateway Timeout", "Connection to upstream proxy timed out"
-            )
-            failure = self._upstream_failure(e, project_id, proxy, latency_ms, 504)
+            if not success:
+                latency_ms = (time.monotonic() - start_time) * 1000
+                failure = self._upstream_failure(e, project_id, proxy, latency_ms, 504)
+                await self._send_upstream_error(
+                    client_writer, failure, "Gateway Timeout", "Connection to upstream proxy timed out"
+                )
         except ConnectionRefusedError as e:
-            latency_ms = (time.monotonic() - start_time) * 1000
-            await self._send_error(
-                client_writer, 502, "Bad Gateway", "Upstream proxy refused connection"
-            )
-            failure = self._upstream_failure(e, project_id, proxy, latency_ms, 502)
-        except ConnectionError as e:
-            latency_ms = (time.monotonic() - start_time) * 1000
-            logger.error("HTTP forward error", error=str(e), target=target)
-            await self._send_error(client_writer, 502, "Bad Gateway", str(e))
-            failure = self._upstream_failure(e, project_id, proxy, latency_ms, 502)
+            if not success:
+                latency_ms = (time.monotonic() - start_time) * 1000
+                failure = self._upstream_failure(e, project_id, proxy, latency_ms, 502)
+                await self._send_upstream_error(
+                    client_writer, failure, "Bad Gateway", "Upstream proxy refused connection"
+                )
         except Exception as e:
-            latency_ms = (time.monotonic() - start_time) * 1000
             logger.error("HTTP forward error", error=str(e), target=target)
-            await self._send_error(client_writer, 502, "Bad Gateway", str(e))
-            failure = self._upstream_failure(e, project_id, proxy, latency_ms, 502)
+            if not success:
+                latency_ms = (time.monotonic() - start_time) * 1000
+                failure = self._upstream_failure(e, project_id, proxy, latency_ms, 502)
+                await self._send_upstream_error(client_writer, failure, "Bad Gateway")
         finally:
             if upstream_writer:
                 upstream_writer.close()

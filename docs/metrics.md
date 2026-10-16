@@ -59,7 +59,7 @@ The **Failures** page (under Overview in the web UI) says what the failure count
 |------|---------------|-----------------|
 | Upstream timeout | The upstream proxy did not answer within `proxy.connection.timeout_seconds` | 504 |
 | Proxy unreachable | The connection to the upstream proxy was refused, or its host could not be reached | 502 |
-| Refused by the vendor | The upstream proxy answered the CONNECT (or SOCKS handshake) with an error. For an HTTP upstream the vendor's status is kept: 407 means it rejected the connector's credentials | 502 |
+| Refused by the vendor | The upstream proxy answered the CONNECT (or SOCKS handshake) with an error. For an HTTP upstream the vendor's status is kept: 407 means it rejected the connector's credentials | 502, with the vendor's answer in the reason phrase and a `Proxy-Status` header |
 | Upstream error | The upstream leg failed another way, for example a reset mid-handshake | 502 |
 | Client went away | The client closed the connection, or stopped sending, before sending the whole request body | 502 (504 when it stopped) |
 | Interrupted | Octoprox stopped while the request was being set up | - |
@@ -68,7 +68,7 @@ The **Failures** page (under Overview in the web UI) says what the failure count
 | Traffic limit reached | The connectors that could serve the request are over their period's traffic | 509 (or as configured) |
 | Wrong exit location | Exit verification found the proxy exiting somewhere other than the requested location | 502 |
 | Invalid location | The username named a state or city without a country | 400 |
-| Intercepted request failed | With [TLS interception]({{ site.baseurl }}/tls-interception), one request inside the connection could not be relayed upstream | 502 |
+| Intercepted request failed | With [TLS interception]({{ site.baseurl }}/tls-interception), one request inside the connection could not be relayed upstream. When the upstream proxy refused the engine's tunnel, the vendor's status is kept as for a refusal | 502 |
 
 The first six are exactly the requests Overview counts as failures, so the summary's upstream failures match Overview's failure count for the same window, apart from traffic limits that cut a request already under way: Overview counts those too, and the summary lists them with the refusals. The next five are requests Octoprox refused before using any proxy, which the request metrics do not count at all (a traffic limit that cuts a request already under way is the exception). The last is a request inside an intercepted connection; the connection itself is counted, as a success. A connection from a tunnel device is closed rather than answered, so for one the status is what a proxy client would have been told.
 
