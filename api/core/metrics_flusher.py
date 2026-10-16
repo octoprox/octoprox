@@ -99,32 +99,27 @@ class MetricsFlusher:
         would write them twice. None (a direct call) skips the check.
         Returns False only for that rollback.
         """
-        # Get all metrics from Redis: independent walks, run side by side
-        # rather than one after another.
-        # Nested because gather's typing stops at six awaitables.
+        # Get all metrics from Redis: each kind through its index rather than a
+        # walk of the keyspace, the six side by side. Then the status of each
+        # proxy that has metrics, by key.
         started = time.monotonic()
         redis = self._redis_client
         (
-            (
-                all_proxy_metrics,
-                all_project_metrics,
-                all_connector_metrics,
-                all_tunnel_peer_metrics,
-                all_host_metrics,
-                all_failure_metrics,
-            ),
-            all_statuses,
+            all_proxy_metrics,
+            all_project_metrics,
+            all_connector_metrics,
+            all_tunnel_peer_metrics,
+            all_host_metrics,
+            all_failure_metrics,
         ) = await asyncio.gather(
-            asyncio.gather(
-                redis.get_all_proxy_metrics(),
-                redis.get_all_project_metrics(),
-                redis.get_all_connector_metrics(),
-                redis.get_all_tunnel_peer_metrics(),
-                redis.get_all_host_metrics(),
-                redis.get_all_failure_metrics(),
-            ),
-            redis.get_all_proxy_statuses(),
+            redis.get_all_proxy_metrics(),
+            redis.get_all_project_metrics(),
+            redis.get_all_connector_metrics(),
+            redis.get_all_tunnel_peer_metrics(),
+            redis.get_all_host_metrics(),
+            redis.get_all_failure_metrics(),
         )
+        all_statuses = await redis.get_proxy_statuses(all_proxy_metrics)
         read_at = time.monotonic()
 
         if (
@@ -221,7 +216,7 @@ class MetricsFlusher:
             tunnel_peer_count=len(all_tunnel_peer_metrics),
             host_count=len(all_host_metrics),
             failure_count_rows=len(all_failure_metrics),
-            # Where the time went: a slow read is the Redis walk waiting on a
+            # Where the time went: a slow read is the Redis reads waiting on a
             # busy event loop, a slow write is Postgres.
             read_ms=round((read_at - started) * 1000),
             write_ms=round((written_at - read_at) * 1000),

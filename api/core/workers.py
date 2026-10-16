@@ -110,7 +110,8 @@ WORKERS: dict[WorkerName, WorkerInfo] = {
         lease_label="Metrics flush to Postgres",
     ),
     WorkerName.METRICS_COMPACTOR: WorkerInfo(
-        "Rolls up old metric rows into coarser granularities and applies retention",
+        "Rolls up old metric rows into coarser granularities and applies retention; "
+        "also, on taking its lease, lists any Redis metrics hash its index misses (written by an older version)",
         lease=LeaseName.METRICS_COMPACTOR,
         lease_label="Metrics compaction",
     ),

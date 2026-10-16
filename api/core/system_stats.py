@@ -39,7 +39,7 @@ from api.core.job_stats import job_stats
 from api.core.loop_lag import loop_lag
 from api.core.workers import LEASE_KINDS, LEASE_WORKERS, worker_info
 from api.db.redis import (
-    INSTANCE_REGISTRY_SCAN,
+    INSTANCE_REGISTRY_KEY,
     INSTANCE_STATS_KEY,
     INSTANCE_TTL_SECONDS,
     LEASE_SCAN,
@@ -383,16 +383,15 @@ async def _collect_instances(redis_client: RedisClient, instance_id: str) -> lis
     Two keys per instance: the registry key that proves it is alive, and the
     snapshot key holding what only that process can see. Both are read in one
     pipeline, and the snapshot is optional - an instance running a version
-    that predates snapshots is still listed as a member.
+    that predates snapshots is still listed as a member. The instances are
+    found through the instance index, so an instance on a version that
+    predates the index is not listed.
     """
     client = redis_client.client
-    keys = [
-        k if isinstance(k, str) else k.decode()
-        async for k in client.scan_iter(match=INSTANCE_REGISTRY_SCAN, count=SCAN_COUNT)
-    ]
-    if not keys:
+    idents = await redis_client.live_instance_ids()
+    if not idents:
         return []
-    idents = [key.partition(":")[2] for key in keys]
+    keys = [INSTANCE_REGISTRY_KEY.format(instance_id=ident) for ident in idents]
     pipe = client.pipeline()
     for key, ident in zip(keys, idents, strict=True):
         pipe.get(key)

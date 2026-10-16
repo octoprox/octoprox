@@ -5,7 +5,7 @@
 
 import time
 from collections import Counter
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import fields
 from functools import lru_cache
 from typing import Any
@@ -42,14 +42,12 @@ CONNECTOR_METRICS_KEY = "connector:metrics:{connector_id}"
 # Per tunnel device (any protocol), the fourth hash in the metrics pipeline;
 # carries the two name-resolution counters as well (TunnelPeerMetricDelta).
 TUNNEL_PEER_METRICS_KEY = "tunnel_peer:metrics:{peer_id}"
-TUNNEL_PEER_METRICS_SCAN = "tunnel_peer:metrics:*"
 # Per destination host under one connector of one project, the fifth hash in
 # the metrics pipeline (the Hosts page). The host is the last segment so a
 # bracketed IPv6 literal's colons do not break the key apart; the two ids
 # before it are UUIDs and never contain a colon.
 HOST_METRICS_PREFIX = "host:metrics:"
 HOST_METRICS_KEY = HOST_METRICS_PREFIX + "{project_id}:{connector_id}:{host}"
-HOST_METRICS_SCAN = HOST_METRICS_PREFIX + "*"
 HOST_METRICS_PROJECT_SCAN = HOST_METRICS_PREFIX + "{project_id}:*"
 HOST_METRICS_CONNECTOR_SCAN = HOST_METRICS_PREFIX + "*:{connector_id}:*"
 # Set while a connector takes no requests because its traffic limit was
@@ -75,11 +73,32 @@ LEGACY_FAILURE_LOG_KEY = "failures:{project_id}"
 # connector (refused before a proxy was chosen) and for no vendor status.
 FAILURE_METRICS_PREFIX = "failure:metrics:"
 FAILURE_METRICS_KEY = FAILURE_METRICS_PREFIX + "{project_id}:{connector_id}:{kind}:{upstream_status}"
-FAILURE_METRICS_SCAN = FAILURE_METRICS_PREFIX + "*"
 FAILURE_METRICS_PROJECT_SCAN = FAILURE_METRICS_PREFIX + "{project_id}:*"
 FAILURE_METRICS_CONNECTOR_SCAN = FAILURE_METRICS_PREFIX + "*:{connector_id}:*"
+# One set per kind of metrics hash, listing its keys, so the leader's flush
+# and every instance's full reload read the hashes without walking the
+# keyspace. A walk costs a round trip per SCAN_COUNT keys of the whole
+# keyspace (sessions and sticky bindings included), and on a saturated event
+# loop each round trip waits its turn: a reload walking it took minutes at
+# peak. A write adds its key after the increment; the drain removes a key
+# with its hash; a reader drops members whose hash is gone. The prefix
+# matches no metrics SCAN pattern, so an instance on an older version
+# walking the keyspace during an upgrade never reads an index as a hash.
+METRICS_INDEX_KEY = "metrics_index:{kind}"
+# Which index a metrics hash is listed in, by its key's prefix.
+METRICS_INDEX_KINDS: tuple[tuple[str, str], ...] = (
+    ("proxy:metrics:", "proxy"),
+    ("project:metrics:", "project"),
+    ("connector:metrics:", "connector"),
+    ("tunnel_peer:metrics:", "tunnel_peer"),
+    (HOST_METRICS_PREFIX, "host"),
+    (FAILURE_METRICS_PREFIX, "failure"),
+)
 INSTANCE_REGISTRY_KEY = "instance_registry:{instance_id}"
-INSTANCE_REGISTRY_SCAN = "instance_registry:*"
+# Every instance that has advertised itself, so peers are found without
+# walking the keyspace. Liveness is still the registry key's TTL: a member
+# whose key has expired is dropped by whoever reads the set.
+INSTANCE_INDEX_KEY = "instance_index"
 # What one instance can see about itself and nobody else can: its runtime,
 # its in-memory caches and its background-worker counters. Published on the
 # same heartbeat as the registry key above so the admin system view can show
@@ -118,7 +137,9 @@ GEO_OBSERVATIONS_KEY = "geo:observations"
 # behind a load balancer each publish their own; readers merge. The protocol
 # is the key prefix: ``wireguard:peer_status:...``, ``openvpn:peer_status:...``.
 TUNNEL_PEER_STATUS_KEY = "{protocol}:peer_status:{instance_id}"
-TUNNEL_PEER_STATUS_SCAN = "{protocol}:peer_status:*"
+# The instances that have published a protocol's statuses, so readers do not
+# walk the keyspace for them; a member whose hash has expired is dropped.
+TUNNEL_PEER_STATUS_INDEX_KEY = "{protocol}:peer_status_index"
 # The fake-IP mapping the tunnel DNS hands out, shared so a connection that
 # lands on a different instance from the one that answered the query still
 # knows the name, whichever tunnel protocol carried either. Two keys per
@@ -155,12 +176,14 @@ REDIS_KEY_GROUPS: tuple[tuple[str, str], ...] = (
     ("tunnel_peer:metrics:", "Tunnel device metrics"),
     ("host:metrics:", "Host metrics"),
     ("failure:metrics:", "Failure metrics"),
+    ("metrics_index:", "Metrics indexes"),
     ("connector:traffic_blocked:", "Traffic limits"),
     ("sticky:", "Sticky bindings"),
     ("session:", "Sessions"),
     ("mitm:requests:", "MITM captures"),
     ("failures:", "Failure log"),
     ("instance_registry:", "Instance heartbeats"),
+    ("instance_index", "Instance heartbeats"),
     ("instance_stats:", "Instance snapshots"),
     ("lease:", "Worker leases"),
     ("autoscaler:", "Auto-scaler state"),
@@ -193,8 +216,13 @@ SCAN_COUNT = 500
 # keep it alive). A hash gone since the read (its entity was removed) is left
 # gone, and one with a counter below zero was reset and refilled since the
 # read, so nothing in it can be told apart as the next flush's: it goes.
+# KEYS[2] is the hash's index (METRICS_INDEX_KEY): a hash that goes leaves
+# it in the same step, so no write can slip in between and be left unlisted.
 _DRAIN_METRICS_SCRIPT = """
-if redis.call('EXISTS', KEYS[1]) == 0 then return 0 end
+if redis.call('EXISTS', KEYS[1]) == 0 then
+  redis.call('SREM', KEYS[2], KEYS[1])
+  return 0
+end
 local floats = {}
 for i = 1, #ARGV, 3 do
   if ARGV[i + 2] == 'f' then
@@ -212,14 +240,52 @@ for i = 1, #values, 2 do
     local n = tonumber(values[i + 1])
     if n ~= nil and n < 0 then
       redis.call('DEL', KEYS[1])
+      redis.call('SREM', KEYS[2], KEYS[1])
       return 0
     end
     if n ~= nil and n > 0 then left = true end
   end
 end
-if not left then redis.call('DEL', KEYS[1]) end
+if not left then
+  redis.call('DEL', KEYS[1])
+  redis.call('SREM', KEYS[2], KEYS[1])
+end
 return left and 1 or 0
 """
+
+# Drops index members whose key is gone. KEYS[1] is the index; ARGV holds
+# pairs of member and the key it stands for (the same string for a metrics
+# index). Checked and removed in one step: a reader that saw a hash missing
+# must not unlist one a writer has just recreated.
+_PRUNE_INDEX_SCRIPT = """
+local removed = 0
+for i = 1, #ARGV, 2 do
+  if redis.call('EXISTS', ARGV[i + 1]) == 0 then
+    removed = removed + redis.call('SREM', KEYS[1], ARGV[i])
+  end
+end
+return removed
+"""
+
+
+def _decode(value: str | bytes) -> str:
+    return value if isinstance(value, str) else value.decode()
+
+
+def metrics_index_key(key: str) -> str | None:
+    """The index a metrics hash is listed in, None for a key that is not a metrics hash."""
+    for prefix, kind in METRICS_INDEX_KINDS:
+        if key.startswith(prefix):
+            return METRICS_INDEX_KEY.format(kind=kind)
+    return None
+
+
+def _metrics_index(key: str) -> str:
+    """:func:`metrics_index_key` for a key known to be a metrics hash."""
+    index = metrics_index_key(key)
+    if index is None:
+        raise ValueError(f"not a metrics hash key: {key}")
+    return index
 
 
 def parse_host_metrics_key(key: str | bytes) -> tuple[str, str, str] | None:
@@ -294,6 +360,7 @@ class RedisClient:
         self._redis_url = redis_url
         self._client: redis.Redis | None = None
         self._drain_script: AsyncScript | None = None
+        self._prune_script: AsyncScript | None = None
 
     async def connect(self) -> None:
         """Connect to Redis."""
@@ -355,27 +422,22 @@ class RedisClient:
             "updated_at": data["updated_at"],
         }
 
-    async def get_all_proxy_statuses(self) -> dict[str, dict[str, Any]]:
-        """Get all proxy statuses from Redis."""
+    async def get_proxy_statuses(self, proxy_ids: Iterable[str]) -> dict[str, dict[str, Any]]:
+        """The status of each of ``proxy_ids`` that has one, read by key: no walk of the keyspace."""
+        ids = list(dict.fromkeys(proxy_ids))
+        keys = [PROXY_STATUS_KEY.format(proxy_id=proxy_id) for proxy_id in ids]
         statuses = {}
-        for key, data in await self._read_hashes("proxy:status:*"):
+        for proxy_id, (_key, data) in zip(ids, await self._read_hash_batches(keys), strict=True):
             status = self._read_status_hash(data)
             if status:
-                statuses[key.split(":")[-1]] = status
+                statuses[proxy_id] = status
         return statuses
 
-    async def _read_hashes(self, pattern: str) -> list[tuple[str, dict[str, Any]]]:
-        """Every hash whose key matches ``pattern``, as ``(key, fields)``.
+    async def _read_hash_batches(self, keys: list[str]) -> list[tuple[str, dict[str, Any]]]:
+        """``keys`` read as ``(key, fields)`` in pipelined batches, a round trip per batch, not per key.
 
-        One SCAN walk, then the hashes read in pipelined batches rather than a
-        round trip each: the metrics flusher and every instance's full reload
-        read all proxy, project and connector hashes once a minute. A key that
-        expired or was drained between the walk and the read comes back empty.
+        A key that does not exist comes back with empty fields.
         """
-        keys = [
-            key if isinstance(key, str) else key.decode()
-            async for key in self.client.scan_iter(match=pattern, count=SCAN_COUNT)
-        ]
         hashes: list[tuple[str, dict[str, Any]]] = []
         for start in range(0, len(keys), _HOST_METRICS_BATCH):
             batch = keys[start:start + _HOST_METRICS_BATCH]
@@ -384,6 +446,77 @@ class RedisClient:
                 pipe.hgetall(key)
             hashes.extend(zip(batch, await pipe.execute(), strict=True))
         return hashes
+
+    async def _read_indexed_hashes(self, kind: str) -> list[tuple[str, dict[str, Any]]]:
+        """Every hash a metrics index lists that still exists, as ``(key, fields)``.
+
+        One SMEMBERS and the hashes in pipelined batches, so the cost follows
+        the number of metrics hashes, not the size of the keyspace: the
+        metrics flusher and every instance's full reload read them once a
+        minute. Members whose hash is gone (drained or deleted with its entity
+        since) leave the index.
+        """
+        return await self._read_listed_hashes(METRICS_INDEX_KEY.format(kind=kind), lambda key: key)
+
+    async def _read_listed_hashes(
+        self, index: str, key_of: Callable[[str], str]
+    ) -> list[tuple[str, dict[str, Any]]]:
+        """The hash of each member of ``index`` (at ``key_of(member)``) that still exists, as ``(key, fields)``.
+
+        Members whose hash is gone leave the index.
+        """
+        members = [_decode(member) for member in await self.client.smembers(index)]  # type: ignore[misc]
+        found = await self._read_hash_batches([key_of(member) for member in members])
+        gone = [(member, key) for member, (key, data) in zip(members, found, strict=True) if not data]
+        if gone:
+            await self._prune_index(index, gone)
+        return [(key, data) for key, data in found if data]
+
+    async def _prune_index(self, index: str, members: list[tuple[str, str]]) -> None:
+        """Drop each ``(member, key)`` from ``index`` whose key is still gone when Redis checks.
+
+        Best-effort housekeeping: a failure is logged and left to the next
+        reader, so it never costs the read that found the members gone.
+        """
+        if self._prune_script is None:
+            self._prune_script = self.client.register_script(_PRUNE_INDEX_SCRIPT)
+        try:
+            for start in range(0, len(members), _HOST_METRICS_BATCH):
+                args = [part for pair in members[start:start + _HOST_METRICS_BATCH] for part in pair]
+                await self._prune_script(keys=[index], args=args)
+        except Exception:
+            logger.warning("Index prune failed; left to the next reader", index=index, exc_info=True)
+
+    async def reindex_metrics(self) -> int:
+        """List every metrics hash in its index, in one walk of the keyspace. Returns how many were missing.
+
+        For hashes the indexes do not know: written by an instance on an
+        older version during an upgrade, or before the indexes existed. The
+        metrics compactor runs it once each time it takes its lease (again
+        after its next compactions only if that walk failed); everything else
+        reads the indexes.
+        """
+        added = 0
+        batch: list[tuple[str, str]] = []
+        async for raw in self.client.scan_iter(count=SCAN_COUNT):
+            key = _decode(raw)
+            index = metrics_index_key(key)
+            if index is None:
+                continue
+            batch.append((index, key))
+            if len(batch) >= _HOST_METRICS_BATCH:
+                added += await self._add_to_indexes(batch)
+                batch = []
+        if batch:
+            added += await self._add_to_indexes(batch)
+        return added
+
+    async def _add_to_indexes(self, members: list[tuple[str, str]]) -> int:
+        """SADD each ``(index, key)``; returns how many keys were not listed yet."""
+        pipe = self.client.pipeline(transaction=False)
+        for index, key in members:
+            pipe.sadd(index, key)
+        return sum(int(n) for n in await pipe.execute())
 
     async def get_proxy_exit_ips(self, proxy_ids: Iterable[str]) -> dict[str, str | None]:
         """The last counted exit IP per proxy, None where none is recorded. One round trip."""
@@ -448,6 +581,7 @@ class RedisClient:
         if bytes_received > 0:
             pipe.hincrby(key, "bytes_received", bytes_received)
         pipe.hset(key, "updated_at", utc_now().isoformat())
+        pipe.sadd(_metrics_index(key), key)
         await pipe.execute()
 
     async def flush_metric_deltas(
@@ -519,6 +653,9 @@ class RedisClient:
             else:
                 pipe.hincrby(key, f.name, value)
         pipe.hset(key, "updated_at", now_iso)
+        # After the increments, so the drain can never unlist a hash this
+        # write has just recreated (see METRICS_INDEX_KEY).
+        pipe.sadd(_metrics_index(key), key)
 
     async def get_proxy_metrics(self, proxy_id: str) -> MetricDelta | None:
         """Get proxy metrics from Redis."""
@@ -528,7 +665,7 @@ class RedisClient:
     async def get_all_proxy_metrics(self) -> dict[str, MetricDelta]:
         """Get all proxy metrics from Redis."""
         metrics = {}
-        for key, data in await self._read_hashes("proxy:metrics:*"):
+        for key, data in await self._read_indexed_hashes("proxy"):
             m = self._read_metrics_hash(data, MetricDelta)
             if m:
                 metrics[key.split(":")[-1]] = m
@@ -568,6 +705,7 @@ class RedisClient:
         if bytes_received > 0:
             pipe.hincrby(key, "bytes_received", bytes_received)
         pipe.hset(key, "updated_at", utc_now().isoformat())
+        pipe.sadd(_metrics_index(key), key)
         await pipe.execute()
 
     async def get_project_metrics(self, project_id: str) -> MetricDelta | None:
@@ -578,7 +716,7 @@ class RedisClient:
     async def get_all_project_metrics(self) -> dict[str, MetricDelta]:
         """Get all project-level metrics from Redis."""
         metrics = {}
-        for key, data in await self._read_hashes("project:metrics:*"):
+        for key, data in await self._read_indexed_hashes("project"):
             m = self._read_metrics_hash(data, MetricDelta)
             if m:
                 metrics[key.split(":")[-1]] = m
@@ -599,7 +737,7 @@ class RedisClient:
     async def get_all_connector_metrics(self) -> dict[str, MetricDelta]:
         """Get all connector-level metrics from Redis."""
         metrics = {}
-        for key, data in await self._read_hashes("connector:metrics:*"):
+        for key, data in await self._read_indexed_hashes("connector"):
             m = self._read_metrics_hash(data, MetricDelta)
             if m:
                 metrics[key.split(":")[-1]] = m
@@ -618,7 +756,7 @@ class RedisClient:
 
     async def get_all_tunnel_peer_metrics(self) -> dict[str, TunnelPeerMetricDelta]:
         metrics = {}
-        for key, data in await self._read_hashes(TUNNEL_PEER_METRICS_SCAN):
+        for key, data in await self._read_indexed_hashes("tunnel_peer"):
             m = self._read_metrics_hash(data, TunnelPeerMetricDelta)
             if m:
                 metrics[key.split(":", 2)[2]] = m
@@ -635,7 +773,7 @@ class RedisClient:
     async def get_all_host_metrics(self) -> dict[tuple[str, str, str], MetricDelta]:
         """Every host metrics hash, keyed by (project_id, connector_id, host)."""
         metrics: dict[tuple[str, str, str], MetricDelta] = {}
-        for raw_key, data in await self._read_hashes(HOST_METRICS_SCAN):
+        for raw_key, data in await self._read_indexed_hashes("host"):
             parsed = parse_host_metrics_key(raw_key)
             m = self._read_metrics_hash(data, MetricDelta)
             if parsed is not None and m:
@@ -854,7 +992,9 @@ class RedisClient:
         for project_id in {project_id for project_id, _kind in streams}:
             pipe.expire(FAILURE_LOG_APPENDED_KEY.format(project_id=project_id), retention_seconds)
         for count_key, count in counts.items():
-            pipe.hincrby(failure_metrics_key(count_key), "failure_count", count)
+            key = failure_metrics_key(count_key)
+            pipe.hincrby(key, "failure_count", count)
+            pipe.sadd(_metrics_index(key), key)
         results = await pipe.execute(raise_on_error=False)
         # The XADDs come first; anything else failing fails the window.
         failed = next((r for r in results[len(entries):] if isinstance(r, Exception)), None)
@@ -932,20 +1072,12 @@ class RedisClient:
 
     async def get_all_failure_metrics(self) -> dict[FailureCountKey, int]:
         """Every failure count hash, keyed by (project_id, connector_id, kind, upstream_status)."""
-        keys: list[FailureCountKey] = []
-        async for raw_key in self.client.scan_iter(match=FAILURE_METRICS_SCAN, count=SCAN_COUNT):
-            parsed = parse_failure_metrics_key(raw_key)
-            if parsed is not None:
-                keys.append(parsed)
         counts: dict[FailureCountKey, int] = {}
-        for start in range(0, len(keys), _HOST_METRICS_BATCH):
-            batch = keys[start:start + _HOST_METRICS_BATCH]
-            pipe = self.client.pipeline()
-            for key in batch:
-                pipe.hget(failure_metrics_key(key), "failure_count")
-            for key, value in zip(batch, await pipe.execute(), strict=True):
-                if value is not None and int(value) > 0:
-                    counts[key] = int(value)
+        for key, data in await self._read_indexed_hashes("failure"):
+            parsed = parse_failure_metrics_key(key)
+            value = data.get("failure_count")
+            if parsed is not None and value is not None and int(value) > 0:
+                counts[parsed] = int(value)
         return counts
 
     async def drain_flushed_metrics(
@@ -986,7 +1118,7 @@ class RedisClient:
         for start in range(0, len(drains), _HOST_METRICS_BATCH):
             pipe = self.client.pipeline(transaction=False)
             for name, args in drains[start:start + _HOST_METRICS_BATCH]:
-                await self._drain_script(keys=[name], args=args, client=pipe)
+                await self._drain_script(keys=[name, _metrics_index(name)], args=args, client=pipe)
             await pipe.execute()
 
     @staticmethod
@@ -1012,6 +1144,45 @@ class RedisClient:
         """Delete every failure count hash of a connector, when the connector goes."""
         await self._delete_matching(FAILURE_METRICS_CONNECTOR_SCAN.format(connector_id=connector_id))
 
+    # Instance membership: the registry key proves an instance alive (it
+    # expires with the TTL), the snapshot key carries what it reports about
+    # itself, and the index lists who to look at.
+
+    async def advertise_instance(self, instance_id: str, role: str, snapshot: str | None) -> None:
+        """One heartbeat: the registry and snapshot keys with a fresh expiry, and the instance listed."""
+        pipe = self.client.pipeline()
+        pipe.set(INSTANCE_REGISTRY_KEY.format(instance_id=instance_id), role, ex=INSTANCE_TTL_SECONDS)
+        if snapshot is not None:
+            pipe.set(INSTANCE_STATS_KEY.format(instance_id=instance_id), snapshot, ex=INSTANCE_TTL_SECONDS)
+        pipe.sadd(INSTANCE_INDEX_KEY, instance_id)
+        await pipe.execute()
+
+    async def withdraw_instance(self, instance_id: str) -> None:
+        """A graceful departure, so peers see it now rather than when the keys expire."""
+        pipe = self.client.pipeline()
+        pipe.delete(INSTANCE_REGISTRY_KEY.format(instance_id=instance_id), INSTANCE_STATS_KEY.format(instance_id=instance_id))
+        pipe.srem(INSTANCE_INDEX_KEY, instance_id)
+        await pipe.execute()
+
+    async def live_instance_ids(self) -> list[str]:
+        """The instances whose registry key has not expired, sorted. Two round trips, whatever the keyspace.
+
+        Listed instances whose key has expired (a process that died without
+        withdrawing) leave the index.
+        """
+        members = sorted(_decode(member) for member in await self.client.smembers(INSTANCE_INDEX_KEY))  # type: ignore[misc]
+        if not members:
+            return []
+        keys = [INSTANCE_REGISTRY_KEY.format(instance_id=member) for member in members]
+        pipe = self.client.pipeline(transaction=False)
+        for key in keys:
+            pipe.exists(key)
+        alive = await pipe.execute()
+        gone = [(member, key) for member, key, live in zip(members, keys, alive, strict=True) if not live]
+        if gone:
+            await self._prune_index(INSTANCE_INDEX_KEY, gone)
+        return [member for member, live in zip(members, alive, strict=True) if live]
+
     # Tunnel peer status, per protocol
 
     async def set_tunnel_peer_status(self, protocol: str, instance_id: str, statuses: dict[str, str]) -> None:
@@ -1021,6 +1192,8 @@ class RedisClient:
         pipe.delete(key)
         if statuses:
             pipe.hset(key, mapping=statuses)
+            # Only with a hash to find: an empty one is gone, and readers would drop it again.
+            pipe.sadd(TUNNEL_PEER_STATUS_INDEX_KEY.format(protocol=protocol), instance_id)
         pipe.expire(key, TUNNEL_STATUS_TTL_SECONDS)
         await pipe.execute()
 
@@ -1071,8 +1244,11 @@ class RedisClient:
 
     async def get_tunnel_peer_status(self, protocol: str) -> list[dict[str, str]]:
         """What every instance carrying a protocol last published, one hash per carrier; [] when none is."""
-        hashes = await self._read_hashes(TUNNEL_PEER_STATUS_SCAN.format(protocol=protocol))
-        return [data for _key, data in hashes if data]
+        hashes = await self._read_listed_hashes(
+            TUNNEL_PEER_STATUS_INDEX_KEY.format(protocol=protocol),
+            lambda instance_id: TUNNEL_PEER_STATUS_KEY.format(protocol=protocol, instance_id=instance_id),
+        )
+        return [data for _key, data in hashes]
 
 
 @lru_cache

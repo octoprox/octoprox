@@ -64,9 +64,6 @@ from api.core.traffic_limiter import TrafficLimiter, TrafficMeter
 from api.core.workers import WorkerName
 from api.db.redis import (
     INSTANCE_HEARTBEAT_INTERVAL,
-    INSTANCE_REGISTRY_KEY,
-    INSTANCE_STATS_KEY,
-    INSTANCE_TTL_SECONDS,
     METRIC_DELTAS_CHANNEL,
     RedisClient,
 )
@@ -518,38 +515,36 @@ class ProxyManager:
         so a peer never reads a snapshot from an instance it thinks is gone.
         Building the snapshot touches memory only - see
         :func:`api.core.system_stats.build_instance_snapshot` - which is what
-        keeps it affordable at this cadence.
+        keeps it affordable at this cadence. The same pipeline lists the
+        instance in the instance index, which is how peers find it without
+        walking the keyspace.
 
         Cleanup is double-belt:
 
         * Redis TTL (10s) expires the keys automatically if the process
-          dies hard (SIGKILL, OOM, network partition).
+          dies hard (SIGKILL, OOM, network partition); readers then drop
+          it from the index.
         * The ``finally`` block deletes them on graceful shutdown so
           peers see the departure immediately rather than waiting 10s.
 
         Refresh interval (5s) is deliberately half the TTL so a single
         missed write does not declare us dead.
         """
-        key = INSTANCE_REGISTRY_KEY.format(instance_id=self._settings.instance_id)
-        stats_key = INSTANCE_STATS_KEY.format(instance_id=self._settings.instance_id)
-        payload = self._settings.role
+        instance_id = self._settings.instance_id
         job_stats.declare_interval(WorkerName.HEARTBEAT, INSTANCE_HEARTBEAT_INTERVAL)
         try:
             while self._running:
                 try:
                     with job_stats.track(WorkerName.HEARTBEAT):
-                        snapshot = self._instance_snapshot_json()
-                        pipe = self._redis_client.client.pipeline()
-                        pipe.set(key, payload, ex=INSTANCE_TTL_SECONDS)
-                        if snapshot is not None:
-                            pipe.set(stats_key, snapshot, ex=INSTANCE_TTL_SECONDS)
-                        await pipe.execute()
+                        await self._redis_client.advertise_instance(
+                            instance_id, self._settings.role, self._instance_snapshot_json()
+                        )
                 except Exception:
                     logger.warning("Instance heartbeat write failed", exc_info=True)
                 await asyncio.sleep(INSTANCE_HEARTBEAT_INTERVAL)
         finally:
             with contextlib.suppress(Exception):
-                await self._redis_client.client.delete(key, stats_key)
+                await self._redis_client.withdraw_instance(instance_id)
 
     def _subscribe_to_signals(self) -> None:
         """Subscribe to signals from other components."""
@@ -931,7 +926,10 @@ class ProxyManager:
         """
         logger.info("Hydrating operational data")
         started = time.monotonic()
-        statuses = await self._redis_client.get_all_proxy_statuses()
+        # By key for the proxies this instance knows, and the metrics through
+        # their index: nothing here walks the keyspace, which at peak made
+        # this reload take minutes.
+        statuses = await self._redis_client.get_proxy_statuses(list(self._proxies))
         redis_proxy_metrics = await self._redis_client.get_all_proxy_metrics()
 
         # Always load cumulative totals from Postgres
@@ -985,7 +983,7 @@ class ProxyManager:
             project_count=len(self._projects),
             from_redis=len(redis_proxy_metrics),
             from_postgres=len(postgres_proxy_metrics),
-            # postgres_ms is the cumulative totals; the rest is mostly Redis walks
+            # postgres_ms is the cumulative totals; the rest is mostly Redis reads
             # waiting on the event loop, plus the traffic limiter's period totals
             # (a Postgres read of its own).
             duration_ms=round((time.monotonic() - started) * 1000),

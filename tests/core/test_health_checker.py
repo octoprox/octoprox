@@ -14,7 +14,7 @@ from api.core.health_checker import (
     HealthChecker,
 )
 from api.core.signals import health_check_completed
-from api.db.redis import INSTANCE_REGISTRY_KEY, RedisClient
+from api.db.redis import RedisClient
 from api.models.proxy import Proxy, ProxyStatus
 
 
@@ -33,7 +33,7 @@ def health_checker(
 ) -> HealthChecker:
     """Create a HealthChecker instance against a real testcontainers Redis.
 
-    With no instance_registry:* keys present, the HRW filter resolves to a
+    With no instance advertised, the HRW filter resolves to a
     single-instance run and every active proxy is checked locally.
     """
     return HealthChecker(mock_proxy_data_provider, redis_client, "test-instance")
@@ -322,12 +322,10 @@ class TestCheckAllProxiesSharding:
         redis_client: RedisClient,
     ) -> None:
         # Advertise three peers in the real testcontainers Redis. The
-        # HealthChecker's _live_instances will SCAN these and use them
-        # for HRW ownership.
+        # HealthChecker's _live_instances reads them through the instance
+        # index and uses them for HRW ownership.
         for inst in ("self", "peer-1", "peer-2"):
-            await redis_client.client.set(
-                INSTANCE_REGISTRY_KEY.format(instance_id=inst), inst, ex=30
-            )
+            await redis_client.advertise_instance(inst, "all", snapshot=None)
 
         checker = HealthChecker(mock_proxy_data_provider, redis_client, "self")
 

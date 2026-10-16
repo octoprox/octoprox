@@ -29,7 +29,7 @@ from api.core.event_bus import event_bus
 from api.core.job_stats import job_stats
 from api.core.signals import exit_ip_observed, health_check_completed
 from api.core.workers import WorkerName
-from api.db.redis import INSTANCE_REGISTRY_SCAN, SCAN_COUNT, RedisClient
+from api.db.redis import RedisClient
 from api.models.connector import Connector
 from api.models.location import LocationTarget
 from api.models.proxy import Proxy, ProxyProtocol, ProxyStatus
@@ -195,21 +195,15 @@ class HealthChecker:
         """Return the sorted list of live instance ids advertised in Redis.
 
         Always includes our own id (covers the bootstrap window before the
-        heartbeat has written its first key).
+        heartbeat has written its first key). Read through the instance index,
+        not a walk of the keyspace: this runs every tick on every instance.
         """
         ids: set[str] = {self._instance_id}
         try:
-            async for key in self._redis_client.client.scan_iter(
-                match=INSTANCE_REGISTRY_SCAN, count=SCAN_COUNT
-            ):
-                if isinstance(key, bytes):
-                    key = key.decode("utf-8")
-                _, _, ident = key.partition(":")
-                if ident:
-                    ids.add(ident)
+            ids.update(await self._redis_client.live_instance_ids())
         except Exception:
             logger.warning(
-                "Instance registry scan failed; running solo this tick",
+                "Instance registry read failed; running solo this tick",
                 exc_info=True,
             )
         return sorted(ids)

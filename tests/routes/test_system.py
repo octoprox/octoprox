@@ -17,6 +17,7 @@ from api.core import utc_now
 from api.core.config import Settings
 from api.db.models import SystemMetricsModel
 from api.db.redis import (
+    INSTANCE_INDEX_KEY,
     INSTANCE_REGISTRY_KEY,
     INSTANCE_STATS_KEY,
     INSTANCE_TTL_SECONDS,
@@ -435,6 +436,8 @@ def peer_writer(test_settings: Settings) -> Iterator[Any]:
     client = redis.Redis.from_url(test_settings.redis_url, decode_responses=True)
     written: list[str] = []
 
+    listed: list[str] = []
+
     def write(instance_id: str, *, snapshot: str | None) -> None:
         registry = INSTANCE_REGISTRY_KEY.format(instance_id=instance_id)
         stats = INSTANCE_STATS_KEY.format(instance_id=instance_id)
@@ -443,12 +446,16 @@ def peer_writer(test_settings: Settings) -> Iterator[Any]:
         if snapshot is not None:
             client.set(stats, snapshot, ex=INSTANCE_TTL_SECONDS)
             written.append(stats)
+        client.sadd(INSTANCE_INDEX_KEY, instance_id)
+        listed.append(instance_id)
 
     try:
         yield write
     finally:
         if written:
             client.delete(*written)
+        if listed:
+            client.srem(INSTANCE_INDEX_KEY, *listed)
         client.close()
 
 

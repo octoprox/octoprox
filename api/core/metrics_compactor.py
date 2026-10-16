@@ -63,6 +63,8 @@ class MetricsCompactor:
         self._instance_id = instance_id
         self._interval = interval
         self._running = False
+        # Set on taking the lease, cleared by the first metrics reindex that succeeds.
+        self._reindex_pending = False
 
     async def run(self) -> None:
         """Run the compaction loop while holding the global lease.
@@ -82,13 +84,24 @@ class MetricsCompactor:
         try:
             while self._running:
                 try:
-                    if not lease.is_held and not await lease.try_acquire():
-                        await asyncio.sleep(_LEASE_RETRY_SECONDS)
-                        continue
+                    if not lease.is_held:
+                        if not await lease.try_acquire():
+                            await asyncio.sleep(_LEASE_RETRY_SECONDS)
+                            continue
+                        # Taking the lease (a deploy, a restart) is when hashes no
+                        # index lists can exist: written by older instances during
+                        # an upgrade, or restored from a snapshot taken before it.
+                        # Listed now, once; not on every compaction, since the walk
+                        # covers the whole keyspace and finds nothing after that.
+                        self._reindex_pending = True
+                        await self._reindex_metrics()
                     await asyncio.sleep(self._interval)
                     if lease.is_held and self._running:
                         with job_stats.track(WorkerName.METRICS_COMPACTOR):
                             await self._compact_and_retain()
+                        if self._reindex_pending:
+                            # The walk on taking the lease failed: again until one succeeds.
+                            await self._reindex_metrics()
                 except asyncio.CancelledError:
                     logger.info("Metrics compactor stopped")
                     break
@@ -96,6 +109,25 @@ class MetricsCompactor:
                     logger.error("Metrics compaction error", error=str(e))
         finally:
             await lease.release()
+
+    async def _reindex_metrics(self) -> None:
+        """List any Redis metrics hash its index misses, so the flusher and reloads see it.
+
+        One walk of the keyspace, here rather than in the flusher: at peak a
+        walk takes minutes, and the flush must not wait for it. Only hashes
+        written by an instance on an older version (or before the indexes
+        existed) can be missing, so this is housekeeping for upgrades. A failed
+        walk is logged and tried again after the next compaction; it never
+        costs a compaction.
+        """
+        try:
+            added = await self._redis_client.reindex_metrics()
+        except Exception:
+            logger.warning("Metrics reindex failed; retried after the next compaction", exc_info=True)
+            return
+        self._reindex_pending = False
+        if added:
+            logger.info("Listed metrics hashes their index was missing", count=added)
 
     async def _compact_and_retain(self) -> None:
         """Run compaction tiers and retention for all projects."""

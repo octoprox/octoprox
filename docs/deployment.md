@@ -150,9 +150,27 @@ A few small mechanisms keep N instances in sync without a coordinator.
 ### Heartbeat (instance discovery)
 
 Every instance writes a Redis key `instance_registry:<instance_id>` with a
-10-second TTL, refreshed every 5 seconds. On graceful shutdown it deletes
-its key; on hard kill, Redis expires it. The set of live keys is the
-membership snapshot used by everything below.
+10-second TTL, refreshed every 5 seconds, and lists its id in the set
+`instance_index`. On graceful shutdown it deletes its key and leaves the set;
+on hard kill, Redis expires the key and the next reader drops the id. The
+listed instances whose key is alive are the membership snapshot used by
+everything below. Peers are found through the set rather than by walking the
+keyspace, which grows with sessions and sticky bindings and, on a busy event
+loop, made every walk slow. During a rolling upgrade from a version without
+the set, the older instances are not listed: until they are replaced, the
+newer ones also health-check the older ones' share of proxies, and leave them
+(and the tunnel devices they carry) out of what they report.
+
+A known gap, left for a later release: a dead instance leaves `instance_index`
+only when something reads the set (the health checker, on every tick while
+there are proxies to check, and the System page). The same goes for
+`<protocol>:peer_status_index`, the instances publishing WireGuard or OpenVPN
+device status, which the device views read. Instance ids are new on every
+boot, so on an install where a set is never read (no proxies, or tunnel
+devices nobody looks at) each restart leaves one dead id in it. Each is a few
+dozen bytes and is dropped the first time the set is read, so nothing
+misbehaves. The planned fix is to keep both as sorted sets scored by the time
+of the last write and trim old entries on every write.
 
 The same beat writes `instance_stats:<instance_id>`, holding what only that
 process can see: its runtime, its in-memory cache sizes and its
@@ -208,8 +226,24 @@ instances in parallel - only the same connector is single-writer.
 
 Health-checking is the highest-volume background task. Each proxy is
 assigned to exactly one instance at a time via rendezvous hashing (HRW)
-over the live `instance_registry:*` membership. When an instance joins
+over the live membership. When an instance joins
 or leaves, only ~1/N of proxies move owner; the rest stay put.
+
+### Metrics in Redis
+
+Each instance adds its request counters to Redis hashes every few seconds,
+and the leader's metrics flusher turns them into history rows once a minute.
+Each kind of hash (proxy, project, connector, tunnel device, host, failure)
+is listed in a set, `metrics_index:<kind>`, written in the same step as the
+counters, so the flusher and every instance's periodic reload read the
+hashes without walking the keyspace. During a rolling upgrade from a version
+without these sets, the older instances write hashes no set lists yet, and a
+Redis restored from a snapshot taken before the upgrade holds some too. The
+metrics compactor lists them, in one walk of the keyspace, each time it takes
+its lease, so at every deploy and restart. A hash that newer instances write
+again is listed at once; one written only by an older instance after that
+walk waits for the next restart, so its counts (a minute or two at most)
+reach the history late rather than never.
 
 ### Per-request side effects
 
@@ -284,9 +318,9 @@ milliseconds; retry the read if that matters.
 ### Inspecting cluster state
 
 ```bash
-# Live membership
+# Live membership (an id whose instance_registry:<id> key has expired is gone)
 docker compose -f docker-compose.cluster.yml exec redis \
-  redis-cli KEYS 'instance_registry:*'
+  redis-cli SMEMBERS instance_index
 
 # Active leases (and who holds them)
 docker compose -f docker-compose.cluster.yml exec redis \

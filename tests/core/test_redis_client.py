@@ -3,7 +3,18 @@
 
 """Tests for RedisClient."""
 from api.core.stats import MetricDelta, TunnelPeerMetricDelta
-from api.db.redis import HOST_METRICS_KEY, PROJECT_METRICS_KEY, PROXY_METRICS_KEY, RedisClient
+from api.db.redis import (
+    HOST_METRICS_KEY,
+    INSTANCE_INDEX_KEY,
+    INSTANCE_REGISTRY_KEY,
+    METRICS_INDEX_KEY,
+    PROJECT_METRICS_KEY,
+    PROXY_METRICS_KEY,
+    TUNNEL_PEER_STATUS_INDEX_KEY,
+    TUNNEL_PEER_STATUS_KEY,
+    RedisClient,
+    failure_metrics_key,
+)
 from api.models.proxy import ProxyStatus
 
 
@@ -54,9 +65,8 @@ class TestRedisClient:
         finally:
             await redis_client.delete_proxy_status("has-hash")
 
-    async def test_get_all_proxy_statuses(self, redis_client: RedisClient) -> None:
-        """Test getting all proxy statuses."""
-        # Set multiple statuses
+    async def test_proxy_statuses_by_id(self, redis_client: RedisClient) -> None:
+        """Read by key for the proxies asked about: a proxy without a status is left out."""
         for i in range(3):
             await redis_client.set_proxy_status(
                 proxy_id=f"proxy-{i}",
@@ -64,7 +74,7 @@ class TestRedisClient:
                 latency_ms=float(i * 10),
             )
 
-        statuses = await redis_client.get_all_proxy_statuses()
+        statuses = await redis_client.get_proxy_statuses(["proxy-0", "proxy-1", "proxy-2", "proxy-unknown"])
 
         assert len(statuses) == 3
         assert "proxy-0" in statuses
@@ -132,7 +142,7 @@ class TestRedisClient:
         await redis_client.client.hset("proxy:status:sighting-only", "exit_ip", "203.0.113.7")
 
         metrics = await redis_client.get_all_proxy_metrics()
-        statuses = await redis_client.get_all_proxy_statuses()
+        statuses = await redis_client.get_proxy_statuses([*proxies, "sighting-only"])
 
         assert metrics == proxies
         assert len(statuses) == 1200
@@ -365,3 +375,114 @@ class TestDrainFlushedMetrics:
         assert not await redis_client.client.exists(
             HOST_METRICS_KEY.format(project_id="proj", connector_id="conn", host="host8.example.com")
         )
+
+
+
+def _index(kind: str) -> str:
+    return METRICS_INDEX_KEY.format(kind=kind)
+
+
+class TestMetricsIndexes:
+    """The flusher and full reloads find the metrics hashes through their indexes, not a walk of the keyspace."""
+
+    async def test_every_kind_is_listed_as_it_is_written(self, redis_client: RedisClient) -> None:
+        device = TunnelPeerMetricDelta()
+        device.add_request(True, 10.0)
+        await redis_client.flush_metric_deltas(
+            {"p1": _requests(1)},
+            {"proj": _requests(1)},
+            connector_deltas={"conn": _requests(1)},
+            tunnel_peer_deltas={"dev": device},
+            host_deltas={("proj", "conn", "example.com"): _requests(1)},
+        )
+        await redis_client.update_proxy_metrics("p2", success=True, latency_ms=5)
+        failure = ("proj", "conn", "upstream_rejected", 429)
+        await redis_client.append_failures([], {failure: 2}, max_entries=10, retention_seconds=60)
+
+        client = redis_client.client
+        assert await client.smembers(_index("proxy")) == {PROXY_METRICS_KEY.format(proxy_id="p1"), PROXY_METRICS_KEY.format(proxy_id="p2")}
+        assert await client.smembers(_index("project")) == {PROJECT_METRICS_KEY.format(project_id="proj")}
+        assert await client.smembers(_index("connector")) == {"connector:metrics:conn"}
+        assert await client.smembers(_index("tunnel_peer")) == {"tunnel_peer:metrics:dev"}
+        assert await client.smembers(_index("host")) == {HOST_METRICS_KEY.format(project_id="proj", connector_id="conn", host="example.com")}
+        assert await client.smembers(_index("failure")) == {failure_metrics_key(failure)}
+        assert await redis_client.get_all_failure_metrics() == {failure: 2}
+        assert set(await redis_client.get_all_connector_metrics()) == {"conn"}
+
+    async def test_a_drained_hash_leaves_its_index_with_it(self, redis_client: RedisClient) -> None:
+        await redis_client.flush_metric_deltas({"p1": _requests(2), "p2": _requests(2)}, {})
+        read = await redis_client.get_all_proxy_metrics()
+        await redis_client.flush_metric_deltas({"p2": _requests(1)}, {})  # arrives after the read
+
+        await _drain(redis_client, proxies=read)
+
+        # p1 went to zero and left; p2 keeps what arrived since and stays listed.
+        assert await redis_client.client.smembers(_index("proxy")) == {PROXY_METRICS_KEY.format(proxy_id="p2")}
+
+    async def test_a_hash_deleted_elsewhere_is_dropped_from_its_index_on_the_next_read(
+        self, redis_client: RedisClient
+    ) -> None:
+        await redis_client.flush_metric_deltas({"p1": _requests(1), "p2": _requests(1)}, {})
+        await redis_client.reset_proxy_metrics("p1")
+
+        assert set(await redis_client.get_all_proxy_metrics()) == {"p2"}
+        assert await redis_client.client.smembers(_index("proxy")) == {PROXY_METRICS_KEY.format(proxy_id="p2")}
+
+    async def test_pruning_never_unlists_a_hash_that_exists(self, redis_client: RedisClient) -> None:
+        """A writer can recreate a hash between a reader seeing it gone and the prune: Redis checks again."""
+        await redis_client.flush_metric_deltas({"p1": _requests(1)}, {})
+        key = PROXY_METRICS_KEY.format(proxy_id="p1")
+
+        await redis_client._prune_index(_index("proxy"), [(key, key)])
+
+        assert await redis_client.client.sismember(_index("proxy"), key)
+
+    async def test_a_hash_no_index_lists_is_found_by_the_reindex(self, redis_client: RedisClient) -> None:
+        """As an instance on an older version writes during an upgrade, without listing what it writes."""
+        legacy = PROXY_METRICS_KEY.format(proxy_id="legacy")
+        await redis_client.client.hset(legacy, mapping={"request_count": 3, "success_count": 3})
+        await redis_client.client.set("sticky:proj:session-1", "proxy")  # not a metrics hash: never listed
+        await redis_client.flush_metric_deltas({"p1": _requests(1)}, {})
+        assert set(await redis_client.get_all_proxy_metrics()) == {"p1"}
+
+        assert await redis_client.reindex_metrics() == 1  # the legacy hash, not the sticky binding
+        assert await redis_client.reindex_metrics() == 0  # nothing left to list
+
+        assert set(await redis_client.get_all_proxy_metrics()) == {"p1", "legacy"}
+
+
+class TestInstanceIndex:
+    """Peers are found through the instance index; liveness is still the registry key's TTL."""
+
+    async def test_advertised_instances_are_live_until_they_withdraw(self, redis_client: RedisClient) -> None:
+        await redis_client.advertise_instance("a", "all", snapshot='{"x": 1}')
+        await redis_client.advertise_instance("b", "all", snapshot=None)
+        assert await redis_client.live_instance_ids() == ["a", "b"]
+        assert await redis_client.client.get("instance_stats:a") == '{"x": 1}'
+
+        await redis_client.withdraw_instance("a")
+
+        assert await redis_client.live_instance_ids() == ["b"]
+        assert not await redis_client.client.exists(INSTANCE_REGISTRY_KEY.format(instance_id="a"), "instance_stats:a")
+
+    async def test_an_instance_whose_key_expired_is_dropped(self, redis_client: RedisClient) -> None:
+        """A process killed without withdrawing: its key expires, and the first reader unlists it."""
+        await redis_client.advertise_instance("a", "all", snapshot=None)
+        await redis_client.advertise_instance("dead", "all", snapshot=None)
+        await redis_client.client.delete(INSTANCE_REGISTRY_KEY.format(instance_id="dead"))
+
+        assert await redis_client.live_instance_ids() == ["a"]
+        assert await redis_client.client.smembers(INSTANCE_INDEX_KEY) == {"a"}
+
+
+class TestTunnelPeerStatusIndex:
+    async def test_carriers_are_read_through_the_index_and_expired_ones_dropped(
+        self, redis_client: RedisClient
+    ) -> None:
+        await redis_client.set_tunnel_peer_status("wireguard", "a", {"peer-1": '{"online": true}'})
+        await redis_client.set_tunnel_peer_status("wireguard", "b", {"peer-2": '{"online": false}'})
+        await redis_client.client.delete(TUNNEL_PEER_STATUS_KEY.format(protocol="wireguard", instance_id="b"))
+
+        assert await redis_client.get_tunnel_peer_status("wireguard") == [{"peer-1": '{"online": true}'}]
+        assert await redis_client.client.smembers(TUNNEL_PEER_STATUS_INDEX_KEY.format(protocol="wireguard")) == {"a"}
+        assert await redis_client.get_tunnel_peer_status("openvpn") == []
