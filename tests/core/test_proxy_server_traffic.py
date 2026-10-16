@@ -13,7 +13,7 @@ import asyncio
 import contextlib
 from collections.abc import AsyncIterator
 from typing import Any
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -175,6 +175,28 @@ class TestTunnelMetering:
         assert await asyncio.wait_for(tunnel, 5) == (4, 5)
         await _close(client_server[1], upstream_server[1])
 
+
+
+class TestClosedLeg:
+    async def test_bytes_for_a_leg_that_already_closed_end_the_tunnel_quietly(self) -> None:
+        """uvloop raises RuntimeError, not an OSError, for a write to a closed transport."""
+        server = ProxyServer(proxy_manager=MagicMock())
+        client_reader = asyncio.StreamReader()
+        client_reader.feed_data(b"late bytes")
+        client_reader.feed_eof()
+        upstream_reader = asyncio.StreamReader()
+        upstream_reader.feed_eof()
+        closed = MagicMock(spec=asyncio.StreamWriter)
+        closed.is_closing.return_value = True
+        closed.write.side_effect = RuntimeError("unable to perform operation on <TCPTransport closed=True>")
+        client_writer = MagicMock(spec=asyncio.StreamWriter)
+        client_writer.is_closing.return_value = False
+        client_writer.drain = AsyncMock()
+
+        result = await asyncio.wait_for(server._tunnel(client_reader, client_writer, upstream_reader, closed), 5)
+
+        assert result == (0, 0)
+        closed.write.assert_not_called()
 
 class TestChunkedForwarding:
     async def test_chunked_body_is_metered_and_forwarded(self, pipes: list[Pipe]) -> None:

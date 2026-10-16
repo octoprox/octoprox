@@ -861,6 +861,10 @@ class ProxyServer:
                         if writer.can_write_eof():
                             writer.write_eof()
                         break
+                    if writer.is_closing():
+                        # The other leg closed while this read waited. uvloop
+                        # answers a write to it with RuntimeError, not OSError.
+                        break
                     total_bytes += len(data)
                     writer.write(data)
                     await writer.drain()
