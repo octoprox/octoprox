@@ -684,6 +684,7 @@ class GeoDatabaseModel(Base):
     update_url: Mapped[str | None] = mapped_column(String(2048), nullable=True)
     update_interval_hours: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     update_auth: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    update_paused: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
     last_update_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     last_update_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     uploaded_by: Mapped[str | None] = mapped_column(String(255), nullable=True)

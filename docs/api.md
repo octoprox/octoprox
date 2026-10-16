@@ -1247,11 +1247,11 @@ All endpoints live under `/api/v1/geo`. Reads need any authenticated user; write
 |--------|------|---------|
 | GET | `/geo/settings` | Install-wide settings (default conflict rule, `default_city_radius_km`, echo endpoint, preflight, retention), whether an admin saved them, databases loaded on this instance |
 | PUT | `/geo/settings` | Replace the settings (body: the `settings` object). Applies to every instance |
-| GET | `/geo/databases` | Every database: stored rows plus config-file entries, with `loaded_here` and `load_error` |
+| GET | `/geo/databases` | Every database: stored rows plus config-file entries, with `loaded_here`, `load_error` and, for a scheduled download, `last_update_at` (the last check, whether or not the file changed) and `next_update_at` (when the schedule is next due; null without a schedule, while `update_paused`, or while the database is disabled) |
 | POST | `/geo/databases` | Upload a file (`multipart/form-data`: `file`, optional `name`, `priority`, `enabled`): an mmdb, an IP2Location BIN, or a GeoNames table (zipped or `.txt`, stored with `vendor: geonames`, `kind: places`, `format: geonames`). Validated before it is stored; proxies are re-attributed |
 | POST | `/geo/databases/from-url` | Register a vendor download URL (`name`, `update_url` which may carry `{YYYY}` and `{MM}` placeholders filled per run, `update_interval_hours`, `update_auth`, `priority`) and download it now. `update_auth` takes `{username, password}` for basic auth or `{token}` / `{header, token}` |
 | POST | `/geo/databases/inspect` | Open an uploaded file and report its metadata without storing it |
-| PATCH | `/geo/databases/{id}` | Change `name`, `enabled`, `priority`, `update_url`, `update_interval_hours`, `update_auth` |
+| PATCH | `/geo/databases/{id}` | Change `name`, `enabled`, `priority`, `update_url`, `update_interval_hours`, `update_auth`, `update_paused` (true stops the schedule and keeps the file loaded and the URL, credentials and interval; a refresh still downloads) |
 | POST | `/geo/databases/{id}/refresh` | Download a scheduled database now |
 | DELETE | `/geo/databases/{id}` | Remove a stored database everywhere |
 | POST | `/geo/lookup` | `{ip, claimed_country?, claimed_state?, claimed_city?, project_id?}`: each database's answer and how the IP resolves at every level, judging the optional claim as a vendor's would be under the default conflict rule and city radius, or the project's. `resolution.city_distance_km` is how far the observed city is from the claimed one when both could be placed |

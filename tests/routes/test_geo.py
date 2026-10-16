@@ -266,6 +266,29 @@ class TestDatabases:
         assert len(rows) == 1 and rows[0]["source"] == "url" and rows[0]["last_update_error"]
         assert rows[0]["loaded_here"] is False
 
+    def test_pausing_a_schedule_keeps_it(self, authenticated_client: TestClient) -> None:
+        _clear(authenticated_client)
+        authenticated_client.post(
+            "/api/v1/geo/databases/from-url",
+            json={"name": "blocked", "update_url": "http://127.0.0.1:1/db.mmdb", "update_interval_hours": 24},
+        )
+        row = authenticated_client.get("/api/v1/geo/databases").json()["databases"][0]
+        assert row["update_paused"] is False and row["next_update_at"] is not None
+
+        paused = authenticated_client.patch(f"/api/v1/geo/databases/{row['id']}", json={"update_paused": True})
+        assert paused.status_code == 200
+        assert paused.json()["update_paused"] is True and paused.json()["next_update_at"] is None
+        assert paused.json()["update_url"] == row["update_url"] and paused.json()["update_interval_hours"] == 24
+
+        resumed = authenticated_client.patch(f"/api/v1/geo/databases/{row['id']}", json={"update_paused": False})
+        assert resumed.json()["update_paused"] is False and resumed.json()["next_update_at"] == row["next_update_at"]
+
+        # Disabling stops the schedule too, and enabling brings it back as it was.
+        disabled = authenticated_client.patch(f"/api/v1/geo/databases/{row['id']}", json={"enabled": False})
+        assert disabled.json()["next_update_at"] is None and disabled.json()["update_paused"] is False
+        enabled = authenticated_client.patch(f"/api/v1/geo/databases/{row['id']}", json={"enabled": True})
+        assert enabled.json()["next_update_at"] == row["next_update_at"]
+
 
 class TestProxyAttribution:
     def test_manual_country_and_reattribute(

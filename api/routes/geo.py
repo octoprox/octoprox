@@ -44,7 +44,7 @@ from api.geo.models import (
     normalize_country,
 )
 from api.geo.readers import GeoDatabaseError, inspect_file, is_ip
-from api.geo.updater import DownloadError, validate_bytes
+from api.geo.updater import DownloadError, next_update_at, validate_bytes
 from api.models.connector import Connector
 from api.models.location import LocationTarget
 from api.routes.common import geo_runtime_of, proxy_manager_of
@@ -78,6 +78,8 @@ class GeoDatabaseResponse(GeoDatabaseRecord):
     loaded_here: bool = False
     load_error: str | None = None
     has_file: bool = True
+    # When the schedule is next due; null without one, or while it is paused or disabled.
+    next_update_at: datetime | None = None
 
 
 class GeoDatabaseListResponse(BaseModel):
@@ -91,6 +93,7 @@ class GeoDatabaseUpdate(BaseModel):
     update_url: str | None = None
     update_interval_hours: int | None = Field(default=None, ge=0, le=24 * 365)
     update_auth: dict[str, Any] | None = None
+    update_paused: bool | None = None
 
 
 class GeoDatabaseFromUrl(BaseModel):
@@ -326,6 +329,7 @@ def _response(
         loaded_here=store.is_loaded(record.id),
         load_error=store.load_errors.get(record.id),
         has_file=has_file,
+        next_update_at=next_update_at(record),
     )
 
 
@@ -556,6 +560,8 @@ async def update_database(
         record.update_interval_hours = body.update_interval_hours
     if body.update_auth is not None:
         record.update_auth = body.update_auth
+    if body.update_paused is not None:
+        record.update_paused = body.update_paused
     await repo.update(record)
     await session.commit()
     await runtime.database_store.apply_record(record)
@@ -569,7 +575,7 @@ async def update_database(
 async def refresh_database(
     request: Request, session: DbDep, database_id: str, admin: RequireAdminDep
 ) -> GeoDatabaseResponse:
-    """Download a scheduled database now (admin)."""
+    """Download a scheduled database now (admin), paused or disabled as it may be."""
     runtime = geo_runtime_of(request)
     record = await GeoDatabaseRepository(session).get_by_id(database_id)
     if record is None:
@@ -582,7 +588,9 @@ async def refresh_database(
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     if refreshed.last_update_error:
         raise HTTPException(status_code=502, detail=refreshed.last_update_error)
-    runtime.reattribute_later()
+    # A disabled database downloads on request too, but stays unloaded: nothing to re-judge.
+    if refreshed.enabled:
+        runtime.reattribute_later()
     return _response(runtime, refreshed)
 
 

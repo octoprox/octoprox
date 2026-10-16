@@ -390,6 +390,8 @@ export interface GeoDatabase {
   update_url: string | null
   update_interval_hours: number
   update_auth: Record<string, unknown>
+  /** The schedule is kept but skipped; Download now still runs. */
+  update_paused: boolean
   last_update_at: string | null
   last_update_error: string | null
   uploaded_by: string | null
@@ -399,6 +401,8 @@ export interface GeoDatabase {
   loaded_here: boolean
   load_error: string | null
   has_file: boolean
+  /** When the schedule is next due (the leader downloads at its first check after); null without a schedule, or while paused or disabled. */
+  next_update_at: string | null
 }
 
 export interface GeoDatabaseUpdate {
@@ -408,6 +412,7 @@ export interface GeoDatabaseUpdate {
   update_url?: string | null
   update_interval_hours?: number
   update_auth?: Record<string, unknown>
+  update_paused?: boolean
 }
 
 export interface GeoDatabaseFromUrl {

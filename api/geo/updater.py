@@ -21,6 +21,7 @@ import io
 import tarfile
 import tempfile
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -32,7 +33,7 @@ from api.core import utc_now
 from api.core.job_stats import job_stats
 from api.core.leadership import Lease
 from api.core.workers import LeaseName, WorkerName
-from api.db.geo_repository import GeoDatabaseRepository
+from api.db.geo_repository import GeoDatabaseRepository, reclaim_blob_space
 from api.db.redis import RedisClient
 from api.db.session import SessionFactory
 from api.geo.models import GeoDatabaseRecord, GeoDatabaseSource
@@ -45,6 +46,19 @@ logger = structlog.get_logger()
 _LEASE_RETRY_SECONDS = 60.0
 MAX_DOWNLOAD_BYTES = 512 * 1024 * 1024
 DOWNLOAD_TIMEOUT = 600.0
+# What an admin edits on a row. A refresh holds the row as it was read before a
+# download that can run for minutes, so it takes these from the row as it is
+# when it writes: putting back what it read would undo a Pause clicked meanwhile.
+_ADMIN_FIELDS = (
+    "name",
+    "source",
+    "enabled",
+    "priority",
+    "update_url",
+    "update_interval_hours",
+    "update_auth",
+    "update_paused",
+)
 
 Publisher = Callable[[str, str], Awaitable[None]]
 # Runs after a scheduled refresh stored a new file: the runtime re-attributes every proxy.
@@ -215,6 +229,39 @@ def validate_bytes(data: bytes, suffix: str = ".mmdb") -> Any:
         temp.unlink(missing_ok=True)
 
 
+def next_update_at(record: GeoDatabaseRecord) -> datetime | None:
+    """When ``record``'s schedule is next due, or None when nothing will download it on its own.
+
+    A schedule never run is due from the moment it was registered. The leader
+    checks once per ``geo_updater_interval``, so the download itself runs at the
+    first check after this time. Disabling a database stops its schedule as
+    pausing does; either way a manual refresh still downloads.
+    """
+    if (
+        record.source != GeoDatabaseSource.URL
+        or not record.update_url
+        or record.update_interval_hours <= 0
+        or record.update_paused
+        or not record.enabled
+    ):
+        return None
+    if record.last_update_at is None:
+        return record.created_at
+    return record.last_update_at + timedelta(hours=record.update_interval_hours)
+
+
+@dataclass(frozen=True)
+class TickResult:
+    """What one tick did: the downloads it attempted, and whether it rewrote the stored files' table."""
+
+    refreshed: int = 0
+    reclaimed: bool = False
+
+    @property
+    def idle(self) -> bool:
+        return self.refreshed == 0 and not self.reclaimed
+
+
 class GeoDatabaseUpdater:
     """Leader loop that refreshes scheduled databases."""
 
@@ -253,7 +300,7 @@ class GeoDatabaseUpdater:
                     await asyncio.sleep(self._interval)
                     if lease.is_held and self._running:
                         with job_stats.track(WorkerName.GEO_DATABASE_UPDATER) as run:
-                            if await self.tick() == 0:
+                            if (await self.tick()).idle:
                                 run.idle()
                 except asyncio.CancelledError:
                     break
@@ -262,22 +309,26 @@ class GeoDatabaseUpdater:
         finally:
             await lease.release()
 
-    async def tick(self) -> int:
-        """Refresh every database whose schedule is due. Returns how many were attempted."""
+    async def tick(self) -> TickResult:
+        """Sweep the stored files, then refresh every database whose schedule is due."""
+        reclaimed = await self._sweep_storage()
         async with self._session_factory() as session:
             records = await GeoDatabaseRepository(session).get_all()
-        due = [r for r in records if self._is_due(r)]
+        now = utc_now()
+        due = [r for r in records if (at := next_update_at(r)) is not None and at <= now]
         for record in due:
             await self.refresh(record)
-        return len(due)
+        return TickResult(refreshed=len(due), reclaimed=reclaimed)
 
-    @staticmethod
-    def _is_due(record: GeoDatabaseRecord) -> bool:
-        if record.source != GeoDatabaseSource.URL or not record.update_url or record.update_interval_hours <= 0:
+    async def _sweep_storage(self) -> bool:
+        """Give back the disk replaced and removed files still hold (see geo_repository); True when rewritten."""
+        try:
+            async with self._session_factory() as session:
+                conn = await session.connection(execution_options={"isolation_level": "AUTOCOMMIT"})
+                return await reclaim_blob_space(conn)
+        except Exception as exc:
+            logger.warning("Could not reclaim IP database storage", error=str(exc))
             return False
-        if record.last_update_at is None:
-            return True
-        return utc_now() - record.last_update_at >= timedelta(hours=record.update_interval_hours)
 
     async def refresh(self, record: GeoDatabaseRecord) -> GeoDatabaseRecord:
         """Download ``record`` now and store it if it changed. Errors land on the row."""
@@ -287,9 +338,7 @@ class GeoDatabaseUpdater:
         except (DownloadError, GeoDatabaseError) as exc:
             record.last_update_error = str(exc)
             record.last_update_at = utc_now()
-            async with self._session_factory() as session:
-                await GeoDatabaseRepository(session).update(record)
-                await session.commit()
+            await self._save(record)
             logger.warning("IP database update failed", database_id=record.id, name=record.name, error=str(exc))
             return record
 
@@ -309,9 +358,7 @@ class GeoDatabaseUpdater:
             record.vendor = info.vendor
             record.kind = info.kind
             record.format = info.format
-        async with self._session_factory() as session:
-            await GeoDatabaseRepository(session).update(record, blob=None if unchanged else data)
-            await session.commit()
+        await self._save(record, None if unchanged else data)
         if unchanged:
             logger.info("IP database is current", database_id=record.id, name=record.name)
             return record
@@ -320,14 +367,26 @@ class GeoDatabaseUpdater:
         logger.info(
             "IP database updated", database_id=record.id, name=record.name, build=str(record.build_epoch), bytes=len(data)
         )
-        if self._after_update is not None:
+        if self._after_update is not None and record.enabled:
             # A new build moves ranges; verdicts computed with the old one are
-            # stale until every proxy is re-judged, as the admin routes do.
+            # stale until every proxy is re-judged, as the admin routes do. A
+            # disabled file is consulted by nothing, so nothing is stale.
             try:
                 await self._after_update()
             except Exception as exc:
                 logger.warning("Re-attribution after database update failed", database_id=record.id, error=str(exc))
         return record
+
+    async def _save(self, record: GeoDatabaseRecord, blob: bytes | None = None) -> None:
+        """Write a refresh's outcome onto the row as it is now, keeping what an admin changed meanwhile."""
+        async with self._session_factory() as session:
+            repo = GeoDatabaseRepository(session)
+            current = await repo.get_by_id(record.id)
+            if current is not None:
+                for name in _ADMIN_FIELDS:
+                    setattr(record, name, getattr(current, name))
+            await repo.update(record, blob=blob)
+            await session.commit()
 
     def stop(self) -> None:
         self._running = False

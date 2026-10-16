@@ -20,7 +20,6 @@ from sqlalchemy import (
     case,
     column,
     delete,
-    event,
     func,
     literal_column,
     or_,
@@ -35,8 +34,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import DBAPIError
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import Session, SessionTransaction
+from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession
 
 from api.core import utc_now
 from api.db.models import (
@@ -213,10 +211,9 @@ class GeoDatabaseRepository:
         record.version = model.version
         record.updated_at = model.updated_at
         if blob is not None:
-            result = await self._session.execute(
+            await self._session.execute(
                 delete(GeoDatabaseBlobModel).where(GeoDatabaseBlobModel.database_id == record.id)
             )
-            mark_blob_rows_deleted(self._session, result.rowcount)  # type: ignore[attr-defined]
             self._session.add(GeoDatabaseBlobModel(database_id=record.id, data=blob))
         await self._session.flush()
         return record
@@ -225,7 +222,6 @@ class GeoDatabaseRepository:
         result = await self._session.execute(
             delete(GeoDatabaseModel).where(GeoDatabaseModel.id == database_id)
         )
-        mark_blob_rows_deleted(self._session, result.rowcount)  # type: ignore[attr-defined]
         return bool(result.rowcount and result.rowcount > 0)  # type: ignore[attr-defined]
 
     async def blob_ids(self) -> set[str]:
@@ -264,6 +260,7 @@ class GeoDatabaseRepository:
             "update_url": record.update_url,
             "update_interval_hours": record.update_interval_hours,
             "update_auth": dict(record.update_auth),
+            "update_paused": record.update_paused,
             "last_update_at": record.last_update_at,
             "last_update_error": record.last_update_error,
             "uploaded_by": record.uploaded_by,
@@ -294,6 +291,7 @@ class GeoDatabaseRepository:
             update_url=model.update_url,
             update_interval_hours=model.update_interval_hours,
             update_auth=dict(model.update_auth or {}),
+            update_paused=model.update_paused,
             last_update_at=model.last_update_at,
             last_update_error=model.last_update_error,
             uploaded_by=model.uploaded_by,
@@ -307,44 +305,63 @@ class GeoDatabaseRepository:
 #
 # Postgres never overwrites in place: a replaced or removed database file stays on
 # disk as dead TOAST tuples, and autovacuum only makes that space reusable, so the
-# table would settle at twice the files it holds. Whenever a session that deleted
-# blob rows (or the parent rows they cascade from) commits, the table is rewritten
-# instead. It has one row per database and is read only when an instance syncs a
-# file, so the exclusive lock of a second or two goes unnoticed. The code that
-# deletes such rows says so with mark_blob_rows_deleted; a delete that matched
-# nothing leaves nothing to reclaim and is not marked.
+# table would settle at twice the files it holds. The leader sweeps it on every
+# updater tick and rewrites it when it holds well more than its files. It has one
+# row per database and is read only when an instance syncs a file, so the
+# exclusive lock of a second or two goes unnoticed, and a table left bloated until
+# the next sweep costs nothing but disk.
+#
+# A rewrite keeps every row version a transaction still running anywhere in the
+# database could see, so a file dropped moments before a sweep can survive it; the
+# next sweep, an hour on, takes it. The sweep runs before the tick's downloads for
+# the same reason: right after one replaced a file, it would copy the old one over.
 
-_BLOB_ROWS_DELETED = "geo_blob_rows_deleted"
-# ANALYZE as well: VACUUM FULL alone leaves n_dead_tup at its pre-rewrite value and
-# never sets last_vacuum, so the system page would keep reporting the bloat it
-# just removed.
-_RECLAIM_SQL = text(f"VACUUM (FULL, ANALYZE) {GeoDatabaseBlobModel.__tablename__}")
+_BLOB_TABLE = GeoDatabaseBlobModel.__tablename__
+# Rewritten when the table holds a tenth more than its files (and at least a MiB
+# more); a compact one carries about 4% of page and TOAST overhead.
+_BLOAT_FRACTION = 0.1
+_BLOAT_FLOOR_BYTES = 1024 * 1024
+
+# The rewrite, then a plain VACUUM. The rewrite leaves the TOAST table's dead-row
+# count as it was and never sets last_vacuum, so the system page would keep
+# reporting the bloat it removed; the plain pass resets both, and on a table just
+# rewritten it has nothing to do.
+_RECLAIM_SQL = (text(f"VACUUM FULL {_BLOB_TABLE}"), text(f"VACUUM (ANALYZE) {_BLOB_TABLE}"))
+# The table on disk against the files in it; pg_column_size reads the TOAST
+# pointer and fetches nothing.
+_BLOB_BYTES_SQL = text(
+    f"SELECT pg_total_relation_size('{_BLOB_TABLE}'), "
+    f"(SELECT coalesce(sum(pg_column_size(data)), 0) FROM {_BLOB_TABLE})"
+)
 
 
-def mark_blob_rows_deleted(session: AsyncSession | Session, rowcount: int | None) -> None:
-    """Have the session's commit rewrite the blob table, if ``rowcount`` rows went."""
-    if rowcount is not None and rowcount > 0:
-        session.info[_BLOB_ROWS_DELETED] = True
+async def reclaim_blob_space(conn: AsyncConnection) -> bool:
+    """Rewrite the blob table if it holds far more than its files. Returns whether it did.
+
+    ``conn`` must be in autocommit, since VACUUM cannot run in a transaction.
+    """
+    stored, files = (await conn.execute(_BLOB_BYTES_SQL)).one()
+    if not _bloated(stored, files):
+        return False
+    for statement in _RECLAIM_SQL:
+        await conn.execute(statement)
+    after, files_after = (await conn.execute(_BLOB_BYTES_SQL)).one()
+    if _bloated(after, files_after):
+        # Rewritten again on every sweep until whatever kept the old bytes lets go.
+        logger.warning(
+            "IP database storage still bloated after a rewrite: a long-running transaction holds the old files,"
+            " or the database role does not own the table",
+            before_bytes=stored,
+            after_bytes=after,
+            file_bytes=files_after,
+        )
+    else:
+        logger.info("IP database storage reclaimed", before_bytes=stored, after_bytes=after, file_bytes=files_after)
+    return True
 
 
-@event.listens_for(Session, "after_transaction_end")
-def _forget_deleted(session: Session, transaction: SessionTransaction) -> None:
-    # Outermost transaction only; covers rollback and a close() without one
-    # (which fires no after_rollback). After a commit the flag is already gone.
-    if transaction.parent is None:
-        session.info.pop(_BLOB_ROWS_DELETED, None)
-
-
-@event.listens_for(Session, "after_commit")
-def _reclaim_blob_space(session: Session) -> None:
-    if not session.info.pop(_BLOB_ROWS_DELETED, False):
-        return
-    try:
-        # VACUUM cannot run inside a transaction: a separate autocommit connection.
-        with session.get_bind().engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
-            conn.execute(_RECLAIM_SQL)
-    except Exception as exc:
-        logger.warning("Could not reclaim IP database storage", error=str(exc))
+def _bloated(stored: int, files: int) -> bool:
+    return stored - files > files * _BLOAT_FRACTION + _BLOAT_FLOOR_BYTES
 
 
 class ObservationRepository:

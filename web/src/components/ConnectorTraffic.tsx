@@ -15,7 +15,7 @@ import {
   fetchConnectorMetricsHistory, resetConnectorTraffic,
   HISTORY_RANGES,
 } from '../api/client'
-import { formatBytesDecimal, formatDateTime, formatMoney, parseApiDate } from '../utils/format'
+import { formatBytesDecimal, formatDateTime, formatMoney, parseApiDate, timeUntil } from '../utils/format'
 import { useTheme } from '../contexts/ThemeContext'
 import { formatRangeTick, useTimeRange } from '../contexts/TimeRangeContext'
 import { useToast } from '../contexts/ToastContext'
@@ -23,19 +23,6 @@ import { Badge, ConfirmDialog, InspectorSection, KeyValue, Segmented } from './u
 
 export const PERIOD_LABEL: Record<TrafficPeriod, string> = { day: 'today', week: 'this week', month: 'this month' }
 export const ACTION_LABEL = { alert: 'Alert only', block: 'Block new requests', interrupt: 'Block and cut transfers' } as const
-
-/** "in 3 days", "in 4 h", "in 12 min" for a future timestamp, or "now". */
-export function timeUntil(value: string | null | undefined): string {
-  const d = parseApiDate(value)
-  if (!d) return '-'
-  const diff = d.getTime() - Date.now()
-  if (diff <= 0) return 'now'
-  const m = Math.round(diff / 60000)
-  if (m < 60) return `in ${m} min`
-  const h = Math.round(m / 60)
-  if (h < 48) return `in ${h} h`
-  return `in ${Math.round(h / 24)} days`
-}
 
 type Tone = 'ok' | 'warning' | 'danger'
 

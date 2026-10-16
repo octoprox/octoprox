@@ -94,3 +94,16 @@ export function relativeTime(value: string | null | undefined): string {
   if (days < 30) return `${days} d ago`
   return d.toLocaleDateString()
 }
+
+/** "in 3 days", "in 4 h", "in 12 min" for a future timestamp, or "now". */
+export function timeUntil(value: string | null | undefined): string {
+  const d = parseApiDate(value)
+  if (!d) return '-'
+  const diff = d.getTime() - Date.now()
+  if (diff <= 0) return 'now'
+  const m = Math.round(diff / 60000)
+  if (m < 60) return `in ${m} min`
+  const h = Math.round(m / 60)
+  if (h < 48) return `in ${h} h`
+  return `in ${Math.round(h / 24)} days`
+}

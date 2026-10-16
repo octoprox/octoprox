@@ -4,7 +4,7 @@
 import { useMemo, useRef, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { ColumnDef } from '@tanstack/react-table'
-import { Database, Globe, RefreshCw, Search, Trash2, Upload } from 'lucide-react'
+import { Database, Globe, Pause, Play, RefreshCw, Search, Trash2, Upload } from 'lucide-react'
 import {
   addGeoDatabaseFromUrl, deleteGeoDatabase, fetchGeoDatabases, fetchGeoSettings, fetchGeoStatus, lookupGeoIp,
   reattributeProxies, refreshGeoDatabase, updateGeoDatabase, updateGeoSettings, uploadGeoDatabase,
@@ -17,7 +17,7 @@ import { AccuracyRow, ProviderAccuracyPanel, accuracyDays, useAccuracyRange } fr
 import { AccuracyDetailsInspector } from '../../components/geo/AccuracyDetails'
 import { ObservationsPanel } from '../../components/geo/ObservationsPanel'
 import { ExitIpsPanel } from '../../components/geo/ExitIpsPanel'
-import { formatBytes, formatDateTime } from '../../utils/format'
+import { formatBytes, formatDateTime, parseApiDate, relativeTime, timeUntil } from '../../utils/format'
 import { Alert, Badge, Button, Card, ConfirmDialog, Input, Label, Select, Tabs } from '../../components/ui'
 import { cn } from '../../utils/cn'
 
@@ -127,6 +127,11 @@ function DatabasesTab() {
     onSuccess: invalidate,
     onError: (e: Error) => toast.show(e.message || 'Failed to update database', 'error'),
   })
+  const pauseMutation = useMutation({
+    mutationFn: ({ id, paused }: { id: string; paused: boolean }) => updateGeoDatabase(id, { update_paused: paused }),
+    onSuccess: (db) => { invalidate(); toast.show(db.update_paused ? `${db.name}: schedule paused` : `${db.name}: schedule resumed`) },
+    onError: (e: Error) => toast.show(e.message || 'Failed to update the schedule', 'error'),
+  })
   const refreshMutation = useMutation({
     mutationFn: (id: string) => refreshGeoDatabase(id),
     onSuccess: () => { invalidate(); toast.show('Database refreshed') },
@@ -152,48 +157,63 @@ function DatabasesTab() {
         </div>
       ),
     },
-    { accessorKey: 'vendor', header: 'Vendor', size: 110, cell: ({ getValue }) => VENDOR_LABELS[getValue<string>()] ?? getValue<string>() },
-    { accessorKey: 'kind', header: 'Answers', size: 100, cell: ({ getValue }) => KIND_LABELS[getValue<string>()] ?? <span className="capitalize">{getValue<string>()}</span> },
+    // Sized to their content so the unsized Database column takes the rest. Never
+    // 150: DataTable reads TanStack's default size as unsized and shares the room out.
+    { accessorKey: 'vendor', header: 'Vendor', size: 96, cell: ({ getValue }) => VENDOR_LABELS[getValue<string>()] ?? getValue<string>() },
+    { accessorKey: 'kind', header: 'Answers', size: 128, cell: ({ getValue }) => KIND_LABELS[getValue<string>()] ?? <span className="capitalize">{getValue<string>()}</span> },
+    { accessorKey: 'source', header: 'Source', size: 240, cell: ({ row }) => <SourceCell db={row.original} /> },
     {
-      accessorKey: 'source', header: 'Source', size: 110,
-      cell: ({ row }) => row.original.source === 'path' ? <span title={row.original.path ?? ''}>Config file</span> : row.original.source === 'url' ? 'Scheduled download' : 'Uploaded',
-    },
-    {
-      accessorKey: 'priority', header: 'Priority', size: 90, meta: { align: 'right' as const },
+      accessorKey: 'priority', header: 'Priority', size: 88, meta: { align: 'right' as const },
       cell: ({ row }) => row.original.source === 'path' ? <span className="tabular-nums">{row.original.priority}</span> : (
-        <Input type="number" min={0} className="w-20 h-7 px-2 py-0 text-xs text-right" defaultValue={row.original.priority}
+        <Input type="number" min={0} className="w-16 h-7 px-2 py-0 text-xs text-right" defaultValue={row.original.priority}
           onBlur={(e) => { const v = parseInt(e.target.value); if (!Number.isNaN(v) && v !== row.original.priority) priorityMutation.mutate({ id: row.original.id, priority: v }) }} />
       ),
     },
-    { accessorKey: 'build_epoch', header: 'Built', size: 120, cell: ({ getValue }) => getValue<string | null>() ? formatDateTime(getValue<string>()).split(',')[0] : '-' },
-    { accessorKey: 'size_bytes', header: 'Size', size: 90, meta: { align: 'right' as const }, cell: ({ getValue }) => formatBytes(getValue<number>()) },
+    { accessorKey: 'build_epoch', header: 'Built', size: 104, cell: ({ getValue }) => getValue<string | null>() ? formatDateTime(getValue<string>()).split(',')[0] : '-' },
+    { accessorKey: 'size_bytes', header: 'Size', size: 92, meta: { align: 'right' as const }, cell: ({ getValue }) => formatBytes(getValue<number>()) },
     {
-      id: 'state', header: 'Status', size: 150,
+      id: 'state', header: 'Status', size: 112,
       cell: ({ row }) => row.original.load_error
         ? <Badge color="red" title={row.original.load_error}>Not loaded</Badge>
         : row.original.last_update_error
           ? <Badge color="yellow" title={row.original.last_update_error}>Update failed</Badge>
-          : row.original.loaded_here ? <Badge color="green">Loaded</Badge> : <Badge color="gray">{row.original.enabled ? 'Not loaded here' : 'Off'}</Badge>,
+          : row.original.loaded_here ? <Badge color="green">Loaded</Badge>
+            : <Badge color="gray" title={row.original.enabled ? 'Enabled, but not loaded on the instance that answered' : 'Disabled'}>{row.original.enabled ? 'Not here' : 'Off'}</Badge>,
     },
     {
-      id: 'actions', header: '', size: 150,
-      cell: ({ row }) => row.original.source === 'path' ? null : (
-        <div className="flex items-center justify-end gap-1">
-          {row.original.update_url && (
-            <Button variant="ghost" size="sm" title={`Download now (every ${row.original.update_interval_hours}h)`} onClick={() => refreshMutation.mutate(row.original.id)} disabled={refreshMutation.isPending}>
-              <RefreshCw className={cn('w-3.5 h-3.5', refreshMutation.isPending && 'animate-spin')} />
+      id: 'actions', header: '', size: 184,
+      cell: ({ row }) => {
+        const db = row.original
+        if (db.source === 'path') return null
+        // One mutation tracks only its latest call: every row waits while any download runs,
+        // so a second click cannot re-enable the first row and download it twice.
+        const refreshing = refreshMutation.isPending && refreshMutation.variables === db.id
+        return (
+          <div className="flex items-center justify-end gap-0.5">
+            {db.update_url && (
+              <Button variant="ghost" size="icon" title="Download now" onClick={() => refreshMutation.mutate(db.id)} disabled={refreshMutation.isPending}>
+                <RefreshCw className={cn('w-3.5 h-3.5', refreshing && 'animate-spin')} />
+              </Button>
+            )}
+            {/* A paused row always offers Resume, whatever its interval became since. */}
+            {db.update_url && (db.update_interval_hours > 0 || db.update_paused) && (
+              <Button variant="ghost" size="icon" disabled={pauseMutation.isPending && pauseMutation.variables?.id === db.id}
+                title={db.update_paused ? 'Resume the schedule' : 'Pause the schedule. The file stays loaded and Download now still works'}
+                onClick={() => pauseMutation.mutate({ id: db.id, paused: !db.update_paused })}>
+                {db.update_paused ? <Play className="w-3.5 h-3.5" /> : <Pause className="w-3.5 h-3.5" />}
+              </Button>
+            )}
+            <Button variant="ghost" size="sm" className="px-2" onClick={() => toggleMutation.mutate({ id: db.id, enabled: !db.enabled })}>
+              {db.enabled ? 'Disable' : 'Enable'}
             </Button>
-          )}
-          <Button variant="ghost" size="sm" onClick={() => toggleMutation.mutate({ id: row.original.id, enabled: !row.original.enabled })}>
-            {row.original.enabled ? 'Disable' : 'Enable'}
-          </Button>
-          <Button variant="ghost" size="sm" className="text-danger" title="Remove" onClick={() => setPendingDelete(row.original)}>
-            <Trash2 className="w-3.5 h-3.5" />
-          </Button>
-        </div>
-      ),
+            <Button variant="ghost" size="icon" className="text-danger" title="Remove" onClick={() => setPendingDelete(db)}>
+              <Trash2 className="w-3.5 h-3.5" />
+            </Button>
+          </div>
+        )
+      },
     },
-  ], [priorityMutation, refreshMutation, toggleMutation])
+  ], [pauseMutation, priorityMutation, refreshMutation, toggleMutation])
 
   const attributions = useMemo(() => Array.from(new Set((databases ?? []).filter((d) => d.enabled && d.attribution).map((d) => d.attribution))), [databases])
 
@@ -239,6 +259,43 @@ function DatabasesTab() {
           onCancel={() => setPendingDelete(null)}
         />
       )}
+    </div>
+  )
+}
+
+/** "day", "30 days", "6 h": how often a schedule runs, after "every". */
+function everyLabel(hours: number): string {
+  if (hours % 24 === 0) return hours === 24 ? 'day' : `${hours / 24} days`
+  return hours === 1 ? 'hour' : `${hours} h`
+}
+
+/** Where a row's file comes from, and for a scheduled download when it last ran and next runs. */
+function SourceCell({ db }: { db: GeoDatabase }) {
+  if (db.source === 'path') return <span title={db.path ?? ''}>Config file</span>
+  if (db.source !== 'url') return <>Uploaded</>
+  if (!db.update_url) return <>No download URL</>
+  const scheduled = db.update_interval_hours > 0
+  const next = parseApiDate(db.next_update_at)
+  const due = next !== null && next.getTime() <= Date.now()
+  // Every attempt moves last_update_at, whether the file changed, stayed the same or failed to download.
+  const last = db.last_update_at ? `Checked ${relativeTime(db.last_update_at)}` : 'Never checked'
+  const upcoming = db.update_paused ? <span className="text-warning">paused</span>
+    : !scheduled ? null
+      : !db.enabled ? 'off while disabled'
+        : due ? 'due now' : `next ${timeUntil(db.next_update_at)}`
+  const title = [
+    !db.last_update_at ? 'Not downloaded yet.'
+      : db.last_update_error ? `Last check ${formatDateTime(db.last_update_at)} failed: ${db.last_update_error}.`
+        : `Last checked ${formatDateTime(db.last_update_at)}; the file is replaced only when the vendor's has changed.`,
+    db.update_paused ? 'Schedule paused: downloads only when asked, until it is resumed.'
+      : !scheduled ? 'No schedule: downloads only when asked.'
+        : !db.enabled ? 'Disabled: the schedule is off until the database is enabled. Download now still fetches the file, which stays unloaded.'
+        : `Next due ${due ? 'now' : formatDateTime(db.next_update_at)}. The leader checks periodically (hourly by default) and downloads at the first check after that.`,
+  ].join(' ')
+  return (
+    <div className="min-w-0" title={title}>
+      <div className="truncate">{scheduled ? `Scheduled, every ${everyLabel(db.update_interval_hours)}` : 'Download URL, on demand'}</div>
+      <div className="text-xs text-fg-muted truncate">{last}{upcoming && <> · {upcoming}</>}</div>
     </div>
   )
 }

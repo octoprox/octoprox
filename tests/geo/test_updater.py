@@ -5,14 +5,17 @@
 
 import gzip
 import hashlib
-from datetime import datetime
+import os
+from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import MagicMock
 
 import httpx
 import pytest
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from api.core import utc_now
 from api.db.geo_repository import GeoDatabaseRepository
 from api.geo import updater
 from api.geo.models import GeoDatabaseRecord, GeoDatabaseSource
@@ -20,9 +23,11 @@ from api.geo.store import GeoDatabaseStore
 from api.geo.updater import (
     DownloadError,
     GeoDatabaseUpdater,
+    TickResult,
     candidate_urls,
     download,
     expand_update_url,
+    next_update_at,
 )
 from api.providers.sdk.egress import EgressGuard, EgressPolicy
 from tests.geo.test_readers import MAXMIND_RECORD, write_mmdb
@@ -175,3 +180,169 @@ class TestRefresh:
         await refresher.refresh(record)
         assert published == [(record.id, "updated")]
         store.close_all()
+
+
+class TestSchedule:
+    def test_next_update_at(self) -> None:
+        record = _record(update_interval_hours=24)
+        # Never run: due from the moment it was registered.
+        assert next_update_at(record) == record.created_at
+        record.last_update_at = utc_now()
+        assert next_update_at(record) == record.last_update_at + timedelta(hours=24)
+        record.update_paused = True
+        assert next_update_at(record) is None
+        record.update_paused = False
+        record.enabled = False
+        assert next_update_at(record) is None
+        assert next_update_at(_record(update_interval_hours=0)) is None
+        uploaded = GeoDatabaseRecord(name="up", source=GeoDatabaseSource.UPLOAD, update_interval_hours=24)
+        assert next_update_at(uploaded) is None
+
+    async def test_a_paused_schedule_is_skipped_until_resumed(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        db_session: AsyncSession,
+        db_session_factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        mmdb = write_mmdb(tmp_path / "country.mmdb", "GeoLite2-Country", {"81.2.69.0/24": MAXMIND_RECORD}).read_bytes()
+        seen = _use_transport(monkeypatch, lambda request: httpx.Response(200, content=gzip.compress(mmdb)))
+
+        async def publish(database_id: str, op: str) -> None:
+            pass
+
+        repo = GeoDatabaseRepository(db_session)
+        record = _record(update_interval_hours=24)
+        record.update_paused = True
+        await repo.create(record, None)
+        await db_session.commit()
+        store = GeoDatabaseStore(db_session_factory, tmp_path / "cache")
+        ticker = GeoDatabaseUpdater(db_session_factory, MagicMock(), "inst-1", store, publish, egress_policy=OPEN)
+
+        # The tick also sweeps the stored files, against the real table.
+        assert (await ticker.tick()).idle and seen == []
+
+        record.update_paused = False
+        await repo.update(record)
+        await db_session.commit()
+        assert (await ticker.tick()).refreshed == 1 and len(seen) == 1
+        stored = await repo.get_by_id(record.id)
+        assert stored is not None and stored.last_update_at is not None and stored.update_paused is False
+        store.close_all()
+
+    async def test_a_disabled_database_is_downloaded_by_hand_only_and_stays_unloaded(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        db_session: AsyncSession,
+        db_session_factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        mmdb = write_mmdb(tmp_path / "country.mmdb", "GeoLite2-Country", {"81.2.69.0/24": MAXMIND_RECORD}).read_bytes()
+        seen = _use_transport(monkeypatch, lambda request: httpx.Response(200, content=gzip.compress(mmdb)))
+        reattributed: list[bool] = []
+
+        async def publish(database_id: str, op: str) -> None:
+            pass
+
+        async def after_update() -> None:
+            reattributed.append(True)
+
+        repo = GeoDatabaseRepository(db_session)
+        record = _record(update_interval_hours=24)
+        record.enabled = False
+        await repo.create(record, None)
+        await db_session.commit()
+        store = GeoDatabaseStore(db_session_factory, tmp_path / "cache")
+        ticker = GeoDatabaseUpdater(
+            db_session_factory, MagicMock(), "inst-1", store, publish, after_update=after_update, egress_policy=OPEN
+        )
+
+        assert (await ticker.tick()).refreshed == 0 and seen == []
+
+        # Download now: the file is stored, the row stays disabled, nothing loads it or is re-judged.
+        refreshed = await ticker.refresh(record)
+        assert len(seen) == 1 and refreshed.enabled is False
+        assert await repo.get_blob(record.id) == mmdb
+        assert store.loaded == [] and reattributed == []
+        store.close_all()
+
+    async def test_a_failed_sweep_does_not_stop_the_downloads(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        db_session: AsyncSession,
+        db_session_factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        mmdb = write_mmdb(tmp_path / "country.mmdb", "GeoLite2-Country", {"81.2.69.0/24": MAXMIND_RECORD}).read_bytes()
+        seen = _use_transport(monkeypatch, lambda request: httpx.Response(200, content=gzip.compress(mmdb)))
+
+        async def failing(_conn: object) -> bool:
+            raise RuntimeError("permission denied")
+
+        async def publish(database_id: str, op: str) -> None:
+            pass
+
+        monkeypatch.setattr(updater, "reclaim_blob_space", failing)
+        await GeoDatabaseRepository(db_session).create(_record(update_interval_hours=24), None)
+        await db_session.commit()
+        store = GeoDatabaseStore(db_session_factory, tmp_path / "cache")
+        ticker = GeoDatabaseUpdater(db_session_factory, MagicMock(), "inst-1", store, publish, egress_policy=OPEN)
+        assert (await ticker.tick()).refreshed == 1 and len(seen) == 1
+        store.close_all()
+
+    async def test_a_pause_made_during_a_download_survives_it(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        db_session: AsyncSession,
+        db_session_factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        mmdb = write_mmdb(tmp_path / "country.mmdb", "GeoLite2-Country", {"81.2.69.0/24": MAXMIND_RECORD}).read_bytes()
+        _use_transport(monkeypatch, lambda request: httpx.Response(200, content=gzip.compress(mmdb)))
+
+        async def publish(database_id: str, op: str) -> None:
+            pass
+
+        repo = GeoDatabaseRepository(db_session)
+        record = _record(update_interval_hours=24)
+        await repo.create(record, None)
+        await db_session.commit()
+        # The tick read the row; then an admin paused it before the download finished.
+        stale = await repo.get_by_id(record.id)
+        assert stale is not None
+        record.update_paused = True
+        await repo.update(record)
+        await db_session.commit()
+
+        store = GeoDatabaseStore(db_session_factory, tmp_path / "cache")
+        ticker = GeoDatabaseUpdater(db_session_factory, MagicMock(), "inst-1", store, publish, egress_policy=OPEN)
+        refreshed = await ticker.refresh(stale)
+        stored = await repo.get_by_id(record.id)
+        assert stored is not None and stored.update_paused is True and stored.last_update_at is not None
+        assert refreshed.update_paused is True
+        store.close_all()
+
+    async def test_the_tick_rewrites_a_bloated_blob_table(
+        self, db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+    ) -> None:
+        """The sweep goes through the session factory's own connection, put in autocommit."""
+        size = 2 * 1024 * 1024  # random so TOAST cannot compress it away
+        repo = GeoDatabaseRepository(db_session)
+        record = GeoDatabaseRecord(name="City", sha256="a" * 64, size_bytes=size)
+        await repo.create(record, os.urandom(size))
+        await db_session.commit()
+        for _ in range(3):
+            await repo.update(record, blob=os.urandom(size))
+            await db_session.commit()
+
+        async def table_bytes() -> int:
+            result = await db_session.execute(text("SELECT pg_total_relation_size('geo_database_blobs')"))
+            await db_session.commit()
+            return int(result.scalar_one())
+
+        assert await table_bytes() >= 3 * size
+        ticker = GeoDatabaseUpdater(db_session_factory, MagicMock(), "inst-1", MagicMock(), MagicMock(), egress_policy=OPEN)
+        # Nothing was due, but the rewrite is work: the run is not reported idle.
+        assert await ticker.tick() == TickResult(refreshed=0, reclaimed=True)
+        assert await table_bytes() < size + size // 2
+        assert (await ticker.tick()).idle

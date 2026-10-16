@@ -35,7 +35,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.core import utc_now
 from api.db.base import Base
-from api.db.geo_repository import mark_blob_rows_deleted
 from api.db.models import (
     ApiTokenModel,
     AuthIdentityModel,
@@ -498,8 +497,7 @@ async def replace_all(
     await session.execute(delete(ProviderAuditModel))
     await session.execute(delete(ProviderDescriptorModel))
     await session.execute(delete(GeoSettingsModel))
-    deleted_databases = await session.execute(delete(GeoDatabaseModel))
-    mark_blob_rows_deleted(session, deleted_databases.rowcount)  # type: ignore[attr-defined]
+    await session.execute(delete(GeoDatabaseModel))
     await session.execute(delete(IpObservationModel))
     # The WireGuard and OpenVPN identity rows are global too; their peers cascade with projects.
     await session.execute(delete(WireGuardSettingsModel))

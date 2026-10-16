@@ -397,6 +397,8 @@ class GeoDatabaseRecord(BaseModel):
     update_url: str | None = None
     update_interval_hours: int = 0
     update_auth: dict[str, Any] = Field(default_factory=dict)
+    # A paused schedule keeps its URL and interval; only a manual refresh downloads.
+    update_paused: bool = False
     last_update_at: datetime | None = None
     last_update_error: str | None = None
     uploaded_by: str | None = None
