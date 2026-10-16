@@ -377,7 +377,7 @@ class ProxyAttributor:
         dynamic-sessions gateway stays, since the misplaced session was this
         request's alone and the next request mints another.
         """
-        logger.info("Request refused for its exit location", proxy_id=proxy_id, expected=expected, observed=observed, ip=ip)
+        logger.debug("Request refused for its exit location", proxy_id=proxy_id, expected=expected, observed=observed, ip=ip)
 
     # --- offline re-attribution --------------------------------------------------------
 

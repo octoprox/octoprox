@@ -5,10 +5,14 @@
 
 import ssl
 from typing import Any
+from unittest.mock import patch
 
+import httpx
 import pytest
 
+from api.providers.sdk.descriptor import IpDiscoverySpec
 from api.providers.sdk.sources import (
+    IpDiscoverer,
     _proxy_ssl_context,
     default_proxied_client_factory,
     httpx_proxy,
@@ -44,3 +48,28 @@ def test_only_an_https_proxy_carries_the_shared_proxy_context() -> None:
     assert context is not shared_ssl_context()
     # httpcore refuses a context for an http:// proxy: there is no TLS to it.
     assert httpx_proxy("http://u:p@proxy.example:8080").ssl_context is None
+
+
+def _refusing_discoverer() -> IpDiscoverer:
+    def factory(proxy_url: str, timeout: float) -> httpx.AsyncClient:
+        return httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(400)), timeout=timeout)
+
+    return IpDiscoverer(IpDiscoverySpec(), client_factory=factory)
+
+
+@pytest.mark.parametrize(
+    ("log_context", "level"),
+    [
+        # One echo per request: its failure fails the request, which the Failures page counts.
+        ({"proxy_id": "p1", "preflight": True}, "debug"),
+        # The health checker and attribution check a proxy now and then: still worth a warning.
+        ({"proxy_id": "p1"}, "warning"),
+    ],
+)
+async def test_a_failed_preflight_echo_is_logged_at_debug(log_context: dict[str, Any], level: str) -> None:
+    with patch("api.providers.sdk.sources.logger") as logger:
+        ip, _place = await _refusing_discoverer().discover_with_place("http://u:p@proxy:8080", log_context=log_context)
+
+    assert ip is None
+    getattr(logger, level).assert_called_once_with("IP discovery returned an error", status_code=400, **log_context)
+    assert not getattr(logger, "warning" if level == "debug" else "debug").called

@@ -15,6 +15,7 @@ request that went through is not logged at all.
 import asyncio
 import base64
 import contextlib
+import errno
 import socket
 from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import Any
@@ -306,6 +307,59 @@ class TestUpstreamFailures:
         assert response.endswith(b"\r\n\r\n5\r\n")
         assert _failures(publish) == []
         assert [c["success"] for c in _completions(publish)] == [True]
+
+    async def test_a_vendor_refusal_is_not_logged_as_an_error(self, listen: Any, publish: AsyncMock) -> None:
+        """At one per failed request it flooded the log; the Failures page already counts it."""
+        async with _vendor(b"HTTP/1.1 400 Bad Request\r\n\r\n") as port:
+            server = await listen(_upstream(port))
+            with patch("api.core.proxy_server.logger") as logger:
+                await _exchange(server, f"CONNECT example.com:443 HTTP/1.1\r\n{_auth()}\r\n")
+
+        assert "CONNECT error" in [call.args[0] for call in logger.debug.call_args_list]
+        logger.error.assert_not_called()
+        (failure,) = _failures(publish)
+        assert failure.kind is FailureKind.UPSTREAM_REJECTED
+
+    async def test_a_fault_of_ours_is_still_an_error_with_its_traceback(self, listen: Any, publish: AsyncMock) -> None:
+        server = await listen(_upstream(_closed_port()))
+        with (
+            patch.object(server, "_connect_via_proxy", AsyncMock(side_effect=RuntimeError("a bug"))),
+            patch("api.core.proxy_server.logger") as logger,
+        ):
+            await _exchange(server, f"CONNECT example.com:443 HTTP/1.1\r\n{_auth()}\r\n")
+
+        logger.error.assert_called_once()
+        assert logger.error.call_args.args == ("CONNECT error",)
+        assert logger.error.call_args.kwargs["exc_info"] is True
+        (failure,) = _failures(publish)
+        assert failure.kind is FailureKind.UPSTREAM_ERROR
+
+    @pytest.mark.parametrize(
+        ("error", "level"),
+        [
+            # The client hung up before it was answered.
+            (OSError(errno.ENOTCONN, "Transport endpoint is not connected"), "debug"),
+            # Out of file descriptors is a fault here.
+            (OSError(errno.EMFILE, "Too many open files"), "error"),
+        ],
+    )
+    async def test_a_client_that_is_gone_is_not_an_error(
+        self, listen: Any, publish: AsyncMock, error: OSError, level: str
+    ) -> None:
+        server = await listen(_upstream(_closed_port()))
+        with (
+            patch.object(server, "_handle_connect", AsyncMock(side_effect=error)),
+            patch("api.core.proxy_server.logger") as logger,
+        ):
+            await _exchange(server, f"CONNECT example.com:443 HTTP/1.1\r\n{_auth()}\r\n")
+
+        if level == "debug":
+            assert "Client connection gone" in [call.args[0] for call in logger.debug.call_args_list]
+            logger.error.assert_not_called()
+        else:
+            logger.error.assert_called_once()
+            assert logger.error.call_args.args == ("Error handling client",)
+            assert logger.error.call_args.kwargs["exc_info"] is True
 
     def test_an_unparseable_target_keeps_neither_query_nor_userinfo(self) -> None:
         server = ProxyServer(MagicMock())

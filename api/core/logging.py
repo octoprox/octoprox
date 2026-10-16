@@ -33,6 +33,21 @@ LOG_FORMATS = ("console", "json")
 # Loggers uvicorn configures itself when launched from its CLI.
 UVICORN_LOGGERS = ("uvicorn", "uvicorn.error", "uvicorn.access")
 
+# Paths the kubelet and the load balancers probe every few seconds.
+PROBE_PATHS = frozenset({"/health", "/live"})
+
+
+class _DropProbeAccess(logging.Filter):
+    """Drop uvicorn's access lines for the probe paths."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        # uvicorn.access logs (client, method, path, http version, status).
+        args = record.args
+        return not (isinstance(args, tuple) and len(args) >= 3 and args[2] in PROBE_PATHS)
+
+
+_PROBE_FILTER = _DropProbeAccess()
+
 
 def _add_instance(instance_id: str) -> Any:
     """Build a processor that stamps ``instance`` on every event.
@@ -115,6 +130,19 @@ def setup_logging(
         for existing in list(uvicorn_logger.handlers):
             uvicorn_logger.removeHandler(existing)
         uvicorn_logger.propagate = True
+
+    # Below DEBUG, quiet the request lines nobody reads: httpx logs every
+    # outbound request at INFO (each preflight echo is one), and probes hit
+    # the health paths every few seconds. At a busy proxy's rate they made up
+    # half of all output and pushed everything else out of the container log
+    # within minutes.
+    quiet = level != "DEBUG"
+    logging.getLogger("httpx").setLevel(logging.WARNING if quiet else logging.NOTSET)
+    access_logger = logging.getLogger("uvicorn.access")
+    if quiet:
+        access_logger.addFilter(_PROBE_FILTER)
+    else:
+        access_logger.removeFilter(_PROBE_FILTER)
 
     # Prevent SQLAlchemy from propagating to root logger to avoid duplicate logs
     # SQLAlchemy's echo=True adds its own handler, so we don't want it to also

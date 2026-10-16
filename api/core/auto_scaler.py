@@ -322,6 +322,7 @@ class AutoScaler:
                 self._redis_client,
                 name=resource_lease(LeaseName.AUTOSCALER, connector.id),
                 owner_id=self._instance_id,
+                per_cycle=True,
             )
             if not await lease.try_acquire():
                 logger.debug(

@@ -3,6 +3,10 @@
 
 """Tests for the Redis lease: ``confirm`` asks Redis rather than trusting the last refresh."""
 
+from unittest.mock import patch
+
+import pytest
+
 from api.core.leadership import Lease
 from api.db.redis import LEASE_KEY, RedisClient
 
@@ -57,3 +61,19 @@ class TestConfirm:
 
     async def test_a_lease_never_acquired_is_not_confirmed(self, redis_client: RedisClient) -> None:
         assert not await Lease(redis_client, name="test", owner_id="me").confirm()
+
+
+class TestTransitionLogging:
+    @pytest.mark.parametrize(("per_cycle", "level"), [(False, "info"), (True, "debug")])
+    async def test_a_per_cycle_lock_logs_its_transitions_at_debug(
+        self, redis_client: RedisClient, per_cycle: bool, level: str
+    ) -> None:
+        """A leader taking over is worth a line; a lock taken every cycle per connector is not."""
+        with patch("api.core.leadership.logger") as logger:
+            lease = Lease(redis_client, name="test", owner_id="me", per_cycle=per_cycle)
+            assert await lease.try_acquire()
+            await lease.release()
+
+        events = [call.args[0] for call in getattr(logger, level).call_args_list]
+        assert events == ["Lease acquired", "Lease released"]
+        assert not getattr(logger, "debug" if level == "info" else "info").called

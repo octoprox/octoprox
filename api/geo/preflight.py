@@ -492,7 +492,9 @@ class PreflightChecker:
             )
         if not ok:
             self.rejections += 1
-            logger.warning(
+            # Debug: a refusal is routine under strict location rules, and the
+            # Failures page keeps the count and examples (preflight_mismatch).
+            logger.debug(
                 "Preflight: exit location mismatch",
                 project_id=project.id,
                 proxy_id=proxy.id,

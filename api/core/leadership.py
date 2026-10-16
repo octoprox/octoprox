@@ -76,6 +76,10 @@ class Lease:
             if the holder fails to refresh within this window.
         refresh_ms: How often the holder refreshes the TTL. Must be well
             under ``ttl_ms``; a 2-of-5 ratio gives a safe margin.
+        per_cycle: A lock taken and released on every cycle (one connector's
+            autoscaler run, say) rather than held while leading. Its acquire
+            and release are logged at debug: at info they were a pair of lines
+            per connector per cycle on every instance. Losses still warn.
     """
 
     def __init__(
@@ -85,6 +89,8 @@ class Lease:
         owner_id: str,
         ttl_ms: int = 5000,
         refresh_ms: int = 2000,
+        *,
+        per_cycle: bool = False,
     ) -> None:
         if refresh_ms >= ttl_ms:
             raise ValueError("refresh_ms must be less than ttl_ms")
@@ -94,6 +100,7 @@ class Lease:
         self._owner_id = owner_id
         self._ttl_ms = ttl_ms
         self._refresh_ms = refresh_ms
+        self._log_transition = logger.debug if per_cycle else logger.info
         self._held = False
         self._refresh_task: asyncio.Task[None] | None = None
 
@@ -124,7 +131,7 @@ class Lease:
             return False
         self._held = True
         self._refresh_task = asyncio.create_task(self._refresh_loop())
-        logger.info("Lease acquired", name=self._name, owner=self._owner_id)
+        self._log_transition("Lease acquired", name=self._name, owner=self._owner_id)
         return True
 
     async def _refresh_loop(self) -> None:
@@ -206,4 +213,4 @@ class Lease:
             )
         except Exception:
             logger.warning("Lease release failed", name=self._name, exc_info=True)
-        logger.info("Lease released", name=self._name, owner=self._owner_id)
+        self._log_transition("Lease released", name=self._name, owner=self._owner_id)

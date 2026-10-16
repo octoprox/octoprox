@@ -17,11 +17,13 @@ Emits request_completed signals instead of directly calling ProxyManager.
 
 import asyncio
 import base64
+import errno
 import time
 from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 import structlog
+from python_socks import ProxyConnectionError, ProxyError
 from python_socks.async_.asyncio import Proxy as SocksProxy
 
 from api.core.config import settings
@@ -539,8 +541,15 @@ class ProxyServer:
             logger.debug("Client connection timeout", client_addr=client_addr)
         except ConnectionResetError:
             logger.debug("Client connection reset", client_addr=client_addr)
+        except OSError as e:
+            # ENOTCONN: the client hung up before it was answered, its doing
+            # rather than a fault here. Any other socket error still is.
+            if e.errno == errno.ENOTCONN:
+                logger.debug("Client connection gone", error=str(e), client_addr=client_addr)
+            else:
+                logger.error("Error handling client", error=str(e), client_addr=client_addr, exc_info=True)
         except Exception as e:
-            logger.error("Error handling client", error=str(e), client_addr=client_addr)
+            logger.error("Error handling client", error=str(e), client_addr=client_addr, exc_info=True)
         finally:
             try:
                 client_writer.close()
@@ -759,7 +768,8 @@ class ProxyServer:
                 client_disconnected = True
                 logger.debug("Client disconnected", target=target)
             else:
-                logger.error("CONNECT error", error=str(e), target=target)
+                # A reset on the network: answered below and counted on the Failures page.
+                logger.debug("CONNECT error", error=str(e), target=target)
                 if not success:
                     latency_ms = (time.monotonic() - start_time) * 1000
                     failure = self._upstream_failure(e, project.id, proxy, latency_ms, 502)
@@ -769,7 +779,13 @@ class ProxyServer:
                 client_disconnected = True
                 logger.debug("Client disconnected", target=target)
             else:
-                logger.error("CONNECT error", error=str(e), target=target)
+                # The vendor refusing the handshake or being out of reach is
+                # its answer, counted on the Failures page; anything else is a
+                # fault here and keeps its traceback.
+                if isinstance(e, ProxyError | ProxyConnectionError | OSError):
+                    logger.debug("CONNECT error", error=str(e), target=target)
+                else:
+                    logger.error("CONNECT error", error=str(e), target=target, exc_info=True)
                 if not success:
                     latency_ms = (time.monotonic() - start_time) * 1000
                     failure = self._upstream_failure(e, project.id, proxy, latency_ms, 502)

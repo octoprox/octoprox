@@ -133,17 +133,20 @@ class IpDiscoverer:
         ``city_path`` yield.
         """
         context = log_context or {}
+        # A failed preflight echo fails its request, which the Failures page
+        # counts; at one echo per request a warning each would flood the log.
+        log_failure = logger.debug if context.get("preflight") else logger.warning
         try:
             async with self._client_factory(proxy_url, self._spec.timeout_seconds) as client:
                 response = await client.get(self._spec.url)
         except httpx.TimeoutException:
-            logger.warning("IP discovery timed out", **context)
+            log_failure("IP discovery timed out", **context)
             return None, None
         except httpx.HTTPError as exc:
-            logger.warning("IP discovery request failed", error=str(exc), **context)
+            log_failure("IP discovery request failed", error=str(exc), **context)
             return None, None
         if response.status_code != 200:
-            logger.warning("IP discovery returned an error", status_code=response.status_code, **context)
+            log_failure("IP discovery returned an error", status_code=response.status_code, **context)
             return None, None
         ip, place = self._extract(response)
         if not ip:

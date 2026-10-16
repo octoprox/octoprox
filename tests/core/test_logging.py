@@ -101,7 +101,7 @@ class TestSetupLogging:
         setup_logging("INFO", "json", instance_id="octoprox-1")
 
         logging.getLogger("uvicorn.access").info(
-            '%s - "%s %s HTTP/%s" %d', "172.19.0.7:49574", "GET", "/health", "1.0", 200
+            '%s - "%s %s HTTP/%s" %d', "172.19.0.7:49574", "GET", "/api/v1/projects", "1.0", 200
         )
         logging.getLogger("uvicorn.error").info("Application startup complete.")
 
@@ -109,7 +109,7 @@ class TestSetupLogging:
         records = [json.loads(line) for line in lines]
         events = [record["event"] for record in records]
         assert events == [
-            '172.19.0.7:49574 - "GET /health HTTP/1.0" 200',
+            '172.19.0.7:49574 - "GET /api/v1/projects HTTP/1.0" 200',
             "Application startup complete.",
         ]
         assert {record["logger"] for record in records} == {"uvicorn.access", "uvicorn.error"}
@@ -145,3 +145,33 @@ class TestSetupLogging:
         events = [json.loads(line)["event"] for line in lines]
         assert "should not appear" not in events
         assert "should appear" in events
+
+
+def _access(path: str) -> None:
+    logging.getLogger("uvicorn.access").info('%s - "%s %s HTTP/%s" %d', "10.0.0.1:5000", "GET", path, "1.1", 200)
+
+
+class TestQuietRequestLines:
+    """At a busy proxy's rate these lines pushed everything else out of the container log within minutes."""
+
+    def test_probes_and_outbound_requests_are_dropped_above_debug(
+        self, capsys: pytest.CaptureFixture[str], restore_logging: None
+    ) -> None:
+        setup_logging("INFO", "json")
+        _access("/health")
+        _access("/live")
+        logging.getLogger("httpx").info('HTTP Request: GET https://httpbin.org/ip "HTTP/1.1 200 OK"')
+        _access("/api/v1/projects")
+        logging.getLogger("httpx").warning("an httpx warning")
+
+        events = [json.loads(line)["event"] for line in capsys.readouterr().out.splitlines() if line.strip()]
+        assert events == ['10.0.0.1:5000 - "GET /api/v1/projects HTTP/1.1" 200', "an httpx warning"]
+
+    def test_debug_shows_them_again(self, capsys: pytest.CaptureFixture[str], restore_logging: None) -> None:
+        setup_logging("INFO", "json")
+        setup_logging("DEBUG", "json")
+        _access("/health")
+        logging.getLogger("httpx").info("HTTP Request: GET https://httpbin.org/ip")
+
+        events = [json.loads(line)["event"] for line in capsys.readouterr().out.splitlines() if line.strip()]
+        assert events == ['10.0.0.1:5000 - "GET /health HTTP/1.1" 200', "HTTP Request: GET https://httpbin.org/ip"]
