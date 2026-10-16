@@ -14,7 +14,9 @@ Three stages, mirroring the request-metrics pipeline:
    bulk-inserts the raw rows, decides which sightings are hand-outs, upserts
    the per-connector exit table the accuracy and exit views read, and applies
    retention. Each cycle keeps popping while batches come back full, so a
-   backlog is drained rather than outgrowing one batch per interval.
+   backlog is drained rather than outgrowing one batch per interval, and a
+   cycle that ran out of time with the queue still full is followed at once
+   by the next one rather than after the interval.
 
 Losing Redis loses at most a few seconds of observations. Nothing on the
 request path waits for a database.
@@ -47,11 +49,15 @@ logger = structlog.get_logger()
 # Standby instances poll this often to see whether the flush lease has freed up.
 _LEASE_RETRY_SECONDS = 30.0
 # Rows popped from Redis per batch, each batch its own transaction. Bounded so
-# no transaction stays open for a minute after a traffic burst.
-FLUSH_BATCH_SIZE = 2000
+# no transaction stays open for a minute after a traffic burst. A batch costs
+# about a dozen round trips, plus one per thousand exits upserted or judged,
+# and on a busy event loop each one waits its turn (a batch of 2000 took 4-5 s
+# at peak), so batches are large: rows per second grow with rows per batch.
+FLUSH_BATCH_SIZE = 5000
 # How long one cycle keeps writing batch after batch while they come back full.
-# A backlog clears over a few cycles instead of in one long burst, and the
-# cycle still yields to the next tick.
+# A cycle that runs out of time with the queue still full is followed by the
+# next one at once (see ObservationFlusher.run), so the budget bounds how long
+# one run lasts in the job stats, not the drain rate.
 DRAIN_BUDGET_SECONDS = 20.0
 # Retention runs at most this often.
 _RETENTION_EVERY = timedelta(hours=1)
@@ -294,6 +300,9 @@ class ObservationFlusher:
         self._exit_ip_retention_days = exit_ip_retention_days
         self._running = False
         self._last_retention = utc_now() - _RETENTION_EVERY
+        # Set by drain() when it ran out of time with the queue still full:
+        # run() then starts the next drain at once instead of sleeping.
+        self.backlogged = False
 
     def _retention(self) -> int:
         value = self._retention_days() if callable(self._retention_days) else self._retention_days
@@ -314,7 +323,10 @@ class ObservationFlusher:
                     if not lease.is_held and not await lease.try_acquire():
                         await asyncio.sleep(_LEASE_RETRY_SECONDS)
                         continue
-                    await asyncio.sleep(self._interval)
+                    # Sleeping 30 s after every 20 s drain left the flusher
+                    # idle most of the time while a burst's backlog grew.
+                    if not self.backlogged:
+                        await asyncio.sleep(self._interval)
                     if lease.is_held and self._running:
                         with job_stats.track(WorkerName.GEO_OBSERVATION_FLUSHER) as run:
                             if await self.drain(lease) == 0:
@@ -334,13 +346,16 @@ class ObservationFlusher:
         without bound and every exit lands in the tables later and later.
         Each batch is still its own transaction. The loop stops at a short
         batch (the queue is drained), after ``drain_budget`` seconds (the
-        rest waits for the next cycle), once :meth:`stop` was called, or when
-        ``lease`` can no longer be confirmed. The lease is confirmed before
-        every batch, the first included, since hand-outs are only counted
-        right when one instance writes the queue in order.
+        rest waits for the next cycle, which then follows at once: see
+        ``backlogged``), once :meth:`stop` was called, or when ``lease`` can
+        no longer be confirmed. The lease is confirmed before every batch,
+        the first included, since hand-outs are only counted right when one
+        instance writes the queue in order.
         """
-        deadline = time.monotonic() + self._drain_budget
+        started = time.monotonic()
+        deadline = started + self._drain_budget
         written = judged = batches = 0
+        self.backlogged = False
         self._idle.clear()
         try:
             while not self._stopping and (lease is None or await lease.confirm()):
@@ -348,7 +363,10 @@ class ObservationFlusher:
                 written += batch_written
                 judged += batch_judged
                 batches += 1 if popped else 0
-                if popped < FLUSH_BATCH_SIZE or time.monotonic() >= deadline:
+                if popped < FLUSH_BATCH_SIZE:
+                    break
+                if time.monotonic() >= deadline:
+                    self.backlogged = True
                     break
         except Exception:
             # The batches before the failing one are committed; say so next to the error.
@@ -365,6 +383,7 @@ class ObservationFlusher:
                 count=written,
                 judged=judged,
                 batches=batches,
+                duration_ms=round((time.monotonic() - started) * 1000),
                 queued=await queue_length(self._redis),
             )
         return written + judged

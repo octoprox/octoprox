@@ -1030,7 +1030,7 @@ Editors and viewers receive `403`.
 
 | Section | Scope | Contents |
 |---------|-------|----------|
-| `runtime` | This instance | Version, instance id, role, uptime, ports, worker intervals. |
+| `runtime` | This instance | Version, instance id, role, uptime, ports, worker intervals, and `event_loop_lag_max_ms` / `event_loop_lag_mean_ms`: how late the event loop ran timers over the last minute (null before the first minute). A worst case over a second is also logged as `Event loop running behind`. |
 | `inventory` | Whole install | Exact counts of projects, credentials, connectors, proxies, users and providers, plus the live pool's health breakdown. |
 | `projects` | Whole install | Per-project credential, connector and proxy counts, busiest first. |
 | `database` | Whole install | Database size, per-table size (indexes included), server connections and this instance's pool usage. |

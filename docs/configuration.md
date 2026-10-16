@@ -135,7 +135,7 @@ The install-wide settings (default conflict rule and city radius, echo endpoint,
 | `geo.echo.enabled` | Serve the public `/echo` endpoint on this instance | true |
 | `geo.echo.trusted_proxies` | CIDRs of load balancers whose `X-Forwarded-For` the `/echo` endpoint trusts for the client IP | [] |
 | `geo.observations.publish_interval_seconds` | How often buffered IP observations are pushed to Redis | 5 |
-| `geo.observations.flush_interval_seconds` | How often the leader drains the Redis queue into Postgres; each cycle writes 2000-row batches while they come back full, for up to 20 s | 30 |
+| `geo.observations.flush_interval_seconds` | How often the leader drains the Redis queue into Postgres; each cycle writes 5000-row batches while they come back full, for up to 20 s, and one that runs out of time with the queue still full is followed at once by the next | 30 |
 | `geo.observations.max_buffer` | Observations one instance keeps in memory before dropping the oldest | 5000 |
 | `geo.updater.check_interval_seconds` | How often the leader checks for scheduled database downloads | 3600 |
 

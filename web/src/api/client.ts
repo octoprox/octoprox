@@ -1901,6 +1901,10 @@ export interface SystemRuntime {
   health_check_interval: number
   metrics_flush_interval: number
   ip_refresh_interval: number
+  // How late the event loop ran timers over the last minute; null before the
+  // first minute is up and for peers on older versions.
+  event_loop_lag_max_ms?: number | null
+  event_loop_lag_mean_ms?: number | null
 }
 
 export interface SystemInventory {

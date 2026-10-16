@@ -652,6 +652,11 @@ class ObservationRepository:
         "proxy_id", "source", "claimed_country", "resolved_source", "country_conflict",
         "claimed_state", "claimed_city", "resolved_state", "resolved_city", "state_conflict", "city_conflict",
     )
+    # Rows per statement. asyncpg takes at most 32767 bound values per
+    # statement: an exit upsert row binds 17 (under 1928 rows fit), a
+    # judgement 14 (under 2341).
+    _EXIT_UPSERT_ROWS = 1000
+    _JUDGEMENT_ROWS = 1000
 
     async def add_exit_ips(self, exits: dict[tuple[str, str], ExitSighting]) -> None:
         """Upsert (connector, ip) rows: first sighting kept, last sighting and count advanced.
@@ -659,6 +664,7 @@ class ObservationRepository:
         The latest-state columns are taken from the batch only when its
         newest sighting is at least as new as the row's, so batches flushed
         out of order by different instances cannot roll the state back.
+        Written in statements of ``_EXIT_UPSERT_ROWS``, in the caller's transaction.
         """
         if not exits:
             return
@@ -674,6 +680,10 @@ class ObservationRepository:
             }
             for (connector_id, ip), sighting in exits.items()
         ]
+        for start in range(0, len(rows), self._EXIT_UPSERT_ROWS):
+            await self._upsert_exit_rows(rows[start:start + self._EXIT_UPSERT_ROWS])
+
+    async def _upsert_exit_rows(self, rows: list[dict[str, Any]]) -> None:
         statement = pg_insert(ConnectorExitIpModel).values(rows)
         newer = statement.excluded.last_seen >= ConnectorExitIpModel.last_seen
         statement = statement.on_conflict_do_update(
@@ -716,8 +726,15 @@ class ObservationRepository:
         exit with different claims, and the row's verdict belongs to the
         holder's claim. And a judgement older than the row's last sighting
         is dropped: that sighting saw the proxy's state after the judgement
-        read it. Returns how many rows were actually rewritten.
+        read it. Returns how many rows were actually rewritten. Of several
+        judgements of one exit by one proxy only the newest is applied: within
+        one UPDATE ... FROM, Postgres picks any of the rows that match. Applied
+        in statements of ``_JUDGEMENT_ROWS``.
         """
+        newest: dict[tuple[str, str, str], ExitJudgement] = {}
+        for j in sorted(judgements, key=lambda j: j.judged_at):
+            if j.connector_id:
+                newest[(j.connector_id, j.ip, j.proxy_id)] = j
         data = [
             (
                 j.connector_id,
@@ -735,11 +752,14 @@ class ObservationRepository:
                 j.state_conflict,
                 j.city_conflict,
             )
-            for j in sorted(judgements, key=lambda j: j.judged_at)
-            if j.connector_id
+            for j in newest.values()
         ]
-        if not data:
-            return 0
+        rewritten = 0
+        for start in range(0, len(data), self._JUDGEMENT_ROWS):
+            rewritten += await self._apply_judgement_rows(data[start:start + self._JUDGEMENT_ROWS])
+        return rewritten
+
+    async def _apply_judgement_rows(self, data: list[tuple[Any, ...]]) -> int:
         judged = values(
             column("connector_id", String),
             column("ip", String),

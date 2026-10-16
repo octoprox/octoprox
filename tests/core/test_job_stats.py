@@ -107,6 +107,29 @@ class TestTrack:
         assert stats.avg_duration_ms == 20.0
         assert stats.max_duration_ms == 20.0
 
+    async def test_a_cycle_that_gave_up_without_raising_can_count_as_failed(self) -> None:
+        """A flush rolled back on purpose did not happen, though it returned normally."""
+        with job_stats.track("worker") as run:
+            run.idle()
+            run.fail("Rolled back: the lease could not be confirmed before the commit")
+
+        stats = job_stats.get("worker")
+        assert stats is not None
+        assert (stats.runs, stats.idle_runs, stats.failures, stats.consecutive_failures) == (1, 0, 1, 1)
+        assert stats.last_error == "Rolled back: the lease could not be confirmed before the commit"
+
+    async def test_standing_by_ends_the_failure_streak_but_keeps_the_record(self) -> None:
+        """A standby records no cycles, so nothing else would clear the streak of the last one it ran."""
+        with job_stats.track("worker") as run:
+            run.fail("Skipped")
+        job_stats.standing_by("worker")
+        job_stats.standing_by("never-ran")  # nothing to clear, nothing created
+
+        stats = job_stats.get("worker")
+        assert stats is not None
+        assert (stats.failures, stats.consecutive_failures, stats.last_error) == (1, 0, "Skipped")
+        assert job_stats.get("never-ran") is None
+
     async def test_a_cycle_that_raised_is_never_idle(self) -> None:
         """However early it gave up, it failed rather than found nothing."""
         with pytest.raises(RuntimeError), job_stats.track("worker") as run:

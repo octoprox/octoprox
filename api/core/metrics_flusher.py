@@ -4,6 +4,7 @@
 """Periodic flusher for Redis metrics to Postgres."""
 
 import asyncio
+import time
 
 import structlog
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -62,12 +63,25 @@ class MetricsFlusher:
             while self._running:
                 try:
                     if not lease.is_held and not await lease.try_acquire():
+                        # A cycle skipped or rolled back on losing the lease
+                        # stays counted, but is not "failing now" on a standby.
+                        job_stats.standing_by(WorkerName.METRICS_FLUSHER)
                         await asyncio.sleep(_LEASE_RETRY_SECONDS)
                         continue
                     await asyncio.sleep(self._interval)
-                    if lease.is_held and self._running:
-                        with job_stats.track(WorkerName.METRICS_FLUSHER):
-                            await self._flush_metrics(lease)
+                    if not self._running:
+                        continue
+                    if not lease.is_held:
+                        # Lost while waiting: no flush this cycle, and the
+                        # counts wait in Redis. A gap in the history charts
+                        # starts here, so the system view counts it.
+                        job_stats.record(
+                            WorkerName.METRICS_FLUSHER, 0.0, "Skipped: the lease was lost before the flush"
+                        )
+                        continue
+                    with job_stats.track(WorkerName.METRICS_FLUSHER) as run:
+                        if not await self._flush_metrics(lease):
+                            run.fail("Rolled back: the lease could not be confirmed before the commit")
                 except asyncio.CancelledError:
                     logger.info("Metrics flusher stopped")
                     break
@@ -76,17 +90,19 @@ class MetricsFlusher:
         finally:
             await lease.release()
 
-    async def _flush_metrics(self, lease: Lease | None = None) -> None:
+    async def _flush_metrics(self, lease: Lease | None = None) -> bool:
         """Flush all proxy, project, connector, tunnel device, host and failure metrics from Redis to Postgres.
 
         ``lease`` is confirmed with Redis just before the commit. A flush that
         outlived its lease is rolled back and leaves Redis as it found it: the
         new holder flushes the same counts, and two flushes committing them
         would write them twice. None (a direct call) skips the check.
+        Returns False only for that rollback.
         """
         # Get all metrics from Redis: independent walks, run side by side
         # rather than one after another.
         # Nested because gather's typing stops at six awaitables.
+        started = time.monotonic()
         redis = self._redis_client
         (
             (
@@ -109,6 +125,7 @@ class MetricsFlusher:
             ),
             redis.get_all_proxy_statuses(),
         )
+        read_at = time.monotonic()
 
         if (
             not all_proxy_metrics
@@ -119,7 +136,7 @@ class MetricsFlusher:
             and not all_failure_metrics
         ):
             logger.debug("No metrics to flush")
-            return
+            return True
 
         logger.info(
             "Flushing metrics to Postgres",
@@ -181,8 +198,9 @@ class MetricsFlusher:
 
             if lease is not None and not await lease.confirm():
                 logger.warning("Metrics flush rolled back: the lease could not be confirmed before the commit")
-                return
+                return False
             await session.commit()
+        written_at = time.monotonic()
 
         # Subtracted, not deleted: what the instances added since the read
         # stays in the hashes for the next flush.
@@ -203,7 +221,13 @@ class MetricsFlusher:
             tunnel_peer_count=len(all_tunnel_peer_metrics),
             host_count=len(all_host_metrics),
             failure_count_rows=len(all_failure_metrics),
+            # Where the time went: a slow read is the Redis walk waiting on a
+            # busy event loop, a slow write is Postgres.
+            read_ms=round((read_at - started) * 1000),
+            write_ms=round((written_at - read_at) * 1000),
+            drain_ms=round((time.monotonic() - written_at) * 1000),
         )
+        return True
 
     def stop(self) -> None:
         """Stop the flusher."""

@@ -39,6 +39,10 @@ class RuntimeStats(BaseModel):
     health_check_interval: int
     metrics_flush_interval: int
     ip_refresh_interval: int
+    # How late the event loop ran timers over the last minute (api.core.loop_lag);
+    # None before the first minute is up, and from peers on older versions.
+    event_loop_lag_max_ms: float | None = None
+    event_loop_lag_mean_ms: float | None = None
 
 
 class InventoryStats(BaseModel):

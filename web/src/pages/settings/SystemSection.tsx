@@ -265,6 +265,7 @@ function RuntimeCard({ view }: { view: InstanceView }) {
       </div>
       <div className="grid grid-cols-2 @lg:grid-cols-3 @3xl:grid-cols-6 gap-x-6 gap-y-2">
         <Fact label="Uptime" value={formatDuration(runtime.uptime_seconds)} />
+        <LoopLagFact runtime={runtime} />
         <Fact label="Environment" value={runtime.environment} />
         <Fact label="Log level" value={runtime.log_level} />
         <Fact label="API / proxy port" value={`${runtime.api_port} / ${runtime.proxy_port}`} />
@@ -276,6 +277,37 @@ function RuntimeCard({ view }: { view: InstanceView }) {
       </div>
     </Card>
   )
+}
+
+// Over a second behind, background jobs made of many awaits (flushes, reloads)
+// stretch from seconds to minutes; the server warns in its log at the same mark.
+const LOOP_LAG_WARN_MS = 1000
+
+function LoopLagFact({ runtime }: { runtime: SystemRuntime }) {
+  const max = runtime.event_loop_lag_max_ms
+  if (max == null) {
+    return (
+      <Fact
+        label="Event loop lag"
+        value="-"
+        hint="Measured over a minute: no full minute yet, or a peer on a version that does not report it."
+      />
+    )
+  }
+  const hint =
+    `Worst delay of a timer over the last minute; average ${formatLag(runtime.event_loop_lag_mean_ms ?? 0)}. ` +
+    'Every await waits about this long for its turn.'
+  return (
+    <Fact
+      label="Event loop lag"
+      value={<span className={cn(max >= LOOP_LAG_WARN_MS && 'text-warning')}>{formatLag(max)}</span>}
+      hint={hint}
+    />
+  )
+}
+
+function formatLag(ms: number): string {
+  return ms < 1000 ? `${Math.round(ms)} ms` : `${(ms / 1000).toFixed(1)} s`
 }
 
 function Fact({ label, value, hint }: { label: string; value: ReactNode; hint?: string }) {

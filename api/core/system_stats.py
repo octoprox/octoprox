@@ -36,6 +36,7 @@ from api import __version__
 from api.core import utc_now
 from api.core.config import Settings
 from api.core.job_stats import job_stats
+from api.core.loop_lag import loop_lag
 from api.core.workers import LEASE_KINDS, LEASE_WORKERS, worker_info
 from api.db.redis import (
     INSTANCE_REGISTRY_SCAN,
@@ -95,6 +96,7 @@ def collect_runtime(
     interesting one when the configuration asked for 0 (OS-assigned).
     """
     uptime = (utc_now() - started_at).total_seconds() if started_at else 0.0
+    lag = loop_lag.last
     return RuntimeStats(
         version=__version__,
         instance_id=settings.instance_id,
@@ -111,6 +113,8 @@ def collect_runtime(
         health_check_interval=settings.health_check_interval,
         metrics_flush_interval=settings.metrics_flush_interval,
         ip_refresh_interval=settings.ip_refresh_interval,
+        event_loop_lag_max_ms=lag.max_ms if lag else None,
+        event_loop_lag_mean_ms=lag.mean_ms if lag else None,
     )
 
 

@@ -10,6 +10,7 @@ Emits proxy lifecycle signals (proxy_added, proxy_removed, proxy_status_changed)
 import asyncio
 import contextlib
 import json
+import time
 from collections import Counter
 from collections.abc import Awaitable, Callable, Coroutine, Mapping, Sequence
 from datetime import datetime
@@ -29,6 +30,7 @@ from api.core.failure_log import FailureLog
 from api.core.health_checker import HealthChecker, IpExtractionRules
 from api.core.job_stats import job_stats
 from api.core.leadership import Lease
+from api.core.loop_lag import loop_lag
 from api.core.metrics_compactor import MetricsCompactor
 from api.core.metrics_flusher import MetricsFlusher
 from api.core.provider_syncer import ProxyProviderSyncer
@@ -283,6 +285,9 @@ class ProxyManager:
 
         # Hydrate with Redis operational data
         await self._hydrate_from_redis()
+
+        # How far behind the event loop runs: what every other loop here waits.
+        self._spawn(WorkerName.LOOP_LAG_MONITOR, loop_lag.run())
 
         # Start health checker
         self._spawn(WorkerName.HEALTH_CHECKER, self._health_checker.run())
@@ -925,15 +930,18 @@ class ProxyManager:
         the current window from Redis to get accurate total counts.
         """
         logger.info("Hydrating operational data")
+        started = time.monotonic()
         statuses = await self._redis_client.get_all_proxy_statuses()
         redis_proxy_metrics = await self._redis_client.get_all_proxy_metrics()
 
         # Always load cumulative totals from Postgres
+        postgres_started = time.monotonic()
         async with self._session_factory() as session:
             repo = MetricsRepository(session)
             postgres_proxy_metrics = await repo.get_cumulative_metrics_for_all_proxies()
             postgres_project_metrics = await repo.get_cumulative_project_metrics()
             postgres_tunnel_peer_metrics = await repo.get_cumulative_tunnel_peer_metrics()
+        postgres_ms = round((time.monotonic() - postgres_started) * 1000)
 
         # Hydrate proxy metrics
         for proxy_id, proxy in self._proxies.items():
@@ -977,6 +985,11 @@ class ProxyManager:
             project_count=len(self._projects),
             from_redis=len(redis_proxy_metrics),
             from_postgres=len(postgres_proxy_metrics),
+            # postgres_ms is the cumulative totals; the rest is mostly Redis walks
+            # waiting on the event loop, plus the traffic limiter's period totals
+            # (a Postgres read of its own).
+            duration_ms=round((time.monotonic() - started) * 1000),
+            postgres_ms=postgres_ms,
         )
 
     async def full_reload(self) -> None:

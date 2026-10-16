@@ -139,6 +139,7 @@ class JobRun:
         self._name = name
         self._started = 0.0
         self._idle = False
+        self._failure: str | None = None
 
     def __enter__(self) -> JobRun:
         self._started = time.perf_counter()
@@ -153,6 +154,15 @@ class JobRun:
         """
         self._idle = True
 
+    def fail(self, reason: str) -> None:
+        """Count this cycle as failed although it returned normally.
+
+        For a cycle that gave up on purpose rather than raising, such as a
+        flush rolled back because its lease could not be confirmed: the work
+        did not happen, and the system view should say so.
+        """
+        self._failure = reason
+
     def __exit__(
         self,
         exc_type: type[BaseException] | None,
@@ -163,9 +173,9 @@ class JobRun:
         if exc_type is not None and issubclass(exc_type, asyncio.CancelledError):
             return False
         duration_ms = (time.perf_counter() - self._started) * 1000.0
-        error = f"{type(exc).__name__}: {exc}" if exc is not None else None
+        error = f"{type(exc).__name__}: {exc}" if exc is not None else self._failure
         self._registry.record(
-            self._name, duration_ms, error, idle=self._idle and exc is None
+            self._name, duration_ms, error, idle=self._idle and error is None
         )
         # Never swallow: the caller's own ``except`` decides what happens to
         # the loop. Only the bookkeeping happens here.
@@ -234,6 +244,17 @@ class JobStatsRegistry:
             stats.consecutive_failures += 1
             stats.last_error = error[:MAX_ERROR_CHARS]
             stats.last_error_at = stats.last_run_at
+
+    def standing_by(self, name: str) -> None:
+        """``name`` is a peer's to run now: a failure streak from before is history, not "failing now".
+
+        For a leased worker whose lease moved. Its standby polls record no
+        cycles, so without this the streak of the last cycle it ran stays up
+        until it leads again. The lifetime ``failures`` and ``last_error`` stay.
+        """
+        stats = self._stats.get(name)
+        if stats is not None:
+            stats.consecutive_failures = 0
 
     def get(self, name: str) -> JobStats | None:
         """Counters for one worker, or None if no cycle has completed yet."""

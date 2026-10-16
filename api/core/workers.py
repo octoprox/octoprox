@@ -44,6 +44,7 @@ class WorkerName(StrEnum):
     WIREGUARD_STATUS_PUBLISHER = "wireguard_status_publisher"
     OPENVPN_STATUS_PUBLISHER = "openvpn_status_publisher"
     OPENVPN_SUPERVISOR = "openvpn_supervisor"
+    LOOP_LAG_MONITOR = "loop_lag_monitor"
 
 
 class LeaseName(StrEnum):
@@ -181,6 +182,10 @@ WORKERS: dict[WorkerName, WorkerInfo] = {
     WorkerName.OPENVPN_SUPERVISOR: WorkerInfo(
         "Watches the OpenVPN daemon this instance runs and starts it again, with "
         "backoff, when it exits on its own",
+    ),
+    WorkerName.LOOP_LAG_MONITOR: WorkerInfo(
+        "Measures how late this instance's event loop runs a timer - the wait every "
+        "await pays - and warns when it falls a second behind",
     ),
 }
 

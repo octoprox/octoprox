@@ -4,6 +4,7 @@
 """Tests for the IP attribution repositories and the observation flusher against Postgres."""
 
 import asyncio
+import contextlib
 import os
 from datetime import datetime, timedelta
 from typing import Any
@@ -519,6 +520,37 @@ class TestObservations:
 
 
 @pytest.mark.usefixtures("db_engine")
+class TestStatementSize:
+    async def test_exit_upserts_and_judgements_go_out_in_bounded_statements(
+        self, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """asyncpg binds at most 32767 values per statement; one statement for a 5000-row batch would overflow."""
+        await _connectors(db_session, "conn-1")
+        monkeypatch.setattr(ObservationRepository, "_EXIT_UPSERT_ROWS", 2)
+        monkeypatch.setattr(ObservationRepository, "_JUDGEMENT_ROWS", 1)
+        repo = ObservationRepository(db_session)
+        from api.geo.observations import aggregate_exits
+
+        day = datetime(2026, 9, 1, 8, 0, 0)
+        sightings = [_observation(ip=f"10.9.0.{n}", observed_at=day) for n in range(5)]
+        await repo.add_exit_ips(aggregate_exits([(o, True) for o in sightings]))
+        # The same exits again add to the rows, whichever statement they land in.
+        await repo.add_exit_ips(aggregate_exits([(o, True) for o in sightings]))
+        # Two judgements of one row, out of order: the newer stays, and the row counts once.
+        applied = await repo.apply_judgements([
+            ExitJudgement(proxy_id="proxy-1", connector_id="conn-1", ip="10.9.0.0", judged_at=day + timedelta(hours=3), claimed_country="DE"),
+            ExitJudgement(proxy_id="proxy-1", connector_id="conn-1", ip="10.9.0.1", judged_at=day + timedelta(hours=2), claimed_country="FR"),
+            ExitJudgement(proxy_id="proxy-1", connector_id="conn-1", ip="10.9.0.0", judged_at=day + timedelta(hours=1), claimed_country="FR"),
+        ])
+        await db_session.commit()
+
+        assert applied == 2
+        rows = {r["ip"]: r for r in (await repo.exit_ips(connector_ids=["conn-1"], limit=1000))[0]}
+        assert all(rows[f"10.9.0.{n}"]["sightings"] == 2 for n in range(5))
+        assert (rows["10.9.0.0"]["claimed_country"], rows["10.9.0.1"]["claimed_country"]) == ("DE", "FR")
+
+
+@pytest.mark.usefixtures("db_engine")
 class TestFlusher:
     async def test_recorder_to_redis_to_postgres(
         self,
@@ -696,6 +728,83 @@ class TestFlusher:
         assert await recorder.queued() == 2
         await asyncio.wait_for(flusher.settle(), 1)  # nothing in flight: returns at once
         await redis_client.client.delete(GEO_OBSERVATIONS_KEY)
+
+    async def test_only_a_drain_cut_short_by_its_budget_leaves_a_backlog(
+        self,
+        db_session_factory: async_sessionmaker[AsyncSession],
+        redis_client: RedisClient,
+        db_session: AsyncSession,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        await _connectors(db_session, "conn-1")
+        await redis_client.client.delete(GEO_OBSERVATIONS_KEY)
+        monkeypatch.setattr(observations, "FLUSH_BATCH_SIZE", 2)
+        recorder = ObservationRecorder(redis_client)
+        for n in range(3):
+            recorder.record(_observation(proxy_id=None, ip=f"10.3.0.{n}"))
+        await recorder.publish()
+
+        no_time = ObservationFlusher(db_session_factory, redis_client, "inst", drain_budget=0, retention_days=lambda: 7)
+        assert await no_time.drain() == 2 and no_time.backlogged  # out of time, queue still full
+        assert await no_time.drain() == 1 and not no_time.backlogged  # a short batch: drained
+
+    async def test_a_backlog_is_drained_without_waiting_out_the_interval(
+        self,
+        db_session_factory: async_sessionmaker[AsyncSession],
+        redis_client: RedisClient,
+        db_session: AsyncSession,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Sleeping 30 s after every 20 s drain left the flusher idle most of a burst while the queue grew."""
+        await _connectors(db_session, "conn-1")
+        await redis_client.client.delete(GEO_OBSERVATIONS_KEY)
+        monkeypatch.setattr(observations, "FLUSH_BATCH_SIZE", 2)
+
+        class HeldLease:
+            is_held = True
+
+            def __init__(self, *args: object, **kwargs: object) -> None:
+                pass
+
+            async def try_acquire(self) -> bool:
+                return True
+
+            async def confirm(self) -> bool:
+                return True
+
+            async def release(self) -> None:
+                pass
+
+        monkeypatch.setattr(observations, "Lease", HeldLease)
+        recorder = ObservationRecorder(redis_client)
+        for n in range(6):
+            recorder.record(_observation(proxy_id=None, ip=f"10.4.0.{n}"))
+        await recorder.publish()
+
+        # An hour between cycles, a batch per cycle: only back-to-back cycles drain it in time.
+        flusher = ObservationFlusher(
+            db_session_factory, redis_client, "inst", interval=3600, drain_budget=0, retention_days=lambda: 7
+        )
+        flusher.backlogged = True  # as a previous cycle that ran out of time would leave it
+        wanted = {f"10.4.0.{n}" for n in range(6)}
+        task = asyncio.create_task(flusher.run())
+        try:
+            # Waits on its own rows, not an empty queue: other test apps publish to the same list.
+            async with asyncio.timeout(5):
+                while not wanted <= await self._exits(db_session_factory):
+                    await asyncio.sleep(0.01)
+        finally:
+            flusher.stop()
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+            await redis_client.client.delete(GEO_OBSERVATIONS_KEY)
+
+    @staticmethod
+    async def _exits(session_factory: async_sessionmaker[AsyncSession]) -> set[str]:
+        async with session_factory() as session:
+            rows, _, _ = await ObservationRepository(session).exit_ips(connector_ids=["conn-1"], limit=1000)
+        return {r["ip"] for r in rows}
 
 
 class TestPlaceAccuracy:
