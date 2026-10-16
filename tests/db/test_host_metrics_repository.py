@@ -114,7 +114,8 @@ class TestHostWindowQueries:
         session: AsyncSession,
     ) -> tuple[Project, list[Connector], datetime]:
         project, (a, b) = await _project_with_connectors(project_repo, credential_repo, connector_repo, session)
-        now = utc_now().replace(microsecond=0)
+        # Mid-hour in the past, so the rows never straddle an hourly bucket boundary.
+        now = utc_now().replace(minute=30, second=0, microsecond=0) - timedelta(hours=1)
         # shop: 6 requests across both connectors; news: 2 on a; a stale row outside the window.
         await _insert(session, project.id, a.id, "shop.example.com", now - timedelta(minutes=5), requests=4, failures=1, sent=100, received=400, latency=100)
         await _insert(session, project.id, b.id, "shop.example.com", now - timedelta(minutes=4), requests=2, sent=50, received=50, latency=400)
