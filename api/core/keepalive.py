@@ -17,7 +17,9 @@ def set_keepalive(
     """Have the kernel probe ``sock``'s peer after ``idle`` seconds without traffic, every ``interval``, giving up after ``probes``; each option the platform lacks is left out.
 
     Args:
-        user_timeout_ms: how long sent data may stay unacknowledged before the connection fails (Linux only); None leaves it.
+        user_timeout_ms: how long anything sent (data, a close, a keepalive or zero-window probe) may stay
+            unacknowledged before the connection fails; set, Linux gives up after it instead of after ``probes``.
+            Linux only; None leaves it.
     """
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
     options = (

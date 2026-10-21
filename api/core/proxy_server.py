@@ -61,22 +61,21 @@ BUFFER_SIZE = 65536
 # the gateway's shutdown, for as long as it stays silent.
 CLOSE_TIMEOUT_SECONDS = 5.0
 
-# TCP keepalive and a user timeout on every leg the gateway relays itself (the
-# curl_cffi and rnet MITM engines open their own upstream connections): the
-# kernel probes a leg idle for KEEPALIVE_IDLE_SECONDS, every
-# KEEPALIVE_INTERVAL_SECONDS. On Linux USER_TIMEOUT_MS then decides when the
-# leg is given up: once nothing on it has been acknowledged for that long,
-# whether its probes went unanswered or its data or close did (keepalive
-# never probes a leg with something unacknowledged). Without a user timeout
-# the leg is given up after KEEPALIVE_PROBES unanswered probes. A peer that
-# vanished without a FIN or RST (a device that left its tunnel, a load
-# balancer or NAT that forgot the flow, a node that died) is so noticed in
-# about five minutes, instead of never or of the 15 minutes the kernel's
-# retransmissions take: the leg fails, which ends the relay (see _tunnel) and
-# releases its in-flight count, which least_used routes on. A live peer whose
-# receive window stays shut as long (it stopped reading, or reads only a
-# trickle) is cut as well. A live idle tunnel stays open, and its probes keep
-# middleboxes that drop idle flows (an AWS NLB after 350 s) from dropping it.
+# TCP keepalive and, on Linux, a user timeout on every leg the gateway relays
+# itself (the curl_cffi and rnet MITM engines open their own upstream
+# connections): an idle leg is probed after KEEPALIVE_IDLE_SECONDS, every
+# KEEPALIVE_INTERVAL_SECONDS, and given up once nothing on it has been
+# acknowledged for USER_TIMEOUT_MS, whether probes, data or a close (without
+# a user timeout, after KEEPALIVE_PROBES unanswered probes). So a peer that
+# vanished without a FIN or RST ends its relay in about five minutes, up to
+# about ten when the other side sends or closes just before then, rather
+# than never or after the 15 minutes the kernel's retransmissions take, and
+# releases its in-flight count, which least_used routes on. A live peer that
+# stops reading is cut after five minutes too, and so can be one that reads
+# only a trickle (about 1 KB/s) for longer than that. A live idle tunnel
+# stays open, and its probes keep middleboxes that drop idle flows (an AWS
+# NLB after 350 s) from dropping it. docs/architecture.md (Connections) has
+# the details.
 KEEPALIVE_IDLE_SECONDS = 60
 KEEPALIVE_INTERVAL_SECONDS = 15
 KEEPALIVE_PROBES = 4
@@ -898,10 +897,13 @@ class ProxyServer:
                         return total_bytes, True
                     total_bytes += len(data)
                     writer.write(data)
-                    # Counted as it is handed on, so a direction cut while it
-                    # drains still counts its last chunk.
-                    allowed = count is None or count(len(data))
-                    await writer.drain()
+                    try:
+                        await writer.drain()
+                    finally:
+                        # Counted once handed on, whether the drain finished,
+                        # failed or was cut; and asked after it, so a block
+                        # that landed meanwhile stops the direction here.
+                        allowed = count is None or count(len(data))
                     if not allowed:
                         return total_bytes, True
             except (ConnectionResetError, BrokenPipeError, OSError):
