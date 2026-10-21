@@ -20,6 +20,7 @@ from api.core.proxy_server import (
     KEEPALIVE_IDLE_SECONDS,
     KEEPALIVE_INTERVAL_SECONDS,
     KEEPALIVE_PROBES,
+    USER_TIMEOUT_MS,
     ProxyServer,
     keep_alive,
 )
@@ -33,6 +34,8 @@ PROJECT = Project(name="Scraping", username="proj", password="secret")
 AUTH = "Proxy-Authorization: Basic " + base64.b64encode(b"proj:secret").decode() + "\r\n"
 # The idle-time option: TCP_KEEPIDLE on Linux, TCP_KEEPALIVE on macOS.
 TCP_KEEPIDLE: int = getattr(socket, "TCP_KEEPIDLE", getattr(socket, "TCP_KEEPALIVE", 0))
+# Linux only; None where the platform has no user timeout.
+TCP_USER_TIMEOUT: int | None = getattr(socket, "TCP_USER_TIMEOUT", None)
 
 
 def _server(vendor_port: int, inflight: InFlight) -> ProxyServer:
@@ -46,18 +49,25 @@ def _server(vendor_port: int, inflight: InFlight) -> ProxyServer:
     return ProxyServer(router, metering, host="127.0.0.1", port=0, timeout=5.0)
 
 
-def _keepalive_of(writer: asyncio.StreamWriter) -> tuple[bool, int, int, int]:
-    """(keepalive on, idle seconds, probe interval, probes) of the socket under ``writer``."""
+def _keepalive_of(writer: asyncio.StreamWriter) -> tuple[bool, int, int, int, int | None]:
+    """(keepalive on, idle seconds, probe interval, probes, user timeout in ms) of the socket under ``writer``."""
     sock = writer.get_extra_info("socket")
     return (
         sock.getsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE) != 0,
         sock.getsockopt(socket.IPPROTO_TCP, TCP_KEEPIDLE),
         sock.getsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL),
         sock.getsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT),
+        sock.getsockopt(socket.IPPROTO_TCP, TCP_USER_TIMEOUT) if TCP_USER_TIMEOUT is not None else None,
     )
 
 
-EXPECTED = (True, KEEPALIVE_IDLE_SECONDS, KEEPALIVE_INTERVAL_SECONDS, KEEPALIVE_PROBES)
+EXPECTED = (
+    True,
+    KEEPALIVE_IDLE_SECONDS,
+    KEEPALIVE_INTERVAL_SECONDS,
+    KEEPALIVE_PROBES,
+    USER_TIMEOUT_MS if TCP_USER_TIMEOUT is not None else None,
+)
 
 
 @pytest.fixture
@@ -90,7 +100,7 @@ async def vendor() -> AsyncIterator[int]:
 class TestKeepAlive:
     async def test_both_legs_of_a_tunnel_are_probed_when_idle(self, vendor: int) -> None:
         server = _server(vendor, InFlight())
-        legs: list[tuple[bool, int, int, int]] = []
+        legs: list[tuple[bool, int, int, int, int | None]] = []
 
         async def tunnel(_client_reader: Any, client_writer: Any, _upstream_reader: Any, upstream_writer: Any,
                          meter: Any = None) -> tuple[int, int]:
@@ -112,7 +122,7 @@ class TestKeepAlive:
 
     async def test_a_plain_request_probes_its_upstream_and_its_client(self, vendor: int) -> None:
         server = _server(vendor, InFlight())
-        legs: list[tuple[bool, int, int, int]] = []
+        legs: list[tuple[bool, int, int, int, int | None]] = []
 
         def recording(writer: asyncio.StreamWriter) -> None:
             keep_alive(writer)

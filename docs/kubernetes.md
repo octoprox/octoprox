@@ -235,7 +235,7 @@ So: require a password (`redis://:password@host:6379/0` in `OCTOPROX_REDIS_URL`,
 
 | Role | Scale on | How |
 |------|----------|-----|
-| gateway | CPU, or open transfers | HorizontalPodAutoscaler on CPU (each gateway uses up to one core); or on `octoprox_gateway_in_flight` through the Prometheus adapter or KEDA |
+| gateway | CPU, or open transfers | HorizontalPodAutoscaler on CPU (each gateway uses up to one core); or on `octoprox_gateway_in_flight` (open relays, idle tunnel connections included) through the Prometheus adapter or KEDA |
 | worker | The length of each work stream it takes | KEDA's Redis Streams scaler, one trigger per stream, `streamLength` at one worker's capacity for the stream |
 | api | CPU | HorizontalPodAutoscaler |
 | controller | Nothing | Two small replicas, for failover only |

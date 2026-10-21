@@ -10,6 +10,9 @@ tests control when the connector counts as interrupted.
 
 import asyncio
 import contextlib
+import errno
+import socket
+import struct
 from collections.abc import AsyncIterator
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
@@ -178,6 +181,63 @@ class TestClosedLeg:
 
         assert result == (0, 0)
         closed.write.assert_not_called()
+
+    async def test_a_half_close_is_not_passed_on_to_a_leg_already_closing(self) -> None:
+        """uvloop raises RuntimeError for write_eof on a closing transport, which would end the relay uncounted."""
+        server = _server()
+        client_reader = asyncio.StreamReader()
+        client_reader.feed_eof()
+        upstream_reader = asyncio.StreamReader()
+        upstream_reader.feed_eof()
+        closing = MagicMock(spec=asyncio.StreamWriter)
+        closing.is_closing.return_value = True
+        closing.write_eof.side_effect = RuntimeError("unable to perform operation on <TCPTransport closed=True>")
+        client_writer = MagicMock(spec=asyncio.StreamWriter)
+        client_writer.is_closing.return_value = False
+
+        result = await asyncio.wait_for(server._tunnel(client_reader, client_writer, upstream_reader, closing), 5)
+
+        assert result == (0, 0)
+        closing.write_eof.assert_not_called()
+        client_writer.write_eof.assert_called_once()
+
+
+class TestFailedLeg:
+    async def test_a_failed_leg_ends_the_tunnel_without_waiting_on_the_other_peer(self) -> None:
+        """A leg the kernel gave up on can neither send nor receive, so a vendor that never speaks is not waited on."""
+        server = _server()
+        device = asyncio.StreamReader()
+        device.set_exception(TimeoutError(errno.ETIMEDOUT, "Connection timed out"))
+        silent_vendor = asyncio.StreamReader()
+        vendor_writer = MagicMock(spec=asyncio.StreamWriter)
+        vendor_writer.is_closing.return_value = False
+        device_writer = MagicMock(spec=asyncio.StreamWriter)
+        device_writer.is_closing.return_value = False
+
+        result = await asyncio.wait_for(server._tunnel(device, device_writer, silent_vendor, vendor_writer), 5)
+
+        assert result == (0, 0)
+        device_writer.write.assert_not_called()
+
+    async def test_a_reset_vendor_ends_the_tunnel_with_the_device_still_open(self, pipes: list[Pipe]) -> None:
+        """The device's direction is cut too, over real sockets, with what crossed before counted."""
+        meter = TrafficMeter(RecordingMetering(), "proxy", "project", "connector")
+        server = _server()
+        device_pipe, vendor_pipe = Pipe(), Pipe()
+        pipes.extend((device_pipe, vendor_pipe))
+        device, client_side = await device_pipe.open()
+        upstream_side, vendor = await vendor_pipe.open()
+        tunnel = asyncio.create_task(server._tunnel(*client_side, *upstream_side, meter=meter))
+        vendor[1].write(b"hi")
+        await vendor[1].drain()
+        assert await device[0].readexactly(2) == b"hi"
+
+        # A reset, not asyncio's abort alone, which closes with a FIN: a half-close the device is waited on for.
+        vendor[1].get_extra_info("socket").setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+        vendor[1].transport.abort()
+
+        assert await asyncio.wait_for(tunnel, 5) == (0, 2)
+        await _close(device[1], client_side[1], upstream_side[1])
 
 class TestChunkedForwarding:
     async def test_chunked_body_is_metered_and_forwarded(self, pipes: list[Pipe]) -> None:

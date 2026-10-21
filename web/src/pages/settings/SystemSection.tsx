@@ -228,7 +228,7 @@ function processFacts(instance: SystemInstance, feed: SystemGatewayFeed | undefi
   }
   if (gateway) {
     facts.push(gateway.listening
-      ? `${formatCount(gateway.active_connections)} ${plural(gateway.active_connections, 'connection', 'connections')}`
+      ? `${formatCount(gateway.active_connections)} ${plural(gateway.active_connections, 'proxy connection', 'proxy connections')}`
       : 'not listening')
     facts.push(`${formatCount(gateway.in_flight)} in flight`)
     facts.push(feedLabel(gateway, feed))
@@ -535,7 +535,10 @@ function GatewaySection({ gateway, feed }: { gateway: SystemGatewaySnapshot; fee
             ? `port ${gateway.listener_port}, ${formatCount(gateway.active_connections)} ${plural(gateway.active_connections, 'connection', 'connections')}`
             : <span className="text-warning">not listening (port {gateway.listener_port})</span>}
         />
-        <KeyValue label="Transfers in flight" value={formatCount(gateway.in_flight)} />
+        <KeyValue
+          label={<span title="Relays open through this gateway now, from the proxy port and the tunnels, idle tunnel connections included.">Transfers in flight</span>}
+          value={formatCount(gateway.in_flight)}
+        />
         <KeyValue
           label="Routing feed"
           value={gateway.feed_digest == null
