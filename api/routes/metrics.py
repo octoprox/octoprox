@@ -1,20 +1,35 @@
 # Copyright 2026 Octoprox Authors
 # SPDX-License-Identifier: Apache-2.0
 
-"""Metrics endpoints."""
+"""Project metrics endpoints on the api role: pool, counters, scaling, history, the traffic split and hosts.
 
+Every number is read when asked for, the live parts from Redis: losing it shows the pool without quarantines or traffic
+blocks, the counters without the window not flushed yet and demand as none, while losing Postgres fails every route.
+"""
+
+from collections import Counter
+from dataclasses import asdict
 from datetime import datetime, timedelta
 from typing import Any, Literal
 
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, HTTPException, Query, Request, Response
 from pydantic import BaseModel
 
 from api.core import utc_now
-from api.core.stats import HOST_OVERFLOW, normalize_host
-from api.db.repository import MetricsRepository
-from api.models.proxy import ProxyStatus
+from api.core.stats import HOST_OVERFLOW, MetricDelta, normalize_host
+from api.core.telemetry import CONTENT_TYPE
+from api.db.redis import PROJECT_WINDOWS
+from api.db.repository import ConnectorRepository, MetricsRepository, ProxyRepository
 from api.providers.sdk.strategies import is_dynamic_gateway
-from api.routes.common import proxy_manager_of
+from api.routes.common import (
+    api_runtime_of,
+    require_project,
+    runtime_view_of,
+    session_factory_of,
+    settings_of,
+)
+from api.services.read_model import ConnectorRow, PoolCounts
+from api.strategies import STRATEGY_NAMES, served_strategy
 
 router = APIRouter(prefix="/projects/{project_id}/metrics")
 
@@ -61,130 +76,60 @@ class MetricsResponse(BaseModel):
     strategy: StrategyMetrics
 
 
+def success_rate(counters: MetricDelta) -> float:
+    """The share of counted requests that succeeded, 0-100; 0 when none were counted.
+
+    The one rule every page's success rate follows (a project's here, a proxy's in ``api.routes.proxies``).
+    """
+    return counters.success_count / counters.request_count * 100 if counters.request_count else 0.0
+
+
 @router.get("", response_model=MetricsResponse)
 async def get_metrics(request: Request, project_id: str) -> MetricsResponse:
-    """Get current metrics for a project's proxy pool.
+    """Get current metrics for a project's proxy pool: the proxies of its enabled, unblocked connectors, by status.
 
-    Uses project-level metrics stored on the Project model which combines:
-    - Historical totals from Postgres (loaded on startup)
-    - Current window increments (updated in real-time)
-
-    These metrics persist across proxy rotation.
+    Healthy means healthy and not quarantined, and the counters are the project's totals plus the window the gateways
+    counted since a worker's last metrics flush, so they persist across proxy rotation.
     """
-    proxy_manager = proxy_manager_of(request)
-
-    project = proxy_manager.get_project(project_id)
-    if not project:
+    runtime_view = runtime_view_of(request)
+    view = await runtime_view.project(project_id)
+    if view is None:
         raise HTTPException(status_code=404, detail="Project not found")
-
-    proxies = proxy_manager.get_proxies_for_project(project_id)
-    healthy = proxy_manager.get_healthy_proxies_for_project(project_id)
-    current_strategy = proxy_manager._project_strategies.get(
-        project_id, proxy_manager._strategy
-    ).name
-
-    # Count draining and terminating proxies
-    draining_count = sum(1 for p in proxies if p.status == ProxyStatus.DRAINING)
-    terminating_count = sum(1 for p in proxies if p.status == ProxyStatus.TERMINATING)
-    quarantined_count = proxy_manager.get_quarantined_count_for_project(project_id)
-
-    # Get project-level metrics directly from the Project model
-    overall_success_rate = 0.0
-    if project.request_count > 0:
-        overall_success_rate = (project.success_count / project.request_count) * 100
-
+    counters = (await runtime_view.counters(PROJECT_WINDOWS, [project_id]))[project_id]
+    pool = view.pool
     return MetricsResponse(
         pool=PoolMetrics(
-            total_proxies=len(proxies),
-            healthy_proxies=len(healthy),
-            unhealthy_proxies=len(proxies) - len(healthy) - draining_count - terminating_count,
-            quarantined_proxies=quarantined_count,
-            draining_proxies=draining_count,
-            terminating_proxies=terminating_count,
-            total_requests=project.request_count,
-            total_successes=project.success_count,
-            total_failures=project.failure_count,
-            overall_success_rate=round(overall_success_rate, 2),
-            avg_latency_ms=round(project.avg_latency_ms, 2),
-            total_bytes_sent=project.bytes_sent,
-            total_bytes_received=project.bytes_received,
+            total_proxies=pool.total,
+            healthy_proxies=pool.healthy,
+            unhealthy_proxies=pool.unhealthy,
+            quarantined_proxies=pool.quarantined,
+            draining_proxies=pool.draining,
+            terminating_proxies=pool.terminating,
+            total_requests=counters.request_count,
+            total_successes=counters.success_count,
+            total_failures=counters.failure_count,
+            overall_success_rate=round(success_rate(counters), 2),
+            avg_latency_ms=round(counters.avg_latency_ms, 2),
+            total_bytes_sent=counters.bytes_sent,
+            total_bytes_received=counters.bytes_received,
         ),
         strategy=StrategyMetrics(
-            current_strategy=current_strategy,
-            available_strategies=[
-                "round_robin",
-                "least_used",
-                "random",
-                "sticky",
-                "health_based",
-            ],
+            current_strategy=served_strategy(view.project.routing_strategy, settings_of(request).default_strategy),
+            available_strategies=list(STRATEGY_NAMES),
         ),
     )
 
 
 @router.get("/scaling", response_model=ScalingMetrics)
 async def get_scaling_metrics(request: Request, project_id: str) -> ScalingMetrics:
-    """Get auto-scaling metrics for a project.
+    """Get auto-scaling metrics for a project: demand level, request rates and the cloud connectors' instance counts.
 
-    Returns demand level, request rates, and instance counts for cloud provider
-    connectors only (AWS, GCP, Azure) - these are the ones with auto-scaling.
-    Static proxy providers are excluded.
+    Demand is what the gateways counted over the last few minutes, weighed against the project's healthy pool.
     """
-    proxy_manager = proxy_manager_of(request)
-
-    project = proxy_manager.get_project(project_id)
-    if not project:
+    view = await runtime_view_of(request).scaling(project_id)
+    if view is None:
         raise HTTPException(status_code=404, detail="Project not found")
-
-    # Get all connectors and filter to enabled cloud providers only
-    all_connectors = proxy_manager.get_connectors_for_project(project_id)
-    cloud_connector_ids: set[str] = set()
-    min_instances = 0
-    max_instances = 0
-
-    for connector in all_connectors:
-        if not connector.enabled:
-            continue
-        # Check if this is a cloud connector using typed config
-        cloud_config = connector.cloud_config
-        if not cloud_config:
-            continue
-        # This is an enabled cloud provider connector
-        cloud_connector_ids.add(connector.id)
-        min_instances += cloud_config.min_proxies
-        max_instances += cloud_config.max_proxies
-
-    # Get proxies only from cloud provider connectors
-    all_proxies = proxy_manager.get_proxies_for_project(project_id)
-    cloud_proxies = [p for p in all_proxies if p.connector_id in cloud_connector_ids]
-    healthy_cloud_proxies = [p for p in cloud_proxies if p.status == ProxyStatus.HEALTHY]
-
-    # Count draining and terminating (only cloud proxies)
-    draining_count = sum(1 for p in cloud_proxies if p.status == ProxyStatus.DRAINING)
-    terminating_count = sum(1 for p in cloud_proxies if p.status == ProxyStatus.TERMINATING)
-
-    # Get demand info from the demand tracker
-    demand_info = await proxy_manager.get_demand_info(project_id)
-
-    # demand_info returns "demand_level" as a DemandLevel enum
-    demand_level = demand_info.get("demand_level", "LOW")
-    # Convert enum to string if needed
-    if hasattr(demand_level, "value"):
-        demand_level = demand_level.value.upper()
-    else:
-        demand_level = str(demand_level).upper()
-
-    return ScalingMetrics(
-        demand_level=demand_level,
-        requests_per_minute=demand_info.get("requests_per_minute", 0.0),
-        rate_per_proxy=demand_info.get("rate_per_proxy", 0.0),
-        current_instances=len(cloud_proxies),
-        healthy_instances=len(healthy_cloud_proxies),
-        min_instances=min_instances,
-        max_instances=max_instances,
-        draining_instances=draining_count,
-        terminating_instances=terminating_count,
-    )
+    return ScalingMetrics(**asdict(view))
 
 
 class MetricsSnapshot(BaseModel):
@@ -239,14 +184,17 @@ class TrafficSplitResponse(BaseModel):
     connectors: list[ConnectorTrafficShare]
 
 
-# (delta, limit for raw queries, bucket_seconds for aggregated queries)
-# Raw ranges return individual snapshots; aggregated ranges group into time buckets.
+# What each history range reads: how far back (a timedelta), how many rows a
+# raw query returns at most (one-minute rows: 60 per hour), and the bucket in
+# seconds an aggregated query groups into (None reads the raw one-minute rows).
+# Ranges up to a day are raw; longer ones are bucketed to a hundred-odd points
+# so a chart stays readable and a query stays cheap.
 RANGE_CONFIG: dict[str, tuple[timedelta, int, int | None]] = {
     "1h":  (timedelta(hours=1),  60,   None),
     "6h":  (timedelta(hours=6),  360,  None),
     "24h": (timedelta(hours=24), 1440, None),
-    "7d":  (timedelta(days=7),   0,    3600),      # 1-hour buckets → ~168 points
-    "30d": (timedelta(days=30),  0,    3600 * 6),   # 6-hour buckets → ~120 points
+    "7d":  (timedelta(days=7),   0,    3600),      # 1-hour buckets -> ~168 points
+    "30d": (timedelta(days=30),  0,    3600 * 6),   # 6-hour buckets -> ~120 points
 }
 
 
@@ -256,17 +204,12 @@ async def get_metrics_history(
     project_id: str,
     range: Literal["1h", "6h", "24h", "7d", "30d"] = Query("24h", alias="range"),
 ) -> MetricsHistoryResponse:
-    """Get historical metrics snapshots for a project."""
-    proxy_manager = proxy_manager_of(request)
-
-    project = proxy_manager.get_project(project_id)
-    if not project:
-        raise HTTPException(status_code=404, detail="Project not found")
-
+    """Get historical metrics snapshots for a project, as the workers' metrics flushes wrote them."""
+    await require_project(request, project_id)
     delta, limit, bucket_seconds = RANGE_CONFIG[range]
     since = utc_now() - delta
 
-    async with proxy_manager._session_factory() as session:
+    async with session_factory_of(request)() as session:
         repo = MetricsRepository(session)
         if bucket_seconds:
             rows = await repo.get_project_metrics_history_aggregated(
@@ -287,75 +230,75 @@ async def get_metrics_history(
     return MetricsHistoryResponse(snapshots=snapshots)
 
 
-@router.get("/prometheus")
-async def prometheus_metrics(request: Request, project_id: str) -> str:
-    """Export metrics in Prometheus format for a project.
+@router.get("/prometheus", response_class=Response)
+async def prometheus_metrics(request: Request, project_id: str) -> Response:
+    """Export metrics in Prometheus text format for a project (``text/plain``).
 
-    Uses project-level metrics from the Project model which persist across proxy rotation.
+    The pool and the project's counters (which persist across proxy
+    rotation) as ``/metrics`` shows them, and each connector's traffic this
+    period against its limit and price, as the Connectors page shows it.
     """
-    proxy_manager = proxy_manager_of(request)
-
-    project = proxy_manager.get_project(project_id)
-    if not project:
+    runtime_view = runtime_view_of(request)
+    view = await runtime_view.project(project_id)
+    if view is None:
         raise HTTPException(status_code=404, detail="Project not found")
+    counters = (await runtime_view.counters(PROJECT_WINDOWS, [project_id]))[project_id]
+    connectors = await runtime_view.connectors(project_id)
+    return Response(content=_exposition(project_id, view.pool, counters, connectors), media_type=CONTENT_TYPE)
 
-    proxies = proxy_manager.get_proxies_for_project(project_id)
-    healthy = proxy_manager.get_healthy_proxies_for_project(project_id)
-    quarantined = proxy_manager.get_quarantined_count_for_project(project_id)
 
-    label_str = f'{{project="{project_id}"}}'
+def _exposition(project_id: str, pool: PoolCounts, counters: MetricDelta, connectors: list[ConnectorRow]) -> str:
+    """The project's numbers in the Prometheus text format, a family per number, connectors by name."""
+    label_str = f'{{project="{_label_value(project_id)}"}}'
 
     lines = [
         "# HELP octoprox_proxies_total Total number of proxies in the pool",
         "# TYPE octoprox_proxies_total gauge",
-        f"octoprox_proxies_total{label_str} {len(proxies)}",
+        f"octoprox_proxies_total{label_str} {pool.total}",
         "",
         "# HELP octoprox_proxies_healthy Number of healthy proxies",
         "# TYPE octoprox_proxies_healthy gauge",
-        f"octoprox_proxies_healthy{label_str} {len(healthy)}",
+        f"octoprox_proxies_healthy{label_str} {pool.healthy}",
         "",
         "# HELP octoprox_proxies_quarantined Number of quarantined (rate-limited) proxies",
         "# TYPE octoprox_proxies_quarantined gauge",
-        f"octoprox_proxies_quarantined{label_str} {quarantined}",
+        f"octoprox_proxies_quarantined{label_str} {pool.quarantined}",
         "",
         "# HELP octoprox_requests_total Total number of requests processed",
         "# TYPE octoprox_requests_total counter",
-        f"octoprox_requests_total{label_str} {project.request_count}",
+        f"octoprox_requests_total{label_str} {counters.request_count}",
         "",
         "# HELP octoprox_requests_success_total Total successful requests",
         "# TYPE octoprox_requests_success_total counter",
-        f"octoprox_requests_success_total{label_str} {project.success_count}",
+        f"octoprox_requests_success_total{label_str} {counters.success_count}",
         "",
         "# HELP octoprox_requests_failure_total Total failed requests",
         "# TYPE octoprox_requests_failure_total counter",
-        f"octoprox_requests_failure_total{label_str} {project.failure_count}",
+        f"octoprox_requests_failure_total{label_str} {counters.failure_count}",
         "",
         "# HELP octoprox_bytes_sent_total Total bytes sent through proxies",
         "# TYPE octoprox_bytes_sent_total counter",
-        f"octoprox_bytes_sent_total{label_str} {project.bytes_sent}",
+        f"octoprox_bytes_sent_total{label_str} {counters.bytes_sent}",
         "",
         "# HELP octoprox_bytes_received_total Total bytes received through proxies",
         "# TYPE octoprox_bytes_received_total counter",
-        f"octoprox_bytes_received_total{label_str} {project.bytes_received}",
+        f"octoprox_bytes_received_total{label_str} {counters.bytes_received}",
     ]
 
     # Per-connector traffic this period, against the limit and the price.
-    connectors = sorted(proxy_manager.get_connectors_for_project(project_id), key=lambda c: c.name.lower())
     usage_lines: list[str] = []
     limit_lines: list[str] = []
     cost_lines: list[str] = []
     blocked_lines: list[str] = []
-    for connector in connectors:
-        usage = proxy_manager.traffic_usage(connector)
-        labels = f'{{project="{project_id}",connector="{connector.id}",name="{_label_value(connector.name)}"}}'
+    for connector_view in sorted(connectors, key=lambda v: v.connector.name.lower()):
+        connector, usage = connector_view.connector, connector_view.traffic_usage
+        names = f'project="{_label_value(project_id)}",connector="{connector.id}",name="{_label_value(connector.name)}"'
+        labels = f"{{{names}}}"
         usage_lines.append(f"octoprox_connector_traffic_bytes{labels} {usage.total_bytes}")
         if usage.limit_bytes is not None:
             limit_lines.append(f"octoprox_connector_traffic_limit_bytes{labels} {usage.limit_bytes}")
         if usage.cost is not None:
-            cost_lines.append(
-                f'octoprox_connector_traffic_cost{{project="{project_id}",connector="{connector.id}",'
-                f'name="{_label_value(connector.name)}",currency="{usage.currency}"}} {usage.cost}'
-            )
+            cost_lines.append(f'octoprox_connector_traffic_cost{{{names},currency="{usage.currency}"}} {usage.cost}')
         blocked_lines.append(f"octoprox_connector_traffic_blocked{labels} {1 if usage.blocked else 0}")
     if connectors:
         lines += [
@@ -380,12 +323,14 @@ async def prometheus_metrics(request: Request, project_id: str) -> str:
             ]
         lines += [
             "",
-            "# HELP octoprox_connector_traffic_blocked 1 while the connector takes no requests because of its traffic limit",
+            "# HELP octoprox_connector_traffic_blocked"
+            " 1 while the connector takes no requests because of its traffic limit",
             "# TYPE octoprox_connector_traffic_blocked gauge",
             *blocked_lines,
         ]
 
-    return "\n".join(lines)
+    # The text format ends every line, the last one included, with a line feed.
+    return "\n".join(lines) + "\n"
 
 
 def _label_value(value: str) -> str:
@@ -401,47 +346,44 @@ async def get_traffic_split(
 ) -> TrafficSplitResponse:
     """Expected and observed share of traffic per connector.
 
-    The expected share is what an untargeted request (no ``-cc-``, no
-    domain restriction in play) would see right now: each enabled connector
-    with at least one eligible proxy takes ``weight / sum of weights``.
-    Requests that carry a country or hit a filtered domain narrow the set
-    and the remaining connectors split the traffic by the same ratios.
-
-    The observed share sums the flushed connector-level metrics in the
-    window, which outlive the connector's proxies, so a rotation does not
-    make the numbers disagree.
+    The expected share is what an untargeted request would see now, from the gateway's own router over a compile of the
+    project with the quarantines and the traffic blocks Redis holds, as gateways enforce them; the observed share sums
+    the flushed connector metrics in the window.
     """
-    proxy_manager = proxy_manager_of(request)
-
-    project = proxy_manager.get_project(project_id)
-    if not project:
+    preview = await api_runtime_of(request).preview_router(project_id)
+    # The compile holds the project when it exists, so its absence is the 404.
+    if preview.get_project(project_id) is None:
         raise HTTPException(status_code=404, detail="Project not found")
-
-    connectors = proxy_manager.get_connectors_for_project(project_id)
     eligible_groups = {
-        g.key: g for g in proxy_manager.group_by_connector(
-            proxy_manager.get_routable_proxies_for_project(project_id)
-        )
+        g.key: g for g in preview.group_by_connector(preview.get_routable_proxies_for_project(project_id))
     }
     total_weight = sum(g.weight for g in eligible_groups.values())
 
     delta, _limit, _bucket = RANGE_CONFIG[range]
     since = utc_now() - delta
-    async with proxy_manager._session_factory() as session:
+    async with session_factory_of(request)() as session:
+        connectors = await ConnectorRepository(session).get_by_project(project_id)
+        statuses = await ProxyRepository(session).count_by_connector(project_id)
         totals = await MetricsRepository(session).get_connector_totals_since(
             {c.id: since for c in connectors}
         )
     observed_total = sum(t["request_count"] for t in totals.values())
     observed_bytes_total = sum(t["bytes_sent"] + t["bytes_received"] for t in totals.values())
+    # The rows each connector holds that still take requests, whatever their health.
+    active: Counter[str] = Counter()
+    for row in statuses:
+        if not row.status.retiring:
+            active[row.connector_id] += row.count
 
     shares: list[ConnectorTrafficShare] = []
     for connector in sorted(connectors, key=lambda c: c.name.lower()):
-        rows = proxy_manager.get_active_proxies_for_connector(connector.id)
+        compiled = preview.snapshot.connector_view(connector.id)
+        rows = [p for p in compiled.proxies if not p.status.retiring] if compiled is not None else []
         group = eligible_groups.get(connector.id)
         eligible = len(group.proxies) if group else 0
         if not connector.enabled:
             reason: str | None = "disabled"
-        elif proxy_manager.is_traffic_blocked(connector.id):
+        elif preview.is_traffic_blocked(connector.id):
             reason = "traffic_limit"
         elif group is None:
             reason = "no_eligible_proxies"
@@ -459,7 +401,7 @@ async def get_traffic_split(
             enabled=connector.enabled,
             weight=connector.weight,
             dynamic=any(is_dynamic_gateway(p) for p in rows),
-            total_proxies=len(rows),
+            total_proxies=active[connector.id],
             eligible_proxies=eligible,
             expected_share=round(expected, 2),
             excluded_reason=reason,
@@ -471,7 +413,7 @@ async def get_traffic_split(
         ))
 
     return TrafficSplitResponse(
-        strategy=proxy_manager.strategy_for_project(project_id).name,
+        strategy=preview.strategy_for_project(project_id).name,
         range=range,
         total_weight=total_weight,
         observed_requests=observed_total,
@@ -585,7 +527,11 @@ HOST_HISTORY_BUCKETS: dict[str, int] = {
     "30d": 3600 * 6,
 }
 
+# Most hosts one page of the Hosts table holds: enough to scroll through, few
+# enough that one answer stays small; search reaches the rest.
 MAX_HOSTS_PER_PAGE = 500
+# Most hosts the chart gives a series of their own; every other host is folded
+# into one more. Past a dozen stacked series no chart stays readable.
 MAX_HOST_SERIES = 12
 
 
@@ -598,29 +544,19 @@ async def get_host_metrics(
     search: str | None = Query(None, max_length=255, description="Only hosts containing this text"),
     limit: int = Query(100, ge=1, le=MAX_HOSTS_PER_PAGE),
 ) -> HostsResponse:
-    """The hosts a project requested in the window, with totals and a per-connector split.
+    """The hosts a project requested in the window, busiest first, with totals and a per-connector split.
 
-    Sums the flushed host history (``host_metrics``), which the leader
-    writes every flush interval, so the last minute or so of traffic is
-    not in the numbers yet. A request is the CONNECT tunnel or the plain
-    HTTP exchange; see the metrics docs for what that means under
-    keep-alive. Hosts are returned busiest first, at most ``limit`` of
-    them; ``totals.host_count`` is how many matched in all.
+    Sums the host history the workers' metrics flushes write, so the last flush interval of traffic is not in it yet;
+    ``totals.host_count`` is how many hosts matched, of which at most ``limit`` are returned.
     """
-    proxy_manager = proxy_manager_of(request)
-
-    project = proxy_manager.get_project(project_id)
-    if not project:
-        raise HTTPException(status_code=404, detail="Project not found")
-
-    connectors = {c.id: c for c in proxy_manager.get_connectors_for_project(project_id)}
-    if connector_id is not None and connector_id not in connectors:
-        raise HTTPException(status_code=404, detail="Connector not found in this project")
-
+    await require_project(request, project_id)
     delta, _limit, _bucket = RANGE_CONFIG[range]
     since = utc_now() - delta
     search = search.strip() if search else None
-    async with proxy_manager._session_factory() as session:
+    async with session_factory_of(request)() as session:
+        connectors = {c.id: c for c in await ConnectorRepository(session).get_by_project(project_id)}
+        if connector_id is not None and connector_id not in connectors:
+            raise HTTPException(status_code=404, detail="Connector not found in this project")
         repo = MetricsRepository(session)
         summary = await repo.get_host_summary(project_id, since, connector_id=connector_id, search=search or None)
         rows = await repo.get_host_totals(
@@ -665,7 +601,7 @@ async def get_host_metrics(
     return HostsResponse(
         range=range,
         since=since,
-        enabled=proxy_manager._settings.host_metrics_enabled,
+        enabled=settings_of(request).host_metrics_enabled,
         limit=limit,
         totals=HostsTotals(
             host_count=summary["host_count"],
@@ -698,28 +634,19 @@ async def get_host_metrics_history(
         description="Comma-separated hosts to chart instead of the busiest ones",
     ),
 ) -> HostsHistoryResponse:
-    """The busiest hosts of the window over time, every other host folded into one series.
+    """The busiest hosts of the window over time: ``top`` hosts (or the ``hosts`` named) each get a series, busiest first.
 
-    ``top`` hosts by requests (or the ``hosts`` named) get a series each, in
-    fixed buckets sized to the range; the remainder is one series under
-    ``overflow_host``. Series are ordered busiest first, the remainder last,
-    and each carries every bucket of the window with zeros where the host
-    was quiet, so they stack without gaps.
+    Every other host is folded into one last series under ``overflow_host``, and each series carries every bucket of the
+    window, with zeros where the host was quiet, so they stack without gaps.
     """
-    proxy_manager = proxy_manager_of(request)
-
-    project = proxy_manager.get_project(project_id)
-    if not project:
-        raise HTTPException(status_code=404, detail="Project not found")
-    if connector_id is not None and all(
-        c.id != connector_id for c in proxy_manager.get_connectors_for_project(project_id)
-    ):
-        raise HTTPException(status_code=404, detail="Connector not found in this project")
-
+    await require_project(request, project_id)
     delta, _limit, _bucket = RANGE_CONFIG[range]
     bucket_seconds = HOST_HISTORY_BUCKETS[range]
     since = utc_now() - delta
-    async with proxy_manager._session_factory() as session:
+    async with session_factory_of(request)() as session:
+        connector_repo = ConnectorRepository(session)
+        if connector_id is not None and await connector_repo.get_in_project(project_id, connector_id) is None:
+            raise HTTPException(status_code=404, detail="Connector not found in this project")
         repo = MetricsRepository(session)
         if hosts:
             # The stored form (normalize_host), each host once, in the order given.

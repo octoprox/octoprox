@@ -82,32 +82,21 @@ class TestProjectRepository:
         result = await project_repo.get_by_id("non-existent-id")
         assert result is None
 
-    async def test_get_by_username(
+    async def test_many_by_id_in_one_read(
         self,
         project_repo: ProjectRepository,
         db_session: AsyncSession,
     ) -> None:
-        """Test retrieving a project by username."""
-        project = Project(
-            name="Username Test",
-            username="uniqueuser",
-            password="pass",
-        )
-        await project_repo.create(project)
+        """The projects asked for that exist, in id order; an unknown id is left out."""
+        projects = [Project(name=f"Many {i}", username=f"many{i}", password="pass") for i in range(3)]
+        for project in projects:
+            await project_repo.create(project)
         await db_session.commit()
 
-        result = await project_repo.get_by_username("uniqueuser")
+        found = await project_repo.get_many([projects[2].id, projects[0].id, "unknown", projects[0].id])
 
-        assert result is not None
-        assert result.username == "uniqueuser"
-
-    async def test_get_by_username_not_found(
-        self,
-        project_repo: ProjectRepository,
-    ) -> None:
-        """Test retrieving a project by non-existent username."""
-        result = await project_repo.get_by_username("nonexistent")
-        assert result is None
+        assert [project.id for project in found] == sorted([projects[0].id, projects[2].id])
+        assert await project_repo.get_many([]) == []
 
     async def test_update_project(
         self,
@@ -126,7 +115,7 @@ class TestProjectRepository:
         # Update the project
         project.name = "Updated Name"
         project.description = "New description"
-        await project_repo.update(project)
+        saved = await project_repo.update(project)
         await db_session.commit()
 
         # Verify update
@@ -134,6 +123,11 @@ class TestProjectRepository:
         assert result is not None
         assert result.name == "Updated Name"
         assert result.description == "New description"
+        # The answer is the row as stored, its updated_at stamped by the write.
+        assert saved == result and saved.updated_at > project.updated_at
+
+    async def test_an_update_of_a_project_that_is_gone_answers_none(self, project_repo: ProjectRepository) -> None:
+        assert await project_repo.update(Project(name="Gone", username="gone", password="pass")) is None
 
     async def test_delete_project(
         self,

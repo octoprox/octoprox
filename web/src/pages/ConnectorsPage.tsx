@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { useEffect, useMemo, useState } from 'react'
-import { useSearchParams } from 'react-router-dom'
+import { useSearchParams } from 'react-router'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { ColumnDef } from '@tanstack/react-table'
 import { Link2, Trash2, Plus, AlertTriangle } from 'lucide-react'
@@ -23,7 +23,7 @@ import { useTimeRange } from '../contexts/TimeRangeContext'
 import { useAuth } from '../contexts/AuthContext'
 import { useToast } from '../contexts/ToastContext'
 import { useProviders } from '../hooks/useProviders'
-import { DataTable } from '../components/DataTable'
+import { DataTable, type DataTableFeatures } from '../components/DataTable'
 import { Page, EmptyState } from '../components/layout/Page'
 import { NewCredentialPanel, TypePicker, TypeCard } from '../components/CredentialForm'
 import { ProviderLogo } from '../components/ProviderLogo'
@@ -55,7 +55,7 @@ const DEFAULT_LIMIT_GB = 100
 const ACTION_HELP: Record<TrafficLimitAction, string> = {
   alert: 'Keeps routing. The connector is flagged in the lists, the Overview and the logs, and the Prometheus gauge moves.',
   block: 'Stops handing the connector new requests; the other connectors share its weight. Transfers already running finish.',
-  interrupt: 'Stops new requests and closes the transfers still running on the connector, wherever they are.',
+  interrupt: 'Stops new requests and closes the transfers still running on the connector, on every gateway.',
 }
 
 // ---------------------------------------------------------------------------
@@ -110,7 +110,6 @@ export default function ConnectorsPage() {
       searchParams.delete('open')
       setSearchParams(searchParams, { replace: true })
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [searchParams])
 
   const deleteMutation = useMutation({
@@ -142,7 +141,7 @@ export default function ConnectorsPage() {
   }, [trafficSplit])
   const openConnector = panel?.kind === 'edit' ? connectors.find((c) => c.id === panel.id) ?? null : null
 
-  const columns: ColumnDef<Connector>[] = useMemo(() => [
+  const columns: ColumnDef<DataTableFeatures, Connector>[] = useMemo(() => [
     {
       accessorKey: 'name',
       header: 'Connector',
@@ -224,7 +223,7 @@ export default function ConnectorsPage() {
     },
     {
       id: 'status',
-      accessorFn: (row: Connector) => (row.last_error ? 'Error' : row.traffic_usage?.blocked ? 'Over limit' : row.enabled ? 'Enabled' : 'Disabled'),
+      accessorFn: (row: Connector) => (row.last_error ? 'Error' : row.traffic_usage?.pending ? 'Pending' : row.traffic_usage?.blocked ? 'Over limit' : row.enabled ? 'Enabled' : 'Disabled'),
       header: 'Status',
       size: 190,
       meta: { filterVariant: 'select' as const },
@@ -253,12 +252,12 @@ export default function ConnectorsPage() {
       enableSorting: false,
       cell: ({ row }: { row: { original: Connector } }) => (
         <div className="flex justify-end">
-          <button onClick={() => setPendingDelete(row.original)} className="p-1 rounded text-fg-subtle hover:text-danger hover:bg-danger-soft" title="Delete">
+          <button onClick={() => setPendingDelete(row.original)} className="p-1 rounded-sm text-fg-subtle hover:text-danger hover:bg-danger-soft" title="Delete">
             <Trash2 className="w-4 h-4" />
           </button>
         </div>
       ),
-    }] as ColumnDef<Connector>[] : []),
+    }] as ColumnDef<DataTableFeatures, Connector>[] : []),
   ], [canMutate, labelFor, shares])
 
   let panelNode: React.ReactNode = null
@@ -463,7 +462,7 @@ function ConnectorEditor({ connector, siblings, canMutate, onClose, onDelete, on
     return result
   }
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = (e: React.SubmitEvent) => {
     e.preventDefault()
     setError(null)
     if (!formData.credential_id) { setError('Select or create a credential first.'); return }
@@ -594,7 +593,7 @@ function ConnectorEditor({ connector, siblings, canMutate, onClose, onDelete, on
             onRemove={removeRoutingDomain}
             placeholder="Type a domain and press Enter…"
           />
-          <p className="text-xs text-fg-muted mt-1">Subdomains are included automatically (<code className="bg-surface-raised px-1 rounded">bing.com</code> also matches <code className="bg-surface-raised px-1 rounded">www.bing.com</code>).</p>
+          <p className="text-xs text-fg-muted mt-1">Subdomains are included automatically (<code className="bg-surface-raised px-1 rounded-sm">bing.com</code> also matches <code className="bg-surface-raised px-1 rounded-sm">www.bing.com</code>).</p>
         </div>
       )}
     </div>
@@ -603,7 +602,7 @@ function ConnectorEditor({ connector, siblings, canMutate, onClose, onDelete, on
   const Toggle = ({ checked, onChange }: { checked: boolean; onChange: (v: boolean) => void }) => (
     <label className="relative inline-flex items-center cursor-pointer shrink-0">
       <input type="checkbox" checked={checked} onChange={(e) => onChange(e.target.checked)} className="sr-only peer" />
-      <div className="w-9 h-5 bg-surface-raised peer-focus:outline-none peer-focus:ring-2 peer-focus:ring-ring rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:start-[2px] after:bg-white after:border-line-strong after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-primary" />
+      <div className="w-9 h-5 bg-surface-raised peer-focus:outline-hidden peer-focus:ring-2 peer-focus:ring-ring rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:inset-s-[2px] after:bg-white after:border-line-strong after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-primary" />
     </label>
   )
 
@@ -716,7 +715,7 @@ function ConnectorEditor({ connector, siblings, canMutate, onClose, onDelete, on
             <span className="inline-flex items-center gap-1.5">
               <span>Traffic limit</span>
               <InfoTip label="About the limit">
-                Bytes through this connector's proxies in the period, both directions, counted while transfers run. Enter decimal gigabytes as vendors bill them (1 GB = 1,000,000,000 bytes). Octoprox meters what passes through it; TLS overhead and how the vendor counts headers make the vendor's meter differ slightly, so set the limit a little under the plan.
+                Bytes through this connector's proxies in the period, both directions, counted while transfers run, so the action follows within a few seconds of the limit being reached. Enter decimal gigabytes as vendors bill them (1 GB = 1,000,000,000 bytes). Octoprox meters what passes through it; TLS overhead and how the vendor counts headers make the vendor's meter differ slightly, so set the limit a little under the plan.
               </InfoTip>
             </span>
           </Label>
@@ -764,7 +763,7 @@ function ConnectorEditor({ connector, siblings, canMutate, onClose, onDelete, on
       </div>
 
       <div className="border-t border-line pt-3 space-y-3">
-        <Label className="text-xs">
+        <Label className="text-xs mb-3">
           <span className="inline-flex items-center gap-1.5">
             <span>Billing</span>
             <InfoTip label="About billing">
@@ -883,7 +882,7 @@ function ConnectorEditor({ connector, siblings, canMutate, onClose, onDelete, on
                   <span>{getFieldLabel(key)}{required && <span className="text-danger ml-1">*</span>}</span>
                   {key === 'countries' && (
                     <InfoTip label="About countries">
-                      Lets clients pick these instances with a <code className="bg-surface-raised px-1 rounded">-cc-&lt;code&gt;</code> username suffix. Leave empty if the instances should not be selectable by country.
+                      Lets clients pick these instances with a <code className="bg-surface-raised px-1 rounded-sm">-cc-&lt;code&gt;</code> username suffix. Leave empty if the instances should not be selectable by country.
                     </InfoTip>
                   )}
                 </span>
@@ -923,7 +922,7 @@ function ConnectorEditor({ connector, siblings, canMutate, onClose, onDelete, on
         <span className="inline-flex items-center gap-1.5">
           <span>Countries</span>
           <InfoTip label="About countries">
-            Where the proxies you add to this connector exit from, used for proxies whose own location is unknown. Each proxy also gets its own exit country when it is added, looked up through the proxy. Clients pick a country with a <code className="bg-surface-raised px-1 rounded">-cc-&lt;code&gt;</code> username suffix.
+            Where the proxies you add to this connector exit from, used for proxies whose own location is unknown. Each proxy also gets its own exit country when it is added, looked up through the proxy. Clients pick a country with a <code className="bg-surface-raised px-1 rounded-sm">-cc-&lt;code&gt;</code> username suffix.
           </InfoTip>
         </span>
       </Label>

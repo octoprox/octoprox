@@ -9,10 +9,11 @@
  */
 
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react'
-import { useLocation } from 'react-router-dom'
-import { BookOpen, Braces, Bug, ExternalLink, Github, HelpCircle, LifeBuoy } from 'lucide-react'
+import { useLocation } from 'react-router'
+import { BookOpen, Braces, Bug, ExternalLink, HelpCircle, LifeBuoy } from 'lucide-react'
 import { cn } from '../utils/cn'
 import { navItemBase, navItemCollapsed, navItemExpanded, navItemIdle } from './layout/navStyles'
+import { ProviderMark } from './SignInProviderMark'
 
 export const DOCS_URL = 'https://www.octoprox.com'
 const REPO_URL = 'https://github.com/octoprox/octoprox'
@@ -131,7 +132,7 @@ export function HelpMenu({ collapsed }: { collapsed: boolean }) {
           <MenuLink href={`${DOCS_URL}/configuration`} icon={<BookOpen />}>Configuration reference</MenuLink>
           <MenuLink href={`${DOCS_URL}/api`} icon={<Braces />}>API reference</MenuLink>
           <MenuDivider />
-          <MenuLink href={REPO_URL} icon={<Github />}>Source on GitHub</MenuLink>
+          <MenuLink href={REPO_URL} icon={<ProviderMark kind="github" />}>Source on GitHub</MenuLink>
           <MenuLink href={`${REPO_URL}/issues`} icon={<Bug />}>Report a problem</MenuLink>
         </div>
       )}
@@ -158,7 +159,7 @@ function MenuLink({ href, icon, children }: { href: string; icon: ReactNode; chi
     >
       {icon}
       <span className="truncate flex-1">{children}</span>
-      <ExternalLink className="!w-3 !h-3 opacity-60" />
+      <ExternalLink className="w-3! h-3! opacity-60" />
     </a>
   )
 }

@@ -17,9 +17,13 @@ All API endpoints are prefixed with `/api/v1`. For example:
 http://localhost:8000/api/v1/projects
 ```
 
+Request bodies are JSON, and a request that sends one must say so with `Content-Type: application/json`; a JSON body without it is refused with `422`. File uploads (IP databases, proxy lists, backups) are `multipart/form-data`.
+
 ## Authentication
 
-All API endpoints except `/api/v1/auth/*` and `/health` require a bearer token: either a session token from a login, or a personal access token. Mutation endpoints require at least Editor role; user management requires Admin role.
+All API endpoints except `/api/v1/auth/*` and the ops endpoints (`/live`, `/ready`, `/health`, `/metrics`, see [Health Check](#health-check)) require a bearer token: either a session token from a login, or a personal access token. Mutation endpoints require at least Editor role; user management requires Admin role.
+
+The API is served by the api role (or a single instance); any api process answers any request, a write included, since every one reads the entities from Postgres on each request, and the provider catalog (`GET /api/v1/providers`, `GET /api/v1/providers/{provider_id}`) and the attribution settings (`GET /api/v1/geo/settings`) as well. Each api also keeps the custom provider descriptors, the attribution settings and the IP database list in memory for its other routes (credential checks, previews, lookups); those follow a change made through another api as soon as the change stream announces it.
 
 ### Login
 
@@ -109,9 +113,13 @@ Every response carries an `X-Request-ID` header. Send your own value in the same
 curl -i -H "X-Request-ID: deploy-42-step-3" http://localhost:8000/api/v1/projects
 ```
 
+### When Postgres or Redis cannot be reached
+
+A route that needs Postgres or Redis while it cannot be reached answers `503` with `Retry-After: 5` and `{"detail": "Postgres cannot be reached; try again shortly"}` (or `Redis`), not a `500`. Retry after the delay.
+
 ## Projects
 
-Projects provide multi-tenancy support. Each project has its own credentials, connectors, and proxy pools.
+Projects provide multi-tenancy support. Each project has its own credentials, connectors, and proxy pools. A route under `/projects/{project_id}` answers `404` for an id that belongs to another project, and a duplicate name or an unknown `routing_strategy` is a `400`. Changing a project's location rules (`location_contradicted`, `location_unknown`, `location_conflict_rule`, `location_city_radius_km`) queues a re-attribution of its proxies.
 
 ### List Projects
 
@@ -373,7 +381,7 @@ Connectors declare the countries their proxies exit from inside `config`, so cli
 
 Proxy responses include `country`, the exit country when the vendor reported it or the slot was provisioned for one, and `state_code` and `city`, each with a `state_source` or `city_source` (`manual` when pinned by hand, else the attribution source that resolved it), the place `-st-` and `-city-` requests match the proxy on (see [State and City Routing]({{ site.baseurl }}/routing-strategies#state-and-city-routing)). Connector responses include `target`: the intended pool size (`total`, or null when the connector has none) and how it is derived, `per_country` times the `countries` that have a slot group, with the ones created on demand listed in `on_demand`.
 
-Manually added proxies (static connectors) get their exit location looked up right after they are created: one request goes through the proxy to the `proxy.geo_lookup` endpoint and the discovered IP becomes `display_host` while the country lands in `country`. Pass `country` on `POST .../proxies` to set it yourself and skip the lookup, set `country` to `""` on `PATCH .../proxies/{id}` to clear it, or call `POST .../proxies/{id}/locate` to re-run the lookup and get the updated proxy back (502 when the request through the proxy fails). `state` (an ISO 3166-2 subdivision part such as `NY`, `ON` or `ENG`, or the full `US-NY`) and `city` (any spelling; stored as a slug) pin the state and city by hand on create and update; an empty string clears each. Pinned values win over the databases for routing and are what attribution verifies the exit against.
+Manually added proxies (static connectors) get their exit location looked up by a worker within seconds of being created: one request goes through the proxy to the `proxy.geo_lookup` endpoint and the discovered IP becomes `display_host` while the country lands in `country`. Pass `country` on `POST .../proxies` to set it yourself and skip the lookup, set `country` to `""` on `PATCH .../proxies/{id}` to clear it, or call `POST .../proxies/{id}/locate` to re-run the lookup and get the updated proxy back (the api makes the request itself, so it needs network access to the proxy; 502 when the request through the proxy fails). `state` (an ISO 3166-2 subdivision part such as `NY`, `ON` or `ENG`, or the full `US-NY`) and `city` (any spelling; stored as a slug) pin the state and city by hand on create and update; an empty string clears each. Pinned values win over the databases for routing and are what attribution verifies the exit against.
 
 #### Rate Limiting (rate_limit_config)
 
@@ -435,7 +443,7 @@ Connectors meter the bytes through their proxies per billing period and can cap 
 }
 ```
 
-Every connector response carries `traffic_usage`, the usage in the current period as the serving instance sees it:
+Every connector response carries `traffic_usage`, the usage in the current period: the connector's flushed history since the period started plus what the gateways counted since the last flush, judged with the same rules the traffic job blocks connectors with:
 
 ```json
 {
@@ -451,6 +459,7 @@ Every connector response carries `traffic_usage`, the usage in the current perio
     "action": "block",
     "status": "ok",
     "blocked": false,
+    "pending": false,
     "price_per_gb": 8.0,
     "currency": "USD",
     "cost": 1936.0,
@@ -459,19 +468,19 @@ Every connector response carries `traffic_usage`, the usage in the current perio
 }
 ```
 
-`status` is `ok`, `warning` (past `warn_percent`) or `exceeded`. `blocked` is true while the connector takes no new requests. `percent` and `cost` are `null` without a limit or a price. `reset_at` is set when usage was reset by hand inside the period; `traffic_reset_at` on the connector holds the same timestamp.
+`status` is `ok`, `warning` (past `warn_percent`) or `exceeded`, judged with the rule the traffic job decides by. `blocked` is the block the traffic job stored, the one the gateways enforce: true while the connector takes no new requests. After a usage reset or a raised limit it stays true until a worker decides again, normally within a second and at most a minute later, and it reads `false` while Redis cannot be read. `pending` is true from a usage reset, or an edit of the limit, the action, the period or the reset day, until a worker stores the decision it asked for; it too reads `false` while Redis cannot be read. `percent` and `cost` are `null` without a limit or a price. `reset_at` is set when usage was reset by hand inside the period; `traffic_reset_at` on the connector holds the same timestamp.
 
 Clients whose request finds every eligible connector over its limit get the configured status (509 by default) with a `Proxy-Status: octoprox; error=bandwidth_limit_exceeded` header.
 
 #### Reset Traffic Usage
 
-Start the connector's usage over from now (editor role). History is kept; the count against the limit restarts and a block is lifted:
+Start the connector's usage over from now (editor role). History is kept; the count against the limit restarts, and a traffic decision is asked for, which lifts a block the limit raised:
 
 ```bash
 POST /api/v1/projects/{project_id}/connectors/{connector_id}/traffic/reset
 ```
 
-Returns the updated connector.
+Returns the updated connector. Its usage counts from now, while `traffic_usage.blocked` still shows the stored block, with `pending` true, until a worker has decided (normally within a second; the gateways keep the block until then).
 
 #### Connector Metrics History
 
@@ -491,7 +500,7 @@ Forcefully remove a proxy from quarantine:
 POST /api/v1/projects/{project_id}/proxies/{proxy_id}/unquarantine
 ```
 
-Returns `200` with `{"status": "ok", "proxy_id": "..."}` on success, `400` if the proxy is not quarantined.
+Returns `200` with `{"status": "ok", "proxy_id": "..."}` on success, `400` if the proxy is not quarantined. Every gateway routes to the proxy again within moments, through the routing feed.
 
 ### Get Connector Options
 
@@ -501,7 +510,7 @@ Get available regions, instance types, the country list and other static options
 GET /api/v1/connector-options
 ```
 
-Provider-specific dynamic options (zones, entry nodes, sub-users) are served by the [provider options endpoint](#resolve-provider-options).
+Provider-specific dynamic options (zones, entry nodes, sub-users) are served by `POST /api/v1/providers/{provider_id}/options/{option_name}`, which asks the vendor's API through the provider's descriptor (see [Providers & SDK]({{ site.baseurl }}/providers)).
 
 ### Get Connector
 
@@ -523,11 +532,19 @@ Content-Type: application/json
 }
 ```
 
+Returns the updated connector. After the edit is saved, it asks for the work that follows, for a worker to run within seconds:
+
+- a reconcile (`sync`) for a connector of a syncing provider, and a scaling check (`scale`) for a cloud connector;
+- a traffic decision when the edit changes the limit, the action, the period or the reset day of `traffic_config`; until it is stored, the answer shows the stored block with `traffic_usage.pending` true. An edit of the price, the currency, `warn_percent` or `limit_status` applies at once and asks for nothing;
+- a change of `rate_limit_config` lifts the quarantines of the connector's proxies, tripped under limits that no longer apply.
+
 ### Delete Connector
 
 ```bash
 DELETE /api/v1/projects/{project_id}/connectors/{connector_id}
 ```
+
+A cloud connector is not deleted at once: it is disabled, its proxies are marked terminating, and a worker terminates their instances and then deletes the connector. Creating or editing a connector of a syncing provider queues a sync, and a cloud connector a scaling check, for a worker to run within seconds.
 
 ---
 
@@ -571,6 +588,8 @@ file: proxies.csv
 connector_id: connector-uuid
 ```
 
+Lines that cannot be read are reported and skipped; the rest are added in one transaction, so they are all added or, when the write fails, none is.
+
 CSV format (one proxy per line):
 ```
 http://192.168.1.1:8080
@@ -589,6 +608,8 @@ GET /api/v1/projects/{project_id}/proxies/{proxy_id}
 DELETE /api/v1/projects/{project_id}/proxies/{proxy_id}
 ```
 
+A cloud proxy is marked terminating and a worker terminates its instance before the row goes; a slot of a provider connector is deleted and a sync is queued, which provisions a replacement when the connector wants one.
+
 ### Proxy location fields
 
 Every proxy response carries the outcome of [IP attribution]({{ site.baseurl }}/ip-attribution): `country` (what routing uses), `country_source` (`database`, `vendor`, `endpoint` or `manual`), `vendor_country` (what the vendor claimed), `location_conflict` (the claim is contradicted), `location_verdict` (`confirmed`, `contradicted` or `open`; null when nothing was claimed or the exit was not judged yet), `location` (region, `state_code`, city, coordinates, ASN and anonymity flags from the databases, when any covers the IP), `state_code`, `state_source`, `city` and `city_source` (the state and city routing matches on: pinned by hand, or resolved from the databases, then the echo endpoint, then the vendor's word, like the country), and `state_verdict` and `city_verdict` (how a claimed state or city fared, with the same values as `location_verdict`). Setting `country` by hand pins it as `manual`: attribution then verifies the exit against it instead of overwriting it.
@@ -606,13 +627,29 @@ GET /api/v1/projects/{project_id}/metrics
 **Response:**
 ```json
 {
-  "total_proxies": 10,
-  "healthy_proxies": 8,
-  "total_requests": 15420,
-  "success_rate": 0.98,
-  "avg_latency_ms": 145.2
+  "pool": {
+    "total_proxies": 10,
+    "healthy_proxies": 8,
+    "unhealthy_proxies": 2,
+    "quarantined_proxies": 1,
+    "draining_proxies": 0,
+    "terminating_proxies": 0,
+    "total_requests": 15420,
+    "total_successes": 15112,
+    "total_failures": 308,
+    "overall_success_rate": 98.0,
+    "avg_latency_ms": 145.2,
+    "total_bytes_sent": 91000000,
+    "total_bytes_received": 4830000000
+  },
+  "strategy": {
+    "current_strategy": "round_robin",
+    "available_strategies": ["round_robin", "least_used", "random", "sticky", "health_based"]
+  }
 }
 ```
+
+The pool is the proxies of the project's enabled connectors that no traffic limit holds back; `healthy_proxies` are healthy and not quarantined, and `unhealthy_proxies` is everything else that is not draining or terminating, quarantined proxies included. The counters are the project's all-time totals plus what the gateways counted since the last metrics flush, so they are within seconds of live traffic and read the same on every api process. `overall_success_rate` is a percentage. The strategy is the project's `routing_strategy`; change it with [Update Project](#update-project).
 
 ### Traffic Split
 
@@ -860,13 +897,13 @@ Discards the examples (editors and admins). The counts are part of the metrics h
 
 ### Prometheus Metrics
 
-Export metrics in Prometheus format:
+Export a project's metrics as Prometheus text (`text/plain; version=0.0.4`):
 
 ```bash
 GET /api/v1/projects/{project_id}/metrics/prometheus
 ```
 
-Besides the project gauges and counters, each connector's traffic this period is exported with `project`, `connector` and `name` labels:
+The pool and the project's counters, as [Get Project Metrics](#get-project-metrics) reports them, with a `project` label: `octoprox_proxies_total`, `octoprox_proxies_healthy`, `octoprox_proxies_quarantined` (gauges), `octoprox_requests_total`, `octoprox_requests_success_total`, `octoprox_requests_failure_total`, `octoprox_bytes_sent_total` and `octoprox_bytes_received_total` (counters). Each connector's traffic this period is exported with `project`, `connector` and `name` labels:
 
 | Metric | Type | Description |
 |--------|------|-------------|
@@ -875,12 +912,25 @@ Besides the project gauges and counters, each connector's traffic this period is
 | `octoprox_connector_traffic_cost` | gauge | Spend at the connector's price per GB, with a `currency` label |
 | `octoprox_connector_traffic_blocked` | gauge | 1 while the connector takes no requests because of its limit |
 
+This export needs a sign-in, like the rest of the API. How each process is doing (gateway traffic, the controller, job runs) is exported separately, without sign-in, at `/metrics` on port 8000 of every process; see [Metrics]({{ site.baseurl }}/metrics#prometheus).
+
+### Intercepted Requests
+
+With [TLS interception]({{ site.baseurl }}/tls-interception) on, the requests seen inside a project's intercepted connections are kept for its inspector:
+
+```bash
+GET    /api/v1/projects/{project_id}/mitm/requests
+DELETE /api/v1/projects/{project_id}/mitm/requests
+```
+
+Any signed-in user reads them; clearing them needs an editor (`403` for viewers).
+
 ---
 
 ## Backup & Migration
 
 Admin-only endpoints for exporting the entire Octoprox setup to a single
-encrypted file and restoring it on the same or another instance. Useful for
+encrypted file and restoring it on the same or another install. Useful for
 disaster recovery and for migrating between deployments.
 
 ### Export Backup
@@ -927,12 +977,16 @@ Content-Type: multipart/form-data
 | `mode` | string | Only `replace` is supported (default). |
 | `keep_current_user` | boolean | Default `false`. See below. |
 
-**Import replaces all existing data** on the instance. The wipe and restore run
-in a single transaction, so a failure leaves the existing data untouched.
-Afterwards the live proxy cache is rebuilt, stale Redis state for the
-replaced projects and proxies is purged, and IP attribution reloads its
-settings and reopens whatever database files the backup carried. Other
-instances pick the changes up on their periodic reload.
+**Import replaces all existing data** on the install. The wipe and restore run
+in a single transaction, so a failure leaves the existing data untouched; the
+last step rebuilds the running metric totals from the imported history (the
+totals themselves are never in the file). Afterwards the Redis keys of the
+projects the import removed (MITM captures, failure examples) are deleted, and
+the api that answered reads the imported provider descriptors and attribution
+settings at once. Every other process follows the change entry the import
+appends: the controller compiles the imported definitions and the gateways
+receive them through the routing feed, and the other api and worker processes
+read them again, within moments.
 
 With `keep_current_user=true` the calling admin's own account survives the
 wipe, so an admin importing a backup taken from another instance is not locked
@@ -983,8 +1037,8 @@ again with credentials that are valid in the backup.
 - Incorrect passphrase or corrupt file.
 - File is not an Octoprox backup.
 - Backup was created by a newer Octoprox (`format_version` too high).
-- Schema mismatch: the backup's Alembic revision differs from this instance's.
-  Upgrade both instances to the same Octoprox version, then retry. This check
+- Schema mismatch: the backup's Alembic revision differs from this install's.
+  Upgrade both installs to the same Octoprox version, then retry. This check
   runs before decryption, so it does not require the passphrase.
 - `keep_current_user=true` but the caller's account has no database row.
 
@@ -1016,9 +1070,7 @@ provider credentials, protected only by the passphrase.
 
 ## System Statistics
 
-Admin-only. One endpoint returning what exists in the install, what it costs in
-Postgres and Redis, and which background workers are alive. This is what the
-**Settings → System** page renders.
+Admin-only. One endpoint describing the install as a cluster: every process and what it is doing, the controller, the routing feed and each gateway's copy of it, the work streams, and what the install holds and costs in Postgres and Redis. This is what the **Settings → System** page renders.
 
 ```bash
 GET /api/v1/system/stats
@@ -1028,52 +1080,76 @@ Editors and viewers receive `403`.
 
 **Response sections:**
 
-| Section | Scope | Contents |
-|---------|-------|----------|
-| `runtime` | This instance | Version, instance id, role, uptime, ports, worker intervals, and `event_loop_lag_max_ms` / `event_loop_lag_mean_ms`: how late the event loop ran timers over the last minute (null before the first minute). A worst case over a second is also logged as `Event loop running behind`. |
-| `inventory` | Whole install | Exact counts of projects, credentials, connectors, proxies, users and providers, plus the live pool's health breakdown. |
-| `projects` | Whole install | Per-project credential, connector and proxy counts, busiest first. |
-| `database` | Whole install | Database size, per-table size (indexes included), server connections and this instance's pool usage. |
-| `redis` | Whole install | Memory, throughput, hit rate and a breakdown of the keyspace by purpose. |
-| `cache` | This instance | Entry counts of every in-memory cache the process holds. |
-| `workers` | Mixed | `tasks` are this instance's background loops and their run counters; `leases` and `instances` are cluster-wide, and each entry in `instances` carries that instance's own `snapshot`. |
+| Section | Contents |
+|---------|----------|
+| `instances` | Every live process, grouped by the role it registered with (`all`, `api`, `gateway`, `controller`, `worker`; a role with no live process is absent), each list sorted by instance id. An entry carries `instance_id`, `role`, the process's last heartbeat `snapshot` (below) and `age_seconds`, how old that snapshot is. `{}` when Redis cannot be read. Echo processes do not heartbeat and are never listed. |
+| `controller` | `leader`: the instance id holding the controller lease (`null` while none does, during a failover); `changes` and `compiled_at`: how far the leader's last compile read the change stream (an entry ID) and when it was made, from its heartbeat; `changes_head`: the change stream's newest entry ID, read now, ahead of `changes` while the leader has changes to compile (`null` while there is no stream); `standby_poll_ms` and `lease_ttl_ms`: how often a standby asks for the lease and how long a failed leader holds it, the numbers the page words the takeover from; `error` when Redis cannot be read. |
+| `feed` | The routing feed in Redis: `digest`, `changes`, `compiled_at` and `sections` of its head (all `null` while there is none), and `gateways`: per gateway the `digest` and `changes` it applied, `in_sync` (it applied the current head) and `age_seconds` since it last applied an update, which grows while nothing changes. `error` when Redis cannot be read or the head was published by another release. |
+| `streams` | `by_name`: every work stream by name, `jobs.<kind>` for each of the thirteen job kinds, then `sightings` and `observations`, each with `length` (entries queued and running, since workers delete each entry once handled), `pending` (delivered to a worker and not acknowledged yet: running, or waiting to be reclaimed), `queued` (`length` less `pending`, never below zero: the backlog), `consumers` (worker processes in the `workers` group, a stopped one until index hygiene removes it, within the hour) and `oldest_seconds` (the age of the oldest entry, queued or running, by Redis's clock; `null` when the stream is empty). A stream nobody created yet reads as zeros. `error` when Redis cannot be read. |
+| `inventory` | Exact counts of projects, credentials, connectors, proxies, users and providers, and `proxies_by_status` from the proxies' status column. |
+| `projects` | Per-project credential, connector and proxy counts, busiest first. |
+| `database` | Database size, per-table size (indexes included) and server connections. Each api process's own pool is in its snapshot. |
+| `redis` | Memory, throughput, hit rate and a breakdown of the keyspace by purpose; keys without the `o6:` prefix, left by 5.x, are grouped as *Earlier releases*. |
 
-**Scope matters behind a load balancer.** `runtime`, `cache` and
-`workers.tasks` describe only the instance that answered the request. With
-several replicas, repeated calls may land on different instances and report
-different numbers - that is accurate, not a bug. Everything Postgres- or
-Redis-derived is the same from every instance.
+The answer is the same whichever api process the load balancer picked: every process publishes its own state, and the api reads them all. Every section read from Redis reports its own `error`, and the Postgres sections still render without Redis, so the page stays useful during the outage it should explain. Redis's own consumer-group `lag` is never used: it is unknown whenever an entry deleted out of order lies past the group's position, which is when a backlog builds.
 
-**Every instance, from any instance.** Because a load balancer gives no way to
-address a particular replica, each instance publishes those same three sections
-about *itself* on its heartbeat, and they come back under
-`workers.instances[].snapshot`:
+**A process's snapshot.** Every process except echo publishes a snapshot every 5 seconds, under a key that expires 10 seconds later; a process that stops withdraws it at once.
 
 | Field | Notes |
 |-------|-------|
-| `snapshot.runtime` / `snapshot.cache` / `snapshot.tasks` | The same shape as the top-level `runtime`, `cache` and `workers.tasks`, for that instance. |
-| `snapshot.proxy_server_listening` / `proxy_server_connections` | That instance's proxy listener, as in the top-level `workers`. |
-| `snapshot.geo_lookup_enabled` / `geo_lookups_in_flight` | That instance's exit-location lookups. |
-| `age_seconds` | How long ago the snapshot was published - up to the 10s key TTL. Derived from the remaining TTL, so it does not depend on hosts agreeing on the time. `null` when there is no snapshot. |
+| `runtime` | `version`, `role`, `instance_id`, `pid`, `started_at`, `uptime_seconds`, and `loop_lag_max_ms` / `loop_lag_mean_ms`: how late the event loop ran timers over the last minute (null before the first minute). A worst case over a second is also logged as `Event loop running behind`. |
+| `ready`, `reasons` | Whether the process answers `/ready` with 200, and why not, as `/ready` says it (`"gateway: feed not applied yet"`). |
+| `tasks` | The process's background loops and their run counters (below). |
+| `streams` | Each event stream the process follows (`changes`, `runtime`, `feed`): `position` (the last entry it read, or the newest at its last full read; `0-0` when there was no stream), `lag_seconds` (how far behind the newest entry its last read found it), `entries` read, `full_reads` by reason (`start`, `gap`, `reconnect`, `reconcile`) and `last_full_read_at`. In role `all`, `changes` is the worker's definitions refresher's. |
+| `api` | An api process's Postgres pool (`pool_size`, `pool_checked_out`, `pool_overflow`). |
+| `gateway` | A gateway's proxy listener (`listener_port`, `listening`, `active_connections`); the feed it applied (`feed_digest`, `feed_changes`, `feed_applied_at`, `feed_age_seconds`); what it keeps out of routing on its own (`retired_slots`, `local_quarantines`); `in_flight` transfers; its traffic since it started (`requests`, `successes`, `failures`, `bytes_sent`, `bytes_received`, `failures_by_kind`); its buffers (`pending_metric_deltas`, `metric_flush_failures`, `rate_limit_errors`, `observations_pending`, `observations_dropped`, `sightings_pending`, `sightings_dropped`, `failure_log_dropped`, `mitm_captures_dropped`); `preflight_checks` and `preflight_rejections`; its IP databases (`geo_databases_loaded`, `geo_database_errors`, `geo_databases_missing`); and `tunnels`, one entry per tunnel protocol it terminates. |
+| `controller` | `is_leader` and `lease_terms`; the last compile (`changes`, `compiled_at`, `compiles`, `compile_ms`, `compile_error`) and publish (`publishes`, `published_at`, `publish_ms`, `publish_error`, `sections`, `sections_written`, `sections_removed`); `quarantined` proxies and `blocked_connectors` as published. A standby reports what it last saw while it led. |
+| `worker` | `jobs`: per job kind it takes, `runs`, `failures`, `duration_seconds` and `in_flight`; `sightings_consumed` and `sightings_dropped`, `observations_consumed` and `observations_dropped` (dropped: given up after repeated deliveries). |
 
-A snapshot is republished every 5 seconds, so it is a recent reading rather
-than a live one; the top-level sections remain live for the answering
-instance, which is also listed (with its own, slightly older, snapshot).
-`snapshot` is `null` for an instance running a version that predates
-snapshots - during a rolling upgrade, for example. The **Settings → System**
-page uses this to switch its per-instance cards between replicas.
+A process of role `all` carries all four role sections. `snapshot` is `null` for a process that could not build one, or that runs another release; it is listed anyway.
 
 **Cost.** Entity counts are exact. Table row counts are planner estimates
 (`pg_class.reltuples`), so they stay cheap on metric tables with millions of
 rows, drift until the next `ANALYZE`, and are `null` on a table autovacuum has
-not reached yet. The Redis keyspace breakdown is a bounded `SCAN`; past 50,000
-keys it reports a sample and sets `"truncated": true`.
+not reached yet. The work streams are read in one round trip (`XLEN`,
+`XINFO GROUPS` and the oldest entry of each, and Redis's `TIME`). The Redis
+keyspace breakdown is a bounded `SCAN`; past 50,000 keys it reports a sample
+and sets `"truncated": true`.
 
 **Example (abridged):**
 ```json
 {
-  "generated_at": "2026-09-19T21:52:35.740343",
-  "runtime": { "version": "2.2.2", "role": "all", "uptime_seconds": 3841.2 },
+  "generated_at": "2026-10-18T09:12:35.740343",
+  "instances": {
+    "api": [
+      { "instance_id": "api-1", "role": "api", "age_seconds": 2.1,
+        "snapshot": {
+          "runtime": { "version": "6.0.0", "role": "api", "instance_id": "api-1", "uptime_seconds": 3841.2 },
+          "ready": true, "reasons": [], "tasks": [],
+          "streams": { "changes": { "position": "1760778750114-0", "lag_seconds": 0.0, "entries": 412,
+                                    "full_reads": { "start": 1, "reconcile": 1 }, "last_full_read_at": "2026-10-18T08:12:30.114221" } },
+          "api": { "pool_size": 5, "pool_checked_out": 1, "pool_overflow": 0 },
+          "gateway": null, "controller": null, "worker": null } }
+    ],
+    "gateway": [ { "instance_id": "gateway-1", "role": "gateway", "age_seconds": 3.4, "snapshot": { "…": "…" } } ],
+    "controller": [ { "instance_id": "controller-1", "role": "controller", "age_seconds": 1.0, "snapshot": { "…": "…" } } ],
+    "worker": [ { "instance_id": "worker-1", "role": "worker", "age_seconds": 4.2, "snapshot": { "…": "…" } } ]
+  },
+  "controller": { "leader": "controller-1", "changes": "1760778750114-0", "compiled_at": "2026-10-18T09:12:30.114221",
+                  "changes_head": "1760778750114-0", "standby_poll_ms": 1000, "lease_ttl_ms": 30000, "error": null },
+  "feed": {
+    "digest": "9c1f…", "changes": "1760778750114-0", "compiled_at": "2026-10-18T09:12:30.114221", "sections": 10,
+    "gateways": [ { "instance_id": "gateway-1", "digest": "9c1f…", "changes": "1760778750114-0", "in_sync": true, "age_seconds": 5.2 } ],
+    "error": null
+  },
+  "streams": {
+    "by_name": {
+      "jobs.health": { "length": 220, "pending": 200, "queued": 20, "consumers": 2, "oldest_seconds": 1.4 },
+      "jobs.sync": { "length": 0, "pending": 0, "queued": 0, "consumers": 2, "oldest_seconds": null },
+      "sightings": { "length": 3, "pending": 0, "queued": 3, "consumers": 2, "oldest_seconds": 0.2 }
+    },
+    "error": null
+  },
   "inventory": {
     "projects": 2, "credentials": 8, "connectors": 9, "connectors_enabled": 2,
     "proxies": 29, "users": 1, "users_by_role": { "admin": 1 },
@@ -1087,95 +1163,80 @@ keys it reports a sample and sets `"truncated": true`.
         "table_bytes": 65536, "index_bytes": 229376,
         "dead_rows": 4, "last_vacuum_at": "2026-10-10T06:12:40Z" }
     ],
-    "backends": 2, "pool_size": 5, "pool_checked_out": 1
+    "backends": 9, "error": null
   },
   "redis": {
     "used_memory_bytes": 1558312, "total_keys": 33, "ops_per_sec": 4,
-    "groups": [ { "label": "Proxy health", "keys": 29 } ],
+    "groups": [ { "label": "Routing feed", "keys": 3 } ],
     "truncated": false
-  },
-  "workers": {
-    "tasks": [
-      { "name": "metrics_flusher", "scope": "singleton", "lease": "metrics_flusher",
-        "state": "running", "error": null, "interval_seconds": 60,
-        "runs": 412, "idle_runs": 0, "failures": 1, "consecutive_failures": 0,
-        "overruns": 3, "consecutive_overruns": 0,
-        "last_overrun_at": "2026-09-19T19:31:55.417002",
-        "last_run_at": "2026-09-19T21:52:30.114221", "last_duration_ms": 84.2,
-        "avg_duration_ms": 61.9, "max_duration_ms": 512.7,
-        "last_error": "TimeoutError: ", "last_error_at": "2026-09-19T18:04:11.002913" }
-    ],
-    "leases": [
-      { "name": "metrics_flusher", "kind": "Metrics flush to Postgres",
-        "worker": "metrics_flusher", "target": null,
-        "holder": "66eb615b-…", "held_by_self": true, "ttl_ms": 4027 }
-    ],
-    "instances": [ { "instance_id": "66eb615b-…", "role": "all", "is_self": true, "ttl_seconds": 9 } ]
   }
 }
 ```
 
-**Two kinds of worker health.** `state` and `error` describe the asyncio task:
-not `running` means the loop on that instance has stopped, and `error` carries
+A task in `tasks` looks like this:
+
+```json
+{ "name": "feed_builder", "scope": "singleton", "lease": "controller",
+  "state": "running", "error": null, "interval_seconds": 1,
+  "runs": 412, "idle_runs": 0, "failures": 1, "consecutive_failures": 0,
+  "overruns": 3, "consecutive_overruns": 0,
+  "last_overrun_at": "2026-10-18T07:31:55.417002",
+  "last_run_at": "2026-10-18T09:12:30.114221", "last_duration_ms": 84.2,
+  "avg_duration_ms": 61.9, "max_duration_ms": 512.7,
+  "last_error": "TimeoutError: ", "last_error_at": "2026-10-18T06:04:11.002913" }
+```
+
+**Two kinds of loop health.** `state` and `error` describe the asyncio task:
+not `running` means the loop in that process has stopped, and `error` carries
 the exception that ended it. The run counters describe the cycles *inside* the
-loop - one health-check sweep, one metrics flush, one peer message applied - so
-a loop that raises every cycle and recovers is still `running`, and only
+loop - one compile, one batch of a job kind, one metering window - so a loop
+that raises every cycle and recovers is still `running`, and only
 `consecutive_failures` and `last_error` say it is broken. Counters are
 per-process and reset with it; a cycle cancelled at shutdown is not counted.
-Granularity is the cycle, not the item: the auto-scaler handles each connector
-under its own `try`, so a cycle counts as a success even when one connector
-failed.
+A job runner's runs are the batches it ran, and its failures the batches whose
+run raised.
 
 **Runs that had nothing to do.** `idle_runs` is the subset of `runs` where the
-loop ticked and returned early - the metric-delta publisher over an empty
-buffer, a health-check sweep whose shard landed entirely on peers, a system
-snapshot a peer already wrote, an auto-scaler cycle on an install with no cloud
-connectors. Subtract it from `runs` for the cycles that did something. The
-split matters because the two numbers answer different questions: an install
-taking no traffic ticks the metric-delta publisher 17k times a day without a
-single flush, and without `idle_runs` that reads as a busy worker. The
-durations describe the working cycles only - an early return is not a
-measurement of the work it skipped, and averaging it in would report a
-publisher that spends 20ms on every real flush as taking 0.1ms. A worker with
-no idle path (the heartbeat, the pub/sub subscribers) reports `0`.
+loop ticked and returned early - a feed read that found the head already
+applied, a metering window with nothing to write, a stream read that timed out
+with no entry. Subtract it from `runs` for the cycles that did something. The
+split matters because the two numbers answer different questions: a gateway
+taking no traffic wakes its loops all day without doing anything, and without
+`idle_runs` that reads as busy loops. The durations describe the working cycles
+only - an early return is not a measurement of the work it skipped. A loop with
+no idle path (the heartbeat) reports `0`.
 
 **Cadence and overruns.** `interval_seconds` is the interval the loop was
 started with, declared by the loop itself so it is the value actually slept on
-rather than a config setting read elsewhere - worth knowing, because a worker
-whose module was configured differently from the rest of the process will say
-so here. It is `null` for the two pub/sub subscribers, which run when a peer
-message arrives and so have no cadence to miss. `overruns` counts cycles that
+rather than a config setting read elsewhere - worth knowing, because a process
+configured differently from the rest will say so here. A loop that acts on
+stream entries rather than a timer declares none. `overruns` counts cycles that
 took longer than that interval: a loop cannot start its next cycle until the
-current one returns, so those cycles pushed the worker off its cadence - the
-system snapshotter shows this as gaps in the trend charts, and the others as
-work simply happening less often than configured.
+current one returns, so those cycles pushed it off its cadence, and its work
+happened less often than configured.
 
 `overruns` is a lifetime count, so read it with `consecutive_overruns`, which
 the first cycle back inside the cadence resets: that pair distinguishes "slow
 right now" from "hit one slow cycle during a restart and has been fine since",
 and `last_overrun_at` says when the most recent one was. `failures` /
 `consecutive_failures` work the same way. A climbing `consecutive_overruns`
-with `failures` at zero is the signature of a worker that needs a longer
+with `failures` at zero is the signature of a loop that needs a longer
 interval or less to do, rather than one that is broken.
 
-**Which worker runs where.** `scope` is `singleton` for leader-elected loops
-and `instance` for ones every instance runs. A singleton's `lease` matches a
-`leases[].name` (for per-connector leases, the part before the `:`), and each
-lease names its `worker` in return - so "which instance is doing this job right
-now" (`leases`) and "how is it going on this instance" (`tasks`) line up. A
-standby's singleton worker is legitimately at `"runs": 0`. Leader-elected work
-is metrics flushing, compaction and system snapshots globally, auto-scaling and
-provider sync (discovery and IP refresh) per connector.
+**Which loop runs where.** `scope` is `singleton` for the controller's loops,
+the feed builder (`feed_builder`) and one job producer per periodic kind
+(`job_producer_health`, `job_producer_metrics_flush`, ...), which act only in
+the leading controller, under the one `controller` lease their `lease` names;
+it is `instance` for the loops every process of a role runs. A standby
+controller's singleton loops are legitimately at `"runs": 0`. The job runners
+of a worker are named after their kind (`job_runner_health`), one per kind it
+takes, beside `sighting_ingest` and `observation_ingest`.
 
-**An absent lease means two different things**, which is what
-`lease_per_resource` is for. A global singleton (`false`) holds its lease
-continuously, so finding no holder in `leases` is a failover gap that closes
-within seconds. A per-resource worker (`true` - the auto-scaler and provider
-syncer) takes one lease per connector at the top of the work and releases it in
-a `finally` a moment later, so between ticks **no instance holds one**, and
-several instances can hold different ones at the same time. For those, an
-absent lease is the resting state, not a standby; whether the loop is actually
-working is answered by its run counters, not by `leases`.
+**How the System page reads it.**
+
+- **The work streams table** shows one row per stream: length, pending, queued, consumers and the oldest entry's age. Two hints read the numbers: *queued with no live worker: no worker takes this kind* shows when entries are queued and either the group has no consumer or none of the live workers, by their heartbeats (`worker.jobs`; every worker takes the sightings and the observations), takes the stream, so it shows within a heartbeat after the last such worker stops, while the group still lists it as a consumer until index hygiene removes it. *Queued stays above zero: too few workers for this kind* shows once every one of the page's own readings has found a backlog for a minute, since a single reading can land in a burst of periodic jobs that drains in milliseconds.
+- **Positions are times.** Every "how far" is an entry ID of a stream, shown as the time it carries: the leader's compile, the feed head's, each gateway's applied feed, and each api's and worker's definitions (their **Definitions** rows: how far the process has read the change stream, and how often it read in full instead, by reason). A position at or past `changes_head` is *in sync*; one behind it reads *behind, at <time>*, where the process has read through, coloured as late only once the newest change is 30 seconds older than the process's snapshot, so the moment between a save and the next heartbeat is not flagged. `0-0` reads *before any change*. IDs compare as two numbers, milliseconds then sequence, never as text.
+- **The takeover** is worded from `standby_poll_ms` and `lease_ttl_ms`: within a poll of the leader stopping cleanly, or within the TTL and a poll of it failing, each rounded up to whole seconds.
 
 ### System Trends
 
@@ -1187,9 +1248,10 @@ Admin-only. Returns the gauge history behind the **Trends** charts on the
 System page. Ranges: `1h`, `24h` (raw snapshots) and `7d`, `30d`, `90d`
 (averaged into buckets).
 
-Snapshots are written by the `system_snapshotter` worker on whichever instance
-holds its lease, so unlike the per-instance sections of `/system/stats`, this
-series reads the same from every instance.
+Snapshots are written by the `snapshot` job, which the controller publishes
+every `system.metrics_interval` and a worker runs, so the series reads the same
+from every api process. The interval is reported from the api's settings, so
+set `system.metrics_interval` alike on the controller, the workers and the api.
 
 **Gauges, not counters.** These are readings like "how big is the database",
 so downsampling a range **averages** them. Summing, as the proxy and project
@@ -1208,7 +1270,7 @@ points are averages, so a chart can say which it is showing.
 
 ```yaml
 system:
-  metrics_interval: 300        # seconds between snapshots; 0 disables the worker
+  metrics_interval: 300        # seconds between snapshots; 0 takes none
   metrics_retention_days: 90   # 0 keeps snapshots forever
 ```
 
@@ -1245,24 +1307,24 @@ All endpoints live under `/api/v1/geo`. Reads need any authenticated user; write
 
 | Method | Path | Purpose |
 |--------|------|---------|
-| GET | `/geo/settings` | Install-wide settings (default conflict rule, `default_city_radius_km`, echo endpoint, preflight, retention), whether an admin saved them, databases loaded on this instance |
-| PUT | `/geo/settings` | Replace the settings (body: the `settings` object). Applies to every instance |
-| GET | `/geo/databases` | Every database: stored rows plus config-file entries, with `loaded_here`, `load_error` and, for a scheduled download, `last_update_at` (the last check, whether or not the file changed) and `next_update_at` (when the schedule is next due; null without a schedule, while `update_paused`, or while the database is disabled) |
-| POST | `/geo/databases` | Upload a file (`multipart/form-data`: `file`, optional `name`, `priority`, `enabled`): an mmdb, an IP2Location BIN, or a GeoNames table (zipped or `.txt`, stored with `vendor: geonames`, `kind: places`, `format: geonames`). Validated before it is stored; proxies are re-attributed |
-| POST | `/geo/databases/from-url` | Register a vendor download URL (`name`, `update_url` which may carry `{YYYY}` and `{MM}` placeholders filled per run, `update_interval_hours`, `update_auth`, `priority`) and download it now. `update_auth` takes `{username, password}` for basic auth or `{token}` / `{header, token}` |
+| GET | `/geo/settings` | Install-wide settings (default conflict rule, `default_city_radius_km`, echo endpoint, preflight, retention), whether an admin saved them, and the databases the api process that answered has open |
+| PUT | `/geo/settings` | Replace the settings (body: the `settings` object). Applies everywhere within moments, as its change entry reaches each process; a change of the default conflict rule or city radius also queues a re-attribution of every proxy |
+| GET | `/geo/databases` | Every database: stored rows plus config-file entries, with `loaded_here` and `load_error` (the api process that answered), `gateways_loaded` out of `gateways_total` (how many live gateways have it open, from their heartbeats) and `gateway_errors` (why not, by gateway instance id), and, for a scheduled download, `last_update_at` (the last check, whether or not the file changed) and `next_update_at` (when the schedule is next due; null without a schedule, while `update_paused`, or while the database is disabled) |
+| POST | `/geo/databases` | Upload a file (`multipart/form-data`: `file`, optional `name`, `priority`, `enabled`): an mmdb, an IP2Location BIN, or a GeoNames table (zipped or `.txt`, stored with `vendor: geonames`, `kind: places`, `format: geonames`). Validated before it is stored; an enabled upload queues a re-attribution |
+| POST | `/geo/databases/from-url` | Register a vendor download URL (`name`, `update_url` which may carry `{YYYY}` and `{MM}` placeholders filled per run, `update_interval_hours`, `update_auth`, `priority`) and download it now, on the api. `update_auth` takes `{username, password}` for basic auth or `{token}` / `{header, token}`; the list never returns it, only `has_update_auth` |
 | POST | `/geo/databases/inspect` | Open an uploaded file and report its metadata without storing it |
 | PATCH | `/geo/databases/{id}` | Change `name`, `enabled`, `priority`, `update_url`, `update_interval_hours`, `update_auth`, `update_paused` (true stops the schedule and keeps the file loaded and the URL, credentials and interval; a refresh still downloads) |
-| POST | `/geo/databases/{id}/refresh` | Download a scheduled database now |
-| DELETE | `/geo/databases/{id}` | Remove a stored database everywhere |
+| POST | `/geo/databases/{id}/refresh` | Download a scheduled database now, on the api; a changed file of an enabled database queues a re-attribution |
+| DELETE | `/geo/databases/{id}` | Remove a stored database everywhere; an enabled one queues a re-attribution |
 | POST | `/geo/lookup` | `{ip, claimed_country?, claimed_state?, claimed_city?, project_id?}`: each database's answer and how the IP resolves at every level, judging the optional claim as a vendor's would be under the default conflict rule and city radius, or the project's. `resolution.city_distance_km` is how far the observed city is from the claimed one when both could be placed |
-| POST | `/geo/reattribute` | `{connector_id?}`: re-run attribution offline for every proxy with a known exit IP; returns `{updated}` |
+| POST | `/geo/reattribute` | `{connector_id?}`: queue a re-run of attribution, offline, for every proxy with a known exit IP (or the connector's). Answers `202` with `{"kind": "reattribute", "key": "all"}` (or `"connector:<id>"`) and a worker runs it. Each press is a job of its own; presses a worker reads together run once, `all` covering the connectors among them. `404` for an unknown connector, `503` when Redis did not take the job |
 | GET | `/geo/observations` | One page of observations, newest first, with `total` for paging. Filters apply on the server and mirror the table's columns: `connector_id`, `proxy_id`, `project_id`, `source`, `ip` (exact), `claimed_country`, `resolved_country`, `verdict` (`contradicted`, `open`, `confirmed`, `no_claim`: the country verdict; the state and city verdicts come back per row and do not move the label), `until` (ISO time: start the log at that moment; without an offset it is UTC); paging with `limit` (max 1000) and `offset`. `total` is counted no further than 10,000 rows past the page: `total_exact` false makes it a lower bound. Each row also carries the place below the country: `claimed_state`, `claimed_city`, `resolved_state`, `resolved_city`, and one verdict per level, `country_conflict`, `state_conflict`, `city_conflict` (true contradicted, false confirmed, null no verdict) |
 | GET | `/geo/accuracy` | Per connector, over the distinct exit IPs last seen in the window: `exits`, then `country`, `state` and `city`, each `{claimed, confirmed, contradicted, open, accuracy}`. `open` is a claim without a verdict: for the country one that independent sources disagreed about, counted against `accuracy` (confirmed over claimed); for the state and city one no city-level database could judge, counted in neither (`accuracy` is confirmed over confirmed plus contradicted). `breakdown` lists the contradicted pairs as `{level, claimed, observed, exits}` (`project_id`, `connector_id`, `days`) |
 | GET | `/geo/exits` | Per connector: distinct exit IPs first seen in the window and ever, sightings, reuse (`project_id`, `connector_id`, `days`). Dynamic-sessions connectors carry `coverage` (`preflight_on`, `sampled_percent`): below 100 the figures for session-less traffic are undercounts |
 | GET | `/geo/observations/count` | `{"total"}`: every observation under the same filters, counted outright. Quick under `project_id`, `connector_id`, `proxy_id` or `ip`; under the other filters alone it reads the table, and past 30 s it answers 504 |
 | GET | `/geo/exits/ips` | One page of distinct exit IPs, most recently seen first, each with first and last sighting, hand-out count and the latest observation's state (proxy, source, vendor claim, resolved country and source, verdict flags, and the same place fields as an observation). Filters: `project_id`, `connector_id`, `ip`, `proxy_id`, `country`, `claimed_country`, `verdict` (the country verdict, as for observations); paging with `limit` (max 1000) and `offset`; `total` and `total_exact` in the response, counted as for observations |
 | GET | `/geo/exits/ips/count` | `{"total"}`: every exit IP under the same filters, counted outright, as for observations |
-| GET | `/geo/status` | Pipeline health: databases, buffered, queued (`queued_observations`: published to Redis, not written yet) and stored observations (`stored_observations`: the database's row estimate, within a few percent), preflight counters |
+| GET | `/geo/status` | Pipeline health: the databases the answering api process has open and its own observation buffer (Detect records into it), queued (`queued_observations`: published to Redis, not written yet) and stored observations (`stored_observations`: the database's row estimate, within a few percent), preflight counters summed over the live gateways, and `gateways`: per gateway, from its heartbeat, `databases_loaded`, `databases_missing`, `load_errors`, `preflight_checks`, `preflight_rejections`, and its pending and dropped observations and sightings |
 
 Projects carry `location_contradicted` (`evidence`, `vendor`, `refuse`: what to do when the independent sources agree against the vendor's claim), `location_unknown` (`vendor`, `refuse`: what to do when nothing independent places the exit), `location_preflight` (boolean, whether a session's exit is echoed before its first request), and the optional overrides `location_conflict_rule` (`consensus`, `first`, `any`) and `location_city_radius_km` (0 to 500 km; 0 compares city names only) on create, update and in responses. On update an empty string clears an override so the project inherits the install default again. There is no source order: the routing value is always the databases, then the echo endpoint, then the vendor.
 
@@ -1278,7 +1340,7 @@ Public. Returns the caller's IP and, with a database loaded, its attribution:
 {"ip": "203.0.113.7", "country": "GB", "region": "England", "city": "London", "asn": 12345, "organization": "Example Ltd", "databases": ["<database id>"], "nonce": "…", "timestamp": "2026-09-21T12:00:00Z"}
 ```
 
-Requested through a proxy it reports the proxy's exit. Behind a load balancer, list the balancer in `geo.echo.trusted_proxies` so the address comes from `X-Forwarded-For`.
+Requested through a proxy it reports the proxy's exit. Served by the api (and a single instance), and by a process of role `echo` on its own. Behind a load balancer, list the balancer in `geo.echo.trusted_proxies` so the address comes from `X-Forwarded-For`.
 
 ---
 
@@ -1294,8 +1356,9 @@ need an admin to change; devices (peers) are project entities editors manage.
 GET /api/v1/wireguard/settings
 ```
 
-Returns the public key, endpoint, subnet, gateway and the answering
-instance's tunnel status:
+Returns the public key, endpoint, subnet, gateway and the tunnel's status
+across the install: every gateway terminating it, from their heartbeats, and
+the devices:
 
 ```json
 {
@@ -1309,26 +1372,35 @@ instance's tunnel status:
   "configured": true,
   "updated_at": "2026-10-03T09:00:00",
   "status": {
-    "enabled": true,
-    "state": "running",
-    "error": null,
-    "instance_id": "7d6b...",
-    "interface": "wg0",
-    "backend": "kernel",
-    "listen_port": 51820,
-    "transparent_port": 8081,
-    "dns_port": 5353,
-    "fake_ip_range": "198.18.0.0/15",
-    "active_connections": 3,
+    "gateways": [
+      {
+        "protocol": "wireguard",
+        "instance_id": "gateway-1",
+        "state": "running",
+        "error": null,
+        "backend": "kernel",
+        "listen_port": 51820,
+        "active_connections": 3,
+        "restarts": 0,
+        "denied": 0,
+        "daemon_version": null,
+        "interface": "wg0",
+        "fake_ip_range": "198.18.0.0/15",
+        "block_encrypted_dns": true
+      }
+    ],
     "peers_total": 4,
     "peers_enabled": 4,
     "peers_online": 2,
     "connections_by_address": 0,
-    "encrypted_dns_blocked": 1,
-    "block_encrypted_dns": true
+    "encrypted_dns_blocked": 1
   }
 }
 ```
+
+`status.gateways` has one entry per live gateway with the tunnel enabled
+(`state` is `starting`, `running`, `failed` or `stopped`; `error` says why it
+is not up); it is empty when no gateway terminates the tunnel.
 
 ```http
 PUT /api/v1/wireguard/settings
@@ -1343,9 +1415,9 @@ Content-Type: application/json
 }
 ```
 
-Admin only. The subnet must still contain every device's address. Changing
-the subnet re-addresses the gateway on the next restart of the terminating
-instance.
+Admin only. The subnet must still contain every device's address. Gateways
+apply a change live, re-addressing their interface for a new subnet; devices
+learn the new DNS address with their next config.
 
 ```http
 POST /api/v1/wireguard/settings/rotate-key
@@ -1403,13 +1475,13 @@ GET /api/v1/projects/{project_id}/wireguard/peers
 }
 ```
 
-`status` is where the device stands. With `live` true it is what an instance
+`status` is where the device stands. With `live` true it is what a gateway
 carrying the tunnel published in the last half minute (every ten seconds
 while it runs), including the interface's own byte counters since that
-instance's interface came up; with `live` false it is the last sighting on
-record, which the carrying instance writes to the device's row whenever a
-newer handshake appears, and the byte counters are zero. `metrics` is what
-the pool relayed for the device: the same counters a connector has, cluster-wide
+gateway's interface came up; with `live` false it is the last sighting on
+record, which a worker's `tunnel_last_seen` job writes to the device's row
+whenever a newer handshake appears, and the byte counters are zero. `metrics` is what
+the pool relayed for the device: the same counters a connector has, install-wide
 and across restarts, plus the two name-resolution signals (see
 [WireGuard Devices](wireguard#encrypted-dns-on-devices)).
 
@@ -1469,7 +1541,9 @@ GET /api/v1/projects/{project_id}/wireguard/peers/{peer_id}/config
 ```
 
 `complete` is false when the device holds its own private key (the file
-carries a placeholder) or the endpoint host is not set yet.
+carries a placeholder) or the endpoint host is not set yet. The config
+carries the device's private key, so downloading it needs an editor
+(`403` for viewers).
 
 ## OpenVPN
 
@@ -1484,8 +1558,10 @@ GET /api/v1/openvpn/settings
 ```
 
 Returns the CA fingerprint and expiry, endpoint, transport, subnet, gateway
-and the answering instance's daemon status. Private material (the CA key,
-the server key, the tls-crypt key) is never returned.
+and the tunnel's status across the install, in the shape WireGuard's has:
+one entry in `status.gateways` per gateway running the daemon, with its
+`daemon_version`, `restarts`, `denied` and `error`. Private material (the CA
+key, the server key, the tls-crypt key) is never returned.
 
 ```json
 {
@@ -1502,26 +1578,28 @@ the server key, the tls-crypt key) is never returned.
   "configured": true,
   "updated_at": "2026-10-05T09:00:00",
   "status": {
-    "enabled": true,
-    "state": "running",
-    "error": null,
-    "instance_id": "7d6b...",
-    "interface": "ovpn0",
-    "protocol": "udp",
-    "listen_port": 1194,
-    "daemon_version": "OpenVPN 2.6.3 x86_64-pc-linux-gnu",
-    "restarts": 0,
-    "denied": 1,
-    "transparent_port": 8081,
-    "dns_port": 5353,
-    "fake_ip_range": "198.18.0.0/15",
-    "active_connections": 3,
+    "gateways": [
+      {
+        "protocol": "openvpn",
+        "instance_id": "gateway-1",
+        "state": "running",
+        "error": null,
+        "backend": null,
+        "listen_port": 1194,
+        "active_connections": 3,
+        "restarts": 0,
+        "denied": 1,
+        "daemon_version": "OpenVPN 2.6.3 x86_64-pc-linux-gnu",
+        "interface": "ovpn0",
+        "fake_ip_range": "198.18.0.0/15",
+        "block_encrypted_dns": true
+      }
+    ],
     "peers_total": 2,
     "peers_enabled": 2,
     "peers_online": 1,
     "connections_by_address": 0,
-    "encrypted_dns_blocked": 0,
-    "block_encrypted_dns": true
+    "encrypted_dns_blocked": 0
   }
 }
 ```
@@ -1544,7 +1622,7 @@ Content-Type: application/json
 Admin only. `protocol` is `udp` or `tcp`; `keepalive_timeout` must exceed
 `keepalive_interval`; the subnet must still contain every device's address.
 A change to the port, transport, subnet or keepalive restarts the daemon on
-every instance running it.
+every gateway running it.
 
 ```http
 POST /api/v1/openvpn/settings/rotate-identity
@@ -1595,7 +1673,7 @@ GET /api/v1/projects/{project_id}/openvpn/peers
 }
 ```
 
-`status.online` means an instance running the daemon currently carries a
+`status.online` means a gateway running the daemon currently carries a
 session for the device; `last_seen_at` is that session's start, or the
 persisted start of the last one. `metrics` is the same `TunnelPeerMetrics`
 shape WireGuard devices carry.
@@ -1621,9 +1699,12 @@ GET    /api/v1/projects/{project_id}/openvpn/peers/{peer_id}/config
 
 `PATCH` takes the same partial document as a WireGuard device (`name`,
 `enabled`, `session_id`, `country`, `state`, `city`; an empty string
-clears). Disabling, rotating or deleting a device ends any session it has.
-`rotate-certificate` issues a new certificate and key; the serial changes
-and the old profile stops working. `config` returns the `.ovpn` profile:
+clears). Disabling, rotating or deleting a device ends any session it has,
+on every gateway, once the routing feed brings the change (about two
+seconds). `rotate-certificate` issues a new certificate and key; the serial
+changes and the old profile stops working. `config` returns the `.ovpn`
+profile, which carries the device's key, so downloading it needs an editor
+(`403` for viewers):
 
 ```json
 {
@@ -1636,16 +1717,48 @@ and the old profile stops working. `config` returns the `.ovpn` profile:
 
 ## Health Check
 
-Public endpoint for load balancer health checks:
+Every process, whatever its role, answers four paths on port 8000 for probes,
+load balancers and Prometheus. None needs a sign-in, and none touches Postgres
+or Redis: they read the process's own state.
 
 ```bash
-GET /health
+GET /live      # 200 while the process serves
+GET /ready     # 200 while it can do its work, else 503
+GET /health    # the same check, with who answered
+GET /metrics   # Prometheus text of this process
 ```
 
-**Response:**
+**`/ready`**:
 ```json
-{
-  "status": "healthy"
-}
+{ "status": "ready", "role": "gateway", "reasons": [] }
+```
+or, with `503`:
+```json
+{ "status": "unready", "role": "gateway", "reasons": ["gateway: feed not applied yet"] }
 ```
 
+**`/health`** runs the same check and names the process; `reasons` appears only
+with `503`:
+```json
+{ "status": "healthy", "role": "api", "instance": "api-1", "version": "6.0.0" }
+```
+
+**`/live`** answers `{"status": "alive"}`. What ready means for each role is
+in [Deployment & Scaling]({{ site.baseurl }}/deployment#health-endpoints), and
+the metric families of `/metrics` in [Metrics]({{ site.baseurl }}/metrics#prometheus).
+
+## Internal Endpoints
+
+`/internal/v1` is for the cluster's own processes and is not part of the
+public API. A gateway fetches the IP database files the routing feed lists
+from the api:
+
+```bash
+GET /internal/v1/geo/databases/{database_id}/blob?sha256=<checksum>
+Authorization: Bearer <internal token>
+```
+
+The token is derived from `OCTOPROX_INTERNAL_SECRET`; a sign-in token is
+refused with `401`. The answer is the file, or `404` when the api has no file
+of that database at that checksum. The bundled nginx config refuses
+`/internal/` on its public port.

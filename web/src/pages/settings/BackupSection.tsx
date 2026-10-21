@@ -37,7 +37,7 @@ function ExportCard() {
     onError: (err: any) => setError(err.message || 'Export failed'),
   })
 
-  const handleExport = (e: React.FormEvent) => {
+  const handleExport = (e: React.SubmitEvent) => {
     e.preventDefault()
     setError(null)
     if (passphrase.length < MIN_PASSPHRASE) { setError(`Passphrase must be at least ${MIN_PASSPHRASE} characters.`); return }

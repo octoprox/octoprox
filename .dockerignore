@@ -1,0 +1,20 @@
+# The build context is what the Dockerfile copies and nothing else:
+# pyproject.toml and README.md (the package metadata), api/, config/ and
+# web/ (the frontend sources and its lock file). Everything else stays out:
+# the git history, the virtualenv, node_modules, local data (the MITM CA,
+# IP database files), tests, docs, editor and tool caches, and .env with
+# its secrets. A COPY of anything new needs a line here.
+*
+!pyproject.toml
+!README.md
+!api
+!config
+!web
+
+# Inside the copied directories: dependencies the build installs itself,
+# build output, bytecode and editor droppings.
+web/node_modules
+web/dist
+**/__pycache__
+**/*.py[cod]
+**/.DS_Store

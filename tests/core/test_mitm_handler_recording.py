@@ -1,17 +1,23 @@
 # Copyright 2026 Octoprox Authors
 # SPDX-License-Identifier: Apache-2.0
 
-"""Tests for MitmHandler MITM request recording."""
+"""Tests for MitmHandler MITM request recording.
+
+Captures are written to Redis by held background tasks, so an intercepted
+request never waits on Redis; ``settle`` waits for the writes under way.
+"""
 
 import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from api.core.mitm.handler import MitmHandler
+from api.core.tls_cert_manager import TLSCertManager
+from api.db.redis import RedisClient
 from api.models.project import MitmEngine, MitmMode
 
 
 class TestMitmHandlerRecording:
-    """Tests for fire-and-forget request recording in MitmHandler."""
+    """Tests for the held background capture writes of MitmHandler."""
 
     def _make_project(
         self,
@@ -70,8 +76,7 @@ class TestMitmHandlerRecording:
             mock_loop.return_value.start_tls = AsyncMock(return_value=MagicMock())
             await handler.handle(reader, writer, "example.com", 443, proxy, project)
 
-        # Allow the fire-and-forget task to complete
-        await asyncio.sleep(0.05)
+        await handler.settle()
 
         redis_client.record_mitm_request.assert_called_once()
         call_args = redis_client.record_mitm_request.call_args
@@ -82,6 +87,8 @@ class TestMitmHandlerRecording:
         assert fields["status_code"] == "200"
         assert fields["target_host"] == "example.com"
         assert fields["mitm_mode"] == "match_ua"
+        assert fields["mitm_engine"] == "curl_cffi"
+        assert fields["mitm_browser"] == ""
         assert fields["response_body_size"] == str(len(b"<html>ok</html>"))
         assert "timestamp" in fields
         assert float(fields["latency_ms"]) >= 0
@@ -163,7 +170,7 @@ class TestMitmHandlerRecording:
             mock_loop.return_value.start_tls = AsyncMock(return_value=MagicMock())
             await handler.handle(reader, writer, "example.com", 443, proxy, project)
 
-        await asyncio.sleep(0.05)
+        await handler.settle()
 
         # Recording should NOT be called on upstream failure
         redis_client.record_mitm_request.assert_not_called()
@@ -208,8 +215,22 @@ class TestMitmHandlerRecording:
             mock_loop.return_value.start_tls = AsyncMock(return_value=MagicMock())
             bs, br = await handler.handle(reader, writer, "example.com", 443, proxy, project)
 
-        await asyncio.sleep(0.05)
+        await handler.settle()
 
-        # Proxy should still have completed successfully despite Redis error
+        # Proxy should still have completed successfully despite Redis error;
+        # the capture is dropped and counted.
         assert br > 0
         redis_client.record_mitm_request.assert_called_once()
+        assert handler.dropped_captures == 1
+
+    async def test_a_capture_cut_by_the_deadline_is_logged_by_its_type(self) -> None:
+        """A Redis call cut by the request deadline raises a bare TimeoutError; the dropped capture is still named."""
+        redis_client = MagicMock(spec=RedisClient)
+        redis_client.record_mitm_request = AsyncMock(side_effect=TimeoutError)
+        handler = MitmHandler(MagicMock(spec=TLSCertManager), redis_client=redis_client)
+
+        with patch("api.core.mitm.handler.logger") as log:
+            await handler._write_capture(redis_client, "p1", {"method": "GET"})
+
+        assert handler.dropped_captures == 1
+        log.debug.assert_called_once_with("MITM capture dropped", project_id="p1", error="TimeoutError")

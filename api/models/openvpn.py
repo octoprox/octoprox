@@ -3,16 +3,13 @@
 
 """OpenVPN models: the install's CA and server identity, and the devices that may connect.
 
-The same shape as the WireGuard models with the credential swapped: a
-device holds a certificate the install's CA issued instead of a key pair,
-and is told apart at connect time by its common name (its id) and the
-certificate's serial. Routing is stored on the peer as for WireGuard. See
-docs/openvpn.md.
+A device holds a certificate the CA issued and is told apart at connect time by its common name and serial.
 """
 
 from __future__ import annotations
 
 import ipaddress
+from collections.abc import Iterable, Mapping
 from datetime import datetime
 from typing import Any, Literal
 from uuid import uuid4
@@ -23,7 +20,9 @@ from api.core import utc_now
 from api.models.location import LocationTarget, normalize_level
 from api.models.tunnel import (
     TunnelPeerMetrics,
+    TunnelStatus,
     clean_optional,
+    naive_utc,
     validate_endpoint_host,
     validate_tunnel_subnet,
 )
@@ -91,13 +90,6 @@ class OpenVpnServerSettings(BaseModel):
     def configured(self) -> bool:
         return bool(self.endpoint_host)
 
-    def daemon_signature(self) -> tuple[Any, ...]:
-        """What the daemon was started with; a change means it must be restarted."""
-        return (
-            self.ca_cert, self.server_cert, self.tls_crypt_key, self.endpoint_port, self.protocol, self.subnet,
-            self.keepalive_interval, self.keepalive_timeout,
-        )
-
 
 class OpenVpnServerSettingsDoc(BaseModel):
     """What an admin edits: everything but the identity."""
@@ -127,42 +119,6 @@ class OpenVpnServerSettingsDoc(BaseModel):
         return self
 
 
-OpenVpnState = Literal["disabled", "starting", "running", "failed", "stopped"]
-
-
-class OpenVpnStatus(BaseModel):
-    """What the instance answering the request is doing about the endpoint.
-
-    In a cluster this describes the instance the API load balancer picked,
-    which may or may not be one carrying the endpoint. ``peers_online`` is
-    merged from what every carrying instance publishes to Redis and is
-    cluster-wide.
-    """
-
-    enabled: bool
-    state: OpenVpnState
-    error: str | None = None
-    instance_id: str
-    interface: str
-    protocol: OpenVpnProtocol
-    listen_port: int | None = None
-    daemon_version: str | None = None
-    # Times the daemon exited on its own and was started again since this process started.
-    restarts: int = 0
-    # Connections refused at the management interface (unknown, disabled or rotated device) since start.
-    denied: int = 0
-    transparent_port: int
-    dns_port: int
-    fake_ip_range: str
-    active_connections: int = 0
-    peers_total: int = 0
-    peers_enabled: int = 0
-    peers_online: int = 0
-    connections_by_address: int = 0
-    encrypted_dns_blocked: int = 0
-    block_encrypted_dns: bool = True
-
-
 class OpenVpnServerSettingsResponse(BaseModel):
     ca_fingerprint: str
     ca_expires_at: datetime
@@ -176,7 +132,8 @@ class OpenVpnServerSettingsResponse(BaseModel):
     client_mtu: int | None
     configured: bool
     updated_at: datetime
-    status: OpenVpnStatus
+    # The endpoint on every gateway running it, and the devices.
+    status: TunnelStatus
 
 
 # --- peers -----------------------------------------------------------------------------------
@@ -264,22 +221,60 @@ class OpenVpnPeerUpdate(BaseModel):
         return value.strip() if isinstance(value, str) else value
 
 
+class OpenVpnSessionReading(BaseModel):
+    """One session as a gateway's daemon reports it, published every status tick under the device's id.
+
+    It is the JSON in a gateway's ``openvpn:peer_status:<instance>`` hash, one format for the gateway that writes it,
+    the api that shows it and the workers' last-seen job.
+    """
+
+    # When the session started, unix seconds; 0 when the daemon did not say.
+    connected_since: int = 0
+    # The daemon's counters for the session.
+    rx_bytes: int = 0
+    tx_bytes: int = 0
+    # Where the device connects from (host:port).
+    endpoint: str | None = None
+
+    @property
+    def connected_at(self) -> datetime | None:
+        """When the session started, as naive UTC; None when unknown."""
+        return naive_utc(self.connected_since) if self.connected_since else None
+
+    @classmethod
+    def latest(cls, published: Iterable[Mapping[str, str]]) -> dict[str, OpenVpnSessionReading]:
+        """Each device's session by device id, from every gateway running the endpoint.
+
+        A device has one session at a time, so should two gateways both report one (a reconnect landing elsewhere before
+        the old session timed out) the newer wins; an entry that does not parse is skipped.
+        """
+        latest: dict[str, OpenVpnSessionReading] = {}
+        for carrier in published:
+            for peer_id, payload in carrier.items():
+                try:
+                    reading = cls.model_validate_json(payload)
+                except ValueError:
+                    continue
+                current = latest.get(peer_id)
+                if current is None or reading.connected_since > current.connected_since:
+                    latest[peer_id] = reading
+        return latest
+
+
 class OpenVpnPeerStatus(BaseModel):
     """Where a device stands: whether a carrier has a session for it, and when it was last seen.
 
-    ``connected_since`` and ``endpoint`` come from the instance carrying the
-    session when one is publishing; ``last_seen_at`` is that, or the
-    persisted last connection otherwise, so a device's last sighting
-    survives a restart. ``rx_bytes`` / ``tx_bytes`` are the daemon's counters
-    for the current session: wire bytes, control channel and DNS included.
-    What the device's traffic amounted to is in its metrics.
+    Its traffic is in its metrics.
     """
 
     online: bool = False
+    # From the carrying instance while one publishes.
     connected_since: datetime | None = None
+    # That, or else the persisted last connection.
     last_seen_at: datetime | None = None
     endpoint: str | None = None
     live: bool = False
+    # The daemon's counters for the current session (wire bytes, control channel and DNS included).
     rx_bytes: int = 0
     tx_bytes: int = 0
 

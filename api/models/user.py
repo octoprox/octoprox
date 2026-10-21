@@ -5,7 +5,7 @@
 
 import re
 from datetime import datetime
-from enum import Enum
+from enum import StrEnum
 from uuid import uuid4
 
 from pydantic import BaseModel, Field, field_validator
@@ -14,7 +14,7 @@ from api.core import utc_now
 from api.core.password import hash_password
 
 
-class UserRole(str, Enum):
+class UserRole(StrEnum):
     """User roles for access control."""
 
     ADMIN = "admin"

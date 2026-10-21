@@ -14,7 +14,8 @@ A dynamic and flexible proxy manager that acts as an intelligent proxy aggregato
 - **IP Attribution**: Resolve exit locations from your own MaxMind, DB-IP, IPinfo or IP2Location databases, verify vendor claims, track each provider's accuracy, and optionally reject sessions that exit in the wrong country (see [docs/ip-attribution.md](docs/ip-attribution.md))
 - **Traffic Limits & Billing**: Cap the bytes a connector carries per billing period, alert, block or cut transfers at the cap, and see spend from the price you pay per GB (see [docs/traffic-limits.md](docs/traffic-limits.md))
 - **Tunnel Devices**: Routers, TVs, consoles and phones with no proxy settings join a project's pool through a WireGuard or OpenVPN tunnel Octoprox terminates; one config, QR code or profile per device, names resolved at the exit (see [docs/wireguard.md](docs/wireguard.md) and [docs/openvpn.md](docs/openvpn.md))
-- **Health Monitoring**: Automatic health checks with configurable intervals and thresholds
+- **Health Monitoring**: Automatic health checks with configurable intervals and timeouts, run by workers that scale with the pool
+- **Scales by Role**: One image runs as a single process, or as gateways, workers, an api and a controller pair that scale independently and share only Postgres and Redis (see [docs/architecture.md](docs/architecture.md))
 - **Performance Metrics**: Track latency, success rates, and request counts per proxy
 - **Host Analytics**: A per-project Hosts page showing where the traffic goes: requests, bytes and latency by destination host, split by connector, charted over time (see [docs/metrics.md](docs/metrics.md))
 - **Failure Log**: A per-project Failures page saying why requests failed or were refused: every failure counted by kind, vendor status and connector over time, with examples of each kind (the vendor's answer, timeouts, unreachable proxies, no proxy for the location) (see [docs/metrics.md](docs/metrics.md#failures-why-requests-failed))
@@ -37,7 +38,7 @@ The fastest way to get Octoprox running is using the pre-built Docker image from
 curl -O https://raw.githubusercontent.com/octoprox/octoprox/main/docker-compose.ghcr.yml
 
 # Start all services
-docker compose -f docker-compose.ghcr.yml up -d
+docker compose -f docker-compose.ghcr.yml up -d --remove-orphans
 
 # View logs
 docker compose -f docker-compose.ghcr.yml logs -f octoprox
@@ -52,8 +53,10 @@ Default credentials: `admin` / `admin`
 
 > **Important**: For production, update the environment variables in `docker-compose.ghcr.yml`:
 > - Set a strong `OCTOPROX_AUTH_PASSWORD`
-> - Set a secure random `OCTOPROX_JWT_SECRET`
+> - Set secure random values for `OCTOPROX_JWT_SECRET` and `OCTOPROX_INTERNAL_SECRET`, two different ones
 > - Change `OCTOPROX_DB_PASSWORD` and update `POSTGRES_PASSWORD` to match
+>
+> **Upgrading from 5.x?** Do not download over your compose file, which holds your settings: the upgrade carries them into the 6.0 file. The upgrade is a short downtime: a single instance switches with one restart, a cluster with `down` and `up`. Follow [docs/migrating-to-6.md](docs/migrating-to-6.md).
 
 To stop the services:
 
@@ -61,16 +64,20 @@ To stop the services:
 docker compose -f docker-compose.ghcr.yml down
 ```
 
-### Running a multi-instance cluster
+### Running a role cluster
 
-Octoprox can also run as a horizontally-scaled cluster behind an L4 load
-balancer. Two compose flavours are shipped, mirroring the single-instance
-pair: one builds the image from your checkout, one pulls the pre-built
-production image from GitHub Container Registry.
+Octoprox can also run as a cluster of roles, each scaled on its own: gateways
+carry the proxy and tunnel traffic, workers run health checks, provider syncs
+and cloud scaling, the api serves the web UI and REST API, and a controller
+pair (one leads, one stands by) publishes the routing configuration the
+gateways follow. They share one Postgres and one Redis and never talk to each
+other directly. Two compose flavours are shipped, mirroring the
+single-instance pair: one builds the image from your checkout, one pulls the
+pre-built production image from GitHub Container Registry.
 
 ```bash
 # Local-build cluster (fast iteration on your own code)
-make cluster-up       # 3 octoprox replicas + nginx + Postgres + Redis
+make cluster-up       # 2 api, 2 gateways, 2 controllers, 2 workers + nginx + Postgres + Redis
 make cluster-logs
 make cluster-down
 
@@ -79,56 +86,65 @@ make cluster-down
 curl -O https://raw.githubusercontent.com/octoprox/octoprox/main/docker-compose.cluster.ghcr.yml
 mkdir -p nginx
 curl -o nginx/nginx.conf https://raw.githubusercontent.com/octoprox/octoprox/main/nginx/nginx.conf
-docker compose -f docker-compose.cluster.ghcr.yml up -d
+docker compose -f docker-compose.cluster.ghcr.yml up -d --remove-orphans
 docker compose -f docker-compose.cluster.ghcr.yml logs -f
 docker compose -f docker-compose.cluster.ghcr.yml down
 ```
 
-> **Important**: the cluster compose files mount `./nginx/nginx.conf`. If
-> that file is missing when you run `up`, Docker silently creates an empty
-> directory in its place and nginx fails to start -
-> so make sure the config is present (it ships in your checkout for the
-> local-build variant; download it as shown above for the pre-built image).
+> **Important**: the cluster compose files mount `./nginx/nginx.conf`, so
+> make sure the config is present before `up` (it ships in your checkout for
+> the local-build variant; download it as shown above for the pre-built
+> image): Compose refuses to start the cluster without it. Upgrading a 5.x
+> cluster? Do not download over your files, which hold your settings; stop the
+> 5.x cluster with its own file, then start 6.0's. Follow
+> [docs/migrating-to-6.md](docs/migrating-to-6.md).
 
 The full compose-file matrix:
 
-| File                              | Image source         | Instances | Use for                              |
+| File                              | Image source         | Processes | Use for                              |
 |-----------------------------------|----------------------|-----------|--------------------------------------|
-| `docker-compose.yml`              | local build          | 1         | day-to-day development               |
-| `docker-compose.ghcr.yml`         | `ghcr.io/.../latest` | 1         | quickest "just run it" demo          |
-| `docker-compose.cluster.yml`      | local build          | 3 + nginx   | testing distributed code paths      |
-| `docker-compose.cluster.ghcr.yml` | `ghcr.io/.../latest` | 3 + nginx   | production-ready starting point    |
+| `docker-compose.yml`              | local build          | 1 (role `all`) | day-to-day development          |
+| `docker-compose.ghcr.yml`         | `ghcr.io/.../latest` | 1 (role `all`) | quickest "just run it" demo     |
+| `docker-compose.cluster.yml`      | local build          | 2 api, 2 gateways, 2 controllers, 2 workers + nginx | testing the role cluster |
+| `docker-compose.cluster.ghcr.yml` | `ghcr.io/.../latest` | 2 api, 2 gateways, 2 controllers, 2 workers + nginx | production-ready starting point |
 
 Endpoints exposed on the host (same for both cluster variants):
 
 | Port | What                                                    |
 |------|---------------------------------------------------------|
-| 8000 | API + Web UI (nginx → octoprox-{1,2,3}:8000, HTTP)    |
-| 8080 | Proxy traffic (nginx → octoprox-{1,2,3}:8080, TCP)    |
-| 51820/udp | WireGuard (nginx → octoprox-{1,2,3}:51820, each device pinned to one replica) |
-| 1194 | OpenVPN, UDP and TCP (nginx → octoprox-{1,2,3}:1194, each device pinned to one replica) |
+| 8000 | API + Web UI (nginx → api-1, api-2, HTTP)               |
+| 8080 | Proxy traffic (nginx → gateway-1, gateway-2, TCP)       |
+| 51820/udp | WireGuard (nginx → gateway-1, gateway-2, each device pinned to one gateway) |
+| 1194 | OpenVPN, UDP and TCP (nginx → gateway-1, gateway-2, each device pinned to one gateway) |
 
-All three instances share the same Postgres and Redis, generate distinct
-`OCTOPROX_INSTANCE_ID` values, advertise themselves via Redis heartbeat,
-and elect leaders for singleton background workers (metrics flusher,
-compactor, system snapshotter) and per-connector workers (autoscaler,
-provider syncer). See
+Every Octoprox service runs the same image with its own `OCTOPROX_ROLE` and
+`OCTOPROX_INSTANCE_ID`, and every one but the gateways connects to Postgres;
+gateways route on a feed the leading controller compiles from Postgres and
+publishes to Redis. The controller does nothing else but publish the periodic
+jobs; workers take every job from Redis streams through one consumer group
+(health checks, syncs, scaling, metrics flushes and compaction, traffic-limit
+decisions, IP observation ingest, IP database downloads, system snapshots), so
+adding a worker or a gateway never makes the others busier. Set
+`OCTOPROX_INTERNAL_SECRET` to the same value on every service. See
 [`docker-compose.cluster.yml`](docker-compose.cluster.yml),
 [`docker-compose.cluster.ghcr.yml`](docker-compose.cluster.ghcr.yml), and
 [`nginx/nginx.conf`](nginx/nginx.conf) for the wiring details.
 
-For the architecture behind multi-instance - what's shared, what's
-elected, how failover works - see the
-[Deployment & Scaling docs page](https://octoprox.com/deployment).
+For the architecture behind the roles - what each runs, how changes reach the
+gateways, how failover works, what happens when Redis is lost - see
+[docs/architecture.md](docs/architecture.md) and
+[docs/deployment.md](docs/deployment.md); for Kubernetes,
+[docs/kubernetes.md](docs/kubernetes.md).
 
 ---
 
 ### Prerequisites (for local development)
 
 - Python 3.12+ (use `pyenv` for version management)
-- Node.js 20+ (for frontend development, use `nvm` for version management)
+- Node.js 24+ (for frontend development, use `nvm` for version management)
+- Chrome or Edge 111+, Safari 16.4+ or Firefox 128+ for the web UI
 - Docker and Docker Compose (optional, for containerized deployment)
-- Redis (for session storage and caching)
+- Redis 7.2+ and PostgreSQL (the compose file runs both for you; see below)
 
 ---
 
@@ -233,21 +249,21 @@ nvm --version
 nvm install --lts
 
 # Or install a specific version
-nvm install 20
+nvm install 24
 
 # Set default Node.js version
-nvm alias default 20
+nvm alias default 24
 
 # Verify installation
-node --version   # Should output: v20.x.x
-npm --version    # Should output: 10.x.x
+node --version   # Should output: v24.x.x
+npm --version    # Should output: 11.x.x
 ```
 
 #### Alternative: Install Node.js using Homebrew (macOS only)
 
 ```bash
-brew install node@20
-brew link node@20
+# Installs the current release, Node.js 24 or newer
+brew install node
 ```
 
 ---
@@ -327,7 +343,7 @@ The API will be available at `http://localhost:8000`.
 
 ```bash
 # Ensure you're using the correct Node.js version
-nvm use 20  # or: nvm use --lts
+nvm use 24  # or: nvm use --lts
 
 # Install frontend dependencies
 make web-install
@@ -340,8 +356,8 @@ The web UI will be available at `http://localhost:3000`.
 
 > **Note:** If you see npm errors, ensure Node.js is properly installed:
 > ```bash
-> node --version  # Should be v20.x.x or higher
-> npm --version   # Should be v10.x.x or higher
+> node --version  # Should be v24.x.x or higher
+> npm --version   # Should be v11.x.x or higher
 > ```
 
 ### Docker Deployment
@@ -357,7 +373,7 @@ make docker-run
 
 ## Configuration
 
-Configuration is loaded from YAML files in the `config/` directory based on the `OCTOPROX_ENV` environment variable.
+Configuration is loaded from YAML files in the `config/` directory (`config/dev.yaml` or `config/prod.yaml`) based on the `OCTOPROX_ENV` environment variable; environment variables take precedence. Every setting, and which role reads which, is in [docs/configuration.md](docs/configuration.md).
 
 ### Environment Variables
 
@@ -371,6 +387,9 @@ Configuration is loaded from YAML files in the `config/` directory based on the 
 | `OCTOPROX_AUTH_PASSWORD` | Initial admin password (required) | (empty) |
 | `OCTOPROX_JWT_SECRET` | Secret key for JWT token signing | change-me-in-production |
 | `OCTOPROX_JWT_EXPIRY_HOURS` | JWT token expiry in hours | 24 |
+| `OCTOPROX_ROLE` | What the process runs: `all`, `api`, `gateway`, `controller`, `worker` or `echo` | all |
+| `OCTOPROX_INTERNAL_SECRET` | Shared by the api, gateways and controllers: encrypts the routing feed in Redis and signs gateway calls to the api | change-me-in-production |
+| `OCTOPROX_INTERNAL_API_URL` | Where gateways reach the api | http://localhost:8000 |
 
 ### Authentication
 
@@ -404,9 +423,10 @@ OCTOPROX_JWT_SECRET=your-random-secret-key
 - **Always set a strong `OCTOPROX_JWT_SECRET`** in production. The default value is insecure.
 - **Never commit credentials** to version control. Use environment variables or `.env` files (which should be gitignored).
 - The `/api/v1/auth/login` and `/api/v1/auth/status` endpoints are always public.
-- The `/health` endpoint is always public for load balancer health checks.
+- The `/live`, `/ready`, `/health` and `/metrics` endpoints are always public, on every role, for probes, load balancer health checks and Prometheus. The bundled cluster's nginx refuses `/metrics` on its public port, where it would reach whichever api it picked: scrape each container's port 8000 instead.
 - All other API endpoints require authentication.
 - Behind a load balancer or reverse proxy, set `OCTOPROX_PUBLIC_URL` so invite links and sign-in redirects carry the address users reach Octoprox at.
+- Set `OCTOPROX_INTERNAL_SECRET` to a long random value, different from `OCTOPROX_JWT_SECRET`; in a cluster only the api gets the JWT secret.
 
 ### Example Configuration
 
@@ -419,9 +439,9 @@ server:
 proxy:
   default_strategy: round_robin
   health_check:
-    enabled: true
     interval_seconds: 60
     timeout_seconds: 30
+    concurrency: 50
 ```
 
 ## Backup & Migration
@@ -429,15 +449,15 @@ proxy:
 Admins can export the whole setup (users, projects, credentials, connectors,
 proxies and optionally metrics) as a single passphrase-encrypted `.opbak` file
 from **Settings → Backup & Migration**, and restore it on the same or another
-instance.
+install.
 
 - **Export** asks for a passphrase (8+ characters). The file is encrypted with
   it and the passphrase cannot be recovered, so store it safely.
-- **Import** replaces *all* existing data on the target instance in one
-  transaction. Both instances must run the same Octoprox version (the import
+- **Import** replaces *all* existing data on the target install in one
+  transaction. Both installs must run the same Octoprox version (the import
   checks the database schema revision before decrypting).
 - **Keep my current account** (on by default) preserves the importing admin so
-  you are not locked out when restoring a backup from a different instance. An
+  you are not locked out when restoring a backup from a different install. An
   imported user with the same username is renamed to `<username>-imported`, and
   a clashing email is cleared. Untick it to restore users exactly as they are in
   the backup; you will then need to log in with credentials from the backup.
@@ -465,7 +485,7 @@ Residential, ISP and datacenter vendors are integrated through the provider SDK:
 
 ## Tunnel Devices
 
-Anything that cannot be pointed at a proxy becomes a client by connecting to a tunnel that Octoprox terminates, over WireGuard or OpenVPN; the protocol is picked per device. Each device is a peer of a project with its own tunnel address and the routing a proxy client would put in its username (sticky session, exit country, state, city). Inside the tunnel every name resolves to a synthetic address and every TCP connection is turned into a CONNECT through the project's upstream, so DNS never leaks and the device needs no proxy support. The bundled cluster runs both on every replica behind nginx; a single instance enables them with `OCTOPROX_WIREGUARD_ENABLED=true` and/or `OCTOPROX_OPENVPN_ENABLED=true`, `cap_add: [NET_ADMIN]`, `/dev/net/tun` for OpenVPN, and the ports published.
+Anything that cannot be pointed at a proxy becomes a client by connecting to a tunnel that Octoprox terminates, over WireGuard or OpenVPN; the protocol is picked per device. Each device is a peer of a project with its own tunnel address and the routing a proxy client would put in its username (sticky session, exit country, state, city). Inside the tunnel every name resolves to a synthetic address and every TCP connection is turned into a CONNECT through the project's upstream, so DNS never leaks and the device needs no proxy support. The bundled cluster runs both on its gateways behind nginx; a single instance enables them with `OCTOPROX_WIREGUARD_ENABLED=true` and/or `OCTOPROX_OPENVPN_ENABLED=true`, `cap_add: [NET_ADMIN]`, `/dev/net/tun` for OpenVPN, and the ports published.
 
 - [WireGuard Devices](docs/wireguard.md) - How it works, enabling the endpoint, adding devices, limitations
 - [OpenVPN Devices](docs/openvpn.md) - The CA, admission through the management interface, the daemon, profiles
@@ -487,13 +507,13 @@ make docker-build  # Build Docker image
 make docker-compose-up    # Start all services (single instance)
 make docker-compose-down  # Stop all services
 
-# Multi-instance cluster (3 octoprox replicas behind nginx)
+# Role cluster (api, gateways, controllers, workers behind nginx)
 make cluster-up          # Start cluster, building image from local source
 make cluster-down        # Stop the cluster
 make cluster-logs        # Tail aggregated cluster logs
 make cluster-rebuild     # Rebuild images and restart
 # Production-ready cluster (pre-built GHCR image) - run docker compose directly:
-#   docker compose -f docker-compose.cluster.ghcr.yml up -d
+#   docker compose -f docker-compose.cluster.ghcr.yml up -d --remove-orphans
 
 make web-install   # Install frontend dependencies
 make web-dev       # Run frontend dev server

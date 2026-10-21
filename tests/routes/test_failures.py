@@ -1,16 +1,23 @@
 # Copyright 2026 Octoprox Authors
 # SPDX-License-Identifier: Apache-2.0
 
-"""Tests for the project failure log endpoints: examples, the head poll, the counted summary."""
+"""Tests for the project failure log endpoints, on an api process: examples, the head poll, the counted summary.
 
-import asyncio
+The examples are written to Redis as a gateway's failure log writes them,
+and the counts to Postgres as a worker's metrics flush writes them.
+"""
+
 from datetime import timedelta
 from typing import Any
 
 from starlette.testclient import TestClient
 
 from api.core import utc_now
+from api.db.models import FailureMetricsModel
 from api.db.redis import RedisClient
+from api.db.repository import MetricsRepository
+from api.db.session import SessionFactory
+from tests.conftest import api_runtime, on_app_loop
 
 
 def _entry(i: int = 0, **overrides: str) -> dict[str, str]:
@@ -37,42 +44,38 @@ def _entry(i: int = 0, **overrides: str) -> dict[str, str]:
 
 async def _append(redis_client: RedisClient, project_id: str, entries: list[dict[str, str]]) -> None:
     """Examples as one window of the failure log writes them, oldest first."""
-    await redis_client.append_failures(
+    parts = redis_client.failures_batch(
         [(project_id, e["kind"], e) for e in entries], {}, max_entries=1000, retention_seconds=3600
     )
+    await redis_client.send_batch(parts)
 
 
 def _seed_counts(client: TestClient, project_id: str, connector_id: str) -> None:
-    """Write failure history rows through the app's own session, as the flusher would."""
-    from api.db.models import FailureMetricsModel
-    from api.db.repository import MetricsRepository
-    from tests.routes.test_connector_traffic import manager_loop
+    """Write failure history rows through the app's own session, as a worker's metrics flush would."""
+    on_app_loop(client, _save_counts, api_runtime(client).session_factory, project_id, connector_id)
 
-    manager = client.app.state.proxy_manager  # type: ignore[attr-defined]
 
-    async def seed() -> None:
-        async with manager._session_factory() as session:
-            repo = MetricsRepository(session)
-            dropped = await repo.save_failure_metrics_snapshots({
-                (project_id, connector_id, "upstream_rejected", 407): 30,
-                (project_id, connector_id, "upstream_rejected", 502): 5,
-                (project_id, connector_id, "upstream_timeout", None): 12,
-                (project_id, None, "no_proxy_available", None): 4,
-                (project_id, "no-such-connector", "upstream_timeout", None): 99,
-                ("no-such-project", None, "no_proxy_available", None): 99,
-            })
-            assert sorted(dropped, key=str) == sorted([
-                (project_id, "no-such-connector", "upstream_timeout", None),
-                ("no-such-project", None, "no_proxy_available", None),
-            ], key=str)
-            # Outside every range but 30d.
-            session.add(FailureMetricsModel(
-                project_id=project_id, connector_id=connector_id, kind="upstream_timeout",
-                timestamp=utc_now() - timedelta(days=10), failure_count=1000, granularity=3600,
-            ))
-            await session.commit()
-
-    asyncio.run_coroutine_threadsafe(seed(), manager_loop(manager)).result(10)
+async def _save_counts(session_factory: SessionFactory, project_id: str, connector_id: str) -> None:
+    async with session_factory() as session:
+        repo = MetricsRepository(session)
+        dropped = await repo.save_failure_metrics_snapshots({
+            (project_id, connector_id, "upstream_rejected", 407): 30,
+            (project_id, connector_id, "upstream_rejected", 502): 5,
+            (project_id, connector_id, "upstream_timeout", None): 12,
+            (project_id, None, "no_proxy_available", None): 4,
+            (project_id, "no-such-connector", "upstream_timeout", None): 99,
+            ("no-such-project", None, "no_proxy_available", None): 99,
+        })
+        assert sorted(dropped, key=str) == sorted([
+            (project_id, "no-such-connector", "upstream_timeout", None),
+            ("no-such-project", None, "no_proxy_available", None),
+        ], key=str)
+        # Outside every range but 30d.
+        session.add(FailureMetricsModel(
+            project_id=project_id, connector_id=connector_id, kind="upstream_timeout",
+            timestamp=utc_now() - timedelta(days=10), failure_count=1000, granularity=3600,
+        ))
+        await session.commit()
 
 
 class TestListFailures:
@@ -87,6 +90,19 @@ class TestListFailures:
         assert data["appended"] == 0
         assert data["enabled"] is True
         assert data["max_entries"] > 0
+
+    def test_the_log_settings_are_this_installs(
+        self, authenticated_client: TestClient, created_project: dict[str, Any], test_settings: Any,
+    ) -> None:
+        test_settings.failure_log_enabled = False
+        test_settings.failure_log_max_entries = 77
+        test_settings.failure_log_retention_hours = 5
+        url = f"/api/v1/projects/{created_project['id']}/failures"
+
+        data = authenticated_client.get(url).json()
+
+        assert (data["enabled"], data["max_entries"], data["retention_hours"]) == (False, 77, 5)
+        assert authenticated_client.get(f"{url}/summary").json()["enabled"] is False
 
     def test_unknown_project(self, authenticated_client: TestClient) -> None:
         assert authenticated_client.get("/api/v1/projects/nope/failures").status_code == 404
@@ -264,15 +280,17 @@ class TestClearFailures:
     def test_unknown_project(self, authenticated_client: TestClient) -> None:
         assert authenticated_client.delete("/api/v1/projects/nope/failures").status_code == 404
 
-    async def test_deleting_the_project_drops_its_log_and_counts(
+    async def test_deleting_the_project_drops_its_log(
         self, authenticated_client: TestClient, created_project: dict[str, Any], redis_client: RedisClient
     ) -> None:
+        """The examples go with the project; its counts not flushed yet are dropped by the metrics flush (``tests/jobs/test_metrics.py``)."""
         project_id = created_project["id"]
-        await redis_client.append_failures(
+        parts = redis_client.failures_batch(
             [(project_id, "upstream_rejected", _entry())],
             {(project_id, None, "no_proxy_available", None): 3},
             max_entries=1000, retention_seconds=3600,
         )
+        await redis_client.send_batch(parts)
 
         response = authenticated_client.request(
             "DELETE", f"/api/v1/projects/{project_id}", json={"confirmation": "permanently delete"}
@@ -280,4 +298,4 @@ class TestClearFailures:
         assert response.status_code == 204
         assert await redis_client.count_failures(project_id, ["upstream_rejected"]) == 0
         assert await redis_client.failures_appended(project_id) == {}
-        assert await redis_client.get_all_failure_metrics() == {}
+        assert authenticated_client.get(f"/api/v1/projects/{project_id}/failures").status_code == 404

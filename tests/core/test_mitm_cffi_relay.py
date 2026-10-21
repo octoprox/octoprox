@@ -5,14 +5,17 @@
 
 import asyncio
 import contextlib
+import ssl
 from collections.abc import AsyncIterator
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from curl_cffi.requests.exceptions import ProxyError
+from curl_cffi.requests.exceptions import CertificateVerifyError, ProxyError
 
 from api.core.mitm.base import UpstreamRefusedError
 from api.core.mitm.cffi_relay import CffiRelay
+from api.core.tls_cert_manager import TLSCertManager
 from api.models.project import MitmBrowser, MitmMode
 
 
@@ -97,7 +100,7 @@ class TestCffiRelay:
             headers = [("User-Agent", "Mozilla/5.0 Chrome/131.0 Safari/537.36")]
             await relay.send_request("GET", "https://example.com/", headers, None, "http://proxy:8080")
 
-        mock_session_cls.assert_called_with(impersonate="chrome")
+        assert mock_session_cls.call_args.kwargs["impersonate"] == "chrome"
 
     async def test_override_ua_uses_configured_browser(self) -> None:
         """override_ua should use the configured browser regardless of UA."""
@@ -120,7 +123,7 @@ class TestCffiRelay:
             await relay.send_request("GET", "https://example.com/", headers, None, "http://proxy:8080")
 
         # Should use safari, not chrome (despite Chrome UA)
-        mock_session_cls.assert_called_with(impersonate="safari")
+        assert mock_session_cls.call_args.kwargs["impersonate"] == "safari"
 
     async def test_close_closes_session(self) -> None:
         """close() should close the underlying session."""
@@ -294,3 +297,106 @@ class TestUpstreamRefusal:
                 await relay.send_request("GET", "https://example.com/", [], None, "http://vendor.invalid:8080")
 
         assert raised.value is error
+
+
+@contextlib.asynccontextmanager
+async def tls_site(context: ssl.SSLContext) -> AsyncIterator[int]:
+    """A local HTTPS site that answers every request with an empty 200; its port."""
+
+    async def serve(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        with contextlib.suppress(ConnectionError):
+            while (await reader.readline()) not in (b"\r\n", b"\n", b""):
+                pass
+            writer.write(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+            await writer.drain()
+        writer.close()
+
+    server = await asyncio.start_server(serve, "127.0.0.1", 0, ssl=context)
+    try:
+        yield server.sockets[0].getsockname()[1]
+    finally:
+        server.close()
+        await server.wait_closed()
+
+
+@contextlib.asynccontextmanager
+async def tunnelling_proxy(site_port: int, context: ssl.SSLContext | None = None) -> AsyncIterator[str]:
+    """A local upstream proxy that opens every CONNECT to the local site; given ``context``, an https:// one for localhost."""
+
+    async def pipe(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        with contextlib.suppress(ConnectionError):
+            while data := await reader.read(65536):
+                writer.write(data)
+                await writer.drain()
+        writer.close()
+
+    async def serve(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        while (await reader.readline()) not in (b"\r\n", b"\n", b""):
+            pass
+        site_reader, site_writer = await asyncio.open_connection("127.0.0.1", site_port)
+        writer.write(b"HTTP/1.1 200 Connection established\r\n\r\n")
+        await writer.drain()
+        await asyncio.gather(pipe(reader, site_writer), pipe(site_reader, writer))
+
+    server = await asyncio.start_server(serve, "127.0.0.1", 0, ssl=context)
+    port = server.sockets[0].getsockname()[1]
+    try:
+        yield f"https://localhost:{port}" if context else f"http://127.0.0.1:{port}"
+    finally:
+        server.close()
+        await server.wait_closed()
+
+
+class TestCaBundle:
+    """curl_cffi 0.15 and later prefer the OS CA bundle; the engine names certifi's, as 5.x's curl_cffi did.
+
+    libcurl's built-in certificate directory (/etc/ssl/certs on Linux) still
+    applies on top; these tests cover the bundle, not the directory.
+    """
+
+    @pytest.fixture
+    def site_ca(self, tmp_path: Path) -> TLSCertManager:
+        """A throwaway CA that signs the local site's certificate, and the https:// proxy's."""
+        ca = TLSCertManager(tmp_path / "ca.crt", tmp_path / "ca.key")
+        ca._generate_ca()
+        return ca
+
+    async def _get(self, site_ca: TLSCertManager, *, https_proxy: bool = False) -> int:
+        """GET the local site through the relay, real libcurl and a local CONNECT proxy; the status."""
+        context = site_ca.get_server_ssl_context("localhost")
+        relay = CffiRelay(mode=MitmMode.OVERRIDE_UA, browser=MitmBrowser.CHROME)
+        async with tls_site(context) as port, tunnelling_proxy(port, context if https_proxy else None) as proxy_url:
+            try:
+                status, _reason, _headers, _body = await relay.send_request(
+                    "GET", f"https://localhost:{port}/", [], None, proxy_url
+                )
+            finally:
+                await relay.close()
+        return status
+
+    async def test_a_site_is_trusted_when_certifi_s_bundle_holds_its_ca(self, site_ca: TLSCertManager) -> None:
+        with patch("certifi.where", return_value=str(site_ca.ca_cert_path)):
+            assert await self._get(site_ca) == 200
+
+    async def test_a_site_whose_ca_certifi_does_not_hold_is_refused(self, site_ca: TLSCertManager) -> None:
+        with pytest.raises(CertificateVerifyError):
+            await self._get(site_ca)
+
+    # curl_cffi warns on every https:// site reached through an https://
+    # proxy, in case the proxy speaks plain HTTP; this one speaks TLS.
+    @pytest.mark.filterwarnings("ignore:Make sure you are using https over https proxy")
+    async def test_an_https_proxy_is_trusted_when_certifi_s_bundle_holds_its_ca(self, site_ca: TLSCertManager) -> None:
+        """libcurl verifies the proxy against a CA option of its own, which curl_cffi leaves unset once the site's is set."""
+        with patch("certifi.where", return_value=str(site_ca.ca_cert_path)):
+            assert await self._get(site_ca, https_proxy=True) == 200
+
+    @pytest.mark.parametrize("variable", ["REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE"])
+    async def test_a_ca_bundle_variable_does_not_replace_certifi_s(
+        self, site_ca: TLSCertManager, monkeypatch: pytest.MonkeyPatch, variable: str
+    ) -> None:
+        """curl_cffi makes either variable the session's bundle; the relay's curl options are applied after it."""
+        monkeypatch.delenv("REQUESTS_CA_BUNDLE", raising=False)
+        monkeypatch.delenv("CURL_CA_BUNDLE", raising=False)
+        monkeypatch.setenv(variable, str(site_ca.ca_cert_path))
+        with pytest.raises(CertificateVerifyError):
+            await self._get(site_ca)

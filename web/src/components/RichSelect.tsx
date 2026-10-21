@@ -69,9 +69,9 @@ export function RichSelect({
         onClick={() => !disabled && setIsOpen(!isOpen)}
         className={cn(
           'w-full flex items-center justify-between px-3 py-1.5 text-sm border rounded-lg transition-colors text-left',
-          'focus:outline-none focus:ring-1 focus:ring-ring focus:border-ring',
+          'focus:outline-hidden focus:ring-1 focus:ring-ring focus:border-ring',
           disabled
-            ? 'bg-surface-raised cursor-not-allowed text-fg-muted'
+            ? 'bg-surface-raised border-line cursor-not-allowed text-fg-muted'
             : 'bg-surface border-line-strong hover:border-fg-subtle text-fg',
           isOpen && 'ring-1 ring-ring border-ring'
         )}
@@ -84,7 +84,7 @@ export function RichSelect({
         </span>
         <ChevronDown
           className={cn(
-            'w-4 h-4 text-fg-subtle transition-transform flex-shrink-0 ml-2',
+            'w-4 h-4 text-fg-subtle transition-transform shrink-0 ml-2',
             isOpen && 'rotate-180'
           )}
         />
@@ -109,7 +109,7 @@ export function RichSelect({
                     {option.label}
                   </span>
                   {option.badge && (
-                    <span className="inline-flex items-center px-1.5 py-0.5 text-xs font-medium rounded bg-surface-raised text-fg-muted">
+                    <span className="inline-flex items-center px-1.5 py-0.5 text-xs font-medium rounded-sm bg-surface-raised text-fg-muted">
                       {option.badge}
                     </span>
                   )}
@@ -119,7 +119,7 @@ export function RichSelect({
                 )}
               </div>
               {option.value === value && (
-                <Check className="w-4 h-4 text-primary flex-shrink-0 mt-0.5" />
+                <Check className="w-4 h-4 text-primary shrink-0 mt-0.5" />
               )}
             </button>
           ))}

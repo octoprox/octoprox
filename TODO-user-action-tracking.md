@@ -3,10 +3,11 @@
 Landed in Sep 2026: `users.last_login_at` (stamped when a token is issued)
 and request correlation (`X-Request-ID` on every request and response,
 `request_id`, `user_id` and `username` bound into every log line, `instance`
-on every line so replicas can be told apart, JSON log format for
-production). Not done: carrying the originating request id through the
-Redis pub/sub fan-out, so reload log lines on other replicas do not link
-back to the request that caused them. The options below were assessed at the same time
+(and, since 6.0, `role`) on every line so processes can be told apart, JSON
+log format for production). Not done: carrying the originating request id
+into the work a write causes in other processes (the controller's compile
+and publish, the gateways' feed apply, the jobs it queues for workers), so
+those log lines do not link back to the request that caused them. The options below were assessed at the same time
 and deferred. Decision at the time: do not store client IP addresses.
 Revisit that decision explicitly before any of the items below records one.
 
@@ -19,9 +20,9 @@ Redis key so the database sees at most one write every few minutes per
 user. Add a `login_events` table (user id, username as typed, success or
 failure, reason, user agent, timestamp) written from the login and
 set-password handlers. Failed attempts are currently only a log line.
-Surface both on the Users page. Retention via the lease-guarded worker
-pattern in `api/core/metrics_compactor.py`, configured next to
-`system.metrics_retention_days`.
+Surface both on the Users page. Retention as a controller loop, like the
+metrics compactor in `api/controller/metrics_compactor.py`, configured next
+to `system.metrics_retention_days`.
 
 ## Audit log of mutating actions
 
@@ -54,10 +55,14 @@ reviewing the data; build only when there is a concrete question to answer.
 
 ## Full tracing with OpenTelemetry
 
-Auto-instrumentation covers FastAPI, SQLAlchemy, httpx, aiohttp and Redis,
-exporting OTLP to Jaeger or Tempo with a collector added to the compose
-files. The request id from `api/core/request_context.py` should become a
-span attribute so logs and traces join. The hard part is the proxy data
+FastAPI (0.142 and later) emits OpenTelemetry spans, metrics and logs
+itself once a provider is configured, so it needs no instrumentation
+package; `fastapi[opentelemetry]` with `FASTAPI_OTEL_AUTO_CONFIGURE=true`
+sets up OTLP export from the standard `OTEL_*` variables.
+Auto-instrumentation covers SQLAlchemy, httpx and Redis, exporting OTLP to
+Jaeger or Tempo with a collector added to the compose files. The request
+id from `api/core/request_context.py` should become a span attribute so
+logs and traces join. The hard part is the proxy data
 plane: `api/core/proxy_server.py`, curl_cffi and rnet are not
 auto-instrumented, so those spans are hand-written, and request volume
 forces sampling. This answers "why was this slow" rather than "what did

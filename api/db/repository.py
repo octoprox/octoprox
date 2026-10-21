@@ -3,11 +3,41 @@
 
 """Repository layer for database operations."""
 
+from collections.abc import Collection, Iterable, Mapping, Sequence
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import case, delete, exists, func, insert, literal, or_, select, text, update
+from sqlalchemy import (
+    ColumnElement,
+    DateTime,
+    Integer,
+    Select,
+    String,
+    Text,
+    and_,
+    bindparam,
+    case,
+    column,
+    delete,
+    exists,
+    func,
+    insert,
+    literal,
+    literal_column,
+    null,
+    or_,
+    select,
+    text,
+    union_all,
+    update,
+    values,
+)
+from sqlalchemy.dialects.postgresql import ARRAY, JSONB, aggregate_order_by
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.engine import Result
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import joinedload, selectinload
 
 from api.core import utc_now
 from api.core.stats import HOST_OVERFLOW, FailureCountKey, MetricDelta, TunnelPeerMetricDelta
@@ -17,6 +47,8 @@ from api.db.models import (
     CredentialModel,
     FailureMetricsModel,
     HostMetricsModel,
+    MetricFlushModel,
+    MetricTotalsModel,
     OpenVpnPeerModel,
     ProjectMetricsModel,
     ProjectModel,
@@ -29,13 +61,47 @@ from api.db.models import (
     UserModel,
     WireGuardPeerModel,
 )
-from api.geo.models import ConflictRule, ContradictedAction, UnknownAction
+from api.db.redis import PROJECT_WINDOWS, PROXY_WINDOWS, TUNNEL_PEER_WINDOWS, TotalledWindows
+from api.geo.models import META_LOCATION_CHECKED_AT, ConflictRule, ContradictedAction, UnknownAction
 from api.models.connector import Connector
 from api.models.credential import Credential
 from api.models.project import MitmBrowser, MitmEngine, MitmMode, Project
 from api.models.provider import ProviderAuditEntry, ProviderRecord
-from api.models.proxy import Proxy, ProxyProtocol
+from api.models.proxy import Proxy, ProxyProtocol, ProxyStatus
 from api.models.user import User, UserRole
+
+
+@dataclass
+class ProjectCounts:
+    """What one project holds, as the projects list shows it (``ProjectRepository.get_counts``)."""
+
+    credentials: int = 0
+    connectors: int = 0
+    # Proxies per status (ProxyStatus values); a status no proxy has is absent.
+    proxies_by_status: dict[str, int] = field(default_factory=dict)
+
+    @property
+    def proxies(self) -> int:
+        """Every proxy of the project, whatever its status."""
+        return sum(self.proxies_by_status.values())
+
+
+@dataclass(frozen=True)
+class ConnectorStatusCount:
+    """How many proxies of one connector hold one status."""
+
+    project_id: str
+    connector_id: str
+    status: ProxyStatus
+    count: int
+
+
+@dataclass(frozen=True)
+class ProxyPlacement:
+    """Where one proxy sits: its connector, and its status."""
+
+    connector_id: str
+    status: ProxyStatus
 
 
 class ProjectRepository:
@@ -58,13 +124,15 @@ class ProjectRepository:
         model = result.scalar_one_or_none()
         return self._to_domain(model) if model else None
 
-    async def get_by_username(self, username: str) -> Project | None:
-        """Get project by username (for proxy authentication)."""
+    async def get_many(self, project_ids: Iterable[str]) -> list[Project]:
+        """The projects among ``project_ids`` that exist, in id order; one statement however many are asked for."""
+        wanted = sorted(set(project_ids))
+        if not wanted:
+            return []
         result = await self._session.execute(
-            select(ProjectModel).where(ProjectModel.username == username)
+            select(ProjectModel).where(ProjectModel.id.in_(wanted)).order_by(ProjectModel.id)
         )
-        model = result.scalar_one_or_none()
-        return self._to_domain(model) if model else None
+        return [self._to_domain(m) for m in result.scalars().all()]
 
     async def create(self, project: Project) -> Project:
         """Create a new project."""
@@ -95,8 +163,8 @@ class ProjectRepository:
         await self._session.flush()
         return project
 
-    async def update(self, project: Project) -> Project:
-        """Update an existing project."""
+    async def update(self, project: Project) -> Project | None:
+        """Write a stored project as ``project`` has it; the row as stored, ``updated_at`` stamped, or None when it is gone."""
         result = await self._session.execute(
             select(ProjectModel).where(ProjectModel.id == project.id)
         )
@@ -124,7 +192,7 @@ class ProjectRepository:
             model.location_city_radius_km = project.location_city_radius_km
             model.updated_at = utc_now()
             await self._session.flush()
-        return project
+        return self._to_domain(model) if model else None
 
     async def delete(self, project_id: str) -> bool:
         """Delete a project (cascades to sources and proxies)."""
@@ -133,21 +201,37 @@ class ProjectRepository:
         )
         return bool(result.rowcount and result.rowcount > 0)  # type: ignore[attr-defined]
 
-    async def get_connector_count(self, project_id: str) -> int:
-        """Get the number of connectors for a project."""
-        result = await self._session.execute(
-            select(func.count(ConnectorModel.id)).where(ConnectorModel.project_id == project_id)
-        )
-        return result.scalar() or 0
+    async def get_counts(self, project_id: str | None = None) -> dict[str, ProjectCounts]:
+        """What each project holds (credentials, connectors, proxies by status), by project id, in one round trip.
 
-    async def get_proxy_count(self, project_id: str) -> int:
-        """Get the number of proxies for a project (via connectors)."""
-        result = await self._session.execute(
-            select(func.count(ProxyModel.id))
-            .join(ConnectorModel, ProxyModel.connector_id == ConnectorModel.id)
-            .where(ConnectorModel.project_id == project_id)
+        A project holding nothing is absent, and ``project_id`` narrows the counts to one project.
+        """
+        credentials = select(
+            CredentialModel.project_id, literal("credentials").label("what"), null().label("status"), func.count()
+        ).group_by(CredentialModel.project_id)
+        connectors = select(
+            ConnectorModel.project_id, literal("connectors"), null(), func.count()
+        ).group_by(ConnectorModel.project_id)
+        proxies = (
+            select(ConnectorModel.project_id, literal("proxies"), ProxyModel.status, func.count())
+            .join(ProxyModel, ProxyModel.connector_id == ConnectorModel.id)
+            .group_by(ConnectorModel.project_id, ProxyModel.status)
         )
-        return result.scalar() or 0
+        if project_id is not None:
+            credentials = credentials.where(CredentialModel.project_id == project_id)
+            connectors = connectors.where(ConnectorModel.project_id == project_id)
+            proxies = proxies.where(ConnectorModel.project_id == project_id)
+        result: Result[Any, Any, Any, Any] = await self._session.execute(union_all(credentials, connectors, proxies))
+        counts: dict[str, ProjectCounts] = {}
+        for owner, what, status, count in result.all():
+            entry = counts.setdefault(owner, ProjectCounts())
+            if what == "proxies":
+                entry.proxies_by_status[status] = count
+            elif what == "credentials":
+                entry.credentials = count
+            else:
+                entry.connectors = count
+        return counts
 
     def _to_domain(self, model: ProjectModel) -> Project:
         """Convert database model to domain model."""
@@ -209,6 +293,34 @@ class CredentialRepository:
         model = result.scalar_one_or_none()
         return self._to_domain(model) if model else None
 
+    async def get_in_project(self, project_id: str, credential_id: str) -> Credential | None:
+        """The credential with this id if it belongs to the project, else None (a route under another project 404s)."""
+        result = await self._session.execute(
+            select(CredentialModel).where(
+                CredentialModel.id == credential_id, CredentialModel.project_id == project_id
+            )
+        )
+        model = result.scalar_one_or_none()
+        return self._to_domain(model) if model else None
+
+    async def usage_by_type(self, type_id: str | None = None) -> dict[str, tuple[int, int]]:
+        """How many credentials each provider type has, and connectors on them; a type nothing uses is absent.
+
+        ``type_id`` counts that type alone, in two grouped statements whatever the number of rows.
+        """
+        credentials = select(CredentialModel.type, func.count(CredentialModel.id)).group_by(CredentialModel.type)
+        connectors = (
+            select(CredentialModel.type, func.count(ConnectorModel.id))
+            .join(ConnectorModel, ConnectorModel.credential_id == CredentialModel.id)
+            .group_by(CredentialModel.type)
+        )
+        if type_id is not None:
+            credentials = credentials.where(CredentialModel.type == type_id)
+            connectors = connectors.where(CredentialModel.type == type_id)
+        credential_counts: dict[str, int] = dict((await self._session.execute(credentials)).all())
+        connector_counts: dict[str, int] = dict((await self._session.execute(connectors)).all())
+        return {ptype: (count, connector_counts.get(ptype, 0)) for ptype, count in credential_counts.items()}
+
     async def create(self, credential: Credential) -> Credential:
         """Create a new credential."""
         model = CredentialModel(
@@ -224,8 +336,8 @@ class CredentialRepository:
         await self._session.flush()
         return credential
 
-    async def update(self, credential: Credential) -> Credential:
-        """Update an existing credential."""
+    async def update(self, credential: Credential) -> Credential | None:
+        """Write a stored credential's name and config as ``credential`` has them; the row as stored, ``updated_at`` stamped, or None when it is gone."""
         result = await self._session.execute(
             select(CredentialModel).where(CredentialModel.id == credential.id)
         )
@@ -235,7 +347,7 @@ class CredentialRepository:
             model.config = credential.config
             model.updated_at = utc_now()
             await self._session.flush()
-        return credential
+        return self._to_domain(model) if model else None
 
     async def delete(self, credential_id: str) -> bool:
         """Delete a credential."""
@@ -265,7 +377,6 @@ class ConnectorRepository:
 
     async def get_all(self) -> list[Connector]:
         """Get all connectors, ordered by creation time."""
-        from sqlalchemy.orm import selectinload
         result = await self._session.execute(
             select(ConnectorModel)
             .options(selectinload(ConnectorModel.credential))
@@ -276,7 +387,6 @@ class ConnectorRepository:
 
     async def get_by_project(self, project_id: str) -> list[Connector]:
         """Get all connectors for a project, ordered by creation time."""
-        from sqlalchemy.orm import selectinload
         result = await self._session.execute(
             select(ConnectorModel)
             .where(ConnectorModel.project_id == project_id)
@@ -288,7 +398,6 @@ class ConnectorRepository:
 
     async def get_by_id(self, connector_id: str) -> Connector | None:
         """Get connector by ID."""
-        from sqlalchemy.orm import selectinload
         result = await self._session.execute(
             select(ConnectorModel)
             .where(ConnectorModel.id == connector_id)
@@ -296,6 +405,53 @@ class ConnectorRepository:
         )
         model = result.scalar_one_or_none()
         return self._to_domain(model) if model else None
+
+    async def get_in_project(self, project_id: str, connector_id: str) -> Connector | None:
+        """The connector with this id if it belongs to the project, else None (a route under another project 404s)."""
+        result = await self._session.execute(
+            select(ConnectorModel)
+            .where(ConnectorModel.id == connector_id, ConnectorModel.project_id == project_id)
+            .options(selectinload(ConnectorModel.credential))
+        )
+        model = result.scalar_one_or_none()
+        return self._to_domain(model) if model else None
+
+    async def get_with_credential(
+        self, connector_id: str, *, project_id: str | None = None
+    ) -> tuple[Connector, Credential] | None:
+        """A connector with its credential, joined in one statement; None when it is gone, or not in ``project_id`` when given."""
+        query = (
+            select(ConnectorModel)
+            .where(ConnectorModel.id == connector_id)
+            .options(joinedload(ConnectorModel.credential))
+        )
+        if project_id is not None:
+            query = query.where(ConnectorModel.project_id == project_id)
+        model = (await self._session.execute(query)).scalar_one_or_none()
+        if model is None:
+            return None
+        return self._to_domain(model), CredentialRepository(self._session)._to_domain(model.credential)
+
+    async def get_many(self, connector_ids: Iterable[str]) -> list[Connector]:
+        """The connectors among ``connector_ids`` that exist, in id order; one statement however many are asked for."""
+        return [connector for connector, _credential in await self.get_many_with_credentials(connector_ids)]
+
+    async def get_many_with_credentials(self, connector_ids: Iterable[str]) -> list[tuple[Connector, Credential]]:
+        """Each of ``connector_ids`` that exists with its credential, in id order, joined in one statement."""
+        wanted = sorted(set(connector_ids))
+        if not wanted:
+            return []
+        result = await self._session.execute(
+            select(ConnectorModel)
+            .where(ConnectorModel.id.in_(wanted))
+            .options(joinedload(ConnectorModel.credential))
+            .order_by(ConnectorModel.id)
+        )
+        credentials = CredentialRepository(self._session)
+        return [
+            (self._to_domain(model), credentials._to_domain(model.credential))
+            for model in result.scalars().unique().all()
+        ]
 
     async def create(self, connector: Connector) -> Connector:
         """Create a new connector."""
@@ -321,8 +477,8 @@ class ConnectorRepository:
         await self._session.flush()
         return connector
 
-    async def update(self, connector: Connector) -> Connector:
-        """Update an existing connector."""
+    async def update(self, connector: Connector) -> Connector | None:
+        """Write a stored connector as ``connector`` has it; the row as stored, ``updated_at`` stamped, or None when it is gone."""
         result = await self._session.execute(
             select(ConnectorModel).where(ConnectorModel.id == connector.id)
         )
@@ -342,7 +498,9 @@ class ConnectorRepository:
             model.consecutive_errors = connector.consecutive_errors
             model.updated_at = utc_now()
             await self._session.flush()
-        return connector
+            # Read again with its credential, which the edit may have moved to another.
+            self._session.expire(model)
+        return await self.get_by_id(connector.id) if model else None
 
     async def delete(self, connector_id: str) -> bool:
         """Delete a connector."""
@@ -351,12 +509,32 @@ class ConnectorRepository:
         )
         return bool(result.rowcount and result.rowcount > 0)  # type: ignore[attr-defined]
 
-    async def get_proxy_count(self, connector_id: str) -> int:
-        """Get the number of proxies for a connector."""
+    async def record_error(self, connector_id: str, error: str | None) -> bool:
+        """Record a cloud error, ``consecutive_errors`` counted in SQL, or clear the error state for None; False when nothing was written."""
+        values: dict[str, Any]
+        statement = update(ConnectorModel).where(ConnectorModel.id == connector_id)
+        if error is None:
+            statement = statement.where(
+                or_(
+                    ConnectorModel.last_error.is_not(None),
+                    ConnectorModel.last_error_at.is_not(None),
+                    ConnectorModel.consecutive_errors != 0,
+                )
+            )
+            values = {"last_error": None, "last_error_at": None, "consecutive_errors": 0}
+        else:
+            values = {
+                "last_error": error,
+                "last_error_at": utc_now(),
+                "consecutive_errors": ConnectorModel.consecutive_errors + 1,
+            }
+        # The error columns alone, updated_at as it was: an error is not an edit.
         result = await self._session.execute(
-            select(func.count(ProxyModel.id)).where(ProxyModel.connector_id == connector_id)
+            statement.values(**values, updated_at=ConnectorModel.updated_at).execution_options(
+                synchronize_session=False
+            )
         )
-        return result.scalar() or 0
+        return bool(result.rowcount)  # type: ignore[attr-defined]
 
     def _to_domain(self, model: ConnectorModel) -> Connector:
         """Convert database model to domain model."""
@@ -381,16 +559,55 @@ class ConnectorRepository:
         )
 
 
+# The retiring statuses, which only drain and terminate set; the health job's compare-and-set never leaves them.
+_LIFECYCLE_STATUSES = tuple(status.value for status in ProxyStatus if status.retiring)
+
+# Ids bound per statement when placing proxies: well under Postgres's limit
+# of 32767 bind parameters, and a quarantine set rarely holds more than a few
+# hundred.
+_PLACEMENT_BATCH = 2000
+
+# The forward-only metadata patch (``ProxyRepository.patch_metadata``). The
+# column is json, so the merge goes through jsonb and back. Stamps compare as
+# naive UTC timestamps, the way every timestamp here is written: cast to
+# timestamptz they would be read in the server's time zone, and a naive
+# bound value in the client's.
+_PATCH_METADATA = text(
+    "UPDATE proxies "
+    "SET metadata = ((metadata::jsonb - CAST(:removed AS text[])) || CAST(:changed AS jsonb))::json, "
+    "updated_at = :now "
+    "WHERE id = :id "
+    "AND (CAST(:checked_at AS timestamp) IS NULL "
+    f"OR metadata->>'{META_LOCATION_CHECKED_AT}' IS NULL "
+    f"OR (metadata->>'{META_LOCATION_CHECKED_AT}')::timestamp <= :checked_at)"
+).bindparams(
+    bindparam("removed", type_=ARRAY(Text)),
+    bindparam("changed", type_=JSONB),
+    bindparam("checked_at", type_=DateTime()),
+    bindparam("now", type_=DateTime()),
+)
+
+
 class ProxyRepository:
     """Repository for proxy database operations."""
 
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
 
+    @staticmethod
+    def _select() -> Select[ProxyModel]:
+        """Proxy rows as stored, refreshing any the session already holds.
+
+        ``set_status_if``, ``set_status`` and ``patch_metadata`` write with
+        statements the session does not track, so a row it loaded earlier
+        would otherwise come back as it was before them.
+        """
+        return select(ProxyModel).execution_options(populate_existing=True)
+
     async def get_all(self) -> list[Proxy]:
         """Get all proxies, in creation order."""
         result = await self._session.execute(
-            select(ProxyModel).order_by(ProxyModel.created_at, ProxyModel.id)
+            self._select().order_by(ProxyModel.created_at, ProxyModel.id)
         )
         models = result.scalars().all()
         return [self._to_domain(m) for m in models]
@@ -398,45 +615,127 @@ class ProxyRepository:
     async def get_by_id(self, proxy_id: str) -> Proxy | None:
         """Get proxy by ID."""
         result = await self._session.execute(
-            select(ProxyModel).where(ProxyModel.id == proxy_id)
+            self._select().where(ProxyModel.id == proxy_id)
         )
         model = result.scalar_one_or_none()
         return self._to_domain(model) if model else None
 
+    async def get_many(self, proxy_ids: Iterable[str]) -> list[Proxy]:
+        """The proxies among ``proxy_ids`` that exist, in id order; one statement however many are asked for."""
+        wanted = sorted(set(proxy_ids))
+        if not wanted:
+            return []
+        result = await self._session.execute(
+            self._select().where(ProxyModel.id.in_(wanted)).order_by(ProxyModel.id)
+        )
+        return [self._to_domain(m) for m in result.scalars().all()]
+
+    async def get_many_with_connectors(self, proxy_ids: Iterable[str]) -> list[tuple[Proxy, Connector, Credential]]:
+        """Each of ``proxy_ids`` that exists with its connector and their credential, in id order, in one statement."""
+        wanted = sorted(set(proxy_ids))
+        if not wanted:
+            return []
+        result = await self._session.execute(
+            self._select()
+            .where(ProxyModel.id.in_(wanted))
+            .options(joinedload(ProxyModel.connector).joinedload(ConnectorModel.credential))
+            .order_by(ProxyModel.id)
+        )
+        connectors, credentials = ConnectorRepository(self._session), CredentialRepository(self._session)
+        return [
+            (
+                self._to_domain(model),
+                connectors._to_domain(model.connector),
+                credentials._to_domain(model.connector.credential),
+            )
+            for model in result.scalars().unique().all()
+        ]
+
+    async def page(
+        self, after: str | None, limit: int, *, connector_id: str | None = None, project_id: str | None = None
+    ) -> list[Proxy]:
+        """The next ``limit`` proxies after id ``after``, in id order: a connector's, else a project's, else any.
+
+        Keyset paging, so a pass over a large pool costs a short read per
+        page however far it has got.
+        """
+        statement = self._select().order_by(ProxyModel.id).limit(limit)
+        if after is not None:
+            statement = statement.where(ProxyModel.id > after)
+        if connector_id is not None:
+            statement = statement.where(ProxyModel.connector_id == connector_id)
+        elif project_id is not None:
+            statement = statement.join(ConnectorModel, ProxyModel.connector_id == ConnectorModel.id).where(
+                ConnectorModel.project_id == project_id
+            )
+        result = await self._session.execute(statement)
+        return [self._to_domain(m) for m in result.scalars().all()]
+
     async def get_by_connector(self, connector_id: str) -> list[Proxy]:
         """Get all proxies for a connector, in creation order."""
         result = await self._session.execute(
-            select(ProxyModel)
+            self._select()
             .where(ProxyModel.connector_id == connector_id)
             .order_by(ProxyModel.created_at, ProxyModel.id)
         )
         models = result.scalars().all()
         return [self._to_domain(m) for m in models]
 
-    async def create(self, proxy: Proxy) -> Proxy:
-        """Create a new proxy."""
-        model = ProxyModel(
-            id=proxy.id,
-            host=proxy.host,
-            port=proxy.port,
-            protocol=proxy.protocol.value if isinstance(proxy.protocol, ProxyProtocol) else proxy.protocol,
-            username=proxy.username,
-            password=proxy.password,
-            display_host=proxy.display_host,
-            connector_id=proxy.connector_id,
-            tags=proxy.tags,
-            metadata_=proxy.metadata,
-            created_at=proxy.created_at,
-            updated_at=proxy.updated_at,
+    async def get_by_project(self, project_id: str) -> list[Proxy]:
+        """Every proxy of the project's connectors, in creation order."""
+        result = await self._session.execute(
+            self._select()
+            .join(ConnectorModel, ProxyModel.connector_id == ConnectorModel.id)
+            .where(ConnectorModel.project_id == project_id)
+            .order_by(ProxyModel.created_at, ProxyModel.id)
         )
-        self._session.add(model)
+        return [self._to_domain(m) for m in result.scalars().all()]
+
+    async def get_in_project(self, project_id: str, proxy_id: str, *, for_update: bool = False) -> Proxy | None:
+        """The proxy with this id if one of the project's connectors holds it, else None.
+
+        ``for_update`` locks the row until the transaction ends, so an edit built from this read writes back nothing stale.
+        """
+        statement = (
+            self._select()
+            .join(ConnectorModel, ProxyModel.connector_id == ConnectorModel.id)
+            .where(ProxyModel.id == proxy_id, ConnectorModel.project_id == project_id)
+        )
+        if for_update:
+            statement = statement.with_for_update(of=ProxyModel)
+        result = await self._session.execute(statement)
+        model = result.scalar_one_or_none()
+        return self._to_domain(model) if model else None
+
+    async def create(self, proxy: Proxy) -> Proxy:
+        """Create a new proxy, stored with the status its builder gave it."""
+        self._session.add(ProxyModel(**self._row(proxy)))
         await self._session.flush()
         return proxy
 
-    async def update(self, proxy: Proxy) -> Proxy:
-        """Update an existing proxy."""
+    async def bulk_create(self, proxies: Sequence[Proxy]) -> list[Proxy]:
+        """Insert many proxies in one statement, each with its status; the ones inserted, a proxy whose ID is stored skipped.
+
+        So a row whose ID derives from what it stands for, such as a cloud
+        instance, lands once whoever saves it.
+        """
+        if not proxies:
+            return []
         result = await self._session.execute(
-            select(ProxyModel).where(ProxyModel.id == proxy.id)
+            pg_insert(ProxyModel).on_conflict_do_nothing(index_elements=[ProxyModel.id]).returning(ProxyModel.id),
+            [self._row(proxy) for proxy in proxies],
+        )
+        inserted = set(result.scalars())
+        return [proxy for proxy in proxies if proxy.id in inserted]
+
+    async def update(self, proxy: Proxy) -> Proxy:
+        """Write every definition column of a stored proxy as ``proxy`` has it, metadata included, but never its status.
+
+        An edit built from an earlier read must have locked the row with it (``get_in_project(..., for_update=True)``),
+        or what another writer committed in between is written back over.
+        """
+        result = await self._session.execute(
+            self._select().where(ProxyModel.id == proxy.id)
         )
         model = result.scalar_one_or_none()
         if model:
@@ -459,12 +758,158 @@ class ProxyRepository:
         )
         return bool(result.rowcount and result.rowcount > 0)  # type: ignore[attr-defined]
 
-    async def delete_by_connector(self, connector_id: str) -> int:
-        """Delete all proxies for a connector."""
+    async def set_status_if(self, proxy_id: str, new: ProxyStatus, expected: ProxyStatus) -> bool:
+        """Move a proxy from ``expected`` to ``new``; False when it holds another status by now, or is gone.
+
+        The health job's compare-and-set, which never leaves draining or terminating, with ``updated_at`` pinned since a
+        health flip is not an edit.
+        """
         result = await self._session.execute(
-            delete(ProxyModel).where(ProxyModel.connector_id == connector_id)
+            update(ProxyModel)
+            .where(
+                ProxyModel.id == proxy_id,
+                ProxyModel.status == expected.value,
+                ProxyModel.status.not_in(_LIFECYCLE_STATUSES),
+            )
+            .values(status=new.value, status_changed_at=utc_now(), updated_at=ProxyModel.updated_at)
+            .execution_options(synchronize_session=False)
         )
-        return int(result.rowcount or 0)  # type: ignore[attr-defined]
+        return bool(result.rowcount)  # type: ignore[attr-defined]
+
+    async def set_status(self, proxy_id: str, status: ProxyStatus) -> bool:
+        """Put a proxy in ``status`` (drain and terminate); False when gone, already there, or past it.
+
+        The lifecycle only moves forward, a row already in the status is left alone, and ``updated_at`` is pinned, as in
+        ``set_status_if``.
+        """
+        past = _LIFECYCLE_STATUSES if status == ProxyStatus.DRAINING else (status.value,)
+        result = await self._session.execute(
+            update(ProxyModel)
+            .where(ProxyModel.id == proxy_id, ProxyModel.status.not_in(past))
+            .values(status=status.value, status_changed_at=utc_now(), updated_at=ProxyModel.updated_at)
+            .execution_options(synchronize_session=False)
+        )
+        return bool(result.rowcount)  # type: ignore[attr-defined]
+
+    async def patch_metadata(
+        self,
+        proxy_id: str,
+        changed: Mapping[str, Any],
+        removed: Collection[str],
+        checked_at: datetime | None,
+    ) -> bool:
+        """Merge ``changed`` into a proxy's metadata and drop the ``removed`` keys; False when refused or gone.
+
+        Only those keys are written, and no row lock is held.
+
+        Args:
+            checked_at: Naive UTC; applies only over an unset or older ``location_checked_at``; None writes regardless.
+        """
+        result = await self._session.execute(
+            _PATCH_METADATA,
+            {
+                "id": proxy_id,
+                "changed": dict(changed),
+                "removed": sorted(removed),
+                "checked_at": checked_at,
+                "now": utc_now(),
+            },
+        )
+        return bool(result.rowcount)  # type: ignore[attr-defined]
+
+    # Counts and placements over the pool, one grouped statement each.
+
+    async def count_by_status(self, project_id: str | None = None) -> dict[str, int]:
+        """Proxies per status (``ProxyStatus`` values), install-wide or of one project; an unused status is absent."""
+        query = select(ProxyModel.status, func.count()).group_by(ProxyModel.status)
+        if project_id is not None:
+            query = query.join(ConnectorModel, ProxyModel.connector_id == ConnectorModel.id).where(
+                ConnectorModel.project_id == project_id
+            )
+        result = await self._session.execute(query)
+        return dict(result.all())
+
+    async def count_by_connector(
+        self, project_id: str | None = None, *, connector_id: str | None = None
+    ) -> list[ConnectorStatusCount]:
+        """Proxies per connector and status: install-wide, for one project, or for one connector.
+
+        The finer cut of the pool counts: callers sum it over whichever connectors they count (the enabled ones, the
+        cloud ones), so a disabled or traffic-blocked connector is left out without a second query.
+        """
+        query = (
+            select(ConnectorModel.project_id, ProxyModel.connector_id, ProxyModel.status, func.count())
+            .join(ConnectorModel, ProxyModel.connector_id == ConnectorModel.id)
+            .group_by(ConnectorModel.project_id, ProxyModel.connector_id, ProxyModel.status)
+        )
+        if project_id is not None:
+            query = query.where(ConnectorModel.project_id == project_id)
+        if connector_id is not None:
+            query = query.where(ProxyModel.connector_id == connector_id)
+        result = await self._session.execute(query)
+        return [
+            ConnectorStatusCount(project_id=owner, connector_id=connector_id, status=ProxyStatus(status), count=count)
+            for owner, connector_id, status, count in result.all()
+        ]
+
+    async def metadata_values(self, connector_ids: Iterable[str], key: str) -> dict[str, set[str]]:
+        """The values metadata ``key`` takes on each connector's rows; a connector none of whose rows has it is absent.
+
+        One statement that returns a row per connector and value, however many rows share it: a 10,000-slot pool with
+        groups in five countries sends five.
+        """
+        wanted = sorted(set(connector_ids))
+        if not wanted:
+            return {}
+        value = ProxyModel.metadata_[key].as_string()
+        result = await self._session.execute(
+            select(ProxyModel.connector_id, value)
+            .where(ProxyModel.connector_id.in_(wanted), value.is_not(None))
+            .distinct()
+        )
+        found: dict[str, set[str]] = {}
+        for connector_id, taken in result.all():
+            found.setdefault(connector_id, set()).add(taken)
+        return found
+
+    async def placements(self, proxy_ids: Iterable[str], project_id: str | None = None) -> dict[str, ProxyPlacement]:
+        """The connector and status of each of ``proxy_ids`` that exists (in the project, when one is given)."""
+        wanted = sorted(set(proxy_ids))
+        found: dict[str, ProxyPlacement] = {}
+        for start in range(0, len(wanted), _PLACEMENT_BATCH):
+            query = select(ProxyModel.id, ProxyModel.connector_id, ProxyModel.status).where(
+                ProxyModel.id.in_(wanted[start:start + _PLACEMENT_BATCH])
+            )
+            if project_id is not None:
+                query = query.join(ConnectorModel, ProxyModel.connector_id == ConnectorModel.id).where(
+                    ConnectorModel.project_id == project_id
+                )
+            result = await self._session.execute(query)
+            found.update(
+                (proxy_id, ProxyPlacement(connector_id=connector_id, status=ProxyStatus(status)))
+                for proxy_id, connector_id, status in result.all()
+            )
+        return found
+
+    @staticmethod
+    def _row(proxy: Proxy) -> dict[str, Any]:
+        """A new row's columns (by attribute name), the builder's status included."""
+        return {
+            "id": proxy.id,
+            "host": proxy.host,
+            "port": proxy.port,
+            "protocol": ProxyProtocol(proxy.protocol).value,
+            "username": proxy.username,
+            "password": proxy.password,
+            "display_host": proxy.display_host,
+            "connector_id": proxy.connector_id,
+            "tags": proxy.tags,
+            "metadata_": proxy.metadata,
+            "status": ProxyStatus(proxy.status).value,
+            "status_changed_at": proxy.status_changed_at,
+            "created_at": proxy.created_at,
+            "updated_at": proxy.updated_at,
+        }
 
     def _to_domain(self, model: ProxyModel) -> Proxy:
         """Convert database model to domain model."""
@@ -476,24 +921,14 @@ class ProxyRepository:
             username=model.username,
             password=model.password,
             display_host=model.display_host,
+            status=ProxyStatus(model.status),
+            status_changed_at=model.status_changed_at,
             connector_id=model.connector_id,
             tags=model.tags or [],
             metadata=model.metadata_ or {},
             created_at=model.created_at,
             updated_at=model.updated_at,
         )
-
-
-def _totals_from_row(row: Any) -> MetricDelta:
-    """The additive batch shape from a cumulative-totals row (see ``_cumulative_total_columns``)."""
-    return MetricDelta(
-        request_count=int(row.total_requests or 0),
-        success_count=int(row.total_successes or 0),
-        failure_count=int(row.total_failures or 0),
-        latency_sum_ms=float(row.weighted_latency_sum or 0),
-        bytes_sent=int(row.total_bytes_sent or 0),
-        bytes_received=int(row.total_bytes_received or 0),
-    )
 
 
 def _strip_tz(dt: datetime) -> datetime:
@@ -525,21 +960,6 @@ TUNNEL_PEER_TABLES: dict[str, type[WireGuardPeerModel] | type[OpenVpnPeerModel]]
     "wireguard": WireGuardPeerModel,
     "openvpn": OpenVpnPeerModel,
 }
-
-
-def _cumulative_total_columns(model: _MetricsModel) -> list[Any]:
-    """The all-time totals of a metrics table, labelled as ``_totals_from_row`` reads them.
-
-    Latency comes back as the weighted sum so the batches add.
-    """
-    return [
-        func.sum(model.request_count).label("total_requests"),
-        func.sum(model.success_count).label("total_successes"),
-        func.sum(model.failure_count).label("total_failures"),
-        func.sum(model.avg_latency_ms * model.request_count).label("weighted_latency_sum"),
-        func.sum(model.bytes_sent).label("total_bytes_sent"),
-        func.sum(model.bytes_received).label("total_bytes_received"),
-    ]
 
 
 def _bucket_expressions(
@@ -613,63 +1033,83 @@ def _tunnel_peer_row(timestamp: datetime, row: Any) -> dict[str, Any]:
     }
 
 
+# Ids per totals lookup and rows per totals upsert. An upsert row binds 11
+# values, so a statement stays well under asyncpg's 32767 bound parameters.
+_TOTALS_BATCH = 2000
+
+# The additive columns of metric_totals: the fields of TunnelPeerMetricDelta,
+# the shape every totals row is written in.
+_TOTALS_COUNTERS = tuple(TunnelPeerMetricDelta().to_dict())
+
+# Every total recomputed from the history: each entity's rows summed, latency
+# back as a weighted sum so later windows add to it, stamped with its newest
+# row's time. The history columns are nullable and the totals' are not, so a
+# sum over nothing but NULLs counts as 0. Migration 048 filled the table with
+# a frozen copy of this.
+_REBUILD_TOTALS = text(
+    """
+    INSERT INTO metric_totals (
+        kind, entity_id, request_count, success_count, failure_count, latency_sum_ms,
+        bytes_sent, bytes_received, by_address, encrypted_dns_blocked, updated_at
+    )
+    SELECT 'proxy', proxy_id, coalesce(sum(request_count), 0), coalesce(sum(success_count), 0),
+           coalesce(sum(failure_count), 0), coalesce(sum(avg_latency_ms * request_count), 0),
+           coalesce(sum(bytes_sent), 0), coalesce(sum(bytes_received), 0), 0, 0,
+           coalesce(max(timestamp), timezone('UTC', now()))
+    FROM proxy_metrics GROUP BY proxy_id
+    UNION ALL
+    SELECT 'project', project_id, coalesce(sum(request_count), 0), coalesce(sum(success_count), 0),
+           coalesce(sum(failure_count), 0), coalesce(sum(avg_latency_ms * request_count), 0),
+           coalesce(sum(bytes_sent), 0), coalesce(sum(bytes_received), 0), 0, 0,
+           coalesce(max(timestamp), timezone('UTC', now()))
+    FROM project_metrics GROUP BY project_id
+    UNION ALL
+    SELECT 'tunnel_peer', peer_id, coalesce(sum(request_count), 0), coalesce(sum(success_count), 0),
+           coalesce(sum(failure_count), 0), coalesce(sum(avg_latency_ms * request_count), 0),
+           coalesce(sum(bytes_sent), 0), coalesce(sum(bytes_received), 0),
+           coalesce(sum(by_address), 0), coalesce(sum(encrypted_dns_blocked), 0),
+           coalesce(max(timestamp), timezone('UTC', now()))
+    FROM tunnel_peer_metrics GROUP BY peer_id
+    """
+)
+
+
+# The counters a device's history row carries, each named after the
+# TunnelPeerMetricDelta field (or property, for the average) it holds.
+_DEVICE_COUNTERS = (
+    "request_count",
+    "success_count",
+    "failure_count",
+    "avg_latency_ms",
+    "bytes_sent",
+    "bytes_received",
+    "by_address",
+    "encrypted_dns_blocked",
+)
+
+# Devices per history insert. A row binds nine values, so a statement stays
+# well under asyncpg's 32767 bound parameters; installs have tens to hundreds
+# of devices.
+_DEVICE_BATCH = 2000
+
+# The counters a request history table adds up when it compacts, besides the
+# request-weighted average latency every one of them carries.
+_REQUEST_COUNTERS = ("request_count", "success_count", "failure_count", "bytes_sent", "bytes_received")
+
+
 class MetricsRepository:
     """Repository for metrics database operations."""
 
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
 
-    async def save_metrics_snapshot(
-        self,
-        proxy_id: str,
-        request_count: int,
-        success_count: int,
-        failure_count: int,
-        avg_latency_ms: float,
-        status: str,
-        bytes_sent: int = 0,
-        bytes_received: int = 0,
-    ) -> bool:
-        """Save a metrics snapshot for a proxy; False when the proxy no longer exists."""
-        return await self._insert_snapshot(
-            ProxyMetricsModel,
-            ProxyModel.id == proxy_id,
-            proxy_id=proxy_id,
-            timestamp=utc_now(),
-            request_count=request_count,
-            success_count=success_count,
-            failure_count=failure_count,
-            avg_latency_ms=avg_latency_ms,
-            bytes_sent=bytes_sent,
-            bytes_received=bytes_received,
-            status=status,
-        )
-
-    async def _insert_snapshot(self, model: "_MetricsModel", parent_exists: Any, **values: Any) -> bool:
-        """Insert one metrics row only if its parent row still exists.
-
-        A Redis hash can outlive its proxy, project or connector: a peer
-        flushes the last bytes of a transfer after the row is gone. A plain
-        INSERT would violate the foreign key and abort the whole flush, so
-        the row is inserted through ``INSERT ... SELECT ... WHERE EXISTS``:
-        one statement, no separate lookup, and the caller learns from the
-        row count whether the snapshot was kept.
-        """
-        table = model.__table__
-        columns = list(values)
-        source = select(
-            *[literal(value, type_=table.c[name].type).label(name) for name, value in values.items()]
-        ).where(exists().where(parent_exists))
-        result = await self._session.execute(insert(model).from_select(columns, source))
-        return bool(result.rowcount)  # type: ignore[attr-defined]
-
     async def save_proxy_metrics_snapshots(
         self, batch: dict[str, MetricDelta], statuses: dict[str, str]
     ) -> list[str]:
         """Insert one row per proxy of a flush window; returns the ids dropped as gone.
 
-        The batch form of ``save_metrics_snapshot``. ``statuses`` holds each
-        proxy's health status; one without is recorded as ``unknown``.
+        ``statuses`` holds each proxy's health status; one without is recorded
+        as ``unknown``.
         """
         extra = {proxy_id: {"status": statuses.get(proxy_id, "unknown")} for proxy_id in batch}
         return await self._insert_snapshots(ProxyMetricsModel, ProxyModel, "proxy_id", batch, extra)
@@ -692,15 +1132,7 @@ class MetricsRepository:
     ) -> list[str]:
         """Insert a row per entity of ``batch`` whose parent row still exists; returns the ids dropped.
 
-        The batch counterpart of ``_insert_snapshot``, shaped like
-        ``save_host_metrics_snapshots``: one lookup of the parents involved,
-        then a single multi-row insert. A statement per entity is a round trip
-        per proxy on every flush, each one waiting its turn on a busy event
-        loop. The lookup takes the ``FOR KEY SHARE`` lock the inserts' foreign
-        key checks would take anyway, only earlier: a parent cannot be removed
-        between the lookup and the insert and fail the whole flush on its
-        foreign key, as the single-row ``WHERE EXISTS`` form never could. One
-        being removed as the lookup runs is waited for and counted as gone.
+        One lookup of the parents under ``FOR KEY SHARE``, then a single multi-row insert, so no parent goes in between.
         """
         if not batch:
             return []
@@ -734,72 +1166,60 @@ class MetricsRepository:
             await self._session.execute(insert(model), rows)
         return [entity_id for entity_id in ids if entity_id not in known]
 
-    async def get_metrics_history(
+    async def _compact(
         self,
-        proxy_id: str,
-        since: datetime | None = None,
-        limit: int = 100,
-    ) -> list[dict[str, Any]]:
-        """Get historical metrics for a proxy."""
-        query = select(ProxyMetricsModel).where(
-            ProxyMetricsModel.proxy_id == proxy_id
+        model: _MetricsModel | type[FailureMetricsModel],
+        scope: ColumnElement[bool],
+        older_than: datetime,
+        source_granularity: int,
+        target_granularity: int,
+        *,
+        keys: Sequence[str],
+        sums: Sequence[str] = _REQUEST_COUNTERS,
+        latency: bool = True,
+        latest: str | None = None,
+    ) -> int:
+        """Fold the rows ``scope`` selects at the source granularity older than ``older_than`` into a row per key and bucket; the rows folded.
+
+        One statement that inserts the aggregate of exactly the rows it deleted, so two passes at once never fold a row twice.
+
+        Args:
+            keys: the columns a series is kept under, besides its bucket of the target granularity.
+            sums: the counters added up.
+            latency: whether the rows carry ``avg_latency_ms``, averaged by their requests.
+            latest: a column each bucket takes from its newest row.
+        """
+        table = model.__table__
+        returned = [*keys, "timestamp", *sums, *(["avg_latency_ms"] if latency else []), *([latest] if latest else [])]
+        moved = (
+            delete(model)
+            .where(scope, model.granularity == source_granularity, model.timestamp < older_than)
+            .returning(*(table.c[name] for name in returned))
+            .cte("moved")
         )
-        if since:
-            query = query.where(ProxyMetricsModel.timestamp >= since)
-        query = query.order_by(ProxyMetricsModel.timestamp.desc()).limit(limit)
-
-        result = await self._session.execute(query)
-        models = result.scalars().all()
-        return [
-            {
-                "timestamp": m.timestamp,
-                "request_count": m.request_count,
-                "success_count": m.success_count,
-                "failure_count": m.failure_count,
-                "avg_latency_ms": m.avg_latency_ms,
-                "status": m.status,
-                "bytes_sent": m.bytes_sent,
-                "bytes_received": m.bytes_received,
-            }
-            for m in models
-        ]
-
-    # Connector-level metrics methods
-
-    async def save_connector_metrics_snapshot(
-        self,
-        connector_id: str,
-        request_count: int,
-        success_count: int,
-        failure_count: int,
-        avg_latency_ms: float,
-        bytes_sent: int = 0,
-        bytes_received: int = 0,
-    ) -> bool:
-        """Save a connector-level snapshot; False when the connector no longer exists."""
-        return await self._insert_snapshot(
-            ConnectorMetricsModel,
-            ConnectorModel.id == connector_id,
-            connector_id=connector_id,
-            timestamp=utc_now(),
-            request_count=request_count,
-            success_count=success_count,
-            failure_count=failure_count,
-            avg_latency_ms=avg_latency_ms,
-            bytes_sent=bytes_sent,
-            bytes_received=bytes_received,
-        )
+        width = literal_column(str(target_granularity), Integer())
+        bucket = func.floor(func.extract("epoch", moved.c.timestamp) / width) * width
+        columns: dict[str, Any] = {name: moved.c[name] for name in keys}
+        # The bucket's start, as the naive UTC the column holds.
+        columns["timestamp"] = func.timezone("UTC", func.to_timestamp(bucket))
+        columns.update((name, func.sum(moved.c[name])) for name in sums)
+        if latency:
+            weighted = func.sum(moved.c.avg_latency_ms * moved.c.request_count)
+            columns["avg_latency_ms"] = func.coalesce(weighted / func.nullif(func.sum(moved.c.request_count), 0), 0)
+        if latest:
+            columns[latest] = func.array_agg(aggregate_order_by(moved.c[latest], moved.c.timestamp.desc()))[1]
+        columns["granularity"] = literal(target_granularity, Integer())
+        buckets = select(*columns.values()).group_by(*(moved.c[name] for name in keys), bucket)
+        added = insert(model).from_select(list(columns), buckets).cte("added")
+        result = await self._session.execute(select(func.count()).select_from(moved).add_cte(added))
+        return int(result.scalar_one())
 
     async def get_connector_totals_since(
         self, since_by_connector: dict[str, datetime]
     ) -> dict[str, dict[str, int]]:
-        """Requests and bytes per connector since each connector's own ``since``.
+        """Requests and bytes per connector since each connector's own ``since``: the sum of its rows in that window.
 
-        Rows hold per-interval deltas at whatever granularity compaction left
-        them, so summing every row in the window is the total. Connectors
-        without rows in their window are absent from the result. Used for the
-        traffic split (one ``since`` for all) and for usage in the current
-        traffic period (a period start per connector).
+        A connector without rows in its window is absent.
         """
         if not since_by_connector:
             return {}
@@ -890,43 +1310,21 @@ class MetricsRepository:
 
     async def compact_connector_metrics(
         self,
-        connector_id: str,
+        project_id: str,
         older_than: datetime,
         source_granularity: int,
         target_granularity: int,
     ) -> int:
-        """Compact connector metrics from source to target granularity.
-
-        Same as compact_project_metrics for the connector_metrics table.
-        Returns the number of source rows deleted.
-        """
-        bucket_epoch, bucket_ts = _bucket_expressions(ConnectorMetricsModel, target_granularity)
-        agg_cols = _metrics_aggregate_columns(ConnectorMetricsModel)
-        base_filter = [
-            ConnectorMetricsModel.connector_id == connector_id,
-            ConnectorMetricsModel.granularity == source_granularity,
-            ConnectorMetricsModel.timestamp < older_than,
-        ]
-        query = select(bucket_ts, *agg_cols).where(*base_filter).group_by(bucket_epoch)
-        result = await self._session.execute(query)
-        buckets = result.all()
-        if not buckets:
-            return 0
-        for row in buckets:
-            self._session.add(ConnectorMetricsModel(
-                connector_id=connector_id,
-                timestamp=_strip_tz(row.bucket_ts),
-                request_count=row.request_count,
-                success_count=row.success_count,
-                failure_count=row.failure_count,
-                avg_latency_ms=float(row.avg_latency_ms or 0),
-                bytes_sent=row.bytes_sent,
-                bytes_received=row.bytes_received,
-                granularity=target_granularity,
-            ))
-        del_result = await self._session.execute(delete(ConnectorMetricsModel).where(*base_filter))
-        await self._session.flush()
-        return int(del_result.rowcount or 0)  # type: ignore[attr-defined]
+        """As ``compact_project_metrics`` does, for the rows of the project's connectors, a series per connector."""
+        connectors = select(ConnectorModel.id).where(ConnectorModel.project_id == project_id)
+        return await self._compact(
+            ConnectorMetricsModel,
+            ConnectorMetricsModel.connector_id.in_(connectors),
+            older_than,
+            source_granularity,
+            target_granularity,
+            keys=["connector_id"],
+        )
 
     async def delete_connector_metrics_for_project_older_than(
         self,
@@ -946,55 +1344,6 @@ class MetricsRepository:
         )
         result = await self._session.execute(stmt)
         return int(result.rowcount or 0)  # type: ignore[attr-defined]
-
-    async def get_connector_ids_for_project(self, project_id: str) -> list[str]:
-        """All connector IDs belonging to a project."""
-        result = await self._session.execute(
-            select(ConnectorModel.id).where(ConnectorModel.project_id == project_id)
-        )
-        return [row[0] for row in result.all()]
-
-    async def get_cumulative_metrics_for_all_proxies(self) -> dict[str, MetricDelta]:
-        """Each proxy's totals across all its snapshots, keyed by proxy id.
-
-        Used to restore metrics on startup, summed with the current Redis
-        window. Latency comes back as the weighted sum so the batches add.
-        """
-        query = (
-            select(ProxyMetricsModel.proxy_id, *_cumulative_total_columns(ProxyMetricsModel))
-            .group_by(ProxyMetricsModel.proxy_id)
-        )
-        result = await self._session.execute(query)
-        return {row.proxy_id: _totals_from_row(row) for row in result.all()}
-
-    # Project-level metrics methods
-
-    async def save_project_metrics_snapshot(
-        self,
-        project_id: str,
-        request_count: int,
-        success_count: int,
-        failure_count: int,
-        avg_latency_ms: float,
-        bytes_sent: int = 0,
-        bytes_received: int = 0,
-    ) -> bool:
-        """Save a project-level snapshot; False when the project no longer exists.
-
-        These metrics persist across proxy rotation.
-        """
-        return await self._insert_snapshot(
-            ProjectMetricsModel,
-            ProjectModel.id == project_id,
-            project_id=project_id,
-            timestamp=utc_now(),
-            request_count=request_count,
-            success_count=success_count,
-            failure_count=failure_count,
-            avg_latency_ms=avg_latency_ms,
-            bytes_sent=bytes_sent,
-            bytes_received=bytes_received,
-        )
 
     async def get_project_metrics_history(
         self,
@@ -1033,12 +1382,10 @@ class MetricsRepository:
         since: datetime,
         bucket_seconds: int,
     ) -> list[dict[str, Any]]:
-        """Get historical metrics aggregated into fixed-size time buckets.
+        """A project's metrics summed into buckets of ``bucket_seconds`` by epoch floor division, newest first.
 
-        Uses floor division on the epoch to group rows into buckets of
-        ``bucket_seconds`` width, then SUMs counters and computes weighted
-        average latency.  Rows with granularity <= bucket_seconds are included,
-        so pre-compacted rows coexist with recent raw rows.
+        Latency is weighted by requests, and rows of any granularity up to ``bucket_seconds`` count, so compacted rows
+        and recent raw ones add up together.
         """
         bucket_epoch, bucket_ts = _bucket_expressions(ProjectMetricsModel, bucket_seconds)
         agg_cols = _metrics_aggregate_columns(ProjectMetricsModel)
@@ -1067,17 +1414,6 @@ class MetricsRepository:
             for row in rows
         ]
 
-    async def get_cumulative_project_metrics(self) -> dict[str, MetricDelta]:
-        """Each project's totals across all its snapshots, keyed by project id (see the proxy variant)."""
-        query = (
-            select(ProjectMetricsModel.project_id, *_cumulative_total_columns(ProjectMetricsModel))
-            .group_by(ProjectMetricsModel.project_id)
-        )
-        result = await self._session.execute(query)
-        return {row.project_id: _totals_from_row(row) for row in result.all()}
-
-    # Compaction and retention methods
-
     async def compact_project_metrics(
         self,
         project_id: str,
@@ -1085,128 +1421,44 @@ class MetricsRepository:
         source_granularity: int,
         target_granularity: int,
     ) -> int:
-        """Compact project metrics from source to target granularity.
+        """Fold the project's rows of the source granularity older than ``older_than`` into a row per target bucket.
 
-        Aggregates source-granularity rows older than ``older_than`` into
-        target-granularity buckets, inserts the compacted rows, and deletes
-        the originals - all within the current transaction.
-
-        Returns the number of source rows deleted.
+        Returns how many source rows were folded; a compaction at the same time folds each row once between them.
         """
-        bucket_epoch, bucket_ts = _bucket_expressions(ProjectMetricsModel, target_granularity)
-        agg_cols = _metrics_aggregate_columns(ProjectMetricsModel)
-
-        query = (
-            select(bucket_ts, *agg_cols)
-            .where(ProjectMetricsModel.project_id == project_id)
-            .where(ProjectMetricsModel.granularity == source_granularity)
-            .where(ProjectMetricsModel.timestamp < older_than)
-            .group_by(bucket_epoch)
+        return await self._compact(
+            ProjectMetricsModel,
+            ProjectMetricsModel.project_id == project_id,
+            older_than,
+            source_granularity,
+            target_granularity,
+            keys=["project_id"],
         )
-
-        result = await self._session.execute(query)
-        buckets = result.all()
-        if not buckets:
-            return 0
-
-        # Insert compacted rows
-        for row in buckets:
-            model = ProjectMetricsModel(
-                project_id=project_id,
-                timestamp=_strip_tz(row.bucket_ts),
-                request_count=row.request_count,
-                success_count=row.success_count,
-                failure_count=row.failure_count,
-                avg_latency_ms=float(row.avg_latency_ms or 0),
-                bytes_sent=row.bytes_sent,
-                bytes_received=row.bytes_received,
-                granularity=target_granularity,
-            )
-            self._session.add(model)
-
-        # Delete source rows
-        del_stmt = (
-            delete(ProjectMetricsModel)
-            .where(ProjectMetricsModel.project_id == project_id)
-            .where(ProjectMetricsModel.granularity == source_granularity)
-            .where(ProjectMetricsModel.timestamp < older_than)
-        )
-        del_result = await self._session.execute(del_stmt)
-        await self._session.flush()
-        return int(del_result.rowcount or 0)  # type: ignore[attr-defined]
 
     async def compact_proxy_metrics(
         self,
-        proxy_id: str,
+        project_id: str,
         older_than: datetime,
         source_granularity: int,
         target_granularity: int,
     ) -> int:
-        """Compact proxy metrics from source to target granularity.
+        """As ``compact_project_metrics`` does, for the rows of the project's proxies: a series per proxy.
 
-        Same as compact_project_metrics but for the proxy_metrics table.
-        Returns the number of source rows deleted.
+        Each bucket keeps the status of its newest row.
         """
-        bucket_epoch, bucket_ts = _bucket_expressions(ProxyMetricsModel, target_granularity)
-        agg_cols = _metrics_aggregate_columns(ProxyMetricsModel)
-
-        base_filter = [
-            ProxyMetricsModel.proxy_id == proxy_id,
-            ProxyMetricsModel.granularity == source_granularity,
-            ProxyMetricsModel.timestamp < older_than,
-        ]
-
-        agg_query = (
-            select(
-                bucket_ts,
-                *agg_cols,
-                func.max(ProxyMetricsModel.timestamp).label("max_ts"),
-            )
-            .where(*base_filter)
-            .group_by(bucket_epoch)
+        proxies = (
+            select(ProxyModel.id)
+            .join(ConnectorModel, ProxyModel.connector_id == ConnectorModel.id)
+            .where(ConnectorModel.project_id == project_id)
         )
-
-        result = await self._session.execute(agg_query)
-        buckets = result.all()
-        if not buckets:
-            return 0
-
-        # Get the latest status for each bucket (status from the row with max timestamp)
-        max_ts_set = {row.max_ts for row in buckets}
-        status_query = (
-            select(
-                ProxyMetricsModel.timestamp,
-                ProxyMetricsModel.status,
-            )
-            .where(ProxyMetricsModel.proxy_id == proxy_id)
-            .where(ProxyMetricsModel.timestamp.in_(max_ts_set))
+        return await self._compact(
+            ProxyMetricsModel,
+            ProxyMetricsModel.proxy_id.in_(proxies),
+            older_than,
+            source_granularity,
+            target_granularity,
+            keys=["proxy_id"],
+            latest="status",
         )
-        status_result = await self._session.execute(status_query)
-        status_by_ts = {row.timestamp: row.status for row in status_result.all()}
-
-        for row in buckets:
-            status = status_by_ts.get(row.max_ts, "unknown")
-            model = ProxyMetricsModel(
-                proxy_id=proxy_id,
-                timestamp=_strip_tz(row.bucket_ts),
-                request_count=row.request_count,
-                success_count=row.success_count,
-                failure_count=row.failure_count,
-                avg_latency_ms=float(row.avg_latency_ms or 0),
-                bytes_sent=row.bytes_sent,
-                bytes_received=row.bytes_received,
-                status=status,
-                granularity=target_granularity,
-            )
-            self._session.add(model)
-
-        del_stmt = (
-            delete(ProxyMetricsModel)
-            .where(*base_filter)
-        )
-        del_result = await self._session.execute(del_stmt)
-        await self._session.flush()
-        return int(del_result.rowcount or 0)  # type: ignore[attr-defined]
 
     async def delete_project_metrics_older_than(
         self,
@@ -1245,73 +1497,55 @@ class MetricsRepository:
         result = await self._session.execute(stmt)
         return int(result.rowcount or 0)  # type: ignore[attr-defined]
 
-    async def get_proxy_ids_for_project(self, project_id: str) -> list[str]:
-        """Get all proxy IDs belonging to a project (via connectors)."""
-        query = (
-            select(ProxyModel.id)
-            .join(ConnectorModel, ProxyModel.connector_id == ConnectorModel.id)
-            .where(ConnectorModel.project_id == project_id)
-        )
-        result = await self._session.execute(query)
-        return [row[0] for row in result.all()]
-
     # Tunnel device metrics methods
 
-    async def save_tunnel_peer_metrics_snapshot(self, peer_id: str, delta: TunnelPeerMetricDelta) -> bool:
-        """Save one device's window; False when no tunnel protocol knows the device any more.
+    async def save_tunnel_peer_metrics_snapshots(
+        self, batch: Mapping[str, TunnelPeerMetricDelta], *, granularity: int = 60
+    ) -> list[str]:
+        """Insert one history row per device of a flush window; returns the ids no tunnel protocol knows.
 
-        The device's table is not known here (each protocol has its own), so
-        the insert is tried against each registered table: ``INSERT ...
-        SELECT`` from the device's row, which also supplies the protocol and
-        the project the history row carries. At most one table has the id.
+        The rows join every protocol's devices for their protocol and project, so a device deleted since is not written.
         """
+        if not batch:
+            return []
         table = TunnelPeerMetricsModel.__table__
-        values: dict[str, Any] = {
-            "peer_id": peer_id,
-            "timestamp": utc_now(),
-            "request_count": delta.request_count,
-            "success_count": delta.success_count,
-            "failure_count": delta.failure_count,
-            "avg_latency_ms": delta.avg_latency_ms,
-            "bytes_sent": delta.bytes_sent,
-            "bytes_received": delta.bytes_received,
-            "by_address": delta.by_address,
-            "encrypted_dns_blocked": delta.encrypted_dns_blocked,
-        }
-        columns = [*values, "protocol", "project_id"]
-        for protocol, peer_model in TUNNEL_PEER_TABLES.items():
+        devices = union_all(
+            *(
+                select(
+                    peers.id.label("id"),
+                    peers.project_id.label("project_id"),
+                    literal(protocol, String()).label("protocol"),
+                )
+                for protocol, peers in TUNNEL_PEER_TABLES.items()
+            )
+        ).subquery("devices")
+        columns = ["peer_id", "timestamp", *_DEVICE_COUNTERS, "protocol", "project_id", "granularity"]
+        now = utc_now()
+        ids = sorted(batch)
+        kept: set[str] = set()
+        for start in range(0, len(ids), _DEVICE_BATCH):
+            rows: list[tuple[Any, ...]] = [
+                (peer_id, *(getattr(batch[peer_id], name) for name in _DEVICE_COUNTERS))
+                for peer_id in ids[start:start + _DEVICE_BATCH]
+            ]
+            window = values(
+                column("peer_id", String()),
+                *(column(name, table.c[name].type) for name in _DEVICE_COUNTERS),
+                name="window",
+            ).data(rows)
             source = select(
-                *[literal(value, type_=table.c[name].type).label(name) for name, value in values.items()],
-                literal(protocol, type_=table.c.protocol.type).label("protocol"),
-                peer_model.project_id.label("project_id"),
-            ).where(peer_model.id == peer_id)
-            result = await self._session.execute(insert(TunnelPeerMetricsModel).from_select(columns, source))
-            if result.rowcount:  # type: ignore[attr-defined]
-                return True
-        return False
-
-    async def get_cumulative_tunnel_peer_metrics(self) -> dict[str, TunnelPeerMetricDelta]:
-        """Each device's totals across all its rows, keyed by device id (see the proxy variant)."""
-        model = TunnelPeerMetricsModel
-        query = (
-            select(
-                model.peer_id,
-                *_cumulative_total_columns(model),
-                func.sum(model.by_address).label("total_by_address"),
-                func.sum(model.encrypted_dns_blocked).label("total_encrypted_dns_blocked"),
+                window.c.peer_id,
+                literal(now, DateTime()).label("timestamp"),
+                *(window.c[name] for name in _DEVICE_COUNTERS),
+                devices.c.protocol,
+                devices.c.project_id,
+                literal(granularity, Integer()).label("granularity"),
+            ).select_from(window.join(devices, devices.c.id == window.c.peer_id))
+            result = await self._session.execute(
+                insert(TunnelPeerMetricsModel).from_select(columns, source).returning(TunnelPeerMetricsModel.peer_id)
             )
-            .group_by(model.peer_id)
-        )
-        result = await self._session.execute(query)
-        totals: dict[str, TunnelPeerMetricDelta] = {}
-        for row in result.all():
-            base = _totals_from_row(row)
-            totals[row.peer_id] = TunnelPeerMetricDelta(
-                **base.to_dict(),
-                by_address=int(row.total_by_address or 0),
-                encrypted_dns_blocked=int(row.total_encrypted_dns_blocked or 0),
-            )
-        return totals
+            kept.update(result.scalars().all())
+        return [peer_id for peer_id in ids if peer_id not in kept]
 
     async def get_tunnel_peer_metrics_history(
         self,
@@ -1367,47 +1601,16 @@ class MetricsRepository:
         source_granularity: int,
         target_granularity: int,
     ) -> int:
-        """Compact every device of a project from source to target granularity.
-
-        One statement for the whole project rather than one per device: the
-        rows carry the project, so the aggregate groups by device as well as
-        by bucket. Returns the number of source rows deleted.
-        """
-        model = TunnelPeerMetricsModel
-        bucket_epoch, bucket_ts = _bucket_expressions(model, target_granularity)
-        base_filter = [
-            model.project_id == project_id,
-            model.granularity == source_granularity,
-            model.timestamp < older_than,
-        ]
-        query = (
-            select(model.peer_id, model.protocol, bucket_ts, *_tunnel_peer_aggregate_columns())
-            .where(*base_filter)
-            .group_by(model.peer_id, model.protocol, bucket_epoch)
+        """As ``compact_project_metrics`` does, for every tunnel device of the project whatever its protocol: a series per device."""
+        return await self._compact(
+            TunnelPeerMetricsModel,
+            TunnelPeerMetricsModel.project_id == project_id,
+            older_than,
+            source_granularity,
+            target_granularity,
+            keys=["peer_id", "protocol", "project_id"],
+            sums=[*_REQUEST_COUNTERS, "by_address", "encrypted_dns_blocked"],
         )
-        result = await self._session.execute(query)
-        buckets = result.all()
-        if not buckets:
-            return 0
-        for row in buckets:
-            self._session.add(TunnelPeerMetricsModel(
-                peer_id=row.peer_id,
-                protocol=row.protocol,
-                project_id=project_id,
-                timestamp=_strip_tz(row.bucket_ts),
-                request_count=row.request_count,
-                success_count=row.success_count,
-                failure_count=row.failure_count,
-                avg_latency_ms=float(row.avg_latency_ms or 0),
-                bytes_sent=row.bytes_sent,
-                bytes_received=row.bytes_received,
-                by_address=row.by_address,
-                encrypted_dns_blocked=row.encrypted_dns_blocked,
-                granularity=target_granularity,
-            ))
-        del_result = await self._session.execute(delete(model).where(*base_filter))
-        await self._session.flush()
-        return int(del_result.rowcount or 0)  # type: ignore[attr-defined]
 
     async def delete_tunnel_peer_metrics_older_than(self, project_id: str, older_than: datetime) -> int:
         """Delete a project's device history older than the timestamp."""
@@ -1424,11 +1627,8 @@ class MetricsRepository:
     ) -> list[tuple[str, str, str]]:
         """Insert one row per (project, connector, host) of a flush window; returns the keys dropped.
 
-        One lookup of the connectors involved, then a single multi-row
-        insert: a window can hold thousands of host rows and a statement
-        each would stretch the flush. A hash whose connector is gone (or
-        has moved project, which cannot happen but is checked all the same)
-        is dropped, as the single-row variants drop an orphan.
+        One lookup of the connectors involved, then a single multi-row insert, and a window whose connector is gone (or
+        in another project) is dropped.
         """
         if not batch:
             return []
@@ -1484,12 +1684,9 @@ class MetricsRepository:
         search: str | None = None,
         limit: int = 500,
     ) -> list[dict[str, Any]]:
-        """The hosts a project requested in the window, busiest first, with their totals.
+        """The hosts a project requested in the window, busiest first, with their totals: at most ``limit`` of them.
 
-        Rows hold per-interval deltas at whatever granularity compaction
-        left them, so summing every row in the window is the total. One
-        connector or a host substring narrows the set. At most ``limit``
-        hosts come back; ``get_host_summary`` says how many there were.
+        One connector or a host substring narrows the set, and ``get_host_summary`` says how many there were.
         """
         model = HostMetricsModel
         query = (
@@ -1560,11 +1757,9 @@ class MetricsRepository:
         *,
         connector_id: str | None = None,
     ) -> list[dict[str, Any]]:
-        """Per-bucket totals for each listed host, with every other host folded into one series.
+        """Per-bucket totals for each listed host, oldest first, with every other host folded into ``HOST_OVERFLOW``.
 
-        One query: rows of a listed host keep their host, the rest are
-        grouped under ``HOST_OVERFLOW`` so the chart can stack the top
-        hosts against the remainder without a second pass. Chronological.
+        One query, so the chart stacks the top hosts against the remainder without a second pass.
         """
         model = HostMetricsModel
         bucket_epoch, bucket_ts = _bucket_expressions(model, bucket_seconds)
@@ -1589,48 +1784,15 @@ class MetricsRepository:
         source_granularity: int,
         target_granularity: int,
     ) -> int:
-        """Compact every (connector, host) series of a project from source to target granularity.
-
-        One statement for the whole project: the aggregate groups by
-        connector and host as well as by bucket. Returns the number of
-        source rows deleted.
-        """
-        model = HostMetricsModel
-        bucket_epoch, bucket_ts = _bucket_expressions(model, target_granularity)
-        base_filter = [
-            model.project_id == project_id,
-            model.granularity == source_granularity,
-            model.timestamp < older_than,
-        ]
-        query = (
-            select(model.connector_id, model.host, bucket_ts, *_metrics_aggregate_columns(model))
-            .where(*base_filter)
-            .group_by(model.connector_id, model.host, bucket_epoch)
+        """As ``compact_project_metrics`` does, for the project's host rows: a series per connector and host."""
+        return await self._compact(
+            HostMetricsModel,
+            HostMetricsModel.project_id == project_id,
+            older_than,
+            source_granularity,
+            target_granularity,
+            keys=["project_id", "connector_id", "host"],
         )
-        result = await self._session.execute(query)
-        buckets = result.all()
-        if not buckets:
-            return 0
-        rows = [
-            {
-                "project_id": project_id,
-                "connector_id": row.connector_id,
-                "host": row.host,
-                "timestamp": _strip_tz(row.bucket_ts),
-                "request_count": row.request_count,
-                "success_count": row.success_count,
-                "failure_count": row.failure_count,
-                "avg_latency_ms": float(row.avg_latency_ms or 0),
-                "bytes_sent": row.bytes_sent,
-                "bytes_received": row.bytes_received,
-                "granularity": target_granularity,
-            }
-            for row in buckets
-        ]
-        await self._session.execute(insert(HostMetricsModel), rows)
-        del_result = await self._session.execute(delete(model).where(*base_filter))
-        await self._session.flush()
-        return int(del_result.rowcount or 0)  # type: ignore[attr-defined]
 
     async def delete_host_metrics_older_than(self, project_id: str, older_than: datetime) -> int:
         """Delete a project's host history older than the timestamp."""
@@ -1727,42 +1889,17 @@ class MetricsRepository:
         source_granularity: int,
         target_granularity: int,
     ) -> int:
-        """Compact every (connector, kind, vendor status) series of a project; returns source rows deleted."""
-        model = FailureMetricsModel
-        bucket_epoch, bucket_ts = _bucket_expressions(model, target_granularity)
-        base_filter = [
-            model.project_id == project_id,
-            model.granularity == source_granularity,
-            model.timestamp < older_than,
-        ]
-        query = (
-            select(
-                model.connector_id, model.kind, model.upstream_status, bucket_ts,
-                func.sum(model.failure_count).label("failure_count"),
-            )
-            .where(*base_filter)
-            .group_by(model.connector_id, model.kind, model.upstream_status, bucket_epoch)
+        """As ``compact_project_metrics`` does, for the project's failure counts: a series per connector, kind and vendor status."""
+        return await self._compact(
+            FailureMetricsModel,
+            FailureMetricsModel.project_id == project_id,
+            older_than,
+            source_granularity,
+            target_granularity,
+            keys=["project_id", "connector_id", "kind", "upstream_status"],
+            sums=["failure_count"],
+            latency=False,
         )
-        result = await self._session.execute(query)
-        buckets = result.all()
-        if not buckets:
-            return 0
-        rows = [
-            {
-                "project_id": project_id,
-                "connector_id": row.connector_id,
-                "kind": row.kind,
-                "upstream_status": row.upstream_status,
-                "timestamp": _strip_tz(row.bucket_ts),
-                "failure_count": int(row.failure_count or 0),
-                "granularity": target_granularity,
-            }
-            for row in buckets
-        ]
-        await self._session.execute(insert(FailureMetricsModel), rows)
-        del_result = await self._session.execute(delete(model).where(*base_filter))
-        await self._session.flush()
-        return int(del_result.rowcount or 0)  # type: ignore[attr-defined]
 
     async def delete_failure_metrics_older_than(self, project_id: str, older_than: datetime) -> int:
         """Delete a project's failure counts older than the timestamp."""
@@ -1770,6 +1907,105 @@ class MetricsRepository:
         result = await self._session.execute(
             delete(model).where(model.project_id == project_id).where(model.timestamp < older_than)
         )
+        return int(result.rowcount or 0)  # type: ignore[attr-defined]
+
+    # Running totals: each proxy's, project's and tunnel device's counters for all time.
+
+    async def upsert_totals(self, kind: TotalledWindows, deltas: Mapping[str, MetricDelta]) -> None:
+        """Add flushed windows of ``kind`` (proxies, projects or tunnel devices) to their entities' totals, creating the rows that do not exist yet, in id order.
+
+        Called in the transaction that inserts the same windows into the history, with the ids that insert kept; an id
+        whose entity went is left to ``delete_orphan_totals``.
+        """
+        now = utc_now()
+        # Every row in a tunnel device's shape: a proxy's or a project's two device counters are 0.
+        rows = [
+            {
+                **TunnelPeerMetricDelta.summed(deltas[entity_id]).to_dict(),
+                "kind": kind.name,
+                "entity_id": entity_id,
+                "updated_at": now,
+            }
+            for entity_id in sorted(deltas)
+        ]
+        for start in range(0, len(rows), _TOTALS_BATCH):
+            statement = pg_insert(MetricTotalsModel).values(rows[start:start + _TOTALS_BATCH])
+            added = {name: getattr(MetricTotalsModel, name) + getattr(statement.excluded, name) for name in _TOTALS_COUNTERS}
+            await self._session.execute(
+                statement.on_conflict_do_update(
+                    index_elements=[MetricTotalsModel.kind, MetricTotalsModel.entity_id],
+                    set_={**added, "updated_at": statement.excluded.updated_at},
+                )
+            )
+
+    async def get_totals(self, kind: TotalledWindows, ids: Iterable[str]) -> dict[str, MetricDelta]:
+        """The totals of the entities of ``kind`` in ``ids`` that have any, keyed by id, in the kind's counts type.
+
+        Plain rows rather than ORM objects, so totals upserted earlier in the
+        same session are read as they are now.
+        """
+        wanted = sorted(set(ids))
+        totals: dict[str, MetricDelta] = {}
+        for start in range(0, len(wanted), _TOTALS_BATCH):
+            result = await self._session.execute(
+                select(MetricTotalsModel.__table__).where(
+                    MetricTotalsModel.kind == kind.name,
+                    MetricTotalsModel.entity_id.in_(wanted[start:start + _TOTALS_BATCH]),
+                )
+            )
+            totals.update((row.entity_id, kind.read(dict(row._mapping))) for row in result.all())
+        return totals
+
+    async def rebuild_totals(self) -> int:
+        """Recompute every total from the history, as migration 048 first filled them; the rows written.
+
+        The last step of a backup import, in its transaction, so the totals match the history the file brought.
+        """
+        await self._session.execute(delete(MetricTotalsModel))
+        result = await self._session.execute(_REBUILD_TOTALS)
+        return int(result.rowcount or 0)  # type: ignore[attr-defined]
+
+    async def delete_orphan_totals(self) -> int:
+        """Delete the totals of proxies, projects and tunnel devices that no longer exist; how many went.
+
+        A device is gone when no tunnel protocol's table has it.
+        """
+        totals = MetricTotalsModel
+        gone = or_(
+            and_(totals.kind == PROXY_WINDOWS.name, ~exists().where(ProxyModel.id == totals.entity_id)),
+            and_(totals.kind == PROJECT_WINDOWS.name, ~exists().where(ProjectModel.id == totals.entity_id)),
+            and_(
+                totals.kind == TUNNEL_PEER_WINDOWS.name,
+                *[~exists().where(peers.id == totals.entity_id) for peers in TUNNEL_PEER_TABLES.values()],
+            ),
+        )
+        result = await self._session.execute(delete(totals).where(gone))
+        return int(result.rowcount or 0)  # type: ignore[attr-defined]
+
+    # Flush records: each metrics flush Postgres committed, by its job entry's ID.
+
+    async def record_flush(self, message_id: str) -> bool:
+        """Record flush ``message_id`` in the current transaction; False when it is recorded already.
+
+        A transaction recording the same ID meanwhile holds this one until it ends, and its commit makes this False.
+        """
+        statement = (
+            pg_insert(MetricFlushModel)
+            .values(message_id=message_id, flushed_at=utc_now())
+            .on_conflict_do_nothing(index_elements=[MetricFlushModel.message_id])
+            .returning(MetricFlushModel.message_id)
+        )
+        result = await self._session.execute(statement)
+        return result.scalar_one_or_none() is not None
+
+    async def flush_recorded(self, message_id: str) -> bool:
+        """Whether flush ``message_id`` committed."""
+        result = await self._session.execute(select(exists().where(MetricFlushModel.message_id == message_id)))
+        return bool(result.scalar_one())
+
+    async def delete_flushes_older_than(self, older_than: datetime) -> int:
+        """Forget the flushes committed before ``older_than``; how many went."""
+        result = await self._session.execute(delete(MetricFlushModel).where(MetricFlushModel.flushed_at < older_than))
         return int(result.rowcount or 0)  # type: ignore[attr-defined]
 
 
@@ -1803,8 +2039,8 @@ class SystemMetricsRepository:
     async def get_latest_timestamp(self) -> datetime | None:
         """Timestamp of the newest snapshot, or None when the table is empty.
 
-        The snapshotter uses this to decide whether a tick is due, so a
-        restart or a lease handover does not write an off-cadence extra row.
+        The snapshot job uses this to decide whether a reading is due, so a
+        restart or a snapshot asked for twice writes no off-cadence extra row.
         """
         query = select(SystemMetricsModel.timestamp).order_by(
             SystemMetricsModel.timestamp.desc()
@@ -1831,11 +2067,9 @@ class SystemMetricsRepository:
     async def get_history_aggregated(
         self, since: datetime, bucket_seconds: int
     ) -> list[dict[str, Any]]:
-        """Snapshots downsampled into fixed-width buckets, oldest first.
+        """Snapshots downsampled into fixed-width buckets, oldest first, every column averaged since these are gauges.
 
-        Every column is averaged. These are gauges - a database size or a proxy
-        count - so summing them across a bucket would invent a number that was
-        never true at any instant. Counts are rounded back to whole units.
+        Counts are rounded back to whole units.
         """
         bucket_epoch, bucket_ts = _bucket_expressions(SystemMetricsModel, bucket_seconds)
         agg_cols = [
@@ -1980,10 +2214,7 @@ class UserRepository:
     async def touch_last_login(self, user_id: str) -> datetime:
         """Stamp ``last_login_at`` for a user who just obtained a token.
 
-        A targeted UPDATE rather than a full ``update()`` so a login never
-        rewrites the profile. ``updated_at`` tracks edits and has an
-        ``onupdate`` hook, so it is pinned to its current value to keep the
-        hook from firing.
+        A targeted UPDATE that never rewrites the profile, ``updated_at`` pinned so its ``onupdate`` hook does not fire.
         """
         now = utc_now()
         await self._session.execute(
@@ -2025,8 +2256,15 @@ class ProviderDescriptorRepository:
         self._session = session
 
     async def get_all(self) -> list[ProviderRecord]:
+        """Every stored descriptor, by id.
+
+        One order for every reader: the feed compile and the api's and
+        workers' provider stores apply the enabled documents in it, and a
+        store skips a list equal to the one it applied last, which two
+        orders of the same documents never are (role ``all`` runs both).
+        """
         result = await self._session.execute(
-            select(ProviderDescriptorModel).order_by(ProviderDescriptorModel.created_at)
+            select(ProviderDescriptorModel).order_by(ProviderDescriptorModel.id)
         )
         return [self._to_domain(m) for m in result.scalars().all()]
 

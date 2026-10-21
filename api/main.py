@@ -1,46 +1,32 @@
 # Copyright 2026 Octoprox Authors
 # SPDX-License-Identifier: Apache-2.0
 
-"""Main entry point for Octoprox API server."""
+"""The entry point of every Octoprox process: the HTTP app of its role, on port 8000.
+
+``OCTOPROX_ROLE`` decides what :func:`create_app` builds (the admin API, the
+web UI and the internal endpoints for api and all, ``/echo`` for those and
+echo, the ops endpoints for every role), and importing this module builds the
+app object only: its lifespan starts the role's runtimes.
+"""
 
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-import structlog
 import uvicorn
-from fastapi import Depends, FastAPI
+from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from api import __version__
-from api.core import utc_now
 from api.core.auth import require_auth
-from api.core.config import settings
+from api.core.config import Settings, get_settings
 from api.core.logging import setup_logging
-from api.core.mitm import MitmHandler
-from api.core.proxy_manager import ProxyManager
-from api.core.proxy_server import ProxyServer
 from api.core.request_context import REQUEST_ID_HEADER, RequestContextMiddleware
-from api.core.seed import seed_admin_user
-from api.core.signals import (
-    geo_database_changed,
-    geo_settings_changed,
-    openvpn_peer_changed,
-    openvpn_settings_changed,
-    project_changed,
-    wireguard_peer_changed,
-    wireguard_settings_changed,
-)
-from api.core.system_stats import build_instance_snapshot
-from api.core.tls_cert_manager import TLSCertManager
-from api.db.migrations import run_migrations
-from api.db.redis import get_redis_client
-from api.db.session import get_async_session_factory
-from api.geo.runtime import GeoRuntime
-from api.geo.verifier import ExitVerifier
-from api.openvpn.runtime import OpenVpnRuntime
+from api.core.roles import Role
+from api.roles import Node
+from api.roles.echo import Lifespan, create_echo_app
 from api.routes import (
     auth,
     backup,
@@ -50,6 +36,7 @@ from api.routes import (
     failures,
     geo,
     health,
+    internal,
     metrics,
     mitm,
     openvpn,
@@ -61,187 +48,78 @@ from api.routes import (
     users,
     wireguard,
 )
-from api.sso import SsoFlow
-from api.tunnel.dataplane import TunnelDataPlane
-from api.wireguard.runtime import WireGuardRuntime
+from api.routes.common import install_error_handlers
 
-# Configure logging before getting the logger
-setup_logging(settings.log_level, settings.log_format, settings.instance_id)
-logger = structlog.get_logger()
-
-
-@asynccontextmanager
-async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
-    """Application lifespan manager."""
-    logger.info("Starting Octoprox", version=__version__)
-    app.state.started_at = utc_now()
-
-    # Run database migrations (uses sync URL)
-    logger.info("Running database migrations")
-    run_migrations(settings.database_url_sync)
-
-    # Create session factory (uses async URL)
-    session_factory = get_async_session_factory(
-        settings.database_url,
-        settings.db_application_name,
-        settings.debug,
-    )
-
-    # Seed initial admin user if no users exist
-    await seed_admin_user(session_factory, settings)
-
-    # Create and connect Redis client
-    logger.info("Connecting to Redis")
-    redis_client = get_redis_client(settings.redis_url)
-    await redis_client.connect()
-
-    # Store redis client for cleanup
-    app.state.redis_client = redis_client
-
-    # Sign-in through identity providers: the per-login state lives in Redis
-    # so a login may start on one instance and return on another.
-    sso_flow = SsoFlow(redis_client)
-    app.state.sso_flow = sso_flow
-
-    # IP attribution: databases, settings, observation pipeline, preflight.
-    geo_runtime = GeoRuntime(settings, session_factory, redis_client)
-    app.state.geo_runtime = geo_runtime
-    await geo_runtime.start()
-
-    # Tunnel devices. The data plane (fake-IP resolver, transparent listener,
-    # nftables) is one per process and shared by every tunnel protocol; its
-    # listeners come up once the proxy server's collaborators exist. Each
-    # protocol loads the install's identity and the devices allowed in on
-    # every instance; the tunnel itself comes up later, on the instance that
-    # terminates it, by attaching its interface to the data plane.
-    tunnel = TunnelDataPlane(settings, redis_client)
-    app.state.tunnel = tunnel
-    wireguard_runtime = WireGuardRuntime(settings, session_factory, redis_client, tunnel)
-    app.state.wireguard_runtime = wireguard_runtime
-    openvpn_runtime = OpenVpnRuntime(settings, session_factory, redis_client, tunnel)
-    app.state.openvpn_runtime = openvpn_runtime
-
-    async def on_project_change(entity_id: str, op: str | None) -> None:
-        # Runs after the manager's own project handler: a project deleted on
-        # a peer drops its tunnel devices here too, whatever their protocol.
-        await wireguard_runtime.on_project_change(entity_id, op)
-        await openvpn_runtime.on_project_change(entity_id, op)
-
-    # Initialize proxy manager with dependencies. Attribution and the tunnel
-    # protocols join the cross-instance change feed and the periodic reload
-    # here, explicitly, rather than the manager knowing what it is wiring.
-    proxy_manager = ProxyManager(
-        session_factory=session_factory,
-        redis_client=redis_client,
-        settings=settings,
-        health_check_extraction_rules=geo_runtime.extraction_rules,
-        cross_instance_handlers={
-            geo_database_changed: geo_runtime.reload_database,
-            geo_settings_changed: geo_runtime.reload_settings,
-            wireguard_peer_changed: wireguard_runtime.reload_peer,
-            wireguard_settings_changed: wireguard_runtime.reload_settings,
-            openvpn_peer_changed: openvpn_runtime.reload_peer,
-            openvpn_settings_changed: openvpn_runtime.reload_settings,
-            project_changed: on_project_change,
-        },
-        reload_hooks=[geo_runtime.resync, wireguard_runtime.resync, openvpn_runtime.resync],
-    )
-    app.state.proxy_manager = proxy_manager
-    # Tunnel devices are metered by the manager alongside proxies and
-    # projects; the device views read their totals from it.
-    wireguard_runtime.peer_metrics = proxy_manager.tunnel_peer_metrics
-    openvpn_runtime.peer_metrics = proxy_manager.tunnel_peer_metrics
-
-    # The attributor writes attribution onto proxies as sightings arrive; the
-    # manager is its proxy store.
-    await geo_runtime.proxy_attributor.start(proxy_manager)
-
-    # Let the heartbeat publish what this instance sees, for the admin system
-    # view's per-instance cards. Wired here rather than inside ProxyManager
-    # because the snapshot spans components the manager does not own - the
-    # proxy server, the geo lookup, the CA context cache - and read off
-    # app.state rather than captured, because those components are built after
-    # the heartbeat has already started beating. Each is optional, so the first
-    # beat carries a partial snapshot rather than none at all.
-    proxy_manager.snapshot_provider = lambda: build_instance_snapshot(
-        settings,
-        app.state.started_at,
-        proxy_manager=proxy_manager,
-        proxy_server=getattr(app.state, "proxy_server", None),
-        cert_manager=getattr(app.state, "cert_manager", None),
-        geo_runtime=geo_runtime,
-        wireguard_runtime=wireguard_runtime,
-        openvpn_runtime=openvpn_runtime,
-    )
-
-    # Start background tasks (loads from DB, hydrates from Redis)
-    await proxy_manager.start()
-
-    # Initialize TLS MITM certificate manager
-    cert_manager = TLSCertManager(
-        ca_cert_path=Path(settings.tls_mitm_ca_cert_path),
-        ca_key_path=Path(settings.tls_mitm_ca_key_path),
-    )
-    await cert_manager.bootstrap(redis_client, settings.instance_id)
-    mitm_handler = MitmHandler(cert_manager, redis_client=redis_client)
-    app.state.cert_manager = cert_manager
-
-    # Start the HTTP proxy server
-    # Preflight: the manager is the verifier's proxy selector.
-    exit_verifier = ExitVerifier(geo_runtime.preflight_checker, proxy_manager)
-    proxy_server = ProxyServer(proxy_manager, mitm_handler=mitm_handler, exit_verifier=exit_verifier)
-    await proxy_server.start()
-    app.state.proxy_server = proxy_server
-
-    # The tunnel data plane shares the manager, MITM handler and verifier with
-    # the proxy server: same routing, same metering. Then bring each tunnel
-    # protocol up where this instance terminates it.
-    await tunnel.start(proxy_manager, mitm_handler=mitm_handler, exit_verifier=exit_verifier)
-    await wireguard_runtime.start()
-    await openvpn_runtime.start()
-
-    yield
-
-    # Cleanup
-    logger.info("Shutting down Octoprox")
-    await openvpn_runtime.stop()
-    await wireguard_runtime.stop()
-    await tunnel.stop()
-    await proxy_server.stop()
-    await proxy_manager.stop()
-    await geo_runtime.stop()
-    await sso_flow.close()
-    await redis_client.close()
+# The built web UI the api serves, when the image (or a local build) has it.
+WEB_DIST = Path(__file__).resolve().parent.parent / "web" / "dist"
+# The roles whose app serves the admin API, the web UI and the internal endpoints.
+API_ROLES = frozenset({Role.API, Role.ALL})
 
 
-def create_app() -> FastAPI:
-    """Create and configure the FastAPI application."""
-    app = FastAPI(
-        title="Octoprox",
-        description="A dynamic and flexible proxy manager",
-        version=__version__,
-        lifespan=lifespan,
-    )
+def create_app(settings: Settings, *, web_dist: Path = WEB_DIST) -> FastAPI:
+    """The HTTP app of a process of ``settings.role``; its lifespan runs the process's node.
 
-    # Configure CORS. X-Request-ID is exposed so a cross-origin web UI (the
-    # Vite dev server) can read the ID off error responses.
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=settings.cors_origins,
-        allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
-        expose_headers=[REQUEST_ID_HEADER],
-    )
+    An api or all process serves the built web UI from ``web_dist`` when it
+    exists, and logging is the caller's to set up, once per process (see the
+    bottom of this module).
+    """
+    lifespan = _lifespan(settings)
+    if settings.role == Role.ECHO:
+        app = create_echo_app(settings, lifespan=lifespan)
+    else:
+        app = FastAPI(
+            title="Octoprox",
+            description="A dynamic and flexible proxy manager",
+            version=__version__,
+            lifespan=lifespan,
+        )
+    app.state.settings = settings
+    if settings.role in API_ROLES:
+        # Configure CORS. X-Request-ID is exposed so a cross-origin web UI (the
+        # Vite dev server) can read the ID off error responses.
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=settings.cors_origins,
+            allow_credentials=True,
+            allow_methods=["*"],
+            allow_headers=["*"],
+            expose_headers=[REQUEST_ID_HEADER],
+        )
     # Added after CORS so it wraps it: every response, preflight included,
     # carries a request ID and every log line during the request has it bound.
     app.add_middleware(RequestContextMiddleware)
-
-    # Include routers
-    # Health check (public)
+    # The ops endpoints come first, so the web UI's catch-all never shadows them.
     app.include_router(health.router, tags=["Health"])
+    if settings.role in API_ROLES:
+        _include_api(app)
+        _serve_web_ui(app, web_dist)
+    return app
+
+
+def _lifespan(settings: Settings) -> Lifespan:
+    """Build the process's node, start it before serving, and stop it after."""
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
+        node = Node(settings)
+        app.state.node = node
+        # A start that fails stops what it started before raising.
+        await node.start()
+        try:
+            yield
+        finally:
+            await node.stop()
+
+    return lifespan
+
+
+def _include_api(app: FastAPI) -> None:
+    """The admin API, the public echo and the internal endpoints of an api or all process."""
+    install_error_handlers(app)
     # Echo endpoint (public by nature: the caller is a proxy exit)
     app.include_router(echo.router, tags=["Echo"])
+    # What gateways fetch from the api, behind the internal token.
+    app.include_router(internal.router, tags=["Internal"], include_in_schema=False)
 
     # Protected routes - require auth when enabled
     auth_dependency = [Depends(require_auth)]
@@ -306,32 +184,42 @@ def create_app() -> FastAPI:
         openvpn.router, prefix="/api/v1", tags=["OpenVPN"], dependencies=auth_dependency
     )
 
-    # Serve frontend static files in production (when web/dist exists)
-    static_dir = Path(__file__).parent.parent / "web" / "dist"
-    if static_dir.exists():
-        # Serve static assets (JS, CSS, images)
-        assets_dir = static_dir / "assets"
-        if assets_dir.exists():
-            app.mount("/assets", StaticFiles(directory=assets_dir), name="assets")
 
-        # SPA fallback - serve index.html for all non-API routes
-        @app.get("/{full_path:path}")
-        async def serve_spa(full_path: str) -> FileResponse:
-            # If it's a file that exists in dist, serve it (e.g., favicon, robots.txt)
-            file_path = static_dir / full_path
-            if file_path.is_file():
-                return FileResponse(file_path)
-            # Otherwise serve index.html for SPA routing
-            return FileResponse(static_dir / "index.html")
+def _serve_web_ui(app: FastAPI, web_dist: Path) -> None:
+    """The built web UI: its assets, its other files, and ``index.html`` for every route the UI owns.
 
-    return app
+    Registered last, as a catch-all, it serves a path only when the path
+    resolves to a file inside ``web_dist``, so neither an encoded ``..`` nor a
+    symlink out of the build reaches another file, such as the MITM CA key.
+    """
+    if not web_dist.is_dir():
+        return
+    root = web_dist.resolve()
+    assets_dir = root / "assets"
+    if assets_dir.is_dir():
+        app.mount("/assets", StaticFiles(directory=assets_dir), name="assets")
+
+    @app.get("/{full_path:path}", include_in_schema=False)
+    async def serve_spa(full_path: str) -> FileResponse:
+        file_path = (root / full_path).resolve()
+        if not file_path.is_relative_to(root):
+            raise HTTPException(status_code=404, detail="Not Found")
+        if file_path.is_file():
+            return FileResponse(file_path)
+        # Anything else is a route of the single-page app.
+        return FileResponse(root / "index.html")
 
 
-app = create_app()
+# The uvicorn target. Logging first, once, with the role on every line: before
+# anything logs, and outside create_app, which tests call once per app.
+_settings = get_settings()
+setup_logging(_settings.log_level, _settings.log_format, _settings.instance_id, _settings.role)
+app = create_app(_settings)
 
 
 def run() -> None:
     """Run the application using uvicorn."""
+    settings = get_settings()
     uvicorn.run(
         "api.main:app",
         host=settings.host,

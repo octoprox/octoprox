@@ -39,7 +39,7 @@ export default function Login({ onLogin, error }: LoginProps) {
   useEffect(() => { setSsoError(takeSsoError()) }, [])
   const shownError = error ?? ssoError
 
-  const handleSubmit = async (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.SubmitEvent) => {
     e.preventDefault()
     setIsLoading(true)
     try {
@@ -64,7 +64,7 @@ export default function Login({ onLogin, error }: LoginProps) {
           {/* Error message */}
           {shownError && (
             <Alert variant="error" className="mb-6 flex items-center gap-3">
-              <AlertCircle className="w-5 h-5 text-red-500 flex-shrink-0" />
+              <AlertCircle className="w-5 h-5 text-red-500 shrink-0" />
               <p className="text-sm">{shownError}</p>
             </Alert>
           )}
@@ -136,7 +136,7 @@ export default function Login({ onLogin, error }: LoginProps) {
             <Button
               type="submit"
               disabled={isLoading}
-              className="w-full shadow-sm focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-ring"
+              className="w-full shadow-xs focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-ring"
             >
               {isLoading ? 'Signing in...' : 'Sign in'}
             </Button>

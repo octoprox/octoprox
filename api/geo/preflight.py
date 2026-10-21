@@ -1,43 +1,9 @@
 # Copyright 2026 Octoprox Authors
 # SPDX-License-Identifier: Apache-2.0
 
-"""Verify where a selected upstream really exits before forwarding a client's request.
+"""Verify where a selected upstream really exits before forwarding a client's request: one echo through it, judged and cached.
 
-A residential or mobile exit belongs to the *session*, not to the proxy row,
-so the check runs against the proxy the request was routed to, right after
-selection: one echo request through it, resolve the IP, compare with the
-location the request *requires*: the ``-cc-``, ``-st-`` and ``-city-`` values
-the client named. A client that named nothing has no expectation, so a
-pooled slot is not echoed for it: the slot's own claim is judged on the row
-by every sighting of its exit. A dynamic gateway is: the place rendered into
-its vendor session stands in as the vendor's promise. The verdict is
-cached in Redis per (project, proxy) for the settings' session TTL, so a
-session pays one extra round trip and the rest of its requests pay nothing.
-
-Only session-bound rows are checked: dynamic-sessions gateways and pooled
-session slots, whose exit the vendor can move. A fixed exit (static, ISP,
-datacenter, list) was placed by discovery and is re-read by every health
-check that reports its IP, so an echo per request would only repeat what
-attribution already knows.
-
-A dynamic-sessions gateway row is different: its exit belongs to the vendor
-session rendered for the request, so the verdict is cached per (project,
-proxy, vendor session) when the client named a session, and a request
-without one is echoed only when sampled (the connector's ``exit_sample_percent``),
-uncached, with nothing to verify unless it asked for a location. Those
-sightings exist for provider accuracy and unique exits: nothing but an echo
-ever sees where a dynamic request went.
-
-This module produces the verdict for the request. What the echo found about
-a pooled slot is handed to the attributor on ``exit_ip_observed``, exactly as
-a health check's sighting is, so the row learns its new exit, verdict and,
-under a refusing project, its replacement at once rather than a health check
-interval later. Whether a verdict refuses the request is the project's two
-decisions (``PreflightVerdict.acceptable``), and whether a refused request
-moves to another proxy is the exit verifier's call.
-
-Failures of the echo request itself never block traffic: an unreachable echo
-endpoint is an operations problem, not evidence about the proxy.
+Only session-bound rows are checked, pooled slots and dynamic gateways, whose exit the vendor can move.
 """
 
 from __future__ import annotations
@@ -45,21 +11,25 @@ from __future__ import annotations
 import json
 import random
 from collections.abc import Sequence
-from typing import NamedTuple
+from datetime import datetime
+from typing import TYPE_CHECKING, NamedTuple
 
 import structlog
 
-from api.core.event_bus import event_bus
-from api.core.signals import exit_ip_changed, exit_ip_observed
+from api.core import utc_now
+from api.core.logging import error_text
 from api.db.redis import GEO_PREFLIGHT_KEY, RedisClient
+from api.geo.attributor import ProxyAttributor
 from api.geo.models import (
     ContradictedAction,
     IpObservation,
+    LocationCandidate,
     LocationRules,
     ObservationSource,
     UnknownAction,
 )
 from api.geo.service import GeoService
+from api.jobs.messages import SightingMessage
 from api.models.location import LocationTarget
 from api.models.project import Project
 from api.models.proxy import Proxy
@@ -72,56 +42,48 @@ from api.providers.sdk.strategies import (
     is_dynamic_gateway,
 )
 
+if TYPE_CHECKING:
+    from api.gateway.sightings import SightingPublisher
+    from api.routing.exclusions import LocalExclusions
+
 logger = structlog.get_logger()
 
 # Who set a preflight requirement (``PreflightVerdict.required_by``).
 REQUIRED_BY_REQUEST = "request"
 REQUIRED_BY_VENDOR = "vendor"
 
-class PreflightVerdict(NamedTuple):
-    """What one echo through the selected upstream found.
 
-    ``expected`` is the location the request required and ``observed`` where
-    attribution placed the exit at those levels (country always, state and
-    city when asked). One verdict per level, with the polarity of an
-    observation's ``conflict``: True contradicted, False confirmed, None when
-    nothing was asked at that level or nothing was observed there. ``ok`` is
-    False only for a confirmed mismatch at some level; what else refuses the
-    request is the project's rules' call (``acceptable``). ``required_by``
-    says who set the requirement: the client (``request``), or the place
-    rendered into a dynamic session when the client named nothing (``vendor``).
+class PreflightVerdict(NamedTuple):
+    """What one echo through the selected upstream found, a verdict per level with an observation's ``conflict`` polarity.
+
+    ``ok`` is False only for a confirmed mismatch at some level; whatever else refuses the request is the project's
+    rules' call (``acceptable``).
     """
 
     ok: bool
+    # The location the request required, and where attribution placed the exit
+    # at those levels (the country always, the state and city when asked).
     expected: LocationTarget | None
     observed: LocationTarget | None
     ip: str | None
     reason: str
     endpoint_country: str | None = None
+    # True contradicted, False confirmed, None when nothing was asked or
+    # observed at that level.
     country_conflict: bool | None = None
     state_conflict: bool | None = None
     city_conflict: bool | None = None
+    # Who set the requirement: the client (``request``), or the place rendered
+    # into a dynamic session when the client named nothing (``vendor``).
     required_by: str | None = None
     # Set by the verifier when the slot left the pool while it was being checked.
     replaced: bool = False
 
     def acceptable(self, rules: LocationRules, allowed: Sequence[str] = ()) -> bool:
-        """Whether this verdict lets the request through under the project's ``rules``.
+        """Whether this verdict lets the request through under the project's ``rules``; one with no exit or no requirement never refuses.
 
-        A verdict without an exit (the echo failed) or without a requirement
-        (a sampled sighting) is never a refusal: an echo outage must not
-        become a traffic outage. Otherwise the two decisions apply to every
-        level that was required:
-
-        * the client asked for the place: a contradicted level is refused
-          unless the vendor's claim is trusted over the evidence, and an open
-          one is refused when unknown exits are;
-        * the vendor promised it: refusing contradictions holds the vendor
-          to that exact place, as above; routing on the evidence holds the
-          exit to the connector's declared countries (``allowed``) instead,
-          and to nothing when it declares none, so a placed exit anywhere in
-          the list serves; trusting the vendor verifies nothing but, when
-          unknown exits are refused, placement;
+        A client's requirement is exact, as is a vendor's promise when contradictions are refused; else a promise holds
+        the exit to the declared countries (``allowed``).
         """
         if self.expected is None or self.ip is None:
             return True
@@ -134,7 +96,8 @@ class PreflightVerdict(NamedTuple):
             if contradicted:
                 return rules.contradicted == ContradictedAction.VENDOR
             return not (refuse_unknown and self.open_levels)
-        # The vendor's promise, with the vendor not held to its exact word.
+        # The vendor's promise, with the vendor not held to its exact word: a
+        # trusted vendor only needs the exit placed when unknown exits are refused.
         if refuse_unknown and unplaced:
             return False
         if rules.contradicted == ContradictedAction.VENDOR or unplaced:
@@ -210,42 +173,40 @@ SKIP = PreflightVerdict(ok=True, expected=None, observed=None, ip=None, reason="
 
 
 class PreflightChecker:
-    """Runs and caches per-proxy exit verification."""
+    """Runs and caches per-proxy exit verification on a gateway.
 
-    def __init__(self, geo_service: GeoService, redis_client: RedisClient | None) -> None:
+    Args:
+        redis_client: the verdict cache; None runs without one.
+    """
+
+    def __init__(
+        self,
+        geo_service: GeoService,
+        redis_client: RedisClient | None,
+        *,
+        sightings: SightingPublisher,
+        exclusions: LocalExclusions,
+    ) -> None:
         self._geo_service = geo_service
         self._redis = redis_client
+        self._sightings = sightings
+        self._exclusions = exclusions
         self.checks = 0
         self.rejections = 0
 
-    # --- lifecycle -----------------------------------------------------------------
-
-    def start(self) -> None:
-        """Listen for exits moving, so a cached verdict never outlives the exit it judged."""
-        exit_ip_changed.connect(self._on_exit_ip_changed)
-
-    def stop(self) -> None:
-        exit_ip_changed.disconnect(self._on_exit_ip_changed)
-
-    async def _on_exit_ip_changed(
-        self, sender: object, proxy_id: str, project_id: str | None, **_: object
-    ) -> None:
-        if project_id:
-            await self.invalidate(project_id, proxy_id)
-
     async def invalidate(self, project_id: str, proxy_id: str) -> None:
-        """Drop the cached verdict for a proxy; the next request through it is verified again.
+        """Drop the cached verdict for a proxy, on every gateway; the next request through it is verified again.
 
-        The cache is keyed by the project owning the proxy, and the key is in
-        Redis, so one instance noticing the change clears it for all of them.
+        A worker that learns of an exit move from anything but preflight drops the same key.
         """
         if self._redis is None:
             return
         key = GEO_PREFLIGHT_KEY.format(project_id=project_id, proxy_id=proxy_id)
         try:
-            await self._redis.client.delete(key)
+            async with self._redis.request_deadline():
+                await self._redis.client.delete(key)
         except Exception as exc:
-            logger.debug("Could not drop cached preflight verdict", proxy_id=proxy_id, error=str(exc))
+            logger.debug("Could not drop cached preflight verdict", proxy_id=proxy_id, error=error_text(exc))
 
     @property
     def max_attempts(self) -> int:
@@ -258,15 +219,7 @@ class PreflightChecker:
     def requirement(requested: LocationTarget | None, proxy: Proxy) -> tuple[LocationTarget | None, str | None]:
         """The location the request requires and who required it; ``(None, None)`` when nothing was asked or promised.
 
-        The request's own ``-cc-``, ``-st-`` and ``-city-`` are the
-        requirement, and a client that named the country is held to what it
-        named, not to a state or city the vendor rendered. A client that named
-        nothing has no expectation: on a pooled slot there is then nothing to
-        verify, since the slot's own claim is judged on the row by every
-        sighting; on a dynamic gateway the place rendered into the vendor
-        session (``geo``, ``geo_state``, ``geo_city``) stands in as the
-        vendor's promise. The attributed location is never used: it is what
-        was observed, not what was required.
+        For a client that named nothing, a dynamic gateway's rendered place stands in as the vendor's promise.
         """
         target = requested or None
         # The parser keeps a -cc- value that is not a country code as typed so
@@ -290,13 +243,9 @@ class PreflightChecker:
 
     @classmethod
     def applies(cls, project: Project, requested: LocationTarget | None, proxy: Proxy) -> bool:
-        """Whether this request needs a preflight at all.
+        """Whether this request needs a preflight at all: always on a dynamic gateway, on a pooled slot when a place was named.
 
-        Only rows whose exit the vendor can move are checked. A dynamic row
-        always applies once preflight is on: even with nothing to verify its
-        requests are sampled for attribution (``check`` decides). A pooled
-        session slot applies when the client named a place. A fixed exit
-        never does: discovery placed it and health checks re-read it.
+        A fixed exit never does, since discovery placed it and health checks re-read it.
         """
         if not project.location_preflight:
             return False
@@ -329,40 +278,13 @@ class PreflightChecker:
         requested: LocationTarget | None,
         allowed: Sequence[str] = (),
     ) -> PreflightVerdict:
-        """Verify ``proxy``'s exit against the expected location.
+        """Verify the exit of ``proxy``, its credentials resolved, against the location the request requires.
 
-        ``allowed`` is the connector's declared countries, which decide, with
-        the project's rules, whether a verdict on the vendor's promise can
-        refuse at all, and so whether a session-less dynamic request is
-        sampled or always verified.
+        A verdict is cached per project and proxy (and per vendor session and place on a dynamic gateway) for the
+        session TTL, and the echo of a pooled slot is also a sighting for the workers.
 
-        ``proxy`` must carry resolved credentials (the echo request goes
-        through it). Returns a verdict; whether it refuses the request is
-        ``PreflightVerdict.acceptable`` under the project's location rules.
-
-        The expected country is handed to the resolver as the claim, so it
-        is judged under the project's source policy and conflict rule
-        exactly as attribution judges a vendor's claim: contradicted when the
-        independent sources say otherwise, no verdict when they disagree
-        among themselves. What was observed is the independent answer, never
-        the claim, whatever the policy lets win. A state or city is confirmed
-        when any loaded database agrees and contradicted when every database
-        that places the IP at that level says somewhere else; with no
-        city-level database loaded there is no verdict below the country.
-
-        A verdict is cached per project and proxy for the session TTL, since a
-        vendor session keeps its exit for about that long. The cache is
-        dropped early when a health check or refresh sees the proxy exiting
-        from a different IP (``exit_ip_changed``), so a vendor rotating the
-        exit mid-session costs at most one health check interval of trust.
-
-        For a pooled slot the echo is also a sighting of the slot's exit: it
-        is published on ``exit_ip_observed`` before the verdict is cached, so
-        the attributor judges the slot's own claim, writes the row, records
-        the one observation and, when the exit moved, drops this slot's stale
-        cache before the fresh verdict is stored. A dynamic gateway's exit
-        belongs to the vendor session alone, so its sighting is recorded here
-        and nothing is written on the row.
+        Args:
+            allowed: the connector's declared countries, which with the rules decide whether a vendor's promise can refuse.
         """
         expected, required_by = self.requirement(requested, proxy)
         dynamic = is_dynamic_gateway(proxy)
@@ -401,6 +323,7 @@ class PreflightChecker:
             proxy.url,
             log_context={"proxy_id": proxy.id, "project_id": project.id, "preflight": True},
         )
+        observed_at = utc_now()
         if ip is None:
             verdict = PreflightVerdict(
                 ok=True, expected=expected, observed=None, ip=None, reason="echo request failed", required_by=required_by
@@ -454,6 +377,7 @@ class PreflightChecker:
         if dynamic:
             self._geo_service.record(
                 IpObservation(
+                    observed_at=observed_at,
                     proxy_id=proxy.id,
                     connector_id=proxy.connector_id,
                     project_id=project.id,
@@ -472,24 +396,11 @@ class PreflightChecker:
                     state_conflict=resolution.state_conflict,
                     city_conflict=resolution.city_conflict,
                     candidates=resolution.compact_candidates(),
-                    instance_id=self._geo_service._settings.instance_id,
+                    instance_id=self._geo_service.instance_id,
                 )
             )
         else:
-            # The slot's sighting: the attributor judges the slot's own claim,
-            # not the request's, and writes the row.
-            await event_bus.publish(
-                exit_ip_observed,
-                self,
-                proxy_id=proxy.id,
-                ip=ip,
-                source=ObservationSource.PREFLIGHT.value,
-                endpoint_country=endpoint.country if endpoint else None,
-                endpoint_state=endpoint.state if endpoint else None,
-                endpoint_city=endpoint.city if endpoint else None,
-                session_id=session_id,
-                candidates=candidates,
-            )
+            self._sighting(project, proxy, ip, endpoint, session_id=session_id, candidates=candidates, observed_at=observed_at)
         if not ok:
             self.rejections += 1
             # Debug: a refusal is routine under strict location rules, and the
@@ -510,37 +421,77 @@ class PreflightChecker:
             )
         return verdict
 
+    def _sighting(
+        self,
+        project: Project,
+        proxy: Proxy,
+        ip: str,
+        endpoint: LocationTarget | None,
+        *,
+        session_id: str | None,
+        candidates: Sequence[LocationCandidate],
+        observed_at: datetime,
+    ) -> None:
+        """Hand a pooled slot's sighting to the workers, repeats included, retiring the slot here when they will rotate it.
+
+        A copy of the row is judged under the worker's own rules (:meth:`ProxyAttributor.is_repeat`,
+        :meth:`ProxyAttributor.is_refused_slot`); the row itself is never changed, and the worker records the one
+        observation.
+        """
+        if not ProxyAttributor.is_repeat(proxy, ip, ObservationSource.PREFLIGHT):
+            slot = proxy.model_copy(deep=True)
+            self._geo_service.judge(
+                slot,
+                ip,
+                policy=project.source_policy(self._geo_service.default_policy),
+                endpoint=endpoint,
+                candidates=candidates,
+                checked_at=observed_at,
+            )
+            if ProxyAttributor.is_refused_slot(slot, project):
+                self._exclusions.retire(proxy.id)
+        self._sightings.push(
+            SightingMessage(
+                proxy_id=proxy.id,
+                ip=ip,
+                source=ObservationSource.PREFLIGHT,
+                endpoint_country=endpoint.country if endpoint else None,
+                endpoint_state=endpoint.state if endpoint else None,
+                endpoint_city=endpoint.city if endpoint else None,
+                session_id=session_id,
+                candidates=list(candidates),
+                observed_at=observed_at,
+                instance_id=self._geo_service.instance_id,
+            )
+        )
+
     async def _cached(self, key: str) -> PreflightVerdict | None:
+        """The verdict cached under ``key``; None when there is none, or Redis did not answer within the deadline."""
         if self._redis is None:
             return None
         try:
-            raw = await self._redis.client.get(key)
+            async with self._redis.request_deadline():
+                raw = await self._redis.client.get(key)
         except Exception:
             return None
         return PreflightVerdict.from_json(raw) if raw else None
 
     async def _store(self, key: str, verdict: PreflightVerdict, *, ttl: int) -> None:
+        """Cache ``verdict`` under ``key`` for ``ttl`` seconds; a Redis that does not answer in time keeps none."""
         if self._redis is None:
             return
         try:
-            await self._redis.client.set(key, verdict.to_json(), ex=max(int(ttl), 1))
+            async with self._redis.request_deadline():
+                await self._redis.client.set(key, verdict.to_json(), ex=max(int(ttl), 1))
         except Exception as exc:
-            logger.debug("Could not cache preflight verdict", error=str(exc))
+            logger.debug("Could not cache preflight verdict", error=error_text(exc))
 
     @staticmethod
     def _can_refuse(rules: LocationRules, expected: LocationTarget, required_by: str | None, allowed: Sequence[str]) -> bool:
-        """Whether a verdict on this requirement could refuse under ``rules``; if not, an echo changes nothing.
+        """Whether a verdict on this requirement could refuse under ``rules``, judged on the two worst an echo could give.
 
-        Asked of the acceptance rule itself, on the two worst verdicts the
-        echo could produce: a contradiction at the country, and an exit
-        nothing independent could place. If both pass, nothing can fail.
-
-        One exception by choice: under ``evidence`` the connector's declared
-        countries bound a vendor promise best-effort. The client asked for
-        nothing, the operator set a sampling rate for exactly that traffic,
-        so the list is checked on the requests that are sampled and is no
-        guarantee. ``refuse`` holds the promise exactly and verifies every
-        request, as it always did.
+        By choice, under ``evidence`` a vendor's promise is bound to the connector's declared countries only on the
+        requests that are sampled, so the list decides nothing here.
         """
         if required_by == REQUIRED_BY_VENDOR and rules.contradicted == ContradictedAction.EVIDENCE:
             allowed = ()

@@ -1,28 +1,63 @@
 # Copyright 2026 Octoprox Authors
 # SPDX-License-Identifier: Apache-2.0
 
-"""Pytest configuration and fixtures for Octoprox tests.
+"""Shared fixtures: Postgres and Redis testcontainers, the app of a role whose node a ``TestClient`` runs, and app helpers.
 
-This module provides shared fixtures using testcontainers for PostgreSQL and Redis,
-along with FastAPI test client fixtures for integration testing.
+A test that asks for ``db_session`` or ``redis_client`` starts on empty tables or an empty Redis and leaves them empty,
+but the route tests' api apps (``app_with_lifespan``) leave Postgres as their node wrote it, seeds included.
 """
-from collections.abc import AsyncGenerator, Generator
-from typing import Any
-from unittest.mock import AsyncMock, MagicMock
+import logging
+from collections.abc import AsyncGenerator, Awaitable, Callable, Generator
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, cast
 
 import pytest
+from alembic.script import ScriptDirectory
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from sqlalchemy import text
+from sqlalchemy import create_engine, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
-from testcontainers.postgres import PostgresContainer
-from testcontainers.redis import RedisContainer
+from testcontainers.community.postgres import PostgresContainer
+from testcontainers.community.redis import RedisContainer
 
 from api.core.config import Settings
-from api.db.redis import RedisClient
+from api.core.roles import JobKind, Role
+from api.db.migrations import MIGRATIONS_DIR, run_migrations
+from api.db.redis import JOB_STREAM_KEY, RedisClient
+from api.db.streams import ChangeLog
+
+if TYPE_CHECKING:
+    from api.roles.api import ApiRuntime
+
+# Every table a test may write, emptied by ``db_session`` before and after its
+# test. CASCADE also empties the tables that reference these (project_metrics).
+# One statement, not one per table: one per table took about 170 ms, the single
+# statement about 75 ms.
+_TRUNCATE_TABLES = text(
+    "TRUNCATE TABLE "
+    "metric_totals, metric_flushes, proxy_metrics, connector_metrics, host_metrics, failure_metrics, system_metrics, "
+    "proxies, connectors, credentials, projects, api_tokens, auth_identities, auth_providers, users, "
+    "provider_audit_log, provider_descriptors, ip_observations, connector_exit_ips, geo_database_blobs, "
+    "geo_databases, geo_settings, tunnel_peer_metrics, wireguard_peers, wireguard_settings, "
+    "openvpn_peers, openvpn_settings "
+    "CASCADE"
+)
 
 # =============================================================================
 # Session-scoped containers (shared across all tests for performance)
 # =============================================================================
+
+@pytest.fixture(scope="session", autouse=True)
+def _detach_log_handlers_at_exit() -> Generator[None, None, None]:
+    """Detach the app's log handlers when the session ends, so no record logged at exit prints "--- Logging error ---".
+
+    They write to pytest's capture, closed by then, and urllib3 logs testcontainers' removal of its reaper at exit.
+    """
+    yield
+    root = logging.getLogger()
+    for handler in list(root.handlers):
+        root.removeHandler(handler)
+
 
 @pytest.fixture(scope="session")
 def postgres_container() -> Generator[PostgresContainer, None, None]:
@@ -46,6 +81,48 @@ def test_redis_url(redis_container: RedisContainer) -> str:
     return f"redis://{host}:{port}/0"
 
 
+def _database_settings(postgres_container: PostgresContainer) -> dict[str, Any]:
+    """The settings that point at the test Postgres container."""
+    return {
+        "db_host": postgres_container.get_container_host_ip(),
+        "db_port": int(postgres_container.get_exposed_port(5432)),
+        "db_user": postgres_container.username,
+        "db_password": postgres_container.password,
+        "db_name": postgres_container.dbname,
+    }
+
+
+@pytest.fixture(scope="session")
+def migrated_database(postgres_container: PostgresContainer) -> str:
+    """The test database brought to head once per session, without starting an app; its sync URL.
+
+    Migration tests that go down a revision come back up to head before they end.
+    """
+    url = Settings(**_database_settings(postgres_container)).database_url_sync
+    run_migrations(url)
+    return url
+
+
+# The newest revision of the migrations, which a database at head records.
+HEAD = ScriptDirectory(str(MIGRATIONS_DIR)).get_current_head()
+
+
+def tables(url: str) -> set[str]:
+    """The tables of the database at ``url``, a sync URL."""
+    engine = create_engine(url)
+    try:
+        with engine.connect() as conn:
+            return set(conn.execute(text("SELECT tablename FROM pg_tables WHERE schemaname = 'public'")).scalars())
+    finally:
+        engine.dispose()
+
+
+@pytest.fixture(scope="session")
+def test_data_dir(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """Where test apps cache IP database files and keep the MITM CA, instead of data/ in the working tree."""
+    return tmp_path_factory.mktemp("data")
+
+
 # =============================================================================
 # Test Settings
 # =============================================================================
@@ -55,14 +132,11 @@ def test_redis_url(redis_container: RedisContainer) -> str:
 def test_settings(
     test_redis_url: str,
     postgres_container: PostgresContainer,
+    test_data_dir: Path,
 ) -> Settings:
     """Create test settings pointing to testcontainers."""
     return Settings(
-        db_host=postgres_container.get_container_host_ip(),
-        db_port=int(postgres_container.get_exposed_port(5432)),
-        db_user=postgres_container.username,
-        db_password=postgres_container.password,
-        db_name=postgres_container.dbname,
+        **_database_settings(postgres_container),
         redis_url=test_redis_url,
         auth_username="testadmin",
         auth_password="testpassword123",
@@ -74,6 +148,9 @@ def test_settings(
         system_metrics_interval=0,  # No background system snapshots in tests
         proxy_port=0,  # Use port 0 to let OS assign a free port
         geo_lookup_enabled=False,  # No requests through proxies in tests
+        geo_cache_dir=str(test_data_dir / "geo"),
+        tls_mitm_ca_cert_path=str(test_data_dir / "ca" / "octoprox-ca.crt"),
+        tls_mitm_ca_key_path=str(test_data_dir / "ca" / "octoprox-ca.key"),
     )
 
 
@@ -85,12 +162,9 @@ def test_settings(
 @pytest.fixture
 async def db_engine(
     test_settings: Settings,
-    async_client: TestClient,
+    migrated_database: str,
 ) -> AsyncGenerator[Any, None]:
-    """Create an async database engine for tests.
-
-    Depends on async_client to ensure migrations have run via the app's lifespan.
-    """
+    """Create an async database engine for tests, on the migrated schema (no app is started)."""
     engine = create_async_engine(
         test_settings.database_url,
         echo=False,
@@ -118,41 +192,22 @@ async def db_session(
     db_session_factory: async_sessionmaker[AsyncSession],
     db_engine: Any,
 ) -> AsyncGenerator[AsyncSession, None]:
-    """Create a database session with automatic cleanup after each test."""
+    """A database session on empty tables, emptied again after the test.
+
+    Emptied first too, because the app fixtures leave the rows their nodes
+    wrote (see the module docstring), and a test must not depend on what
+    ran before it.
+    """
+    async with db_engine.begin() as conn:
+        await conn.execute(_TRUNCATE_TABLES)
     async with db_session_factory() as session:
         yield session
         # Rollback any uncommitted changes
         await session.rollback()
 
-    # Clean up all tables after each test
+    # Clean up all tables after each test.
     async with db_engine.begin() as conn:
-        # Use CASCADE to handle foreign key constraints
-        await conn.execute(text("TRUNCATE TABLE proxy_metrics CASCADE"))
-        await conn.execute(text("TRUNCATE TABLE connector_metrics CASCADE"))
-        await conn.execute(text("TRUNCATE TABLE host_metrics CASCADE"))
-        await conn.execute(text("TRUNCATE TABLE failure_metrics CASCADE"))
-        await conn.execute(text("TRUNCATE TABLE system_metrics CASCADE"))
-        await conn.execute(text("TRUNCATE TABLE proxies CASCADE"))
-        await conn.execute(text("TRUNCATE TABLE connectors CASCADE"))
-        await conn.execute(text("TRUNCATE TABLE credentials CASCADE"))
-        await conn.execute(text("TRUNCATE TABLE projects CASCADE"))
-        await conn.execute(text("TRUNCATE TABLE api_tokens CASCADE"))
-        await conn.execute(text("TRUNCATE TABLE auth_identities CASCADE"))
-        await conn.execute(text("TRUNCATE TABLE auth_providers CASCADE"))
-        await conn.execute(text("TRUNCATE TABLE users CASCADE"))
-        await conn.execute(text("TRUNCATE TABLE provider_audit_log CASCADE"))
-        await conn.execute(text("TRUNCATE TABLE provider_descriptors CASCADE"))
-        await conn.execute(text("TRUNCATE TABLE ip_observations CASCADE"))
-        await conn.execute(text("TRUNCATE TABLE connector_exit_ips CASCADE"))
-        await conn.execute(text("TRUNCATE TABLE geo_database_blobs CASCADE"))
-        await conn.execute(text("TRUNCATE TABLE geo_databases CASCADE"))
-        await conn.execute(text("TRUNCATE TABLE geo_settings CASCADE"))
-        await conn.execute(text("TRUNCATE TABLE tunnel_peer_metrics CASCADE"))
-        await conn.execute(text("TRUNCATE TABLE wireguard_peers CASCADE"))
-        await conn.execute(text("TRUNCATE TABLE wireguard_settings CASCADE"))
-        await conn.execute(text("TRUNCATE TABLE openvpn_peers CASCADE"))
-        await conn.execute(text("TRUNCATE TABLE openvpn_settings CASCADE"))
-        await conn.commit()
+        await conn.execute(_TRUNCATE_TABLES)
 
 
 # =============================================================================
@@ -162,13 +217,38 @@ async def db_session(
 
 @pytest.fixture
 async def redis_client(test_redis_url: str) -> AsyncGenerator[RedisClient, None]:
-    """Create a Redis client connected to the test container."""
+    """A Redis client connected to the test container, on an empty Redis that is flushed again after the test."""
     client = RedisClient(test_redis_url)
     await client.connect()
+    await client.client.flushdb()
     yield client
     # Clean up all keys after each test
     await client.client.flushdb()
     await client.close()
+
+
+async def queued_job_keys(redis_client: RedisClient, kind: JobKind) -> list[str]:
+    """The ``key`` of each entry on ``kind``'s job stream, oldest first: the runs asked for and not completed yet."""
+    entries = await redis_client.client.xrange(JOB_STREAM_KEY.format(kind=kind))
+    return [fields.get("key", "") for _entry_id, fields in entries]
+
+
+class Clock:
+    """A stand-in for a module's ``time``, set by a test: ``time()`` reads ``now``, the epoch seconds the test moves."""
+
+    def __init__(self, now: float) -> None:
+        self.now = now
+
+    def time(self) -> float:
+        return self.now
+
+
+@pytest.fixture
+async def change_log(redis_client: RedisClient) -> AsyncGenerator[ChangeLog, None]:
+    """A change log on the test Redis, closed after the test so no retry outlives it; it writes ``CHANGES_STREAM_KEY``."""
+    log = ChangeLog(redis_client)
+    yield log
+    await log.close()
 
 
 # =============================================================================
@@ -176,69 +256,94 @@ async def redis_client(test_redis_url: str) -> AsyncGenerator[RedisClient, None]
 # =============================================================================
 
 
-@pytest.fixture
-def mock_proxy_manager() -> MagicMock:
-    """Create a mock ProxyManager for isolated route testing."""
-    manager = MagicMock()
-    manager.projects = []
-    manager.proxies = []
-    manager.healthy_proxies = []
-    manager.credentials = []
-    manager.connectors = []
-    manager.get_project = MagicMock(return_value=None)
-    manager.get_proxy = MagicMock(return_value=None)
-    manager.get_credential = MagicMock(return_value=None)
-    manager.get_connector = MagicMock(return_value=None)
-    manager.add_project = AsyncMock()
-    manager.update_project = AsyncMock()
-    manager.remove_project = AsyncMock(return_value=True)
-    manager.add_credential = AsyncMock()
-    manager.update_credential = AsyncMock()
-    manager.remove_credential = AsyncMock(return_value=True)
-    manager.add_connector = AsyncMock()
-    manager.update_connector = AsyncMock()
-    manager.remove_connector = AsyncMock(return_value=True)
-    manager.add_proxy = AsyncMock()
-    manager.update_proxy = AsyncMock()
-    manager.remove_proxy = AsyncMock(return_value=True)
-    return manager
+def _use_settings(settings: Settings) -> None:
+    """Point the modules that read the module-global ``settings`` at ``settings``.
 
-
-@pytest.fixture
-def app_with_lifespan(test_settings: Settings) -> Any:
-    """Create a FastAPI app with full lifespan."""
+    ``create_app`` passes its settings to everything it builds, but a few
+    modules still read the global: the auth dependency (the JWT secret),
+    ``get_db`` (whose engine must be the node's, one per process), and the
+    auth and sign-in routes.
+    """
     import api.core.auth
     import api.core.config
-    import api.core.proxy_server
     import api.db.session
-    import api.main
     import api.routes.auth
-    import api.routes.projects
     import api.routes.sso
-    import api.routes.system
+
+    api.core.config.settings = settings
+    api.core.auth.settings = settings
+    api.db.session.settings = settings
+    api.routes.auth.settings = settings
+    api.routes.sso.settings = settings
+
+
+@pytest.fixture
+def app_role() -> Role:
+    """The role the app fixtures boot: ``api``, as route tests run (no worker; they assert the jobs a write asks for).
+
+    A test module overrides this fixture to boot another role.
+    """
+    return Role.API
+
+
+@pytest.fixture
+def app_with_lifespan(
+    test_settings: Settings, app_role: Role, redis_client: RedisClient
+) -> Generator[FastAPI, None, None]:
+    """The app of a process of ``app_role`` (``api`` by default) on the test containers; a client's lifespan runs its node.
+
+    Its settings are ``test_settings`` itself, so a test that changes one changes what the app reads, and Redis is
+    flushed once the node has stopped.
+    """
     from api.db.session import get_async_session_factory
     from api.main import create_app
 
-    # Clear the session factory cache to avoid event loop issues between tests
+    # A fresh engine per app: each TestClient runs the app on its own event loop.
+    get_async_session_factory.cache_clear()
+    test_settings.role = app_role
+    _use_settings(test_settings)
+    yield create_app(test_settings)
     get_async_session_factory.cache_clear()
 
-    # Patch settings in all modules that import it at module load time
-    api.core.config.settings = test_settings
-    api.main.settings = test_settings
-    api.core.proxy_server.settings = test_settings
-    api.routes.auth.settings = test_settings
-    api.routes.projects.settings = test_settings
-    api.routes.sso.settings = test_settings
-    api.core.auth.settings = test_settings
-    api.db.session.settings = test_settings
-    api.routes.system.settings = test_settings
 
-    app = create_app()
+@pytest.fixture
+def build_app(
+    test_settings: Settings, db_session: AsyncSession, redis_client: RedisClient
+) -> Generator[Callable[..., FastAPI], None, None]:
+    """Builds the app of any role from a copy of the test settings with overrides, to run under ``with TestClient(app)``.
 
-    yield app
+    For example ``build_app(Role.GATEWAY, proxy_port=0)``; Postgres and Redis are emptied before the test's first node
+    starts and once its nodes have stopped, so a test asks for this, not also for ``app_with_lifespan``.
+    """
+    from api.db.session import get_async_session_factory
+    from api.main import create_app
 
-    # Cleanup
+    def build(role: Role, **overrides: Any) -> FastAPI:
+        settings = test_settings.model_copy(update={"role": role, **overrides})
+        get_async_session_factory.cache_clear()
+        _use_settings(settings)
+        return create_app(settings)
+
+    yield build
     get_async_session_factory.cache_clear()
+
+
+def on_app_loop[T](client: TestClient, call: Callable[..., Awaitable[T]], *args: Any) -> T:
+    """``call(*args)`` awaited on the event loop the client's app runs on, where the node's clients live."""
+    assert client.portal is not None, "use the TestClient as a context manager"
+    return client.portal.call(call, *args)
+
+
+def api_runtime(client: TestClient) -> "ApiRuntime":
+    """The api runtime of the app the client serves."""
+    runtime = client.app.state.node.api  # type: ignore[attr-defined]
+    assert runtime is not None
+    return cast("ApiRuntime", runtime)
+
+
+def queued_jobs(client: TestClient, kind: JobKind) -> set[str]:
+    """The keys of ``kind`` with a run asked for and not taken yet in the app's Redis: those on its job stream."""
+    return set(on_app_loop(client, queued_job_keys, api_runtime(client).redis_client, kind))
 
 
 @pytest.fixture

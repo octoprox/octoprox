@@ -1,15 +1,7 @@
 # Copyright 2026 Octoprox Authors
 # SPDX-License-Identifier: Apache-2.0
 
-"""How far behind this instance's event loop runs.
-
-Every await waits for the loop to come back round to it. On a loop pinned at
-a full core that wait grows from microseconds to a large fraction of a second,
-and a job made of many sequential awaits (a Redis SCAN walk, a batch of
-statements) stretches with it: a full reload that takes a second when idle
-has taken six minutes at peak. A timer shows the wait directly: one asked to
-fire in half a second fires late by what every other await is paying.
-"""
+"""How far behind this process's event loop runs, read off how late a timer fires: the wait every await pays."""
 
 from __future__ import annotations
 
@@ -27,8 +19,10 @@ logger = structlog.get_logger()
 SAMPLE_SECONDS = 0.5
 # One reading per window: the worst and the average lateness in it.
 WINDOW_SECONDS = 60.0
-# A window this late at worst is logged as a warning. A lease is refreshed
-# every 2 s and lapses after 5 s, so a loop a second behind is heading there.
+# A window this late at worst is logged as a warning. A loop that keeps up
+# fires its timers within milliseconds, so a timer a second late means work
+# is holding the loop, and every await, deadline and interval in the process
+# slips by as much.
 WARN_MS = 1000.0
 
 
@@ -56,6 +50,7 @@ class LoopLagMonitor:
         self.last: LoopLagReading | None = None
 
     async def run(self) -> None:
+        """Monitor loop: samples until cancelled, keeping the last full window's reading in ``last``."""
         # One cycle per window in the system view, its duration the window's
         # worst lag: the row keeps the lifetime worst and average next to the
         # live reading, and says the monitor is alive.
@@ -86,8 +81,3 @@ class LoopLagMonitor:
             window_started = now
             worst = total = 0.0
             samples = 0
-
-
-# Process-wide, like ``job_stats``: one loop per process, and the system view
-# reads the reading without being handed the manager that runs the monitor.
-loop_lag = LoopLagMonitor()

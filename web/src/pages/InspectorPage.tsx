@@ -9,7 +9,7 @@ import { fetchMitmRequests, clearMitmRequests, MitmRequestRecord } from '../api/
 import { useProject } from '../contexts/ProjectContext'
 import { useAuth } from '../contexts/AuthContext'
 import { useToast } from '../contexts/ToastContext'
-import { DataTable } from '../components/DataTable'
+import { DataTable, type DataTableFeatures } from '../components/DataTable'
 import { Page, EmptyState } from '../components/layout/Page'
 import { MethodBadge, StatusCodeBadge, RequestPanel } from '../components/mitm/RequestDetail'
 import { formatBytes, formatTime } from '../utils/format'
@@ -41,7 +41,7 @@ export default function InspectorPage() {
     onError: (e: Error) => { setConfirmClear(false); toast.show(e.message || 'Failed to clear requests', 'error') },
   })
 
-  const columns: ColumnDef<MitmRequestRecord, unknown>[] = useMemo(() => [
+  const columns: ColumnDef<DataTableFeatures, MitmRequestRecord, unknown>[] = useMemo(() => [
     {
       accessorKey: 'timestamp',
       header: 'Time',

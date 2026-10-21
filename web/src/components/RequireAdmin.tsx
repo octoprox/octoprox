@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { ReactNode } from 'react'
-import { Navigate } from 'react-router-dom'
+import { Navigate } from 'react-router'
 import { useAuth } from '../contexts/AuthContext'
 
 export default function RequireAdmin({ children }: { children: ReactNode }) {

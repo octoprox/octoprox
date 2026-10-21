@@ -120,7 +120,12 @@ export function ProviderBuilder({ existing, initialSpec, onClose, onSaved, onDel
   const requestClose = () => { if (dirty) setConfirmDiscard(true); else onClose() }
   const discardAndClose = () => { clearDraft(); setConfirmDiscard(false); onClose() }
 
-  const invalidate = () => queryClient.invalidateQueries({ queryKey: ['providers'] })
+  // A save answers with the provider as stored, the document GET /providers/{id} serves. It is cached as is, so
+  // the panel that opens next and the next edit start from what was saved; the catalog is listed again.
+  const remember = (p: ProviderDetail) => {
+    queryClient.setQueryData(['provider', p.id], p)
+    queryClient.invalidateQueries({ queryKey: ['providers'] })
+  }
 
   const validateMutation = useMutation({
     mutationFn: () => validateProviderSpec(spec),
@@ -130,7 +135,7 @@ export function ProviderBuilder({ existing, initialSpec, onClose, onSaved, onDel
 
   const saveMutation = useMutation({
     mutationFn: (confirmedHosts: string[]) => (isEdit ? updateProvider(existing!.id, { spec, confirmed_hosts: confirmedHosts }) : createProvider(spec, confirmedHosts)),
-    onSuccess: (p) => { invalidate(); clearDraft(); setPendingHosts(null); onSaved(p) },
+    onSuccess: (p) => { remember(p); clearDraft(); setPendingHosts(null); onSaved(p) },
     onError: (e: Error) => {
       const conflict = isHostConfirmationError(e)
       if (conflict) { setPendingHosts(conflict.egress_hosts); setHostsAcknowledged(false); return }
@@ -142,11 +147,11 @@ export function ProviderBuilder({ existing, initialSpec, onClose, onSaved, onDel
   const importMutation = useMutation({
     // First attempt without confirmed hosts: the 409 tells us which hosts to confirm.
     mutationFn: (yaml: string) => importProviderYaml(yaml, [], isEdit),
-    onSuccess: (p) => { invalidate(); clearDraft(); onSaved(p) },
+    onSuccess: (p) => { remember(p); clearDraft(); onSaved(p) },
     onError: (e: Error) => {
       const conflict = isHostConfirmationError(e)
       if (conflict && yamlDraft != null) {
-        importProviderYaml(yamlDraft, conflict.egress_hosts, isEdit).then((p) => { invalidate(); clearDraft(); onSaved(p) }).catch((err: Error) => setError(err.message))
+        importProviderYaml(yamlDraft, conflict.egress_hosts, isEdit).then((p) => { remember(p); clearDraft(); onSaved(p) }).catch((err: Error) => setError(err.message))
         return
       }
       setError(e.message || 'Import failed')
@@ -282,7 +287,7 @@ export function ProviderBuilder({ existing, initialSpec, onClose, onSaved, onDel
           confirmDisabled={!hostsAcknowledged}
         >
           <ul className="space-y-1 mb-3">
-            {pendingHosts.map((h) => <li key={h} className="font-mono text-xs bg-surface-raised rounded px-2 py-1">{h}</li>)}
+            {pendingHosts.map((h) => <li key={h} className="font-mono text-xs bg-surface-raised rounded-sm px-2 py-1">{h}</li>)}
           </ul>
           <Checkbox label="I understand credentials will be sent to these hosts" checked={hostsAcknowledged} onChange={setHostsAcknowledged} />
         </ConfirmDialog>

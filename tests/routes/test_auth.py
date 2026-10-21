@@ -3,6 +3,8 @@
 
 """Tests for authentication endpoints."""
 
+import json
+
 from starlette.testclient import TestClient
 
 
@@ -38,6 +40,20 @@ class TestAuthEndpoints:
         assert "access_token" in data
         assert data["token_type"] == "bearer"
         assert "expires_in" in data
+
+    def test_login_refuses_a_json_body_sent_without_a_content_type(
+        self,
+        async_client: TestClient,
+        test_settings,
+    ) -> None:
+        """FastAPI reads a body as JSON only under a JSON Content-Type; without one the body is not a login."""
+        response = async_client.post(
+            "/api/v1/auth/login",
+            content=json.dumps({"username": test_settings.auth_username, "password": test_settings.auth_password}),
+        )
+
+        assert response.status_code == 422
+        assert [error["loc"] for error in response.json()["detail"]] == [["body"]]
 
     def test_login_invalid_credentials(
         self,

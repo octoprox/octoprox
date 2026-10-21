@@ -80,43 +80,39 @@ class ConflictRule(StrEnum):
 class ContradictedAction(StrEnum):
     """Per project: what to do when the independent sources agree against the vendor's claim.
 
-    ``evidence`` routes the proxy on where the databases or the echo put the
-    exit. ``vendor`` routes it on the claim anyway and only shows the
-    contradiction. ``refuse`` skips the proxy, and replaces it when it is a
-    pooled session slot. At preflight, when the client named a place, a
-    contradicted exit is refused unless the vendor is trusted; when the
-    client named nothing, ``evidence`` holds the exit to the connector's
-    declared countries, ``refuse`` to the vendor's exact promise.
+    At preflight a contradicted exit is refused where the client named a place, unless the vendor is trusted.
     """
 
+    # Routes the proxy on where the databases or the echo put the exit; at preflight with no place named, the exit is
+    # held to the connector's declared countries.
     EVIDENCE = "evidence"
+    # Routes it on the claim, and only shows the contradiction.
     VENDOR = "vendor"
+    # Skips it, replacing a pooled session slot; at preflight with no place named, the exit is held to the vendor's
+    # exact promise.
     REFUSE = "refuse"
 
 
 class UnknownAction(StrEnum):
-    """Per project: what to do when nothing independent places the exit.
+    """Per project: what to do when nothing independent places the exit (an open verdict).
 
-    An open verdict: no database knows the IP, or the databases disagree
-    with each other under ``consensus``. ``vendor`` routes on the vendor's
-    word; ``refuse`` skips the proxy until a later sighting places it, and
-    refuses a preflighted request at every level the client named that
-    nothing independent could place.
+    The verdict is open when no database knows the IP, or the databases disagree under ``consensus``.
     """
 
+    # Routes on the vendor's word.
     VENDOR = "vendor"
+    # Skips the proxy until a later sighting places it, and refuses a preflighted request at every level the client
+    # named that nothing independent could place.
     REFUSE = "refuse"
 
 
 class LocationRules(NamedTuple):
     """A project's two location decisions, read together by routing and preflight.
 
-    A country pinned by hand is the operator's word: never open, never
-    overwritten by attribution, and refused only when the project refuses
-    contradictions outright. A row not judged yet is always eligible. See
-    :func:`eligible_under` and ``PreflightVerdict.acceptable``.
+    A country pinned by hand is never open, and a row not judged yet is always eligible.
     """
 
+    # A pin is the operator's word, never overwritten by attribution: refused only under ``REFUSE``.
     contradicted: ContradictedAction = ContradictedAction.EVIDENCE
     unknown: UnknownAction = UnknownAction.VENDOR
 
@@ -172,17 +168,13 @@ def normalize_country(value: Any) -> str | None:
 
 
 class IpLocation(BaseModel):
-    """One database's normalised answer for an IP.
-
-    ``country``, ``state_code`` and ``city`` take part in routing: a
-    request for ``-st-`` or ``-city-`` matches a fixed exit on them (see
-    ``Proxy.location_matches``). ``region`` is the first-level subdivision's
-    name as the database spells it, kept for display; ``state_code`` its ISO
-    3166-2 part (``NY``, ``ON``, ``ENG``), which is what ``-st-`` names.
-    """
+    """One database's normalised answer for an IP: ``country``, ``state_code`` and ``city`` take part in routing."""
 
     country: str | None = None
+    # The first-level subdivision's name as the database spells it, for display.
     region: str | None = None
+    # Its ISO 3166-2 part (``NY``, ``ON``, ``ENG``): what ``-st-`` names, and with the country and the city what
+    # ``Proxy.location_matches`` matches a fixed exit on.
     state_code: str | None = None
     city: str | None = None
     postal_code: str | None = None
@@ -245,40 +237,26 @@ class LocationCandidate(BaseModel):
 
 
 class Resolution(BaseModel):
-    """What the resolver decided for one IP.
+    """What the resolver decided for one IP, per level: the claim, the independent answer, the routing value and a verdict.
 
-    Three countries, one question each:
-
-    * ``claimed_country``: what was promised. The vendor's claim for the
-      exit, or the place a request required when preflight verifies it.
-    * ``observed_country``: what independent evidence found. The first
-      database or endpoint answer; None when only the vendor had an
-      opinion. This is what verification compares against.
-    * ``resolved_country``: the independent answer. The first candidate in
-      ``VALUE_PRECEDENCE`` order with an answer, which is the claim itself
-      only when nothing independent knows. It is what observations record;
-      what a row routes on is this unless the project chose the claim for a
-      contradicted or an open level (``GeoService._attribute``).
-
-    ``country_conflict`` judges the claim by the independent evidence under
-    the conflict rule, never by ``resolved_country``.
-
-    The state and the city are resolved the same way, from the same
-    candidates under the same policy: a vendor's listed city or a ``-city-``
-    request is the claim, databases and endpoints are the evidence, and the
-    policy decides what routing uses. Every level's verdict has the same
-    form: ``country_conflict``, ``state_conflict``, ``city_conflict``.
+    Each verdict judges the claim by the independent evidence under the conflict rule, never by the resolved value.
     """
 
+    # The first candidate in ``VALUE_PRECEDENCE`` order with an answer (the
+    # claim only when nothing independent knows): what observations record.
     resolved_country: str | None = None
     resolved_source: GeoSourceKind | None = None
     resolved_origin: str | None = None
+    # The first independent answer, which verification compares against; None
+    # when only the vendor had an opinion.
     observed_country: str | None = None
     country_conflict: bool | None = None
+    # What was promised: the vendor's claim, or the place a preflighted request required.
     claimed_country: str | None = None
     # The databases' merged record, for display and for the row's ``location``.
     location: IpLocation | None = None
     candidates: list[LocationCandidate] = Field(default_factory=list)
+    # The state and the city, resolved the same way as the country.
     claimed_state: str | None = None
     observed_state: str | None = None
     resolved_state: str | None = None
@@ -309,31 +287,23 @@ VALUE_PRECEDENCE: tuple[GeoSourceKind, ...] = (GeoSourceKind.DATABASE, GeoSource
 class SourcePolicy(BaseModel):
     """How a vendor's claim is judged for one project, and what a contradiction does to the routing value.
 
-    The install keeps a default rule (``GeoSettings.default_policy``); a
-    project may override it on its own row. ``contradicted`` is the
-    project's :class:`ContradictedAction`: under ``vendor`` a contradicted
-    level carries the claim as its routing value instead of the evidence.
-    ``unknown`` is its :class:`UnknownAction`: under ``vendor`` an open level
-    carries the claim too, whether no source placed the exit or the sources
-    disagreed, so "trust the vendor where nothing is settled" means the same
-    on the row as it does for routing. ``city_radius_km`` is how close an
-    independent answer must put the exit to the claimed city to confirm it
-    when the names differ; 0 compares names only, and so does any radius
-    while no GeoNames file is loaded to place the claimed city.
+    The install's default rule (``GeoSettings.default_policy``) applies unless the project overrides it.
     """
 
     conflict_rule: ConflictRule = ConflictRule.CONSENSUS
+    # Under ``vendor``, a contradicted or an open level carries the claim as its routing value.
     contradicted: ContradictedAction = ContradictedAction.EVIDENCE
     unknown: UnknownAction = UnknownAction.VENDOR
+    # How close an independent answer must put the exit to the claimed city to
+    # confirm it when the names differ; 0, or no GeoNames file loaded, compares names only.
     city_radius_km: float = DEFAULT_CITY_RADIUS_KM
 
 
 class GeoSettings(BaseModel):
     """Install-wide attribution settings, edited in the admin panel.
 
-    One typed row (``geo_settings``); the config file's ``geo.defaults`` seeds
-    it on a fresh install. Judgement (when the vendor is contradicted) lives
-    here only as the default projects inherit.
+    One typed row (``geo_settings``), seeded on a fresh install from the config file's ``geo.defaults``, whose judgement
+    of a contradicted vendor is only the default projects inherit.
     """
 
     default_conflict_rule: ConflictRule = ConflictRule.CONSENSUS
@@ -367,8 +337,8 @@ class GeoSettings(BaseModel):
         return SourcePolicy(conflict_rule=self.default_conflict_rule, city_radius_km=self.default_city_radius_km)
 
 
-class GeoDatabaseRecord(BaseModel):
-    """A database the install knows about, as stored in Postgres or named in the config."""
+class GeoDatabaseInfo(BaseModel):
+    """A database the install knows about, as anyone signed in may see it: everything but its download credentials."""
 
     id: str = Field(default_factory=lambda: str(uuid4()))
     name: str
@@ -396,7 +366,6 @@ class GeoDatabaseRecord(BaseModel):
     # Scheduled download (source=url).
     update_url: str | None = None
     update_interval_hours: int = 0
-    update_auth: dict[str, Any] = Field(default_factory=dict)
     # A paused schedule keeps its URL and interval; only a manual refresh downloads.
     update_paused: bool = False
     last_update_at: datetime | None = None
@@ -407,12 +376,20 @@ class GeoDatabaseRecord(BaseModel):
     updated_at: datetime = Field(default_factory=utc_now)
 
 
+class GeoDatabaseRecord(GeoDatabaseInfo):
+    """A database as stored in Postgres or named in the config, download credentials included."""
+
+    # What the scheduled download authenticates with at the vendor (a
+    # username and password, or a token). Read by the downloads only: the API
+    # answers with GeoDatabaseInfo and says whether these are set.
+    update_auth: dict[str, Any] = Field(default_factory=dict)
+
+
 class IpObservation(BaseModel):
     """One time an IP was seen behind a proxy, with what everyone said about it.
 
-    Produced on the request and worker paths, buffered in-process, batched
-    through Redis and written to Postgres by the leader. Never written
-    synchronously on the path that produced it.
+    Produced on the request and worker paths, buffered in-process, appended to the observations stream and written to
+    Postgres by the workers' ingest, never synchronously on the path that produced it.
     """
 
     observed_at: datetime = Field(default_factory=utc_now)
@@ -444,12 +421,7 @@ JUDGEMENT_SOURCE = "reattribute"
 class ExitJudgement(BaseModel):
     """A re-judgement of an exit already on record, after the evidence changed.
 
-    Produced by re-attribution: no request was made and nothing was sighted,
-    the IP already on the proxy was resolved again against the current
-    databases. It travels the same Redis list as observations and the flusher
-    applies it to the exit row's claim, resolution and verdict only. It is not
-    a log row, does not count as a hand-out and does not move first or last
-    seen.
+    The ingest applies it to the exit row's claim, resolution and verdict only: no log row, hand-out or move of its times.
     """
 
     kind: Literal["judgement"] = "judgement"
@@ -470,6 +442,18 @@ class ExitJudgement(BaseModel):
     state_conflict: bool | None = None
     city_conflict: bool | None = None
     instance_id: str = ""
+
+
+class ExitCoverage(BaseModel):
+    """How much of a dynamic-sessions connector's traffic these numbers can see; absent where health checks see exits.
+
+    Only preflight sees a dynamic connector's exits, so below 100 percent the session-less figures are undercounts.
+    """
+
+    dynamic: bool = True
+    # Off: preflight sees none of its exits; only Detect or a plugin records them.
+    preflight_on: bool
+    sampled_percent: int
 
 
 class LoadedDatabase(BaseModel):
@@ -526,24 +510,7 @@ INDEPENDENT_SOURCES = (GeoSourceKind.DATABASE.value, GeoSourceKind.ENDPOINT.valu
 def eligible_under(rules: LocationRules, metadata: dict[str, Any], target: LocationTarget | None = None) -> bool:
     """Whether the verdicts written on a proxy row let the project route to it for ``target``.
 
-    The country is judged for every request. A state or city is judged only
-    when ``target`` names one, since nothing else matches on it, and only
-    when the row carries a value or a pin at that level: a dynamic-sessions
-    gateway has none (the vendor renders the place per request and preflight
-    judges it) and a fixed exit without one fails ``Proxy.location_matches``
-    anyway. A row not judged yet (a slot provisioned seconds ago, before its
-    first health check) is in, so that on-demand provisioning and a fresh
-    pool stay routable. Rows written before the verdict was stored carry
-    only the flag and read as judged by it alone.
-
-    A contradicted level is refused under ``ContradictedAction.REFUSE``, and
-    under ``EVIDENCE`` when its routing value is a value the vendor supplied
-    rather than the evidence, since routing on the evidence is then
-    impossible. A pin is the exception: the operator placed that row
-    deliberately and attribution never overwrites it, so it is refused only
-    under ``REFUSE`` and shown as contradicted otherwise. An open level, and
-    a judged row that nothing independent could place, are refused under
-    ``UnknownAction.REFUSE``, except a pin, which is never open.
+    The country is always judged, a state or city only when ``target`` names it; a row not judged yet is in.
     """
     judged = META_LOCATION_CHECKED_AT in metadata or META_LOCATION_CONFLICT in metadata
     verdict = metadata.get(META_LOCATION_VERDICT)

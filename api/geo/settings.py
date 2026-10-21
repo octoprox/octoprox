@@ -1,16 +1,9 @@
 # Copyright 2026 Octoprox Authors
 # SPDX-License-Identifier: Apache-2.0
 
-"""The install-wide attribution settings row, cached per instance.
+"""The install-wide attribution settings row, cached per process, seeded from the config file on a fresh install.
 
-The config file seeds a fresh install (``geo.defaults`` plus the older
-``proxy.geo_lookup`` echo settings, so existing installs keep their endpoint).
-After that the admin panel owns the row: a save writes it and publishes
-``geo_settings_changed``; every instance reloads it.
-
-Per-project judgement (which source wins, when a vendor is contradicted) is
-not here: it is on the project row, with :attr:`GeoSettings.default_policy`
-as what a project inherits.
+The api and workers read it again on its change entry, the controller adopts its compile's copy and a gateway the feed's.
 """
 
 from __future__ import annotations
@@ -45,7 +38,11 @@ def defaults_from_config(settings: Settings) -> GeoSettings:
 
 
 class GeoSettingsStore:
-    """Read-through cache of the ``geo_settings`` row."""
+    """Read-through cache of the ``geo_settings`` row.
+
+    Args:
+        session_factory: Postgres, for :meth:`load` and :meth:`save`; None on a gateway.
+    """
 
     def __init__(self, settings: Settings, session_factory: SessionFactory | None) -> None:
         self._config = settings
@@ -66,26 +63,36 @@ class GeoSettingsStore:
         """Whether an admin has saved the row (else these are the config defaults)."""
         return self._from_database
 
+    def adopt(self, settings: GeoSettings, *, stored: bool) -> bool:
+        """Use ``settings`` from now on, ``stored`` saying an admin saved them (else they are config defaults); True when they changed.
+
+        Diff-only: settings equal to the ones in use change nothing and log nothing, so a caller can adopt on every sync.
+        """
+        if settings == self._settings and stored == self._from_database:
+            return False
+        self._settings = settings
+        self._from_database = stored
+        logger.info("Geo settings adopted", stored=stored, conflict_rule=settings.default_conflict_rule.value)
+        return True
+
     async def load(self) -> GeoSettings:
-        """Read the row, falling back to the config defaults when absent."""
+        """Read the row and adopt it, or the config defaults when there is none; keep the current settings when Postgres fails."""
         if self._session_factory is None:
             return self._settings
         try:
             async with self._session_factory() as session:
-                stored = await GeoSettingsRepository(session).get()
+                row = await GeoSettingsRepository(session).get()
         except Exception as exc:
             logger.warning("Could not load geo settings", error=str(exc))
             return self._settings
-        if stored is None:
-            self._settings = defaults_from_config(self._config)
-            self._from_database = False
+        if row is None:
+            self.adopt(defaults_from_config(self._config), stored=False)
         else:
-            self._settings = stored
-            self._from_database = True
+            self.adopt(row, stored=True)
         return self._settings
 
     async def save(self, settings: GeoSettings, updated_by: str | None) -> GeoSettings:
-        """Persist and adopt ``settings``. The caller publishes the change to peers."""
+        """Persist and adopt ``settings``; the caller announces the save, which is how other processes learn of it."""
         if self._session_factory is None:
             self._settings = settings
             return settings

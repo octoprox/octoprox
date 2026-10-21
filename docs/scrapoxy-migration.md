@@ -172,6 +172,6 @@ The Scrapoxy document tells you what the vendor needs: `fields` in the overview 
 - **No shared backend.** Exit locations come from MaxMind, DB-IP, IPinfo or IP2Location databases you host, with vendor claims verified against them. See [IP Attribution](ip-attribution).
 - **Traffic caps and spend.** Per-connector byte limits per billing period, alert, block or interrupt at the cap, and spend from your price per GB. See [Traffic Limits & Billing](traffic-limits).
 - **Devices without proxy settings.** Routers, TVs, consoles and phones join a pool through a WireGuard or OpenVPN tunnel Octoprox terminates. See [WireGuard](wireguard) and [OpenVPN](openvpn).
-- **Clustering.** Several instances behind one load balancer sharing Postgres and Redis. See [Deployment & Scaling](deployment).
+- **Clustering.** Gateways, workers and the api scaled each on its own behind one load balancer, sharing Postgres and Redis. See [Architecture](architecture) and [Deployment & Scaling](deployment).
 
 If a Scrapoxy feature you depended on is missing, open an issue on [GitHub](https://github.com/octoprox/octoprox/issues) and say what it did for you.

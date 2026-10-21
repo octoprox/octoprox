@@ -39,9 +39,15 @@ export function describeUsage(usage: TrafficUsage): string {
   const used = formatBytesDecimal(usage.total_bytes)
   const period = PERIOD_LABEL[usage.period]
   const spend = usage.cost != null ? `, ${formatMoney(usage.cost, usage.currency)} at ${usage.price_per_gb} ${usage.currency}/GB` : ''
+  const pct = usage.percent == null ? '' : ` (${Math.round(usage.percent)}%)`
+  if (usage.pending) {
+    // A reset or a limit change asked for a traffic decision; until a worker stores it, gateways keep the last one.
+    const held = usage.blocked ? ' Until it does, the block stands and the connector takes no new requests.' : ''
+    const counted = usage.limit_bytes == null ? `${used} ${period}` : `${used} of ${formatBytesDecimal(usage.limit_bytes)}${pct} ${period}`
+    return `Pending: a worker is deciding its traffic state after a reset or a limit change.${held} ${counted}${spend}.`
+  }
   if (usage.limit_bytes == null) return `${used} ${period}${spend}. No limit set.`
   const limit = formatBytesDecimal(usage.limit_bytes)
-  const pct = usage.percent == null ? '' : ` (${Math.round(usage.percent)}%)`
   const resets = `Resets ${timeUntil(usage.period_end)}.`
   if (usage.blocked) return `Over its ${limit} limit${pct}: takes no new requests until the period resets or the limit is raised. ${resets}${spend}`
   if (usage.status === 'exceeded') return `${used} of ${limit}${pct}: over the limit, alert only, still routing. ${resets}${spend}`
@@ -77,8 +83,9 @@ export function TrafficUsageBar({ usage, compact, className }: { usage: TrafficU
   )
 }
 
-/** "Over limit" or "Near limit"; nothing while usage is fine. */
+/** "Pending" while a worker decides after a reset or a limit change, else "Over limit" or "Near limit"; nothing while usage is fine. */
 export function TrafficStatusBadge({ usage }: { usage: TrafficUsage }) {
+  if (usage.pending) return <Badge color="blue" title={describeUsage(usage)}>Pending</Badge>
   if (usage.blocked) return <Badge color="orange" title={describeUsage(usage)}>Over limit</Badge>
   if (usage.status === 'exceeded') return <Badge color="orange" title={describeUsage(usage)}>Over limit · alert only</Badge>
   if (usage.status === 'warning') return <Badge color="yellow" title={describeUsage(usage)}>Near limit</Badge>
@@ -163,11 +170,11 @@ export function ConnectorTrafficSection({ connector, projectId, canMutate }: { c
           <p className="text-fg-subtle text-xs text-center h-[90px] flex items-center justify-center">No traffic in this range</p>
         ) : (
           <ResponsiveContainer width="100%" height={90}>
-            <AreaChart data={points} margin={{ top: 4, right: 4, left: -8, bottom: 0 }}>
+            <AreaChart data={points} margin={{ top: 4, right: 4, left: -8, bottom: 0 }} aria-label="Traffic over time">
               <CartesianGrid strokeDasharray="2 4" stroke={gridColor} vertical={false} />
               <XAxis dataKey="time" type="number" scale="time" domain={['dataMin', 'dataMax']} tickFormatter={(v: number) => formatRangeTick(v, range)} tick={{ fontSize: 10, fill: tickColor }} axisLine={false} tickLine={false} minTickGap={40} />
               <YAxis tick={{ fontSize: 10, fill: tickColor }} axisLine={false} tickLine={false} tickFormatter={(v: number) => formatBytesDecimal(v, 0)} width={52} />
-              <Tooltip labelFormatter={(v: number) => new Date(v).toLocaleString()} formatter={(v: number) => [formatBytesDecimal(v), 'Traffic']} contentStyle={tooltipStyle} />
+              <Tooltip labelFormatter={(v) => new Date(Number(v)).toLocaleString()} formatter={(v) => [formatBytesDecimal(Number(v)), 'Traffic']} contentStyle={tooltipStyle} />
               <Area type="monotone" dataKey="bytes" name="Traffic" stroke={lineColor} strokeWidth={2} fill={lineColor} fillOpacity={0.08} />
             </AreaChart>
           </ResponsiveContainer>

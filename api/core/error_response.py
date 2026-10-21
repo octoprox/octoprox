@@ -13,7 +13,8 @@ upstream leg is also named in an RFC 9209 Proxy-Status header.
 import re
 import unicodedata
 
-from api.core.failure_log import FailureKind, RequestFailure
+from api.core.failure_log import RequestFailure
+from api.core.stats import FailureKind
 
 #: How this proxy names itself in a Proxy-Status header.
 PROXY_NAME = "octoprox"

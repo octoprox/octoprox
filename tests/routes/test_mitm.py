@@ -1,7 +1,11 @@
 # Copyright 2026 Octoprox Authors
 # SPDX-License-Identifier: Apache-2.0
 
-"""Tests for MITM traffic inspection endpoints."""
+"""Tests for MITM traffic inspection endpoints, on an api process.
+
+Captures are written to the project's stream in Redis as a gateway's MITM
+handler writes them, then paged and cleared over HTTP.
+"""
 
 import json
 from typing import Any
@@ -160,6 +164,41 @@ class TestMitmEndpoints:
         # Verify empty
         response = authenticated_client.get(f"/api/v1/projects/{project_id}/mitm/requests")
         assert response.json()["records"] == []
+
+    async def test_viewers_can_read_but_only_editors_clear(
+        self,
+        authenticated_client: TestClient,
+        viewer_auth_headers: dict[str, str],
+        editor_auth_headers: dict[str, str],
+        created_project: dict[str, Any],
+        redis_client: RedisClient,
+    ) -> None:
+        project_id = created_project["id"]
+        await redis_client.record_mitm_request(project_id, _make_fields())
+        url = f"/api/v1/projects/{project_id}/mitm/requests"
+
+        assert authenticated_client.get(url, headers=viewer_auth_headers).status_code == 200
+        assert authenticated_client.delete(url, headers=viewer_auth_headers).status_code == 403
+        assert len(authenticated_client.get(url).json()["records"]) == 1
+        assert authenticated_client.delete(url, headers=editor_auth_headers).status_code == 200
+        assert authenticated_client.get(url).json()["records"] == []
+
+    async def test_a_project_sees_only_its_own_captures(
+        self,
+        authenticated_client: TestClient,
+        created_project: dict[str, Any],
+        sample_project_data: dict[str, Any],
+        redis_client: RedisClient,
+    ) -> None:
+        other = authenticated_client.post(
+            "/api/v1/projects",
+            json={**sample_project_data, "name": f"{sample_project_data['name']} B", "username": f"{sample_project_data['username']}_b"},
+        ).json()
+        await redis_client.record_mitm_request(created_project["id"], _make_fields())
+
+        assert authenticated_client.get(f"/api/v1/projects/{other['id']}/mitm/requests").json()["records"] == []
+        assert authenticated_client.delete(f"/api/v1/projects/{other['id']}/mitm/requests").status_code == 200
+        assert len(authenticated_client.get(f"/api/v1/projects/{created_project['id']}/mitm/requests").json()["records"]) == 1
 
     def test_clear_mitm_requests_project_not_found(
         self,

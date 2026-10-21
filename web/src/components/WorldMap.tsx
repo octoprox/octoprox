@@ -93,9 +93,9 @@ export function WorldMap({ stats, dynamic, unknown = 0, className }: {
               <path
                 key={loc.id}
                 d={loc.d}
-                fill={reachable ? 'rgb(var(--color-primary))' : 'rgb(var(--color-surface-raised))'}
+                fill={reachable ? 'var(--color-primary)' : 'var(--color-surface-raised)'}
                 fillOpacity={opacity}
-                stroke="rgb(var(--color-surface))"
+                stroke="var(--color-surface)"
                 strokeWidth={0.6}
                 className={reachable ? 'cursor-pointer' : undefined}
                 onMouseMove={reachable ? (e) => {
@@ -134,7 +134,7 @@ export function WorldMap({ stats, dynamic, unknown = 0, className }: {
       </div>
       {hasPills && (
         // One row regardless of how many countries: scroll sideways for the long tail.
-        <ul className="flex flex-nowrap gap-1.5 overflow-x-auto pb-1 text-xs [scrollbar-width:thin]">
+        <ul className="flex flex-nowrap gap-1.5 overflow-x-auto pb-1 text-xs scrollbar-thin">
           {ranked.map(([code, stat]) => (
             <li key={code} className="inline-flex flex-none items-center gap-1.5 rounded-full border border-line bg-surface-raised pl-2 pr-2.5 py-0.5" title={countryName(code)}>
               <span className="font-mono font-medium">{code}</span>

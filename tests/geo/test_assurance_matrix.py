@@ -3,56 +3,8 @@
 
 """The location matrix: every verdict shape against every setting, on the row and at preflight.
 
-This file is the specification of the two location decisions a project makes:
-
-* ``location_contradicted``: the independent sources (databases, the echo
-  endpoint) agree against the vendor's claim. Route on the ``evidence``,
-  route on the ``vendor``'s claim anyway, or ``refuse`` the proxy.
-* ``location_unknown``: nothing independent places the exit (no database
-  knows the IP, or they disagree under ``consensus``). Route on the
-  ``vendor``'s word, or ``refuse`` the proxy.
-
-The conflict rule says what a disagreement between databases is:
-``consensus`` leaves the claim open, ``first`` lets the top-priority
-database judge, ``any`` confirms on any agreement. Independent of the
-settings, a row whose resolved country lies outside its connector's declared
-countries is never routed to, and the routing value is the independent
-answer (databases in their priority, then the echo), the vendor filling only
-what nothing independent answered, unless ``location_contradicted`` is
-``vendor``, in which case a contradicted level carries the claim. The tables
-below walk every shape a verdict can take, for the verdict written on a
-proxy row (fixed exits and pooled slots, judged by health checks and
-discovery) and for the verdict preflight reaches for one request. A cell
-that changes here is a change of behaviour, so change the docs with it.
-
-Row verdicts and preflight verdicts are produced by different code, so the
-two tables are checked through the real entry points: the proxy manager's
-eligibility filter and the preflight checker plus exit verifier.
-
-Decisions taken while this was built, so a review does not re-raise them:
-
-* No automatic one-time re-attribution after the upgrade. Rows judged under
-  the retired vendor-first order, or without the state and city verdicts,
-  are re-judged when their exit moves, when a database or the project's
-  decisions change, or when the operator presses Re-attribute.
-* The old ``observe`` level maps to ``evidence`` plus ``vendor``: row
-  behaviour preserved, preflight now refuses a client-named mismatch. No
-  pair preserves both halves.
-* A judged row that made no claim and that nothing independent placed is
-  refused under ``location_unknown: refuse``, including for projects that
-  had the old ``confirmed`` level.
-* The declared-list rule binds rows with a vendor claim only, exempts a
-  hand-pinned country, skips and never replaces (only ``refuse`` spends a
-  fresh session), and is surfaced on the proxy as ``outside_declared_countries``.
-* A pooled slot is preflighted only when the client named a place; its own
-  promise is judged on the row by every sighting, including the echoes
-  targeted requests make.
-* On an allow-listed dynamic connector an untargeted request is held to the
-  list on the sampled requests only under ``evidence``: a sampled exit
-  outside the list is refused, an unsampled one goes unseen, and the
-  sampling rate is the operator's dial. ``refuse`` verifies every one.
-* A pooled slot's verdict cache is keyed per slot, so two requirements
-  alternating on one slot re-echo on every switch. Accepted as rare.
+This file is the specification of a project's two location decisions, so a
+cell that changes here is a change of behaviour, and the docs change with it.
 """
 
 from collections.abc import Callable, Iterator
@@ -63,8 +15,6 @@ import httpx
 import pytest
 
 from api.core.config import Settings
-from api.core.proxy_manager import ProxyManager
-from api.core.signals import exit_location_mismatch
 from api.geo.models import (
     MANUAL_SOURCE,
     META_COUNTRY_SOURCE,
@@ -91,9 +41,12 @@ from api.models.location import LocationTarget
 from api.models.project import Project
 from api.models.proxy import Proxy, ProxyStatus
 from api.providers.sdk.sources import IpDiscoverer
+from api.routing.router import Router
 from api.strategies import get_strategy
+from tests.geo.doubles import Refusals, Retired, Sightings, logged_refusals
 from tests.geo.test_readers import MAXMIND_RECORD, write_mmdb
 from tests.geo.test_resolver import db
+from tests.routing.builder import FeedBuilder
 
 EVIDENCE, VENDOR_CLAIM, REFUSE = ContradictedAction.EVIDENCE, ContradictedAction.VENDOR, ContradictedAction.REFUSE
 TRUST, REFUSE_UNKNOWN = UnknownAction.VENDOR, UnknownAction.REFUSE
@@ -182,22 +135,18 @@ ROW_CASES: list[tuple[str, dict[str, object], list[str], LocationTarget | None, 
 ]
 
 
-def _manager(rules: LocationRules, declared: list[str]) -> ProxyManager:
-    settings = MagicMock()
-    settings.default_strategy = "round_robin"
-    settings.instance_id = "test-instance"
-    manager = ProxyManager(MagicMock(), MagicMock(), settings)
-    manager._projects["p"] = Project(
-        id="p", name="P", username="p", password="pw", location_contradicted=rules.contradicted, location_unknown=rules.unknown,
+def _feed(rules: LocationRules, declared: list[str]) -> FeedBuilder:
+    """A project deciding by ``rules``, with one static connector declaring ``declared``."""
+    return FeedBuilder().add(
+        Project(
+            id="p", name="P", username="p", password="pw", location_contradicted=rules.contradicted, location_unknown=rules.unknown,
+        ),
+        Credential(id="c", name="Static", type=CredentialType.STATIC_PROXY_PROVIDER, project_id="p", config={}),
+        Connector(
+            id="conn", name="C", credential_id="c", credential_type=CredentialType.STATIC_PROXY_PROVIDER, project_id="p",
+            config={"countries": declared} if declared else {},
+        ),
     )
-    manager._credentials["c"] = Credential(
-        id="c", name="Static", type=CredentialType.STATIC_PROXY_PROVIDER, project_id="p", config={},
-    )
-    manager._connectors["conn"] = Connector(
-        id="conn", name="C", credential_id="c", credential_type=CredentialType.STATIC_PROXY_PROVIDER, project_id="p",
-        config={"countries": declared} if declared else {},
-    )
-    return manager
 
 
 class TestRowMatrix:
@@ -207,11 +156,9 @@ class TestRowMatrix:
         self, rules: LocationRules, name: str, metadata: dict[str, object], declared: list[str],
         asked: LocationTarget | None, serves: dict[LocationRules, bool],
     ) -> None:
-        manager = _manager(rules, declared)
-        row = Proxy(id=name, host=name, port=1, connector_id="conn", metadata=dict(metadata))
-        row.status = ProxyStatus.HEALTHY
-        manager._proxies[name] = row
-        eligible = {p.id for p in manager.get_routable_proxies_for_project("p", location=asked)}
+        feed = _feed(rules, declared)
+        feed.add(Proxy(id=name, host=name, port=1, connector_id="conn", metadata=dict(metadata), status=ProxyStatus.HEALTHY))
+        eligible = {p.id for p in feed.router().get_routable_proxies_for_project("p", location=asked)}
         assert (name in eligible) is serves[rules], f"{name} under {rules}: expected serves={serves[rules]}"
 
 
@@ -289,7 +236,7 @@ class TestValue:
 # a slot was provisioned for or a session was rendered with; ``geo_city``: a
 # city rendered into a dynamic request), ``allowed`` the connector's declared
 # countries, ``exit`` where the echo lands. ``contradicted`` says the verdict
-# is a contradiction. Every refusal is announced on ``exit_location_mismatch``;
+# is a contradiction. Every refusal is logged by the exit verifier;
 # what it does to a pooled slot is decided by the slot's own sighting (see
 # ``TestPreflightSighting``), not here. ``message`` is the start of the 502 text; ``{outside}`` is the
 # reason when the exit left the connector's countries, a plain mismatch otherwise.
@@ -346,7 +293,7 @@ def _checker(geo_service: GeoService, exit_ip: str) -> PreflightChecker:
         )
 
     geo_service.discoverer = lambda: IpDiscoverer(geo_service.echo_spec(), client_factory=factory)  # type: ignore[method-assign]
-    return PreflightChecker(geo_service, None)
+    return PreflightChecker(geo_service, None, sightings=Sightings(), exclusions=Retired())
 
 
 def _slot(**metadata: object) -> Proxy:
@@ -363,25 +310,19 @@ def _project(rules: LocationRules) -> Project:
     )
 
 
-def _sticky_selector(declared: list[str]) -> MagicMock:
+def _sticky_router(declared: list[str]) -> MagicMock:
     """A bound sticky session: a refusal fails at once, so the decision is the verdict's alone."""
-    selector = MagicMock()
-    selector.strategy_for_project = MagicMock(return_value=get_strategy("sticky"))
-    selector.select_proxy_for_project = AsyncMock(return_value=None)
-    selector.declared_countries = MagicMock(return_value=list(declared))
-    return selector
+    router = MagicMock(spec=Router)
+    router.strategy_for_project = MagicMock(return_value=get_strategy("sticky"))
+    router.select_proxy_for_project = AsyncMock(return_value=None)
+    router.declared_countries = MagicMock(return_value=list(declared))
+    return router
 
 
 @pytest.fixture
-def mismatches() -> Iterator[list[dict]]:
-    events: list[dict] = []
-
-    async def receive(sender: object, **kwargs: object) -> None:
-        events.append(kwargs)
-
-    exit_location_mismatch.connect(receive)
-    yield events
-    exit_location_mismatch.disconnect(receive)
+def refusals() -> Iterator[Refusals]:
+    with logged_refusals() as logged:
+        yield logged
 
 
 class TestPreflightMatrix:
@@ -392,16 +333,16 @@ class TestPreflightMatrix:
         ids=[c[0] for c in PREFLIGHT_CASES],
     )
     async def test_preflight(
-        self, geo_service: GeoService, mismatches: list[dict], rules: LocationRules, name: str,
+        self, geo_service: GeoService, refusals: Refusals, rules: LocationRules, name: str,
         requested: LocationTarget | None, metadata: dict[str, object], allowed: list[str], exit_ip: str,
         serves: dict[LocationRules, bool], contradicted: bool, message: str | None,
     ) -> None:
         checker = _checker(geo_service, exit_ip)
-        decision = await ExitVerifier(checker, _sticky_selector(allowed)).verify(
+        decision = await ExitVerifier(checker, _sticky_router(allowed)).verify(
             _project(rules), _slot(**metadata), session_id="s", location=requested, target_host="x"
         )
         assert decision.rejected is (not serves[rules]), f"{name} under {rules}: {decision.rejection}"
-        assert bool(mismatches) is decision.rejected, f"{name} under {rules}: a refusal is announced, a forward is not"
+        assert bool(refusals.events) is decision.rejected, f"{name} under {rules}: a refusal is logged, a forward is not"
         if decision.rejected:
             assert message is not None
             # Outside the list is the reason when the evidence routes; refusing contradictions refuses the same exit as a plain mismatch.
@@ -409,15 +350,15 @@ class TestPreflightMatrix:
             expected = message.replace("{outside}", outside)
             assert (decision.rejection or "").startswith(expected), decision.rejection
 
-    async def test_echo_outage_never_refuses(self, geo_service: GeoService, mismatches: list[dict]) -> None:
+    async def test_echo_outage_never_refuses(self, geo_service: GeoService, refusals: Refusals) -> None:
         def factory(proxy_url: str, timeout: float) -> httpx.AsyncClient:
             return httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(503)), timeout=timeout)
 
         geo_service.discoverer = lambda: IpDiscoverer(geo_service.echo_spec(), client_factory=factory)  # type: ignore[method-assign]
-        checker = PreflightChecker(geo_service, None)
+        checker = PreflightChecker(geo_service, None, sightings=Sightings(), exclusions=Retired())
         for rules in SETTINGS:
-            decision = await ExitVerifier(checker, _sticky_selector([])).verify(
+            decision = await ExitVerifier(checker, _sticky_router([])).verify(
                 _project(rules), _slot(), session_id="s", location=LocationTarget(country="US", city="austin"), target_host="x"
             )
             assert not decision.rejected
-        assert mismatches == []
+        assert refusals.events == []

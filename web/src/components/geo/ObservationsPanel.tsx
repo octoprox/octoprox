@@ -7,7 +7,7 @@ import { ColumnDef, ColumnFiltersState } from '@tanstack/react-table'
 import { Globe } from 'lucide-react'
 import { countGeoObservations, fetchGeoObservations, fetchProjectConnectors, fetchProjects, IpObservation, ObservationFilters, ObservationVerdict } from '../../api/client'
 import { useCountAll } from '../../hooks/useCountAll'
-import { DataTable } from '../DataTable'
+import { DataTable, type DataTableFeatures } from '../DataTable'
 import { EmptyState } from '../layout/Page'
 import { Badge, Card, Select } from '../ui'
 import { formatDateTime, relativeTime } from '../../utils/format'
@@ -88,11 +88,10 @@ export function ObservationsPanel({ projectId }: { projectId?: string }) {
       .sort((a, b) => a.name.localeCompare(b.name))
       .map((c) => ({ value: c.id, label: c.name })),
     // Keyed on when each query last delivered data: the query objects change identity every render.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
     [connectorQueries.map((q) => q.dataUpdatedAt).join()],
   )
 
-  const columns: ColumnDef<IpObservation>[] = useMemo(() => [
+  const columns: ColumnDef<DataTableFeatures, IpObservation>[] = useMemo(() => [
     { accessorKey: 'observed_at', header: 'When', size: 130, enableSorting: false, cell: ({ getValue }) => <span title={formatDateTime(getValue<string>())}>{relativeTime(getValue<string>())}</span> },
     {
       id: 'source', accessorFn: (o: IpObservation) => o.source, size: 130, enableSorting: false,

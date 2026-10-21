@@ -38,7 +38,11 @@ def _connector_validator(type_id: str) -> Any:
 
 
 STATIC_CREDENTIAL_FIELDS = [
-    FieldSpec(key="username", label="Default username", help="Used for proxies without their own credentials."),
+    FieldSpec(
+        key="username",
+        label="Default username",
+        help="Fills {username} in proxies' usernames and passwords; the default password fills {password}.",
+    ),
     FieldSpec(key="password", label="Default password", type="password", secret=True),
 ]
 

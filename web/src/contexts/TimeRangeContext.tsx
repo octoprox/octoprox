@@ -83,7 +83,7 @@ export function TimeRangeProvider({ children }: { children: ReactNode }) {
   }, [])
 
   const value = useMemo(() => ({ range, setRange }), [range, setRange])
-  return <TimeRangeContext.Provider value={value}>{children}</TimeRangeContext.Provider>
+  return <TimeRangeContext value={value}>{children}</TimeRangeContext>
 }
 
 /**

@@ -17,7 +17,7 @@ from api.core import utc_now
 from api.db.models import TunnelPeerMetricsModel, WireGuardPeerModel, WireGuardSettingsModel
 from api.models.wireguard import WireGuardPeer, WireGuardServerSettings
 
-# One handshake sighting: (peer id, when, the endpoint it came from).
+# One handshake sighting: (the device's public key, when, the endpoint it came from).
 Sighting = tuple[str, datetime, str | None]
 
 
@@ -77,12 +77,36 @@ class WireGuardPeerRepository:
         )
         return [self._to_domain(m) for m in result.scalars().all()]
 
+    async def get_by_project(self, project_id: str) -> list[WireGuardPeer]:
+        """One project's devices, oldest first."""
+        result = await self._session.execute(
+            select(WireGuardPeerModel)
+            .where(WireGuardPeerModel.project_id == project_id)
+            .order_by(WireGuardPeerModel.created_at, WireGuardPeerModel.id)
+        )
+        return [self._to_domain(m) for m in result.scalars().all()]
+
     async def get_by_id(self, peer_id: str) -> WireGuardPeer | None:
         result = await self._session.execute(
             select(WireGuardPeerModel).where(WireGuardPeerModel.id == peer_id)
         )
         model = result.scalar_one_or_none()
         return self._to_domain(model) if model else None
+
+    async def get_in_project(self, project_id: str, peer_id: str) -> WireGuardPeer | None:
+        """The device, or None when it does not exist or belongs to another project."""
+        result = await self._session.execute(
+            select(WireGuardPeerModel).where(
+                WireGuardPeerModel.id == peer_id, WireGuardPeerModel.project_id == project_id
+            )
+        )
+        model = result.scalar_one_or_none()
+        return self._to_domain(model) if model else None
+
+    async def used_addresses(self) -> set[str]:
+        """Every tunnel address a device holds, for picking a new device's (see ``first_free_address``)."""
+        result = await self._session.execute(select(WireGuardPeerModel.address))
+        return set(result.scalars().all())
 
     async def create(self, peer: WireGuardPeer) -> WireGuardPeer:
         self._session.add(
@@ -139,25 +163,18 @@ class WireGuardPeerRepository:
         return bool(result.rowcount and result.rowcount > 0)  # type: ignore[attr-defined]
 
     async def record_last_seen(self, sightings: Sequence[Sighting]) -> int:
-        """Advance devices' last handshakes in one statement; the number of rows that moved.
+        """Move each device's last handshake forward to its sighting's, matched by public key, in one statement; how many moved.
 
-        One ``UPDATE ... FROM (VALUES ...)`` for the whole batch, so a
-        carrier's status tick costs one round trip however many devices
-        handshaked. A row holding a newer handshake, or no row at all, is
-        left alone and not counted: several instances may carry a device in
-        turn, and whichever saw the latest handshake wins, so the column
-        only ever moves forward. Operational data: ``version`` is not
-        bumped, and ``updated_at`` is pinned to its current value to keep
-        its ``onupdate`` hook from firing (a sighting is not an edit).
+        A sighting is not an edit: only the last-seen pair changes, with ``updated_at`` kept and ``version`` not bumped.
         """
         if not sightings:
             return 0
         seen = values(
-            column("id", String), column("handshake_at", DateTime), column("endpoint", String), name="seen"
+            column("public_key", String), column("handshake_at", DateTime), column("endpoint", String), name="seen"
         ).data(list(sightings))
         result = await self._session.execute(
             update(WireGuardPeerModel)
-            .where(WireGuardPeerModel.id == seen.c.id)
+            .where(WireGuardPeerModel.public_key == seen.c.public_key)
             .where(
                 or_(
                     WireGuardPeerModel.last_handshake_at.is_(None),

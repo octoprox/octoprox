@@ -5,11 +5,10 @@
 
 import pytest
 from alembic import command
-from alembic.config import Config
 from sqlalchemy import Engine, create_engine, text
 
 from api.core.config import Settings
-from api.db.migrations import MIGRATIONS_DIR
+from api.db.migrations import alembic_config
 
 NEW = {
     "ix_ip_observations_project_observed": "(project_id, observed_at)",
@@ -19,13 +18,6 @@ NEW = {
     "ix_ip_observations_contradicted": "(observed_at) WHERE (country_conflict IS TRUE)",
 }
 REPLACED = {"ix_ip_observations_connector_id", "ix_ip_observations_proxy_id"}
-
-
-def _alembic(url: str) -> Config:
-    cfg = Config(str(MIGRATIONS_DIR / "alembic.ini"))
-    cfg.set_main_option("script_location", str(MIGRATIONS_DIR))
-    cfg.set_main_option("sqlalchemy.url", url)
-    return cfg
 
 
 def _indexes(engine: Engine) -> dict[str, tuple[str, bool]]:
@@ -43,7 +35,7 @@ def _indexes(engine: Engine) -> dict[str, tuple[str, bool]]:
 @pytest.mark.usefixtures("db_session")  # migrations are at head and the tables are truncated afterwards
 def test_indexes_replace_the_old_ones_and_a_broken_build_is_redone(test_settings: Settings) -> None:
     engine = create_engine(test_settings.database_url_sync)
-    cfg = _alembic(test_settings.database_url_sync)
+    cfg = alembic_config(test_settings.database_url_sync)
     try:
         command.downgrade(cfg, "045")
         before = _indexes(engine)

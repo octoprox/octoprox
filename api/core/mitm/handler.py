@@ -1,15 +1,13 @@
 # Copyright 2026 Octoprox Authors
 # SPDX-License-Identifier: Apache-2.0
 
-"""MITM handler for TLS interception.
+"""MITM handler for TLS interception on gateways: the client's TLS ends here, and its HTTP/1.1 requests go upstream through a relay.
 
-Intercepts HTTPS traffic by terminating TLS on the client side,
-reading plaintext HTTP requests, logging headers, and relaying
-requests upstream via a pluggable relay strategy.
-
-Uses h11 as a sans-I/O HTTP/1.1 state machine to handle protocol
-parsing and serialization, replacing manual request/response parsing.
+Every exchange is captured to the project's Redis stream by a held background write, and a failed request is published as
+``request_failed`` for the failure log.
 """
+
+from __future__ import annotations
 
 import asyncio
 import contextlib
@@ -21,15 +19,18 @@ from typing import TYPE_CHECKING
 import h11
 import structlog
 
+from api.core import utc_now
 from api.core.error_response import (
     BANDWIDTH_LIMIT_PROXY_STATUS,
     reason_phrase,
     refused_proxy_status,
 )
-from api.core.event_bus import event_bus
-from api.core.failure_log import FailureKind, build_failure
+from api.core.failure_log import build_failure
+from api.core.logging import error_text
 from api.core.mitm.base import UpstreamRefusedError
 from api.core.signals import request_failed
+from api.core.stats import FailureKind
+from api.core.tasks import HeldTasks
 from api.core.tls_cert_manager import TLSCertManager, pop_client_hello
 
 if TYPE_CHECKING:
@@ -49,15 +50,9 @@ async def start_tls_with_head(
     protocol: asyncio.BaseProtocol,
     ssl_context: ssl.SSLContext,
 ) -> asyncio.Transport | None:
-    """Server-side ``loop.start_tls`` that first feeds the TLS layer ``head``.
+    """Server-side ``loop.start_tls`` that first feeds the TLS layer ``head``, the bytes the caller already read off the socket.
 
-    start_tls swaps the transport's protocol and resumes reading, so only
-    bytes still in the socket reach the handshake. ``head`` is what a caller
-    already pulled off the socket before deciding to intercept (the
-    transparent listener peeks the ClientHello for its SNI); it is handed to
-    the SSL protocol right after its connection_made, in the loop turn order
-    start_tls itself schedules. Without this the handshake would wait for a
-    ClientHello that never comes.
+    The caller pauses reading on ``transport`` before the client can send what the handshake needs.
     """
     handshake = asyncio.ensure_future(
         loop.start_tls(transport, protocol, ssl_context, server_side=True)
@@ -95,7 +90,7 @@ _HOP_BY_HOP = frozenset((
 
 
 class MitmHandler:
-    """Handles MITM interception for a single CONNECT tunnel.
+    """Intercepts the TLS of the gateway's CONNECT tunnels and tunnel connections; one per gateway.
 
     Upgrades the client connection to TLS (presenting a generated cert),
     reads HTTP/1.1 requests, logs headers, and relays them to the target
@@ -105,15 +100,25 @@ class MitmHandler:
     def __init__(
         self,
         cert_manager: TLSCertManager,
-        redis_client: "RedisClient | None" = None,
+        redis_client: RedisClient | None = None,
     ) -> None:
         self._cert_manager = cert_manager
         self._redis_client = redis_client
+        # Capture writes on their way to Redis, held so none is collected
+        # before it runs and the gateway can wait for them when it stops.
+        self._captures = HeldTasks()
+        # Captures Redis did not take, since start. They are debugging aids,
+        # so they are dropped rather than buffered.
+        self.dropped_captures = 0
+
+    async def settle(self) -> None:
+        """Wait for the capture writes under way; the gateway calls it once its listeners are closed."""
+        await self._captures.settle()
 
     def _record_request(
         self,
         *,
-        project: "Project",
+        project: Project,
         method: str,
         url: str,
         request_headers: list[tuple[str, str]],
@@ -127,11 +132,9 @@ class MitmHandler:
         latency_ms: float,
         tls_info: dict[str, str] | None = None,
     ) -> None:
-        """Fire-and-forget: schedule MITM request recording as a background task."""
+        """Capture one intercepted exchange in a held background write; never blocks."""
         if self._redis_client is None:
             return
-
-        from api.core import utc_now
 
         req_ct = next(
             (v for k, v in request_headers if k.lower() == "content-type"), ""
@@ -154,24 +157,26 @@ class MitmHandler:
             "response_content_type": resp_ct,
             "target_host": target_host,
             "proxy_url": proxy_url,
-            "mitm_mode": project.tls_mitm_mode.value
-            if hasattr(project.tls_mitm_mode, "value")
-            else str(project.tls_mitm_mode),
-            "mitm_engine": project.tls_mitm_engine.value
-            if project.tls_mitm_engine and hasattr(project.tls_mitm_engine, "value")
-            else str(project.tls_mitm_engine or ""),
-            "mitm_browser": project.tls_mitm_browser.value
-            if project.tls_mitm_browser and hasattr(project.tls_mitm_browser, "value")
-            else str(project.tls_mitm_browser or ""),
+            "mitm_mode": str(project.tls_mitm_mode),
+            "mitm_engine": str(project.tls_mitm_engine or ""),
+            "mitm_browser": str(project.tls_mitm_browser or ""),
             "latency_ms": str(round(latency_ms, 2)),
         }
 
         if tls_info:
             fields.update(tls_info)
 
-        coro = self._redis_client.record_mitm_request(project.id, fields)
-        task = asyncio.create_task(coro)
-        task.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
+        self._captures.spawn(
+            self._write_capture(self._redis_client, project.id, fields), name="mitm_capture", project_id=project.id
+        )
+
+    async def _write_capture(self, redis_client: RedisClient, project_id: str, fields: dict[str, str]) -> None:
+        """Append one capture to the project's stream; a capture Redis refuses is counted and dropped."""
+        try:
+            await redis_client.record_mitm_request(project_id, fields)
+        except Exception as exc:
+            self.dropped_captures += 1
+            logger.debug("MITM capture dropped", project_id=project_id, error=error_text(exc))
 
     async def handle(
         self,
@@ -179,11 +184,11 @@ class MitmHandler:
         client_writer: asyncio.StreamWriter,
         target_host: str,
         target_port: int,
-        proxy: "Proxy",
-        project: "Project",
+        proxy: Proxy,
+        project: Project,
         upstream_reader: asyncio.StreamReader | None = None,
         upstream_writer: asyncio.StreamWriter | None = None,
-        meter: "TrafficMeter | None" = None,
+        meter: TrafficMeter | None = None,
         client_head: bytes = b"",
     ) -> tuple[int, int]:
         """Run MITM interception on the client connection.
@@ -206,6 +211,8 @@ class MitmHandler:
         Returns:
             Tuple of (bytes_sent, bytes_received).
         """
+        # Local: the package imports this module for MitmHandler. Looked up at
+        # call time from the package, where tests replace it.
         from api.core.mitm import create_relay
 
         bytes_sent = 0
@@ -242,6 +249,7 @@ class MitmHandler:
             if hello_result is not None:
                 raw_hello, record_layer_version = hello_result
                 try:
+                    # Local: the fingerprint code (and dpkt) loads only once something is intercepted.
                     from api.core.mitm.client_hello import (
                         client_hello_to_dict,
                         compute_ja3,
@@ -260,8 +268,11 @@ class MitmHandler:
                 except Exception:
                     logger.debug("Failed to parse ClientHello", exc_info=True)
 
-        # Update the writer's transport to the TLS-wrapped one
+        # The writer and its protocol go on over the TLS transport, as
+        # StreamWriter.start_tls leaves them; the protocol then also knows it
+        # is over TLS, so the client's close is not warned about.
         client_writer._transport = new_transport  # type: ignore[attr-defined]
+        protocol._replace_writer(client_writer)  # type: ignore[attr-defined]
 
         # Build base URL for the target
         if target_port == 443:
@@ -295,7 +306,7 @@ class MitmHandler:
                 if meter is not None and not meter.allowed:
                     status = meter.limit_status
                     limit_message = "The connector serving this connection has reached its traffic limit."
-                    await event_bus.publish(request_failed, self, failure=build_failure(
+                    await request_failed.send_async(self, failure=build_failure(
                         project.id, FailureKind.TRAFFIC_LIMIT_EXCEEDED, status, limit_message, proxy=proxy,
                         method=request_event.method.decode("ascii"),
                         target=f"{base_url}{request_event.target.decode('ascii')}".split("?", 1)[0],
@@ -354,12 +365,12 @@ class MitmHandler:
                     # The query string is left out of the log: it is where tokens travel
                     # (build_failure also cuts it from the error text, which may quote the URL).
                     failure = build_failure(
-                        project.id, FailureKind.INTERCEPTED_REQUEST_FAILED, 502, str(e) or type(e).__name__,
+                        project.id, FailureKind.INTERCEPTED_REQUEST_FAILED, 502, error_text(e),
                         proxy=proxy, exc=e, latency_ms=(time.monotonic() - req_start) * 1000,
                         method=method, target=url.split("?", 1)[0],
                         upstream_status=refused.status if refused else None,
                     )
-                    await event_bus.publish(request_failed, self, failure=failure)
+                    await request_failed.send_async(self, failure=failure)
                     # The client is answered with the logged text, which build_failure
                     # has scrubbed of the upstream's credentials.
                     error_headers = [("Content-Type", "text/plain; charset=utf-8")]

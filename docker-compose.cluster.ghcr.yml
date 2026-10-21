@@ -1,57 +1,58 @@
-# Production-ready multi-instance Octoprox cluster using the
-# pre-built image from GitHub Container Registry.
+# Production-ready Octoprox role cluster using the pre-built image from
+# GitHub Container Registry.
 #
-# Layout is identical to docker-compose.cluster.yml - three Octoprox
-# replicas fronted by nginx, sharing a single Postgres and Redis -
-# but pulls ghcr.io/octoprox/octoprox:latest instead of building from
-# the local source tree. Use this as the starting point for a real
-# deployment.
+# Layout is identical to docker-compose.cluster.yml - the roles in their
+# own containers behind nginx, sharing a single Postgres and Redis - but
+# pulls ghcr.io/octoprox/octoprox:latest instead of building from the local
+# source tree. Use this as the starting point for a real deployment.
 #
-# Start:   docker compose -f docker-compose.cluster.ghcr.yml up -d
+#   nginx takes port 8000 (API/UI), 8080 (proxy traffic), 51820/udp
+#   (WireGuard) and 1194 (OpenVPN, UDP or TCP), and needs nginx/nginx.conf
+#   next to this file. Every service runs the same image; OCTOPROX_ROLE
+#   picks its part:
+#
+#     api-1, api-2                REST API, web UI and /echo. Stateless:
+#                                 either answers any request.
+#     gateway-1, gateway-2        the proxy listener and both tunnels. No
+#                                 Postgres: they route on the feed the
+#                                 controller publishes in Redis.
+#     controller-1, controller-2  one leads: it compiles the routing feed
+#                                 and publishes the periodic jobs. The
+#                                 other stands by and takes over within
+#                                 seconds.
+#     worker-1, worker-2          every job (health checks, provider syncs,
+#                                 scaling, provisioning, IP attribution,
+#                                 traffic decisions, metrics flushes,
+#                                 housekeeping), and the sighting and
+#                                 observation ingest.
+#
+#   To add capacity, copy a service under a new name (a new api or gateway
+#   also needs a server line in nginx/nginx.conf).
+#
+# Start:   docker compose -f docker-compose.cluster.ghcr.yml up -d --remove-orphans
 # Stop:    docker compose -f docker-compose.cluster.ghcr.yml down
+#
+# --remove-orphans stops and removes the containers of services this file
+# no longer names. Upgrading a 5.x cluster: stop it with its own file first
+# (docker compose -f <that file> down), then start this one; the upgrade is
+# a short downtime (docs/migrating-to-6.md).
 #
 # Before running this in production:
 #   - Change OCTOPROX_AUTH_PASSWORD to something strong.
 #   - Set OCTOPROX_JWT_SECRET to a long random string.
+#   - Set OCTOPROX_INTERNAL_SECRET to another long random string, the same
+#     on every Octoprox service.
 #   - Change OCTOPROX_DB_PASSWORD and the matching POSTGRES_PASSWORD.
-#   - Consider locking down the Postgres/Redis ports (the local-build
-#     variant exposes 5433/6379 for convenience; remove or restrict
-#     those rules if running on a public-facing host).
+#   - Consider locking down the Postgres/Redis ports (this file publishes
+#     5433/6379 for convenience, as the local-build variant does; remove or
+#     restrict those rules if running on a public-facing host).
 
-# Shared base for all three octoprox replicas. Each replica overrides
-# OCTOPROX_INSTANCE_ID so logs are unambiguous. Every replica terminates
-# both tunnels (docs/wireguard.md, docs/openvpn.md): NET_ADMIN for the
-# interfaces and nftables rules, /dev/net/tun for OpenVPN (and for the
-# wireguard-go fallback).
-x-octoprox-base: &octoprox-base
-  cap_add:
-    - NET_ADMIN
-  devices:
-    - /dev/net/tun:/dev/net/tun
+# What every Octoprox service shares: the image, and the health check. Every
+# role answers /health on port 8000, and only once it is ready: a gateway
+# after its first routing feed, the others while they reach Postgres and
+# Redis.
+x-octoprox: &octoprox
   image: ghcr.io/octoprox/octoprox:latest
-  environment: &octoprox-env
-    OCTOPROX_AUTH_USERNAME: admin
-    OCTOPROX_AUTH_PASSWORD: admin
-    OCTOPROX_JWT_SECRET: change-me-in-production
-    # OCTOPROX_PUBLIC_URL: https://proxy.example.com
-    OCTOPROX_ENV: production
-    OCTOPROX_REDIS_URL: redis://redis:6379/0
-    OCTOPROX_DB_HOST: postgres
-    OCTOPROX_DB_PORT: "5432"
-    OCTOPROX_DB_USER: octoprox
-    OCTOPROX_DB_PASSWORD: octoprox
-    OCTOPROX_DB_NAME: octoprox
-    OCTOPROX_LOG_LEVEL: INFO
-    OCTOPROX_WIREGUARD_ENABLED: "true"
-    OCTOPROX_OPENVPN_ENABLED: "true"
-  volumes:
-    - ca_data:/app/data/ca
-    - geo_data:/app/data/geo
-  depends_on:
-    redis:
-      condition: service_healthy
-    postgres:
-      condition: service_healthy
   healthcheck:
     test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
     interval: 30s
@@ -60,30 +61,165 @@ x-octoprox-base: &octoprox-base
     start_period: 10s
   restart: unless-stopped
 
+# Every role's environment. OCTOPROX_INTERNAL_SECRET keys the routing feed in
+# Redis and the token a gateway shows the api: change it, to the same value
+# on every service, and keep it apart from OCTOPROX_JWT_SECRET.
+x-octoprox-env: &octoprox-env
+  OCTOPROX_ENV: production
+  OCTOPROX_LOG_LEVEL: INFO
+  OCTOPROX_REDIS_URL: redis://redis:6379/0
+  OCTOPROX_INTERNAL_SECRET: change-me-in-production
+
+# Postgres, for api, controller and worker. Gateways hold no database
+# credentials.
+x-postgres-env: &postgres-env
+  OCTOPROX_DB_HOST: postgres
+  OCTOPROX_DB_PORT: "5432"
+  OCTOPROX_DB_USER: octoprox
+  OCTOPROX_DB_PASSWORD: octoprox
+  OCTOPROX_DB_NAME: octoprox
+
+# The roles with Postgres start once Postgres and Redis answer.
+x-postgres-and-redis: &postgres-and-redis
+  redis:
+    condition: service_healthy
+  postgres:
+    condition: service_healthy
+
+# api: signs users in (the JWT secret and the seeded admin are its alone),
+# serves the MITM CA certificate the gateways create (so it reads ca_data)
+# and shares the IP database cache. The gateways reach it by the network
+# alias "api", which Docker's DNS answers with both api services.
+x-api: &api
+  <<: *octoprox
+  environment: &api-env
+    <<: [*octoprox-env, *postgres-env]
+    OCTOPROX_ROLE: api
+    OCTOPROX_AUTH_USERNAME: admin
+    OCTOPROX_AUTH_PASSWORD: admin
+    OCTOPROX_JWT_SECRET: change-me-in-production
+    # OCTOPROX_PUBLIC_URL: https://proxy.example.com
+    # Needed only when clients reach the proxy at another host than the web UI:
+    # OCTOPROX_PROXY_PUBLIC_URL: http://proxy.example.com:8080
+  volumes:
+    - ca_data:/app/data/ca:ro
+    - geo_data:/app/data/geo
+  networks:
+    default:
+      aliases:
+        - api
+  depends_on: *postgres-and-redis
+
+# gateway: the proxy listener and the tunnel endpoints (docs/wireguard.md,
+# docs/openvpn.md): NET_ADMIN for the interfaces and nftables rules,
+# /dev/net/tun for OpenVPN (and for the wireguard-go fallback). It creates
+# the MITM CA on first start, and finds the IP database files on the shared
+# volume (it would otherwise fetch them from an api).
+x-gateway: &gateway
+  <<: *octoprox
+  cap_add:
+    - NET_ADMIN
+  devices:
+    - /dev/net/tun:/dev/net/tun
+  environment: &gateway-env
+    <<: *octoprox-env
+    OCTOPROX_ROLE: gateway
+    OCTOPROX_INTERNAL_API_URL: http://api:8000
+    OCTOPROX_WIREGUARD_ENABLED: "true"
+    OCTOPROX_OPENVPN_ENABLED: "true"
+  volumes:
+    - ca_data:/app/data/ca
+    - geo_data:/app/data/geo
+  depends_on:
+    redis:
+      condition: service_healthy
+
+# controller: one leads and one stands by; a standby is ready (healthy) too.
+x-controller: &controller
+  <<: *octoprox
+  environment: &controller-env
+    <<: [*octoprox-env, *postgres-env]
+    OCTOPROX_ROLE: controller
+  depends_on: *postgres-and-redis
+
+# worker: runs every job kind; any worker takes any job.
+# OCTOPROX_WORKER_JOBS (such as "health,sync") gives a worker only some kinds.
+x-worker: &worker
+  <<: *octoprox
+  environment: &worker-env
+    <<: [*octoprox-env, *postgres-env]
+    OCTOPROX_ROLE: worker
+  volumes:
+    - geo_data:/app/data/geo
+  depends_on: *postgres-and-redis
+  # A stopping worker gives the jobs it is running up to 30 s to finish;
+  # Compose's default of 10 s would kill it first.
+  stop_grace_period: 60s
+
 services:
-  octoprox-1:
-    <<: *octoprox-base
-    container_name: octoprox-1
-    hostname: octoprox-1
+  api-1:
+    <<: *api
+    container_name: octoprox-api-1
+    hostname: api-1
     environment:
-      <<: *octoprox-env
-      OCTOPROX_INSTANCE_ID: octoprox-1
+      <<: *api-env
+      OCTOPROX_INSTANCE_ID: api-1
 
-  octoprox-2:
-    <<: *octoprox-base
-    container_name: octoprox-2
-    hostname: octoprox-2
+  api-2:
+    <<: *api
+    container_name: octoprox-api-2
+    hostname: api-2
     environment:
-      <<: *octoprox-env
-      OCTOPROX_INSTANCE_ID: octoprox-2
+      <<: *api-env
+      OCTOPROX_INSTANCE_ID: api-2
 
-  octoprox-3:
-    <<: *octoprox-base
-    container_name: octoprox-3
-    hostname: octoprox-3
+  gateway-1:
+    <<: *gateway
+    container_name: octoprox-gateway-1
+    hostname: gateway-1
     environment:
-      <<: *octoprox-env
-      OCTOPROX_INSTANCE_ID: octoprox-3
+      <<: *gateway-env
+      OCTOPROX_INSTANCE_ID: gateway-1
+
+  gateway-2:
+    <<: *gateway
+    container_name: octoprox-gateway-2
+    hostname: gateway-2
+    environment:
+      <<: *gateway-env
+      OCTOPROX_INSTANCE_ID: gateway-2
+
+  controller-1:
+    <<: *controller
+    container_name: octoprox-controller-1
+    hostname: controller-1
+    environment:
+      <<: *controller-env
+      OCTOPROX_INSTANCE_ID: controller-1
+
+  controller-2:
+    <<: *controller
+    container_name: octoprox-controller-2
+    hostname: controller-2
+    environment:
+      <<: *controller-env
+      OCTOPROX_INSTANCE_ID: controller-2
+
+  worker-1:
+    <<: *worker
+    container_name: octoprox-worker-1
+    hostname: worker-1
+    environment:
+      <<: *worker-env
+      OCTOPROX_INSTANCE_ID: worker-1
+
+  worker-2:
+    <<: *worker
+    container_name: octoprox-worker-2
+    hostname: worker-2
+    environment:
+      <<: *worker-env
+      OCTOPROX_INSTANCE_ID: worker-2
 
   nginx:
     image: nginx:1.30-alpine
@@ -95,11 +231,19 @@ services:
       - "1194:1194/udp"     # OpenVPN over UDP
       - "1194:1194/tcp"     # OpenVPN over TCP
     volumes:
-      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      # Long form, so a missing nginx/nginx.conf fails the start instead of
+      # appearing as an empty directory.
+      - type: bind
+        source: ./nginx/nginx.conf
+        target: /etc/nginx/nginx.conf
+        read_only: true
+        bind:
+          create_host_path: false
     depends_on:
-      - octoprox-1
-      - octoprox-2
-      - octoprox-3
+      - api-1
+      - api-2
+      - gateway-1
+      - gateway-2
     restart: unless-stopped
 
   postgres:
@@ -123,10 +267,11 @@ services:
   redis:
     image: redis:7-alpine
     container_name: octoprox-redis
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    tmpfs:
+      - /data
     ports:
       - "6379:6379"
-    volumes:
-      - redis_data:/data
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s
@@ -136,6 +281,5 @@ services:
 
 volumes:
   postgres_data:
-  redis_data:
   ca_data:
   geo_data:

@@ -25,7 +25,9 @@ A load balancer that terminates TLS in front of the proxy port makes it an **HTT
 | Username | The project's username, plus routing parameters |
 | Password | The project's password |
 
-Behind a load balancer or a NAT the proxy is published under another address than the instance listens on. Set `OCTOPROX_PROXY_PUBLIC_URL` (see [Configuration]({{ site.baseurl }}/configuration#environment-variables)) to the URL clients should use, for example `https://proxy.example.com` or `https://proxy.example.com:8443`: the Connect page and its examples use it as given, leaving the port out when an `https://` URL has none (an `http://` one without a port gets `80`). Without it the page shows `http://` on the host the browser reached the web UI at and the proxy port.
+Behind a load balancer or a NAT the proxy is published under another address than the gateway listens on. Set `OCTOPROX_PROXY_PUBLIC_URL` (see [Configuration]({{ site.baseurl }}/configuration#environment-variables)) to the URL clients should use, for example `https://proxy.example.com` or `https://proxy.example.com:8443`: the Connect page and its examples use it as given, leaving the port out when an `https://` URL has none (an `http://` one without a port gets `80`). Without it the page shows `http://` on the host the browser reached the web UI at and the proxy port.
+
+The Connect page is served by the api, so the setting belongs on the api. In a [role cluster]({{ site.baseurl }}/deployment#role-cluster) set it whenever clients reach the gateways at another host or port than the one the web UI is reached at, as behind separate load balancers for the UI and the proxy; an api in a cluster without it logs `The Connect page names the web UI's host as the proxy's` when it starts.
 
 ## Username parameters
 

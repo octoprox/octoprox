@@ -125,7 +125,7 @@ def parse_username_params(raw_username: str) -> UsernameParams:
     positions.sort()
     username = raw_username[: positions[0][0]]
 
-    values: dict[str, str | None] = {name: None for name in _PARAM_SEPARATORS.values()}
+    values: dict[str, str | None] = dict.fromkeys(_PARAM_SEPARATORS.values())
     for i, (index, separator) in enumerate(positions):
         start = index + len(separator)
         end = positions[i + 1][0] if i + 1 < len(positions) else len(raw_username)

@@ -12,9 +12,11 @@ import asyncio
 import re
 from typing import Any
 
+import certifi
 import structlog
+from curl_cffi import CurlOpt
 from curl_cffi.requests import AsyncSession
-from curl_cffi.requests.exceptions import ProxyError
+from curl_cffi.requests.exceptions import RequestException
 
 from api.core.mitm.base import ImpersonationRelay, UpstreamRefusedError
 from api.models.project import MitmBrowser, MitmMode
@@ -22,7 +24,9 @@ from api.models.project import MitmBrowser, MitmMode
 logger = structlog.get_logger()
 
 # libcurl's words when the upstream proxy answers the CONNECT with anything
-# but a 2xx; the status is in the text only.
+# but a 2xx; the status is in the text only. Since libcurl 8.20 the error
+# code is COULDNT_CONNECT, which curl_cffi raises as a ConnectionError (a
+# ProxyError before), so any request error is checked for them.
 _TUNNEL_REFUSED = re.compile(r"CONNECT tunnel failed, response (\d{3})")
 
 
@@ -60,7 +64,19 @@ class CffiRelay(ImpersonationRelay):
         session = self._session
         if session is None or browser != self._current_impersonate:
             replaced = session
-            session = AsyncSession(impersonate=browser)  # type: ignore[arg-type]
+            # Sites and https:// proxies are verified against certifi's CA
+            # bundle plus the certificate directory libcurl was built with
+            # (/etc/ssl/certs in the image, Debian's store), which is what
+            # curl_cffi trusted before 0.15. Since 0.15 it takes the OS bundle
+            # as its CA file instead; naming certifi's keeps 5.x's trust.
+            # libcurl has no clean way to drop the directory, so a private CA
+            # added to the OS store is trusted too. Curl options are applied
+            # last, so neither REQUESTS_CA_BUNDLE nor CURL_CA_BUNDLE replaces
+            # certifi's bundle.
+            ca_bundle = certifi.where()
+            session = AsyncSession(
+                impersonate=browser, curl_options={CurlOpt.CAINFO: ca_bundle, CurlOpt.PROXY_CAINFO: ca_bundle}
+            )
             self._session, self._current_impersonate = session, browser
             if replaced is not None:
                 await _close_replaced(replaced)
@@ -88,7 +104,7 @@ class CffiRelay(ImpersonationRelay):
                 allow_redirects=False,
                 timeout=30,
             )
-        except ProxyError as e:
+        except RequestException as e:
             refused = _TUNNEL_REFUSED.search(str(e))
             if refused is None:
                 raise

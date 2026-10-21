@@ -292,7 +292,7 @@ class TestOxylabsCountryFilteredPorts:
 
     async def test_stops_on_repeated_known_ips(self, builtins: dict[str, ProviderDescriptor]) -> None:
         vendor = MockVendor(api_handler=lambda r: json_response({}))
-        vendor.discovery_handler = _geo_discovery_by_port({p: ("1.1.1.1", "US") for p in range(8001, 8020)})(vendor)
+        vendor.discovery_handler = _geo_discovery_by_port(dict.fromkeys(range(8001, 8020), ("1.1.1.1", "US")))(vendor)
         existing = [Proxy(id="have", host="isp.oxylabs.io", port=8001, connector_id="conn-1", status=ProxyStatus.HEALTHY, metadata={"discovered_ip": "1.1.1.1", "country": "US"})]
         provider = self._provider(builtins, vendor, {"num_proxies": 2, "country_code": ["US"]})
         to_add, to_remove = await provider.sync_proxies(existing)

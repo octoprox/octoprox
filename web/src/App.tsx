@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { useState, useEffect, useMemo } from 'react'
-import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
+import { BrowserRouter, Routes, Route, Navigate } from 'react-router'
 import SetPassword from './components/SetPassword'
 import SsoComplete from './components/SsoComplete'
 import Login from './components/Login'
@@ -88,7 +88,6 @@ function AuthenticatedApp() {
       window.removeEventListener('auth:logout', handleLogout)
       window.removeEventListener('auth:login', handleLogin)
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   const handleLogin = async (username: string, password: string) => {
@@ -177,7 +176,7 @@ function AuthenticatedApp() {
               <Route path="locations" element={<LocationsPage />} />
               <Route path="devices" element={<DevicesPage />} />
               <Route path="settings">{settingsRoutes}</Route>
-              <Route path="*" element={<Navigate to="overview" replace />} />
+              <Route path="*" element={<Navigate to="../overview" replace />} />
             </Route>
 
             <Route path="*" element={<Navigate to="/" replace />} />

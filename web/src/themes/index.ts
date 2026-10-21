@@ -2,7 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 // Keep the theme id set in sync with ALLOWED_THEMES in api/models/user.py
-// and the .theme-* blocks in web/src/index.css.
+// and the theme blocks in web/src/index.css (light is the @theme block, the
+// others are .theme-* classes).
 
 export type ThemeId =
   | 'light'

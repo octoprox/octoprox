@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, cast
@@ -70,13 +71,9 @@ _QUERY_CANCELED = "57014"
 
 
 def _verdict_clauses(m: type[IpObservationModel] | type[ConnectorExitIpModel], verdict: str | None) -> list[Any]:
-    """The rows a verdict label selects.
+    """The rows a verdict label selects: the country badge the tables show, from the country claim and its verdict.
 
-    The label is the country badge the tables show, built from the country
-    claim and its nullable verdict: ``contradicted``, ``confirmed``, ``open``
-    (claimed, no verdict) or ``no_claim``. The state and city verdicts are
-    shown under the badge and do not move the label: an exit that is right at
-    the country is usable at the country whatever its city turned out to be.
+    The state and city verdicts do not move it: an exit right at the country is usable there whatever its city.
     """
     if verdict == "contradicted":
         return [m.country_conflict.is_(True)]
@@ -112,6 +109,46 @@ class ExitSighting:
     resolved_city: str | None = None
     state_conflict: bool | None = None
     city_conflict: bool | None = None
+
+    @classmethod
+    def fold(cls, sightings: Iterable[tuple[IpObservation, bool]]) -> dict[tuple[str, str], ExitSighting]:
+        """Observations, each with whether it is a hand-out, as one exit per (connector, IP); one without a connector has none.
+
+        Only hand-outs move the count, and the newest observation sets the exit's latest state.
+        """
+        exits: dict[tuple[str, str], ExitSighting] = {}
+        for o, hand_out in sightings:
+            if not o.connector_id:
+                continue
+            key = (o.connector_id, o.ip)
+            current = exits.get(key)
+            if current is None:
+                current = exits[key] = cls(first_seen=o.observed_at, last_seen=o.observed_at, count=1 if hand_out else 0)
+                current.observe(o)
+                continue
+            if hand_out:
+                current.count += 1
+            if o.observed_at < current.first_seen:
+                current.first_seen = o.observed_at
+            if o.observed_at >= current.last_seen:
+                current.observe(o)
+        return exits
+
+    def observe(self, o: IpObservation) -> None:
+        """Take ``o``'s state as the exit's latest: when it was seen, who held it, what was claimed and the verdict."""
+        self.last_seen = o.observed_at
+        self.country = o.resolved_country or self.country
+        self.proxy_id = o.proxy_id
+        self.source = o.source.value
+        self.claimed_country = o.claimed_country
+        self.resolved_source = o.resolved_source.value if o.resolved_source else None
+        self.country_conflict = o.country_conflict
+        self.claimed_state = o.claimed_state
+        self.claimed_city = o.claimed_city
+        self.resolved_state = o.resolved_state
+        self.resolved_city = o.resolved_city
+        self.state_conflict = o.state_conflict
+        self.city_conflict = o.city_conflict
 
 
 class GeoSettingsRepository:
@@ -305,8 +342,8 @@ class GeoDatabaseRepository:
 #
 # Postgres never overwrites in place: a replaced or removed database file stays on
 # disk as dead TOAST tuples, and autovacuum only makes that space reusable, so the
-# table would settle at twice the files it holds. The leader sweeps it on every
-# updater tick and rewrites it when it holds well more than its files. It has one
+# table would settle at twice the files it holds. Every ``geo_update`` job sweeps
+# it and rewrites it when it holds well more than its files. It has one
 # row per database and is read only when an instance syncs a file, so the
 # exclusive lock of a second or two goes unnoticed, and a table left bloated until
 # the next sweep costs nothing but disk.
@@ -335,14 +372,14 @@ _BLOB_BYTES_SQL = text(
 )
 
 
-async def reclaim_blob_space(conn: AsyncConnection) -> bool:
-    """Rewrite the blob table if it holds far more than its files. Returns whether it did.
+async def reclaim_blob_space(conn: AsyncConnection) -> None:
+    """Rewrite the blob table if it holds far more than its files, logging what it gave back.
 
     ``conn`` must be in autocommit, since VACUUM cannot run in a transaction.
     """
     stored, files = (await conn.execute(_BLOB_BYTES_SQL)).one()
     if not _bloated(stored, files):
-        return False
+        return
     for statement in _RECLAIM_SQL:
         await conn.execute(statement)
     after, files_after = (await conn.execute(_BLOB_BYTES_SQL)).one()
@@ -357,7 +394,6 @@ async def reclaim_blob_space(conn: AsyncConnection) -> bool:
         )
     else:
         logger.info("IP database storage reclaimed", before_bytes=stored, after_bytes=after, file_bytes=files_after)
-    return True
 
 
 def _bloated(stored: int, files: int) -> bool:
@@ -371,16 +407,21 @@ class ObservationRepository:
         self._session = session
 
     async def insert_many(self, observations: list[IpObservation]) -> int:
-        """Bulk insert one batch; the caller commits."""
+        """Bulk insert one batch, each session and instance ID cut to its column's width; the caller commits."""
         if not observations:
             return 0
+        # The columns' widths: a client's -sessid- can be any length, and one
+        # value too long would fail its whole batch at every delivery.
+        columns = IpObservationModel.__table__.c
+        session_width = cast(String, columns.session_id.type).length
+        instance_width = cast(String, columns.instance_id.type).length
         rows = [
             {
                 "observed_at": o.observed_at,
                 "proxy_id": o.proxy_id,
                 "connector_id": o.connector_id,
                 "project_id": o.project_id,
-                "session_id": o.session_id,
+                "session_id": o.session_id[:session_width] if o.session_id is not None else None,
                 "source": o.source.value,
                 "ip": o.ip,
                 "claimed_country": o.claimed_country,
@@ -395,7 +436,7 @@ class ObservationRepository:
                 "state_conflict": o.state_conflict,
                 "city_conflict": o.city_conflict,
                 "candidates": o.candidates,
-                "instance_id": o.instance_id,
+                "instance_id": o.instance_id[:instance_width],
             }
             for o in observations
         ]
@@ -419,10 +460,8 @@ class ObservationRepository:
     ) -> Any:
         """The observation filters the history page offers, applied server side.
 
-        The table can hold millions of rows, so the browser never sees more
-        than one page; every filter must therefore narrow the query itself.
-        ``verdict`` is the label the page shows (see :func:`_verdict_clauses`);
-        ``until`` starts the history at that moment instead of now.
+        The table can hold millions of rows, so each filter narrows the query itself; ``verdict`` is the label the page
+        shows (see :func:`_verdict_clauses`), and ``until`` starts the history at that moment instead of now.
         """
         m = IpObservationModel
         if connector_id:
@@ -445,15 +484,13 @@ class ObservationRepository:
         return query
 
     async def _capped_total(self, matching: Select[Any], *, offset: int, limit: int, found: int) -> tuple[int, bool]:
-        """How many rows ``matching`` selects, counted no further than COUNT_CAP past ``offset``.
+        """How many rows ``matching`` selects, counted at most COUNT_CAP past ``offset``, and whether that is exact.
 
-        ``found`` is how many rows the page at ``offset`` and ``limit`` held.
-        Returns the total and whether it is exact. Short of exact it is
-        ``offset + COUNT_CAP``, a lower bound that always leaves a next page to
-        offer. A short page is the end, so its rows are the count and nothing
-        is counted. A page past the end (rows aged out under a reader on a
-        deep page) is recounted from the start, so the caller learns where the
-        end is instead of being sent back to the first page.
+        Short of exact the total is ``offset + COUNT_CAP``, a lower bound that always leaves a next page; a short page
+        is the end and counts nothing, and a page past the end is recounted from the start.
+
+        Args:
+            found: how many rows the page at ``offset`` and ``limit`` held.
         """
         if found < limit:
             if found or not offset:
@@ -469,13 +506,9 @@ class ObservationRepository:
         return int((await self._session.execute(select(func.count()).select_from(head))).scalar_one()), True
 
     async def _exact_total(self, matching: Select[Any]) -> int | None:
-        """How many rows ``matching`` selects, or None when counting ran past EXACT_COUNT_TIMEOUT_MS.
+        """How many rows ``matching`` selects, or None when counting ran past ``EXACT_COUNT_TIMEOUT_MS``.
 
-        Under a filter an index serves this is a scan of that index; under any
-        other it reads the table, hence the time limit. The limit is set inside
-        a savepoint that is always rolled back, which undoes it (like SET
-        LOCAL, ``set_config(..., true)`` follows the savepoint) and leaves the
-        caller's transaction as it was, whether the count finished or not.
+        The time limit lives in a savepoint that is always rolled back, so the caller's transaction is left as it was.
         """
         savepoint = await self._session.begin_nested()
         try:
@@ -492,10 +525,7 @@ class ObservationRepository:
     async def recent(self, *, limit: int = 100, offset: int = 0, **filters: Any) -> tuple[list[dict[str, Any]], int, bool]:
         """One page of observations, newest first, how many match, and whether that count is exact.
 
-        ``filters`` are those of :meth:`_filtered`. Both the page and the count
-        are short index reads at any table size: the count stops COUNT_CAP rows
-        past the page (see :meth:`_capped_total`) and :meth:`count_matching`
-        is the exact one.
+        Both are short index reads at any table size: the count stops ``COUNT_CAP`` rows past the page.
         """
         m = IpObservationModel
         page = self._filtered(select(m), **filters).order_by(m.observed_at.desc(), m.id.desc()).offset(offset).limit(limit)
@@ -538,16 +568,9 @@ class ObservationRepository:
     async def exit_accuracy(
         self, *, connector_ids: list[str] | None = None, since: datetime | None = None
     ) -> list[dict[str, Any]]:
-        """Per connector: distinct exits seen in the window and how their vendor claims were judged.
+        """Per connector: distinct exits seen in the window and how their vendor claims were judged, per level.
 
-        Each exit counts once, with the verdict of its latest observation, so
-        re-checks of the same exit change nothing and a re-attribution after a
-        database change simply rewrites the verdicts. ``country``, ``state``
-        and ``city`` each hold ``claimed`` / ``confirmed`` / ``contradicted`` /
-        ``open``, where open is a claim with no verdict: nothing independent
-        answered at that level, or the independent sources disagreed.
-        ``breakdown`` lists the contradicted (claimed, resolved) pairs per
-        level with the number of exits each.
+        Each exit counts once, with the verdict of its latest observation.
         """
         m = ConnectorExitIpModel
 
@@ -659,12 +682,9 @@ class ObservationRepository:
     _JUDGEMENT_ROWS = 1000
 
     async def add_exit_ips(self, exits: dict[tuple[str, str], ExitSighting]) -> None:
-        """Upsert (connector, ip) rows: first sighting kept, last sighting and count advanced.
+        """Upsert (connector, ip) rows: first sighting kept, last sighting and count advanced, in the caller's transaction.
 
-        The latest-state columns are taken from the batch only when its
-        newest sighting is at least as new as the row's, so batches flushed
-        out of order by different instances cannot roll the state back.
-        Written in statements of ``_EXIT_UPSERT_ROWS``, in the caller's transaction.
+        The latest-state columns move only for a batch whose newest sighting is at least as new: out of order, nothing rolls back.
         """
         if not exits:
             return
@@ -709,27 +729,9 @@ class ObservationRepository:
         await self._session.execute(statement)
 
     async def apply_judgements(self, judgements: list[ExitJudgement]) -> int:
-        """Rewrite the latest verdict of exits already on record.
+        """Rewrite the latest verdict, with its claim, of exits already on record; how many rows changed.
 
-        Rows are not created: a judgement concerns an exit the proxy already
-        holds, and an exit never sighted has no row to judge. Sightings, first
-        and last seen and the holding proxy are untouched: a judgement is not
-        a sighting, and the holder is what the flusher consults to tell a
-        counted exit from a new one. The claim moves with the verdict, since
-        the verdict is only meaningful against the claim it was judged with;
-        the exit's ``source`` becomes the judgement marker so the view can say
-        the verdict was recomputed.
-
-        Two guards keep a judgement from overwriting state it did not judge.
-        It applies only to the row whose holder is the judged proxy (or a
-        legacy row with no holder): two slots of one connector can share an
-        exit with different claims, and the row's verdict belongs to the
-        holder's claim. And a judgement older than the row's last sighting
-        is dropped: that sighting saw the proxy's state after the judgement
-        read it. Returns how many rows were actually rewritten. Of several
-        judgements of one exit by one proxy only the newest is applied: within
-        one UPDATE ... FROM, Postgres picks any of the rows that match. Applied
-        in statements of ``_JUDGEMENT_ROWS``.
+        Only the row the judged proxy holds, only when no older than its last sighting; no row is made and no sighting moves.
         """
         newest: dict[tuple[str, str, str], ExitJudgement] = {}
         for j in sorted(judgements, key=lambda j: j.judged_at):
@@ -808,9 +810,8 @@ class ObservationRepository:
     async def exit_holders(self, keys: set[tuple[str, str]]) -> dict[tuple[str, str], str | None]:
         """For each (connector, ip) already on record, the proxy that last held it (None if unknown).
 
-        The flusher asks this only for proxies whose last counted exit Redis
-        does not know, to tell an exit counted before an upgrade or a Redis
-        loss from a genuinely new one.
+        The ingest asks this only for proxies whose last counted exit Redis does not know, to tell an exit counted
+        before an upgrade or a Redis loss from a genuinely new one.
         """
         if not keys:
             return {}
@@ -865,11 +866,10 @@ class ObservationRepository:
         claimed_country: str | None = None,
         verdict: str | None = None,
     ) -> Any:
-        """The exit IPs view's filters, applied server side.
+        """The exit IPs view's filters, applied server side, each mirroring a column of the view but ``connector_ids``.
 
-        ``connector_ids`` is the connectors to show: one, a project's, or None
-        for all; the caller answers an empty list itself, since it matches
-        nothing. The other filters mirror the view's columns.
+        Args:
+            connector_ids: the connectors to show, one or a project's, or None for all (the caller answers an empty list itself).
         """
         m = ConnectorExitIpModel
         if connector_ids is not None:
@@ -885,11 +885,10 @@ class ObservationRepository:
         return query.where(*_verdict_clauses(m, verdict))
 
     async def exit_ips(self, *, limit: int = 100, offset: int = 0, **filters: Any) -> tuple[list[dict[str, Any]], int, bool]:
-        """One page of distinct exit IPs with their latest state, most recently seen first.
+        """One page of distinct exit IPs, most recently seen first, how many match and whether that count is exact.
 
-        ``filters`` are those of :meth:`_exit_ips_filtered`. Returns the page,
-        how many match and whether that count is exact, counted as for
-        observations (see :meth:`_capped_total`).
+        Each row carries its latest state; ``filters`` are those of :meth:`_exit_ips_filtered`, and the count is taken
+        as for observations (:meth:`_capped_total`).
         """
         if filters.get("connector_ids") == []:
             return [], 0, True
@@ -928,9 +927,8 @@ class ObservationRepository:
     async def estimated_count(self) -> int:
         """Rows in ``ip_observations`` as the planner last measured them.
 
-        Free where ``count(*)`` reads the whole table, and kept current by
-        autovacuum within a few percent. A table never analysed reports -1;
-        that is a new one, counted outright.
+        Free where ``count(*)`` reads the whole table and kept within a few percent by autovacuum; a table never
+        analysed reports -1, so a new one is counted outright.
         """
         result = await self._session.execute(
             text("SELECT reltuples::bigint FROM pg_class WHERE oid = 'ip_observations'::regclass")

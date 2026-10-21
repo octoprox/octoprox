@@ -12,7 +12,7 @@ comes from a provider descriptor and is validated by the registry.
 import json
 import re
 from datetime import datetime
-from enum import Enum
+from enum import StrEnum
 from typing import Any
 from uuid import uuid4
 
@@ -21,7 +21,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from api.core import utc_now
 
 
-class CredentialType(str, Enum):
+class CredentialType(StrEnum):
     """Code-implemented credential types (descriptor providers are open strings)."""
     STATIC_PROXY_PROVIDER = "static_proxy_provider"
     AWS = "aws"
@@ -42,7 +42,7 @@ class StaticProxyProviderConfig(BaseModel):
     password: str | None = None
 
 
-class AWSAuthMode(str, Enum):
+class AWSAuthMode(StrEnum):
     """How an AWS credential obtains its base identity.
 
     ``ACCESS_KEYS`` stores an IAM user's key pair. ``HOST_ROLE`` stores nothing
@@ -111,7 +111,7 @@ class AWSCredentialConfig(BaseModel):
         return self
 
 
-class GCPAuthMode(str, Enum):
+class GCPAuthMode(StrEnum):
     """How a GCP credential obtains its base identity.
 
     ``SERVICE_ACCOUNT_KEY`` stores a service account JSON key.
@@ -177,7 +177,7 @@ class GCPCredentialConfig(BaseModel):
         return self
 
 
-class AzureAuthMode(str, Enum):
+class AzureAuthMode(StrEnum):
     """How an Azure credential obtains its base identity.
 
     ``CLIENT_SECRET`` stores a service principal's client secret.
@@ -263,17 +263,12 @@ _CODE_CREDENTIAL_MODELS: dict[str, type[BaseModel]] = {
 }
 
 
-def is_code_credential_type(credential_type: str) -> bool:
-    """True for the types validated by the Pydantic models in this module."""
-    return str(credential_type) in _CODE_CREDENTIAL_MODELS
-
-
 def validate_credential_config(credential_type: str, config: dict[str, Any]) -> dict[str, Any]:
     """Validate a code-implemented credential type's config and return the normalised dict.
 
     Descriptor-driven types are validated by the provider registry, not here.
     """
-    model = _CODE_CREDENTIAL_MODELS.get(str(credential_type))
+    model = _CODE_CREDENTIAL_MODELS.get(credential_type)
     if model is None:
         raise ValueError(f"Unknown credential type: {credential_type}")
     return model(**config).model_dump(exclude_none=True)
@@ -291,11 +286,6 @@ class Credential(BaseModel):
     # Metadata
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
-
-    @model_validator(mode='after')
-    def _normalise_type(self) -> 'Credential':
-        self.type = str(self.type.value) if isinstance(self.type, Enum) else str(self.type)
-        return self
 
 
 class CredentialCreate(BaseModel):

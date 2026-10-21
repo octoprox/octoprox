@@ -3,6 +3,10 @@
 # Note: Environment variables (OCTOPROX_*) take precedence over values in this file.
 # Database and Redis settings can be overridden via:
 #   OCTOPROX_REDIS_URL, OCTOPROX_DB_HOST, OCTOPROX_DB_USER, OCTOPROX_DB_PASSWORD, OCTOPROX_DB_NAME
+# What a process runs is set per process, not here: OCTOPROX_ROLE (all, api,
+# gateway, controller, worker or echo). Secrets come from the environment too:
+# OCTOPROX_INTERNAL_SECRET, the same on every role but echo, and
+# OCTOPROX_JWT_SECRET, which only the api (or all) reads.
 
 server:
   host: "0.0.0.0"
@@ -15,6 +19,7 @@ logging:
 
 redis:
   url: "redis://localhost:6379/0"
+  request_timeout_seconds: 2   # per connect, and per call on a request's path or right after a save; the request path fails open after it
 
 database:
   host: "localhost"
@@ -22,7 +27,8 @@ database:
   user: "octoprox"
   password: "octoprox"
   name: "octoprox"
-  application_name: "octoprox"
+  # application_name names the sessions in pg_stat_activity. Unset, it is
+  # octoprox-<role>, so the load of each role can be told apart.
   metrics_flush_interval: 60
 
 metrics:
@@ -42,7 +48,7 @@ failure_log:
   enabled: true
   max_entries: 1000      # examples per project and kind, newest kept
   retention_hours: 168
-  max_per_window: 100    # distinct examples per project and kind per 5-second window, per instance
+  max_per_window: 100    # distinct examples per project and kind per 5-second window, per gateway
 
 system:
   # Install-wide gauge snapshots behind the admin System trend charts.
@@ -50,16 +56,21 @@ system:
   metrics_interval: 300
   metrics_retention_days: 90
 
+# The routing feed: the controller compiles the definitions in Postgres into
+# Redis, and gateways follow it. The controller, the api and workers follow
+# a Redis stream that announces every saved change.
+feed:
+  compile_interval_seconds: 1       # the least time between two compiles; changes that arrive sooner are compiled together
+  reconcile_interval_seconds: 3600  # how often every process reads in full what it follows, whatever was announced
+
 proxy:
   default_strategy: health_based
   ip_refresh_interval: 3600
 
   health_check:
-    enabled: true
     interval_seconds: 60
     timeout_seconds: 30
-    unhealthy_threshold: 3
-    healthy_threshold: 2
+    concurrency: 50          # checks one worker runs at once
 
   # Exit-location lookup for manually added (static) proxies: one request is
   # made through each new proxy to learn its IP and country for -cc- routing.
@@ -72,8 +83,6 @@ proxy:
 
   connection:
     timeout_seconds: 30
-    max_retries: 3
-    retry_delay_seconds: 1
 
 # Proxy provider SDK (see docs/providers.md)
 providers:
@@ -87,7 +96,7 @@ providers:
     max_response_bytes: 52428800   # 0 disables the limit
 
 # Tunnel devices (see docs/wireguard.md). Devices with no proxy support join
-# a project's pool through a tunnel this instance terminates. This block is
+# a project's pool through a tunnel a gateway terminates. This block is
 # the data plane every tunnel protocol shares: the listeners tunnel traffic
 # is redirected to and how destination names are recovered.
 tunnel:

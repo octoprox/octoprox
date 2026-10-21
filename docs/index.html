@@ -201,7 +201,7 @@ permalink: /
     <div class="container">
 <pre><span class="c"># Run a single instance with the pre-built image</span>
 curl -O https://raw.githubusercontent.com/octoprox/octoprox/main/docker-compose.ghcr.yml
-docker compose -f docker-compose.ghcr.yml up -d</pre>
+docker compose -f docker-compose.ghcr.yml up -d --remove-orphans</pre>
       <p class="hint">Web UI on <code>localhost:8000</code>, proxy on <code>localhost:8080</code>. Default login <code>admin</code> / <code>admin</code>.</p>
     </div>
   </section>
@@ -233,7 +233,7 @@ docker compose -f docker-compose.ghcr.yml up -d</pre>
         </div>
         <div class="feature-card">
           <h3><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>Health monitoring</h3>
-          <p>Automatic health checks with configurable intervals and thresholds; failing proxies are quarantined and released automatically.</p>
+          <p>Automatic health checks with configurable intervals and timeouts; failing proxies leave rotation and come back on their own once they pass again.</p>
         </div>
         <div class="feature-card">
           <h3><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/></svg>TLS interception</h3>
@@ -274,8 +274,14 @@ docker compose -f docker-compose.ghcr.yml up -d</pre>
           <a href="connecting">Connecting clients<span>Proxy URL, credentials, curl and code examples</span></a>
           <a href="configuration">Configuration<span>Environment variables and YAML</span></a>
           <a href="sso">Single sign-on &amp; API tokens<span>Google, Microsoft, GitHub; tokens for scripts</span></a>
-          <a href="deployment">Deployment &amp; scaling<span>Multi-instance behind a load balancer</span></a>
           <a href="scrapoxy-migration">Migrating from Scrapoxy<span>Recreate projects and connectors, repoint clients</span></a>
+        </div>
+        <div class="docs-group">
+          <h3>Operations</h3>
+          <a href="architecture">Architecture<span>Roles, the routing feed, jobs and Redis loss</span></a>
+          <a href="deployment">Deployment &amp; scaling<span>One process, or roles scaled on their own</span></a>
+          <a href="kubernetes">Running on Kubernetes<span>A Deployment per role, probes, secrets, autoscaling</span></a>
+          <a href="migrating-to-6">Migrating to 6.0<span>A short downtime; what changes</span></a>
         </div>
         <div class="docs-group">
           <h3>Routing</h3>

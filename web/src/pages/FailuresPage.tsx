@@ -25,7 +25,7 @@ import { useAuth } from '../contexts/AuthContext'
 import { useToast } from '../contexts/ToastContext'
 import { useTheme } from '../contexts/ThemeContext'
 import { TIME_RANGE_MS, formatRangeTick, useTimeRange } from '../contexts/TimeRangeContext'
-import { DataTable } from '../components/DataTable'
+import { DataTable, type DataTableFeatures } from '../components/DataTable'
 import { Page, EmptyState } from '../components/layout/Page'
 import { StatusCodeBadge } from '../components/mitm/RequestDetail'
 import {
@@ -123,7 +123,7 @@ export default function FailuresPage() {
     onError: (e: Error) => { setConfirmClear(false); toast.show(e.message || 'Failed to clear the failure log', 'error') },
   })
 
-  const columns: ColumnDef<FailureRecord, unknown>[] = useMemo(() => [
+  const columns: ColumnDef<DataTableFeatures, FailureRecord, unknown>[] = useMemo(() => [
     {
       accessorKey: 'last_at',
       header: 'Time',
@@ -439,13 +439,13 @@ function WhatFailed({ summary, loading, failed, range, onRange, isDark, kindFilt
 
           <div className="min-w-0 h-[220px] @md:h-full">
             <ResponsiveContainer width="100%" height="100%">
-              <BarChart data={data} margin={{ top: 4, right: 4, left: -12, bottom: 0 }} barCategoryGap={1}>
+              <BarChart data={data} margin={{ top: 4, right: 4, left: -12, bottom: 0 }} barCategoryGap={1} aria-label="Failures over time">
                 <CartesianGrid strokeDasharray="2 4" stroke={gridColor} vertical={false} />
                 <XAxis dataKey="time" type="number" scale="time" domain={timeDomain} tickFormatter={(v: number) => formatRangeTick(v, range)} tick={{ fontSize: 11, fill: tickColor }} axisLine={false} tickLine={false} minTickGap={48} />
                 <YAxis allowDecimals={false} tick={{ fontSize: 11, fill: tickColor }} axisLine={false} tickLine={false} tickFormatter={(v: number) => compact(v)} />
                 <Tooltip
-                  labelFormatter={(v: number) => new Date(v).toLocaleString()}
-                  formatter={(v: number, kind: string) => [v.toLocaleString(), kindInfo(kind).label]}
+                  labelFormatter={(v) => new Date(Number(v)).toLocaleString()}
+                  formatter={(v, kind) => [Number(v).toLocaleString(), kindInfo(String(kind)).label]}
                   contentStyle={tooltipStyle}
                   cursor={{ fill: isDark ? 'rgba(255,255,255,0.04)' : 'rgba(0,0,0,0.04)' }}
                   itemSorter={(item) => -(item.value as number)}

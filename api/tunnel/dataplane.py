@@ -1,15 +1,9 @@
 # Copyright 2026 Octoprox Authors
 # SPDX-License-Identifier: Apache-2.0
 
-"""What every tunnel this instance terminates shares: the resolver, the listener and the nftables table.
+"""What every tunnel a gateway terminates shares: the resolver, the listener and the nftables table.
 
-A tunnel protocol brings up its interface and *attaches* it here: the
-fake-IP resolver and the transparent listener bind on the interface's
-gateway address, and the nftables table redirects the interface's traffic
-to them. A connection is matched to a device by the address it came from,
-through the index every protocol registers its peers with. One data plane
-per process, started once the proxy manager and its collaborators exist;
-the protocols attach after that and detach before it stops.
+A tunnel protocol's endpoint attaches its interface here, and the fake-IP mapping is shared through Redis.
 """
 
 from __future__ import annotations
@@ -28,15 +22,22 @@ from api.tunnel.transparent import TransparentProxyServer
 
 if TYPE_CHECKING:
     from api.core.mitm import MitmHandler
-    from api.core.proxy_manager import ProxyManager
     from api.db.redis import RedisClient
+    from api.gateway.metering import RequestMetering
     from api.geo.verifier import ExitVerifier
+    from api.routing.router import Router
 
 logger = structlog.get_logger()
 
 
 class TunnelDataPlane:
-    """The tunnel-side listeners of one process and the interfaces they serve."""
+    """The tunnel-side listeners of one gateway and the interfaces they serve.
+
+    Args:
+        settings: This gateway's tunnel configuration and the upstream connection timeout.
+        redis_client: Shares the fake-IP mapping with the other gateways; None keeps it local.
+        runner: Runs ``nft``; tests pass a recording one.
+    """
 
     def __init__(
         self,
@@ -47,7 +48,7 @@ class TunnelDataPlane:
     ) -> None:
         self._config = settings
         self.pool = FakeIpPool(settings.tunnel_fake_ip_range)
-        # Shared through Redis so every instance carrying a tunnel agrees on the mapping.
+        # Shared through Redis so every gateway carrying a tunnel agrees on the mapping.
         self.fake_ips = FakeIpDirectory(self.pool, redis_client)
         self.peers = PeerIndex()
         self.netfilter = Netfilter(runner=runner)
@@ -68,18 +69,21 @@ class TunnelDataPlane:
 
     async def start(
         self,
-        proxy_manager: ProxyManager,
+        router: Router,
+        meters: RequestMetering,
         *,
         mitm_handler: MitmHandler | None = None,
         exit_verifier: ExitVerifier | None = None,
     ) -> None:
-        """Build the listeners. Nothing is bound until a tunnel attaches."""
+        """Build the listeners, routing and metering as the proxy listener does; none is bound before an attach."""
         self.dns_server = DnsServer(FakeIpResolver(self.fake_ips), self._config.tunnel_dns_port)
         self.transparent_server = TransparentProxyServer(
-            proxy_manager,
+            router,
+            meters,
             self.peers,
             self.fake_ips,
             port=self._config.tunnel_transparent_port,
+            timeout=self._config.connection_timeout,
             mitm_handler=mitm_handler,
             exit_verifier=exit_verifier,
             sniff_timeout=self._config.tunnel_sniff_timeout_seconds,

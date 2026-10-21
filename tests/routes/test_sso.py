@@ -10,14 +10,18 @@ the provider: matching, linking, the one-time code, and the ways a sign-in
 is refused.
 """
 
+import base64
+from collections.abc import Callable, Iterator
 from typing import Any
 from urllib.parse import parse_qs, unquote, urlparse
 
 import pytest
 from starlette.testclient import TestClient
 
+from api.db.redis import SSO_LOGIN_CODE_KEY
 from api.models.auth import AuthProviderKind
 from api.sso import Identity, SsoError, SsoFlow
+from tests.conftest import api_runtime, on_app_loop
 
 PROVIDERS = "/api/v1/sso/providers"
 PUBLIC = "/api/v1/auth/sso"
@@ -76,6 +80,17 @@ def _callback(client: TestClient, state: str, kind: str = "google") -> str:
 
 def _error_of(location: str) -> str:
     return unquote(parse_qs(urlparse(location).query)["sso_error"][0])
+
+
+def _parked(client: TestClient) -> dict[str, str]:
+    """The login-code entries in the app's Redis, by key: what any role that reads Redis finds there."""
+    redis = api_runtime(client).redis_client
+
+    async def read() -> dict[str, str]:
+        keys = [key async for key in redis.client.scan_iter(match=SSO_LOGIN_CODE_KEY.format(digest="*"))]
+        return {key: await redis.client.get(key) for key in keys}
+
+    return on_app_loop(client, read)
 
 
 class TestProviderSettings:
@@ -298,3 +313,65 @@ class TestRoundTrip:
     def test_exchange_rejects_garbage(self, async_client: TestClient) -> None:
         assert async_client.post(f"{PUBLIC}/exchange", json={"code": "nope"}).status_code == 400
         assert async_client.post(f"{PUBLIC}/exchange", json={"code": ""}).status_code == 422
+
+
+class TestLoginCode:
+    """The bearer token a sign-in parks for the browser waits in Redis, which gateways read too."""
+
+    @pytest.fixture
+    def sign_in(
+        self, authenticated_client: TestClient, offline_metadata: None, monkeypatch: pytest.MonkeyPatch
+    ) -> Iterator[Callable[[], str]]:
+        """Signs a user in through Google on every call, which returns the code the callback handed the browser."""
+        _enable_google(authenticated_client)
+        user = authenticated_client.post(
+            "/api/v1/users/invite", json={"username": "parked", "email": "parked@example.com", "role": "viewer"}
+        ).json()["user"]
+        _identity_from(monkeypatch, Identity(AuthProviderKind.GOOGLE, "g-parked", "parked@example.com"))
+
+        def sign_in() -> str:
+            location = _callback(authenticated_client, _start(authenticated_client))
+            return parse_qs(urlparse(location).query)["code"][0]
+
+        yield sign_in
+        authenticated_client.request("DELETE", f"/api/v1/users/{user['id']}")
+        _disable_all(authenticated_client)
+
+    def test_redis_holds_neither_the_code_nor_the_token(
+        self, authenticated_client: TestClient, sign_in: Callable[[], str]
+    ) -> None:
+        code = sign_in()
+        ((key, value),) = _parked(authenticated_client).items()
+
+        exchanged = authenticated_client.post(f"{PUBLIC}/exchange", json={"code": code})
+        assert exchanged.status_code == 200, exchanged.text
+        token = exchanged.json()["access_token"]
+        me = authenticated_client.get("/api/v1/users/me", headers={"Authorization": f"Bearer {token}"})
+        assert me.json()["username"] == "parked"
+
+        # A reader of Redis found no code to redeem and no token to present, encoded or not.
+        assert code not in key and code not in value
+        assert token not in value and token.encode() not in base64.b64decode(value)
+        # Spent: the entry is gone, and the code redeems nothing a second time.
+        assert _parked(authenticated_client) == {}
+        assert authenticated_client.post(f"{PUBLIC}/exchange", json={"code": code}).status_code == 400
+
+    def test_an_entry_opens_only_under_its_own_code(
+        self, authenticated_client: TestClient, sign_in: Callable[[], str]
+    ) -> None:
+        """Whoever can write Redis cannot hand one sign-in's token to another code, nor plant a plain token."""
+        first = sign_in()
+        (first_key,) = _parked(authenticated_client)
+        second = sign_in()
+        entries = _parked(authenticated_client)
+        (second_key,) = set(entries) - {first_key}
+        redis = api_runtime(authenticated_client).redis_client
+
+        on_app_loop(authenticated_client, redis.client.set, first_key, entries[second_key])
+        assert authenticated_client.post(f"{PUBLIC}/exchange", json={"code": first}).status_code == 400
+
+        token = authenticated_client.post(f"{PUBLIC}/exchange", json={"code": second}).json()["access_token"]
+        third = sign_in()
+        (third_key,) = _parked(authenticated_client)
+        on_app_loop(authenticated_client, redis.client.set, third_key, token)
+        assert authenticated_client.post(f"{PUBLIC}/exchange", json={"code": third}).status_code == 400

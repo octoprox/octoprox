@@ -4,20 +4,21 @@
 import { useMemo, useRef, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { ColumnDef } from '@tanstack/react-table'
-import { Database, Globe, Pause, Play, RefreshCw, Search, Trash2, Upload } from 'lucide-react'
+import { Database, Globe, KeyRound, Pause, Play, RefreshCw, Search, Trash2, Upload } from 'lucide-react'
 import {
   addGeoDatabaseFromUrl, deleteGeoDatabase, fetchGeoDatabases, fetchGeoSettings, fetchGeoStatus, lookupGeoIp,
   reattributeProxies, refreshGeoDatabase, updateGeoDatabase, updateGeoSettings, uploadGeoDatabase,
-  GeoDatabase, GeoLookupResponse, GeoSettingsDoc, GeoSourceKind,
+  GatewayGeoStatus, GeoDatabase, GeoLookupResponse, GeoSettingsDoc, GeoSourceKind, GeoStatus,
 } from '../../api/client'
 import { useToast } from '../../contexts/ToastContext'
-import { DataTable } from '../../components/DataTable'
+import { DataTable, type DataTableFeatures } from '../../components/DataTable'
 import { Page, EmptyState } from '../../components/layout/Page'
 import { AccuracyRow, ProviderAccuracyPanel, accuracyDays, useAccuracyRange } from '../../components/geo/ProviderAccuracyPanel'
 import { AccuracyDetailsInspector } from '../../components/geo/AccuracyDetails'
 import { ObservationsPanel } from '../../components/geo/ObservationsPanel'
 import { ExitIpsPanel } from '../../components/geo/ExitIpsPanel'
-import { formatBytes, formatDateTime, parseApiDate, relativeTime, timeUntil } from '../../utils/format'
+import { formatBytes, formatDateTime, parseApiDate, plural, relativeTime, timeUntil } from '../../utils/format'
+import { isInUse } from '../../utils/geo'
 import { Alert, Badge, Button, Card, ConfirmDialog, Input, Label, Select, Tabs } from '../../components/ui'
 import { cn } from '../../utils/cn'
 
@@ -54,7 +55,6 @@ const KIND_LABELS: Record<string, string> = {
 export default function GeoSection() {
   const [tab, setTab] = useState<Tab>('databases')
   const { data: status } = useQuery({ queryKey: ['geo-status'], queryFn: fetchGeoStatus, refetchInterval: 30_000 })
-  const queued = status?.queued_observations ?? 0
   const [range] = useAccuracyRange()
   const [inspecting, setInspecting] = useState<AccuracyRow | null>(null)
   const days = accuracyDays(range)
@@ -66,18 +66,7 @@ export default function GeoSection() {
       panel={inspecting && tab === 'accuracy' ? (
         <AccuracyDetailsInspector row={inspecting} exits={inspecting.exit_stats} days={days} projectName={inspecting.project_name} onClose={() => setInspecting(null)} />
       ) : undefined}
-      toolbar={status && (
-        <div className="flex items-center gap-2 text-xs text-fg-muted">
-          <Badge color={status.databases_loaded > 0 ? 'green' : 'gray'}>{status.databases_loaded} database{status.databases_loaded === 1 ? '' : 's'} loaded</Badge>
-          {Object.keys(status.load_errors).length > 0 && <Badge color="red">{Object.keys(status.load_errors).length} failed to load</Badge>}
-          <span className="tabular-nums" title="Estimated from the database's statistics, within a few percent">about {status.stored_observations.toLocaleString()} observations</span>
-          {queued > 0 && (
-            <Badge color={queued >= QUEUE_BACKLOG ? 'yellow' : 'gray'} title="Published by the instances and not written yet: sightings, and verdict rewrites after a re-attribution. Exit IPs, accuracy and the observation log lag until they are.">
-              {queued.toLocaleString()} queued
-            </Badge>
-          )}
-        </div>
-      )}
+      toolbar={status && <StatusStrip status={status} />}
     >
       <Tabs<Tab>
         tabs={[
@@ -99,6 +88,61 @@ export default function GeoSection() {
   )
 }
 
+/**
+ * Where the databases are open, at a glance. Gateways judge requests with
+ * their own copies, so the strip counts them, from heartbeats a few seconds
+ * old; the api process that answered (lookups and /echo) only shows up when
+ * it failed to open one.
+ */
+function StatusStrip({ status }: { status: GeoStatus }) {
+  const queued = status.queued_observations ?? 0
+  const gateways = status.gateways
+  const failing = gateways.filter((g) => Object.keys(g.load_errors).length > 0).length
+  const waiting = gateways.filter((g) => g.databases_missing.length > 0).length
+  const counts = new Set(gateways.map((g) => g.databases_loaded))
+  const lines = gateways.map(gatewayLine).join('\n')
+  const apiErrors = Object.keys(status.load_errors).length
+  return (
+    <div className="flex items-center gap-2 text-xs text-fg-muted flex-wrap">
+      {gateways.length === 0 ? (
+        <Badge color="gray" title="No gateway reports where its databases are open: none is running, or their heartbeats cannot be read.">no gateway reporting</Badge>
+      ) : failing > 0 ? (
+        <Badge color="red" title={lines}>failed to load on {failing} of {gateways.length} {plural(gateways.length, 'gateway', 'gateways')}</Badge>
+      ) : waiting > 0 ? (
+        <Badge color="yellow" title={lines}>loading on {waiting} of {gateways.length} {plural(gateways.length, 'gateway', 'gateways')}</Badge>
+      ) : counts.size > 1 ? (
+        <Badge color="yellow" title={lines}>
+          {Math.min(...counts)} to {Math.max(...counts)} databases loaded on {gateways.length} gateways
+        </Badge>
+      ) : (
+        <Badge color={gateways[0].databases_loaded > 0 ? 'green' : 'gray'} title={lines}>
+          {gateways[0].databases_loaded} {plural(gateways[0].databases_loaded, 'database', 'databases')} loaded on {gateways.length} {plural(gateways.length, 'gateway', 'gateways')}
+        </Badge>
+      )}
+      {apiErrors > 0 && (
+        <Badge color="red" title={`The api process that answered could not open ${apiErrors === 1 ? 'one' : 'some'}; lookups and /echo on it go without: ${Object.values(status.load_errors).join('; ')}`}>
+          {apiErrors} failed on the api
+        </Badge>
+      )}
+      <span className="tabular-nums" title="Estimated from the database's statistics, within a few percent">about {status.stored_observations.toLocaleString()} observations</span>
+      {queued > 0 && (
+        <Badge color={queued >= QUEUE_BACKLOG ? 'yellow' : 'gray'} title="Published by the gateways, workers and api processes and not ingested by a worker yet: sightings, and verdict rewrites after a re-attribution. Exit IPs, accuracy and the observation log lag until they are.">
+          {queued.toLocaleString()} queued
+        </Badge>
+      )}
+    </div>
+  )
+}
+
+/** One gateway's databases, for a hover title. */
+function gatewayLine(gateway: GatewayGeoStatus): string {
+  const parts = [`${gateway.databases_loaded} open`]
+  if (gateway.databases_missing.length > 0) parts.push(`waiting for ${gateway.databases_missing.length}`)
+  const errors = Object.values(gateway.load_errors)
+  if (errors.length > 0) parts.push(`failed: ${errors.join('; ')}`)
+  return `${gateway.instance_id}: ${parts.join(', ')}`
+}
+
 // --- databases -------------------------------------------------------------------------
 
 function DatabasesTab() {
@@ -113,8 +157,11 @@ function DatabasesTab() {
   }
 
   const deleteMutation = useMutation({
-    mutationFn: (id: string) => deleteGeoDatabase(id),
-    onSuccess: () => { invalidate(); setPendingDelete(null); toast.show('Database removed. Proxies are being re-attributed.') },
+    mutationFn: (db: GeoDatabase) => deleteGeoDatabase(db.id),
+    onSuccess: (_r, db) => {
+      invalidate(); setPendingDelete(null)
+      toast.show(db.enabled ? 'Database removed; a worker re-attributes the proxies with the remaining sources' : 'Database removed')
+    },
     onError: (e: Error) => { setPendingDelete(null); toast.show(e.message || 'Failed to remove database', 'error') },
   })
   const toggleMutation = useMutation({
@@ -137,13 +184,15 @@ function DatabasesTab() {
     onSuccess: () => { invalidate(); toast.show('Database refreshed') },
     onError: (e: Error) => { invalidate(); toast.show(e.message || 'Refresh failed', 'error') },
   })
+  // Answered as soon as the job is queued: a worker re-judges the proxies page by page, and
+  // asking again while it runs only runs it once more after.
   const reattributeMutation = useMutation({
     mutationFn: () => reattributeProxies(),
-    onSuccess: (r) => toast.show(`Re-attributed ${r.scanned} prox${r.scanned === 1 ? 'y' : 'ies'}, ${r.updated} changed`),
-    onError: (e: Error) => toast.show(e.message || 'Re-attribution failed', 'error'),
+    onSuccess: () => toast.show('Re-attribution queued; a worker re-judges every proxy with a known exit IP'),
+    onError: (e: Error) => toast.show(e.message || 'Could not queue the re-attribution', 'error'),
   })
 
-  const columns: ColumnDef<GeoDatabase>[] = useMemo(() => [
+  const columns: ColumnDef<DataTableFeatures, GeoDatabase>[] = useMemo(() => [
     {
       accessorKey: 'name',
       header: 'Database',
@@ -171,15 +220,7 @@ function DatabasesTab() {
     },
     { accessorKey: 'build_epoch', header: 'Built', size: 104, cell: ({ getValue }) => getValue<string | null>() ? formatDateTime(getValue<string>()).split(',')[0] : '-' },
     { accessorKey: 'size_bytes', header: 'Size', size: 92, meta: { align: 'right' as const }, cell: ({ getValue }) => formatBytes(getValue<number>()) },
-    {
-      id: 'state', header: 'Status', size: 112,
-      cell: ({ row }) => row.original.load_error
-        ? <Badge color="red" title={row.original.load_error}>Not loaded</Badge>
-        : row.original.last_update_error
-          ? <Badge color="yellow" title={row.original.last_update_error}>Update failed</Badge>
-          : row.original.loaded_here ? <Badge color="green">Loaded</Badge>
-            : <Badge color="gray" title={row.original.enabled ? 'Enabled, but not loaded on the instance that answered' : 'Disabled'}>{row.original.enabled ? 'Not here' : 'Off'}</Badge>,
-    },
+    { id: 'state', header: 'Loaded on', size: 136, cell: ({ row }) => <LoadState db={row.original} /> },
     {
       id: 'actions', header: '', size: 184,
       cell: ({ row }) => {
@@ -231,7 +272,7 @@ function DatabasesTab() {
             <h3 className="text-sm font-semibold text-fg">Installed databases</h3>
             <span className="text-xs text-fg-subtle">Consulted lowest priority first. The first database with a country answers. Load one geolocation file per vendor: a city file already answers country. A GeoNames file answers no IP: it places claimed cities, so a city claim can be confirmed within the radius set under Policy &amp; echo.</span>
           </div>
-          <Button variant="outline" size="sm" onClick={() => reattributeMutation.mutate()} disabled={reattributeMutation.isPending} title="Re-run attribution for every proxy with a known exit IP, offline">
+          <Button variant="outline" size="sm" onClick={() => reattributeMutation.mutate()} disabled={reattributeMutation.isPending} title="Queue a re-attribution: a worker re-runs it for every proxy with a known exit IP, offline">
             <RefreshCw className={cn('w-3.5 h-3.5', reattributeMutation.isPending && 'animate-spin')} /> Re-attribute proxies
           </Button>
         </div>
@@ -251,14 +292,57 @@ function DatabasesTab() {
       {pendingDelete && (
         <ConfirmDialog
           title="Remove database?"
-          message={<>Remove <b className="text-fg">{pendingDelete.name}</b> from every instance. Proxies will be re-attributed with the remaining sources.</>}
+          message={<>Remove <b className="text-fg">{pendingDelete.name}</b> from the install: every process closes it within a few seconds. Proxies are re-attributed with the remaining sources.</>}
           confirmLabel="Remove"
           danger
           isLoading={deleteMutation.isPending}
-          onConfirm={() => deleteMutation.mutate(pendingDelete.id)}
+          onConfirm={() => deleteMutation.mutate(pendingDelete)}
           onCancel={() => setPendingDelete(null)}
         />
       )}
+    </div>
+  )
+}
+
+/**
+ * Where a database is open. Gateways judge requests with their own copies,
+ * so the badge counts them, from heartbeats a few seconds old; the api
+ * process that answered, whose copy lookups and /echo use, is in the title.
+ */
+function LoadState({ db }: { db: GeoDatabase }) {
+  const errors = Object.entries(db.gateway_errors)
+  const here = db.load_error
+    ? `The api process that answered could not open it: ${db.load_error}`
+    : db.loaded_here
+      ? 'Open in the api process that answered, whose copy lookups and /echo use.'
+      : 'Not open in the api process that answered yet.'
+  const updateFailed = db.last_update_error ? `The last download failed: ${db.last_update_error}` : null
+  let badge: React.ReactNode
+  let lines: string[]
+  if (!db.enabled) {
+    badge = <Badge color="gray">Off</Badge>
+    lines = ['Disabled: no process opens it.']
+  } else if (db.gateways_total === 0) {
+    badge = db.load_error ? <Badge color="red">Not loaded</Badge> : <Badge color="gray">No gateway</Badge>
+    lines = ['No gateway reports where its databases are open: none is running, or their heartbeats cannot be read.', here]
+  } else {
+    const all = db.gateways_loaded === db.gateways_total
+    badge = (
+      <Badge color={all ? 'green' : errors.length > 0 ? 'red' : 'yellow'}>
+        {db.gateways_loaded} of {db.gateways_total} {plural(db.gateways_total, 'gateway', 'gateways')}
+      </Badge>
+    )
+    lines = [
+      `Open on ${db.gateways_loaded} of the ${db.gateways_total} live ${plural(db.gateways_total, 'gateway', 'gateways')}, as their heartbeats a few seconds ago report it.`,
+      ...errors.map(([gateway, reason]) => `${gateway}: ${reason}`),
+      ...(!all && errors.length < db.gateways_total - db.gateways_loaded ? ['The others are still fetching it, and retry every 30 seconds.'] : []),
+      here,
+    ]
+  }
+  return (
+    <div className="flex flex-col items-start gap-0.5 min-w-0" title={[...lines, updateFailed].filter(Boolean).join('\n')}>
+      {badge}
+      {db.enabled && db.last_update_error && <span className="text-[11px] text-warning">update failed</span>}
     </div>
   )
 }
@@ -290,11 +374,15 @@ function SourceCell({ db }: { db: GeoDatabase }) {
     db.update_paused ? 'Schedule paused: downloads only when asked, until it is resumed.'
       : !scheduled ? 'No schedule: downloads only when asked.'
         : !db.enabled ? 'Disabled: the schedule is off until the database is enabled. Download now still fetches the file, which stays unloaded.'
-        : `Next due ${due ? 'now' : formatDateTime(db.next_update_at)}. The leader checks periodically (hourly by default) and downloads at the first check after that.`,
-  ].join(' ')
+        : `Next due ${due ? 'now' : formatDateTime(db.next_update_at)}. The IP database update job runs on a worker, hourly by default, and downloads at its first run after that.`,
+    db.has_update_auth ? 'Downloads with the vendor credentials stored for it.' : null,
+  ].filter(Boolean).join(' ')
   return (
     <div className="min-w-0" title={title}>
-      <div className="truncate">{scheduled ? `Scheduled, every ${everyLabel(db.update_interval_hours)}` : 'Download URL, on demand'}</div>
+      <div className="truncate flex items-center gap-1.5">
+        {scheduled ? `Scheduled, every ${everyLabel(db.update_interval_hours)}` : 'Download URL, on demand'}
+        {db.has_update_auth && <KeyRound className="w-3 h-3 flex-none text-fg-subtle" aria-label="Vendor credentials stored" />}
+      </div>
       <div className="text-xs text-fg-muted truncate">{last}{upcoming && <> · {upcoming}</>}</div>
     </div>
   )
@@ -311,7 +399,7 @@ function UploadCard({ onDone }: { onDone: () => void }) {
     mutationFn: () => uploadGeoDatabase(file!, { name: name || undefined, priority }),
     onSuccess: (db) => {
       setError(null); setFile(null); setName(''); if (fileRef.current) fileRef.current.value = ''
-      onDone(); toast.show(`${db.name} loaded (${VENDOR_LABELS[db.vendor] ?? db.vendor}, ${db.kind}). Proxies are being re-attributed.`)
+      onDone(); toast.show(`${db.name} stored (${VENDOR_LABELS[db.vendor] ?? db.vendor}, ${db.kind}). The gateways load it within a few seconds and a worker re-attributes the proxies.`)
     },
     onError: (e: Error) => setError(e.message || 'Upload failed'),
   })
@@ -322,7 +410,7 @@ function UploadCard({ onDone }: { onDone: () => void }) {
         <h3 className="text-sm font-semibold text-fg">Upload a database file</h3>
       </div>
       <p className="text-xs text-fg-muted mb-4">
-        Any mmdb file (MaxMind GeoIP2 and GeoLite2, DB-IP, IPinfo, IP2Location DB1 and DB9), an IP2Location BIN file, or a GeoNames cities file (.zip or .txt) for city coordinates. The file is validated, stored, and distributed to every instance.
+        Any mmdb file (MaxMind GeoIP2 and GeoLite2, DB-IP, IPinfo, IP2Location DB1 and DB9), an IP2Location BIN file, or a GeoNames cities file (.zip or .txt) for city coordinates. The file is validated and stored in Postgres, and every gateway and api process loads it from there within a few seconds.
       </p>
       <form onSubmit={(e) => { e.preventDefault(); if (file) mutation.mutate() }} className="flex-1 flex flex-col gap-3">
         {error && <Alert variant="error">{error}</Alert>}
@@ -356,7 +444,7 @@ const URL_PRESETS: { label: string; url: string; hint: string; auth: 'basic' | '
   { label: 'DB-IP City Lite', url: 'https://download.db-ip.com/free/dbip-city-lite-{YYYY}-{MM}.mmdb.gz', hint: 'Country, region, city and coordinates; supersedes DB-IP Country Lite. {YYYY} and {MM} are filled in on each run, falling back to the previous month until DB-IP publishes the new file; no credentials', auth: 'none', interval: 720 },
   { label: 'DB-IP ASN Lite', url: 'https://download.db-ip.com/free/dbip-asn-lite-{YYYY}-{MM}.mmdb.gz', hint: 'ASN and organisation only; fills in what a geolocation file lacks. {YYYY} and {MM} are filled in on each run, falling back to the previous month until DB-IP publishes the new file; no credentials', auth: 'none', interval: 720 },
   { label: 'IPinfo country + ASN', url: 'https://ipinfo.io/data/free/country_asn.mmdb?token=', hint: 'Append your IPinfo token to the URL', auth: 'none', interval: 24 },
-  { label: 'GeoNames cities500 (city coordinates)', url: 'https://download.geonames.org/export/dump/cities500.zip', hint: 'Answers no IP: places claimed cities so the city radius can confirm a neighbouring one. Every place over 500 people and every administrative seat, about 236k places, ~35 MB in memory per instance. cities1000, cities5000, cities15000 or one country (BR.zip) work too; no credentials. CC BY 4.0', auth: 'none', interval: 720 },
+  { label: 'GeoNames cities500 (city coordinates)', url: 'https://download.geonames.org/export/dump/cities500.zip', hint: 'Answers no IP: places claimed cities so the city radius can confirm a neighbouring one. Every place over 500 people and every administrative seat, about 236k places, ~35 MB in memory in every process that loads it. cities1000, cities5000, cities15000 or one country (BR.zip) work too; no credentials. CC BY 4.0', auth: 'none', interval: 720 },
   { label: 'Custom URL', url: '', hint: 'Any HTTPS URL serving an mmdb, .mmdb.gz or .tar.gz containing one, or a GeoNames .zip. {YYYY} and {MM} are filled in on each run for vendors that name files by month.', auth: 'none', interval: 24 },
 ]
 
@@ -381,7 +469,7 @@ function FromUrlCard({ onDone }: { onDone: () => void }) {
       name: name || current.label, update_url: url, update_interval_hours: interval, priority, enabled: true,
       update_auth: username || password ? { username, password } : {},
     }),
-    onSuccess: (db) => { setError(null); onDone(); toast.show(`${db.name} downloaded and loaded`) },
+    onSuccess: (db) => { setError(null); onDone(); toast.show(`${db.name} downloaded; the gateways load it within a few seconds`) },
     onError: (e: Error) => { onDone(); setError(e.message || 'Download failed') },
   })
   return (
@@ -391,7 +479,7 @@ function FromUrlCard({ onDone }: { onDone: () => void }) {
         <h3 className="text-sm font-semibold text-fg">Download from the vendor</h3>
       </div>
       <p className="text-xs text-fg-muted mb-4">
-        Register a download URL with your own vendor credentials. The leader instance fetches it now and again on the schedule, and every instance picks up the new file.
+        Register a download URL with your own vendor credentials. The file is fetched now, then by a worker on the schedule, and every gateway, api and worker process picks up each new file.
       </p>
       <form onSubmit={(e) => { e.preventDefault(); mutation.mutate() }} className="flex-1 flex flex-col gap-3">
         {error && <Alert variant="error">{error}</Alert>}
@@ -446,11 +534,15 @@ function PolicyTab() {
   const queryClient = useQueryClient()
   const toast = useToast()
   const { data, isLoading } = useQuery({ queryKey: ['geo-settings'], queryFn: fetchGeoSettings })
+  // Whether a GeoNames file is open where cities are judged; the Databases tab shares the list.
+  const { data: databases } = useQuery({ queryKey: ['geo-databases'], queryFn: fetchGeoDatabases, staleTime: 60_000 })
   const [draft, setDraft] = useState<GeoSettingsDoc | null>(null)
   const policy = draft ?? data?.settings ?? null
   const mutation = useMutation({
     mutationFn: (doc: GeoSettingsDoc) => updateGeoSettings(doc),
-    onSuccess: () => { setDraft(null); queryClient.invalidateQueries({ queryKey: ['geo-settings'] }); toast.show('Settings saved on every instance') },
+    // The PUT answers with the settings as stored, the document the GET serves, so the form shows them at once
+    // instead of the values from before the save until a refetch returns.
+    onSuccess: (saved) => { queryClient.setQueryData(['geo-settings'], saved); setDraft(null); toast.show('Settings saved; every process applies them within a few seconds') },
     onError: (e: Error) => toast.show(e.message || 'Failed to save settings', 'error'),
   })
   if (isLoading || !policy) return <p className="text-sm text-fg-muted">Loading…</p>
@@ -477,7 +569,7 @@ function PolicyTab() {
             <Input id="geo-city-radius" type="number" min={0} max={500} step={1} className="w-32" value={policy.default_city_radius_km} onChange={(e) => update({ default_city_radius_km: Math.min(500, Math.max(0, parseFloat(e.target.value) || 0)) })} />
             <p className="text-[11px] text-fg-subtle mt-1">
               How far from the claimed city an independent answer may place the exit and still confirm a city claim: a database that puts a São Paulo exit in Diadema, 15 km from the centre, confirms it at 25 km. 0 compares city names only. Projects can set their own on their Location tab.
-              {data && !data.databases_loaded.some((d) => d.kind === 'places') && <span className="text-warning"> No GeoNames file is loaded, so cities are compared by name until one is added on the Databases tab.</span>}
+              {databases && !databases.some((d) => d.kind === 'places' && isInUse(d)) && <span className="text-warning"> No GeoNames file is loaded, so cities are compared by name until one is added on the Databases tab.</span>}
             </p>
           </div>
           <p className="text-xs text-fg-muted mt-4 border-t border-line pt-3">
@@ -488,7 +580,7 @@ function PolicyTab() {
         <Card className="p-5">
           <h3 className="text-sm font-semibold text-fg mb-1">Echo endpoint</h3>
           <p className="text-xs text-fg-muted mb-3">
-            Requested through a proxy to learn its exit IP. Used by health checks, discovery, exit lookups and preflight. Every Octoprox instance serves <span className="font-mono">/echo</span>; point this at a publicly reachable one, or at the standalone echo service.
+            Requested through a proxy to learn its exit IP. Used by health checks, discovery, exit lookups and preflight. The api processes serve <span className="font-mono">/echo</span>, and so does the echo role on its own; point this at one the proxies' exits can reach.
             {data && !data.echo_enabled && <span className="text-warning"> The local /echo endpoint is disabled in this install's config.</span>}
           </p>
           <div className="space-y-3">
@@ -557,7 +649,7 @@ function PolicyTab() {
       </div>
 
       <div className="flex items-center justify-between flex-wrap gap-3">
-        <span className="text-xs text-fg-subtle">{data?.from_database ? 'Saved in the database; applies to every instance.' : 'Using the defaults from the config file until saved.'}</span>
+        <span className="text-xs text-fg-subtle">{data?.from_database ? 'Saved in the database; every process follows it.' : 'Using the defaults from the config file until saved.'}</span>
         <div className="flex gap-2 ml-auto">
           {draft && <Button type="button" variant="outline" size="sm" onClick={() => setDraft(null)}>Discard</Button>}
           <Button type="submit" size="sm" disabled={!draft || mutation.isPending}>{mutation.isPending ? 'Saving…' : 'Save settings'}</Button>
@@ -613,7 +705,7 @@ function LookupCard() {
             {result.resolution.country_conflict === true && <Badge color="red">claim contradicted</Badge>}
             {result.resolution.country_conflict === false && <Badge color="green">claim confirmed</Badge>}
             {result.resolution.country_conflict === null && result.resolution.claimed_country && <Badge color="yellow">claim open: no independent answer, or sources disagree</Badge>}
-            {result.databases_loaded === 0 && <span className="text-xs text-warning">No databases loaded.</span>}
+            {result.databases_loaded === 0 && <span className="text-xs text-warning">No database is open in the api process that answered.</span>}
           </div>
           {resolution?.claimed_city && (
             <div className="flex items-center gap-2 flex-wrap">

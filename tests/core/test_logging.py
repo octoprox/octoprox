@@ -1,7 +1,7 @@
 # Copyright 2026 Octoprox Authors
 # SPDX-License-Identifier: Apache-2.0
 
-"""Tests for the logging configuration: formats and request context."""
+"""Tests for the logging configuration, formats and request context, and for how a line names an error."""
 
 import json
 import logging
@@ -11,14 +11,31 @@ from collections.abc import Generator
 import pytest
 import structlog
 
-from api.core.logging import setup_logging
+from api.core.logging import UVICORN_LOGGERS, error_label, error_text, setup_logging
+from api.core.roles import Role
+
+# The standard library loggers setup_logging changes, besides structlog: the
+# root logger and the ones it quiets, routes or detaches.
+_STDLIB_LOGGERS = ("", *UVICORN_LOGGERS, "httpx", "sqlalchemy.engine")
 
 
 @pytest.fixture
 def restore_logging() -> Generator[None, None, None]:
-    """Put logging back the way conftest expects it after a test reconfigures it."""
+    """Put back, after a test reconfigures logging, structlog's very configuration and each standard library logger's own handlers, levels, filters and propagation.
+
+    A new processors list would hide every logger that cached the old one from later tests' ``capture_logs``, and a new
+    handler would write to the stream ``capsys`` closes when the test ends.
+    """
+    configured = structlog.get_config()
+    loggers = [logging.getLogger(name) for name in _STDLIB_LOGGERS]
+    saved = [(lg, list(lg.handlers), lg.level, list(lg.filters), lg.propagate) for lg in loggers]
     yield
-    setup_logging("DEBUG", "console")
+    for lg, handlers, level, filters, propagate in saved:
+        lg.handlers[:] = handlers
+        lg.setLevel(level)
+        lg.filters[:] = filters
+        lg.propagate = propagate
+    structlog.configure(**configured)
 
 
 def _last_line(capsys: pytest.CaptureFixture[str]) -> str:
@@ -67,12 +84,30 @@ class TestSetupLogging:
         assert by_event["outside a request"]["instance"] == "octoprox-2"
         assert by_event["stdlib line"]["instance"] == "octoprox-2"
 
-    def test_instance_id_omitted_when_unset(
+    def test_role_on_every_line_next_to_the_instance(
+        self, capsys: pytest.CaptureFixture[str], restore_logging: None
+    ) -> None:
+        setup_logging("INFO", "json", instance_id="octoprox-2", role=Role.GATEWAY)
+        structlog.contextvars.clear_contextvars()
+
+        structlog.get_logger("test.role").info("outside a request")
+        logging.getLogger("uvicorn.error").info("stdlib line")
+
+        records = [json.loads(line) for line in capsys.readouterr().out.splitlines() if line.strip()]
+        assert {record["event"] for record in records} == {"outside a request", "stdlib line"}
+        for record in records:
+            assert (record["instance"], record["role"]) == ("octoprox-2", "gateway")
+            keys = list(record)
+            assert keys[keys.index("instance") + 1] == "role"
+
+    def test_instance_and_role_omitted_when_unset(
         self, capsys: pytest.CaptureFixture[str], restore_logging: None
     ) -> None:
         setup_logging("INFO", "json")
         structlog.get_logger("test.instance").info("no instance")
-        assert "instance" not in json.loads(_last_line(capsys))
+        record = json.loads(_last_line(capsys))
+        assert "instance" not in record
+        assert "role" not in record
 
     def test_stdlib_loggers_render_through_same_formatter(
         self, capsys: pytest.CaptureFixture[str], restore_logging: None
@@ -160,6 +195,8 @@ class TestQuietRequestLines:
         setup_logging("INFO", "json")
         _access("/health")
         _access("/live")
+        _access("/ready")
+        _access("/metrics")
         logging.getLogger("httpx").info('HTTP Request: GET https://httpbin.org/ip "HTTP/1.1 200 OK"')
         _access("/api/v1/projects")
         logging.getLogger("httpx").warning("an httpx warning")
@@ -175,3 +212,18 @@ class TestQuietRequestLines:
 
         events = [json.loads(line)["event"] for line in capsys.readouterr().out.splitlines() if line.strip()]
         assert events == ['10.0.0.1:5000 - "GET /health HTTP/1.1" 200', "HTTP Request: GET https://httpbin.org/ip"]
+
+
+class TestErrorText:
+    def test_an_error_is_named_by_its_text(self) -> None:
+        assert error_text(ConnectionError("Connection refused")) == "Connection refused"
+
+    def test_an_error_without_text_is_named_by_its_type(self) -> None:
+        """A deadline's TimeoutError carries no text: a line saying ``error=''`` would say nothing."""
+        assert error_text(TimeoutError()) == "TimeoutError"
+
+
+class TestErrorLabel:
+    def test_an_error_is_labelled_by_its_type_then_its_text(self) -> None:
+        assert error_label(ConnectionError("Connection refused")) == "ConnectionError: Connection refused"
+        assert error_label(TimeoutError()) == "TimeoutError: "

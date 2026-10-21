@@ -28,7 +28,7 @@ async def test_attach_binds_listeners_and_rules_follow_the_interfaces() -> None:
     plane = TunnelDataPlane(_settings(), None, runner=runner)
     with pytest.raises(RuntimeError):
         await plane.attach("wg0", "127.0.0.1")
-    await plane.start(MagicMock())
+    await plane.start(MagicMock(), MagicMock())
     assert plane.started and not plane.interfaces
 
     await plane.attach("wg0", "127.0.0.1")
@@ -72,7 +72,7 @@ async def test_failed_attach_leaves_nothing_behind() -> None:
             return ""
 
     plane = TunnelDataPlane(_settings(), None, runner=FailingRunner())
-    await plane.start(MagicMock())
+    await plane.start(MagicMock(), MagicMock())
     with pytest.raises(RuntimeError):
         await plane.attach("wg0", "127.0.0.1")
     assert plane.interfaces == {}
@@ -85,7 +85,7 @@ async def test_failed_attach_leaves_nothing_behind() -> None:
 async def test_reattach_on_another_gateway_releases_the_old_one() -> None:
     runner = RecordingRunner()
     plane = TunnelDataPlane(_settings(), None, runner=runner)
-    await plane.start(MagicMock())
+    await plane.start(MagicMock(), MagicMock())
     await plane.attach("wg0", "127.0.0.1")
     await plane.attach("wg0", "0.0.0.0")
     assert plane.interfaces == {"wg0": "0.0.0.0"}
@@ -98,7 +98,7 @@ async def test_reattach_on_another_gateway_releases_the_old_one() -> None:
 async def test_stop_without_an_attached_interface_leaves_nftables_alone() -> None:
     runner = RecordingRunner()
     plane = TunnelDataPlane(_settings(), None, runner=runner)
-    await plane.start(MagicMock())
+    await plane.start(MagicMock(), MagicMock())
     await plane.stop()
     assert runner.calls == []
 

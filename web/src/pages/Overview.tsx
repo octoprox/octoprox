@@ -2,13 +2,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { useMemo, useState } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useNavigate } from 'react-router'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts'
 import { Settings, Check, Loader, Power, AlertTriangle } from 'lucide-react'
 import {
   fetchProjectMetrics, fetchProjectScalingMetrics, fetchProjectMetricsHistory, fetchProjectConnectors,
-  updateProject, MetricsSnapshot, ProjectUpdate,
+  updateProject, poolBreakdown, MetricsSnapshot, ProjectUpdate,
   HISTORY_RANGES, HistoryRange,
 } from '../api/client'
 import { useProject } from '../contexts/ProjectContext'
@@ -104,6 +104,9 @@ function formatStrategy(strategy: string): string {
 
 // Series colours are literal so charts read the same on every theme.
 const C = { requests: '#2563eb', successes: '#16a34a', failures: '#dc2626', latency: '#2563eb', sent: '#ea580c', received: '#0d9488' }
+// Tooltip rows follow the legend order; Recharts sorts them by name otherwise.
+const REQUEST_SERIES = ['request_count', 'success_count', 'failure_count']
+const TRAFFIC_SERIES = ['bytes_sent', 'bytes_received']
 
 export default function Overview() {
   const queryClient = useQueryClient()
@@ -186,11 +189,8 @@ export default function Overview() {
     ? { backgroundColor: '#1f2937', border: '1px solid #374151', color: '#f3f4f6', borderRadius: 8, fontSize: 12 }
     : { borderRadius: 8, fontSize: 12, border: '1px solid #e5e7eb' }
 
-  const total = pool?.total_proxies ?? 0
-  const healthy = pool?.healthy_proxies ?? 0
-  const quarantined = pool?.quarantined_proxies ?? 0
-  const unhealthy = pool?.unhealthy_proxies ?? 0
-  const other = Math.max(0, total - healthy - quarantined - unhealthy)
+  // Each proxy once: the API also counts quarantined proxies inside unhealthy.
+  const { total, healthy, quarantined, unhealthy, leaving } = poolBreakdown(pool)
   const successRate = totals.successRate ?? pool?.overall_success_rate ?? null
 
   const connectors = connectorsData?.connectors ?? []
@@ -250,10 +250,10 @@ export default function Overview() {
           <div className="flex h-2.5 rounded-md overflow-hidden gap-0.5 bg-surface-raised">
             {total > 0 ? (
               <>
-                <div style={{ flex: healthy }} className="bg-success rounded-sm first:rounded-l-md last:rounded-r-md" />
-                <div style={{ flex: quarantined }} className="bg-orange-500 rounded-sm" />
-                <div style={{ flex: unhealthy }} className="bg-danger rounded-sm" />
-                <div style={{ flex: other }} className="bg-fg-subtle/40 rounded-sm last:rounded-r-md" />
+                <div style={{ flex: healthy }} className="bg-success rounded-xs first:rounded-l-md last:rounded-r-md" />
+                <div style={{ flex: quarantined }} className="bg-orange-500 rounded-xs" />
+                <div style={{ flex: unhealthy }} className="bg-danger rounded-xs" />
+                <div style={{ flex: leaving }} className="bg-fg-subtle/40 rounded-xs last:rounded-r-md" />
               </>
             ) : null}
           </div>
@@ -261,7 +261,7 @@ export default function Overview() {
             <Legend dot="bg-success" n={healthy} label="healthy" />
             <Legend dot="bg-orange-500" n={quarantined} label="quarantined" />
             <Legend dot="bg-danger" n={unhealthy} label="unhealthy" />
-            {other > 0 && <Legend dot="bg-fg-subtle/40" n={other} label="initializing / draining" />}
+            {leaving > 0 && <Legend dot="bg-fg-subtle/40" n={leaving} label="draining / terminating" />}
             <span className="flex-1" />
             {scaling && scaling.draining_instances > 0 && (
               <span className="inline-flex items-center gap-1.5"><Loader className="w-3 h-3 text-orange-500 animate-spin" /> {scaling.draining_instances} draining</span>
@@ -275,7 +275,7 @@ export default function Overview() {
       </Card>
 
       {/* KPI row */}
-      <Card className={`grid grid-cols-2 @lg:grid-cols-3 ${spend ? '@5xl:grid-cols-7' : '@5xl:grid-cols-6'} gap-px bg-line overflow-hidden [&>*]:bg-surface`}>
+      <Card className={`grid grid-cols-2 @lg:grid-cols-3 ${spend ? '@5xl:grid-cols-7' : '@5xl:grid-cols-6'} gap-px bg-line overflow-hidden *:bg-surface`}>
         <Kpi label="Requests" value={compact(totals.requests)} spark={sparks.requests} color={C.requests} />
         <Kpi label="Successes" value={compact(totals.successes)} spark={sparks.successes} color={C.successes} />
         <Kpi label="Failures" value={compact(totals.failures)} spark={sparks.failures} color={C.failures} sub={totals.failures > 0 ? 'See why →' : undefined} onClick={() => navigate(`${base}/failures`)} />
@@ -298,11 +298,11 @@ export default function Overview() {
               <p className="text-fg-subtle text-sm text-center h-[240px] flex items-center justify-center">No data for this time range</p>
             ) : (
               <ResponsiveContainer width="100%" height={240}>
-                <AreaChart data={chartData} margin={{ top: 8, right: 8, left: -12, bottom: 0 }}>
+                <AreaChart data={chartData} margin={{ top: 8, right: 8, left: -12, bottom: 0 }} aria-label="Requests over time">
                   <CartesianGrid strokeDasharray="2 4" stroke={gridColor} vertical={false} />
                   <XAxis dataKey="time" type="number" scale="time" domain={timeDomain} tickFormatter={(v: number) => formatRangeTick(v, range)} tick={{ fontSize: 11, fill: tickColor }} axisLine={false} tickLine={false} minTickGap={48} />
                   <YAxis allowDecimals={false} tick={{ fontSize: 11, fill: tickColor }} axisLine={false} tickLine={false} />
-                  <Tooltip labelFormatter={(v: number) => new Date(v).toLocaleString()} contentStyle={tooltipStyle} />
+                  <Tooltip labelFormatter={(v) => new Date(Number(v)).toLocaleString()} contentStyle={tooltipStyle} itemSorter={(item) => REQUEST_SERIES.indexOf(String(item.dataKey))} />
                   <Area connectNulls={false} type="monotone" dataKey="request_count" name="Requests" stroke={C.requests} strokeWidth={2} fill={C.requests} fillOpacity={0.08} />
                   <Area connectNulls={false} type="monotone" dataKey="success_count" name="Successes" stroke={C.successes} strokeWidth={2} fill={C.successes} fillOpacity={0.08} />
                   <Area connectNulls={false} type="monotone" dataKey="failure_count" name="Failures" stroke={C.failures} strokeWidth={2} fill={C.failures} fillOpacity={0.08} />
@@ -318,11 +318,11 @@ export default function Overview() {
                 <p className="text-fg-subtle text-xs text-center h-[110px] flex items-center justify-center">No data</p>
               ) : (
                 <ResponsiveContainer width="100%" height={110}>
-                  <AreaChart data={chartData} margin={{ top: 6, right: 4, left: -20, bottom: 0 }}>
+                  <AreaChart data={chartData} margin={{ top: 6, right: 4, left: -20, bottom: 0 }} aria-label="Latency over time">
                     <CartesianGrid strokeDasharray="2 4" stroke={gridColor} vertical={false} />
                     <XAxis dataKey="time" type="number" scale="time" domain={timeDomain} tickFormatter={(v: number) => formatRangeTick(v, range)} tick={{ fontSize: 10, fill: tickColor }} axisLine={false} tickLine={false} minTickGap={48} />
                     <YAxis tick={{ fontSize: 10, fill: tickColor }} axisLine={false} tickLine={false} tickFormatter={(v: number) => `${Math.round(v)}`} />
-                    <Tooltip labelFormatter={(v: number) => new Date(v).toLocaleString()} formatter={(v: number) => [`${Math.round(v)} ms`, 'Latency']} contentStyle={tooltipStyle} />
+                    <Tooltip labelFormatter={(v) => new Date(Number(v)).toLocaleString()} formatter={(v) => [`${Math.round(Number(v))} ms`, 'Latency']} contentStyle={tooltipStyle} />
                     <Area connectNulls={false} type="monotone" dataKey="avg_latency_ms" name="Latency" stroke={C.latency} strokeWidth={2} fill={C.latency} fillOpacity={0.08} />
                   </AreaChart>
                 </ResponsiveContainer>
@@ -334,11 +334,11 @@ export default function Overview() {
                 <p className="text-fg-subtle text-xs text-center h-[110px] flex items-center justify-center">No data</p>
               ) : (
                 <ResponsiveContainer width="100%" height={110}>
-                  <AreaChart data={chartData} margin={{ top: 6, right: 4, left: -8, bottom: 0 }}>
+                  <AreaChart data={chartData} margin={{ top: 6, right: 4, left: -8, bottom: 0 }} aria-label="Traffic over time">
                     <CartesianGrid strokeDasharray="2 4" stroke={gridColor} vertical={false} />
                     <XAxis dataKey="time" type="number" scale="time" domain={timeDomain} tickFormatter={(v: number) => formatRangeTick(v, range)} tick={{ fontSize: 10, fill: tickColor }} axisLine={false} tickLine={false} minTickGap={48} />
                     <YAxis tick={{ fontSize: 10, fill: tickColor }} axisLine={false} tickLine={false} tickFormatter={(v: number) => bytesShort(v)} width={56} />
-                    <Tooltip labelFormatter={(v: number) => new Date(v).toLocaleString()} formatter={(v: number) => formatBytes(v)} contentStyle={tooltipStyle} />
+                    <Tooltip labelFormatter={(v) => new Date(Number(v)).toLocaleString()} formatter={(v) => formatBytes(Number(v))} contentStyle={tooltipStyle} itemSorter={(item) => TRAFFIC_SERIES.indexOf(String(item.dataKey))} />
                     <Area connectNulls={false} type="monotone" dataKey="bytes_sent" name="Sent" stroke={C.sent} strokeWidth={2} fill={C.sent} fillOpacity={0.08} />
                     <Area connectNulls={false} type="monotone" dataKey="bytes_received" name="Received" stroke={C.received} strokeWidth={2} fill={C.received} fillOpacity={0.08} />
                   </AreaChart>
@@ -438,7 +438,7 @@ export default function Overview() {
                   )
                 })}
               </div>
-              <p className="text-xs text-fg-muted mt-2">Changes take effect immediately for new requests.</p>
+              <p className="text-xs text-fg-muted mt-2">A change reaches every gateway within a few seconds and applies to new requests.</p>
             </div>
           )}
         </Card>
@@ -479,7 +479,7 @@ function ChartLegend({ items, small }: { items: [string, string][]; small?: bool
     <div className={`flex items-center flex-wrap gap-x-3 gap-y-1 ${small ? 'text-[11px]' : 'text-xs'} text-fg-muted`}>
       {items.map(([label, color]) => (
         <span key={label} className="inline-flex items-center gap-1.5">
-          <span className="inline-block w-2.5 h-0.5 rounded" style={{ background: color }} />
+          <span className="inline-block w-2.5 h-0.5 rounded-sm" style={{ background: color }} />
           {label}
         </span>
       ))}
@@ -492,7 +492,7 @@ function Kpi({ label, value, sub, spark, color, onClick }: { label: string; valu
   return (
     <Tile
       {...(onClick ? { type: 'button' as const, onClick } : {})}
-      className={cn('px-3 py-2.5 @lg:px-4 @lg:py-3 flex flex-col gap-1 min-w-0 text-left', onClick && 'hover:!bg-surface-raised transition-colors')}
+      className={cn('px-3 py-2.5 @lg:px-4 @lg:py-3 flex flex-col gap-1 min-w-0 text-left', onClick && 'hover:bg-surface-raised! transition-colors')}
     >
       <div className="text-xs text-fg-muted truncate">{label}</div>
       {/* Wrapping drops the sparkline under the value when both do not fit, so a tight tile never truncates the number */}

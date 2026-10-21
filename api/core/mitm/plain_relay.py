@@ -42,20 +42,9 @@ class PlainRelay(MitmRelay):
         if self._tls_upgraded:
             return
 
-        loop = asyncio.get_running_loop()
-        transport = self._upstream_writer.transport
-        protocol = transport.get_protocol()
-
-        ssl_ctx = ssl.create_default_context()
-        new_transport = await loop.start_tls(
-            transport,
-            protocol,
-            ssl_ctx,
-            server_hostname=self._target_host,
-        )
-
-        # Update writer's transport to the TLS-wrapped one
-        self._upstream_writer._transport = new_transport  # type: ignore[attr-defined]
+        # The stream's own upgrade: its protocol then knows it is over TLS, so
+        # the target's close is not warned about.
+        await self._upstream_writer.start_tls(ssl.create_default_context(), server_hostname=self._target_host)
         self._tls_upgraded = True
 
     async def send_request(

@@ -431,7 +431,7 @@ class PortModeStrategy(SyncStrategy):
 
     async def _sync_by_country(self, existing: list[Proxy], per_country: int) -> SyncResult:
         """Keep ``per_country`` proxies for each wanted country; discover the rest."""
-        wanted: dict[str, int] = {country: per_country for country in self._countries}
+        wanted: dict[str, int] = dict.fromkeys(self._countries, per_country)
         keep: list[Proxy] = []
         to_remove: list[str] = []
         for proxy in _sort_proxies_healthy_first(existing):

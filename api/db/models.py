@@ -24,7 +24,7 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from api.core import utc_now
 from api.db.base import Base
-from api.models.proxy import ProxyProtocol
+from api.models.proxy import ProxyProtocol, ProxyStatus
 
 
 class UserModel(Base):
@@ -55,9 +55,8 @@ class UserModel(Base):
 class AuthProviderModel(Base):
     """A sign-in provider the admin has set up (see api.sso): one row per kind.
 
-    The OAuth client this install registered with Google, Microsoft or GitHub.
-    In the database rather than in settings so every instance presents the
-    same client and the admin can change it without a redeploy.
+    The OAuth client this install registered with Google, Microsoft or GitHub, kept in the database so every instance
+    presents the same client and the admin can change it without a redeploy.
     """
 
     __tablename__ = "auth_providers"
@@ -148,8 +147,6 @@ class ProjectModel(Base):
     # Km from a claimed city that still confirms it; null inherits geo_settings.default_city_radius_km.
     location_city_radius_km: Mapped[float | None] = mapped_column(Float, nullable=True)
 
-    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
-
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now, onupdate=utc_now)
 
@@ -171,7 +168,6 @@ class CredentialModel(Base):
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     type: Mapped[str] = mapped_column(String(50), nullable=False)
     config: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
-    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now, onupdate=utc_now)
 
@@ -204,7 +200,6 @@ class ConnectorModel(Base):
     traffic_config: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     traffic_reset_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     rate_limit_config: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
-    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now, onupdate=utc_now)
 
@@ -233,7 +228,15 @@ class ProxyModel(Base):
     connector_id: Mapped[str] = mapped_column(String(36), ForeignKey("connectors.id", ondelete="CASCADE"), nullable=False)
     tags: Mapped[list[str]] = mapped_column(JSON, default=list)
     metadata_: Mapped[dict[str, Any]] = mapped_column("metadata", JSON, default=dict)
-    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
+    # Health, draining or terminating (a ProxyStatus value), which the routing
+    # feed carries. Inserted with the builder's status, then written only by
+    # the health job's compare-and-set and by drain and terminate, never by an
+    # edit (ProxyRepository.set_status_if / set_status).
+    status: Mapped[str] = mapped_column(
+        String(16), nullable=False, default=ProxyStatus.UNKNOWN.value, server_default=ProxyStatus.UNKNOWN.value
+    )
+    # When the status last changed; null until it first does.
+    status_changed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now, onupdate=utc_now)
 
@@ -287,13 +290,9 @@ class ProjectMetricsModel(Base):
 
 
 class ConnectorMetricsModel(Base):
-    """Historical per-connector metrics (flushed from Redis).
+    """Historical metrics per connector, the unit vendors bill and traffic limits apply to (flushed from Redis).
 
-    The connector is the unit vendors bill and limits apply to, and its
-    proxies come and go (cloud rotation, provider re-sync) taking their
-    proxy_metrics rows with them. These rows survive that, so traffic usage
-    over a billing period and the observed traffic split stay complete.
-    Same shape and compaction tiers as the other two metrics tables.
+    The rows outlive the connector's proxies, and have the shape and compaction tiers of the other metrics tables.
     """
 
     __tablename__ = "connector_metrics"
@@ -317,17 +316,10 @@ class ConnectorMetricsModel(Base):
 
 
 class TunnelPeerMetricsModel(Base):
-    """Historical per-device metrics for tunnel devices (flushed from Redis).
+    """Historical per-device metrics for the tunnel devices of every protocol (flushed from Redis), keyed by device id.
 
-    One table for every tunnel protocol: the data plane meters a device's
-    requests without knowing which protocol it arrived through, so its history
-    is keyed by the device id with the protocol alongside, and ``project_id``
-    (copied from the device's row at flush time) carries retention and the
-    project cascade. There is no foreign key to the device: each protocol
-    keeps its devices in its own table, and a device's rows are deleted with
-    it by its repository. Same shape and compaction tiers as the other
-    metrics tables, plus the two name-resolution signals the transparent
-    listener counts per device.
+    No foreign key to the device, whose repository deletes its rows; ``project_id``, copied from the device's row at
+    flush time, carries retention and the project cascade.
     """
 
     __tablename__ = "tunnel_peer_metrics"
@@ -357,13 +349,8 @@ class TunnelPeerMetricsModel(Base):
 class HostMetricsModel(Base):
     """Historical per-host metrics: a project's requests by destination host and connector.
 
-    The fifth metrics history table. Each completed request is counted
-    against the host it was for (the CONNECT target or the URL host, lower
-    case) under the connector that carried it, so a project can see where
-    its traffic goes and which connector serves which host. Same shape,
-    flush, compaction tiers and retention as the other four tables. Rows
-    cascade with their connector, as connector_metrics rows do, and with
-    the project.
+    Each completed request counts against its host (the CONNECT target or the URL host, lower case) under the connector
+    that carried it, and rows cascade with the connector and the project.
     """
 
     __tablename__ = "host_metrics"
@@ -392,13 +379,10 @@ class HostMetricsModel(Base):
 
 
 class FailureMetricsModel(Base):
-    """Historical failure counts: a project's failed requests by kind, vendor status and connector.
+    """Historical failure counts for the Failures page: failed requests by project, kind, vendor status and connector.
 
-    The sixth metrics history table, behind the Failures page summary. The
-    failure log keeps examples of failures; this counts every one. A
-    request refused before a proxy was chosen has no connector. Same
-    flush, compaction tiers and retention as the other tables; rows
-    cascade with their connector and with the project.
+    Every failure counts, where the failure log keeps only examples, and a request refused before a proxy was chosen has
+    no connector.
     """
 
     __tablename__ = "failure_metrics"
@@ -421,18 +405,51 @@ class FailureMetricsModel(Base):
     granularity: Mapped[int] = mapped_column(Integer, default=60, nullable=False)
 
 
+class MetricTotalsModel(Base):
+    """Each proxy's, project's and tunnel device's counters for all time, one row per entity.
+
+    The metrics flush adds every window here in the transaction that writes its history rows, and the api shows these
+    plus the window not flushed yet.
+    """
+
+    __tablename__ = "metric_totals"
+
+    # proxy, project or tunnel_peer (its metrics window kind's name), and that entity's id.
+    kind: Mapped[str] = mapped_column(String(16), primary_key=True)
+    entity_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    request_count: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
+    success_count: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
+    failure_count: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
+    # A sum, as in MetricDelta, so windows add; the average is derived.
+    latency_sum_ms: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    bytes_sent: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
+    bytes_received: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
+    # The two name-resolution counters only tunnel devices carry; zero otherwise.
+    by_address: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
+    encrypted_dns_blocked: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
+    # When the latest window was added.
+    updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=utc_now)
+
+
+class MetricFlushModel(Base):
+    """A metrics flush Postgres committed, by its job entry's ID: one recorded already only clears its staging hash.
+
+    Recorded in the transaction that writes the flush's history and totals.
+    """
+
+    __tablename__ = "metric_flushes"
+
+    # The flush's job stream entry ID, which also names its staging hash in Redis (METRICS_TAKEN_KEY).
+    message_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    # When it committed (naive UTC); compaction deletes the rows older than a day.
+    flushed_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=utc_now)
+
+
 class SystemMetricsModel(Base):
-    """Periodic install-wide gauge readings, for the admin trend charts.
+    """Periodic install-wide gauge readings for the admin trend charts, one row per snapshot.
 
-    Distinct from the per-entity metrics tables in three ways, all consequences
-    of these being gauges rather than counters:
-
-    * One row per snapshot for the whole install, not per entity - so the
-      volume is small enough that retention alone replaces compaction tiers.
-    * Downsampling a range AVERAGES these columns. Summing a database size
-      across a bucket would be meaningless.
-    * There is no ``granularity`` column, because rows are never rewritten
-      into coarser ones.
+    Gauges rather than counters: a range is downsampled by averaging, and retention alone bounds the rows, so there is
+    no ``granularity`` column.
     """
 
     __tablename__ = "system_metrics"
@@ -498,10 +515,8 @@ class ProviderAuditModel(Base):
 class WireGuardSettingsModel(Base):
     """The install's WireGuard identity and device-config defaults: exactly one row, id 1.
 
-    One key pair for the whole install rather than one per instance, so a
-    device's config stays valid whichever instance answers on the endpoint.
-    The private key is here, not in a file, for the same reason the MITM CA
-    is shared: every instance must present the same identity.
+    One key pair for the whole install, kept here rather than in a file, so a device's config stays valid whichever
+    instance answers on the endpoint.
     """
 
     __tablename__ = "wireguard_settings"
@@ -521,10 +536,7 @@ class WireGuardSettingsModel(Base):
 class WireGuardPeerModel(Base):
     """A device allowed into the tunnel, and the project its traffic belongs to.
 
-    The tunnel address is the credential. WireGuard only delivers packets
-    whose source address is in the sending peer's allowed IPs, so the address
-    a connection arrives from names this row, and through it the project,
-    the fixed session and the exit location its traffic is routed with.
+    The tunnel address is the credential.
     """
 
     __tablename__ = "wireguard_peers"
@@ -592,12 +604,7 @@ class OpenVpnSettingsModel(Base):
 class OpenVpnPeerModel(Base):
     """A device allowed into the OpenVPN endpoint, and the project its traffic belongs to.
 
-    The tunnel address is the credential, as with WireGuard: the daemon
-    pushes each device the address on its row and drops packets it sends
-    from any other, so the address a connection arrives from names this
-    row. The certificate is issued by the install's CA with the id as
-    common name; the serial tells the current certificate from a rotated
-    one when the device connects.
+    The tunnel address is the credential, as with WireGuard.
     """
 
     __tablename__ = "openvpn_peers"
@@ -631,11 +638,10 @@ class OpenVpnPeerModel(Base):
 
 
 class GeoSettingsModel(Base):
-    """The install-wide IP attribution settings: exactly one row, id 1.
+    """The install-wide IP attribution settings, as typed columns: exactly one row, id 1.
 
-    Typed columns rather than a settings blob, so the schema says what exists.
-    The config file's ``geo.defaults`` seeds a fresh install; an admin's save
-    writes this row and reaches every instance through ``geo_settings_changed``.
+    The config file's ``geo.defaults`` seeds a fresh install, and an admin's save writes this row and reaches every
+    instance as a ``geo_settings`` change.
     """
 
     __tablename__ = "geo_settings"
@@ -705,12 +711,9 @@ class GeoDatabaseBlobModel(Base):
 
 
 class IpObservationModel(Base):
-    """One sighting of an exit IP and what every source said about it.
+    """One sighting of an exit IP and what every source said about it, in the short-lived raw history.
 
-    No foreign keys on purpose: this is the short-lived raw history and it
-    must survive a proxy or connector being removed, so what a deleted
-    connector did stays traceable for the retention window. The two
-    aggregates below are keyed by connector and cascade with it instead.
+    No foreign keys, so what a deleted proxy or connector did stays traceable for the retention window.
     """
 
     __tablename__ = "ip_observations"
@@ -749,15 +752,10 @@ class IpObservationModel(Base):
 
 
 class ConnectorExitIpModel(Base):
-    """Every distinct exit IP a connector has handed out, and how often.
+    """Every distinct exit IP a connector has handed out, and how often: one row per (connector, IP).
 
-    One row per (connector, IP), upserted by the observation flusher. Unlike
-    the raw observations this is kept until ``exit_ip_retention_days`` after
-    the IP was last seen (forever by default), so "how many distinct exits
-    has this pool given us" survives the raw retention window. ``sightings``
-    counts how many times the IP was newly handed out, not minutes in use.
-    Rows go with their connector: the flusher drops sightings of connectors
-    deleted since they were made, so the cascade never fails a batch.
+    Kept until ``exit_ip_retention_days`` after the IP was last seen (forever by default), and ``sightings`` counts how
+    many times the IP was newly handed out, not minutes in use.
     """
 
     __tablename__ = "connector_exit_ips"

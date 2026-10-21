@@ -72,7 +72,7 @@ export function ChipInput({ label, values, onAdd, onRemove, placeholder, separat
           onKeyDown={handleKeyDown}
           onPaste={handlePaste}
           onBlur={() => { if (inputValue.trim()) { onAdd(inputValue); setInputValue('') } }}
-          className="flex-1 min-w-[150px] bg-transparent border-none outline-none text-sm text-fg placeholder:text-fg-subtle"
+          className="flex-1 min-w-[150px] bg-transparent border-none outline-hidden text-sm text-fg placeholder:text-fg-subtle"
           placeholder={values.length === 0 ? (placeholder ?? 'Type and press Enter...') : ''}
         />
       </div>

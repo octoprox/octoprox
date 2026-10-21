@@ -1,11 +1,10 @@
 # Copyright 2026 Octoprox Authors
 # SPDX-License-Identifier: Apache-2.0
 
-"""Admin-only system statistics.
+"""Admin-only system statistics: the cluster and the stores as Postgres and Redis describe them, and their trend history.
 
-One endpoint returning inventory, storage and worker health for the whole
-install. Admin-only because it exposes deployment shape - instance ids, lease
-holders, database sizing - that nothing below that role has a use for.
+Admin-only because they expose deployment shape (instance ids, the lease holder, database sizing) that no other role
+has a use for.
 """
 
 from datetime import timedelta
@@ -16,11 +15,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.core import utc_now
 from api.core.auth import RequireAdminDep
-from api.core.config import settings
-from api.core.system_stats import collect_system_stats
+from api.core.system_stats import SystemReader
 from api.db.repository import SystemMetricsRepository
 from api.db.session import get_db
 from api.models.system import SystemMetricsHistory, SystemMetricsPoint, SystemStats, TableGrowth
+from api.routes.common import provider_registry_of, redis_client_of, settings_of
 
 router = APIRouter(prefix="/system")
 
@@ -29,29 +28,13 @@ DbDep = Annotated[AsyncSession, Depends(get_db)]
 
 @router.get("/stats", response_model=SystemStats)
 async def get_system_stats(request: Request, session: DbDep, _admin: RequireAdminDep) -> SystemStats:
-    """Return inventory, cache, storage and worker statistics.
+    """Return every live process by role, the controller and feed, the work streams, and the stores.
 
-    Postgres-derived sections describe the whole install; ``runtime``,
-    ``cache`` and ``workers.tasks`` describe only the instance that served
-    the request, which in a cluster is whichever one the load balancer picked.
-    The same three sections for every *other* instance arrive in
-    ``workers.instances[].snapshot``, published by each instance on its own
-    heartbeat - so this one endpoint covers the whole cluster without the
-    caller needing a route to a specific instance.
+    The processes' sections come from their heartbeats in Redis, so this one
+    endpoint covers the whole cluster without a route to any process; the
+    rest is read from Postgres and Redis directly.
     """
-    state = request.app.state
-    return await collect_system_stats(
-        session,
-        settings,
-        proxy_manager=getattr(state, "proxy_manager", None),
-        proxy_server=getattr(state, "proxy_server", None),
-        cert_manager=getattr(state, "cert_manager", None),
-        geo_runtime=getattr(state, "geo_runtime", None),
-        wireguard_runtime=getattr(state, "wireguard_runtime", None),
-        openvpn_runtime=getattr(state, "openvpn_runtime", None),
-        redis_client=getattr(state, "redis_client", None),
-        started_at=getattr(state, "started_at", None),
-    )
+    return await SystemReader(session, redis_client_of(request), provider_registry_of(request)).read()
 
 
 # (window, bucket width). A null bucket returns raw snapshots; anything longer
@@ -67,15 +50,15 @@ HISTORY_RANGES: dict[str, tuple[timedelta, int | None]] = {
 
 @router.get("/stats/history", response_model=SystemMetricsHistory)
 async def get_system_stats_history(
+    request: Request,
     session: DbDep,
     _admin: RequireAdminDep,
     range: Literal["1h", "24h", "7d", "30d", "90d"] = Query("24h", alias="range"),
 ) -> SystemMetricsHistory:
-    """Return the install-wide gauge history behind the System trend charts.
+    """Return the install-wide gauge history behind the System trend charts, as the snapshot job records it.
 
-    Snapshots are written by the ``system_snapshotter`` worker on whichever
-    instance holds its lease, so this series is the same from every instance -
-    unlike the live ``/system/stats`` sections that describe one process.
+    ``interval_seconds`` is this process's ``system_metrics_interval``, which
+    the controller's snapshot producer should match.
     """
     window, bucket_seconds = HISTORY_RANGES[range]
     since = utc_now() - window
@@ -101,7 +84,7 @@ async def get_system_stats_history(
     return SystemMetricsHistory(
         range=range,
         bucket_seconds=bucket_seconds,
-        interval_seconds=settings.system_metrics_interval,
+        interval_seconds=settings_of(request).system_metrics_interval,
         snapshots=[SystemMetricsPoint(**row) for row in rows],
         table_growth=growth,
     )

@@ -10,11 +10,14 @@ import ssl
 import stat
 from pathlib import Path
 
+import pytest
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes
 
+from api.core import tls_cert_manager
 from api.core.tls_cert_manager import TLSCertManager, _pending_client_hellos, pop_client_hello
-from api.db.redis import RedisClient
+from api.core.workers import LeaseName
+from api.db.redis import LEASE_KEY, RedisClient
 
 
 def _mgr(ca_dir: Path) -> TLSCertManager:
@@ -93,6 +96,23 @@ class TestBootstrapCoordination:
         assert len(fingerprints) == 1
         assert fingerprints == {_disk_fingerprint(ca_dir / "octoprox-ca.crt")}
 
+    async def test_a_peer_generating_the_ca_is_waited_for(self, redis_client: RedisClient, tmp_path: Path) -> None:
+        """The bootstrap lock is the CA_BOOTSTRAP lease: while a peer holds it, nothing is generated here."""
+        await redis_client.client.set(LEASE_KEY.format(name=LeaseName.CA_BOOTSTRAP), "octoprox-peer", px=30_000)
+        mgr = _mgr(tmp_path / "ca")
+
+        with pytest.raises(TimeoutError):
+            await mgr.bootstrap(redis_client, "octoprox-1", timeout_s=0.5)
+
+        assert not mgr.loaded
+        assert not (tmp_path / "ca").exists()
+
+    async def test_loaded_once_bootstrapped(self, redis_client: RedisClient, tmp_path: Path) -> None:
+        mgr = _mgr(tmp_path / "ca")
+        assert not mgr.loaded
+        await mgr.bootstrap(redis_client, "octoprox-1")
+        assert mgr.loaded
+
     async def test_bootstrap_loads_preexisting_ca(
         self, redis_client: RedisClient, tmp_path: Path
     ) -> None:
@@ -150,3 +170,47 @@ class TestClientHelloCapture:
         del server
         gc.collect()
         assert len(_pending_client_hellos) == before
+
+
+def _handshake_trusting_only_the_ca(server_ctx: ssl.SSLContext, ca_cert: Path, hostname: str) -> None:
+    """A full handshake with a client that trusts the CA alone and checks the host name; raises when it fails."""
+    client_ctx = ssl.create_default_context(cafile=str(ca_cert))
+    server_in, server_out, client_in, client_out = (ssl.MemoryBIO() for _ in range(4))
+    server = server_ctx.wrap_bio(server_in, server_out, server_side=True)
+    client = client_ctx.wrap_bio(client_in, client_out, server_hostname=hostname)
+    for _ in range(5):
+        try:
+            client.do_handshake()
+            return
+        except ssl.SSLWantReadError:
+            pass
+        server_in.write(client_out.read())
+        with contextlib.suppress(ssl.SSLWantReadError):
+            server.do_handshake()
+        client_in.write(server_out.read())
+    raise AssertionError("the handshake did not complete")
+
+
+class TestHostCertificates:
+    def test_a_new_host_costs_a_signature_not_a_key(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        mgr = _mgr(tmp_path / "ca")
+        mgr._generate_ca()
+
+        def no_key(**_: object) -> None:
+            raise AssertionError("a key was made for a host")
+
+        # Keys are made with the CA, never per host: a new host is only signed for.
+        monkeypatch.setattr(tls_cert_manager.rsa, "generate_private_key", no_key)
+        for host in ("a.example.com", "b.example.com"):
+            _handshake_trusting_only_the_ca(mgr.get_server_ssl_context(host), mgr.ca_cert_path, host)
+
+    def test_every_host_certificate_is_issued_for_the_processs_key(self, tmp_path: Path) -> None:
+        mgr = _mgr(tmp_path / "ca")
+        mgr._generate_ca()
+        (cert_a, key_a), (cert_b, key_b) = (mgr._generate_domain_cert(h) for h in ("a.example.com", "b.example.com"))
+
+        assert key_a == key_b
+        first, second = x509.load_pem_x509_certificate(cert_a), x509.load_pem_x509_certificate(cert_b)
+        assert first.public_key() == second.public_key()
+        names = [cert.extensions.get_extension_for_class(x509.SubjectAlternativeName).value for cert in (first, second)]
+        assert [name.get_values_for_type(x509.DNSName) for name in names] == [["a.example.com"], ["b.example.com"]]

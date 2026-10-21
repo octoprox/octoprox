@@ -14,12 +14,14 @@ Octoprox supports multiple routing strategies for distributing requests across p
 | Strategy | Description |
 |----------|-------------|
 | `round_robin` | Distributes requests evenly across all healthy proxies in order |
-| `least_used` | Routes to the proxy with the fewest active connections |
+| `least_used` | Routes to the proxy with the fewest transfers open on the gateway serving the request |
 | `random` | Randomly selects a healthy proxy for each request |
 | `sticky` | Routes requests carrying the same `-sessid-` to the same proxy; requests without one are routed like `random` |
-| `health_based` | Prioritizes proxies with better health scores and lower latency |
+| `health_based` | Prefers the proxies with the best success rate and connect latency on the gateway serving the request, and keeps trying the ones it has too few results for |
 
 Every strategy picks in two steps when a project has more than one connector: first a **connector**, by its [weight](#connector-weights), then a proxy inside that connector, by the strategy. A project with a single connector skips the first step.
+
+Strategies run on the [gateways]({{ site.baseurl }}/architecture), each on its own: `round_robin` and `random` keep their position per gateway, `least_used` counts the transfers open on its gateway and `health_based` scores what its gateway saw, so nothing is shared between gateways on the request path. Only `sticky` sessions are shared, through Redis, so a session keeps its proxy whichever gateway the next request reaches.
 
 ## Connector weights
 
@@ -39,11 +41,13 @@ How the strategy performs step 2:
 |----------|----------------|----------------------------|
 | `random` | Weighted random draw | Random proxy |
 | `round_robin` | Smooth weighted round robin: weights 3 and 1 give the fixed order A A B A, three A for every B, spread out rather than clumped | Proxies cycled in order; each connector keeps its own position |
-| `least_used` | Lowest requests divided by weight, so weight reads as relative capacity | Proxy with the fewest requests |
+| `least_used` | Fewest open transfers on this gateway divided by weight, so weight reads as relative capacity; ties broken at random, by weight | Proxy with the fewest open transfers on this gateway; ties broken at random |
 | `sticky` | The session id is hashed onto a connector, weighted, so a session always lands on the same connector | The usual sticky binding |
-| `health_based` | Weighted random draw; weight is not adjusted for health | Healthiest proxies preferred |
+| `health_based` | Weighted random draw; weight is not adjusted for health | A random pick among the best-scoring third of the proxies this gateway has at least 10 results for, and every proxy it has fewer for |
 
 Under `sticky`, a session already bound to a proxy keeps it while that proxy is eligible, whatever the weights say. Weight changes steer new sessions only, and raising one weight moves a proportional slice of new sessions rather than reshuffling them all.
+
+`health_based` scores a proxy on the requests its gateway sent through it since the gateway started: 60% the share that succeeded, 40% the time to connect to the upstream (full marks at 0 ms, none at 1000 ms). A proxy with fewer than 10 results is always in the draw, so a new proxy, or every proxy on a gateway that just started, is tried before the scores decide. Which proxies are healthy at all is the health checks' business: every strategy only ever sees proxies whose status is healthy.
 
 ### Examples
 
@@ -87,7 +91,7 @@ Proxy-Authorization: Basic base64(my-project-sessid-abc456:password)
 - If the upstream proxy assigned to a session becomes unhealthy (e.g., IP rotation), a new proxy is automatically assigned on the next request.
 - Without a session ID, the sticky strategy picks a connector by weight and a proxy inside it at random for each request, exactly like `random`.
 - This feature only takes effect when the project's routing strategy is set to `sticky`. Other strategies ignore the session ID.
-- Connectors running a residential or mobile product with **dynamic sessions** also forward the session to the vendor: the `-sessid-` value is hashed into the vendor's session id, so the same value keeps the same exit IP across requests and instances, and a request without `-sessid-` gets a fresh vendor session every time. The whole requested place is part of that hash: `-sessid-order-1-cc-de` and `-sessid-order-1-cc-us` are two vendor sessions with two exits, and so are `-cc-us-city-austin` and `-cc-us-city-dallas` under one `-sessid-`, each kept for as long as the client reuses it, since a vendor does not move a session it has already placed somewhere else. This applies under every routing strategy, not only `sticky`. See [Dynamic sessions]({{ site.baseurl }}/providers#descriptor-reference).
+- Connectors running a residential or mobile product with **dynamic sessions** also forward the session to the vendor: the `-sessid-` value is hashed into the vendor's session id, so the same value keeps the same exit IP across requests and gateways, and a request without `-sessid-` gets a fresh vendor session every time. The whole requested place is part of that hash: `-sessid-order-1-cc-de` and `-sessid-order-1-cc-us` are two vendor sessions with two exits, and so are `-cc-us-city-austin` and `-cc-us-city-dallas` under one `-sessid-`, each kept for as long as the client reuses it, since a vendor does not move a session it has already placed somewhere else. This applies under every routing strategy, not only `sticky`. See [Dynamic sessions]({{ site.baseurl }}/providers#descriptor-reference).
 
 > **Note:** The strings `-sessid-`, `-cc-`, `-st-` and `-city-` are reserved delimiters and should not appear in your project username or in session IDs.
 
@@ -118,7 +122,7 @@ Every connector has one **Countries** setting, on its General (or Infrastructure
 
 | Connector | Countries listed | Countries empty |
 |-----------|------------------|-----------------|
-| Residential and mobile pools (Oxylabs, Bright Data, Decodo, IPRoyal, NetNut) | *N* sessions are created **per listed country right away**, geo-targeted in the upstream credentials. Requests for other countries are refused. | *N* sessions are created without a country. In addition, the first `-cc-` request for any country creates *N* sessions geo-targeted to it, **on demand**, and they stay for later requests. |
+| Residential and mobile pools (Oxylabs, Bright Data, Decodo, IPRoyal, NetNut) | *N* sessions are created **per listed country right away**, geo-targeted in the upstream credentials. Requests for other countries are refused. | *N* sessions are created without a country. In addition, the first `-cc-` request for any country creates *N* sessions geo-targeted to it, **on demand** (that request waits up to 5 seconds for them), and they stay for later requests. |
 | Port-based types that pick IPs from the vendor's list (Bright Data ISP and datacenter) | *N* IPs are pinned per listed country right away, chosen from the IPs the zone has in that country. | IPs are pinned in list order; each keeps its reported country for per-proxy matching. |
 | Port-based types where each gateway port is pinned to an IP (Oxylabs and Decodo ISP and datacenter) | Gateway ports are scanned in order and **only IPs located in the listed countries are kept**, *N* per country. With 5 countries and *N* = 10 the scan aims for 50 proxies and stops early when the ports start returning failures or IPs already held, or after `max_scan_ports` ports. | Ports are taken in order regardless of location; each IP keeps its discovered country for per-proxy matching. |
 | Static connectors | The countries the manually added proxies exit from, used for proxies whose own location is unknown. | Each proxy is matched on its own exit country, looked up when it was added (`proxy.geo_lookup`), set by hand, or refreshed from the Proxies page. |
@@ -134,7 +138,7 @@ Octoprox narrows the project's healthy proxies before the routing strategy runs,
 2. A proxy with a known exit country must match exactly. The exit country is what [IP attribution]({{ site.baseurl }}/ip-attribution) resolved for the proxy's exit IP from the local IP databases, then the echo endpoint, then the vendor's claim (list-mode entries, known-IP APIs, the country a slot was provisioned for), which fills only what nothing independent answered. A proxy whose resolved country lies outside its connector's listed countries is never eligible, whatever was asked.
    The project's two location decisions then read the verdict on the row. With `location_contradicted: refuse`, a proxy whose vendor-declared country is contradicted by attribution is not eligible at all; with `evidence` it serves on the country the evidence puts it in, and with `vendor` on the vendor's claim. With `location_unknown: refuse`, a claim the sources could not settle or place is left out. A `-st-` or `-city-` request reads the row's state or city verdict the same way.
 3. A proxy with no known country is eligible only through its connector's list.
-4. A residential or mobile pool with **no** countries listed that has no slot group yet for the requested country creates one on the first request: `num_proxies` fresh sessions geo-targeted to that country, ready immediately. Later requests rotate across that group like any other, and the periodic sync keeps it alive. Pools that list countries are provisioned up front and never expand on demand.
+4. A residential or mobile pool with **no** countries listed that has no slot group yet for the requested country creates one on the first request: `num_proxies` fresh sessions geo-targeted to that country. The gateway asks a worker for the group and holds the request until the group reaches it through the routing feed, usually within two or three seconds and at most 5, then routes it; when the group does not arrive in time the request is refused as if nothing served the country. Gateways that miss the same country at the same moment get the one group between them. Later requests rotate across that group like any other, and the periodic sync keeps it alive. Pools that list countries are provisioned up front and never expand on demand.
 
 If nothing in the project serves the requested country, the request is rejected with `502 Bad Gateway`. Octoprox never silently falls back to another country. What happens when a proxy's exit turns out not to be where it should, and how that differs between pooled sessions, dynamic sessions and fixed exits, is worked through on [Location routing]({{ site.baseurl }}/location-routing).
 

@@ -43,7 +43,7 @@ interface KindInfo {
   hint: ReactNode
 }
 
-/** Every kind the backend logs (api/core/failure_log.py FailureKind). */
+/** Every kind the backend logs (api/core/stats.py FailureKind). */
 export const KIND_INFO: Record<string, KindInfo> = {
   upstream_timeout: {
     label: 'Upstream timeout',
@@ -160,7 +160,7 @@ export function FailurePanel({ record, onClose }: { record: FailureRecord; onClo
 
       <div className="rounded-lg border border-line bg-surface-raised/50 px-3 py-2.5">
         <div className="flex items-start gap-2">
-          <p className="font-mono text-xs break-words leading-relaxed text-fg flex-1 min-w-0">{record.message || '-'}</p>
+          <p className="font-mono text-xs wrap-break-word leading-relaxed text-fg flex-1 min-w-0">{record.message || '-'}</p>
           {record.message && <CopyButton text={record.message} className="" />}
         </div>
         {record.error_type && <p className="text-[11px] text-fg-subtle mt-1">{record.error_type}</p>}

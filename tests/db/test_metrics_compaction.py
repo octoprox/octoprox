@@ -3,12 +3,17 @@
 
 """Tests for metrics compaction and retention repository methods."""
 
+import asyncio
 from datetime import timedelta
+from typing import Any
 
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import func, select, text
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from api.core import utc_now
-from api.db.models import ProjectMetricsModel, ProxyMetricsModel
+from api.core.stats import MetricDelta
+from api.db.models import ConnectorMetricsModel, ProjectMetricsModel, ProxyMetricsModel
+from api.db.redis import PROJECT_WINDOWS, PROXY_WINDOWS, EntityWindows
 from api.db.repository import (
     ConnectorRepository,
     CredentialRepository,
@@ -20,6 +25,7 @@ from api.models.connector import Connector
 from api.models.credential import Credential, CredentialType
 from api.models.project import Project
 from api.models.proxy import Proxy, ProxyProtocol
+from tests.waits import until
 
 
 async def _create_full_chain(
@@ -65,6 +71,22 @@ async def _create_full_chain(
     await proxy_repo.create(proxy)
     await session.commit()
     return project, proxy
+
+
+async def _history_totals(metrics_repo: MetricsRepository, kind: EntityWindows, entity_id: str) -> MetricDelta:
+    """What the entity's history adds up to: its totals recomputed from the rows, as a backup import does."""
+    await metrics_repo.rebuild_totals()
+    return (await metrics_repo.get_totals(kind, [entity_id]))[entity_id]
+
+
+async def _proxy_rows(session: AsyncSession, proxy_id: str) -> list[ProxyMetricsModel]:
+    """A proxy's history rows, newest first."""
+    result = await session.execute(
+        select(ProxyMetricsModel)
+        .where(ProxyMetricsModel.proxy_id == proxy_id)
+        .order_by(ProxyMetricsModel.timestamp.desc())
+    )
+    return list(result.scalars().all())
 
 
 async def _insert_project_metrics(
@@ -213,9 +235,7 @@ class TestCompactProjectMetrics:
             )
         await db_session.commit()
 
-        # Get cumulative before compaction
-        before = await metrics_repo.get_cumulative_project_metrics()
-        before_project = before[project.id]
+        before_project = await _history_totals(metrics_repo, PROJECT_WINDOWS, project.id)
 
         # Compact
         cutoff = utc_now() - timedelta(hours=24)
@@ -227,9 +247,7 @@ class TestCompactProjectMetrics:
         )
         await db_session.commit()
 
-        # Get cumulative after compaction
-        after = await metrics_repo.get_cumulative_project_metrics()
-        after_project = after[project.id]
+        after_project = await _history_totals(metrics_repo, PROJECT_WINDOWS, project.id)
 
         assert after_project.request_count == before_project.request_count
         assert after_project.success_count == before_project.success_count
@@ -250,13 +268,9 @@ class TestCompactProjectMetrics:
         proxy_repo: ProxyRepository,
         db_session: AsyncSession,
     ) -> None:
-        """A bucket totalling over 2 GB must survive compaction.
+        """A bucket totalling over 2 GB survives compaction, though each of its rows stays under the int32 ceiling.
 
-        Raw rows stay well under the int32 ceiling; the bucket that sums an
-        hour of them does not. The columns are BIGINT in Postgres, so this
-        only ever failed on the way in - the ORM declared them Integer, which
-        is what binds the parameter, and asyncpg refused the value before it
-        reached the database. Real traffic hit this at ~2.1 GB in one hour.
+        Real traffic once put about 2.1 GB through one project in an hour.
         """
         project, _ = await _create_full_chain(
             project_repo, credential_repo, connector_repo, proxy_repo, db_session
@@ -282,7 +296,7 @@ class TestCompactProjectMetrics:
         )
         await db_session.commit()
 
-        totals = (await metrics_repo.get_cumulative_project_metrics())[project.id]
+        totals = await _history_totals(metrics_repo, PROJECT_WINDOWS, project.id)
         assert totals.bytes_sent == per_row * 6 > 2**31 - 1
         assert totals.bytes_received == per_row * 6
 
@@ -362,7 +376,7 @@ class TestCompactProxyMetrics:
         db_session: AsyncSession,
     ) -> None:
         """Proxy compaction preserves totals and picks the latest status."""
-        _, proxy = await _create_full_chain(
+        project, proxy = await _create_full_chain(
             project_repo, credential_repo, connector_repo, proxy_repo, db_session
         )
 
@@ -382,13 +396,11 @@ class TestCompactProxyMetrics:
         )
         await db_session.commit()
 
-        # Get totals before
-        before = await metrics_repo.get_cumulative_metrics_for_all_proxies()
-        before_proxy = before[proxy.id]
+        before_proxy = await _history_totals(metrics_repo, PROXY_WINDOWS, proxy.id)
 
         cutoff = now - timedelta(hours=24)
         deleted = await metrics_repo.compact_proxy_metrics(
-            proxy_id=proxy.id,
+            project_id=project.id,
             older_than=cutoff,
             source_granularity=60,
             target_granularity=3600,
@@ -398,16 +410,15 @@ class TestCompactProxyMetrics:
         assert deleted == 2
 
         # Totals preserved
-        after = await metrics_repo.get_cumulative_metrics_for_all_proxies()
-        after_proxy = after[proxy.id]
+        after_proxy = await _history_totals(metrics_repo, PROXY_WINDOWS, proxy.id)
         assert after_proxy.request_count == before_proxy.request_count
         assert after_proxy.success_count == before_proxy.success_count
         assert after_proxy.bytes_sent == before_proxy.bytes_sent
 
         # Check the compacted row has the latest status
-        history = await metrics_repo.get_metrics_history(proxy.id)
+        history = await _proxy_rows(db_session, proxy.id)
         assert len(history) == 1
-        assert history[0]["status"] == "unhealthy"
+        assert history[0].status == "unhealthy"
 
 
 class TestDeleteMetrics:
@@ -473,7 +484,7 @@ class TestDeleteMetrics:
 
         assert deleted == 1
 
-        remaining = await metrics_repo.get_metrics_history(proxy.id)
+        remaining = await _proxy_rows(db_session, proxy.id)
         assert len(remaining) == 1
 
 
@@ -552,3 +563,140 @@ class TestGranularityFilters:
 
         total_requests = sum(r["request_count"] for r in rows)
         assert total_requests == 110  # 10 + 100, not 999
+
+
+class TestCompactionScope:
+    """Each statement folds the rows of the project it is given, and no other's."""
+
+    async def test_only_the_projects_proxies_and_connectors_are_compacted(
+        self,
+        metrics_repo: MetricsRepository,
+        project_repo: ProjectRepository,
+        credential_repo: CredentialRepository,
+        connector_repo: ConnectorRepository,
+        proxy_repo: ProxyRepository,
+        db_session: AsyncSession,
+    ) -> None:
+        compacted, proxy = await _create_full_chain(
+            project_repo, credential_repo, connector_repo, proxy_repo, db_session, "A"
+        )
+        _other, other_proxy = await _create_full_chain(
+            project_repo, credential_repo, connector_repo, proxy_repo, db_session, "B"
+        )
+        old = utc_now().replace(minute=0, second=0, microsecond=0) - timedelta(days=2)
+        for minute in (5, 35):
+            for chosen in (proxy, other_proxy):
+                await _insert_proxy_metrics(db_session, chosen.id, old + timedelta(minutes=minute))
+                db_session.add(
+                    ConnectorMetricsModel(
+                        connector_id=chosen.connector_id, timestamp=old + timedelta(minutes=minute),
+                        request_count=10, granularity=60,
+                    )
+                )
+        await db_session.commit()
+        cutoff = utc_now() - timedelta(hours=24)
+
+        assert await metrics_repo.compact_proxy_metrics(compacted.id, cutoff, 60, 3600) == 2
+        assert await metrics_repo.compact_connector_metrics(compacted.id, cutoff, 60, 3600) == 2
+        await db_session.commit()
+
+        assert await _granularities(db_session, ProxyMetricsModel.proxy_id) == {
+            (proxy.id, 3600): 1, (other_proxy.id, 60): 2,
+        }
+        assert await _granularities(db_session, ConnectorMetricsModel.connector_id) == {
+            (proxy.connector_id, 3600): 1, (other_proxy.connector_id, 60): 2,
+        }
+
+
+class TestBuckets:
+    async def test_rows_fold_into_their_buckets_with_latency_weighted_by_requests(
+        self,
+        metrics_repo: MetricsRepository,
+        project_repo: ProjectRepository,
+        db_session: AsyncSession,
+    ) -> None:
+        """A bucket of no requests has no latency to weigh: it reads 0, not NULL."""
+        project = Project(name="Buckets", username="buckets_user", password="pass")
+        await project_repo.create(project)
+        hour = utc_now().replace(minute=0, second=0, microsecond=0) - timedelta(days=2)
+        await _insert_project_metrics(db_session, project.id, hour + timedelta(minutes=5), request_count=1, avg_latency_ms=100.0)
+        await _insert_project_metrics(db_session, project.id, hour + timedelta(minutes=55), request_count=3, avg_latency_ms=200.0)
+        await _insert_project_metrics(
+            db_session, project.id, hour + timedelta(minutes=65), request_count=0, success_count=0, failure_count=0,
+            avg_latency_ms=0.0,
+        )
+        await db_session.commit()
+
+        assert await metrics_repo.compact_project_metrics(project.id, utc_now() - timedelta(hours=24), 60, 3600) == 3
+        await db_session.commit()
+
+        hourly = await metrics_repo.get_project_metrics_history(project.id, granularity=3600)
+        assert [(row["timestamp"], row["request_count"], row["avg_latency_ms"]) for row in hourly] == [
+            (hour + timedelta(hours=1), 0, 0.0),
+            (hour, 4, 175.0),
+        ]
+
+    async def test_rows_of_another_granularity_are_left_alone(
+        self,
+        metrics_repo: MetricsRepository,
+        project_repo: ProjectRepository,
+        db_session: AsyncSession,
+    ) -> None:
+        project = Project(name="Mixed", username="mixed_user", password="pass")
+        await project_repo.create(project)
+        hour = utc_now().replace(minute=0, second=0, microsecond=0) - timedelta(days=2)
+        await _insert_project_metrics(db_session, project.id, hour, request_count=100, granularity=3600)
+        await _insert_project_metrics(db_session, project.id, hour + timedelta(minutes=5), request_count=1)
+        await db_session.commit()
+
+        assert await metrics_repo.compact_project_metrics(project.id, utc_now() - timedelta(hours=24), 60, 3600) == 1
+        await db_session.commit()
+
+        hourly = await metrics_repo.get_project_metrics_history(project.id, granularity=3600)
+        assert sorted(row["request_count"] for row in hourly) == [1, 100]
+
+
+class TestSetBased:
+    async def test_a_compaction_at_the_same_time_waits_for_the_first_and_folds_nothing(
+        self,
+        db_session_factory: async_sessionmaker[AsyncSession],
+        metrics_repo: MetricsRepository,
+        project_repo: ProjectRepository,
+        db_session: AsyncSession,
+    ) -> None:
+        """Three statements, select, insert and delete, would have both passes insert the bucket."""
+        project = Project(name="Raced", username="raced_user", password="pass")
+        await project_repo.create(project)
+        hour = utc_now().replace(minute=0, second=0, microsecond=0) - timedelta(days=2)
+        for minute in (5, 25, 45):
+            await _insert_project_metrics(db_session, project.id, hour + timedelta(minutes=minute))
+        await db_session.commit()
+        cutoff = utc_now() - timedelta(hours=24)
+
+        async with db_session_factory() as first, db_session_factory() as second:
+            assert await MetricsRepository(first).compact_project_metrics(project.id, cutoff, 60, 3600) == 3
+            racing = asyncio.create_task(MetricsRepository(second).compact_project_metrics(project.id, cutoff, 60, 3600))
+            await until(lambda: _waiting_for_locks(db_session_factory), timeout=5)
+            await first.commit()
+            assert await asyncio.wait_for(racing, 5) == 0
+            await second.commit()
+
+        hourly = await metrics_repo.get_project_metrics_history(project.id, granularity=3600)
+        assert [row["request_count"] for row in hourly] == [30]
+        assert await metrics_repo.get_project_metrics_history(project.id, granularity=60) == []
+
+
+async def _granularities(session: AsyncSession, owner: Any) -> dict[tuple[str, int], int]:
+    """Rows of the owner column's table, by owner and granularity."""
+    table = owner.class_
+    result = await session.execute(select(owner, table.granularity, func.count()).group_by(owner, table.granularity))
+    return {(entity_id, granularity): count for entity_id, granularity, count in result.all()}
+
+
+async def _waiting_for_locks(session_factory: async_sessionmaker[AsyncSession]) -> int:
+    """How many statements of the test database wait for a lock another transaction holds."""
+    async with session_factory() as session:
+        result = await session.execute(
+            text("SELECT count(*) FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND datname = current_database()")
+        )
+        return int(result.scalar_one())

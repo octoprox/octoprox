@@ -60,7 +60,9 @@ Create an IAM role with the policy above and attach it to whatever runs Octoprox
 
 - **EC2:** create the role with the EC2 trust policy (`ec2.amazonaws.com`) and attach it as the instance profile.
 - **ECS / Fargate:** use it as the task role (`ecs-tasks.amazonaws.com`).
-- **EKS:** bind it to the Octoprox service account with EKS Pod Identity or IRSA.
+- **EKS:** bind it to the service account of the Octoprox worker pods with EKS Pod Identity or IRSA.
+
+Only the processes that launch, watch and terminate instances call EC2: the single instance, or in a [role cluster]({{ site.baseurl }}/architecture) the workers, which run the scaling jobs. The api, gateways and controller never call AWS (the api checks a credential's fields without calling it), so they need no role; giving them the workers' role does no harm.
 
 Octoprox picks the role up through the AWS SDK's default credential chain, so no Octoprox-side configuration is needed beyond choosing the mode. The same chain also honours `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` and `AWS_SESSION_TOKEN` environment variables on the host, and `AWS_PROFILE` with a mounted `~/.aws` directory, if you would rather supply keys to the process than store them in Octoprox.
 
@@ -111,7 +113,7 @@ Use this when the proxies should live in a different AWS account from the one Oc
 
 Credential config: `{"auth_mode": "host_role", "role_arn": "arn:aws:iam::222222222222:role/octoprox-proxies", "external_id": "acme-7f3b9c"}`.
 
-The host role is the IAM role attached to the Octoprox instance, task or pod in account A, and it never changes. For each additional AWS account you want to provision in, create a role there with the same trust policy, allow the host role to assume it, and add an Octoprox credential naming it; there is no limit on how many.
+The host role is the IAM role attached to the Octoprox host, task or worker pods in account A, and it never changes. For each additional AWS account you want to provision in, create a role there with the same trust policy, allow the host role to assume it, and add an Octoprox credential naming it; there is no limit on how many.
 
 ### 1.4 Option C: IAM user access keys
 
@@ -273,6 +275,19 @@ curl -X POST http://localhost:8000/api/v1/projects/{project_id}/connectors \
 5. Fill in the configuration fields
 6. Click **Save**
 
+## How Octoprox Manages the Instances
+
+A worker's scale job runs for each AWS connector about every 30 seconds, and at once after the connector is created or edited. It launches, rotates, drains and terminates the connector's instances.
+
+- **Names and tags.** Each instance is named `<instance_name>-<epoch seconds>-<6 hex>`, cut to 64 characters. The name is the instance's `Name` tag and the launch's client token, so a launch that is retried returns the same instance. Every instance carries the tags `Name`, `ManagedBy=octoprox`, `octoprox-connector=<connector id>` and the connector's own `tags`, which never replace `Name` or `octoprox-connector`.
+- **No credentials in tags.** Each instance's proxy credentials are random and live only in its user data, the start-up script that installs Squid, as in 5.x. No tag holds them, so whoever can read the instances' tags sees the connector's ID and nothing more; whoever may call `ec2:DescribeInstanceAttribute` on an instance can read its user data, and with it the credentials.
+- **A listing when needed.** A run lists the connector's instances with one `DescribeInstances` call filtered by the `octoprox-connector` tag, pending and running ones only, while a launch is under way (or one a worker never finished is not settled yet) or the connector is being deleted, and otherwise once an hour. That is one call per cloud connector an hour, and one about every 30 seconds while it launches.
+- **Instances without a row are terminated.** A tagged instance that has no proxy row in Octoprox, and that no worker is creating, is terminated at the next listing, within the hour, and logged as `Terminating a cloud instance with no row`: its creator died, or Redis lost track of the launch, before the row was saved. That includes an instance launched by hand with the tag copied (*Launch more like this* copies it), so never copy the `octoprox-connector` tag onto instances of your own. An instance whose launch failed after AWS had started it (it runs without an address, the wait for it to run timed out, or Octoprox could not save its row) has no row either: the launch's error is recorded on the connector, and the instance is terminated at the next listing, within the hour. A stopped instance is not listed, so it is never terminated this way. One with termination protection fails to terminate, and that is logged at every listing. Instances 5.x launched carry no `octoprox-connector` tag and are managed through their rows, as before.
+
+Launches a worker never finished, the read of the connector before each launch, deleting a cloud connector, and which failures are only logged work the same on every cloud: see [Cloud scaling]({{ site.baseurl }}/architecture#cloud-scaling).
+
+No permission beyond those of 1.1 is needed: the listing is `ec2:DescribeInstances`, and the tags are set at launch through `ec2:CreateTags`.
+
 ## Configuration Reference
 
 ### Credential
@@ -300,7 +315,7 @@ The AssumeRole session is named `octoprox-<credential id>`, which is what appear
 | `max_proxies` | No | Maximum proxy instances (default: 10) | `10` |
 | `min_rotation_period_minutes` | No | Minimum instance lifetime (default: 60) | `60` |
 | `max_rotation_period_minutes` | No | Maximum instance lifetime (default: 1440) | `1440` |
-| `tags` | No | Custom tags for instances | `{"Environment": "prod"}` |
+| `tags` | No | Custom tags for instances, beside `Name`, `ManagedBy` and `octoprox-connector` | `{"Environment": "prod"}` |
 
 > **Note:** The AMI is automatically selected based on region and instance type. Octoprox uses Ubuntu 24.04 LTS for all instances.
 

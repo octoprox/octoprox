@@ -365,6 +365,7 @@ export interface GeoSettings {
   from_database: boolean
   echo_enabled: boolean
   echo_trusted_proxies: string[]
+  /** The databases the api process that answered has open, in lookup order. Where requests are judged, see GeoDatabase.gateways_loaded. */
   databases_loaded: LoadedGeoDatabase[]
 }
 
@@ -389,7 +390,8 @@ export interface GeoDatabase {
   attribution: string
   update_url: string | null
   update_interval_hours: number
-  update_auth: Record<string, unknown>
+  /** Whether vendor download credentials are stored; the credentials themselves are never sent back. */
+  has_update_auth: boolean
   /** The schedule is kept but skipped; Download now still runs. */
   update_paused: boolean
   last_update_at: string | null
@@ -398,11 +400,17 @@ export interface GeoDatabase {
   version: number
   created_at: string
   updated_at: string
+  /** Whether the api process that answered has it open (lookups and /echo use its copy), and why not when opening it failed there. */
   loaded_here: boolean
   load_error: string | null
   has_file: boolean
-  /** When the schedule is next due (the leader downloads at its first check after); null without a schedule, or while paused or disabled. */
+  /** When the schedule is next due (the IP database update job, hourly by default, downloads it at its first run after); null without a schedule, or while paused or disabled. */
   next_update_at: string | null
+  /** How many of the live gateways have it open, out of how many, as their heartbeats (a few seconds old) report it. */
+  gateways_loaded: number
+  gateways_total: number
+  /** Why it is not open on the gateways that report a reason, by gateway instance id. */
+  gateway_errors: Record<string, string>
 }
 
 export interface GeoDatabaseUpdate {
@@ -597,20 +605,48 @@ export interface ExitIpsPage {
   offset: number
 }
 
+/** One live gateway's attribution, as its last heartbeat (a few seconds old) reports it. */
+export interface GatewayGeoStatus {
+  instance_id: string
+  /** The IP databases it has open, the ids it still waits for, and why the others are not open, by database id. */
+  databases_loaded: number
+  databases_missing: string[]
+  load_errors: Record<string, string>
+  /** Echoes preflight sent through an upstream, and verdicts that placed the exit elsewhere, since the gateway started. */
+  preflight_checks: number
+  preflight_rejections: number
+  /** Observations and preflight sightings waiting for Redis, and those dropped since start because Redis would not take them. */
+  observations_pending: number
+  observations_dropped: number
+  sightings_pending: number
+  sightings_dropped: number
+}
+
 export interface GeoStatus {
+  /** The api process that answered: the databases it has open, out of every database listed, and why the others are not open there. */
   databases_loaded: number
   databases_total: number
   load_errors: Record<string, string>
   policy_from_database: boolean
+  /** The answering api process's own observation buffer (Detect records into it); each gateway's is in `gateways`. */
   pending_observations: number
   published_observations: number
   dropped_observations: number
-  /** Sightings and verdict rewrites waiting in Redis for the flusher; exit IPs and accuracy lag until they are written. Null when Redis cannot say. */
+  /** Sightings and verdict rewrites on the observations stream that no worker has ingested yet; exit IPs and accuracy lag until they are. Null when Redis cannot say. */
   queued_observations: number | null
   /** The planner's estimate, within a few percent: an exact count would read the whole table. */
   stored_observations: number
+  /** Preflight runs on gateways: summed over every live gateway, since each started. */
   preflight_checks: number
   preflight_rejections: number
+  /** Every live gateway, by instance id; empty when no gateway reports or the heartbeats cannot be read. */
+  gateways: GatewayGeoStatus[]
+}
+
+/** A re-attribution a worker will run: the job's kind and the key it is queued under ('all' or 'connector:<id>'). */
+export interface ReattributeQueued {
+  kind: 'reattribute'
+  key: string
 }
 
 export const fetchGeoSettings = async (): Promise<GeoSettings> => (await api.get('/geo/settings')).data
@@ -630,7 +666,8 @@ export const refreshGeoDatabase = async (id: string): Promise<GeoDatabase> => (a
 export const deleteGeoDatabase = async (id: string): Promise<void> => { await api.delete(`/geo/databases/${id}`) }
 export const lookupGeoIp = async (ip: string, claimedCountry?: string, projectId?: string, claimedCity?: string): Promise<GeoLookupResponse> =>
   (await api.post('/geo/lookup', { ip, claimed_country: claimedCountry || null, claimed_city: claimedCity || null, project_id: projectId || null })).data
-export const reattributeProxies = async (connectorId?: string): Promise<{ scanned: number; updated: number }> =>
+/** Queues a re-attribution of one connector's proxies, or of every proxy; answers 202 before a worker runs it. */
+export const reattributeProxies = async (connectorId?: string): Promise<ReattributeQueued> =>
   (await api.post('/geo/reattribute', { connector_id: connectorId ?? null })).data
 export type ObservationVerdict = 'contradicted' | 'open' | 'confirmed' | 'no_claim'
 
@@ -959,8 +996,18 @@ export interface TrafficUsage {
   percent: number | null
   action: TrafficLimitAction
   status: 'ok' | 'warning' | 'exceeded'
-  /** True while the connector takes no new requests because of its limit. */
+  /**
+   * True while the connector takes no new requests because of its limit: the
+   * block the traffic job stored, which gateways enforce. After a reset or a
+   * raised limit it stays true, with pending, until a worker decides again;
+   * false while the api cannot read Redis.
+   */
   blocked: boolean
+  /**
+   * True from a traffic reset or a limit edit until a worker stores the
+   * traffic decision it asked for; false while the api cannot read Redis.
+   */
+  pending: boolean
   price_per_gb: number | null
   currency: string
   cost: number | null
@@ -1058,10 +1105,18 @@ export interface ConnectorOptions {
   countries: CountryOption[]
 }
 
+/**
+ * A project's pool: the proxies of its enabled connectors that no traffic
+ * limit blocks. Statuses come from Postgres as the health jobs wrote them,
+ * quarantines from Redis.
+ */
 export interface PoolMetrics {
   total_proxies: number
+  /** Healthy and not quarantined: what requests can be routed to. */
   healthy_proxies: number
+  /** Neither routable nor on its way out: every status but healthy, draining and terminating, plus quarantined healthy proxies. */
   unhealthy_proxies: number
+  /** Quarantined by a rate limit, whatever their status, so they are also inside unhealthy (or draining, terminating). */
   quarantined_proxies: number
   draining_proxies: number
   terminating_proxies: number
@@ -1094,18 +1149,47 @@ export interface MetricsResponse {
   }
 }
 
-export const fetchMetrics = async (): Promise<MetricsResponse> => {
-  const response = await api.get('/metrics')
-  return response.data
+/** A pool split into parts that add up to its total, each proxy counted once. */
+export interface PoolBreakdown {
+  total: number
+  healthy: number
+  quarantined: number
+  /** Not routable for another reason: unhealthy, initializing, unknown. */
+  unhealthy: number
+  /** Draining or terminating: on their way out. */
+  leaving: number
 }
 
-export const setStrategy = async (strategy: string) => {
-  const response = await api.post('/proxies/strategy', { strategy })
-  return response.data
+/**
+ * The pool as one bar can draw it. The API counts a quarantined proxy inside
+ * unhealthy_proxies as well, so drawing both as they come counts it twice and
+ * pushes draining and terminating proxies off the bar. Taking quarantines out
+ * of unhealthy is exact unless a quarantined proxy is also draining or
+ * terminating, which is rare and short-lived.
+ */
+export const poolBreakdown = (pool: PoolMetrics | undefined): PoolBreakdown => {
+  const total = pool?.total_proxies ?? 0
+  const healthy = pool?.healthy_proxies ?? 0
+  const quarantined = pool?.quarantined_proxies ?? 0
+  const unhealthy = Math.max(0, (pool?.unhealthy_proxies ?? 0) - quarantined)
+  return { total, healthy, quarantined, unhealthy, leaving: Math.max(0, total - healthy - quarantined - unhealthy) }
 }
 
+/**
+ * Save the MITM CA certificate. The api reads it from the CA volume the
+ * gateways share, and a gateway creates it when it first starts, so until
+ * then there is none: that 404 comes back as an error saying so.
+ */
 export const downloadCaCertificate = async (): Promise<void> => {
-  const response = await api.get('/projects/ca-certificate', { responseType: 'blob' })
+  let response
+  try {
+    response = await api.get('/projects/ca-certificate', { responseType: 'blob' })
+  } catch (error) {
+    if (axios.isAxiosError(error) && error.response?.status === 404) {
+      throw new Error('There is no CA certificate yet: a gateway creates it when it first starts, on the CA volume the api reads it from.')
+    }
+    throw error
+  }
   const url = URL.createObjectURL(response.data as Blob)
   const a = document.createElement('a')
   a.href = url
@@ -1510,11 +1594,6 @@ export const fetchProjectConnectors = async (projectId: string): Promise<Connect
   return response.data
 }
 
-export const fetchProjectConnector = async (projectId: string, connectorId: string): Promise<Connector> => {
-  const response = await api.get(`/projects/${projectId}/connectors/${connectorId}`)
-  return response.data
-}
-
 export const createProjectConnector = async (projectId: string, data: ConnectorCreate): Promise<Connector> => {
   const response = await api.post(`/projects/${projectId}/connectors`, data)
   return response.data
@@ -1684,6 +1763,7 @@ export const fetchMitmRequests = async (
   return response.data
 }
 
+/** Editors and admins only: viewers get a 403. */
 export const clearMitmRequests = async (projectId: string): Promise<void> => {
   await api.delete(`/projects/${projectId}/mitm/requests`)
 }
@@ -1884,27 +1964,46 @@ export const setPasswordWithToken = async (token: string, password: string): Pro
   return data
 }
 
-// System statistics (admin only)
-export interface SystemRuntime {
+// System statistics (admin only): the install as Postgres and Redis describe it,
+// the same whichever api process answers. Nothing in it describes that process.
+
+/** The kinds of work workers run, one job stream each: the controller publishes the periodic ones, and any process asks for a run now. */
+export const JOB_KINDS = [
+  'health', 'sync', 'scale', 'provision', 'reattribute', 'enrich', 'traffic',
+  'metrics_flush', 'compaction', 'snapshot', 'geo_update', 'tunnel_last_seen', 'index_hygiene',
+] as const
+export type JobKind = (typeof JOB_KINDS)[number]
+
+/** A Redis stream entry ID's two numbers: the milliseconds Redis stamped the entry with, and its sequence within them. */
+export interface StreamId {
+  ms: number
+  seq: number
+}
+
+/** A stream position as its numbers ("1760875200000-0"); null for none, or anything that is not an entry ID. */
+export function parseStreamId(id: string | null | undefined): StreamId | null {
+  const match = id ? /^(\d+)-(\d+)$/.exec(id) : null
+  return match ? { ms: Number(match[1]), seq: Number(match[2]) } : null
+}
+
+/** Whether position `a` lies before `b` in their stream, by their numbers: entry IDs never compare as strings. */
+export function streamIdBefore(a: StreamId, b: StreamId): boolean {
+  return a.ms < b.ms || (a.ms === b.ms && a.seq < b.seq)
+}
+
+/** The process a snapshot describes: what it runs, since when, and how late its event loop is. */
+export interface SystemInstanceRuntime {
   version: string
-  instance_id: string
+  /** all, api, gateway, controller or worker. */
   role: string
-  environment: string
-  python_version: string
-  platform: string
+  instance_id: string
   pid: number
   started_at: string | null
   uptime_seconds: number
-  api_port: number
-  proxy_port: number
-  log_level: string
-  health_check_interval: number
-  metrics_flush_interval: number
-  ip_refresh_interval: number
-  // How late the event loop ran timers over the last minute; null before the
-  // first minute is up and for peers on older versions.
-  event_loop_lag_max_ms?: number | null
-  event_loop_lag_mean_ms?: number | null
+  // How late the event loop ran timers over the last full minute, worst and
+  // average; null before the first minute is up.
+  loop_lag_max_ms: number | null
+  loop_lag_mean_ms: number | null
 }
 
 export interface SystemInventory {
@@ -1921,6 +2020,7 @@ export interface SystemInventory {
   providers_builtin: number
   providers_custom: number
   custom_providers_enabled: number
+  /** Proxies per status, from the column the health jobs and the drains write; a status no proxy holds is absent. */
   proxies_by_status: Record<string, number>
 }
 
@@ -1946,9 +2046,8 @@ export interface SystemDatabase {
   name: string
   size_bytes: number
   tables: SystemTableStats[]
+  /** Connections to the database from every process and client; each api process's own pool is in its snapshot. */
   backends: number | null
-  pool_size: number | null
-  pool_checked_out: number | null
   error: string | null
 }
 
@@ -1970,53 +2069,28 @@ export interface SystemRedis {
   error: string | null
 }
 
-export interface SystemCache {
-  projects: number
-  credentials: number
-  connectors: number
-  proxies: number
-  project_strategies: number
-  geo_provision_locks: number
-  pending_proxy_deltas: number
-  pending_project_deltas: number
-  pending_connector_deltas?: number
-  pending_tunnel_peer_deltas?: number
-  tunnel_peer_totals?: number
-  quarantined_proxies: number
-  traffic_blocked_connectors?: number
-  tls_contexts: number
-  provider_types: number
-}
-
 export type WorkerState = 'running' | 'done' | 'cancelled' | 'failed'
 
-/** 'instance' runs on every instance; 'singleton' only on the lease holder. */
+/** 'instance' runs in every process of its roles; 'singleton' only in the one holding its lease (the controller's loops). */
 export type WorkerScope = 'instance' | 'singleton'
 
 export interface SystemWorkerTask {
   name: string
   description: string
   scope: WorkerScope
-  /** Lease this worker elects on, matching SystemLease.name (or its prefix). */
+  /** The lease a singleton runs under ('controller' for the controller's loops); null for every other loop. */
   lease: string | null
-  /**
-   * Whether that lease is taken per resource. A global singleton holds its
-   * lease continuously; a per-resource worker takes one per connector and
-   * releases it a moment later, so between ticks no lease exists at all -
-   * idle, not standing by, and several instances can hold different ones.
-   */
-  lease_per_resource: boolean
   /** State of the asyncio task itself - whether the loop still exists. */
   state: WorkerState
   /** The exception that ended the loop, when state is not 'running'. */
   error: string | null
-  /** Cadence the loop was started with; null for the event-driven subscribers. */
+  /** Cadence the loop was started with; null for a loop that declared none. */
   interval_seconds: number | null
-  /** Counters for the cycles inside the loop, since this process started. */
+  /** Counters for the cycles inside the loop, since its process started. A standby controller's loops count none. */
   runs: number
   /**
-   * Runs that found nothing to do - an empty buffer, a shard owned by peers, a
-   * snapshot already covered. A subset of `runs`, so `runs - idle_runs` is the
+   * Runs that found nothing to do - an empty buffer, no key due this second,
+   * a snapshot not due yet. A subset of `runs`, so `runs - idle_runs` is the
    * cycles that did something, and the durations describe those only.
    */
   idle_runs: number
@@ -2036,68 +2110,256 @@ export interface SystemWorkerTask {
   last_error_at: string | null
 }
 
-export interface SystemLease {
-  name: string
-  kind: string
-  /** Name of the background worker that takes this lease. */
-  worker: string
-  target: string | null
-  holder: string
-  held_by_self: boolean
-  ttl_ms: number
+/** An api process: its Postgres pool. How far it has read the change stream is in its snapshot's `streams.changes`. */
+export interface SystemApiSnapshot {
+  /** Connections the pool keeps open, in use now, and opened beyond its size; null when the pool does not say. */
+  pool_size: number | null
+  pool_checked_out: number | null
+  pool_overflow: number | null
+}
+
+/** A gateway: its listener, the feed it routes on, and its traffic and buffers since it started. */
+export interface SystemGatewaySnapshot {
+  listener_port: number
+  listening: boolean
+  /** Client connections being served now. */
+  active_connections: number
+  /**
+   * The routing feed it applied last: the head's digest, how far the change
+   * stream had been read by the compile that made it (an entry ID), and when
+   * it was applied; null before the first apply.
+   */
+  feed_digest: string | null
+  feed_changes: string | null
+  feed_applied_at: string | null
+  feed_age_seconds: number | null
+  /** What it keeps out of routing on its own: retired session slots, and quarantines it tripped before the feed carried them. */
+  retired_slots: number
+  local_quarantines: number
+  /** Transfers open now. */
+  in_flight: number
+  /** Requests carried since it started (counted when they end) and their bytes (counted as they flow). */
+  requests: number
+  successes: number
+  failures: number
+  bytes_sent: number
+  bytes_received: number
+  /** Failed and refused requests since start, by failure kind. */
+  failures_by_kind: Record<string, number>
+  /** Metric entries waiting for the next write to Redis, writes Redis did not take, and rate-limit windows that could not be counted. */
+  pending_metric_deltas: number
+  metric_flush_failures: number
+  rate_limit_errors: number
+  /** Echoes preflight sent through an upstream, and verdicts that placed the exit elsewhere, since start. */
+  preflight_checks: number
+  preflight_rejections: number
+  /** IP databases: the ids open, why the others are not, and the ids it still waits for. */
+  geo_databases_loaded: string[]
+  geo_database_errors: Record<string, string>
+  geo_databases_missing: string[]
+  /** Buffers on their way to Redis, and what they dropped since start. */
+  observations_pending: number
+  observations_dropped: number
+  sightings_pending: number
+  sightings_dropped: number
+  failure_log_dropped: number
+  mitm_captures_dropped: number
+  /** The tunnel endpoints it runs, one per protocol it terminates. */
+  tunnels: TunnelEndpointState[]
 }
 
 /**
- * The sections of a stats response that describe one process, as that process
- * published them on its own heartbeat. Every instance reports these about
- * itself, which is how the System page shows workers for an instance other
- * than the one the load balancer routed the request to.
+ * A controller: whether it leads, and what it last compiled and published.
+ * A standby keeps what it saw while it led, if it ever did.
  */
-export interface SystemInstanceSnapshot {
-  runtime: SystemRuntime
-  cache: SystemCache
-  tasks: SystemWorkerTask[]
-  proxy_server_listening: boolean
-  proxy_server_connections: number
-  geo_lookup_enabled: boolean
-  geo_lookups_in_flight: number
+export interface SystemControllerSnapshot {
+  is_leader: boolean
+  /** Times this process has taken the lease since it started. */
+  lease_terms: number
+  /** How far the change stream had been read by its last compile (an entry ID), and when that compile was made. */
+  changes: string | null
+  compiled_at: string | null
+  compiles: number
+  compile_ms: number | null
+  /** Why the last compile failed, while none has succeeded since. */
+  compile_error: string | null
+  publishes: number
+  published_at: string | null
+  publish_ms: number | null
+  publish_error: string | null
+  /** Sections the feed holds now; sections its publishes wrote (new or changed) and removed since start. */
+  sections: number
+  sections_written: number
+  sections_removed: number
+  /** Proxies in quarantine, and connectors whose traffic block still runs, as published. */
+  quarantined: number
+  blocked_connectors: number
 }
 
+/** One job kind on one worker, since the process started. */
+export interface SystemJobKindStats {
+  /** Batches run, and batches whose run raised: delivered again, and given up after five deliveries. */
+  runs: number
+  failures: number
+  /** Seconds spent in the job, summed over the batches that ran. */
+  duration_seconds: number
+  /** Entries it holds now, in the batches it is running or giving up. */
+  in_flight: number
+}
+
+/** A worker: the job kinds it takes, and the sightings and observations it ingested. */
+export interface SystemWorkerSnapshot {
+  jobs: Partial<Record<JobKind, SystemJobKindStats>>
+  /** Preflight sightings attributed, and lost with a batch given up after five deliveries, since start. */
+  sightings_consumed: number
+  sightings_dropped: number
+  /** IP observations and exit judgements ingested, and lost the same way, since start. */
+  observations_consumed: number
+  observations_dropped: number
+}
+
+/** Why a follower read a stream in full rather than on from its position. */
+export type FullReadReason = 'start' | 'gap' | 'reconnect' | 'reconcile'
+
+/** How far one process has read one stream it follows, and how often it read in full instead. */
+export interface SystemStreamState {
+  /** The last entry ID it handled, or the newest one at its last full read ('0-0' when there was no stream); null before its first read. */
+  position: string | null
+  /** How far behind the stream's newest entry its last read found it, by the milliseconds both IDs carry: 0 when it found nothing new, and after a full read; null before its first read. */
+  lag_seconds: number | null
+  /** Entries read since the process started. */
+  entries: number
+  /**
+   * Full reads since the process started, by reason: a gap means entries after
+   * its position were lost (it fell behind the stream's cap, or Redis lost the
+   * stream), a reconnect that a read failed.
+   */
+  full_reads: Partial<Record<FullReadReason, number>>
+  last_full_read_at: string | null
+}
+
+/**
+ * What one process publishes about itself on its heartbeat every few
+ * seconds: the process, whether it is ready, its loops, the streams it
+ * follows, and one section per runtime it runs (a process of role 'all' has
+ * all four).
+ */
+export interface SystemInstanceSnapshot {
+  runtime: SystemInstanceRuntime
+  /** Whether it answers /ready with 200 now, and when not, why ("gateway: feed not applied yet"). */
+  ready: boolean
+  reasons: string[]
+  tasks: SystemWorkerTask[]
+  /**
+   * Each stream it follows from a position of its own, by name: `changes`
+   * (the api's and workers' definitions, or a controller's compile),
+   * `runtime` (a controller), `feed` (a gateway).
+   */
+  streams: Record<string, SystemStreamState>
+  api: SystemApiSnapshot | null
+  gateway: SystemGatewaySnapshot | null
+  controller: SystemControllerSnapshot | null
+  worker: SystemWorkerSnapshot | null
+}
+
+/** One live process, listed while the registry key its heartbeat renews lasts. */
 export interface SystemInstance {
   instance_id: string
   role: string
-  is_self: boolean
-  ttl_seconds: number
-  /**
-   * What that instance last published about itself. Published alongside its
-   * membership, so a live instance normally has one; null when it runs a
-   * version predating snapshots. Present for this instance too, a few seconds
-   * behind the live top-level sections of the same response.
-   */
+  /** Null when it could not build a snapshot, or another release wrote one this release cannot read; it is listed anyway. */
   snapshot: SystemInstanceSnapshot | null
-  /** Seconds since the snapshot was published; null when there is none. */
+  /** Seconds since the snapshot was published, read off the key's TTL so no two clocks are compared; null without one. */
   age_seconds: number | null
 }
 
-export interface SystemWorkers {
-  tasks: SystemWorkerTask[]
-  leases: SystemLease[]
-  instances: SystemInstance[]
-  proxy_server_listening: boolean
-  proxy_server_connections: number
-  geo_lookup_enabled: boolean
-  geo_lookups_in_flight: number
+/** The active controller: who holds the lease, and how far its last compile read the change stream against the stream's head. */
+export interface SystemControllerStatus {
+  /** Instance id holding the controller lease; null while none leads (none running, or a failover under way). */
+  leader: string | null
+  /** How far the leader's last compile read the change stream (an entry ID), and when it was made, from its heartbeat; null until it reports one. */
+  changes: string | null
+  compiled_at: string | null
+  /**
+   * The change stream's newest entry ID, read now: ahead of `changes` while
+   * the leader has changes to compile, or its heartbeat has not reported the
+   * compile yet. Null while there is no stream (nothing announced since Redis
+   * started empty), so nothing is behind it.
+   */
+  changes_head: string | null
+  /**
+   * How soon a standby takes the lease over, in milliseconds: it asks for the
+   * lease every `standby_poll_ms`, and a leader that fails holds it for at
+   * most `lease_ttl_ms` more. The values the controllers run with.
+   */
+  standby_poll_ms: number
+  lease_ttl_ms: number
+  /** Why the lease and the heartbeats could not be read from Redis. */
+  error: string | null
+}
+
+/** One gateway's routing feed against the head in Redis. */
+export interface SystemGatewayFeed {
+  /** Every process with a gateway section (role gateway or all). */
+  instance_id: string
+  /** The feed it applied last, and how far the change stream had been read by the compile that made it; null before its first apply. */
+  digest: string | null
+  changes: string | null
+  /** Whether it routes on the head now. False after each publish until its next heartbeat reports the apply, or while it cannot apply one. */
+  in_sync: boolean
+  /** Seconds since it applied a feed update, as of this answer; it grows while nothing changes. */
+  age_seconds: number | null
+}
+
+/** The routing feed: the head the active controller published, and every gateway against it. */
+export interface SystemFeed {
+  /** The head (feed:head): its digest, how far its compile read the change stream, when that was, and its sections; all null while there is none. */
+  digest: string | null
+  changes: string | null
+  compiled_at: string | null
+  sections: number | null
+  gateways: SystemGatewayFeed[]
+  /** Redis could not be read, or holds a head this release cannot read. */
+  error: string | null
+}
+
+/** One work stream and the workers' consumer group on it, as Redis describes it now. */
+export interface SystemWorkStream {
+  /** Entries on the stream: queued and running, since a worker deletes each entry once it has handled it. */
+  length: number
+  /** Delivered to a worker and not acknowledged yet: running, or waiting to be reclaimed (a worker stopped, a batch failed, or its acknowledgement was refused). */
+  pending: number
+  /** Not delivered to any worker yet: the backlog. */
+  queued: number
+  /** Worker processes in the group, the stopped ones too until index hygiene prunes them (within the hour). */
+  consumers: number
+  /** Age of the oldest entry, queued or running, by Redis's clock; null when the stream is empty. */
+  oldest_seconds: number | null
+}
+
+/** Every work stream by name: `jobs.<kind>` for each job kind, then `sightings` and `observations`. */
+export interface SystemWorkStreams {
+  /** Empty when Redis could not be read (`error` says why). */
+  by_name: Record<string, SystemWorkStream>
+  error: string | null
 }
 
 export interface SystemStats {
   generated_at: string
-  runtime: SystemRuntime
+  /**
+   * Every live process by the role it registered with, in the order all,
+   * api, gateway, controller, worker, then any other; each list sorted by
+   * instance id. A role with no live process is absent and echo processes do
+   * not heartbeat. Empty when Redis cannot be read (controller.error says why).
+   */
+  instances: Record<string, SystemInstance[]>
+  controller: SystemControllerStatus
+  feed: SystemFeed
+  /** The work the workers take: each job kind's stream, the sightings and the observations. */
+  streams: SystemWorkStreams
   inventory: SystemInventory
   projects: SystemProjectUsage[]
   database: SystemDatabase
   redis: SystemRedis
-  cache: SystemCache
-  workers: SystemWorkers
 }
 
 export const fetchSystemStats = async (): Promise<SystemStats> => {
@@ -2149,32 +2411,54 @@ export const fetchSystemHistory = async (
 export default api
 
 
-// WireGuard: the install's tunnel endpoint and the devices allowed in (see docs/wireguard.md)
-export type WireGuardState = 'disabled' | 'starting' | 'running' | 'failed' | 'stopped'
+// Tunnels: what WireGuard and OpenVPN share. Gateways terminate them; the api shows them from the gateways' heartbeats.
+export type TunnelProtocol = 'wireguard' | 'openvpn'
 
-export interface WireGuardStatus {
-  /** Whether the instance that answered terminates the tunnel. */
-  enabled: boolean
-  state: WireGuardState
-  error: string | null
+/**
+ * What a gateway's endpoint is doing: bringing the tunnel up (also while it
+ * waits for the feed to carry the settings), carrying it, failed (it says
+ * why, and tries again), or stopped with the gateway.
+ */
+export type TunnelEndpointPhase = 'starting' | 'running' | 'failed' | 'stopped'
+
+/** One gateway's endpoint for one tunnel protocol, as its last heartbeat (a few seconds old) reports it. */
+export interface TunnelEndpointState {
+  protocol: TunnelProtocol
   instance_id: string
-  interface: string
+  state: TunnelEndpointPhase
+  /** Why the tunnel is not up, or what last went wrong applying a change to it (with the daemon's last output for OpenVPN). */
+  error: string | null
+  /** WireGuard: the kernel module or wireguard-go, once the interface is up. */
   backend: 'kernel' | 'userspace' | null
+  /** The port devices reach this gateway on: its own override, else the install's endpoint port; null until the feed carries the settings. */
   listen_port: number | null
-  transparent_port: number
-  dns_port: number
-  fake_ip_range: string
+  /** Connections the gateway's tunnel listener relays now, every tunnel protocol included (the listener is shared). */
   active_connections: number
-  peers_total: number
-  peers_enabled: number
-  peers_online: number
-  /** Connections relayed by address because no destination name could be recovered: every device, all time, cluster-wide. */
-  connections_by_address: number
-  /** Encrypted-DNS connections (DoT, known DoH resolvers) closed so devices keep the tunnel resolver: every device, all time, cluster-wide. */
-  encrypted_dns_blocked: number
+  /** OpenVPN: times the daemon exited on its own and was started again, and connections refused at admission, since the gateway started. */
+  restarts: number
+  denied: number
+  daemon_version: string | null
+  /** The gateway's own tunnel configuration: the interface it creates, the range its resolver answers from, and whether it closes encrypted DNS. */
+  interface: string | null
+  fake_ip_range: string | null
   block_encrypted_dns: boolean
 }
 
+/** A tunnel protocol across the install: every gateway carrying it, and its devices. */
+export interface TunnelStatus {
+  /** One entry per live gateway running the protocol's endpoint, by instance id; empty when none does. */
+  gateways: TunnelEndpointState[]
+  peers_total: number
+  peers_enabled: number
+  /** Devices a gateway carries now (OpenVPN) or that handshaked recently (WireGuard), merged across gateways. */
+  peers_online: number
+  /** Connections relayed by address because no destination name could be recovered: every device, all time. */
+  connections_by_address: number
+  /** Encrypted-DNS connections (DoT, known DoH resolvers) closed so devices keep the tunnel resolver: every device, all time. */
+  encrypted_dns_blocked: number
+}
+
+// WireGuard: the install's tunnel endpoint and the devices allowed in (see docs/wireguard.md)
 export interface WireGuardServerSettings {
   public_key: string
   endpoint_host: string
@@ -2185,7 +2469,8 @@ export interface WireGuardServerSettings {
   client_mtu: number | null
   configured: boolean
   updated_at: string
-  status: WireGuardStatus
+  /** The tunnel on every gateway carrying it, and the devices. */
+  status: TunnelStatus
 }
 
 export interface WireGuardServerSettingsDoc {
@@ -2200,14 +2485,14 @@ export interface WireGuardPeerStatus {
   online: boolean
   last_handshake_at: string | null
   endpoint: string | null
-  /** True when an instance carrying the tunnel published this reading in the last half minute; false when it is the persisted last sighting. */
+  /** True when a gateway carrying the tunnel published this reading in the last half minute; false when it is the persisted last sighting. */
   live: boolean
-  /** The carrying instance's interface counters since its interface came up (wire bytes, handshakes and DNS included); zero when none is carrying the device. */
+  /** The carrying gateway's interface counters since its interface came up (wire bytes, handshakes and DNS included); zero when none is carrying the device. */
   rx_bytes: number
   tx_bytes: number
 }
 
-/** A tunnel device's traffic as the pool relayed it: history plus the current window, cluster-wide. */
+/** A tunnel device's traffic as the pool relayed it: history plus the current window, from every gateway. */
 export interface TunnelPeerMetrics {
   request_count: number
   success_count: number
@@ -2299,6 +2584,7 @@ export const deleteWireGuardPeer = async (projectId: string, peerId: string): Pr
 }
 export const rotateWireGuardPeerKeys = async (projectId: string, peerId: string): Promise<WireGuardPeer> =>
   (await api.post(`/projects/${projectId}/wireguard/peers/${peerId}/rotate-keys`)).data
+/** The device's config file. It carries the device's private key, so editors and admins only: viewers get a 403. */
 export const fetchWireGuardPeerConfig = async (projectId: string, peerId: string): Promise<WireGuardPeerConfig> =>
   (await api.get(`/projects/${projectId}/wireguard/peers/${peerId}/config`)).data
 /** The device's own metrics history: same ranges and tiers as project and connector history. */
@@ -2306,34 +2592,7 @@ export const fetchWireGuardPeerMetricsHistory = async (projectId: string, peerId
   (await api.get(`/projects/${projectId}/wireguard/peers/${peerId}/metrics/history`, { params: { range } })).data
 
 // OpenVPN: the install's CA and endpoint, and the devices allowed in (see docs/openvpn.md)
-export type OpenVpnState = 'disabled' | 'starting' | 'running' | 'failed' | 'stopped'
 export type OpenVpnProtocol = 'udp' | 'tcp'
-
-export interface OpenVpnStatus {
-  /** Whether the instance that answered runs the daemon. */
-  enabled: boolean
-  state: OpenVpnState
-  error: string | null
-  instance_id: string
-  interface: string
-  protocol: OpenVpnProtocol
-  listen_port: number | null
-  daemon_version: string | null
-  /** Times the daemon exited on its own and was started again since this process started. */
-  restarts: number
-  /** Connections refused at the management interface (unknown, disabled or rotated device) since start. */
-  denied: number
-  transparent_port: number
-  dns_port: number
-  fake_ip_range: string
-  active_connections: number
-  peers_total: number
-  peers_enabled: number
-  peers_online: number
-  connections_by_address: number
-  encrypted_dns_blocked: number
-  block_encrypted_dns: boolean
-}
 
 export interface OpenVpnServerSettings {
   ca_fingerprint: string
@@ -2348,7 +2607,8 @@ export interface OpenVpnServerSettings {
   client_mtu: number | null
   configured: boolean
   updated_at: string
-  status: OpenVpnStatus
+  /** The endpoint on every gateway running it, and the devices. */
+  status: TunnelStatus
 }
 
 export interface OpenVpnServerSettingsDoc {
@@ -2363,7 +2623,7 @@ export interface OpenVpnServerSettingsDoc {
 
 export interface OpenVpnPeerStatus {
   online: boolean
-  /** When the current session started, while a carrying instance reports one. */
+  /** When the current session started, while a carrying gateway reports one. */
   connected_since: string | null
   /** The current session's start, or the persisted last connection. */
   last_seen_at: string | null
@@ -2432,6 +2692,7 @@ export const deleteOpenVpnPeer = async (projectId: string, peerId: string): Prom
 }
 export const rotateOpenVpnPeerCertificate = async (projectId: string, peerId: string): Promise<OpenVpnPeer> =>
   (await api.post(`/projects/${projectId}/openvpn/peers/${peerId}/rotate-certificate`)).data
+/** The device's profile. It carries the device's private key, so editors and admins only: viewers get a 403. */
 export const fetchOpenVpnPeerConfig = async (projectId: string, peerId: string): Promise<OpenVpnPeerConfig> =>
   (await api.get(`/projects/${projectId}/openvpn/peers/${peerId}/config`)).data
 export const fetchOpenVpnPeerMetricsHistory = async (projectId: string, peerId: string, range: string): Promise<TunnelPeerMetricsHistoryResponse> =>

@@ -1,76 +1,69 @@
 # Copyright 2026 Octoprox Authors
 # SPDX-License-Identifier: Apache-2.0
 
-"""Bridges admin-authored descriptors in Postgres with the in-memory registry."""
+"""Applies the enabled admin-authored descriptors in Postgres (``provider_descriptors``) to a process's registry, diff-only."""
 
 from __future__ import annotations
 
-from collections.abc import Callable
-from contextlib import AbstractAsyncContextManager
+from collections.abc import Mapping, Sequence
+from typing import Any
 
 import structlog
-from sqlalchemy.ext.asyncio import AsyncSession
 
+from api.core.logging import error_text
 from api.db.repository import ProviderDescriptorRepository
-from api.models.provider import ProviderRecord
+from api.db.session import SessionFactory
 from api.providers.registry import ProviderRegistry
 from api.providers.sdk.loader import DescriptorLoadError, descriptor_from_dict
 
 logger = structlog.get_logger()
 
-SessionFactory = Callable[[], AbstractAsyncContextManager[AsyncSession]]
-
 
 class ProviderStore:
-    """Loads custom descriptors from the database into a registry."""
+    """Applies the custom descriptors to one registry.
 
-    def __init__(self, registry: ProviderRegistry, session_factory: SessionFactory) -> None:
+    Args:
+        session_factory: Postgres, for :meth:`sync_all`; None on a gateway.
+    """
+
+    def __init__(self, registry: ProviderRegistry, session_factory: SessionFactory | None) -> None:
         self._registry = registry
         self._session_factory = session_factory
+        # The documents last applied: the same ones again are not even parsed.
+        self._applied: list[dict[str, Any]] | None = None
 
-    async def sync_all(self) -> int:
-        """Replace the registry's custom providers with the enabled rows in Postgres."""
+    @property
+    def registry(self) -> ProviderRegistry:
+        return self._registry
+
+    def apply_specs(self, specs: Sequence[Mapping[str, Any]]) -> bool:
+        """Make the registry's custom providers exactly ``specs``, the enabled descriptors' documents; True when it changed.
+
+        A document that does not load is logged and skipped, and one that
+        would shadow a built-in id is skipped with a warning; both are said
+        once, when the documents change, not on every call.
+        """
+        wanted = [dict(spec) for spec in specs]
+        if wanted == self._applied:
+            return False
+        descriptors = []
+        for spec in wanted:
+            try:
+                descriptors.append(descriptor_from_dict(spec))
+            except DescriptorLoadError as exc:
+                logger.error("Stored provider descriptor is invalid", provider_id=spec.get("id"), error=error_text(exc))
+        added, updated, removed = self._registry.replace_custom(descriptors)
+        self._applied = wanted
+        if not (added or updated or removed):
+            return False
+        logger.info("Custom provider descriptors synced", added=added, updated=updated, removed=removed)
+        return True
+
+    async def sync_all(self) -> bool:
+        """Read the enabled descriptors from Postgres and apply them (:meth:`apply_specs`); False without Postgres."""
+        if self._session_factory is None:
+            return False
         async with self._session_factory() as session:
             records = await ProviderDescriptorRepository(session).get_all()
-        descriptors = []
-        for record in records:
-            if not record.enabled:
-                continue
-            try:
-                descriptors.append(descriptor_from_dict(record.spec))
-            except DescriptorLoadError as exc:
-                logger.error("Stored provider descriptor is invalid", provider_id=record.id, error=str(exc))
-        added, updated, removed = self._registry.replace_custom(descriptors)
-        if added or updated or removed:
-            logger.info(
-                "Custom provider descriptors synced", added=added, updated=updated, removed=removed
-            )
-        else:
-            logger.debug("Custom provider descriptors unchanged", count=len(descriptors))
-        return len(descriptors)
+        return self.apply_specs([record.spec for record in records if record.enabled])
 
-    async def reload_one(self, provider_id: str, op: str | None) -> None:
-        """Apply a cross-instance change notification for one descriptor."""
-        if op == "removed":
-            self._registry.unregister(provider_id)
-            return
-        async with self._session_factory() as session:
-            record = await ProviderDescriptorRepository(session).get_by_id(provider_id)
-        self.apply_record(record, provider_id)
-
-    def apply_record(self, record: ProviderRecord | None, provider_id: str) -> None:
-        """Register/unregister from a record without touching the database."""
-        if record is None or not record.enabled:
-            self._registry.unregister(provider_id)
-            return
-        try:
-            descriptor = descriptor_from_dict(record.spec)
-        except DescriptorLoadError as exc:
-            logger.error("Stored provider descriptor is invalid", provider_id=provider_id, error=str(exc))
-            self._registry.unregister(provider_id)
-            return
-        existing = self._registry.get(descriptor.id)
-        if existing is not None and existing.source != "custom":
-            logger.warning("Custom provider shadows a built-in id and was skipped", provider_id=descriptor.id)
-            return
-        self._registry.register_descriptor(descriptor, "custom", origin="database")

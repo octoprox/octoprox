@@ -1,8 +1,13 @@
 # Copyright 2026 Octoprox Authors
 # SPDX-License-Identifier: Apache-2.0
 
-"""Tests for project endpoints."""
+"""Tests for project endpoints, on an api process: writes through the project service, reads from Postgres and Redis.
 
+The app runs no worker, so a write that starts work is checked by the job
+it asks for (its key on the job's stream), not by the job's effect.
+"""
+
+import time
 import uuid
 from typing import Any
 
@@ -10,7 +15,11 @@ import pytest
 from starlette.testclient import TestClient
 
 from api.core.config import Settings
+from api.core.roles import JobKind
 from api.core.username_params import LOCATION_INVALID_COUNTRY, LOCATION_NEEDS_COUNTRY
+from api.db.redis import QUARANTINE_KEY
+from api.models.proxy import Proxy, ProxyProtocol, ProxyStatus
+from tests.conftest import api_runtime, on_app_loop, queued_jobs
 
 
 class TestProjectEndpoints:
@@ -53,10 +62,39 @@ class TestProjectEndpoints:
         authenticated_client.post("/api/v1/projects", json=sample_project_data)
 
         # Try to create another with same username
-        response = authenticated_client.post("/api/v1/projects", json=sample_project_data)
+        response = authenticated_client.post(
+            "/api/v1/projects", json={**sample_project_data, "name": f"{sample_project_data['name']} B"}
+        )
 
         assert response.status_code == 400
-        assert "already exists" in response.json()["detail"]
+        assert response.json()["detail"] == f"Project with username '{sample_project_data['username']}' already exists"
+
+    def test_create_project_duplicate_name(
+        self,
+        authenticated_client: TestClient,
+        sample_project_data: dict[str, Any],
+    ) -> None:
+        """A name another project holds is refused by the unique index as a 400 (it was a 500)."""
+        assert authenticated_client.post("/api/v1/projects", json=sample_project_data).status_code == 201
+
+        response = authenticated_client.post(
+            "/api/v1/projects", json={**sample_project_data, "username": f"{sample_project_data['username']}_b"}
+        )
+
+        assert response.status_code == 400
+        assert response.json()["detail"] == f"Project with name '{sample_project_data['name']}' already exists"
+
+    def test_create_project_unknown_strategy(
+        self,
+        authenticated_client: TestClient,
+        sample_project_data: dict[str, Any],
+    ) -> None:
+        response = authenticated_client.post(
+            "/api/v1/projects", json={**sample_project_data, "routing_strategy": "fastest_first"}
+        )
+
+        assert response.status_code == 400
+        assert "fastest_first" in response.json()["detail"]
 
     def test_get_project(
         self,
@@ -77,6 +115,25 @@ class TestProjectEndpoints:
         response = authenticated_client.get("/api/v1/projects/non-existent-id")
 
         assert response.status_code == 404
+
+    def test_counts_come_from_postgres(
+        self,
+        authenticated_client: TestClient,
+        created_project: dict[str, Any],
+        created_connector: dict[str, Any],
+    ) -> None:
+        """A project's counts are what it holds; its proxy counts are its pool's."""
+        project_id = created_project["id"]
+
+        data = authenticated_client.get(f"/api/v1/projects/{project_id}").json()
+        assert (data["credential_count"], data["connector_count"], data["proxy_count"]) == (1, 1, 0)
+        listed = next(p for p in authenticated_client.get("/api/v1/projects").json()["projects"] if p["id"] == project_id)
+        assert (listed["credential_count"], listed["connector_count"], listed["healthy_proxy_count"]) == (1, 1, 0)
+
+        _add_proxy(authenticated_client, created_connector["id"], ProxyStatus.HEALTHY)
+        _add_proxy(authenticated_client, created_connector["id"], ProxyStatus.UNHEALTHY)
+        data = authenticated_client.get(f"/api/v1/projects/{project_id}").json()
+        assert (data["proxy_count"], data["healthy_proxy_count"]) == (2, 1)
 
     def test_update_project(
         self,
@@ -139,6 +196,7 @@ class TestProjectEndpoints:
 
         assert response.status_code == 400
         assert "Confirmation required" in response.json()["detail"]
+        assert authenticated_client.get(f"/api/v1/projects/{project_id}").status_code == 200
 
     def test_delete_project_not_found(self, authenticated_client: TestClient) -> None:
         """Test deleting a non-existent project."""
@@ -203,6 +261,21 @@ class TestProjectEndpoints:
         assert data["tls_mitm_engine"] == "rnet"
         assert data["tls_mitm_browser"] == "firefox"
 
+    def test_refused_mitm_edit_leaves_the_project_as_it_was(
+        self,
+        authenticated_client: TestClient,
+        created_project: dict[str, Any],
+    ) -> None:
+        """Validation runs on a copy: a refused edit changes nothing, not even the fields it set first."""
+        url = f"/api/v1/projects/{created_project['id']}"
+
+        response = authenticated_client.patch(url, json={"name": "Renamed", "tls_mitm_mode": "match_ua"})
+
+        assert response.status_code == 400
+        assert response.json()["detail"] == "tls_mitm_engine is required when tls_mitm_mode is 'match_ua'"
+        data = authenticated_client.get(url).json()
+        assert (data["name"], data["tls_mitm_mode"]) == (created_project["name"], "off")
+
     def test_list_projects_with_data(
         self,
         authenticated_client: TestClient,
@@ -217,7 +290,7 @@ class TestProjectEndpoints:
         for i in range(3):
             unique_id = uuid.uuid4().hex[:8]
             project_data = sample_project_data.copy()
-            project_data["name"] = f"Project {i}"
+            project_data["name"] = f"Project {i} {unique_id}"
             project_data["username"] = f"user{i}_{unique_id}"
             authenticated_client.post("/api/v1/projects", json=project_data)
 
@@ -228,6 +301,27 @@ class TestProjectEndpoints:
         # Should have 3 more projects than initial count
         assert data["total"] == initial_count + 3
         assert len(data["projects"]) == initial_count + 3
+
+
+class TestProjectJobs:
+    """What a project write asks the workers for."""
+
+    def test_a_location_rule_edit_asks_for_a_reattribution_of_the_project(
+        self,
+        authenticated_client: TestClient,
+        created_project: dict[str, Any],
+    ) -> None:
+        project_id = created_project["id"]
+        url = f"/api/v1/projects/{project_id}"
+
+        assert authenticated_client.patch(url, json={"description": "No judgement change"}).status_code == 200
+        assert f"project:{project_id}" not in queued_jobs(authenticated_client, JobKind.REATTRIBUTE)
+
+        response = authenticated_client.patch(url, json={"location_contradicted": "refuse"})
+
+        assert response.status_code == 200
+        assert response.json()["location_contradicted"] == "refuse"
+        assert f"project:{project_id}" in queued_jobs(authenticated_client, JobKind.REATTRIBUTE)
 
 
 class TestProjectRoleAccess:
@@ -307,8 +401,7 @@ class TestConnectInfo:
         test_settings: Settings,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        monkeypatch.setattr(test_settings, "proxy_public_host", "proxy.example.com")
-        monkeypatch.setattr(test_settings, "proxy_public_port", 18080)
+        monkeypatch.setattr(test_settings, "proxy_public_url", "http://proxy.example.com:18080")
         data = self._get(authenticated_client, created_project)
         assert data["endpoint"] == {"scheme": "http", "host": "proxy.example.com", "port": 18080}
         # A TLS load balancer in front of the listener, on the default port.
@@ -342,5 +435,42 @@ class TestConnectInfo:
         data = self._get(authenticated_client, created_project, sessid="a:b")
         assert data["error"] == "A session ID cannot contain a colon" and data["routes"] == []
 
+    def test_routes_preview_the_pool_as_a_gateway_would_route_it(
+        self,
+        authenticated_client: TestClient,
+        created_project: dict[str, Any],
+        created_connector: dict[str, Any],
+    ) -> None:
+        """The preview compiles the project's rows and quarantines now: a healthy row routes, a quarantined one does not."""
+        proxy = _add_proxy(authenticated_client, created_connector["id"], ProxyStatus.HEALTHY)
+        _add_proxy(authenticated_client, created_connector["id"], ProxyStatus.UNHEALTHY)
+
+        routes = self._get(authenticated_client, created_project)["routes"]
+        assert routes == [
+            {
+                "connector_id": created_connector["id"],
+                "connector_name": created_connector["name"],
+                "dynamic": False,
+                "on_demand": False,
+                "proxies": 1,
+                "share": 1.0,
+            }
+        ]
+
+        redis = api_runtime(authenticated_client).redis_client
+        on_app_loop(authenticated_client, redis.client.zadd, QUARANTINE_KEY, {proxy.id: time.time() + 600})
+        assert self._get(authenticated_client, created_project)["routes"] == []
+
+    def test_not_found(self, authenticated_client: TestClient) -> None:
+        assert authenticated_client.get("/api/v1/projects/non-existent-id/connect").status_code == 404
+
     def test_viewer_can_read_it(self, viewer_client: TestClient) -> None:
         assert viewer_client.get("/api/v1/projects/non-existent-id/connect").status_code == 404
+
+
+def _add_proxy(client: TestClient, connector_id: str, status: ProxyStatus) -> Proxy:
+    """A proxy stored with ``status``, as a job adds one (the proxies routes are another module's)."""
+    proxy = Proxy(host=f"{uuid.uuid4().hex[:8]}.example.com", port=8080, protocol=ProxyProtocol.HTTP,
+                  connector_id=connector_id, status=status)
+    on_app_loop(client, api_runtime(client).proxy_service.add, proxy)
+    return proxy

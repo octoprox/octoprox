@@ -1,16 +1,27 @@
 # Copyright 2026 Octoprox Authors
 # SPDX-License-Identifier: Apache-2.0
 
-"""Tests for routing strategies."""
+"""Tests for routing strategies.
+
+``least_used`` and ``health_based`` route on what one gateway measures: the
+transfers it has in flight (:class:`InFlight`) and the outcomes of the
+requests it finished (:class:`LocalOutcomes`, recorded through it here).
+"""
 
 import random
 from collections import Counter
+from typing import cast
+from unittest.mock import AsyncMock, call, patch
 
 import pytest
 
+from api.db.redis import RedisClient
 from api.models.proxy import Proxy, ProxyStatus
+from api.routing.inflight import InFlight
+from api.routing.outcomes import LocalOutcomes
+from api.strategies import STRATEGY_NAMES, get_strategy
 from api.strategies.base import ProxyGroup
-from api.strategies.health_based import HealthBasedStrategy
+from api.strategies.health_based import HEALTH_MIN_SAMPLES, HealthBasedStrategy
 from api.strategies.least_used import LeastUsedStrategy
 from api.strategies.random import RandomStrategy
 from api.strategies.round_robin import RoundRobinStrategy
@@ -21,9 +32,9 @@ from api.strategies.sticky import StickySessionStrategy
 def sample_proxies() -> list[Proxy]:
     """Create a list of sample proxies for testing."""
     return [
-        Proxy(id="proxy-1", host="proxy1.example.com", port=8080, connector_id="conn-1", request_count=10, success_count=9, status=ProxyStatus.HEALTHY, avg_latency_ms=100),
-        Proxy(id="proxy-2", host="proxy2.example.com", port=8080, connector_id="conn-1", request_count=5, success_count=5, status=ProxyStatus.HEALTHY, avg_latency_ms=50),
-        Proxy(id="proxy-3", host="proxy3.example.com", port=8080, connector_id="conn-1", request_count=20, success_count=15, status=ProxyStatus.DEGRADED, avg_latency_ms=200),
+        Proxy(id="proxy-1", host="proxy1.example.com", port=8080, connector_id="conn-1", status=ProxyStatus.HEALTHY),
+        Proxy(id="proxy-2", host="proxy2.example.com", port=8080, connector_id="conn-1", status=ProxyStatus.HEALTHY),
+        Proxy(id="proxy-3", host="proxy3.example.com", port=8080, connector_id="conn-1", status=ProxyStatus.DEGRADED),
     ]
 
 
@@ -61,34 +72,46 @@ class TestRoundRobinStrategy:
 
 
 class TestLeastUsedStrategy:
-    """Tests for LeastUsedStrategy."""
+    def test_name(self) -> None:
+        assert LeastUsedStrategy().name == "least_used"
 
-    def test_name(self):
-        strategy = LeastUsedStrategy()
-        assert strategy.name == "least_used"
+    async def test_select_empty_list(self) -> None:
+        assert await LeastUsedStrategy().select([]) is None
 
-    async def test_select_empty_list(self):
-        strategy = LeastUsedStrategy()
-        result = await strategy.select([])
-        assert result is None
+    async def test_select_returns_the_proxy_with_the_fewest_open_transfers(self, sample_proxies: list[Proxy]) -> None:
+        inflight = InFlight()
+        strategy = LeastUsedStrategy(inflight)
+        for proxy_id, open_transfers in (("proxy-1", 2), ("proxy-2", 1), ("proxy-3", 3)):
+            for _ in range(open_transfers):
+                inflight.begin(proxy_id, "conn-1")
+        for _ in range(10):
+            selected = await strategy.select(sample_proxies)
+            assert selected is not None and selected.id == "proxy-2"
 
-    async def test_select_returns_least_used(self, sample_proxies: list[Proxy]):
-        strategy = LeastUsedStrategy()
+    async def test_a_finished_transfer_frees_its_proxy(self, sample_proxies: list[Proxy]) -> None:
+        inflight = InFlight()
+        strategy = LeastUsedStrategy(inflight)
+        for proxy in sample_proxies:
+            inflight.begin(proxy.id, "conn-1")
+        inflight.end("proxy-3", "conn-1")
+        selected = await strategy.select(sample_proxies)
+        assert selected is not None and selected.id == "proxy-3"
 
-        # proxy-2 has the lowest request_count (5)
-        result = await strategy.select(sample_proxies)
-        assert result.id == "proxy-2"
+    async def test_ties_are_broken_at_random(self, sample_proxies: list[Proxy]) -> None:
+        """Sequential traffic has nothing in flight between requests; a fixed tie-break would pin one proxy."""
+        random.seed(5)
+        strategy = LeastUsedStrategy(InFlight())
+        picks = Counter([(await strategy.select(sample_proxies)).id for _ in range(300)])
+        assert set(picks) == {"proxy-1", "proxy-2", "proxy-3"}
+        assert min(picks.values()) > 60
 
-    async def test_select_with_equal_counts(self):
-        strategy = LeastUsedStrategy()
-        proxies = [
-            Proxy(id="proxy-1", host="p1.example.com", port=8080, connector_id="conn-1", request_count=10),
-            Proxy(id="proxy-2", host="p2.example.com", port=8080, connector_id="conn-1", request_count=10),
-        ]
-
-        result = await strategy.select(proxies)
-        assert result is not None
-        assert result.request_count == 10
+    async def test_lifetime_counters_play_no_part(self, sample_proxies: list[Proxy]) -> None:
+        """``request_count`` moved only when a flush landed, so it herded every request onto one proxy."""
+        inflight = InFlight()
+        inflight.begin("proxy-2", "conn-1")
+        strategy = LeastUsedStrategy(inflight)
+        picks = {(await strategy.select(sample_proxies)).id for _ in range(50)}
+        assert picks == {"proxy-1", "proxy-3"}
 
 
 class TestRandomStrategy:
@@ -113,12 +136,9 @@ class TestRandomStrategy:
 
 
 class TestStickySessionStrategy:
-    """Tests for StickySessionStrategy.
+    """Tests for StickySessionStrategy, most of them in-process: with no ``redis_client`` it routes from ``_session_map``.
 
-    These cover the in-process behaviour only - no redis_client is
-    passed, so the strategy operates purely from ``_session_map``.
-    Cross-instance behaviour (Redis read-through inside ``select``) is
-    exercised in tests/core/test_cross_instance_events.py.
+    The Redis binding is an ``AsyncMock`` here; the router's tests read a real one (tests/routing/test_router.py).
     """
 
     def test_name(self):
@@ -198,7 +218,7 @@ class TestStickySessionStrategy:
 
         now = [0.0]
         strategy = StickySessionStrategy(ttl_seconds=10, clock=lambda: now[0])
-        redis = AsyncMock()
+        redis = AsyncMock(spec=RedisClient)
         redis.get_sticky_binding.return_value = sample_proxies[0].id
         # This instance never binds anything itself: every session arrives already bound by a peer.
         for i in range(sticky_module._SWEEP_EVERY - 1):
@@ -212,17 +232,20 @@ class TestStickySessionStrategy:
 
         now = [0.0]
         strategy = StickySessionStrategy(ttl_seconds=300, clock=lambda: now[0])
-        redis = AsyncMock()
+        redis = AsyncMock(spec=RedisClient)
         redis.get_sticky_binding.return_value = None
         first = await strategy.select(sample_proxies, session_id="s", redis_client=redis, project_id="p")
+        await strategy.settle()
         assert redis.set_sticky_binding.await_count == 1
         for _ in range(10):
             now[0] += 10
             await strategy.select(sample_proxies, session_id="s", redis_client=redis, project_id="p")
         # 100 seconds in: still within the first half TTL, nothing rewritten.
+        await strategy.settle()
         assert redis.set_sticky_binding.await_count == 1
         now[0] += 60
         await strategy.select(sample_proxies, session_id="s", redis_client=redis, project_id="p")
+        await strategy.settle()
         assert redis.set_sticky_binding.await_count == 2
         redis.set_sticky_binding.assert_awaited_with("p", "s", first.id, ttl_seconds=300)
 
@@ -295,96 +318,207 @@ class TestStickySessionStrategy:
         assert result.id != first_result.id
         assert result.id in [p.id for p in remaining]
 
+    async def test_an_unreadable_binding_places_the_session_by_hashing(self, sample_proxies: list[Proxy]) -> None:
+        redis = AsyncMock(spec=RedisClient)
+        redis.get_sticky_binding.side_effect = ConnectionError("Redis is down")
+        strategy = StickySessionStrategy()
+        selected = await strategy.select(sample_proxies, session_id="s", redis_client=redis, project_id="p")
+        assert selected is not None and selected.id == StickySessionStrategy._consistent_hash_pick(sample_proxies, "s").id
+
+    async def test_an_unwritable_binding_stays_local(self, sample_proxies: list[Proxy]) -> None:
+        now = [0.0]
+        redis = AsyncMock(spec=RedisClient)
+        redis.get_sticky_binding.return_value = None
+        redis.set_sticky_binding.side_effect = ConnectionError("Redis is down")
+        strategy = StickySessionStrategy(ttl_seconds=300, clock=lambda: now[0])
+        first = await strategy.select(sample_proxies, session_id="s", redis_client=redis, project_id="p")
+        now[0] += 10
+        again = await strategy.select(sample_proxies, session_id="s", redis_client=redis, project_id="p")
+        assert first is not None and again is not None and first.id == again.id
+        # The failed write is not retried on every request: the next try is half a TTL later.
+        await strategy.settle()
+        assert redis.set_sticky_binding.await_count == 1
+
+    async def test_stored_binding_reads_redis_and_fails_open(self) -> None:
+        redis = AsyncMock(spec=RedisClient)
+        redis.get_sticky_binding.return_value = "proxy-2"
+        strategy = StickySessionStrategy()
+        assert await strategy.stored_binding(cast(RedisClient, redis), "p", "s") == "proxy-2"
+        redis.get_sticky_binding.side_effect = ConnectionError("Redis is down")
+        assert await strategy.stored_binding(cast(RedisClient, redis), "p", "s") is None
+
+    async def test_a_binding_cut_by_the_deadline_is_logged_by_its_type(self, sample_proxies: list[Proxy]) -> None:
+        """A Redis call cut by the request deadline raises a bare TimeoutError; the read's and the write's logs name it."""
+        redis = AsyncMock(spec=RedisClient)
+        redis.get_sticky_binding.side_effect = TimeoutError
+        redis.set_sticky_binding.side_effect = TimeoutError
+        strategy = StickySessionStrategy()
+        with patch("api.strategies.sticky.logger") as log:
+            selected = await strategy.select(sample_proxies, session_id="s", redis_client=cast(RedisClient, redis), project_id="p")
+            await strategy.settle()
+        assert selected is not None
+        assert log.debug.call_args_list == [
+            call("Sticky binding could not be read", project_id="p", error="TimeoutError"),
+            call("Sticky binding could not be stored", project_id="p", error="TimeoutError"),
+        ]
+
+
+class TestHeldProxy:
+    """The proxy a strategy holds a session to, which the router keeps the session on while it rests in quarantine."""
+
+    async def test_a_strategy_that_binds_no_session_holds_none(self, sample_proxies: list[Proxy]) -> None:
+        redis = AsyncMock(spec=RedisClient)
+        for strategy in (RandomStrategy(), RoundRobinStrategy(), LeastUsedStrategy(), HealthBasedStrategy()):
+            assert await strategy.select(sample_proxies, session_id="s") is not None
+            assert await strategy.held_proxy("s", redis_client=cast(RedisClient, redis), project_id="p") is None
+        redis.get_sticky_binding.assert_not_called()
+
+    async def test_sticky_holds_its_own_binding_without_asking_redis(self, sample_proxies: list[Proxy]) -> None:
+        redis = AsyncMock(spec=RedisClient)
+        strategy = StickySessionStrategy()
+        first = await strategy.select(sample_proxies, session_id="s")
+        assert first is not None
+        assert await strategy.held_proxy("s", redis_client=cast(RedisClient, redis), project_id="p") == first.id
+        redis.get_sticky_binding.assert_not_called()
+
+    async def test_sticky_reads_a_binding_made_elsewhere_once_and_remembers_it(self) -> None:
+        redis = AsyncMock(spec=RedisClient)
+        redis.get_sticky_binding.return_value = "proxy-2"
+        strategy = StickySessionStrategy()
+        for _ in range(2):
+            assert await strategy.held_proxy("s", redis_client=cast(RedisClient, redis), project_id="p") == "proxy-2"
+        assert redis.get_sticky_binding.await_count == 1
+        assert strategy.bound_proxy_id("s") == "proxy-2"
+
+    async def test_sticky_holds_none_for_a_session_bound_nowhere_or_unreadable(self) -> None:
+        redis = AsyncMock(spec=RedisClient)
+        redis.get_sticky_binding.return_value = None
+        strategy = StickySessionStrategy()
+        assert await strategy.held_proxy("s", redis_client=cast(RedisClient, redis), project_id="p") is None
+        redis.get_sticky_binding.side_effect = ConnectionError("Redis is down")
+        assert await strategy.held_proxy("s", redis_client=cast(RedisClient, redis), project_id="p") is None
+        # Without Redis only a binding made here counts.
+        assert await strategy.held_proxy("s") is None
+        assert strategy.bound_proxy_id("s") is None
+
+
+def _measured(**outcomes: tuple[int, int, float]) -> LocalOutcomes:
+    """A gateway's outcomes with each proxy's ``(requests, successes, latency sum in ms)`` recorded, latency spread evenly.
+
+    Keyword names spell proxy ids with ``_`` for ``-``: ``high_success`` is ``high-success``.
+    """
+    measured = LocalOutcomes()
+    for name, (requests, successes, latency_sum_ms) in outcomes.items():
+        for index in range(requests):
+            measured.record(name.replace("_", "-"), index < successes, latency_sum_ms / requests)
+    return measured
+
+
+def _rows(*ids: str) -> list[Proxy]:
+    return [Proxy(id=i, host=f"{i}.example.com", port=8080, connector_id="conn-1", status=ProxyStatus.HEALTHY) for i in ids]
+
 
 class TestHealthBasedStrategy:
-    """Tests for HealthBasedStrategy."""
+    def test_name(self) -> None:
+        assert HealthBasedStrategy().name == "health_based"
 
-    def test_name(self):
+    async def test_select_empty_list(self) -> None:
+        assert await HealthBasedStrategy().select([]) is None
+
+    async def test_select_considers_success_rate(self) -> None:
+        outcomes = _measured(high_success=(100, 95, 10000.0), low_success=(100, 50, 10000.0))
+        strategy = HealthBasedStrategy(outcomes)
+        results = [await strategy.select(_rows("high-success", "low-success")) for _ in range(20)]
+        assert {r.id for r in results if r is not None} == {"high-success"}
+
+    async def test_select_considers_latency(self) -> None:
+        outcomes = _measured(fast=(100, 90, 5000.0), slow=(100, 90, 50000.0))
+        strategy = HealthBasedStrategy(outcomes)
+        results = [await strategy.select(_rows("fast", "slow")) for _ in range(20)]
+        assert {r.id for r in results if r is not None} == {"fast"}
+
+    async def test_draws_from_the_best_third(self) -> None:
+        random.seed(2)
+        outcomes = _measured(**{f"p{i}": (100, 100 - i * 10, 5000.0) for i in range(6)})
+        strategy = HealthBasedStrategy(outcomes)
+        picks = {(await strategy.select(_rows(*(f"p{i}" for i in range(6))))).id for _ in range(100)}
+        assert picks == {"p0", "p1"}
+
+    async def test_unmeasured_rows_are_always_candidates(self) -> None:
+        """A restarted gateway or a new slot has no outcomes yet; without this the first scored rows took everything."""
+        random.seed(4)
+        outcomes = _measured(good=(100, 100, 5000.0), bad=(100, 10, 90000.0), fresh=(HEALTH_MIN_SAMPLES - 1, 0, 0.0))
+        strategy = HealthBasedStrategy(outcomes)
+        picks = Counter([(await strategy.select(_rows("good", "bad", "fresh", "new"))).id for _ in range(400)])
+        assert set(picks) == {"good", "fresh", "new"}
+
+    async def test_a_row_with_enough_samples_is_scored(self) -> None:
+        outcomes = _measured(good=(100, 100, 5000.0), bad=(HEALTH_MIN_SAMPLES, 0, 0.0))
+        strategy = HealthBasedStrategy(outcomes)
+        picks = {(await strategy.select(_rows("good", "bad"))).id for _ in range(30)}
+        assert picks == {"good"}
+
+    async def test_a_cold_gateway_spreads_over_every_row(self) -> None:
+        random.seed(6)
         strategy = HealthBasedStrategy()
-        assert strategy.name == "health_based"
+        picks = Counter([(await strategy.select(_rows("a", "b", "c"))).id for _ in range(300)])
+        assert set(picks) == {"a", "b", "c"}
 
-    async def test_select_empty_list(self):
-        strategy = HealthBasedStrategy()
-        result = await strategy.select([])
-        assert result is None
-
-    async def test_select_prefers_healthy_proxies(self):
-        strategy = HealthBasedStrategy()
-        proxies = [
-            Proxy(id="healthy", host="h.example.com", port=8080, connector_id="conn-1", status=ProxyStatus.HEALTHY, success_count=90, request_count=100, avg_latency_ms=50),
-            Proxy(id="unhealthy", host="u.example.com", port=8080, connector_id="conn-1", status=ProxyStatus.UNHEALTHY, success_count=10, request_count=100, avg_latency_ms=500),
-        ]
-
-        # Run multiple times - should always prefer healthy
-        for _ in range(10):
-            result = await strategy.select(proxies)
-            assert result.id == "healthy"
-
-    async def test_select_falls_back_to_degraded(self):
-        strategy = HealthBasedStrategy()
-        proxies = [
-            Proxy(id="degraded", host="d.example.com", port=8080, connector_id="conn-1", status=ProxyStatus.DEGRADED, success_count=70, request_count=100),
-            Proxy(id="unhealthy", host="u.example.com", port=8080, connector_id="conn-1", status=ProxyStatus.UNHEALTHY, success_count=10, request_count=100),
-        ]
-
-        # Should prefer degraded over unhealthy
-        for _ in range(10):
-            result = await strategy.select(proxies)
-            assert result.id == "degraded"
-
-    async def test_select_considers_success_rate(self):
-        strategy = HealthBasedStrategy()
-        proxies = [
-            Proxy(id="high-success", host="h.example.com", port=8080, connector_id="conn-1", status=ProxyStatus.HEALTHY, success_count=95, request_count=100, avg_latency_ms=100),
-            Proxy(id="low-success", host="l.example.com", port=8080, connector_id="conn-1", status=ProxyStatus.HEALTHY, success_count=50, request_count=100, avg_latency_ms=100),
-        ]
-
-        # High success rate should be preferred
-        results = [await strategy.select(proxies) for _ in range(20)]
-        high_success_count = sum(1 for r in results if r.id == "high-success")
-
-        # Should mostly select high-success proxy
-        assert high_success_count > 10
-
-    async def test_select_considers_latency(self):
-        strategy = HealthBasedStrategy()
-        proxies = [
-            Proxy(id="fast", host="f.example.com", port=8080, connector_id="conn-1", status=ProxyStatus.HEALTHY, success_count=90, request_count=100, avg_latency_ms=50),
-            Proxy(id="slow", host="s.example.com", port=8080, connector_id="conn-1", status=ProxyStatus.HEALTHY, success_count=90, request_count=100, avg_latency_ms=500),
-        ]
-
-        # Fast proxy should be preferred
-        results = [await strategy.select(proxies) for _ in range(20)]
-        fast_count = sum(1 for r in results if r.id == "fast")
-
-        # Should mostly select fast proxy
-        assert fast_count > 10
-
-    def test_calculate_score(self):
-        strategy = HealthBasedStrategy()
-
-        # High success rate, low latency = high score
-        good_proxy = Proxy(id="good", host="g.example.com", port=8080, connector_id="conn-1", success_count=95, request_count=100, avg_latency_ms=50)
-
-        # Low success rate, high latency = low score
-        bad_proxy = Proxy(id="bad", host="b.example.com", port=8080, connector_id="conn-1", success_count=30, request_count=100, avg_latency_ms=800)
-
-        good_score = strategy._calculate_score(good_proxy)
-        bad_score = strategy._calculate_score(bad_proxy)
-
-        assert good_score > bad_score
+    def test_score(self) -> None:
+        # High success rate, low latency = high score; an unmeasured latency is neutral.
+        assert HealthBasedStrategy.score(100, 95, 5000.0) > HealthBasedStrategy.score(100, 30, 80000.0)
+        assert HealthBasedStrategy.score(100, 100, 0.0) == pytest.approx(100 * 0.6 + 50 * 0.4)
+        assert HealthBasedStrategy.score(0, 0, 0.0) == pytest.approx(50 * 0.4)
 
 
-def _group(key: str, weight: int, count: int, requests: int = 0, load: int | None = None) -> ProxyGroup:
+class TestGetStrategy:
+    def test_every_name_builds_its_strategy(self) -> None:
+        assert {get_strategy(name).name for name in STRATEGY_NAMES} == set(STRATEGY_NAMES)
+        assert get_strategy("Sticky").name == "sticky"
+
+    def test_an_unknown_name_is_refused(self) -> None:
+        with pytest.raises(ValueError, match="Unknown strategy"):
+            get_strategy("fastest")
+
+    async def test_counters_reach_the_strategies_that_route_on_them(self) -> None:
+        """Twenty draws each: without its counters a strategy would pick either row at random."""
+        inflight = InFlight()
+        inflight.begin("a", "conn-1")
+        least_used = get_strategy("least_used", inflight=inflight)
+        assert {(await least_used.select(_rows("a", "b"))).id for _ in range(20)} == {"b"}
+        health_based = get_strategy("health_based", outcomes=_measured(a=(100, 100, 1.0), b=(100, 0, 1.0)))
+        assert {(await health_based.select(_rows("a", "b"))).id for _ in range(20)} == {"a"}
+
+    async def test_built_without_counters_a_strategy_sees_nothing_in_flight_and_no_outcomes(self) -> None:
+        """Validation and the api's previews build strategies no gateway serves through: every row is idle and unmeasured."""
+        random.seed(8)
+        rows = _rows("a", "b", "c")
+        for name in ("least_used", "health_based"):
+            strategy = get_strategy(name)
+            assert {(await strategy.select(rows)).id for _ in range(100)} == {"a", "b", "c"}, name
+
+    async def test_every_strategy_can_be_settled(self) -> None:
+        """The router settles every strategy it holds as the gateway stops; only sticky has writes to wait for."""
+        for name in STRATEGY_NAMES:
+            assert await get_strategy(name).settle() is None
+
+
+def _group(key: str, weight: int, count: int) -> ProxyGroup:
     return ProxyGroup(
         key=key,
         weight=weight,
         proxies=[
-            Proxy(id=f"{key}-{i}", host=f"{key}{i}", port=1, connector_id=key, request_count=requests, status=ProxyStatus.HEALTHY)
+            Proxy(id=f"{key}-{i}", host=f"{key}{i}", port=1, connector_id=key, status=ProxyStatus.HEALTHY)
             for i in range(count)
         ],
-        load=requests * count if load is None else load,
     )
+
+
+def _open(inflight: InFlight, group: ProxyGroup, per_proxy: int) -> None:
+    """``per_proxy`` transfers open through every proxy of the group."""
+    for proxy in group.proxies:
+        for _ in range(per_proxy):
+            inflight.begin(proxy.id, group.key)
 
 
 class TestWeightedSelection:
@@ -442,20 +576,33 @@ class TestWeightedSelection:
         assert "a" not in strategy._indices
         assert "b" in strategy._current
 
-    async def test_least_used_treats_weight_as_capacity(self):
-        strategy = LeastUsedStrategy()
-        # "a" has served 9 requests at weight 3 (3 per unit); "b" 4 at weight 1 (4 per unit).
-        groups = [_group("a", 3, 3, requests=3), _group("b", 1, 1, requests=4)]
-        assert (await strategy.select_weighted(groups)).connector_id == "a"
-        groups = [_group("a", 3, 3, requests=5), _group("b", 1, 1, requests=4)]
-        assert (await strategy.select_weighted(groups)).connector_id == "b"
+    async def test_least_used_treats_weight_as_capacity(self) -> None:
+        inflight = InFlight()
+        strategy = LeastUsedStrategy(inflight)
+        # "a" has 9 transfers open at weight 3 (3 per unit); "b" 4 at weight 1 (4 per unit).
+        a, b = _group("a", 3, 3), _group("b", 1, 1)
+        _open(inflight, a, 3)
+        _open(inflight, b, 4)
+        assert (await strategy.select_weighted([a, b])).connector_id == "a"
+        # Two more each through "a": 15 at weight 3 is 5 per unit.
+        _open(inflight, a, 2)
+        assert (await strategy.select_weighted([a, b])).connector_id == "b"
 
-    async def test_least_used_counts_the_whole_connector_not_the_eligible_slice(self):
-        strategy = LeastUsedStrategy()
-        # "a" is a busy 50-row connector of which 5 rows serve this request; "b" is one idle row.
-        busy = _group("a", 1, 5, requests=200, load=10_000)
-        idle = _group("b", 1, 1, requests=5000, load=5000)
+    async def test_least_used_counts_the_whole_connector_not_the_eligible_slice(self) -> None:
+        inflight = InFlight()
+        strategy = LeastUsedStrategy(inflight)
+        # "a" is a busy connector of which one idle row serves this request; "b" is one idle row.
+        busy, idle = _group("a", 1, 1), _group("b", 1, 1)
+        for _ in range(50):
+            inflight.begin("a-other", "a")
         assert (await strategy.select_weighted([busy, idle])).connector_id == "b"
+
+    async def test_least_used_splits_idle_connectors_by_weight(self) -> None:
+        random.seed(9)
+        strategy = LeastUsedStrategy(InFlight())
+        groups = [_group("a", 1, 1), _group("b", 3, 1)]
+        counts = Counter([(await strategy.select_weighted(groups)).connector_id for _ in range(4000)])
+        assert 0.70 < counts["b"] / 4000 < 0.80
 
     async def test_sticky_same_session_same_connector(self):
         strategy = StickySessionStrategy()
@@ -496,14 +643,9 @@ class TestWeightedSelection:
         counts = Counter([(await strategy.select_weighted(groups)).connector_id for _ in range(4000)])
         assert 0.70 < counts["b"] / 4000 < 0.80
 
-    async def test_health_based_ignores_health_when_picking_connector(self):
+    async def test_health_based_ignores_health_when_picking_connector(self) -> None:
         random.seed(11)
-        strategy = HealthBasedStrategy()
-        sick = _group("a", 3, 1)
-        for p in sick.proxies:
-            p.request_count, p.success_count, p.avg_latency_ms = 100, 10, 900
-        well = _group("b", 1, 1)
-        for p in well.proxies:
-            p.request_count, p.success_count, p.avg_latency_ms = 100, 100, 50
+        strategy = HealthBasedStrategy(_measured(a_0=(100, 10, 90000.0), b_0=(100, 100, 5000.0)))
+        sick, well = _group("a", 3, 1), _group("b", 1, 1)
         counts = Counter([(await strategy.select_weighted([sick, well])).connector_id for _ in range(4000)])
         assert 0.70 < counts["a"] / 4000 < 0.80

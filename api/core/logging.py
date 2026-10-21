@@ -1,25 +1,10 @@
 # Copyright 2026 Octoprox Authors
 # SPDX-License-Identifier: Apache-2.0
 
-"""Logging configuration for Octoprox.
+"""Logging for Octoprox: one formatter for the lines of structlog and of the standard library, as console text or JSON.
 
-Both structlog loggers (application code) and plain stdlib loggers (uvicorn,
-SQLAlchemy, third-party libraries) render through one structlog formatter,
-so every line has the same shape and carries the same request context.
-
-Two formats are supported:
-
-- ``console``: human-readable, coloured only when stdout is a terminal so
-  container logs and files stay free of escape codes. The default, and
-  what development should use.
-- ``json``: one JSON object per line with ISO-8601 timestamps, for log
-  shippers and structured search in production.
-
-Whatever the format, fields bound with ``structlog.contextvars`` (the
-request ID from ``RequestContextMiddleware`` and the user from
-``get_current_user``) appear on every line logged during a request, and
-``instance`` names the process that wrote the line so replicas in a cluster
-can be told apart once their output is collected in one place.
+Every line carries the request context bound with ``structlog.contextvars`` and the ``instance`` and ``role`` of the
+process that wrote it; ``error_text`` is how a line names an error.
 """
 
 import logging
@@ -33,8 +18,8 @@ LOG_FORMATS = ("console", "json")
 # Loggers uvicorn configures itself when launched from its CLI.
 UVICORN_LOGGERS = ("uvicorn", "uvicorn.error", "uvicorn.access")
 
-# Paths the kubelet and the load balancers probe every few seconds.
-PROBE_PATHS = frozenset({"/health", "/live"})
+# Paths the kubelet, the load balancers and Prometheus poll every few seconds.
+PROBE_PATHS = frozenset({"/health", "/live", "/ready", "/metrics"})
 
 
 class _DropProbeAccess(logging.Filter):
@@ -49,32 +34,35 @@ class _DropProbeAccess(logging.Filter):
 _PROBE_FILTER = _DropProbeAccess()
 
 
-def _add_instance(instance_id: str) -> Any:
-    """Build a processor that stamps ``instance`` on every event.
+def _add_identity(identity: dict[str, str]) -> Any:
+    """Build a processor that stamps the process's identity (``instance``, ``role``) on every event.
 
-    A processor rather than a bound context variable because the request
+    A processor rather than bound context variables because the request
     middleware clears context variables at each request boundary, and the
-    instance should be on every line, inside a request or not.
+    identity should be on every line, inside a request or not.
     """
 
     def processor(logger: Any, method_name: str, event_dict: dict[str, Any]) -> dict[str, Any]:
-        event_dict.setdefault("instance", instance_id)
+        for key, value in identity.items():
+            event_dict.setdefault(key, value)
         return event_dict
 
     return processor
 
 
 def setup_logging(
-    log_level: str = "INFO", log_format: str = "console", instance_id: str | None = None
+    log_level: str = "INFO",
+    log_format: str = "console",
+    instance_id: str | None = None,
+    role: str | None = None,
 ) -> None:
     """Configure application logging.
 
     Args:
         log_level: The logging level (DEBUG, INFO, WARNING, ERROR, CRITICAL).
-        log_format: ``console`` for human-readable output, ``json`` for one
-            JSON object per line.
-        instance_id: Identifier of this process, added to every line as
-            ``instance``. Omitted when ``None``.
+        log_format: ``console`` for human-readable lines, ``json`` for one JSON object per line.
+        instance_id: This process's identifier, on every line as ``instance``; None leaves it out.
+        role: What this process runs (``Settings.role``), on every line as ``role``; None leaves it out.
     """
     level = log_level.upper()
     fmt = log_format.lower()
@@ -92,8 +80,13 @@ def setup_logging(
         structlog.processors.TimeStamper(fmt="iso" if as_json else "%Y-%m-%d %H:%M:%S"),
         structlog.processors.StackInfoRenderer(),
     ]
+    identity: dict[str, str] = {}
     if instance_id:
-        shared_processors.append(_add_instance(instance_id))
+        identity["instance"] = instance_id
+    if role:
+        identity["role"] = role
+    if identity:
+        shared_processors.append(_add_identity(identity))
 
     renderers: list[Any]
     if as_json:
@@ -164,3 +157,13 @@ def setup_logging(
         logger_factory=structlog.stdlib.LoggerFactory(),
         cache_logger_on_first_use=True,
     )
+
+
+def error_text(error: BaseException) -> str:
+    """How a log line names ``error``: its text, or its type's name when it has none (a deadline's TimeoutError)."""
+    return str(error) or type(error).__name__
+
+
+def error_label(error: BaseException) -> str:
+    """How the job stats and a failed task's state name ``error``: its type's name, then its text."""
+    return f"{type(error).__name__}: {error}"

@@ -4,7 +4,7 @@
 """Project model definitions for multi-tenancy."""
 
 from datetime import datetime
-from enum import Enum
+from enum import StrEnum
 from typing import Annotated, Literal
 from uuid import uuid4
 
@@ -21,7 +21,7 @@ from api.geo.models import (
 )
 
 
-class MitmMode(str, Enum):
+class MitmMode(StrEnum):
     """TLS MITM interception modes."""
 
     OFF = "off"
@@ -30,14 +30,14 @@ class MitmMode(str, Enum):
     OVERRIDE_UA = "override_ua"
 
 
-class MitmEngine(str, Enum):
+class MitmEngine(StrEnum):
     """TLS engines for browser fingerprint impersonation."""
 
     CURL_CFFI = "curl_cffi"
     RNET = "rnet"
 
 
-class MitmBrowser(str, Enum):
+class MitmBrowser(StrEnum):
     """Browser profiles for TLS fingerprint impersonation."""
 
     CHROME = "chrome"
@@ -45,6 +45,38 @@ class MitmBrowser(str, Enum):
     SAFARI = "safari"
     EDGE = "edge"
     RANDOM = "random"
+
+
+def mitm_fields(
+    mode: MitmMode, engine: MitmEngine | None, browser: MitmBrowser | None
+) -> tuple[MitmEngine | None, MitmBrowser | None]:
+    """The engine and browser a TLS interception mode keeps, the ones it does not use cleared.
+
+    The one rule for a project's interception fields, applied on create and on
+    every edit; raises ValueError when the mode needs one that is missing.
+    """
+    if mode in (MitmMode.OFF, MitmMode.PLAIN):
+        return None, None
+    if engine is None:
+        raise ValueError(f"tls_mitm_engine is required when tls_mitm_mode is '{mode.value}'")
+    if mode == MitmMode.MATCH_UA:
+        return engine, None
+    if browser is None:
+        raise ValueError(f"tls_mitm_browser is required when tls_mitm_mode is '{mode.value}'")
+    return engine, browser
+
+
+# The project fields attribution judges a proxy by: what a contradicted
+# vendor claim and an exit nothing places do, when a vendor counts as
+# contradicted, and how far from a claimed city an answer may be. A change
+# to any of them re-judges the project's proxies. Preflight is not one: it
+# decides whether sessions are checked before use, not how a row is judged.
+JUDGEMENT_FIELDS = (
+    "location_contradicted",
+    "location_unknown",
+    "location_conflict_rule",
+    "location_city_radius_km",
+)
 
 
 class Project(BaseModel):
@@ -86,53 +118,26 @@ class Project(BaseModel):
     # 0 compares names only. None inherits the install default (GeoSettings).
     location_city_radius_km: float | None = Field(default=None, ge=0, le=MAX_CITY_RADIUS_KM)
 
-    # Aggregate statistics (persists across proxy rotation)
-    request_count: int = 0
-    success_count: int = 0
-    failure_count: int = 0
-    avg_latency_ms: float = 0.0
-    bytes_sent: int = 0
-    bytes_received: int = 0
-
     # Metadata
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
 
-    def merge_definition_from(self, other: "Project") -> None:
-        """Adopt the Postgres-backed *definition* fields from ``other``.
-
-        Used by ``ProxyManager.reload_project`` and ``full_reload`` to
-        apply a fresh-from-DB ``Project`` to the existing cached instance
-        without clobbering the per-request aggregate counters that live
-        on this object in memory.
-
-        Adding a new column to the projects table? Add the field here
-        too. Adding a new runtime-only field? Leave it out.
-        """
-        self.name = other.name
-        self.description = other.description
-        self.username = other.username
-        self.password = other.password
-        self.routing_strategy = other.routing_strategy
-        self.health_check_interval = other.health_check_interval
-        self.health_check_timeout = other.health_check_timeout
-        self.connection_timeout = other.connection_timeout
-        self.max_retries = other.max_retries
-        self.tls_mitm_mode = other.tls_mitm_mode
-        self.tls_mitm_engine = other.tls_mitm_engine
-        self.tls_mitm_browser = other.tls_mitm_browser
-        self.metrics_retention_days = other.metrics_retention_days
-        self.location_contradicted = other.location_contradicted
-        self.location_unknown = other.location_unknown
-        self.location_preflight = other.location_preflight
-        self.location_conflict_rule = other.location_conflict_rule
-        self.location_city_radius_km = other.location_city_radius_km
-        self.created_at = other.created_at
-        self.updated_at = other.updated_at
-
     @property
     def location_rules(self) -> LocationRules:
         return LocationRules(self.location_contradicted, self.location_unknown)
+
+    @property
+    def judgement(self) -> tuple[object, ...]:
+        """The values of the fields attribution judges the project's proxies by (``JUDGEMENT_FIELDS``)."""
+        return tuple(getattr(self, field) for field in JUDGEMENT_FIELDS)
+
+    def mitm_checked(self) -> "Project":
+        """This project with the TLS interception fields its mode does not use cleared; ValueError when one it needs is missing.
+
+        The rule ``ProjectCreate`` applies, for an edit, which can change the mode alone and leave the engine and browser as stored.
+        """
+        engine, browser = mitm_fields(self.tls_mitm_mode, self.tls_mitm_engine, self.tls_mitm_browser)
+        return self.model_copy(update={"tls_mitm_engine": engine, "tls_mitm_browser": browser})
 
     def source_policy(self, default: SourcePolicy) -> SourcePolicy:
         """This project's source policy: its own conflict rule and city radius on top of the install default, plus its location decisions."""
@@ -167,23 +172,10 @@ class ProjectCreate(BaseModel):
 
     @model_validator(mode="after")
     def validate_mitm_fields(self) -> "ProjectCreate":
-        """Validate and clean MITM fields based on mode."""
-        mode = self.tls_mitm_mode
-        if mode in (MitmMode.OFF, MitmMode.PLAIN):
-            self.tls_mitm_engine = None
-            self.tls_mitm_browser = None
-        elif mode == MitmMode.MATCH_UA:
-            if self.tls_mitm_engine is None:
-                msg = "tls_mitm_engine is required when tls_mitm_mode is 'match_ua'"
-                raise ValueError(msg)
-            self.tls_mitm_browser = None
-        elif mode == MitmMode.OVERRIDE_UA:
-            if self.tls_mitm_engine is None:
-                msg = "tls_mitm_engine is required when tls_mitm_mode is 'override_ua'"
-                raise ValueError(msg)
-            if self.tls_mitm_browser is None:
-                msg = "tls_mitm_browser is required when tls_mitm_mode is 'override_ua'"
-                raise ValueError(msg)
+        """Clear the TLS interception fields the mode does not use; refuse one it needs missing."""
+        self.tls_mitm_engine, self.tls_mitm_browser = mitm_fields(
+            self.tls_mitm_mode, self.tls_mitm_engine, self.tls_mitm_browser
+        )
         return self
 
 
@@ -209,6 +201,14 @@ class ProjectUpdate(BaseModel):
     location_conflict_rule: ConflictRule | Literal[""] | None = None
     # "" clears the override (inherit the install default).
     location_city_radius_km: Annotated[float, Field(ge=0, le=MAX_CITY_RADIUS_KM)] | Literal[""] | None = None
+
+    def changes(self) -> dict[str, object]:
+        """The fields this edit sets, with the empty strings that clear an override turned into None."""
+        changes: dict[str, object] = self.model_dump(exclude_none=True)
+        for field in ("location_conflict_rule", "location_city_radius_km"):
+            if changes.get(field) == "":
+                changes[field] = None
+        return changes
 
 
 class ProjectResponse(BaseModel):

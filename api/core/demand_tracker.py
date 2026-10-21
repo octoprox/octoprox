@@ -1,43 +1,51 @@
 # Copyright 2026 Octoprox Authors
 # SPDX-License-Identifier: Apache-2.0
 
-"""Demand tracking for auto-scaling decisions.
+"""Demand: how many requests each project asked for lately, for scaling and the api's demand view.
 
-This module tracks request rates per project using a sliding window
-approach stored in Redis, enabling demand-based auto-scaling decisions.
-
-Subscribes to request_completed and request_rejected signals to track demand
-automatically, including demand from rejected requests (e.g., when no proxy
-is available).
+Only the gateways' request metering writes it, to a Redis hash per project and
+minute, and :class:`DemandTracker` reads it; losing Redis empties the window,
+so callers treat a project with no demand at all as unknown rather than idle.
 """
 
+from __future__ import annotations
+
 import time
-from enum import Enum
-from typing import Any
+from collections.abc import Callable
+from enum import StrEnum
+from typing import TYPE_CHECKING, Any
 
-import structlog
+from api.db.redis import DEMAND_KEY
 
-from api.core import utc_now
-from api.core.signals import request_completed, request_rejected
-from api.db.redis import RedisClient
+if TYPE_CHECKING:
+    from api.db.redis import RedisClient
 
-logger = structlog.get_logger()
-
-# Redis key for demand tracking (sorted set with timestamps)
-DEMAND_KEY = "project:demand:{project_id}"
-# Window size for demand calculation (in seconds)
+# The span demand is averaged over, in seconds: long enough that one burst
+# does not scale a pool on its own, short enough that a pool follows its
+# traffic within minutes. A whole number of minutes, the buckets' size.
 DEMAND_WINDOW_SECONDS = 300
-# Short window for recent activity confirmation (in seconds)
+# The span that tells traffic still arriving from a burst that is only left
+# in the longer window (it gates scaling up).
 RECENT_ACTIVITY_WINDOW_SECONDS = 60
-# Minimum recent req/min to confirm demand is still active (not a stale burst)
+# Requests per minute in the recent span that count as activity.
 RECENT_ACTIVITY_MIN_RPM = 1.0
-# TTL for demand entries (slightly longer than window to allow cleanup)
-DEMAND_TTL_SECONDS = 360
-# Rate limit for recording rejected requests (seconds between records per project)
-REJECTION_RECORD_INTERVAL_SECONDS = 1.0
+# How long a demand hash lives after its last write, in seconds: the window
+# plus the minute the hash spans, so a minute's hash outlives every read that
+# still includes part of it, and goes a minute after it has left the window.
+DEMAND_TTL_SECONDS = DEMAND_WINDOW_SECONDS + 60
+# The fields of a demand hash: requests that completed through a proxy, and
+# requests rejected before any proxy served them (no proxy, every proxy
+# quarantined, a traffic limit). Both are demand the pool is asked to meet.
+DEMAND_REQUESTS_FIELD = "r"
+DEMAND_REJECTIONS_FIELD = "x"
 
 
-class DemandLevel(str, Enum):
+def demand_minute(epoch_seconds: float) -> int:
+    """The bucket a moment falls in: whole minutes since the epoch, the ``{minute}`` of ``DEMAND_KEY``."""
+    return int(epoch_seconds // 60)
+
+
+class DemandLevel(StrEnum):
     """Demand level classification for auto-scaling."""
     LOW = "low"
     MEDIUM = "medium"
@@ -55,148 +63,36 @@ DEMAND_THRESHOLDS = {
 
 
 class DemandTracker:
-    """Tracks request demand per project using a sliding window in Redis.
-
-    Uses Redis sorted sets to store request timestamps, allowing efficient
-    calculation of request rates over a sliding time window.
-
-    Subscribes to request_completed signals to automatically track demand.
+    """Reads each project's demand from the per-minute hashes the gateways write.
 
     Args:
-        redis_client: Redis client for storing demand data.
+        redis_client: Holds the demand hashes.
+        clock: Epoch seconds now; tests pass their own.
     """
 
-    def __init__(self, redis_client: RedisClient) -> None:
+    def __init__(self, redis_client: RedisClient, *, clock: Callable[[], float] = time.time) -> None:
         self._redis_client = redis_client
-        self._last_rejection_recorded: dict[str, float] = {}
-
-    def subscribe_to_signals(self) -> None:
-        """Subscribe to signals for automatic demand tracking."""
-        request_completed.connect(self._on_request_completed)
-        request_rejected.connect(self._on_request_rejected)
-        logger.debug("DemandTracker subscribed to request signals")
-
-    async def _on_request_completed(
-        self,
-        sender: object,
-        proxy_id: str,
-        project_id: str,
-        success: bool,
-        latency_ms: float,
-        bytes_sent: int,
-        bytes_received: int,
-        peer_id: str | None = None,
-        target_host: str | None = None,
-    ) -> None:
-        """Handle request completed signal to track demand."""
-        await self.record_request(project_id)
-
-    async def _on_request_rejected(
-        self,
-        sender: object,
-        project_id: str,
-        reason: str,
-    ) -> None:
-        """Handle request rejected signal to track demand from 503s.
-
-        Rate-limited to avoid flooding Redis during sustained outages
-        where clients may retry aggressively.
-        """
-        now = time.monotonic()
-        last = self._last_rejection_recorded.get(project_id, 0.0)
-        if now - last < REJECTION_RECORD_INTERVAL_SECONDS:
-            return
-        self._last_rejection_recorded[project_id] = now
-        await self.record_request(project_id)
-
-    async def record_request(self, project_id: str) -> None:
-        """Record a request for demand tracking.
-
-        Adds the current timestamp to a sorted set for the project.
-        Old entries are automatically cleaned up.
-
-        Args:
-            project_id: The project ID to record the request for.
-        """
-        key = DEMAND_KEY.format(project_id=project_id)
-        now = utc_now()
-        timestamp = now.timestamp()
-
-        # Use pipeline for efficiency
-        pipe = self._redis_client.client.pipeline()
-
-        # Add current request with timestamp as score
-        pipe.zadd(key, {f"{timestamp}": timestamp})
-
-        # Remove entries older than the window
-        cutoff = timestamp - DEMAND_WINDOW_SECONDS
-        pipe.zremrangebyscore(key, "-inf", cutoff)
-
-        # Set TTL on the key
-        pipe.expire(key, DEMAND_TTL_SECONDS)
-
-        await pipe.execute()
+        self._clock = clock
 
     async def get_requests_per_minute(self, project_id: str) -> float:
-        """Get the current request rate for a project.
-
-        Counts requests in the sliding window and extrapolates to per-minute.
-
-        Args:
-            project_id: The project ID to get the rate for.
-
-        Returns:
-            Requests per minute (float).
-        """
-        key = DEMAND_KEY.format(project_id=project_id)
-        now = utc_now()
-        timestamp = now.timestamp()
-        cutoff = timestamp - DEMAND_WINDOW_SECONDS
-
-        # Count requests in the window
-        count: int = await self._redis_client.client.zcount(key, cutoff, timestamp)
-
-        # Extrapolate to per-minute rate
-        # If window is 60 seconds, count is already per-minute
-        rate = float(count) * (60.0 / DEMAND_WINDOW_SECONDS)
-
-        return rate
+        """The project's requests per minute over the demand window, rejected ones included."""
+        return await self._rate(project_id, DEMAND_WINDOW_SECONDS)
 
     async def get_recent_requests_per_minute(self, project_id: str) -> float:
-        """Get the request rate using only the recent activity window.
+        """The project's requests per minute over the last minute only.
 
-        Uses RECENT_ACTIVITY_WINDOW_SECONDS to detect whether traffic is
-        currently active, as opposed to stale burst data in the longer window.
-
-        Args:
-            project_id: The project ID to get the rate for.
-
-        Returns:
-            Requests per minute based on the recent window (float).
+        Tells whether traffic is arriving now, as opposed to a burst that is
+        only left in the longer window.
         """
-        key = DEMAND_KEY.format(project_id=project_id)
-        now = utc_now()
-        timestamp = now.timestamp()
-        cutoff = timestamp - RECENT_ACTIVITY_WINDOW_SECONDS
-
-        count: int = await self._redis_client.client.zcount(key, cutoff, timestamp)
-        return float(count) * (60.0 / RECENT_ACTIVITY_WINDOW_SECONDS)
+        return await self._rate(project_id, RECENT_ACTIVITY_WINDOW_SECONDS)
 
     async def has_recent_activity(self, project_id: str) -> bool:
-        """Check if a project has recent request activity.
+        """Whether the project's recent rate reaches ``RECENT_ACTIVITY_MIN_RPM``.
 
-        Returns True if the request rate in the recent window meets
-        RECENT_ACTIVITY_MIN_RPM. Used to gate scale-up decisions so that
-        stale burst data in the longer window doesn't trigger scaling.
-
-        Args:
-            project_id: The project ID to check.
-
-        Returns:
-            True if there is recent activity, False otherwise.
+        Gates scaling up, so a stale burst in the longer window does not add
+        proxies to a project nobody uses any more.
         """
-        recent_rpm = await self.get_recent_requests_per_minute(project_id)
-        return recent_rpm >= RECENT_ACTIVITY_MIN_RPM
+        return await self.get_recent_requests_per_minute(project_id) >= RECENT_ACTIVITY_MIN_RPM
 
     async def get_demand_level(
         self,
@@ -290,3 +186,25 @@ class DemandTracker:
             "proxy_count": current_proxy_count,
         }
 
+    async def _rate(self, project_id: str, span_seconds: int) -> float:
+        """Requests per minute over the last ``span_seconds``, from the minute hashes the span touches, in one round trip.
+
+        The current minute counts with what it holds so far and the oldest only
+        for the share of it still inside the span: the usual sliding-window
+        estimate, exact while the traffic is steady.
+        """
+        now = self._clock()
+        minutes = span_seconds // 60
+        current = demand_minute(now)
+        # The share of the oldest minute that is still inside the span.
+        inside = 1.0 - (now - current * 60) / 60
+        pipe = self._redis_client.client.pipeline(transaction=False)
+        for minute in range(current - minutes, current + 1):
+            key = DEMAND_KEY.format(project_id=project_id, minute=minute)
+            pipe.hmget(key, [DEMAND_REQUESTS_FIELD, DEMAND_REJECTIONS_FIELD])
+        rows: list[list[str | None]] = await pipe.execute()
+        total = 0.0
+        for offset, values in enumerate(rows):
+            weight = inside if offset == 0 else 1.0
+            total += weight * sum(int(value) for value in values if value is not None)
+        return total / minutes

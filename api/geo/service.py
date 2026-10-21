@@ -1,27 +1,16 @@
 # Copyright 2026 Octoprox Authors
 # SPDX-License-Identifier: Apache-2.0
 
-"""Applies IP attribution to proxies and feeds the observation pipeline.
+"""Applies IP attribution to proxies under each project's source policy, and records what it judges.
 
-Judgement is per project: callers pass the :class:`SourcePolicy` of the
-project owning the proxy (the attributor looks it up); without one the
-install default applies.
-
-Every code path that learns an exit IP ends up in
-:meth:`GeoService.apply_observation`: discovery in the provider syncer, the
-static-proxy exit lookup, the health checker, the locate button and the
-offline re-attribution after a database change. Preflight goes through
-:meth:`GeoService.resolve_ip` and :meth:`GeoService.record` because a
-session's exit is not a property of the proxy row.
-
-The service holds no I/O of its own: databases are memory-mapped by the
-store, the policy is a cached row, and observations are appended to a buffer.
-Callers persist the proxy when ``apply_observation`` reports a change.
+Judging changes only the proxy object it is given; applying an observation, re-judging and recording a sighting each
+record what they find.
 """
 
 from __future__ import annotations
 
 from collections.abc import Sequence
+from datetime import datetime
 from typing import Any
 
 import structlog
@@ -82,7 +71,10 @@ from api.providers.sdk.strategies import (
 logger = structlog.get_logger()
 
 
-# Metadata keys apply_observation may change, compared to decide whether the caller must persist.
+# Metadata keys judge may change, compared to decide whether the caller must persist.
+# ``location_checked_at`` is not among them: a sighting that confirms what the
+# row says moves nothing a reader acts on, and writing the stamp alone would
+# put every repeat sighting into the routing feed.
 _TRACKED_KEYS = (
     META_COUNTRY,
     META_COUNTRY_SOURCE,
@@ -102,7 +94,10 @@ _TRACKED_KEYS = (
 
 
 class GeoService:
-    """Attribution for one process."""
+    """Attribution for one process, with no I/O of its own: the databases are memory-mapped, the policy a cached row, and observations buffered.
+
+    Callers persist a proxy whose judgement changed it.
+    """
 
     def __init__(
         self,
@@ -141,6 +136,11 @@ class GeoService:
     def observation_recorder(self) -> ObservationRecorder:
         return self._observation_recorder
 
+    @property
+    def instance_id(self) -> str:
+        """This process, as observations and judgements it records name it unless told otherwise."""
+        return self._settings.instance_id
+
     # --- echo endpoint -------------------------------------------------------------
 
     def echo_spec(self) -> IpDiscoverySpec:
@@ -163,12 +163,11 @@ class GeoService:
             self._discoverer_spec = spec
         return self._discoverer
 
-    async def apply_settings_change(self) -> None:
-        """The settings row changed on some instance; reload it."""
-        await self._settings_store.load()
-
     async def resync(self) -> None:
-        """Safety net alongside the periodic full reload: re-read settings and databases."""
+        """Re-read the settings row and the database list from Postgres; both apply only what changed.
+
+        A re-attribution job runs it first, so it judges with what was committed before it was asked for.
+        """
         await self._settings_store.load()
         await self._database_store.sync_all()
 
@@ -195,15 +194,13 @@ class GeoService:
     ) -> Resolution:
         """Resolve one IP from the databases plus whatever the caller learned.
 
-        ``policy`` defaults to the install default; callers attributing a
-        proxy pass its project's policy. ``claimed`` is what was promised
-        about the exit at any level (the vendor's word, or the place a
-        request required); ``endpoint`` what an independent endpoint
-        requested through the proxy reported. ``candidates`` is what the
-        databases said about ``ip`` when the caller looked it up already,
-        so one lookup serves two claims. A city claim is judged by the
-        policy's radius only while a GeoNames file is loaded; without one,
-        cities are compared by name.
+        A city claim is judged by the policy's radius while a GeoNames file is loaded, and by name without one.
+
+        Args:
+            policy: the owning project's source policy; None for the install default.
+            claimed: what was promised about the exit at any level: the vendor's word, or the place a request required.
+            endpoint: what an independent endpoint requested through the proxy reported.
+            candidates: the databases' answer for ``ip`` when the caller looked it up already, so one lookup serves two claims.
         """
         candidates = list(candidates) if candidates is not None else self.attribute(ip)
         vendor = vendor_candidate(claimed)
@@ -228,13 +225,9 @@ class GeoService:
 
     @classmethod
     def outside_declared_countries(cls, proxy: Proxy, declared: Sequence[str]) -> bool:
-        """Whether a row the vendor placed in a declared country now resolves outside the connector's list.
+        """Whether a row the vendor placed in a declared country now resolves outside the connector's list: routing never uses it.
 
-        Routing never uses such a row, whatever the project decided, and
-        the proxy response flags it. A row that made no claim is bound by
-        the list only for a request that names a country, so it is never
-        outside it here; nor is a row whose country an operator pinned, the
-        more deliberate of two operator inputs.
+        A row that made no claim, or whose country an operator pinned, is never outside it here.
         """
         if proxy.metadata.get(META_COUNTRY_SOURCE) == MANUAL_SOURCE:
             return False
@@ -242,15 +235,9 @@ class GeoService:
 
     @classmethod
     def claimed_place_of(cls, proxy: Proxy) -> LocationTarget | None:
-        """Everything promised about a proxy's exit, per level.
+        """Everything promised about a proxy's exit, per level: what attribution judges and preflight verifies against.
 
-        The country the vendor listed or the slot was provisioned for; the
-        state and city the vendor's list or discovery endpoint named
-        (``vendor_state``, ``vendor_city``) or a request asked for and a
-        dynamic row was rendered with (``geo_state``, ``geo_city``); and,
-        where the vendor said nothing, what an operator pinned by hand. It is
-        what attribution judges and what preflight verifies against. Every
-        value was normalised when it was written, so none is touched here.
+        The vendor's word or the slot's provisioned place, else what an operator pinned, each normalised when written.
         """
         manual = proxy.manual_location
         metadata = proxy.metadata
@@ -284,20 +271,29 @@ class GeoService:
         project_id: str | None = None,
         session_id: str | None = None,
         candidates: Sequence[LocationCandidate] | None = None,
+        observed_at: datetime | None = None,
+        instance_id: str | None = None,
     ) -> tuple[Resolution, bool]:
-        """Resolve ``ip`` for ``proxy``, write the result to its metadata and record the sighting.
+        """Judge ``ip`` for ``proxy`` (see :meth:`judge`) and record the sighting; the resolution, and whether a persisted field changed.
 
-        ``policy`` is the owning project's source policy (default: the
-        install's); ``endpoint`` is what the endpoint requested through the
-        proxy reported about the exit, if any; ``session_id`` is the client
-        session the sighting served, when one did. Returns the resolution
-        and whether any persisted field changed, so the caller knows whether
-        to write the proxy.
+        A gateway's sighting is applied by a worker seconds later, and both the row's stamp and the observation keep the
+        gateway's time and name.
+
+        Args:
+            policy: the owning project's source policy; None for the install's.
+            endpoint: what the endpoint requested through the proxy reported about the exit, if anything.
+            session_id: the client session the sighting served, when one did.
+            observed_at: when the exit was seen, naive UTC; None for now.
+            instance_id: the process that saw it; None for this one.
         """
-        resolution, changed = self._attribute(proxy, ip, policy=policy, endpoint=endpoint, candidates=candidates)
+        observed_at = observed_at or utc_now()
+        resolution, changed = self.judge(
+            proxy, ip, policy=policy, endpoint=endpoint, candidates=candidates, checked_at=observed_at
+        )
         self.record(
             self._observation(
                 proxy, ip, resolution, source=source, project_id=project_id, endpoint=endpoint, session_id=session_id,
+                observed_at=observed_at, instance_id=instance_id,
             )
         )
         self._log_conflict(proxy, ip, resolution, source.value)
@@ -312,10 +308,13 @@ class GeoService:
         source: ObservationSource,
         project_id: str | None,
         endpoint: LocationTarget | None,
-        session_id: str | None = None,
+        session_id: str | None,
+        observed_at: datetime,
+        instance_id: str | None,
     ) -> IpObservation:
         """The sighting record for ``ip`` behind ``proxy`` as ``resolution`` judged it."""
         return IpObservation(
+            observed_at=observed_at,
             proxy_id=proxy.id,
             connector_id=proxy.connector_id,
             project_id=project_id,
@@ -334,7 +333,7 @@ class GeoService:
             state_conflict=resolution.state_conflict,
             city_conflict=resolution.city_conflict,
             candidates=resolution.compact_candidates(),
-            instance_id=self._settings.instance_id,
+            instance_id=instance_id or self.instance_id,
         )
 
     def record_sighting(
@@ -348,12 +347,12 @@ class GeoService:
         project_id: str | None = None,
         session_id: str | None = None,
         candidates: Sequence[LocationCandidate] | None = None,
+        observed_at: datetime | None = None,
+        instance_id: str | None = None,
     ) -> Resolution:
         """Resolve ``ip`` seen behind ``proxy`` and record the sighting without touching the row.
 
-        For a dynamic-sessions gateway row: the exit belongs to one vendor
-        session, not to the row, so the row's country, location and conflict
-        flag are left alone while accuracy and unique exits still learn of it.
+        For a dynamic-sessions gateway row and for an exit the row already carries: accuracy and unique exits still learn of it.
         """
         resolution = self.resolve_ip(
             ip, policy=policy, claimed=self.claimed_place_of(proxy), endpoint=endpoint, candidates=candidates
@@ -361,6 +360,7 @@ class GeoService:
         self.record(
             self._observation(
                 proxy, ip, resolution, source=source, project_id=project_id, endpoint=endpoint, session_id=session_id,
+                observed_at=observed_at or utc_now(), instance_id=instance_id,
             )
         )
         self._log_conflict(proxy, ip, resolution, source.value)
@@ -374,13 +374,11 @@ class GeoService:
         policy: SourcePolicy | None = None,
         endpoint: LocationTarget | None = None,
     ) -> tuple[Resolution, bool]:
-        """Re-run attribution for the exit already on ``proxy`` and record a judgement, not a sighting.
+        """Re-run attribution for the exit already on ``proxy`` after a database changed, and record a judgement, not a sighting.
 
-        Used after a database changed. Nothing was observed: the IP is the one
-        the proxy already had, so the exit's verdict is rewritten and no log
-        row, hand-out or sighting time is produced.
+        Nothing was observed: no log row or hand-out, and the row keeps its ``location_checked_at``.
         """
-        resolution, changed = self._attribute(proxy, ip, policy=policy, endpoint=endpoint)
+        resolution, changed = self.judge(proxy, ip, policy=policy, endpoint=endpoint)
         self.record(
             ExitJudgement(
                 proxy_id=proxy.id,
@@ -396,32 +394,28 @@ class GeoService:
                 resolved_city=resolution.resolved_city,
                 state_conflict=resolution.state_conflict,
                 city_conflict=resolution.city_conflict,
-                instance_id=self._settings.instance_id,
+                instance_id=self.instance_id,
             )
         )
         self._log_conflict(proxy, ip, resolution, JUDGEMENT_SOURCE)
         return resolution, changed
 
-    def _attribute(
+    def judge(
         self,
         proxy: Proxy,
         ip: str,
         *,
-        policy: SourcePolicy | None,
-        endpoint: LocationTarget | None,
+        policy: SourcePolicy | None = None,
+        endpoint: LocationTarget | None = None,
         candidates: Sequence[LocationCandidate] | None = None,
+        checked_at: datetime | None = None,
     ) -> tuple[Resolution, bool]:
-        """Resolve ``ip`` for ``proxy`` and write the result to its metadata.
+        """Resolve ``ip`` for ``proxy`` and write the result to its metadata alone; the resolution, and whether a field changed.
 
-        The claim is read off the proxy (see ``claimed_place_of``). A country,
-        state or city set by hand is kept as the routing value and treated as
-        the claim to verify when the vendor made none. Otherwise routing gets
-        the independent answer at each level, with its source, except that a
-        project routing contradictions on the vendor
-        (``ContradictedAction.VENDOR``) gets the claim itself where the
-        evidence contradicted it, and a confirmed level carries the claim it
-        confirmed. Returns the resolution and whether any persisted field
-        changed.
+        Routing gets the independent answer at each level, except a value set by hand and a claim the project routes on.
+
+        Args:
+            checked_at: when the exit was seen, naive UTC, which becomes the row's ``location_checked_at``; None keeps the stamp.
         """
         policy = policy or self.default_policy
         vendor_country = self.claimed_country_of(proxy)
@@ -438,15 +432,7 @@ class GeoService:
         ) -> tuple[str | None, GeoSourceKind | None]:
             """The routing value for one level: the evidence, or the claim where the project chose it.
 
-            A contradicted level carries the claim under ``vendor`` for
-            contradictions; an open one (nothing placed it, or the sources
-            disagreed) carries the claim under ``vendor`` for unknowns, so a
-            slot the databases cannot settle is not routed on whichever
-            database happens to rank first. A confirmed level carries the
-            claim with the source that confirmed it: the same value as the
-            evidence when the names match, and the claimed city when the
-            evidence put the exit in a neighbouring one within the project's
-            radius, so a ``-city-`` request for the claim still reaches it.
+            A confirmed level carries the claim with its confirming source, so a ``-city-`` request reaches an exit within the radius.
             """
             if claimed and ((contradicted_on_claim and conflict) or (open_on_claim and conflict is None)):
                 return claimed, GeoSourceKind.VENDOR
@@ -455,7 +441,6 @@ class GeoService:
             return resolved, source
 
         before = self._snapshot(proxy)
-        proxy.display_host = ip
         proxy.metadata[META_DISCOVERED_IP] = ip
         if vendor_country:
             proxy.metadata[META_VENDOR_COUNTRY] = vendor_country
@@ -493,7 +478,8 @@ class GeoService:
             else:
                 proxy.metadata[key] = verdict.value
         proxy.metadata[META_LOCATION_CANDIDATES] = resolution.compact_candidates()
-        proxy.metadata[META_LOCATION_CHECKED_AT] = utc_now().isoformat()
+        if checked_at is not None:
+            proxy.metadata[META_LOCATION_CHECKED_AT] = checked_at.isoformat()
         return resolution, self._snapshot(proxy) != before
 
     @staticmethod
@@ -509,11 +495,12 @@ class GeoService:
             )
 
     def record(self, item: IpObservation | ExitJudgement) -> None:
+        """Buffer one observation or judgement for the observations stream."""
         self._observation_recorder.record(item)
 
     @staticmethod
     def _snapshot(proxy: Proxy) -> tuple[Any, ...]:
-        return (proxy.display_host, *(repr(proxy.metadata.get(key)) for key in _TRACKED_KEYS))
+        return tuple(repr(proxy.metadata.get(key)) for key in _TRACKED_KEYS)
 
     # --- admin helpers -------------------------------------------------------------
 

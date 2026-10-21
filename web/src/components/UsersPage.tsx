@@ -6,7 +6,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { ColumnDef } from '@tanstack/react-table'
 import { Plus, Trash2, Send, Copy, Check, KeyRound } from 'lucide-react'
 import { Button, Input, Label, Badge, Alert, Inspector, InspectorSection, KeyValue, ConfirmDialog } from './ui'
-import { DataTable } from './DataTable'
+import { DataTable, type DataTableFeatures } from './DataTable'
 import { Page } from './layout/Page'
 import { RichSelect, RichSelectOption } from './RichSelect'
 import { ApiTokensPanel, LinkedSignInsPanel } from './AccessPanels'
@@ -64,7 +64,7 @@ export default function UsersPage() {
     onError: (err: any) => { setPendingDelete(null); toast.show(err.message || 'Failed to delete user', 'error') },
   })
 
-  const columns: ColumnDef<UserAccount, unknown>[] = useMemo(() => [
+  const columns: ColumnDef<DataTableFeatures, UserAccount, unknown>[] = useMemo(() => [
     {
       accessorKey: 'username',
       header: 'User',
@@ -140,12 +140,12 @@ export default function UsersPage() {
       cell: ({ row }) => (
         <div className="flex items-center justify-end gap-0.5">
           {!row.original.has_password && (
-            <button onClick={() => reinviteMutation.mutate(row.original.id)} className="p-1 rounded text-fg-subtle hover:text-warning hover:bg-warning-soft" title={invitePending(row.original) ? 'Regenerate invite link' : 'Link to set a password'}>
+            <button onClick={() => reinviteMutation.mutate(row.original.id)} className="p-1 rounded-sm text-fg-subtle hover:text-warning hover:bg-warning-soft" title={invitePending(row.original) ? 'Regenerate invite link' : 'Link to set a password'}>
               <Send className="w-4 h-4" />
             </button>
           )}
           {row.original.id !== authStatus?.user_id && (
-            <button onClick={() => setPendingDelete(row.original)} className="p-1 rounded text-fg-subtle hover:text-danger hover:bg-danger-soft" title="Delete user">
+            <button onClick={() => setPendingDelete(row.original)} className="p-1 rounded-sm text-fg-subtle hover:text-danger hover:bg-danger-soft" title="Delete user">
               <Trash2 className="w-4 h-4" />
             </button>
           )}
@@ -260,7 +260,7 @@ function UserPanel({ user, isSelf, inviteUrl, onClose, onDelete, onReinvite, onS
     onError: (err: any) => setError(err.message || 'Failed to update user'),
   })
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = (e: React.SubmitEvent) => {
     e.preventDefault()
     setError(null)
     if (user) {
@@ -384,7 +384,7 @@ function InviteLink({ url }: { url: string }) {
       <p className="text-xs">Share this link with the user. They use it to set a password and sign in. It expires in 7 days.</p>
       <div className="flex items-center gap-2">
         <Input value={url} readOnly className="flex-1 font-mono text-xs h-8" onClick={(e) => (e.target as HTMLInputElement).select()} />
-        <Button type="button" variant="outline" size="sm" onClick={handleCopy} className="flex-shrink-0">
+        <Button type="button" variant="outline" size="sm" onClick={handleCopy} className="shrink-0">
           {copied ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />} {copied ? 'Copied' : 'Copy'}
         </Button>
       </div>

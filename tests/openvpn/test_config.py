@@ -96,5 +96,3 @@ class TestSettings:
             OpenVpnServerSettingsDoc(keepalive_interval=60, keepalive_timeout=60)
         with pytest.raises(ValueError):
             OpenVpnServerSettingsDoc(protocol="sctp")  # type: ignore[arg-type]
-        assert SERVER.daemon_signature() != SERVER.model_copy(update={"protocol": "tcp"}).daemon_signature()
-        assert SERVER.daemon_signature() == SERVER.model_copy(update={"endpoint_host": "other"}).daemon_signature()

@@ -1,17 +1,37 @@
 # Copyright 2026 Octoprox Authors
 # SPDX-License-Identifier: Apache-2.0
 
-"""Tests for cloud provider classes."""
+"""Tests for the cloud providers: credentials, and what each cloud is asked to create, find, list and terminate.
 
+AWS runs on botocore's stubbed client, Azure on its SDK over a transport that answers locally, and GCP on a stand-in
+for its instances client that hands back the SDK's own instance messages.
+"""
+
+import base64
+import functools
+import io
+import json
+import re
 import sys
+import time
+from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
+from urllib.parse import urlsplit
 
+import boto3
 import pytest
+import requests
+from azure.core.credentials import AccessToken
+from azure.core.exceptions import HttpResponseError
+from azure.core.pipeline.transport import RequestsTransport
 from botocore.credentials import Credentials, DeferredRefreshableCredentials
-from botocore.exceptions import NoCredentialsError
+from botocore.exceptions import ClientError, NoCredentialsError
+from botocore.stub import Stubber
+from google.api_core.exceptions import BadRequest, Forbidden, NotFound
+from google.cloud import compute_v1
 
 from api.models.connector import (
     AWSConnectorConfig,
@@ -20,13 +40,20 @@ from api.models.connector import (
     GCPConnectorConfig,
 )
 from api.models.credential import Credential, CredentialType
+from api.models.proxy import Proxy, ProxyStatus
 from api.providers.cloud import (
+    CONNECTOR_TAG,
     AWSProvider,
     AzureProvider,
+    CloudInstance,
+    CloudProvider,
     GCPProvider,
-    _generate_proxy_credentials,
+    ProxyCredentials,
     build_squid_setup_script,
 )
+
+# The credentials the setup script tests bake in.
+TEST_CREDENTIALS = ProxyCredentials("testuser", "testpass123")
 
 
 @pytest.fixture
@@ -485,40 +512,26 @@ class TestAzureConnectorConfigImageResolution:
 
 
 class TestGenerateProxyCredentials:
-    """Tests for _generate_proxy_credentials."""
+    """Tests for ProxyCredentials.generate."""
 
-    def test_returns_username_and_password(self) -> None:
-        """Test that credentials are returned as a tuple of two strings."""
-        username, password = _generate_proxy_credentials()
-        assert isinstance(username, str)
-        assert isinstance(password, str)
-
-    def test_username_starts_with_u(self) -> None:
-        """Test that username starts with 'u' prefix."""
-        username, _ = _generate_proxy_credentials()
-        assert username.startswith("u")
-
-    def test_username_length(self) -> None:
-        """Test that username is 8 characters (1 prefix + 7 random)."""
-        username, _ = _generate_proxy_credentials()
-        assert len(username) == 8
+    def test_username_starts_with_u_and_is_eight_characters(self) -> None:
+        credentials = ProxyCredentials.generate()
+        assert credentials.username.startswith("u")
+        assert len(credentials.username) == 8
 
     def test_password_length(self) -> None:
         """Test that password is 24 characters."""
-        _, password = _generate_proxy_credentials()
-        assert len(password) == 24
+        assert len(ProxyCredentials.generate().password) == 24
 
     def test_credentials_are_alphanumeric(self) -> None:
         """Test that credentials contain only alphanumeric characters."""
-        username, password = _generate_proxy_credentials()
-        assert username.isalnum()
-        assert password.isalnum()
+        credentials = ProxyCredentials.generate()
+        assert credentials.username.isalnum()
+        assert credentials.password.isalnum()
 
     def test_credentials_are_unique(self) -> None:
         """Test that successive calls produce different credentials."""
-        creds1 = _generate_proxy_credentials()
-        creds2 = _generate_proxy_credentials()
-        assert creds1 != creds2
+        assert ProxyCredentials.generate() != ProxyCredentials.generate()
 
 
 class TestBuildSquidSetupScript:
@@ -533,7 +546,7 @@ class TestBuildSquidSetupScript:
 
     def test_with_auth_uses_req_header_acl(self) -> None:
         """Test that credentials produce req_header ACL directives."""
-        script = build_squid_setup_script("testuser", "testpass123")
+        script = build_squid_setup_script(TEST_CREDENTIALS)
         assert "req_header Proxy-Authorization" in script
         assert "has_valid_auth" in script
         assert "http_access allow has_valid_auth" in script
@@ -542,66 +555,51 @@ class TestBuildSquidSetupScript:
 
     def test_with_auth_does_not_allow_all(self) -> None:
         """Test that auth mode does not contain 'allow all'."""
-        script = build_squid_setup_script("testuser", "testpass123")
+        script = build_squid_setup_script(TEST_CREDENTIALS)
         assert "http_access allow all" not in script
 
     def test_with_auth_contains_correct_base64(self) -> None:
         """Test that auth mode contains the correct base64-encoded credentials."""
         import base64
 
-        script = build_squid_setup_script("testuser", "testpass123")
+        script = build_squid_setup_script(TEST_CREDENTIALS)
         expected_b64 = base64.b64encode(b"testuser:testpass123").decode()
         assert expected_b64 in script
 
     def test_with_auth_does_not_use_auth_param(self) -> None:
         """Test that the new approach does not use auth_param (no 407 challenges)."""
-        script = build_squid_setup_script("testuser", "testpass123")
+        script = build_squid_setup_script(TEST_CREDENTIALS)
         assert "auth_param" not in script
         assert "ncsa_auth" not in script
         assert "htpasswd" not in script
 
     def test_with_auth_no_preamble_needed(self) -> None:
         """Test that auth mode doesn't inject bash preamble (no htpasswd setup)."""
-        script = build_squid_setup_script("testuser", "testpass123")
+        script = build_squid_setup_script(TEST_CREDENTIALS)
         assert "openssl passwd" not in script
         assert "/etc/squid/passwd" not in script
 
     def test_base64_plus_sign_is_escaped_for_regex(self) -> None:
-        """Test that + in base64 output is escaped for Squid regex."""
-        import base64
-
-        # Find credentials that produce a + in the base64 output
-        # "u1234567" : "aaaaaaaaaaaaaaaaaaaaaaaa" won't necessarily have +,
-        # but we can test the escaping logic directly by checking the function
-        # handles it. Use a known value that produces +.
-        # base64("test+:test") = "dGVzdCs6dGVzdA==" (no +)
-        # Let's just verify the escaping logic works by checking that any +
-        # in the base64 is properly escaped
-        username = "testuser"
-        password = "testpass123"
-        raw_b64 = base64.b64encode(f"{username}:{password}".encode()).decode()
-        script = build_squid_setup_script(username, password)
-        # The raw base64 with + escaped should appear in the script
-        escaped_b64 = raw_b64.replace("+", "\\+")
-        assert escaped_b64 in script
+        """A + in the base64 Squid matches is escaped, since the ACL is a regex."""
+        script = build_squid_setup_script(ProxyCredentials("u1234567", "p>p>p>"))
+        assert "dTEyMzQ1Njc6cD5wPnA\\+" in script
+        assert "dTEyMzQ1Njc6cD5wPnA+" not in script
 
     def test_placeholders_are_fully_replaced(self) -> None:
         """Test that no placeholders remain in the output."""
-        script = build_squid_setup_script("testuser", "testpass123")
+        script = build_squid_setup_script(TEST_CREDENTIALS)
         assert "##OCTOPROX_AUTH_CONFIG##" not in script
 
     def test_script_is_valid_bash(self) -> None:
         """Test that the script starts with a shebang and has key structure."""
-        script = build_squid_setup_script("testuser", "testpass123")
+        script = build_squid_setup_script(TEST_CREDENTIALS)
         assert script.startswith("#!/bin/bash")
         assert "squid.conf" in script
         assert "systemctl restart squid" in script
 
-    def test_none_username_produces_no_auth(self) -> None:
-        """Test that None username produces the same result as no args."""
-        script_none = build_squid_setup_script(None, None)
-        script_default = build_squid_setup_script()
-        assert script_none == script_default
+    def test_no_credentials_produce_the_same_as_no_args(self) -> None:
+        """Test that None credentials produce the same result as no args."""
+        assert build_squid_setup_script(None) == build_squid_setup_script()
 
 
 
@@ -865,13 +863,13 @@ class TestAWSProviderSessions:
         with pytest.raises(RuntimeError, match="AccessDenied"):
             _assumed_credentials(fake_boto3).get_frozen_credentials()
 
-    def test_missing_boto3_returns_no_clients(
-        self, aws_connector: Connector, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_missing_boto3_is_an_error(self, aws_connector: Connector, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The scale job records it on the connector, rather than reading a missing SDK as nothing to do."""
         monkeypatch.setitem(sys.modules, "boto3", None)
         provider = AWSProvider(aws_connector, _credential({"auth_mode": "host_role"}))
 
-        assert provider._get_boto3_clients() == (None, None)
+        with pytest.raises(RuntimeError, match="boto3 is not installed"):
+            provider._get_boto3_clients()
 
 
 class TestGCPProviderCredentials:
@@ -907,7 +905,6 @@ class TestGCPProviderCredentials:
         )
         gcp_auth.default.assert_not_called()
         assert client == ("instances", "key-creds")
-        assert provider._gcp_credentials == "key-creds"
 
     def test_legacy_config_without_auth_mode_uses_stored_key(
         self, gcp_connector: Connector, gcp_credential: Credential, gcp_auth: SimpleNamespace
@@ -959,7 +956,6 @@ class TestGCPProviderCredentials:
             target_scopes=["https://www.googleapis.com/auth/cloud-platform"],
         )
         assert client == ("instances", "impersonated-creds")
-        assert provider._gcp_credentials == "impersonated-creds"
 
     def test_client_is_cached(self, gcp_connector: Connector, gcp_auth: SimpleNamespace) -> None:
         provider = GCPProvider(gcp_connector, self._credential({"auth_mode": "host_identity"}))
@@ -1094,3 +1090,620 @@ class TestAzureProviderCredentials:
 
         assert first == second
         assert azure_sdk.default.call_count == 1
+
+
+
+
+def _named(connector: Connector, instance_name: str, **config: Any) -> Connector:
+    """The connector with its instances named from ``instance_name``, and ``config`` merged into its config."""
+    return connector.model_copy(update={"config": {**connector.config, "instance_name": instance_name, **config}})
+
+
+class TestCloudProviderOf:
+    def test_each_cloud_credential_type_gets_its_provider_and_any_other_none(
+        self,
+        aws_connector: Connector,
+        aws_credential: Credential,
+        gcp_connector: Connector,
+        gcp_credential: Credential,
+        azure_connector: Connector,
+        azure_credential: Credential,
+    ) -> None:
+        assert isinstance(CloudProvider.of(aws_connector, aws_credential), AWSProvider)
+        assert isinstance(CloudProvider.of(gcp_connector, gcp_credential), GCPProvider)
+        assert isinstance(CloudProvider.of(azure_connector, azure_credential), AzureProvider)
+        static = Credential(name="s", type=CredentialType.STATIC_PROXY_PROVIDER, project_id="p", config={})
+        assert CloudProvider.of(aws_connector, static) is None
+
+
+class TestCreationName:
+    def test_a_long_prefix_is_cut_so_the_name_fits_each_clouds_limit(
+        self,
+        aws_connector: Connector,
+        aws_credential: Credential,
+        gcp_connector: Connector,
+        gcp_credential: Credential,
+        azure_connector: Connector,
+        azure_credential: Credential,
+    ) -> None:
+        long = "p" * 80
+        providers: list[tuple[CloudProvider, int]] = [
+            (AWSProvider(_named(aws_connector, long), aws_credential), 64),
+            (GCPProvider(_named(gcp_connector, long), gcp_credential), 63),
+            (AzureProvider(_named(azure_connector, long), azure_credential), 64),
+        ]
+        for provider, limit in providers:
+            name = provider.creation_name(1_700_000_000.9)
+            assert len(name) == limit, type(provider).__name__
+            assert re.fullmatch(r"p+-1700000000-[0-9a-f]{6}", name)
+
+    def test_a_short_prefix_is_kept_whole_and_every_name_is_new(
+        self, aws_connector: Connector, aws_credential: Credential
+    ) -> None:
+        provider = AWSProvider(aws_connector, aws_credential)
+        names = {provider.creation_name(1_700_000_000.0) for _ in range(5)}
+        assert len(names) == 5
+        assert all(re.fullmatch(r"test-proxy-1700000000-[0-9a-f]{6}", name) for name in names)
+
+
+# --- AWS ----------------------------------------------------------------------------------
+
+
+def _token(proxy: Proxy) -> str:
+    """The base64 of the proxy's ``username:password``, which its Squid matches the Proxy-Authorization header against."""
+    return base64.b64encode(f"{proxy.username}:{proxy.password}".encode()).decode()
+
+
+def _in_start_up_script(proxy: Proxy, script: str) -> bool:
+    """Whether a start-up script holds the proxy's credentials, as the regex its Squid matches (+ escaped)."""
+    return _token(proxy).replace("+", "\\+") in script
+
+
+def _carries_credentials(proxy: Proxy, request: Any) -> bool:
+    """Whether ``request`` holds the proxy's password, or the base64 of its credentials, anywhere in it."""
+    text = json.dumps(request, default=str)
+    return bool(proxy.password and proxy.password in text) or _token(proxy) in text
+
+
+def _aws_instance(connector: Connector, name: str | None, instance_id: str, *, state: str = "running") -> dict[str, Any]:
+    """An instance as DescribeInstances describes it, launched under the client token ``name`` (None: launched without)."""
+    instance: dict[str, Any] = {
+        "InstanceId": instance_id,
+        "State": {"Name": state, "Code": 16 if state == "running" else 0},
+        "PrivateIpAddress": "10.0.0.5",
+        "PublicIpAddress": "203.0.113.5",
+        "Tags": [{"Key": CONNECTOR_TAG, "Value": connector.id}],
+    }
+    if name is not None:
+        instance["ClientToken"] = name
+    return instance
+
+
+_LIVE_STATES = {"Name": "instance-state-name", "Values": ["pending", "running"]}
+
+
+class TestAWSInstances:
+    """What the AWS provider asks EC2, on a real client whose answers are stubbed."""
+
+    @pytest.fixture
+    def ec2(self, monkeypatch: pytest.MonkeyPatch) -> Iterator[Stubber]:
+        resource = boto3.resource("ec2", region_name="us-east-1", aws_access_key_id="k", aws_secret_access_key="s")
+        stubber = Stubber(resource.meta.client)
+        monkeypatch.setattr(AWSProvider, "_get_boto3_clients", lambda self: (resource.meta.client, resource))
+        with stubber:
+            yield stubber
+            stubber.assert_no_pending_responses()
+
+    async def test_create_launches_under_the_name_as_client_token_tagged_with_the_connector_alone(
+        self, ec2: Stubber, aws_connector: Connector, aws_credential: Credential
+    ) -> None:
+        launched: dict[str, Any] = {}
+        ec2.client.meta.events.register(
+            "before-parameter-build.ec2.RunInstances", lambda params, **kwargs: launched.update(params)
+        )
+        name = "test-proxy-1700000000-abcdef"
+        running = {"Reservations": [{"Instances": [_aws_instance(aws_connector, name, "i-0abc")]}]}
+        ec2.add_response("run_instances", {"Instances": [{"InstanceId": "i-0abc"}]})
+        ec2.add_response("describe_instances", running, {"InstanceIds": ["i-0abc"]})
+        ec2.add_response("describe_instances", running, {"InstanceIds": ["i-0abc"]})
+        connector = _named(aws_connector, "test-proxy", tags={"team": "scraping", "Name": "mine", CONNECTOR_TAG: "x"})
+
+        proxy = await AWSProvider(connector, aws_credential).create_instance(name)
+
+        assert launched["ClientToken"] == name
+        (spec,) = launched["TagSpecifications"]
+        tags = {tag["Key"]: tag["Value"] for tag in spec["Tags"]}
+        assert tags == {"ManagedBy": "octoprox", "team": "scraping", "Name": name, CONNECTOR_TAG: connector.id}
+        # The credentials are in the user data, the instance's start-up script, and nowhere else.
+        assert _in_start_up_script(proxy, base64.b64decode(launched["UserData"]).decode())
+        assert not _carries_credentials(proxy, {key: value for key, value in launched.items() if key != "UserData"})
+        assert (proxy.id, proxy.host, proxy.port, proxy.status) == ("aws-i-0abc", "203.0.113.5", 3128, ProxyStatus.INITIALIZING)
+        assert (proxy.connector_id, proxy.metadata) == (connector.id, {"instance_id": "i-0abc"})
+
+    async def test_create_of_an_instance_running_without_an_address_is_an_error(
+        self, ec2: Stubber, aws_connector: Connector, aws_credential: Credential
+    ) -> None:
+        bare = _aws_instance(aws_connector, "x-1-abcdef", "i-0abc")
+        del bare["PublicIpAddress"], bare["PrivateIpAddress"]
+        ec2.add_response("run_instances", {"Instances": [{"InstanceId": "i-0abc"}]})
+        ec2.add_response("describe_instances", {"Reservations": [{"Instances": [bare]}]})
+        ec2.add_response("describe_instances", {"Reservations": [{"Instances": [bare]}]})
+        with pytest.raises(RuntimeError, match="i-0abc runs without an address"):
+            await AWSProvider(aws_connector, aws_credential).create_instance("x-1-abcdef")
+
+    async def test_create_without_an_image_for_the_region_is_an_error(
+        self, ec2: Stubber, aws_credential: Credential, aws_connector: Connector
+    ) -> None:
+        with pytest.raises(ValueError, match="No Ubuntu image"):
+            await AWSProvider(_named(aws_connector, "x", region="invalid-region-1"), aws_credential).create_instance("x-1-abcdef")
+
+    async def test_tagged_instances_reads_every_page_of_the_connectors_live_instances(
+        self, ec2: Stubber, aws_connector: Connector, aws_credential: Credential
+    ) -> None:
+        tagged = {"Name": f"tag:{CONNECTOR_TAG}", "Values": [aws_connector.id]}
+        first = {
+            "Reservations": [{"Instances": [_aws_instance(aws_connector, "a-1-aaaaaa", "i-a")]}],
+            "NextToken": "page-2",
+        }
+        second = {
+            "Reservations": [
+                {"Instances": [_aws_instance(aws_connector, "b-1-bbbbbb", "i-b", state="pending")]},
+                # Launched by hand with the tag: no client token.
+                {"Instances": [_aws_instance(aws_connector, None, "i-c")]},
+            ]
+        }
+        ec2.add_response("describe_instances", first, {"Filters": [tagged, _LIVE_STATES]})
+        ec2.add_response("describe_instances", second, {"Filters": [tagged, _LIVE_STATES], "NextToken": "page-2"})
+
+        listed = await AWSProvider(aws_connector, aws_credential).tagged_instances()
+
+        # Stopping and terminated instances are filtered out by EC2; a pending one is listed with the running ones.
+        assert listed == [
+            CloudInstance("a-1-aaaaaa", "aws-i-a"),
+            CloudInstance("b-1-bbbbbb", "aws-i-b"),
+            CloudInstance("", "aws-i-c"),
+        ]
+
+    async def test_terminate_succeeds_for_an_instance_aws_no_longer_knows_and_raises_other_errors(
+        self, ec2: Stubber, aws_connector: Connector, aws_credential: Credential
+    ) -> None:
+        provider = AWSProvider(aws_connector, aws_credential)
+        stopping = {"TerminatingInstances": [{"InstanceId": "i-0abc", "CurrentState": {"Name": "shutting-down", "Code": 32}}]}
+        ec2.add_response("terminate_instances", stopping, {"InstanceIds": ["i-0abc"]})
+        ec2.add_client_error("terminate_instances", "InvalidInstanceID.NotFound", expected_params={"InstanceIds": ["i-0abc"]})
+        ec2.add_client_error("terminate_instances", "UnauthorizedOperation", expected_params={"InstanceIds": ["i-0abc"]})
+
+        await provider.terminate_instance("aws-i-0abc")
+        await provider.terminate_instance("aws-i-0abc")
+        with pytest.raises(ClientError, match="UnauthorizedOperation"):
+            await provider.terminate_instance("aws-i-0abc")
+
+
+# --- GCP ----------------------------------------------------------------------------------
+
+
+class _Operation:
+    """An extended operation of Compute Engine, done at once or failed with ``error``."""
+
+    def __init__(self, error: Exception | None = None) -> None:
+        self.error = error
+        self.waited = False
+
+    def result(self, timeout: float | None = None) -> None:
+        self.waited = True
+        if self.error is not None:
+            raise self.error
+
+
+class _Instances:
+    """Compute Engine's instances client for one zone: its instances by name, and every operation it handed out."""
+
+    def __init__(self) -> None:
+        self.instances: dict[str, compute_v1.Instance] = {}
+        self.operations: list[_Operation] = []
+        self.filters: list[str] = []
+        self.insert_error: Exception | None = None
+        self.delete_error: Exception | None = None
+        # The external IP an inserted instance gets.
+        self.address = "34.1.2.3"
+
+    def put(self, name: str, status: str, *, nat_ip: str = "", labels: dict[str, str] | None = None) -> None:
+        """Hold an instance as the zone reports it."""
+        self.instances[name] = compute_v1.Instance(
+            name=name,
+            status=status,
+            labels=labels or {},
+            network_interfaces=[
+                compute_v1.NetworkInterface(
+                    network_i_p="10.128.0.2" if status == "RUNNING" else "",
+                    access_configs=[compute_v1.AccessConfig(nat_i_p=nat_ip)],
+                )
+            ],
+        )
+
+    def _operation(self, error: Exception | None) -> _Operation:
+        self.operations.append(_Operation(error))
+        return self.operations[-1]
+
+    def insert(self, *, project: str, zone: str, instance_resource: compute_v1.Instance) -> _Operation:
+        created = compute_v1.Instance(instance_resource)
+        created.status = "RUNNING"
+        created.network_interfaces[0].access_configs[0].nat_i_p = self.address
+        self.instances[created.name] = created
+        return self._operation(self.insert_error)
+
+    def get(self, *, project: str, zone: str, instance: str) -> compute_v1.Instance:
+        if instance not in self.instances:
+            raise NotFound(f"instance {instance}")
+        return self.instances[instance]
+
+    def list(self, *, project: str, zone: str, filter: str) -> list[compute_v1.Instance]:
+        self.filters.append(filter)
+        return list(self.instances.values())
+
+    def delete(self, *, project: str, zone: str, instance: str) -> _Operation:
+        if instance not in self.instances:
+            raise NotFound(f"instance {instance}")
+        if self.delete_error is None:
+            self.instances.pop(instance)
+        return self._operation(self.delete_error)
+
+
+class TestGCPInstances:
+    """What the GCP provider asks Compute Engine; the client answers with the SDK's own instance messages."""
+
+    @pytest.fixture
+    def zone(self, monkeypatch: pytest.MonkeyPatch) -> _Instances:
+        instances = _Instances()
+        monkeypatch.setattr(GCPProvider, "_get_compute_client", lambda self: instances)
+        return instances
+
+    async def test_create_names_and_labels_the_instance_with_its_credentials_in_the_start_up_script_alone(
+        self, zone: _Instances, gcp_connector: Connector, gcp_credential: Credential
+    ) -> None:
+        connector = _named(gcp_connector, "test-proxy", tags={"Team_Name": "Scraping", CONNECTOR_TAG: "x"})
+        name = "test-proxy-1700000000-abcdef"
+
+        proxy = await GCPProvider(connector, gcp_credential).create_instance(name)
+
+        created = compute_v1.Instance.to_dict(zone.instances[name])
+        assert created["labels"] == {"managed-by": "octoprox", "team-name": "scraping", CONNECTOR_TAG: connector.id}
+        [item] = created["metadata"]["items"]
+        assert item["key"] == "startup-script" and _in_start_up_script(proxy, item["value"])
+        item["value"] = ""
+        assert not _carries_credentials(proxy, created)
+        assert [operation.waited for operation in zone.operations] == [True]
+        assert (proxy.id, proxy.host, proxy.metadata) == (f"gcp-{name}", "34.1.2.3", {"instance_name": name})
+
+    async def test_create_raises_the_error_its_insert_ended_with(
+        self, zone: _Instances, gcp_connector: Connector, gcp_credential: Credential
+    ) -> None:
+        zone.insert_error = Forbidden("Quota 'CPUS' exceeded")
+        with pytest.raises(Forbidden, match="Quota"):
+            await GCPProvider(gcp_connector, gcp_credential).create_instance("test-proxy-1-abcdef")
+
+    async def test_create_of_an_instance_running_without_an_address_is_an_error(
+        self, zone: _Instances, gcp_connector: Connector, gcp_credential: Credential
+    ) -> None:
+        zone.address = ""
+        with pytest.raises(RuntimeError, match="test-proxy-1-abcdef runs without an address"):
+            await GCPProvider(gcp_connector, gcp_credential).create_instance("test-proxy-1-abcdef")
+
+    async def test_a_missing_sdk_is_an_error(
+        self, gcp_connector: Connector, gcp_credential: Credential, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delattr("google.cloud.compute_v1")
+        monkeypatch.setitem(sys.modules, "google.cloud.compute_v1", None)
+        with pytest.raises(RuntimeError, match="google-cloud-compute is not installed"):
+            await GCPProvider(gcp_connector, gcp_credential).tagged_instances()
+
+    async def test_tagged_instances_filters_on_the_connector_label_and_skips_stopped_ones(
+        self, zone: _Instances, gcp_connector: Connector, gcp_credential: Credential
+    ) -> None:
+        zone.put("a", "RUNNING", nat_ip="34.1.2.3")
+        zone.put("b", "STAGING")
+        zone.put("c", "STOPPING", nat_ip="34.1.2.4")
+        zone.put("d", "TERMINATED")
+        zone.put("e", "PROVISIONING")
+
+        listed = await GCPProvider(gcp_connector, gcp_credential).tagged_instances()
+
+        assert zone.filters == [f'labels.{CONNECTOR_TAG} = "{gcp_connector.id}"']
+        assert listed == [CloudInstance("a", "gcp-a"), CloudInstance("b", "gcp-b"), CloudInstance("e", "gcp-e")]
+
+    async def test_terminate_waits_for_the_delete_and_counts_a_missing_or_stopping_instance_as_terminated(
+        self, zone: _Instances, gcp_connector: Connector, gcp_credential: Credential
+    ) -> None:
+        provider = GCPProvider(gcp_connector, gcp_credential)
+        zone.put("a", "RUNNING", nat_ip="34.1.2.3")
+        await provider.terminate_instance("gcp-a")
+        assert "a" not in zone.instances and [operation.waited for operation in zone.operations] == [True]
+
+        await provider.terminate_instance("gcp-a")
+
+        # Another run's delete holds it: the instance is stopping.
+        zone.put("b", "STOPPING")
+        zone.delete_error = BadRequest("The resource is not ready")
+        await provider.terminate_instance("gcp-b")
+
+    async def test_terminate_raises_when_a_delete_fails_on_an_instance_still_running(
+        self, zone: _Instances, gcp_connector: Connector, gcp_credential: Credential
+    ) -> None:
+        zone.put("a", "RUNNING", nat_ip="34.1.2.3")
+        zone.delete_error = Forbidden("compute.instances.delete denied")
+        with pytest.raises(Forbidden):
+            await GCPProvider(gcp_connector, gcp_credential).terminate_instance("gcp-a")
+
+
+# --- Azure --------------------------------------------------------------------------------
+
+# The resource kinds the provider lists in its resource group.
+_ARM_LISTED = frozenset({"virtualMachines", "publicIPAddresses", "networkInterfaces"})
+
+
+class _Arm(requests.adapters.BaseAdapter):
+    """Azure Resource Manager on a ``requests`` adapter: it holds resources by kind and name, and keeps each request.
+
+    A PUT stores its body as provisioned, a GET reads one resource or lists a kind, and a DELETE removes one, or answers
+    with the status ``delete_status`` names for it, or raises the error ``delete_errors`` names for it.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.sent: list[tuple[str, str, Any]] = []
+        self.resources: dict[tuple[str, str], dict[str, Any]] = {}
+        self.delete_status: dict[str, int] = {}
+        self.delete_errors: dict[str, Exception] = {}
+        # Statuses a PUT of a kind answers with instead, and the IP a public IP gets once created.
+        self.put_status: dict[str, int] = {}
+        self.pip_address: str | None = "203.0.113.9"
+
+    def put(self, kind: str, name: str, *, tags: dict[str, str] | None = None, **properties: Any) -> None:
+        """Hold a provisioned resource, as another create left it."""
+        self.resources[(kind, name)] = {
+            "id": f"/rg/{kind}/{name}",
+            "name": name,
+            "location": "eastus",
+            "tags": tags or {},
+            "properties": {"provisioningState": "Succeeded", **properties},
+        }
+
+    def send(self, request: requests.PreparedRequest, **kwargs: Any) -> requests.Response:
+        path = urlsplit(request.url).path
+        body = json.loads(request.body) if request.body else None
+        self.sent.append((str(request.method), path, body))
+        segments = path.rstrip("/").split("/")
+        if segments[-1] in _ARM_LISTED:
+            listed = [resource for (kind, _name), resource in self.resources.items() if kind == segments[-1]]
+            return self._answer(request, 200, {"value": listed})
+        kind, name = segments[-2], segments[-1]
+        if request.method == "PUT":
+            if (status := self.put_status.get(kind)) is not None:
+                return self._answer(request, status, {"error": {"code": str(status), "message": name}})
+            properties = {**(body or {}).get("properties", {}), "provisioningState": "Succeeded"}
+            if kind == "publicIPAddresses" and self.pip_address is not None:
+                properties["ipAddress"] = self.pip_address
+            elif kind == "virtualMachines":
+                properties["vmId"] = "vm-guid"
+            self.resources[(kind, name)] = {**(body or {}), "id": path, "name": name, "properties": properties}
+            return self._answer(request, 200, self.resources[(kind, name)])
+        if request.method == "DELETE":
+            if (error := self.delete_errors.get(name)) is not None:
+                raise error
+            if (status := self.delete_status.get(name)) is not None:
+                return self._answer(request, status, {"error": {"code": str(status), "message": name}})
+            self.resources.pop((kind, name), None)
+            return self._answer(request, 204, None)
+        found = self.resources.get((kind, name))
+        if found is None and kind in _ARM_LISTED:
+            return self._answer(request, 404, {"error": {"code": "ResourceNotFound", "message": name}})
+        return self._answer(request, 200, found or {"id": path, "name": name, "properties": {}})
+
+    @staticmethod
+    def _answer(request: requests.PreparedRequest, status: int, body: Any) -> requests.Response:
+        response = requests.Response()
+        response.status_code = status
+        if body is not None:
+            response.headers["Content-Type"] = "application/json"
+        response.raw = io.BytesIO(json.dumps(body).encode() if body is not None else b"")
+        response.request = request
+        response.url = request.url
+        return response
+
+    def close(self) -> None:
+        pass
+
+
+def _keys(value: Any) -> list[str]:
+    """Every key of every mapping in ``value``, however deep."""
+    if isinstance(value, dict):
+        return [key for item_key, item in value.items() for key in (item_key, *_keys(item))]
+    if isinstance(value, list):
+        return [key for item in value for key in _keys(item)]
+    return []
+
+
+class TestAzureInstances:
+    """What the Azure provider sends, through the real SDK on a transport that answers locally.
+
+    The SDK sends a dict body as it is, without mapping attribute names, so each body must already be the REST API's
+    JSON: camelCase keys, nested under ``properties``.
+    """
+
+    @pytest.fixture
+    def arm(self, monkeypatch: pytest.MonkeyPatch) -> _Arm:
+        from azure.mgmt.compute import ComputeManagementClient
+        from azure.mgmt.network import NetworkManagementClient
+
+        adapter = _Arm()
+        session = requests.Session()
+        session.mount("https://", adapter)
+        transport = RequestsTransport(session=session, session_owner=False)
+        monkeypatch.setattr(
+            "azure.mgmt.compute.ComputeManagementClient", functools.partial(ComputeManagementClient, transport=transport)
+        )
+        monkeypatch.setattr(
+            "azure.mgmt.network.NetworkManagementClient", functools.partial(NetworkManagementClient, transport=transport)
+        )
+        token = AccessToken("token", int(time.time()) + 3600)
+        monkeypatch.setattr(
+            AzureProvider, "_build_credential", lambda self: SimpleNamespace(get_token=lambda *scopes, **kwargs: token)
+        )
+        return adapter
+
+    @pytest.fixture
+    def connector(self, azure_connector: Connector) -> Connector:
+        return _named(azure_connector, "test-proxy", vnet_name="vnet", subnet_name="subnet")
+
+    def _vm(self, arm: _Arm, connector: Connector, name: str, *, state: str = "Succeeded", pip: str | None = "203.0.113.10") -> None:
+        """A VM of the connector as its create leaves it: tagged, with its public IP."""
+        arm.put("virtualMachines", name, tags={CONNECTOR_TAG: connector.id}, vmId=f"guid-{name}")
+        arm.resources[("virtualMachines", name)]["properties"]["provisioningState"] = state
+        if pip is not None:
+            arm.put("publicIPAddresses", f"{name}-pip", ipAddress=pip)
+
+    async def test_create_sends_rest_shaped_bodies_named_and_tagged_with_the_credentials_in_the_custom_data_alone(
+        self, arm: _Arm, connector: Connector, azure_credential: Credential
+    ) -> None:
+        connector = _named(
+            connector, "test-proxy", vnet_name="vnet", subnet_name="subnet", tags={"team": "scraping", CONNECTOR_TAG: "x"}
+        )
+        name = "test-proxy-1700000000-abcdef"
+
+        proxy = await AzureProvider(connector, azure_credential).create_instance(name)
+
+        assert (proxy.id, proxy.host) == (f"azure-{name}", "203.0.113.9")
+        assert proxy.metadata == {"vm_name": name, "vm_id": "vm-guid"}
+        bodies = {path.split("/")[-2]: (path, body) for method, path, body in arm.sent if method == "PUT"}
+        assert set(bodies) == {"publicIPAddresses", "networkInterfaces", "virtualMachines"}
+        for _path, body in bodies.values():
+            assert not [key for key in _keys(body) if "_" in key], body
+        assert bodies["publicIPAddresses"] == (
+            bodies["publicIPAddresses"][0],
+            {"location": "eastus", "sku": {"name": "Standard"}, "properties": {"publicIPAllocationMethod": "Static"}},
+        )
+        assert bodies["publicIPAddresses"][0].endswith(f"/publicIPAddresses/{name}-pip")
+        nic_path, nic = bodies["networkInterfaces"]
+        assert nic_path.endswith(f"/networkInterfaces/{name}-nic")
+        (ip_configuration,) = nic["properties"]["ipConfigurations"]
+        assert ip_configuration["properties"]["subnet"]["id"].endswith("/virtualNetworks/vnet/subnets/subnet")
+        assert ip_configuration["properties"]["publicIPAddress"]["id"].endswith(f"{name}-pip")
+        vm_path, vm_body = bodies["virtualMachines"]
+        assert vm_path.endswith(f"/virtualMachines/{name}")
+        assert vm_body["tags"] == {"managed-by": "octoprox", "team": "scraping", CONNECTOR_TAG: connector.id}
+        vm = vm_body["properties"]
+        assert vm["hardwareProfile"] == {"vmSize": "Standard_B2ls_v2"}
+        assert vm["storageProfile"]["osDisk"]["name"] == f"{name}-osdisk"
+        assert vm["storageProfile"]["osDisk"]["managedDisk"] == {"storageAccountType": "Standard_LRS"}
+        assert vm["osProfile"]["computerName"] == name
+        assert vm["osProfile"]["linuxConfiguration"]["ssh"]["publicKeys"][0]["keyData"] == connector.config["ssh_public_key"]
+        (interface,) = vm["networkProfile"]["networkInterfaces"]
+        assert interface["id"].endswith(f"{name}-nic") and interface["properties"] == {"primary": True}
+        # The credentials are in the custom data, the VM's start-up script, and nowhere else.
+        assert _in_start_up_script(proxy, base64.b64decode(vm["osProfile"].pop("customData")).decode())
+        assert not _carries_credentials(proxy, [body for _path, body in bodies.values()])
+
+    async def test_a_create_that_fails_deletes_the_interface_and_public_ip_it_made(
+        self, arm: _Arm, connector: Connector, azure_credential: Credential
+    ) -> None:
+        arm.put_status["virtualMachines"] = 400
+        with pytest.raises(HttpResponseError):
+            await AzureProvider(connector, azure_credential).create_instance("vm-a")
+        deleted = [path.rsplit("/", 1)[-1] for method, path, _body in arm.sent if method == "DELETE"]
+        assert deleted == ["vm-a-nic", "vm-a-pip"] and arm.resources == {}
+
+    async def test_create_of_a_vm_without_an_address_or_a_network_is_an_error(
+        self, arm: _Arm, connector: Connector, azure_connector: Connector, azure_credential: Credential
+    ) -> None:
+        arm.pip_address = None
+        with pytest.raises(RuntimeError, match="vm-a runs without an address"):
+            await AzureProvider(connector, azure_credential).create_instance("vm-a")
+        with pytest.raises(ValueError, match="vnet_name and subnet_name"):
+            await AzureProvider(azure_connector, azure_credential).create_instance("vm-b")
+
+    async def test_a_missing_sdk_is_an_error(
+        self, connector: Connector, azure_credential: Credential, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setitem(sys.modules, "azure.mgmt.compute", None)
+        with pytest.raises(RuntimeError, match="the Azure SDK is not installed"):
+            await AzureProvider(connector, azure_credential).tagged_instances()
+
+    async def test_tagged_instances_lists_the_connectors_live_vms_from_the_vm_list_alone(
+        self, arm: _Arm, connector: Connector, azure_credential: Credential
+    ) -> None:
+        self._vm(arm, connector, "vm-a")
+        arm.put("networkInterfaces", "vm-a-nic", ipConfigurations=[{"name": "ip", "properties": {"privateIPAddress": "10.0.0.3"}}])
+        self._vm(arm, connector, "vm-b", state="Deleting")
+        self._vm(arm, connector.model_copy(update={"id": "another"}), "vm-c")
+        arm.put("virtualMachines", "vm-d")
+        self._vm(arm, connector, "vm-e", pip=None)
+        self._vm(arm, connector, "vm-g", state="Creating", pip=None)
+        self._vm(arm, connector, "vm-h", state="Failed")
+
+        listed = await AzureProvider(connector, azure_credential).tagged_instances()
+
+        assert listed == [
+            CloudInstance("vm-a", "azure-vm-a"),
+            CloudInstance("vm-e", "azure-vm-e"),
+            CloudInstance("vm-g", "azure-vm-g"),
+        ]
+        assert [path.rsplit("/", 1)[-1] for _method, path, _body in arm.sent] == ["virtualMachines"]
+
+    async def test_terminate_deletes_the_vm_then_its_interface_and_public_ip(
+        self, arm: _Arm, connector: Connector, azure_credential: Credential
+    ) -> None:
+        self._vm(arm, connector, "vm-a")
+        arm.put("networkInterfaces", "vm-a-nic")
+
+        await AzureProvider(connector, azure_credential).terminate_instance("azure-vm-a")
+
+        deleted = [path.rsplit("/", 1)[-1] for method, path, _body in arm.sent if method == "DELETE"]
+        assert deleted == ["vm-a", "vm-a-nic", "vm-a-pip"]
+        assert arm.resources == {}
+
+    async def test_a_network_resource_left_after_a_vm_is_terminated_is_logged_not_raised(
+        self, arm: _Arm, connector: Connector, azure_credential: Credential
+    ) -> None:
+        self._vm(arm, connector, "vm-a")
+        arm.put("networkInterfaces", "vm-a-nic")
+        arm.delete_status["vm-a-nic"] = 400
+
+        await AzureProvider(connector, azure_credential).terminate_instance("azure-vm-a")
+
+        assert list(arm.resources) == [("networkInterfaces", "vm-a-nic")]
+
+    async def test_a_network_resource_cleanup_cut_by_a_deadline_is_logged_by_its_type(
+        self, arm: _Arm, connector: Connector, azure_credential: Credential
+    ) -> None:
+        """A bare TimeoutError has no text: the log line names its type, and the termination stands."""
+        self._vm(arm, connector, "vm-a")
+        arm.put("networkInterfaces", "vm-a-nic")
+        arm.delete_errors["vm-a-nic"] = TimeoutError()
+
+        with patch("api.providers.cloud.logger") as log:
+            await AzureProvider(connector, azure_credential).terminate_instance("azure-vm-a")
+
+        event = "Failed to clean up a network resource of a terminated VM"
+        failed = [call.kwargs for call in log.warning.call_args_list if call.args == (event,)]
+        assert failed == [{"resource": "vm-a-nic", "error": "TimeoutError"}]
+
+    async def test_terminate_counts_a_missing_vm_or_one_under_another_delete_as_terminated(
+        self, arm: _Arm, connector: Connector, azure_credential: Credential
+    ) -> None:
+        provider = AzureProvider(connector, azure_credential)
+        arm.delete_status["vm-gone"] = 404
+        await provider.terminate_instance("azure-vm-gone")
+
+        self._vm(arm, connector, "vm-b", state="Deleting")
+        arm.delete_status["vm-b"] = 409
+        await provider.terminate_instance("azure-vm-b")
+        # The other delete removes the network resources once the VM is gone.
+        assert ("publicIPAddresses", "vm-b-pip") in arm.resources
+
+    async def test_terminate_raises_when_a_vm_that_is_not_being_deleted_refuses(
+        self, arm: _Arm, connector: Connector, azure_credential: Credential
+    ) -> None:
+        self._vm(arm, connector, "vm-a")
+        arm.delete_status["vm-a"] = 409
+        with pytest.raises(HttpResponseError):
+            await AzureProvider(connector, azure_credential).terminate_instance("azure-vm-a")

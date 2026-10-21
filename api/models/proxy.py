@@ -3,8 +3,9 @@
 
 """Proxy model definitions."""
 
+from collections.abc import Mapping
 from datetime import datetime
-from enum import Enum
+from enum import StrEnum
 from typing import Any
 from uuid import uuid4
 
@@ -21,7 +22,13 @@ from api.models.location import (
 )
 
 
-class ProxyProtocol(str, Enum):
+def metadata_diff(before: Mapping[str, Any], after: Mapping[str, Any]) -> tuple[dict[str, Any], set[str]]:
+    """What ``after`` changed of the metadata ``before``, key by key: each key it sets anew with its value, and the keys it drops."""
+    changed = {key: value for key, value in after.items() if key not in before or before[key] != value}
+    return changed, {key for key in before if key not in after}
+
+
+class ProxyProtocol(StrEnum):
     """Supported proxy protocols."""
     HTTP = "http"
     HTTPS = "https"
@@ -29,7 +36,7 @@ class ProxyProtocol(str, Enum):
     SOCKS5 = "socks5"
 
 
-class ProxyStatus(str, Enum):
+class ProxyStatus(StrEnum):
     """Proxy health status."""
     UNKNOWN = "unknown"
     INITIALIZING = "initializing"  # Newly created, still starting up (grace period for health checks)
@@ -38,6 +45,11 @@ class ProxyStatus(str, Enum):
     UNHEALTHY = "unhealthy"
     DRAINING = "draining"  # Not accepting new connections, waiting for existing to complete
     TERMINATING = "terminating"  # Being terminated/removed
+
+    @property
+    def retiring(self) -> bool:
+        """Whether a proxy in this status is on its way out: draining or terminating."""
+        return self in (ProxyStatus.DRAINING, ProxyStatus.TERMINATING)
 
 
 class Proxy(BaseModel):
@@ -52,21 +64,16 @@ class Proxy(BaseModel):
 
     # Display host - for UI display purposes
     # For most proxies this equals host, but for Oxylabs port-based proxies
-    # this contains the discovered IP while host keeps the Oxylabs endpoint for routing
+    # this contains the discovered IP while host keeps the Oxylabs endpoint for routing.
+    # Attribution no longer writes it; see effective_display_host.
     display_host: str | None = None
 
-    # Status and health
+    # Status and health. ``status`` is a column of the proxies table: stored
+    # with the row when it is added, then changed only by the health job's
+    # compare-and-set and by drain and terminate, never by an edit.
     status: ProxyStatus = ProxyStatus.UNKNOWN
-    consecutive_failures: int = 0
-    last_check_latency_ms: float = 0.0
-
-    # Statistics
-    request_count: int = 0
-    success_count: int = 0
-    failure_count: int = 0
-    avg_latency_ms: float = 0.0
-    bytes_sent: int = 0
-    bytes_received: int = 0
+    # When ``status`` last changed; None until it first does.
+    status_changed_at: datetime | None = None
 
     # Metadata
     connector_id: str
@@ -85,7 +92,13 @@ class Proxy(BaseModel):
 
     @property
     def effective_display_host(self) -> str:
-        """Get the host to display in UI. Falls back to host if display_host is not set."""
+        """The host the UI shows: the exit attribution last saw, else ``display_host``, else ``host``.
+
+        Attribution writes the exit into the metadata alone (``discovered_ip``), so the newest sighting is what shows.
+        """
+        discovered = self.metadata.get("discovered_ip")
+        if isinstance(discovered, str) and discovered:
+            return discovered
         return self.display_host if self.display_host else self.host
 
     @property
@@ -156,51 +169,6 @@ class Proxy(BaseModel):
         if target.state and self.state_code != target.state:
             return False
         return not target.city or self.city_slug == target.city
-
-    @property
-    def success_rate(self) -> float:
-        """Calculate success rate percentage."""
-        if self.request_count == 0:
-            return 0.0
-        return (self.success_count / self.request_count) * 100
-
-    def apply_status_snapshot(self, status_data: dict[str, Any]) -> None:
-        """Adopt the health fields from a Redis ``proxy:status:<id>`` hash.
-
-        Redis - not Postgres - is authoritative for these three: the health
-        checker writes them there on every probe and they are never persisted
-        to the proxies table. Anything that refreshes a cached proxy therefore
-        takes its status from here, and a peer's health flip needs no database
-        read at all.
-        """
-        self.status = status_data["status"]
-        self.last_check_latency_ms = status_data["latency_ms"]
-        self.consecutive_failures = status_data["consecutive_failures"]
-
-    def merge_definition_from(self, other: "Proxy") -> None:
-        """Adopt the Postgres-backed *definition* fields from ``other``.
-
-        Used by ``ProxyManager.reload_proxy`` and ``full_reload`` to apply
-        a fresh-from-DB ``Proxy`` to the existing cached instance without
-        clobbering runtime state - ``status``, ``last_check_latency_ms``,
-        ``consecutive_failures`` (refreshed from Redis), and the
-        per-request counters (``request_count`` and friends, incremented
-        in-process and reconciled with Redis on the next hydrate).
-
-        Adding a new column to the proxies table? Add the field here
-        too. Adding a new runtime-only field? Leave it out.
-        """
-        self.host = other.host
-        self.port = other.port
-        self.protocol = other.protocol
-        self.username = other.username
-        self.password = other.password
-        self.display_host = other.display_host
-        self.connector_id = other.connector_id
-        self.tags = other.tags
-        self.metadata = other.metadata
-        self.created_at = other.created_at
-        self.updated_at = other.updated_at
 
 
 class ProxyCreate(BaseModel):

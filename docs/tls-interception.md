@@ -66,7 +66,7 @@ WebSocket and HTTP/2 client-side support are planned for a future release.
 
 When any MITM mode is enabled, clients must trust the Octoprox CA certificate. Without it, clients will see TLS verification errors.
 
-**Auto-generation**: The CA certificate and private key are automatically generated on first startup if they don't already exist. They are stored at the paths configured by `OCTOPROX_TLS_MITM_CA_CERT_PATH` and `OCTOPROX_TLS_MITM_CA_KEY_PATH` (default: `data/ca/`).
+**Auto-generation**: The gateways sign with the CA, so a gateway (or a single instance) generates the CA certificate and private key on its first start if they don't already exist. They are stored at the paths configured by `OCTOPROX_TLS_MITM_CA_CERT_PATH` and `OCTOPROX_TLS_MITM_CA_KEY_PATH` (default: `data/ca/`). Every gateway must sign with the same CA, since a client trusts one CA whichever gateway serves it: gateways that share one volume and start together on an empty one take turns through a short Redis lock, so exactly one generates it and the others load it. Gateways that share no volume, as on Kubernetes, need the CA created up front and given to each (see [Running on Kubernetes]({{ site.baseurl }}/kubernetes#the-mitm-ca)). A gateway that cannot load or create the CA does not start. The api reads only the certificate, to offer it for download, and answers `404` until a gateway has created it.
 
 **Download**: The CA certificate can be downloaded from the web UI (shown when editing a project with MITM enabled) or directly at:
 
@@ -98,7 +98,7 @@ sudo cp octoprox-ca.crt /usr/local/share/ca-certificates/octoprox-ca.crt
 sudo update-ca-certificates
 ```
 
-**Bring your own CA**: To use a custom CA certificate instead of the auto-generated one, place your PEM-encoded certificate and private key at the configured paths before starting the server. The files must be readable by the Octoprox process.
+**Bring your own CA**: To use a custom CA certificate instead of the auto-generated one, place your PEM-encoded certificate and private key at the configured paths before starting the gateways; the api needs the certificate only. The files must be readable by the Octoprox process (uid 1000 in the image).
 
 ```bash
 # Example: provide your own CA
@@ -123,7 +123,7 @@ openssl req -new -x509 -key data/ca/octoprox-ca.key \
 
 ## Docker
 
-In Docker deployments, the CA files are persisted in a named volume (`ca_data`) mounted at `/app/data/ca`. This ensures the CA certificate survives container restarts - clients only need to install it once.
+In Docker deployments, the CA files are persisted in a named volume (`ca_data`) mounted at `/app/data/ca`: on the single instance, and in the role cluster on every gateway and, read-only, on the api services. This ensures the CA certificate survives container restarts - clients only need to install it once. On Kubernetes, keep it in a Secret mounted on the gateways (certificate and key) and the api (certificate).
 
 ## YAML Configuration
 

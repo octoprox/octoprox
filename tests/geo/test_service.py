@@ -3,6 +3,7 @@
 
 """Tests for GeoService: applying resolutions to proxies and recording observations."""
 
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -13,12 +14,14 @@ from api.geo.models import (
     META_COUNTRY_SOURCE,
     META_LOCATION,
     META_LOCATION_CANDIDATES,
+    META_LOCATION_CHECKED_AT,
     META_LOCATION_CONFLICT,
     META_LOCATION_VERDICT,
     META_VENDOR_COUNTRY,
     ConflictRule,
     ExitJudgement,
     GeoSourceKind,
+    IpObservation,
     ObservationSource,
     SourcePolicy,
 )
@@ -60,7 +63,8 @@ class TestApplyObservation:
         assert changed
         assert resolution.resolved_country == "GB" and resolution.resolved_source == GeoSourceKind.DATABASE
         assert proxy.country == "GB"
-        assert proxy.display_host == GB_IP
+        # The exit is written to the metadata alone, which is what the UI shows; the column is the vendor's.
+        assert proxy.effective_display_host == GB_IP and proxy.display_host is None
         assert proxy.metadata[META_DISCOVERED_IP] == GB_IP
         assert proxy.metadata[META_COUNTRY_SOURCE] == "database"
         assert proxy.metadata[META_LOCATION]["city"] == "London"
@@ -172,6 +176,44 @@ class TestApplyObservation:
         assert observation.claimed_country == "US" and observation.resolved_country == "GB"
         assert observation.endpoint_country == "GB" and observation.country_conflict
         assert observation.instance_id == "test-instance"
+
+
+class TestJudge:
+    """Judging writes the row and records nothing; recording is ``apply_observation``'s second half."""
+
+    async def test_judge_records_nothing_and_stamps_when_seen(self, geo_service: GeoService) -> None:
+        seen = datetime(2026, 10, 17, 12, 0, 0)
+        proxy = _proxy(**{META_GEO_COUNTRY: "US"})
+        resolution, changed = geo_service.judge(proxy, GB_IP, checked_at=seen)
+        assert changed and resolution.country_conflict and proxy.metadata[META_LOCATION_VERDICT] == "contradicted"
+        assert proxy.metadata[META_LOCATION_CHECKED_AT] == seen.isoformat()
+        assert geo_service.observation_recorder.pending == 0
+        # Without a time the stamp stays as it was: a re-judgement is not a sighting.
+        _, again = geo_service.judge(proxy, GB_IP)
+        assert not again and proxy.metadata[META_LOCATION_CHECKED_AT] == seen.isoformat()
+        # A stamp moving alone is no change worth writing.
+        _, stamped = geo_service.judge(proxy, GB_IP, checked_at=seen + timedelta(minutes=1))
+        assert not stamped
+
+    async def test_apply_observation_is_judge_plus_one_observation_stamped_by_the_sighting(self, geo_service: GeoService) -> None:
+        seen = datetime(2026, 10, 17, 12, 0, 0)
+        proxy = _proxy()
+        geo_service.apply_observation(
+            proxy, GB_IP, source=ObservationSource.PREFLIGHT, observed_at=seen, instance_id="gateway-3", session_id="s"
+        )
+        (observation,) = geo_service.observation_recorder._buffer
+        assert isinstance(observation, IpObservation)
+        assert observation.observed_at == seen and observation.instance_id == "gateway-3" and observation.session_id == "s"
+        assert proxy.metadata[META_LOCATION_CHECKED_AT] == seen.isoformat()
+        geo_service.record_sighting(proxy, GB_IP, source=ObservationSource.PREFLIGHT, observed_at=seen, instance_id="gateway-4")
+        assert geo_service.observation_recorder._buffer[-1].instance_id == "gateway-4"
+        assert geo_service.instance_id == "test-instance"
+
+    async def test_rejudge_keeps_the_stamp(self, geo_service: GeoService) -> None:
+        proxy = _proxy(**{META_GEO_COUNTRY: "US", META_LOCATION_CHECKED_AT: "2026-10-17T12:00:00"})
+        geo_service.rejudge(proxy, GB_IP)
+        assert proxy.metadata[META_LOCATION_CHECKED_AT] == "2026-10-17T12:00:00"
+        assert geo_service.observation_recorder._buffer[-1].instance_id == "test-instance"
 
 
 class TestEchoSpec:

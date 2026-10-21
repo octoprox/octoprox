@@ -32,7 +32,10 @@ export function ProjectLocations({ projectId, onSummary }: { projectId: string; 
     queryKey: ['proxies', projectId],
     queryFn: () => fetchProjectProxies(projectId),
     enabled: !!projectId,
-    refetchInterval: 10000, // statuses and counters move
+    // What the map shows moves when proxies are provisioned or placed, and with each health check (a minute apart
+    // by default). Each poll also reads every row's counters and soft health, which the map does not use, so it
+    // runs at the map's pace rather than the pool figures'.
+    refetchInterval: 60_000,
   })
   // Same key as the Overview's connector list, so this is served from its cache.
   const { data: connectorsData, isLoading: connectorsLoading } = useQuery({

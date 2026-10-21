@@ -6,17 +6,18 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { KeyRound, ShieldCheck } from 'lucide-react'
 import {
   fetchOpenVpnSettings, rotateOpenVpnIdentity, updateOpenVpnSettings,
-  OpenVpnProtocol, OpenVpnServerSettings, OpenVpnServerSettingsDoc, OpenVpnStatus,
+  OpenVpnProtocol, OpenVpnServerSettings, OpenVpnServerSettingsDoc, TunnelStatus,
 } from '../../api/client'
 import { useToast } from '../../contexts/ToastContext'
 import { Page } from '../../components/layout/Page'
-import { formatDateTime } from '../../utils/format'
-import { Alert, Badge, Button, Card, CardHeader, ConfirmDialog, InfoTip, Input, Label, Select } from '../../components/ui'
+import { TunnelGatewaysCard, TunnelStateBadge, relayedLabel } from '../../components/TunnelGateways'
+import { formatDateTime, plural } from '../../utils/format'
+import { Alert, Button, Card, CardHeader, ConfirmDialog, InfoTip, Input, Label, Select } from '../../components/ui'
 
 /**
  * Admin page for the OpenVPN endpoint: the install's CA and what every device
- * profile says about reaching it, plus what the answering instance is doing
- * about the daemon.
+ * profile says about reaching it, plus the daemon on every gateway running
+ * it, from the heartbeats the gateways publish.
  */
 export default function OpenVpnSection() {
   const queryClient = useQueryClient()
@@ -40,7 +41,7 @@ export default function OpenVpnSection() {
     <Page
       title="OpenVPN"
       subtitle="Devices without proxy support join a project's pool through an OpenVPN tunnel terminated by Octoprox."
-      toolbar={data && <StateBadge status={data.status} />}
+      toolbar={data && <TunnelStateBadge status={data.status} />}
     >
       {isLoading || !data ? (
         <div className="text-sm text-fg-muted py-10 text-center">Loading…</div>
@@ -53,7 +54,7 @@ export default function OpenVpnSection() {
                 title="Server identity"
                 action={<Button size="sm" variant="outline" onClick={() => setConfirmRotate(true)}><KeyRound className="w-3.5 h-3.5" /> Rotate identity</Button>}
               />
-              <p className="text-sm text-fg-muted mt-1">A private certificate authority for the whole install, shared by every instance. It signs the server certificate devices check and the certificate each device presents. Rotating it reissues every device.</p>
+              <p className="text-sm text-fg-muted mt-1">A private certificate authority for the whole install, shared by every gateway. It signs the server certificate devices check and the certificate each device presents. Rotating it reissues every device.</p>
               <dl className="mt-3 grid grid-cols-[auto_minmax(0,1fr)] gap-x-4 gap-y-1.5 text-sm">
                 <dt className="text-fg-muted">CA fingerprint</dt>
                 <dd className="font-mono text-xs break-all select-all">{data.ca_fingerprint}</dd>
@@ -63,13 +64,13 @@ export default function OpenVpnSection() {
               <div className="text-xs text-fg-subtle mt-2">Last changed {formatDateTime(data.updated_at)}</div>
             </Card>
           </div>
-          <StatusCard status={data.status} />
+          <StatusCard status={data.status} transport={data.protocol} />
         </div>
       )}
       {confirmRotate && (
         <ConfirmDialog
           title="Rotate the OpenVPN identity?"
-          message="A new CA, server certificate and tls-crypt key replace the current ones on every instance, and every device is reissued a certificate under the new CA. Every OpenVPN profile in every project stops working until it is downloaded again."
+          message="A new CA, server certificate and tls-crypt key replace the current ones, every gateway restarts its daemon with them within a few seconds, and every device is reissued a certificate under the new CA. Every OpenVPN profile in every project stops working until it is downloaded again."
           confirmLabel="Rotate identity"
           onCancel={() => setConfirmRotate(false)}
           onConfirm={() => rotate.mutate()}
@@ -78,14 +79,6 @@ export default function OpenVpnSection() {
       )}
     </Page>
   )
-}
-
-function StateBadge({ status }: { status: OpenVpnStatus }) {
-  if (!status.enabled) return <Badge color="gray">Not running here</Badge>
-  const colors: Record<OpenVpnStatus['state'], 'green' | 'yellow' | 'red' | 'gray'> = {
-    running: 'green', starting: 'yellow', failed: 'red', disabled: 'gray', stopped: 'gray',
-  }
-  return <Badge color={colors[status.state]}>{status.state}</Badge>
 }
 
 function EndpointForm({ settings }: { settings: OpenVpnServerSettings }) {
@@ -120,16 +113,16 @@ function EndpointForm({ settings }: { settings: OpenVpnServerSettings }) {
       )}
       <form className="mt-4 grid grid-cols-1 @lg:grid-cols-2 gap-4" onSubmit={(e) => { e.preventDefault(); save.mutate() }}>
         <div>
-          <Label htmlFor="ovpn-host" className="inline-flex items-center gap-1">Public endpoint host <InfoTip>The hostname or IP devices reach this install at over the internet, as written into every device profile. Point it at the load balancer in a cluster, or at the instance itself otherwise.</InfoTip></Label>
+          <Label htmlFor="ovpn-host" className="inline-flex items-center gap-1">Public endpoint host <InfoTip>The hostname or IP devices reach this install at over the internet, as written into every device profile. Point it at the load balancer in front of the gateways, or at the gateway's own address when there is only one.</InfoTip></Label>
           <Input id="ovpn-host" value={doc.endpoint_host} onChange={(e) => setDoc({ ...doc, endpoint_host: e.target.value })} placeholder="vpn.example.com" />
         </div>
         <div className="grid grid-cols-[minmax(0,1fr)_110px] gap-3">
           <div>
-            <Label htmlFor="ovpn-port" className="inline-flex items-center gap-1">Port <InfoTip>The port in device profiles. Every instance running the daemon listens on it too unless its openvpn.listen_port overrides that (port-mapping NAT).</InfoTip></Label>
+            <Label htmlFor="ovpn-port" className="inline-flex items-center gap-1">Port <InfoTip>The port in device profiles. Every gateway running the daemon listens on it too unless its openvpn.listen_port overrides that (port-mapping NAT).</InfoTip></Label>
             <Input id="ovpn-port" type="number" min={1} max={65535} value={doc.endpoint_port} onChange={(e) => setDoc({ ...doc, endpoint_port: Number(e.target.value) })} />
           </div>
           <div>
-            <Label htmlFor="ovpn-proto" className="inline-flex items-center gap-1">Transport <InfoTip>UDP is faster and the usual choice. TCP (typically on port 443) gets through networks that block UDP; the daemon listens on one of the two, so changing it restarts the daemon on every instance.</InfoTip></Label>
+            <Label htmlFor="ovpn-proto" className="inline-flex items-center gap-1">Transport <InfoTip>UDP is faster and the usual choice. TCP (typically on port 443) gets through networks that block UDP; the daemon listens on one of the two, so changing it restarts the daemon on every gateway.</InfoTip></Label>
             <Select id="ovpn-proto" value={doc.protocol} onChange={(e) => setDoc({ ...doc, protocol: e.target.value as OpenVpnProtocol })}>
               <option value="udp">UDP</option>
               <option value="tcp">TCP</option>
@@ -137,7 +130,7 @@ function EndpointForm({ settings }: { settings: OpenVpnServerSettings }) {
           </div>
         </div>
         <div>
-          <Label htmlFor="ovpn-subnet" className="inline-flex items-center gap-1">Tunnel subnet <InfoTip>Devices get addresses from this network; its first host is the gateway devices use as DNS. It must not overlap the WireGuard subnet. Changing it needs every device removed first and restarts the daemon on every instance.</InfoTip></Label>
+          <Label htmlFor="ovpn-subnet" className="inline-flex items-center gap-1">Tunnel subnet <InfoTip>Devices get addresses from this network; its first host is the gateway devices use as DNS. It must not overlap the WireGuard subnet. A new subnet must still hold every device's address, so devices outside it are removed first; changing it restarts the daemon on every gateway.</InfoTip></Label>
           <Input id="ovpn-subnet" value={doc.subnet} onChange={(e) => setDoc({ ...doc, subnet: e.target.value })} placeholder="10.67.0.0/16" className="font-mono text-xs" />
         </div>
         <div className="grid grid-cols-2 gap-3">
@@ -163,46 +156,34 @@ function EndpointForm({ settings }: { settings: OpenVpnServerSettings }) {
   )
 }
 
-function StatusCard({ status }: { status: OpenVpnStatus }) {
+function StatusCard({ status, transport }: { status: TunnelStatus; transport: OpenVpnProtocol }) {
   return (
-    <Card className="p-5 h-fit">
-      <CardHeader title="This instance" action={<StateBadge status={status} />} />
-      {!status.enabled ? (
-        <p className="text-sm text-fg-muted mt-2">
-          This instance is not running the OpenVPN daemon. Enable it with <span className="font-mono text-fg">OCTOPROX_OPENVPN_ENABLED=true</span> (or <span className="font-mono text-fg">openvpn.enabled</span> in the config file) on every instance the public endpoint reaches; the bundled cluster compose does so on all replicas. Each needs CAP_NET_ADMIN, /dev/net/tun and the port published.
+    <TunnelGatewaysCard
+      status={status}
+      notRunning={<>
+        No gateway is running the OpenVPN daemon. Enable it with <span className="font-mono text-fg">OCTOPROX_OPENVPN_ENABLED=true</span> (or <span className="font-mono text-fg">openvpn.enabled</span> in the config file) on the gateways the public endpoint reaches. Each needs CAP_NET_ADMIN, /dev/net/tun and the port published.
+      </>}
+      details={(gateway) => [
+        gateway.interface,
+        gateway.daemon_version,
+        `${transport.toUpperCase()}${gateway.listen_port != null ? ` ${gateway.listen_port}` : ''}`,
+        relayedLabel(gateway),
+        gateway.restarts > 0 ? `${gateway.restarts} ${plural(gateway.restarts, 'restart', 'restarts')}` : null,
+        gateway.denied > 0 ? `${gateway.denied} refused` : null,
+        gateway.fake_ip_range ? `fake IPs ${gateway.fake_ip_range}` : null,
+        gateway.block_encrypted_dns ? null : 'encrypted DNS allowed',
+      ]}
+    >
+      {status.gateways.some((g) => g.restarts > 0 || g.denied > 0) && (
+        <p className="text-[11px] text-fg-subtle mt-3">
+          Restarts count the times a gateway's daemon exited on its own and was started again, and refused the connections
+          it turned away at admission (unknown, disabled or rotated devices), each since that gateway started.
         </p>
-      ) : status.state === 'failed' ? (
-        <Alert variant="error" className="text-sm mt-2 break-words whitespace-pre-wrap">{status.error}</Alert>
-      ) : (
-        <p className="text-sm text-fg-muted mt-2">Tunnel traffic from devices is redirected into this instance's proxy path.</p>
       )}
-      <dl className="mt-4 grid grid-cols-2 gap-x-4 gap-y-2 text-sm">
-        <Row label="Instance" value={status.instance_id} mono />
-        <Row label="Interface" value={status.interface} mono />
-        <Row label="Daemon" value={status.daemon_version ?? '-'} />
-        <Row label="Transport" value={`${status.protocol.toUpperCase()}${status.listen_port ? ` ${status.listen_port}` : ''}`} />
-        <Row label="Restarts" value={status.restarts} title="Times the daemon exited on its own and was started again since this process started." />
-        <Row label="Refused" value={status.denied} title="Connections refused at the daemon since this process started: unknown, disabled or rotated devices." />
-        <Row label="Fake IP range" value={status.fake_ip_range} mono />
-        <Row label="Devices" value={`${status.peers_enabled} enabled of ${status.peers_total}`} />
-        <Row label="Online now" value={status.peers_online} />
-        <Row label="Open tunnels" value={status.active_connections} title="Connections the shared tunnel listener is relaying right now, every tunnel protocol included." />
-        <Row label="Routed by address" value={status.connections_by_address} title="Connections of every OpenVPN device, all time, relayed by address because no destination name could be recovered." />
-        <Row label="Encrypted DNS" value={status.block_encrypted_dns ? `blocked (${status.encrypted_dns_blocked})` : 'allowed'} title="Encrypted-DNS connections closed so devices keep the tunnel resolver: every OpenVPN device, all time." />
-      </dl>
-      <div className="mt-4 flex items-start gap-2 text-xs text-fg-muted">
+      <div className="mt-3 flex items-start gap-2 text-xs text-fg-muted">
         <ShieldCheck className="w-4 h-4 flex-none mt-0.5" />
         <span>Devices are added per project under Devices, picking OpenVPN as the tunnel. Each gets a .ovpn profile.</span>
       </div>
-    </Card>
-  )
-}
-
-function Row({ label, value, mono, title }: { label: string; value: string | number; mono?: boolean; title?: string }) {
-  return (
-    <>
-      <dt className="text-fg-muted" title={title}>{label}</dt>
-      <dd className={mono ? 'font-mono text-xs truncate text-right' : 'text-right tabular-nums'} title={title ?? String(value)}>{value}</dd>
-    </>
+    </TunnelGatewaysCard>
   )
 }

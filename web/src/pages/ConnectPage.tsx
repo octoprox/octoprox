@@ -2,11 +2,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { useMemo, useState, type ReactNode } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useNavigate } from 'react-router'
 import { useQuery } from '@tanstack/react-query'
 import { AlertTriangle, Check, Copy, Download, Eye, EyeOff, RefreshCw } from 'lucide-react'
 import { downloadCaCertificate, fetchConnectInfo, type ConnectInfo, type ConnectParams } from '../api/client'
 import { useProject } from '../contexts/ProjectContext'
+import { useToast } from '../contexts/ToastContext'
 import { useDebounced } from '../hooks/useDebounced'
 import { Page } from '../components/layout/Page'
 import { Alert, Button, Card, CardHeader, InfoTip, Input, Label, Segmented, Select, Tabs } from '../components/ui'
@@ -34,7 +35,7 @@ function CopyButton({ text, label = 'Copy' }: { text: string; label?: string }) 
     } catch { /* clipboard unavailable in insecure contexts; the value is selectable */ }
   }
   return (
-    <button type="button" onClick={copy} title={label} aria-label={label} className="flex-none p-1 rounded text-fg-subtle hover:text-fg hover:bg-surface-raised">
+    <button type="button" onClick={copy} title={label} aria-label={label} className="flex-none p-1 rounded-sm text-fg-subtle hover:text-fg hover:bg-surface-raised">
       {copied ? <Check className="w-3.5 h-3.5 text-success" /> : <Copy className="w-3.5 h-3.5" />}
     </button>
   )
@@ -80,6 +81,7 @@ const plainSlug = (text: string) => text.trim().toLowerCase().replace(/[\s-]+/g,
  */
 export default function ConnectPage() {
   const { selectedProjectId, selectedProject } = useProject()
+  const toast = useToast()
   const navigate = useNavigate()
   const [country, setCountry] = useState('')
   const [state, setState] = useState('')
@@ -152,7 +154,7 @@ export default function ConnectPage() {
   }
   const shown: ProxyAccess = showPassword ? access : { ...access, password: MASK }
   const passwordToggle = (
-    <button type="button" onClick={() => setShowPassword((v) => !v)} title={showPassword ? 'Hide password' : 'Show password'} className="flex-none p-1 rounded text-fg-subtle hover:text-fg hover:bg-surface-raised">
+    <button type="button" onClick={() => setShowPassword((v) => !v)} title={showPassword ? 'Hide password' : 'Show password'} className="flex-none p-1 rounded-sm text-fg-subtle hover:text-fg hover:bg-surface-raised">
       {showPassword ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
     </button>
   )
@@ -257,7 +259,7 @@ export default function ConnectPage() {
               Proxy endpoint
               <InfoTip label="About the endpoint">{info?.endpoint.host
                 ? 'Set by the administrator (server.proxy_public_url). Edit it here to try another address, such as https://proxy.example.com:8443; nothing is saved.'
-                : 'The host you reached this page at, over plain HTTP on the proxy port. An administrator sets the address clients should use with server.proxy_public_url, for example https://proxy.example.com behind a load balancer that terminates TLS. Edits here are not saved.'}
+                : 'The host you reached this page at, over plain HTTP on the proxy port: right when one process serves both, wrong when the gateways have an address of their own. An administrator sets the address clients should use with server.proxy_public_url, for example https://proxy.example.com behind a load balancer that terminates TLS. Edits here are not saved.'}
               </InfoTip>
             </h2>
             <Input
@@ -358,7 +360,7 @@ export default function ConnectPage() {
               <div className="px-4 pt-3">
                 <Alert variant="info" className="text-xs flex items-center gap-2 flex-wrap">
                   <span className="flex-1 min-w-0">TLS interception is on for this project, so clients must trust the Octoprox CA. The examples expect it saved as octoprox-ca.crt.</span>
-                  <Button type="button" size="sm" variant="outline" onClick={() => downloadCaCertificate()}><Download className="w-3.5 h-3.5" /> CA certificate</Button>
+                  <Button type="button" size="sm" variant="outline" onClick={() => downloadCaCertificate().catch((e: Error) => toast.show(e.message || 'Failed to download the CA certificate', 'error'))}><Download className="w-3.5 h-3.5" /> CA certificate</Button>
                 </Alert>
               </div>
             )}

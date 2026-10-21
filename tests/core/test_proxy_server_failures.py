@@ -1,15 +1,10 @@
 # Copyright 2026 Octoprox Authors
 # SPDX-License-Identifier: Apache-2.0
 
-"""Tests for what the proxy server tells the failure log.
+"""Tests for what the proxy server tells the failure log: the kind of failure, and what the client asked and was answered.
 
-Each test drives a real listener with a real client, against an upstream
-that refuses, stays silent or answers with an error, and checks the
-``request_failed`` event that comes out: what kind of failure, what the
-client was answered, and what the client had asked for. The invariant
-across them is that a request counted as failed by the metrics
-(``request_completed`` with success False) is logged exactly once, and a
-request that went through is not logged at all.
+A request counted as failed is logged exactly once and one that went through not at all, and every transfer's meter is
+finished, so nothing stays counted in flight.
 """
 
 import asyncio
@@ -17,33 +12,54 @@ import base64
 import contextlib
 import errno
 import socket
-from collections.abc import AsyncIterator, Awaitable, Callable
+import struct
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
+from dataclasses import dataclass, field
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from api.core.failure_log import FailureKind, RequestFailure
+from api.core.failure_log import RequestFailure
 from api.core.mitm.base import UpstreamRefusedError
 from api.core.mitm.handler import MitmHandler
 from api.core.proxy_server import ProxyServer
 from api.core.signals import request_completed, request_failed
+from api.core.stats import FailureKind
 from api.core.traffic_limiter import TrafficMeter
+from api.gateway.metering import RequestMetering
 from api.models.project import MitmMode, Project
 from api.models.proxy import Proxy, ProxyProtocol
+from api.routing.inflight import InFlight
+from api.routing.router import Router
+from tests.gateway.doubles import QuietMetering
 
 PROJECT = Project(name="Scraping", username="proj", password="secret")
 
 
-class _NoLimit:
-    def is_interrupted(self, connector_id: str) -> bool:
-        return False
+@dataclass
+class _Published:
+    """What the listener published while a test ran: completions and failures, in order."""
 
-    def limit_status_for(self, connector_id: str) -> int:
-        return 509
+    completed: list[dict[str, Any]] = field(default_factory=list)
+    failures: list[RequestFailure] = field(default_factory=list)
 
-    def progress(self, *args: object) -> None:
-        pass
+    async def on_completed(self, _sender: object, **kwargs: Any) -> None:
+        self.completed.append(kwargs)
+
+    async def on_failed(self, _sender: object, failure: RequestFailure, **_: Any) -> None:
+        self.failures.append(failure)
+
+
+def _router(proxy: Proxy | None, *, quarantined: bool = False) -> MagicMock:
+    """The gateway router's surface, answering every request with ``proxy``."""
+    router = MagicMock(spec=Router)
+    router.get_project_by_username.side_effect = lambda u: PROJECT if u == PROJECT.username else None
+    router.get_project.return_value = PROJECT
+    router.select_proxy_for_project.return_value = proxy
+    router.are_all_proxies_quarantined.return_value = quarantined
+    router.traffic_limit_status.return_value = None
+    return router
 
 
 def _auth(username: str = "proj-sessid-s1-cc-us") -> str:
@@ -59,38 +75,37 @@ def _upstream(port: int) -> Proxy:
 
 
 @pytest.fixture
-def publish(monkeypatch: pytest.MonkeyPatch) -> AsyncMock:
-    mock = AsyncMock()
-    monkeypatch.setattr("api.core.proxy_server.event_bus.publish", mock)
-    return mock
+def publish() -> Iterator[_Published]:
+    """The listener's request signals, received for the test's duration."""
+    published = _Published()
+    request_completed.connect(published.on_completed)
+    request_failed.connect(published.on_failed)
+    yield published
+    request_completed.disconnect(published.on_completed)
+    request_failed.disconnect(published.on_failed)
 
 
-def _failures(publish: AsyncMock) -> list[RequestFailure]:
-    return [c.kwargs["failure"] for c in publish.await_args_list if c.args[0] is request_failed]
+def _failures(publish: _Published) -> list[RequestFailure]:
+    return publish.failures
 
 
-def _completions(publish: AsyncMock) -> list[dict[str, Any]]:
-    return [c.kwargs for c in publish.await_args_list if c.args[0] is request_completed]
+def _completions(publish: _Published) -> list[dict[str, Any]]:
+    return publish.completed
 
 
 @pytest.fixture
-async def listen() -> AsyncIterator[Callable[..., Awaitable[ProxyServer]]]:
+def inflight() -> InFlight:
+    return InFlight()
+
+
+@pytest.fixture
+async def listen(inflight: InFlight) -> AsyncIterator[Callable[..., Awaitable[ProxyServer]]]:
     servers: list[ProxyServer] = []
 
-    async def start(proxy: Proxy | None, *, quarantined: bool = False, timeout: float | None = None) -> ProxyServer:
-        manager = MagicMock()
-        manager.get_project_by_username.side_effect = lambda u: PROJECT if u == PROJECT.username else None
-        manager.get_project.return_value = PROJECT
-        manager.select_proxy_for_project = AsyncMock(return_value=proxy)
-        manager.are_all_proxies_quarantined = AsyncMock(return_value=quarantined)
-        manager.traffic_limit_status.return_value = None
-        manager.traffic_meter = lambda p, project_id, **kwargs: TrafficMeter(  # type: ignore[arg-type]
-            _NoLimit(), p.id, project_id, p.connector_id, target_host=kwargs.get("target_host")
+    async def start(proxy: Proxy | None, *, quarantined: bool = False, timeout: float = 30.0) -> ProxyServer:
+        server = ProxyServer(
+            _router(proxy, quarantined=quarantined), QuietMetering(inflight), host="127.0.0.1", port=0, timeout=timeout
         )
-        server = ProxyServer(manager)
-        server._host, server._port = "127.0.0.1", 0
-        if timeout is not None:
-            server._timeout = timeout
         await server.start()
         servers.append(server)
         return server
@@ -98,6 +113,8 @@ async def listen() -> AsyncIterator[Callable[..., Awaitable[ProxyServer]]]:
     yield start
     for server in servers:
         await server.stop()
+    # Whatever happened to the request, its meter was finished.
+    assert inflight.total == 0
 
 
 async def _exchange(server: ProxyServer, request: str, *, then: bytes = b"") -> bytes:
@@ -122,8 +139,12 @@ def _head(response: bytes) -> tuple[str, dict[str, str]]:
 
 
 @contextlib.asynccontextmanager
-async def _vendor(answer: bytes | None) -> AsyncIterator[int]:
-    """An upstream HTTP proxy that answers each CONNECT with ``answer``, or never answers when None."""
+async def _vendor(answer: bytes | None, *, reset_after: int = 0) -> AsyncIterator[int]:
+    """An upstream HTTP proxy that answers each CONNECT with ``answer``, or never answers when None.
+
+    With ``reset_after`` it then takes that many tunnel bytes and resets the
+    connection, as a vendor dropping a session does.
+    """
     held: list[asyncio.StreamWriter] = []
 
     async def serve(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
@@ -134,6 +155,11 @@ async def _vendor(answer: bytes | None) -> AsyncIterator[int]:
             return
         writer.write(answer)
         await writer.drain()
+        if reset_after:
+            await reader.readexactly(reset_after)
+            writer.get_extra_info("socket").setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+            writer.transport.abort()
+            return
         writer.close()
 
     server = await asyncio.start_server(serve, "127.0.0.1", 0)
@@ -154,7 +180,7 @@ def _closed_port() -> int:
 
 
 class TestRefused:
-    async def test_no_proxy_is_logged_with_what_was_asked(self, listen: Any, publish: AsyncMock) -> None:
+    async def test_no_proxy_is_logged_with_what_was_asked(self, listen: Any, publish: _Published) -> None:
         server = await listen(None)
         response = await _exchange(server, f"CONNECT example.com:443 HTTP/1.1\r\n{_auth()}\r\n")
 
@@ -171,7 +197,7 @@ class TestRefused:
         assert "US" in failure.message
         assert failure.proxy is None
 
-    async def test_quarantine(self, listen: Any, publish: AsyncMock) -> None:
+    async def test_quarantine(self, listen: Any, publish: _Published) -> None:
         server = await listen(None, quarantined=True)
         response = await _exchange(server, f"CONNECT example.com:443 HTTP/1.1\r\n{_auth()}\r\n")
 
@@ -179,7 +205,7 @@ class TestRefused:
         (failure,) = _failures(publish)
         assert (failure.kind, failure.status) == (FailureKind.ALL_PROXIES_QUARANTINED, 429)
 
-    async def test_a_state_without_a_country(self, listen: Any, publish: AsyncMock) -> None:
+    async def test_a_state_without_a_country(self, listen: Any, publish: _Published) -> None:
         server = await listen(None)
         response = await _exchange(server, f"GET http://example.com/a?b=c HTTP/1.1\r\n{_auth('proj-st-ny')}\r\n")
 
@@ -188,7 +214,7 @@ class TestRefused:
         assert (failure.kind, failure.status) == (FailureKind.INVALID_LOCATION, 400)
         assert (failure.method, failure.target) == ("GET", "example.com:80")
 
-    async def test_wrong_credentials_are_not_a_project_failure(self, listen: Any, publish: AsyncMock) -> None:
+    async def test_wrong_credentials_are_not_a_project_failure(self, listen: Any, publish: _Published) -> None:
         server = await listen(None)
         token = base64.b64encode(b"proj:wrong").decode()
         response = await _exchange(server, f"CONNECT example.com:443 HTTP/1.1\r\nProxy-Authorization: Basic {token}\r\n\r\n")
@@ -198,7 +224,7 @@ class TestRefused:
 
 
 class TestUpstreamFailures:
-    async def test_vendor_refusal_carries_the_vendors_status(self, listen: Any, publish: AsyncMock) -> None:
+    async def test_vendor_refusal_carries_the_vendors_status(self, listen: Any, publish: _Published) -> None:
         async with _vendor(b"HTTP/1.1 407 Proxy Authentication Required\r\n\r\n") as port:
             server = await listen(_upstream(port))
             response = await _exchange(server, f"CONNECT example.com:443 HTTP/1.1\r\n{_auth()}\r\n")
@@ -221,7 +247,7 @@ class TestUpstreamFailures:
         assert failure.latency_ms is not None
         assert [c["success"] for c in _completions(publish)] == [False]
 
-    async def test_a_vendor_rate_limit_stays_a_502(self, listen: Any, publish: AsyncMock) -> None:
+    async def test_a_vendor_rate_limit_stays_a_502(self, listen: Any, publish: _Published) -> None:
         """One connector throttled is not Octoprox asking the client to slow down: another may serve it."""
         async with _vendor(b"HTTP/1.1 429 Too Many Requests\r\nRetry-After: 7\r\n\r\n") as port:
             server = await listen(_upstream(port))
@@ -233,7 +259,7 @@ class TestUpstreamFailures:
         (failure,) = _failures(publish)
         assert (failure.kind, failure.status, failure.upstream_status) == (FailureKind.UPSTREAM_REJECTED, 502, 429)
 
-    async def test_unreachable_upstream(self, listen: Any, publish: AsyncMock) -> None:
+    async def test_unreachable_upstream(self, listen: Any, publish: _Published) -> None:
         server = await listen(_upstream(_closed_port()))
         response = await _exchange(server, f"CONNECT example.com:443 HTTP/1.1\r\n{_auth()}\r\n")
 
@@ -243,7 +269,7 @@ class TestUpstreamFailures:
         (failure,) = _failures(publish)
         assert (failure.kind, failure.status) == (FailureKind.UPSTREAM_UNREACHABLE, 502)
 
-    async def test_silent_upstream_times_out(self, listen: Any, publish: AsyncMock) -> None:
+    async def test_silent_upstream_times_out(self, listen: Any, publish: _Published) -> None:
         async with _vendor(None) as port:
             server = await listen(_upstream(port), timeout=0.3)
             response = await _exchange(server, f"CONNECT example.com:443 HTTP/1.1\r\n{_auth()}\r\n")
@@ -255,7 +281,7 @@ class TestUpstreamFailures:
         assert (failure.kind, failure.status) == (FailureKind.UPSTREAM_TIMEOUT, 504)
         assert "0.3 seconds" in failure.message
 
-    async def test_a_tunnel_that_went_through_is_not_logged(self, listen: Any, publish: AsyncMock) -> None:
+    async def test_a_tunnel_that_went_through_is_not_logged(self, listen: Any, publish: _Published) -> None:
         async with _vendor(b"HTTP/1.1 200 Connection established\r\n\r\n") as port:
             server = await listen(_upstream(port))
             response = await _exchange(server, f"CONNECT example.com:443 HTTP/1.1\r\n{_auth()}\r\n", then=b"hello")
@@ -264,7 +290,7 @@ class TestUpstreamFailures:
         assert _failures(publish) == []
         assert [c["success"] for c in _completions(publish)] == [True]
 
-    async def test_a_client_that_leaves_mid_body_is_its_own_kind(self, listen: Any, publish: AsyncMock) -> None:
+    async def test_a_client_that_leaves_mid_body_is_its_own_kind(self, listen: Any, publish: _Published) -> None:
         async with _vendor(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n") as port:
             server = await listen(_upstream(port))
             response = await _exchange(
@@ -277,7 +303,7 @@ class TestUpstreamFailures:
         assert (failure.method, failure.target) == ("POST", "example.com:80")
         assert [c["success"] for c in _completions(publish)] == [False]
 
-    async def test_a_client_that_stalls_mid_body_is_its_own_kind(self, listen: Any, publish: AsyncMock) -> None:
+    async def test_a_client_that_stalls_mid_body_is_its_own_kind(self, listen: Any, publish: _Published) -> None:
         async with _vendor(None) as port:
             server = await listen(_upstream(port), timeout=0.3)
             reader, writer = await asyncio.open_connection("127.0.0.1", server.port)
@@ -295,7 +321,7 @@ class TestUpstreamFailures:
         assert "request body" in failure.message
 
     async def test_a_response_cut_short_is_not_followed_by_an_error_answer(
-        self, listen: Any, publish: AsyncMock
+        self, listen: Any, publish: _Published
     ) -> None:
         """Once the vendor's status line is relayed, a second status line would land inside its body."""
         async with _vendor(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nab") as port:
@@ -308,7 +334,7 @@ class TestUpstreamFailures:
         assert _failures(publish) == []
         assert [c["success"] for c in _completions(publish)] == [True]
 
-    async def test_a_vendor_refusal_is_not_logged_as_an_error(self, listen: Any, publish: AsyncMock) -> None:
+    async def test_a_vendor_refusal_is_not_logged_as_an_error(self, listen: Any, publish: _Published) -> None:
         """At one per failed request it flooded the log; the Failures page already counts it."""
         async with _vendor(b"HTTP/1.1 400 Bad Request\r\n\r\n") as port:
             server = await listen(_upstream(port))
@@ -320,7 +346,7 @@ class TestUpstreamFailures:
         (failure,) = _failures(publish)
         assert failure.kind is FailureKind.UPSTREAM_REJECTED
 
-    async def test_a_fault_of_ours_is_still_an_error_with_its_traceback(self, listen: Any, publish: AsyncMock) -> None:
+    async def test_a_fault_of_ours_is_still_an_error_with_its_traceback(self, listen: Any, publish: _Published) -> None:
         server = await listen(_upstream(_closed_port()))
         with (
             patch.object(server, "_connect_via_proxy", AsyncMock(side_effect=RuntimeError("a bug"))),
@@ -344,7 +370,7 @@ class TestUpstreamFailures:
         ],
     )
     async def test_a_client_that_is_gone_is_not_an_error(
-        self, listen: Any, publish: AsyncMock, error: OSError, level: str
+        self, listen: Any, publish: _Published, error: OSError, level: str
     ) -> None:
         server = await listen(_upstream(_closed_port()))
         with (
@@ -361,8 +387,50 @@ class TestUpstreamFailures:
             assert logger.error.call_args.args == ("Error handling client",)
             assert logger.error.call_args.kwargs["exc_info"] is True
 
+    async def test_a_tunnel_the_upstream_reset_is_still_counted(self, listen: Any, publish: _Published) -> None:
+        """Closing a reset upstream leg raises what reset it; the request is counted all the same."""
+        async with _vendor(b"HTTP/1.1 200 Connection established\r\n\r\n", reset_after=5) as port:
+            server = await listen(_upstream(port))
+            response = await _exchange(server, f"CONNECT example.com:443 HTTP/1.1\r\n{_auth()}\r\n", then=b"hello")
+
+        assert response.startswith(b"HTTP/1.1 200")
+        assert [c["success"] for c in _completions(publish)] == [True]
+        assert _failures(publish) == []
+
+    async def test_a_client_gone_mid_error_has_its_bytes_kept_and_its_meter_finished(
+        self, publish: _Published, inflight: InFlight
+    ) -> None:
+        """No completion is published for it, but nothing it carried is lost and it is not left in flight."""
+        metering = QuietMetering(inflight)
+        server = ProxyServer(_router(None), metering, host="127.0.0.1", port=0, timeout=30.0)
+        upstream_writer = MagicMock(spec=asyncio.StreamWriter)
+        upstream_writer.wait_closed = AsyncMock()
+        client_writer = MagicMock(spec=asyncio.StreamWriter)
+        client_writer.transport.is_closing.return_value = True
+
+        async def tunnel(*_streams: object, meter: TrafficMeter) -> tuple[int, int]:
+            meter.add_received(5)
+            raise ConnectionResetError("the client hung up")
+
+        with (
+            patch.object(
+                server,
+                "_connect_via_proxy",
+                AsyncMock(return_value=(MagicMock(spec=asyncio.StreamReader), upstream_writer)),
+            ),
+            patch.object(server, "_tunnel", tunnel),
+        ):
+            await server._relay(
+                MagicMock(spec=asyncio.StreamReader), client_writer, _upstream(8080), PROJECT, "example.com", 443,
+                established=None, use_mitm=False,
+            )
+
+        assert _completions(publish) == [] and _failures(publish) == []
+        assert (metering.totals.bytes_received, metering.totals.request_count) == (5, 0)
+        assert inflight.total == 0
+
     def test_an_unparseable_target_keeps_neither_query_nor_userinfo(self) -> None:
-        server = ProxyServer(MagicMock())
+        server = ProxyServer(_router(None), MagicMock(spec=RequestMetering), host="127.0.0.1", port=0, timeout=30.0)
         assert server._target_of("GET", "http://[2001:db8::1]/a?token=x") == "[2001:db8::1]"
         assert server._target_of("GET", "http://user:pw@example.com/a?token=x") == "example.com"
         assert server._target_of("GET", "http://user:pw@example.com:8080/a") == "example.com:8080"
@@ -390,7 +458,7 @@ async def _intercept(request: bytes, error: Exception) -> bytes:
 
 
 class TestInterceptedRequests:
-    async def test_a_failed_intercepted_request_is_logged_without_its_query(self, publish: AsyncMock) -> None:
+    async def test_a_failed_intercepted_request_is_logged_without_its_query(self, publish: _Published) -> None:
         await _intercept(
             b"GET /search?token=abc HTTP/1.1\r\nHost: example.com\r\n\r\n", ConnectionError("upstream failed")
         )
@@ -401,7 +469,7 @@ class TestInterceptedRequests:
         assert failure.message == "upstream failed"
         assert failure.proxy == "127.0.0.1:8080"
 
-    async def test_an_error_text_quoting_the_url_loses_its_query(self, publish: AsyncMock) -> None:
+    async def test_an_error_text_quoting_the_url_loses_its_query(self, publish: _Published) -> None:
         await _intercept(
             b"GET /search?token=abc HTTP/1.1\r\nHost: example.com\r\n\r\n",
             ConnectionError('error sending request for url (https://example.com/search?token=abc)'),
@@ -412,7 +480,7 @@ class TestInterceptedRequests:
         assert "https://example.com/search" in failure.message
 
     async def test_a_vendor_refusal_inside_the_connection_is_answered_with_the_vendors_status(
-        self, publish: AsyncMock
+        self, publish: _Published
     ) -> None:
         response = await _intercept(
             b"GET /search?token=abc HTTP/1.1\r\nHost: example.com\r\n\r\n", UpstreamRefusedError(429)
@@ -427,7 +495,7 @@ class TestInterceptedRequests:
         assert headers["proxy-status"] == "octoprox; error=connection_refused; received-status=429"
         assert response.endswith(b"\r\n\r\nUpstream proxy refused the tunnel: 429 Too Many Requests")
 
-    async def test_any_failure_inside_the_connection_says_what_went_wrong(self, publish: AsyncMock) -> None:
+    async def test_any_failure_inside_the_connection_says_what_went_wrong(self, publish: _Published) -> None:
         response = await _intercept(
             b"GET / HTTP/1.1\r\nHost: example.com\r\n\r\n",
             ConnectionError("reset by http://vendor-user:vendor-secret@127.0.0.1:8080"),
@@ -441,7 +509,7 @@ class TestInterceptedRequests:
         assert "proxy-status" not in headers
         assert b"vendor-secret" not in response
 
-    async def test_a_failed_head_request_is_answered_without_a_body(self, publish: AsyncMock) -> None:
+    async def test_a_failed_head_request_is_answered_without_a_body(self, publish: _Published) -> None:
         response = await _intercept(b"HEAD / HTTP/1.1\r\nHost: example.com\r\n\r\n", UpstreamRefusedError(429))
 
         status_line, headers = _head(response)

@@ -1,323 +1,213 @@
 # Copyright 2026 Octoprox Authors
 # SPDX-License-Identifier: Apache-2.0
 
-"""Tests for the TrafficLimiter and the TrafficMeter.
+"""Tests for the traffic helpers every role shares, and for the per-transfer meter.
 
-The limiter is driven directly, with a dict standing in for the manager's
-connector cache, a recording sink for the metric deltas, and a loader whose
-totals the test controls. Redis is the real test container so the block
-key and its expiry are exercised.
+The usage report and the block rule are pure, given a connector's window and the bytes counted in it; the meter reports
+to a recording request metering whose interrupt answer the test sets.
 """
 
-import asyncio
-import time
-from collections.abc import AsyncIterator
+from dataclasses import replace
 from datetime import datetime, timedelta
 from typing import Any
 
 import pytest
 
 from api.core import traffic_limiter as tl
-from api.core.signals import connector_traffic_changed
-from api.core.stats import MetricDelta
-from api.core.traffic_limiter import PROGRESS_REPORT_BYTES, TrafficLimiter
-from api.db.redis import CONNECTOR_TRAFFIC_BLOCKED_KEY, RedisClient
-from api.models.connector import Connector, CredentialType
+from api.core.traffic_limiter import (
+    PROGRESS_REPORT_BYTES,
+    ConnectorTraffic,
+    TrafficMeter,
+)
+from api.models.connector import Connector
+from api.models.credential import CredentialType
+from tests.gateway.doubles import RecordingMetering
 
 MB = 1_000_000
+# A Wednesday afternoon, well inside its day, week and month.
+NOW = datetime(2026, 10, 14, 15, 30, 0)
 
 
-def make_connector(traffic_config: dict[str, Any] | None = None, name: str = "vendor") -> Connector:
+def make_connector(traffic_config: dict[str, Any] | None = None, **overrides: Any) -> Connector:
     return Connector(
-        name=name,
+        name="vendor",
         credential_id="cred",
         credential_type=CredentialType.STATIC_PROXY_PROVIDER,
         project_id="project",
         traffic_config=traffic_config or {},
+        **overrides,
     )
 
 
-class Harness:
-    """A limiter with its collaborators under test control."""
-
-    def __init__(self, redis_client: RedisClient) -> None:
-        self.connectors: dict[str, Connector] = {}
-        self.progress: list[tuple[str, str, str, str | None, int, int, str | None]] = []
-        self.totals: dict[str, tuple[int, int]] = {}
-        self.loads: list[dict[str, datetime]] = []
-        self.events: list[tuple[str, str]] = []
-        self.limiter = TrafficLimiter(
-            redis_client,
-            get_connector=self.connectors.get,
-            sink=lambda *args: self.progress.append(args),
-            loader=self._load,
-        )
-        connector_traffic_changed.connect(self._on_event)
-
-    async def _load(self, windows: dict[str, datetime]) -> dict[str, tuple[int, int]]:
-        self.loads.append(dict(windows))
-        return {cid: self.totals[cid] for cid in windows if cid in self.totals}
-
-    async def _on_event(self, sender: Any, **kwargs: Any) -> None:
-        self.events.append((kwargs["entity_id"], kwargs["op"]))
-
-    def add(self, connector: Connector) -> Connector:
-        self.connectors[connector.id] = connector
-        return connector
-
-    def close(self) -> None:
-        connector_traffic_changed.disconnect(self._on_event)
+def traffic(connector: Connector, sent: int = 0, received: int = 0) -> ConnectorTraffic:
+    """The connector's usage window at ``NOW`` with ``sent`` and ``received`` counted in it."""
+    return replace(ConnectorTraffic.of(connector, NOW), sent=sent, received=received)
 
 
-@pytest.fixture
-async def harness(redis_client: RedisClient) -> AsyncIterator[Harness]:
-    h = Harness(redis_client)
-    yield h
-    h.close()
+class TestConnectorTraffic:
+    def test_both_directions_count_against_the_limit(self) -> None:
+        usage = traffic(make_connector({"limit_bytes": 100}), 60, 50).usage(blocked=False, pending=False)
+        assert (usage.bytes_sent, usage.bytes_received, usage.total_bytes) == (60, 50, 110)
+        assert (usage.status, usage.percent, usage.action.value) == ("exceeded", 110.0, "alert")
+
+    def test_the_warning_line(self) -> None:
+        connector = make_connector({"limit_bytes": 100, "warn_percent": 50})
+        assert traffic(connector, 49).usage(blocked=False, pending=False).status == "ok"
+        assert traffic(connector, 50).usage(blocked=False, pending=False).status == "warning"
+        assert traffic(connector, 99, 1).usage(blocked=False, pending=False).status == "exceeded"
+
+    def test_without_a_limit_a_connector_is_only_metered_and_priced(self) -> None:
+        usage = traffic(make_connector({"price_per_gb": 3}), 10**12, 20).usage(blocked=False, pending=False)
+        assert (usage.limit_bytes, usage.percent, usage.status) == (None, None, "ok")
+        assert usage.cost == pytest.approx((10**12 + 20) / 1e9 * 3, rel=1e-6)
+        assert usage.currency == "USD"
+
+    def test_period_and_price(self) -> None:
+        connector = make_connector({
+            "limit_bytes": 10 * MB, "period": "week", "reset_day": 1, "price_per_gb": 2.5, "currency": "EUR",
+        })
+        usage = traffic(connector, MB, MB).usage(blocked=False, pending=False)
+        assert usage.period.value == "week"
+        # The week starts on its reset day, a Monday.
+        assert (usage.period_start, usage.period_end) == (datetime(2026, 10, 12), datetime(2026, 10, 19))
+        assert usage.percent == 20.0
+        assert usage.cost == pytest.approx(0.005)
+        assert usage.currency == "EUR"
+
+    def test_a_manual_reset_inside_the_period_starts_the_window_there(self) -> None:
+        reset_at = NOW - timedelta(hours=1)
+        connector = make_connector({"limit_bytes": 100, "action": "block"}, traffic_reset_at=reset_at)
+        window = ConnectorTraffic.of(connector, NOW)
+        usage = window.usage(blocked=False, pending=False)
+        assert window.start == usage.period_start == usage.reset_at == reset_at
+        assert usage.total_bytes == 0
+
+    def test_a_reset_from_an_earlier_period_is_not_reported(self) -> None:
+        connector = make_connector({"limit_bytes": 100, "period": "day"}, traffic_reset_at=NOW - timedelta(days=2))
+        usage = traffic(connector, 10).usage(blocked=False, pending=False)
+        assert usage.period_start == datetime(2026, 10, 14)
+        assert usage.reset_at is None
+
+    def test_blocked_is_the_callers_word_never_the_totals(self) -> None:
+        """The api reports the block the traffic job stored, which a reset or a raised limit leaves until it decides."""
+        connector = make_connector({"limit_bytes": 100, "action": "block"})
+        over, under = traffic(connector, 100, 100), traffic(connector, 10)
+        assert over.block_until() is not None and under.block_until() is None
+        assert (over.usage(blocked=False, pending=False).blocked, under.usage(blocked=True, pending=False).blocked) == (False, True)
+
+    def test_pending_is_the_callers_word_beside_the_stored_block(self) -> None:
+        """A reset's answer: usage counts from the reset, the stored block stands, and the decision is pending."""
+        connector = make_connector({"limit_bytes": 100, "action": "block"}, traffic_reset_at=NOW - timedelta(minutes=1))
+        usage = ConnectorTraffic.of(connector, NOW).usage(blocked=True, pending=True)
+        assert (usage.total_bytes, usage.status, usage.blocked, usage.pending) == (0, "ok", True, True)
+        assert traffic(connector, 10).usage(blocked=True, pending=False).pending is False
+
+    def test_the_traffic_jobs_rule_blocks_to_the_windows_end(self) -> None:
+        window = traffic(make_connector({"limit_bytes": 100, "action": "block", "period": "day"}), 100)
+        assert window.block_until() == window.end == datetime(2026, 10, 15)
+        assert traffic(make_connector({"limit_bytes": 100}), 100).block_until() is None
+
+
+class TestStatus:
+    def test_a_total_against_the_warning_line_and_the_limit(self) -> None:
+        connector = make_connector({"limit_bytes": 100, "warn_percent": 50})
+        assert [traffic(connector, total).status for total in (49, 50, 99, 100, 101)] == [
+            "ok", "warning", "warning", "exceeded", "exceeded",
+        ]
+
+    def test_without_a_limit_every_total_is_ok(self) -> None:
+        assert traffic(make_connector(), 10**15).status == "ok"
+
+
+class TestBlockUntil:
+    # The end of the monthly window ``NOW`` is in.
+    END = datetime(2026, 11, 1)
+
+    def test_no_limit_never_blocks(self) -> None:
+        assert traffic(make_connector(), 10**15).block_until() is None
+
+    def test_under_the_limit_nothing_is_blocked(self) -> None:
+        assert traffic(make_connector({"limit_bytes": 100, "action": "block"}), 99).block_until() is None
+
+    def test_reaching_the_limit_blocks_to_the_end_of_the_period(self) -> None:
+        assert traffic(make_connector({"limit_bytes": 100, "action": "block"}), 100).block_until() == self.END
+        assert traffic(make_connector({"limit_bytes": 100, "action": "interrupt"}), 250).block_until() == self.END
+
+    def test_the_alert_action_only_flags(self) -> None:
+        assert traffic(make_connector({"limit_bytes": 100}), 250).block_until() is None
+
+    def test_raising_the_limit_releases(self) -> None:
+        assert traffic(make_connector({"limit_bytes": 100, "action": "block"}), 200).block_until() == self.END
+        assert traffic(make_connector({"limit_bytes": 1000, "action": "block"}), 200).block_until() is None
+
+    def test_switching_to_alert_releases(self) -> None:
+        assert traffic(make_connector({"limit_bytes": 100, "action": "alert"}), 200).block_until() is None
 
 
 class TestTrafficMeter:
-    async def test_reports_after_a_megabyte(self, harness: Harness) -> None:
-        connector = harness.add(make_connector())
-        meter = harness.limiter.meter("proxy", "project", connector.id)
+    def test_reports_after_a_megabyte(self) -> None:
+        owner = RecordingMetering()
+        meter = TrafficMeter(owner, "proxy", "project", "connector")
         assert meter.add_sent(PROGRESS_REPORT_BYTES - 1) is True
-        assert harness.progress == []
+        assert owner.reports == []
         meter.add_received(1)
-        assert harness.progress == [("proxy", "project", connector.id, None, PROGRESS_REPORT_BYTES - 1, 1, None)]
+        assert owner.reports == [("proxy", "project", "connector", None, PROGRESS_REPORT_BYTES - 1, 1, None)]
         # The reported bytes are counted once: finish returns only what came after.
         meter.add_received(10)
         assert meter.finish() == (0, 10)
         assert meter.finish() == (0, 0)
 
-    async def test_reports_after_the_time_bound(self, harness: Harness, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_reports_after_the_time_bound(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(tl, "PROGRESS_REPORT_SECONDS", 0.0)
-        connector = harness.add(make_connector())
-        # On behalf of a tunnel device: the sink learns which, so the device is metered too.
-        meter = harness.limiter.meter("proxy", "project", connector.id, "device-1")
+        owner = RecordingMetering()
+        # On behalf of a tunnel device, for a known destination: the owner learns both.
+        meter = TrafficMeter(owner, "proxy", "project", "connector", "device-1", "shop.example.com")
         meter.add_sent(5)
-        assert harness.progress == [("proxy", "project", connector.id, "device-1", 5, 0, None)]
+        assert owner.reports == [("proxy", "project", "connector", "device-1", 5, 0, "shop.example.com")]
 
-    async def test_progress_counts_against_the_limit(self, harness: Harness) -> None:
-        connector = harness.add(make_connector({"limit_bytes": 10 * MB, "action": "block"}))
-        meter = harness.limiter.meter("proxy", "project", connector.id)
-        assert meter.add_received(PROGRESS_REPORT_BYTES) is True
-        usage = harness.limiter.usage(connector)
-        assert usage.total_bytes == PROGRESS_REPORT_BYTES
-        assert usage.bytes_received == PROGRESS_REPORT_BYTES
+    def test_a_long_transfer_is_reported_while_it_runs(self) -> None:
+        owner = RecordingMetering()
+        meter = TrafficMeter(owner, "proxy", "project", "connector")
+        # Two megabytes down in 64 KiB chunks and a little up: a keep-alive tunnel still open.
+        for _ in range(2 * PROGRESS_REPORT_BYTES // 65536):
+            assert meter.add_received(65536) is True
+        meter.add_sent(5)
+        assert owner.reported()[1] >= PROGRESS_REPORT_BYTES
+        # Whatever was not reported while it ran comes out of finish, no more.
+        rest_sent, rest_received = meter.finish()
+        assert owner.reported()[0] + rest_sent == 5
+        assert owner.reported()[1] + rest_received == 2 * PROGRESS_REPORT_BYTES
+        assert (meter.sent, meter.received) == (5, 2 * PROGRESS_REPORT_BYTES)
 
-    async def test_interrupt_stops_the_transfer(self, harness: Harness) -> None:
-        connector = harness.add(make_connector({"limit_bytes": 2 * PROGRESS_REPORT_BYTES, "action": "interrupt"}))
-        meter = harness.limiter.meter("proxy", "project", connector.id)
+    def test_stops_once_its_connector_is_interrupted(self) -> None:
+        owner = RecordingMetering()
+        owner.status = 429
+        meter = TrafficMeter(owner, "proxy", "project", "connector")
         assert meter.add_received(PROGRESS_REPORT_BYTES) is True
-        meter.add_received(PROGRESS_REPORT_BYTES)
-        # The block is applied off the transfer loop; give the task a tick.
-        await asyncio.sleep(0.05)
-        assert harness.limiter.is_interrupted(connector.id) is True
+        owner.interrupted = True
         assert meter.allowed is False
+        # The chunk in hand is still counted; the transfer stops after it.
         assert meter.add_received(1) is False
-        assert meter.limit_status == 509
+        assert meter.add_sent(1) is False
+        assert meter.limit_status == 429
+        assert meter.finish() == (1, 1)
 
-    async def test_block_action_does_not_interrupt(self, harness: Harness) -> None:
-        connector = harness.add(make_connector({"limit_bytes": 1, "action": "block"}))
-        meter = harness.limiter.meter("proxy", "project", connector.id)
-        meter.add_received(PROGRESS_REPORT_BYTES)
-        await asyncio.sleep(0.05)
-        assert harness.limiter.is_blocked(connector.id) is True
-        assert meter.allowed is True
+    def test_finishing_ends_the_meter_once(self) -> None:
+        ended: list[str] = []
+        meter = TrafficMeter(RecordingMetering(), "proxy", "project", "connector", on_finish=lambda: ended.append("x"))
+        meter.add_sent(3)
+        assert ended == []
+        assert meter.finish() == (3, 0)
+        assert meter.finish() == (0, 0)
+        assert ended == ["x"]
 
-
-class TestRecordAndEvaluate:
-    async def test_alert_flags_without_blocking(self, harness: Harness) -> None:
-        connector = harness.add(make_connector({"limit_bytes": 100}))
-        assert harness.limiter.record(connector.id, 60, 50) is True
-        await harness.limiter.evaluate(connector.id)
-        usage = harness.limiter.usage(connector)
-        assert usage.status == "exceeded"
-        assert usage.blocked is False
-        assert usage.percent == 110.0
-        assert harness.limiter.is_blocked(connector.id) is False
-        assert harness.events == []
-
-    async def test_block_sets_redis_key_and_signal(self, harness: Harness, redis_client: RedisClient) -> None:
-        connector = harness.add(make_connector({"limit_bytes": 100, "action": "block"}))
-        assert harness.limiter.record(connector.id, 30, 30) is True  # first sight of the window
-        await harness.limiter.evaluate(connector.id)
-        assert harness.limiter.is_blocked(connector.id) is False
-        assert harness.limiter.record(connector.id, 10, 5) is False  # 75: under the warning line
-        assert harness.limiter.record(connector.id, 30, 0) is True  # 105: over the limit
-        await harness.limiter.evaluate(connector.id)
-        assert harness.limiter.is_blocked(connector.id) is True
-        assert harness.limiter.blocked_count == 1
-        key = CONNECTOR_TRAFFIC_BLOCKED_KEY.format(connector_id=connector.id)
-        ttl = await redis_client.client.ttl(key)
-        assert ttl > 0
-        until = float(await redis_client.client.get(key))
-        period_end = harness.limiter.usage(connector).period_end
-        assert until == pytest.approx(tl._epoch(period_end))
-        assert harness.events == [(connector.id, "blocked")]
-        # Evaluating again changes nothing.
-        await harness.limiter.evaluate(connector.id)
-        assert harness.events == [(connector.id, "blocked")]
-
-    async def test_warning_threshold(self, harness: Harness) -> None:
-        connector = harness.add(make_connector({"limit_bytes": 100, "warn_percent": 50}))
-        harness.limiter.record(connector.id, 0, 0)  # first sight
-        assert harness.limiter.record(connector.id, 49, 0) is False
-        assert harness.limiter.usage(connector).status == "ok"
-        assert harness.limiter.record(connector.id, 1, 0) is True
-        await harness.limiter.evaluate(connector.id)
-        assert harness.limiter.usage(connector).status == "warning"
-        assert harness.limiter.is_blocked(connector.id) is False
-
-    async def test_no_limit_never_needs_evaluation(self, harness: Harness) -> None:
-        connector = harness.add(make_connector({"price_per_gb": 3}))
-        assert harness.limiter.record(connector.id, 10, 10) is True  # first sight of the window
-        assert harness.limiter.record(connector.id, 10 ** 12, 0) is False
-        usage = harness.limiter.usage(connector)
-        assert usage.limit_bytes is None
-        assert usage.percent is None
-        assert usage.status == "ok"
-        assert usage.cost == pytest.approx((10 ** 12 + 20) / 1e9 * 3, rel=1e-6)
-        assert usage.currency == "USD"
-
-    async def test_mark_flushed_moves_bytes_without_changing_the_total(self, harness: Harness) -> None:
-        connector = harness.add(make_connector({"limit_bytes": 1000}))
-        harness.limiter.record(connector.id, 100, 200)
-        harness.limiter.mark_flushed({connector.id: MetricDelta(bytes_sent=100, bytes_received=200)})
-        state = harness.limiter._states[connector.id]
-        assert (state.known_sent, state.known_received) == (100, 200)
-        assert (state.unflushed_sent, state.unflushed_received) == (0, 0)
-        assert harness.limiter.usage(connector).total_bytes == 300
-
-    async def test_peer_deltas_can_trigger_the_block(self, harness: Harness) -> None:
-        connector = harness.add(make_connector({"limit_bytes": 100, "action": "block"}))
-        harness.limiter.record(connector.id, 50, 0)
-        await harness.limiter.evaluate(connector.id)
-        await harness.limiter.apply_peer({connector.id: MetricDelta(bytes_sent=30, bytes_received=30)})
-        assert harness.limiter.usage(connector).total_bytes == 110
-        assert harness.limiter.is_blocked(connector.id) is True
-
-    async def test_refresh_reads_history_and_keeps_unflushed(self, harness: Harness) -> None:
-        connector = harness.add(make_connector({"limit_bytes": 1000}))
-        harness.totals[connector.id] = (400, 500)
-        harness.limiter.record(connector.id, 7, 0)
-        await harness.limiter.refresh([connector.id])
-        assert harness.loads[-1] == {connector.id: harness.limiter.usage(connector).period_start}
-        assert harness.limiter.usage(connector).total_bytes == 907
-
-    async def test_refresh_blocks_when_history_is_over_the_limit(self, harness: Harness) -> None:
-        connector = harness.add(make_connector({"limit_bytes": 100, "action": "block"}))
-        harness.totals[connector.id] = (100, 100)
-        await harness.limiter.refresh([connector.id])
-        assert harness.limiter.is_blocked(connector.id) is True
-
-    async def test_raising_the_limit_releases(self, harness: Harness) -> None:
-        connector = harness.add(make_connector({"limit_bytes": 100, "action": "block"}))
-        harness.totals[connector.id] = (100, 100)
-        await harness.limiter.refresh([connector.id])
-        assert harness.limiter.is_blocked(connector.id) is True
-        # The manager replaces the cached object on every update; mirror that.
-        raised = make_connector({"limit_bytes": 1000, "action": "block"})
-        raised.id = connector.id
-        harness.connectors[connector.id] = raised
-        await harness.limiter.reconfigure(connector.id)
-        assert harness.limiter.is_blocked(connector.id) is False
-        assert harness.events[-1] == (connector.id, "released")
-        assert harness.limiter.usage(raised).total_bytes == 200
-
-    async def test_switching_to_alert_releases(self, harness: Harness) -> None:
-        connector = harness.add(make_connector({"limit_bytes": 100, "action": "block"}))
-        harness.totals[connector.id] = (100, 100)
-        await harness.limiter.refresh([connector.id])
-        alert = make_connector({"limit_bytes": 100})
-        alert.id = connector.id
-        harness.connectors[connector.id] = alert
-        await harness.limiter.reconfigure(connector.id)
-        assert harness.limiter.is_blocked(connector.id) is False
-        assert harness.limiter.usage(alert).status == "exceeded"
-
-    async def test_manual_reset_starts_the_count_over(self, harness: Harness) -> None:
-        connector = harness.add(make_connector({"limit_bytes": 100, "action": "block"}))
-        harness.totals[connector.id] = (100, 100)
-        await harness.limiter.refresh([connector.id])
-        assert harness.limiter.is_blocked(connector.id) is True
-        connector.traffic_reset_at = tl.utc_now()
-        harness.totals[connector.id] = (0, 0)  # nothing flushed since the reset
-        await harness.limiter.reconfigure(connector.id)
-        assert harness.limiter.is_blocked(connector.id) is False
-        usage = harness.limiter.usage(connector)
-        assert usage.total_bytes == 0
-        assert usage.reset_at == connector.traffic_reset_at
-        assert usage.period_start == connector.traffic_reset_at
-
-    async def test_block_expires_with_the_period(self, harness: Harness) -> None:
-        connector = harness.add(make_connector({"limit_bytes": 100, "action": "block"}))
-        harness.limiter._blocked[connector.id] = time.time() - 1
-        assert harness.limiter.is_blocked(connector.id) is False
-        assert connector.id not in harness.limiter._blocked
-
-    async def test_rollover_starts_a_fresh_window(self, harness: Harness) -> None:
-        connector = harness.add(make_connector({"limit_bytes": 100, "period": "day"}))
-        harness.limiter.record(connector.id, 90, 0)
-        state = harness.limiter._states[connector.id]
-        # Pretend the day ended: the stored window is behind the clock.
-        state.period_start -= timedelta(days=1)
-        state.period_end -= timedelta(days=1)
-        state.known_sent = 500
-        assert harness.limiter.record(connector.id, 1, 0) is True
-        fresh = harness.limiter._states[connector.id]
-        assert fresh is not state
-        assert fresh.known_sent == 0
-        assert fresh.unflushed_sent == 91
-        assert fresh.stale is True
-        # Evaluate reads the new window from history.
-        harness.totals[connector.id] = (0, 0)
-        await harness.limiter.evaluate(connector.id)
-        assert harness.limiter._states[connector.id].stale is False
-
-    async def test_peer_block_is_mirrored_from_redis(self, harness: Harness, redis_client: RedisClient) -> None:
-        connector = harness.add(make_connector({"limit_bytes": 100, "action": "block"}))
-        await redis_client.set_connector_traffic_blocked(connector.id, time.time() + 60)
-        assert harness.limiter.is_blocked(connector.id) is False
-        await harness.limiter.refresh_blocked_for(connector.id)
-        assert harness.limiter.is_blocked(connector.id) is True
-        await redis_client.clear_connector_traffic_blocked(connector.id)
-        await harness.limiter.refresh_blocked_for(connector.id)
-        assert harness.limiter.is_blocked(connector.id) is False
-
-    async def test_hydrate_restores_blocks(self, harness: Harness, redis_client: RedisClient) -> None:
-        connector = harness.add(make_connector({"limit_bytes": 100, "action": "block"}))
-        await redis_client.set_connector_traffic_blocked(connector.id, time.time() + 60)
-        await harness.limiter.hydrate_blocked_from_redis([connector.id, "unknown"])
-        assert harness.limiter.is_blocked(connector.id) is True
-        assert harness.limiter.is_blocked("unknown") is False
-
-    async def test_forget_clears_everything(self, harness: Harness, redis_client: RedisClient) -> None:
-        connector = harness.add(make_connector({"limit_bytes": 1, "action": "block"}))
-        harness.limiter.record(connector.id, 5, 5)
-        await harness.limiter.evaluate(connector.id)
-        assert harness.limiter.is_blocked(connector.id) is True
-        await harness.limiter.forget(connector.id)
-        assert harness.limiter.is_blocked(connector.id) is False
-        assert connector.id not in harness.limiter._states
-        key = CONNECTOR_TRAFFIC_BLOCKED_KEY.format(connector_id=connector.id)
-        assert await redis_client.client.exists(key) == 0
-
-    async def test_unknown_connector_is_ignored(self, harness: Harness) -> None:
-        assert harness.limiter.record("nope", 1, 1) is False
-        await harness.limiter.evaluate("nope")
-        assert harness.limiter.is_blocked("nope") is False
-        assert harness.limiter.limit_status_for("nope") == 509
-
-    async def test_usage_period_and_price(self, harness: Harness) -> None:
-        connector = harness.add(make_connector({
-            "limit_bytes": 10 * MB, "period": "week", "reset_day": 1, "price_per_gb": 2.5, "currency": "EUR",
-        }))
-        harness.limiter.record(connector.id, MB, MB)
-        usage = harness.limiter.usage(connector)
-        assert usage.period.value == "week"
-        assert (usage.period_end - usage.period_start).days == 7
-        assert usage.percent == 20.0
-        assert usage.cost == pytest.approx(0.005)
-        assert usage.currency == "EUR"
-        assert usage.action.value == "alert"
+    def test_a_transfer_nothing_will_complete_reports_then_finishes(self) -> None:
+        """A client gone mid-tunnel publishes no completion: its bytes go out as progress, then the meter ends."""
+        owner = RecordingMetering()
+        ended: list[bool] = []
+        meter = TrafficMeter(owner, "proxy", "project", "connector", on_finish=lambda: ended.append(True))
+        meter.add_received(7)
+        meter.report()
+        assert owner.reports == [("proxy", "project", "connector", None, 0, 7, None)]
+        assert meter.finish() == (0, 0)
+        assert ended == [True]

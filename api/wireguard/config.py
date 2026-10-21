@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Iterable
+from typing import Protocol
 
 from api.models.wireguard import WireGuardPeer, WireGuardServerSettings
 
@@ -21,7 +22,23 @@ _FILENAME_LIMIT = 15
 _UNSAFE = re.compile(r"[^a-zA-Z0-9_=+.-]+")
 
 
-def render_server_conf(private_key: str, listen_port: int, peers: Iterable[WireGuardPeer]) -> str:
+class InterfacePeer(Protocol):
+    """What the interface's configuration says of a device: a stored row, or the feed's copy a gateway runs."""
+
+    @property
+    def public_key(self) -> str: ...
+
+    @property
+    def preshared_key(self) -> str | None: ...
+
+    @property
+    def address(self) -> str: ...
+
+    @property
+    def enabled(self) -> bool: ...
+
+
+def render_server_conf(private_key: str, listen_port: int, peers: Iterable[InterfacePeer]) -> str:
     """The ``wg setconf`` / ``wg syncconf`` file: our key, our port, every enabled peer."""
     lines = ["[Interface]", f"PrivateKey = {private_key}", f"ListenPort = {listen_port}", ""]
     for peer in peers:
