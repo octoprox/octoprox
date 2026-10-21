@@ -39,6 +39,7 @@ class Pipe:
         self._accepted: asyncio.Future[tuple[asyncio.StreamReader, asyncio.StreamWriter]] = (
             asyncio.get_running_loop().create_future()
         )
+        self._writers: list[asyncio.StreamWriter] = []
 
     async def _on_connect(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         self._accepted.set_result((reader, writer))
@@ -51,9 +52,13 @@ class Pipe:
         port = self.server.sockets[0].getsockname()[1]
         client = await asyncio.open_connection("127.0.0.1", port)
         server_side = await self._accepted
+        self._writers += [client[1], server_side[1]]
         return client, server_side
 
     async def close(self) -> None:
+        """Abort both ends first: wait_closed waits for open connections, so a test that failed with them open would hang."""
+        for writer in self._writers:
+            writer.transport.abort()
         if self.server is not None:
             self.server.close()
             await self.server.wait_closed()
@@ -84,11 +89,9 @@ async def _close(*writers: asyncio.StreamWriter) -> None:
             await w.wait_closed()
 
 
-async def _abort(tunnel: asyncio.Task[Any], *writers: asyncio.StreamWriter) -> None:
-    """End a test's tunnel and sockets whatever its asserts did: an open socket holds the pipes' teardown forever."""
+async def _stop(tunnel: asyncio.Task[Any]) -> None:
+    """Cancel a test's tunnel if its asserts left it running, and wait for it, so nothing outlives the test."""
     tunnel.cancel()
-    for w in writers:
-        w.transport.abort()
     await asyncio.gather(tunnel, return_exceptions=True)
 
 
@@ -228,24 +231,55 @@ class TestFailedLeg:
         device_writer.write.assert_not_called()
 
     async def test_a_direction_cut_while_draining_counts_its_last_chunk(self) -> None:
-        """Bytes are counted as they are handed on, so the chunk written to the device before the cut is metered."""
+        """A chunk handed on is counted even when its direction is cut while the chunk drains."""
         meter = TrafficMeter(RecordingMetering(), "proxy", "project", "connector")
         server = _server()
         device = asyncio.StreamReader()
         vendor = asyncio.StreamReader()
         vendor.feed_data(b"x" * 1000)
+        written = asyncio.Event()
         device_writer = MagicMock(spec=asyncio.StreamWriter)
         device_writer.is_closing.return_value = False
+        device_writer.write.side_effect = lambda _data: written.set()
         device_writer.drain = asyncio.Event().wait  # a device that never takes the chunk
         vendor_writer = MagicMock(spec=asyncio.StreamWriter)
         vendor_writer.is_closing.return_value = False
         tunnel = asyncio.create_task(server._tunnel(device, device_writer, vendor, vendor_writer, meter=meter))
-        while not device_writer.write.called:
-            await asyncio.sleep(0)
+        try:
+            await asyncio.wait_for(written.wait(), 5)
 
-        device.set_exception(TimeoutError(errno.ETIMEDOUT, "Connection timed out"))
+            device.set_exception(TimeoutError(errno.ETIMEDOUT, "Connection timed out"))
 
-        assert await asyncio.wait_for(tunnel, 5) == (0, 1000)
+            assert await asyncio.wait_for(tunnel, 5) == (0, 1000)
+        finally:
+            await _stop(tunnel)
+
+    async def test_a_block_landing_while_a_chunk_drains_stops_the_direction_after_that_drain(self) -> None:
+        """The interrupt is asked once the drain is done, not before it, so the direction does not wait for one more chunk."""
+        metering = RecordingMetering()
+        meter = TrafficMeter(metering, "proxy", "project", "connector")
+        server = _server()
+        device = asyncio.StreamReader()
+        vendor = asyncio.StreamReader()
+        vendor.feed_data(b"x" * 1000)
+        written, drained = asyncio.Event(), asyncio.Event()
+        device_writer = MagicMock(spec=asyncio.StreamWriter)
+        device_writer.is_closing.return_value = False
+        device_writer.write.side_effect = lambda _data: written.set()
+        device_writer.drain = drained.wait
+        vendor_writer = MagicMock(spec=asyncio.StreamWriter)
+        vendor_writer.is_closing.return_value = False
+        tunnel = asyncio.create_task(server._tunnel(device, device_writer, vendor, vendor_writer, meter=meter))
+        try:
+            await asyncio.wait_for(written.wait(), 5)
+
+            metering.interrupted = True
+            drained.set()
+
+            assert await asyncio.wait_for(tunnel, 5) == (0, 1000)
+            device_writer.write.assert_called_once()
+        finally:
+            await _stop(tunnel)
 
     async def test_a_reset_vendor_ends_the_tunnel_with_the_device_still_open(self, pipes: list[Pipe]) -> None:
         """The device's direction is cut too, over real sockets, with what crossed before counted."""
@@ -259,7 +293,7 @@ class TestFailedLeg:
         try:
             vendor[1].write(b"hi")
             await vendor[1].drain()
-            assert await device[0].readexactly(2) == b"hi"
+            assert await asyncio.wait_for(device[0].readexactly(2), 5) == b"hi"
 
             # A reset, not asyncio's abort alone, which closes with a FIN: a half-close the device is waited on for.
             vendor[1].get_extra_info("socket").setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
@@ -267,7 +301,7 @@ class TestFailedLeg:
 
             assert await asyncio.wait_for(tunnel, 5) == (0, 2)
         finally:
-            await _abort(tunnel, device[1], client_side[1], upstream_side[1], vendor[1])
+            await _stop(tunnel)
 
 
 class TestHalfClose:
@@ -292,7 +326,7 @@ class TestHalfClose:
 
             assert await asyncio.wait_for(tunnel, 5) == (4, 0)
         finally:
-            await _abort(tunnel, device[1], client_side[1], upstream_side[1], vendor[1])
+            await _stop(tunnel)
 
 class TestChunkedForwarding:
     async def test_chunked_body_is_metered_and_forwarded(self, pipes: list[Pipe]) -> None:
