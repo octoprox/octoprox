@@ -728,9 +728,9 @@ function DeviceTrafficSection({ device, adapter, projectId }: { device: Device; 
         value={<>{m.request_count}{successRate != null && <span className="text-fg-subtle font-normal"> · {successRate}% reached the exit, {Math.round(m.avg_latency_ms)} ms to connect</span>}</>}
       />
       <div className="pt-1">
-        <div className="flex items-center justify-between gap-2 mb-1 flex-wrap">
-          <span className="text-xs text-fg-muted tabular-nums">{formatValue(rangeTotal)} over {range}</span>
-          <div className="flex items-center gap-2">
+        <div className="mb-1 space-y-1.5">
+          <div className="text-xs text-fg-muted tabular-nums truncate">{formatValue(rangeTotal)} over {range}</div>
+          <div className="flex items-center justify-between gap-2 flex-wrap">
             <Segmented options={SERIES} value={series} onChange={setSeries} size="sm" />
             <Segmented options={HISTORY_RANGES.map((r) => ({ value: r, label: r }))} value={range} onChange={setRange} size="sm" />
           </div>
