@@ -61,23 +61,26 @@ BUFFER_SIZE = 65536
 # the gateway's shutdown, for as long as it stays silent.
 CLOSE_TIMEOUT_SECONDS = 5.0
 
-# TCP keepalive and a user timeout on every leg the gateway relays: the kernel
-# probes a leg idle for KEEPALIVE_IDLE_SECONDS, every
-# KEEPALIVE_INTERVAL_SECONDS, and gives the connection up after
-# KEEPALIVE_PROBES unanswered probes. Keepalive never probes a leg whose data
-# or close is still unacknowledged, so USER_TIMEOUT_MS gives such a leg up
-# after the same span (Linux only). A peer that vanished without a FIN or RST
-# (a device that left its tunnel, a load balancer or NAT that forgot the
-# flow, a node that died) is noticed in about two minutes, instead of never
-# or of the 15 the kernel's retransmissions take: the leg fails, which ends
-# the relay (see _tunnel) and releases its in-flight count, which least_used
-# routes on. A live peer that stops reading for as long is cut as well. A
-# live idle tunnel stays open, and its probes keep middleboxes that drop idle
-# flows (an AWS NLB after 350 s) from dropping it.
+# TCP keepalive and a user timeout on every leg the gateway relays itself (the
+# curl_cffi and rnet MITM engines open their own upstream connections): the
+# kernel probes a leg idle for KEEPALIVE_IDLE_SECONDS, every
+# KEEPALIVE_INTERVAL_SECONDS. On Linux USER_TIMEOUT_MS then decides when the
+# leg is given up: once nothing on it has been acknowledged for that long,
+# whether its probes went unanswered or its data or close did (keepalive
+# never probes a leg with something unacknowledged). Without a user timeout
+# the leg is given up after KEEPALIVE_PROBES unanswered probes. A peer that
+# vanished without a FIN or RST (a device that left its tunnel, a load
+# balancer or NAT that forgot the flow, a node that died) is so noticed in
+# about five minutes, instead of never or of the 15 minutes the kernel's
+# retransmissions take: the leg fails, which ends the relay (see _tunnel) and
+# releases its in-flight count, which least_used routes on. A live peer whose
+# receive window stays shut as long (it stopped reading, or reads only a
+# trickle) is cut as well. A live idle tunnel stays open, and its probes keep
+# middleboxes that drop idle flows (an AWS NLB after 350 s) from dropping it.
 KEEPALIVE_IDLE_SECONDS = 60
 KEEPALIVE_INTERVAL_SECONDS = 15
 KEEPALIVE_PROBES = 4
-USER_TIMEOUT_MS = (KEEPALIVE_IDLE_SECONDS + KEEPALIVE_INTERVAL_SECONDS * KEEPALIVE_PROBES) * 1000
+USER_TIMEOUT_MS = 300_000
 
 # Reason phrases for the statuses a traffic limit can answer with.
 TRAFFIC_LIMIT_REASONS = {429: "Too Many Requests", 509: "Bandwidth Limit Exceeded"}
@@ -884,8 +887,8 @@ class ProxyServer:
                         # EOF before answering (or before closing itself)
                         # would otherwise wait forever. TLS transports
                         # cannot half-close and are left alone, and so is a
-                        # leg already closing, which uvloop would answer with
-                        # RuntimeError.
+                        # leg already closing, which uvloop answers with
+                        # RuntimeError once it is closed.
                         if writer.can_write_eof() and not writer.is_closing():
                             writer.write_eof()
                         return total_bytes, False
@@ -895,8 +898,11 @@ class ProxyServer:
                         return total_bytes, True
                     total_bytes += len(data)
                     writer.write(data)
+                    # Counted as it is handed on, so a direction cut while it
+                    # drains still counts its last chunk.
+                    allowed = count is None or count(len(data))
                     await writer.drain()
-                    if count is not None and not count(len(data)):
+                    if not allowed:
                         return total_bytes, True
             except (ConnectionResetError, BrokenPipeError, OSError):
                 # The leg failed: reset, or given up by keepalive or the user

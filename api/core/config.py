@@ -463,7 +463,7 @@ class Settings(BaseSettings):
         v = v.strip().rstrip("/")
         parts = urlsplit(v)
         if parts.scheme not in ("http", "https") or not parts.hostname:
-            raise ValueError("internal_api_url is http:// or https:// and a host, such as http://octoprox-api:8000")
+            raise ValueError("internal_api_url is http:// or https:// and a host, such as http://octoprox-internal-api:8000")
         return v
 
     @field_validator("default_strategy")
@@ -687,7 +687,7 @@ class Settings(BaseSettings):
     # internal endpoint at this address.
     internal_api_url: str = Field(
         default="http://localhost:8000",
-        description="Where gateways reach the api, such as http://octoprox-api:8000; the default suits only role all",
+        description="Where gateways reach the api, such as http://octoprox-internal-api:8000; the default suits only role all",
     )
 
     model_config = {
