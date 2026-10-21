@@ -96,7 +96,7 @@ function Row({ label, value, title }: { label: string; value: string | number; t
   )
 }
 
-/** Connections a gateway's shared tunnel listener relays now, as a detail line puts it. */
+/** Connections a gateway's shared tunnel listener relays now, every tunnel protocol together, as a detail line puts it. */
 export function relayedLabel(gateway: TunnelEndpointState): string {
-  return `${gateway.active_connections} ${plural(gateway.active_connections, 'connection', 'connections')} relayed`
+  return `${gateway.active_connections} ${plural(gateway.active_connections, 'connection', 'connections')} relayed, all tunnel protocols`
 }

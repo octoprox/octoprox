@@ -61,17 +61,23 @@ BUFFER_SIZE = 65536
 # the gateway's shutdown, for as long as it stays silent.
 CLOSE_TIMEOUT_SECONDS = 5.0
 
-# TCP keepalive on every leg the gateway relays: the kernel probes a leg idle
-# for KEEPALIVE_IDLE_SECONDS, every KEEPALIVE_INTERVAL_SECONDS, and gives the
-# connection up after KEEPALIVE_PROBES unanswered probes. A peer that vanished
-# without a FIN or RST (a load balancer or NAT that forgot the flow, a node
-# that died) is noticed in about two minutes instead of never: the relay's
-# read fails, the transfer ends and its in-flight count, which least_used
-# routes on, is released. A live idle tunnel stays open, and its probes keep
-# middleboxes that drop idle flows (an AWS NLB after 350 s) from dropping it.
+# TCP keepalive and a user timeout on every leg the gateway relays: the kernel
+# probes a leg idle for KEEPALIVE_IDLE_SECONDS, every
+# KEEPALIVE_INTERVAL_SECONDS, and gives the connection up after
+# KEEPALIVE_PROBES unanswered probes. Keepalive never probes a leg whose data
+# or close is still unacknowledged, so USER_TIMEOUT_MS gives such a leg up
+# after the same span (Linux only). A peer that vanished without a FIN or RST
+# (a device that left its tunnel, a load balancer or NAT that forgot the
+# flow, a node that died) is noticed in about two minutes, instead of never
+# or of the 15 the kernel's retransmissions take: the leg fails, which ends
+# the relay (see _tunnel) and releases its in-flight count, which least_used
+# routes on. A live peer that stops reading for as long is cut as well. A
+# live idle tunnel stays open, and its probes keep middleboxes that drop idle
+# flows (an AWS NLB after 350 s) from dropping it.
 KEEPALIVE_IDLE_SECONDS = 60
 KEEPALIVE_INTERVAL_SECONDS = 15
 KEEPALIVE_PROBES = 4
+USER_TIMEOUT_MS = (KEEPALIVE_IDLE_SECONDS + KEEPALIVE_INTERVAL_SECONDS * KEEPALIVE_PROBES) * 1000
 
 # Reason phrases for the statuses a traffic limit can answer with.
 TRAFFIC_LIMIT_REASONS = {429: "Too Many Requests", 509: "Bandwidth Limit Exceeded"}
@@ -852,8 +858,10 @@ class ProxyServer:
         We wait for both directions to complete naturally, which correctly
         handles half-closed connections (e.g., client sends request, closes
         write side, but still reads the response). A direction stopped by
-        the meter takes the other one down with it: the tunnel is being
-        cut, not half-closed.
+        the meter, or one whose leg failed, takes the other one down with
+        it: the tunnel is being cut, not half-closed, and a failed leg can
+        neither send nor receive, so the other direction would wait on its
+        peer for nothing.
 
         Returns:
             Tuple of (bytes_sent, bytes_received) where bytes_sent is data
@@ -866,7 +874,7 @@ class ProxyServer:
             writer: asyncio.StreamWriter,
             count: _ByteCounter,
         ) -> tuple[int, bool]:
-            """Forward data; return (bytes transferred, stopped by the meter)."""
+            """Forward data; return (bytes transferred, whether the tunnel ends: the meter stopped it or a leg failed)."""
             total_bytes = 0
             try:
                 while True:
@@ -875,23 +883,25 @@ class ProxyServer:
                         # Pass the half-close on: a peer that waits for our
                         # EOF before answering (or before closing itself)
                         # would otherwise wait forever. TLS transports
-                        # cannot half-close and are left alone.
-                        if writer.can_write_eof():
+                        # cannot half-close and are left alone, and so is a
+                        # leg already closing, which uvloop would answer with
+                        # RuntimeError.
+                        if writer.can_write_eof() and not writer.is_closing():
                             writer.write_eof()
-                        break
+                        return total_bytes, False
                     if writer.is_closing():
                         # The other leg closed while this read waited. uvloop
                         # answers a write to it with RuntimeError, not OSError.
-                        break
+                        return total_bytes, True
                     total_bytes += len(data)
                     writer.write(data)
                     await writer.drain()
                     if count is not None and not count(len(data)):
                         return total_bytes, True
             except (ConnectionResetError, BrokenPipeError, OSError):
-                # Connection closed or errored - exit gracefully
-                pass
-            return total_bytes, False
+                # The leg failed: reset, or given up by keepalive or the user
+                # timeout.
+                return total_bytes, True
 
         count_sent: _ByteCounter = meter.add_sent if meter is not None else None
         count_received: _ByteCounter = meter.add_received if meter is not None else None
@@ -1244,7 +1254,7 @@ class ProxyServer:
 
 
 def keep_alive(writer: asyncio.StreamWriter) -> None:
-    """Have the kernel probe the peer of a relayed leg while it is idle, so one that vanished ends the relay.
+    """Have the kernel give a relayed leg up once its peer vanished, idle or with data on its way, so the relay ends.
 
     Best effort: a socket that takes no TCP options (a test's stand-in, a
     Unix socket) is left as it is.
@@ -1254,7 +1264,11 @@ def keep_alive(writer: asyncio.StreamWriter) -> None:
         return
     try:
         set_keepalive(
-            sock, idle=KEEPALIVE_IDLE_SECONDS, interval=KEEPALIVE_INTERVAL_SECONDS, probes=KEEPALIVE_PROBES
+            sock,
+            idle=KEEPALIVE_IDLE_SECONDS,
+            interval=KEEPALIVE_INTERVAL_SECONDS,
+            probes=KEEPALIVE_PROBES,
+            user_timeout_ms=USER_TIMEOUT_MS,
         )
     except OSError as exc:
         logger.debug("TCP keepalive not set", error=error_text(exc))

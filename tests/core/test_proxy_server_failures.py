@@ -429,6 +429,40 @@ class TestUpstreamFailures:
         assert (metering.totals.bytes_received, metering.totals.request_count) == (5, 0)
         assert inflight.total == 0
 
+    async def test_a_device_leg_the_kernel_gave_up_ends_its_relay_counted(
+        self, publish: _Published, inflight: InFlight
+    ) -> None:
+        """The vendor leg is not waited on once the device's leg failed: the transfer is counted and leaves flight."""
+        metering = QuietMetering(inflight)
+        server = ProxyServer(_router(None), metering, host="127.0.0.1", port=0, timeout=30.0)
+        device = asyncio.StreamReader()
+        device.set_exception(TimeoutError(errno.ETIMEDOUT, "Connection timed out"))
+        client_writer = MagicMock(spec=asyncio.StreamWriter)
+        client_writer.is_closing.return_value = False
+        client_writer.transport.is_closing.return_value = False
+        silent_vendor = asyncio.StreamReader()
+        upstream_writer = MagicMock(spec=asyncio.StreamWriter)
+        upstream_writer.is_closing.return_value = False
+        upstream_writer.wait_closed = AsyncMock()
+
+        with (
+            patch.object(server, "_connect_via_proxy", AsyncMock(return_value=(silent_vendor, upstream_writer))),
+            patch("api.core.proxy_server.logger") as logger,
+        ):
+            await asyncio.wait_for(
+                server._relay(
+                    device, client_writer, _upstream(8080), PROJECT, "example.com", 443,
+                    established=None, use_mitm=False,
+                ),
+                5,
+            )
+
+        assert [c["success"] for c in _completions(publish)] == [True]
+        assert _failures(publish) == []
+        assert inflight.total == 0
+        logger.error.assert_not_called()
+        upstream_writer.close.assert_called_once()
+
     def test_an_unparseable_target_keeps_neither_query_nor_userinfo(self) -> None:
         server = ProxyServer(_router(None), MagicMock(spec=RequestMetering), host="127.0.0.1", port=0, timeout=30.0)
         assert server._target_of("GET", "http://[2001:db8::1]/a?token=x") == "[2001:db8::1]"
