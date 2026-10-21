@@ -1,12 +1,9 @@
 # Copyright 2026 Octoprox Authors
 # SPDX-License-Identifier: Apache-2.0
 
-"""Provider catalog and admin-managed provider descriptors.
+"""Provider catalog and admin-managed provider descriptors, served by the api role.
 
-Read endpoints serve the catalog every authenticated user needs to render
-credential/connector forms. Mutations are admin-only, require the caller to
-confirm the vendor hosts a descriptor will send credentials to, are audited,
-and fan out to peer instances through the event bus.
+The catalog reads and the writes apply the stored rows to this registry first, so any api sees what another just wrote.
 """
 
 from __future__ import annotations
@@ -20,11 +17,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.core import utc_now
 from api.core.auth import CurrentUser, RequireAdminDep, RequireEditorDep
-from api.core.event_bus import event_bus
-from api.core.proxy_manager import ProxyManager
-from api.core.signals import provider_changed
-from api.db.repository import ProviderAuditRepository, ProviderDescriptorRepository
+from api.core.logging import error_text
+from api.db.repository import (
+    CredentialRepository,
+    ProviderAuditRepository,
+    ProviderDescriptorRepository,
+)
 from api.db.session import get_db
+from api.db.streams import ChangeKind
 from api.models.cloud_options import COUNTRIES
 from api.models.provider import (
     ProviderAuditEntry,
@@ -44,7 +44,7 @@ from api.models.provider import (
     ProviderValidateResponse,
 )
 from api.models.user import UserRole
-from api.providers.registry import ProviderRegistry, ProviderType, get_provider_registry
+from api.providers.registry import ProviderRegistry, ProviderType
 from api.providers.sdk.descriptor import FieldSpec, ProviderDescriptor
 from api.providers.sdk.discovery import DescriptorTester, OptionsResolver, ResolvedOption
 from api.providers.sdk.egress import EgressDeniedError, EgressGuard
@@ -56,7 +56,8 @@ from api.providers.sdk.loader import (
     descriptor_to_yaml,
 )
 from api.providers.sdk.templating import TemplateRenderer
-from api.routes.common import proxy_manager_of
+from api.providers.store import ProviderStore
+from api.routes.common import change_log_of, provider_registry_of, provider_store_of
 
 logger = structlog.get_logger()
 
@@ -64,15 +65,35 @@ router = APIRouter(prefix="/providers")
 
 DbDep = Annotated[AsyncSession, Depends(get_db)]
 
+# Provider type id -> (credentials of that type, connectors on them).
+type _Usage = dict[str, tuple[int, int]]
+
 
 # --- helpers -----------------------------------------------------------------------
 
 
-def _usage(proxy_manager: ProxyManager, type_id: str) -> tuple[int, int]:
-    """Credential and connector counts for a provider type."""
-    credential_ids = {c.id for c in proxy_manager.credentials if c.type == type_id}
-    connectors = sum(1 for c in proxy_manager.connectors if c.credential_id in credential_ids)
-    return len(credential_ids), connectors
+async def _apply_stored(store: ProviderStore) -> None:
+    """Apply the stored descriptors to this process's registry now, so this api's next answer shows its own write.
+
+    Every other process applies them when the write's change entry reaches
+    it, and this one would too: a failure here is logged, not raised, since
+    the write is committed.
+    """
+    try:
+        await store.sync_all()
+    except Exception as exc:
+        logger.warning("Provider descriptors not applied after a write", error=error_text(exc))
+
+
+async def _read_through(request: Request, session: AsyncSession) -> dict[str, ProviderRecord]:
+    """Every stored descriptor by id, the enabled ones applied to this process's registry first.
+
+    Another api's write reaches the registry only through the refresher; applying the rows here closes that gap.
+    """
+    records = await ProviderDescriptorRepository(session).get_all()
+    # The enabled rows' documents in the repository's order, as sync_all applies them.
+    provider_store_of(request).apply_specs([record.spec for record in records if record.enabled])
+    return {record.id: record for record in records}
 
 
 def _with_dependencies(ptype: ProviderType, fields: list[FieldSpec]) -> list[FieldSpec]:
@@ -101,8 +122,9 @@ def _with_dependencies(ptype: ProviderType, fields: list[FieldSpec]) -> list[Fie
     return annotated
 
 
-def _summary(proxy_manager: ProxyManager, ptype: ProviderType, record: ProviderRecord | None = None) -> ProviderSummary:
-    credential_count, connector_count = _usage(proxy_manager, ptype.id)
+def _summary(ptype: ProviderType, usage: _Usage, record: ProviderRecord | None = None) -> ProviderSummary:
+    """The catalog entry of a provider type, with how many credentials and connectors use it."""
+    credential_count, connector_count = usage.get(ptype.id, (0, 0))
     descriptor = ptype.descriptor
     return ProviderSummary(
         id=ptype.id,
@@ -132,8 +154,9 @@ def _summary(proxy_manager: ProxyManager, ptype: ProviderType, record: ProviderR
     )
 
 
-def _detail(proxy_manager: ProxyManager, ptype: ProviderType, record: ProviderRecord | None = None) -> ProviderDetail:
-    summary = _summary(proxy_manager, ptype, record)
+def _detail(ptype: ProviderType, usage: _Usage, record: ProviderRecord | None = None) -> ProviderDetail:
+    """The catalog entry with the full descriptor."""
+    summary = _summary(ptype, usage, record)
     return ProviderDetail(**summary.model_dump(), spec=ptype.descriptor, origin=ptype.origin)
 
 
@@ -280,20 +303,16 @@ async def _audit(
     )
 
 
-async def _publish(provider_id: str, op: str) -> None:
-    await event_bus.publish(provider_changed, None, entity_id=provider_id, op=op)
-
-
 # --- catalog (all authenticated users) ------------------------------------------------
 
 
 @router.get("", response_model=ProviderListResponse)
 async def list_providers(request: Request, session: DbDep) -> ProviderListResponse:
-    """Catalog of every provider type with its form schemas."""
-    registry = get_provider_registry()
-    records = {r.id: r for r in await ProviderDescriptorRepository(session).get_all()}
-    proxy_manager: ProxyManager = proxy_manager_of(request)
-    providers = [_summary(proxy_manager, t, records.get(t.id)) for t in registry.list()]
+    """Catalog of every provider type with its form schemas, the stored descriptors as Postgres has them."""
+    registry = provider_registry_of(request)
+    records = await _read_through(request, session)
+    usage = await CredentialRepository(session).usage_by_type()
+    providers = [_summary(t, usage, records.get(t.id)) for t in registry.list()]
     return ProviderListResponse(
         total=len(providers), providers=providers, presets=registry.presets, countries=COUNTRIES
     )
@@ -301,12 +320,12 @@ async def list_providers(request: Request, session: DbDep) -> ProviderListRespon
 
 @router.get("/{provider_id}", response_model=ProviderDetail)
 async def get_provider(request: Request, provider_id: str, session: DbDep) -> ProviderDetail:
-    registry = get_provider_registry()
-    ptype = registry.get(provider_id)
+    """One provider type's catalog entry with its full descriptor, a stored one as Postgres has it."""
+    records = await _read_through(request, session)
+    ptype = provider_registry_of(request).get(provider_id)
     if ptype is None:
         raise HTTPException(status_code=404, detail="Provider not found")
-    record = await ProviderDescriptorRepository(session).get_by_id(provider_id)
-    return _detail(proxy_manager_of(request), ptype, record)
+    return _detail(ptype, await CredentialRepository(session).usage_by_type(provider_id), records.get(provider_id))
 
 
 @router.post("/{provider_id}/options/{option_name}", response_model=ProviderOptionsResponse)
@@ -315,16 +334,15 @@ async def resolve_options(
     provider_id: str,
     option_name: str,
     body: ProviderOptionsRequest,
+    session: DbDep,
     _guard: RequireEditorDep,
 ) -> ProviderOptionsResponse:
-    """Resolve a descriptor's dynamic select options for a credential.
+    """Resolve a descriptor's dynamic select options for a saved ``credential_id`` or an in-progress ``credential_config``.
 
-    Editors may pass a saved ``credential_id`` or, while creating a credential,
-    the in-progress ``credential_config``. Admins may also pass an unsaved
-    ``spec`` so the provider builder's test panel can drive dynamic selects
-    before the descriptor is saved; the static egress checks apply as on save.
+    Admins may also pass an unsaved ``spec``, so the provider builder's test panel drives dynamic selects before the
+    descriptor is saved; the static egress checks apply as on save.
     """
-    registry = get_provider_registry()
+    registry = provider_registry_of(request)
     if body.spec is not None:
         if _guard.role != UserRole.ADMIN:
             raise HTTPException(status_code=403, detail="Only admins can resolve options for an unsaved descriptor")
@@ -341,8 +359,7 @@ async def resolve_options(
         raise HTTPException(status_code=404, detail=f"Provider has no options source '{option_name}'")
     credential_config: dict[str, Any] | None = body.credential_config
     if body.credential_id and body.spec is None:
-        proxy_manager = proxy_manager_of(request)
-        credential = proxy_manager.get_credential(body.credential_id)
+        credential = await CredentialRepository(session).get_by_id(body.credential_id)
         if credential is None or credential.type != provider_id:
             raise HTTPException(status_code=404, detail="Credential not found for this provider")
         credential_config = credential.config
@@ -366,7 +383,7 @@ async def validate_provider(
     request: Request, body: ProviderValidateRequest, _admin: RequireAdminDep
 ) -> ProviderValidateResponse:
     """Dry-run: parse a descriptor and report hosts, errors and warnings."""
-    registry = get_provider_registry()
+    registry = provider_registry_of(request)
     try:
         descriptor = descriptor_from_dict(body.spec)
     except DescriptorLoadError as exc:
@@ -396,7 +413,8 @@ async def _create(
     actor: CurrentUser,
     action: str,
 ) -> ProviderDetail:
-    registry = get_provider_registry()
+    """Store a new custom descriptor, audit it, and apply it to this process's registry."""
+    registry = provider_registry_of(request)
     repo = ProviderDescriptorRepository(session)
     if registry.get(descriptor.id) is not None or await repo.get_by_id(descriptor.id) is not None:
         raise HTTPException(status_code=409, detail=f"Provider id '{descriptor.id}' already exists")
@@ -417,15 +435,14 @@ async def _create(
     await _audit(session, descriptor.id, action, actor, descriptor, hosts_changed=bool(descriptor.egress_hosts()))
     await session.commit()
 
-    proxy_manager: ProxyManager = proxy_manager_of(request)
-    proxy_manager.provider_store.apply_record(record, descriptor.id)
-    await _publish(descriptor.id, "added")
+    await change_log_of(request).record(ChangeKind.DESCRIPTOR, descriptor.id)
+    await _apply_stored(provider_store_of(request))
     logger.info("Provider descriptor created", provider_id=descriptor.id, actor=actor.username,
                 egress_hosts=descriptor.egress_hosts())
     ptype = registry.get(descriptor.id)
     if ptype is None:
         raise HTTPException(status_code=500, detail="Provider was stored but could not be registered")
-    return _detail(proxy_manager, ptype, record)
+    return _detail(ptype, await CredentialRepository(session).usage_by_type(descriptor.id), record)
 
 
 @router.post("", response_model=ProviderDetail, status_code=201)
@@ -446,8 +463,8 @@ async def import_provider(
         descriptor = descriptor_from_yaml(body.yaml)
     except DescriptorLoadError as exc:
         raise HTTPException(status_code=422, detail=f"Invalid provider descriptor: {exc}") from None
-    registry = get_provider_registry()
-    existing = registry.get(descriptor.id)
+    await _read_through(request, session)
+    existing = provider_registry_of(request).get(descriptor.id)
     if existing is not None and existing.editable and body.replace:
         return await _update(request, session, existing, descriptor, body.confirmed_hosts, None, admin)
     return await _create(request, session, descriptor, body.confirmed_hosts, True, admin, "imported")
@@ -462,7 +479,8 @@ async def _update(
     enabled: bool | None,
     actor: CurrentUser,
 ) -> ProviderDetail:
-    registry = get_provider_registry()
+    """Store a custom descriptor's new document or enabled flag, audit it, and apply it to this process's registry."""
+    registry = provider_registry_of(request)
     repo = ProviderDescriptorRepository(session)
     record = await repo.get_by_id(ptype.id)
     if record is None:
@@ -490,17 +508,17 @@ async def _update(
     await _audit(session, ptype.id, "updated", actor, descriptor or ptype.descriptor, hosts_changed)
     await session.commit()
 
-    proxy_manager: ProxyManager = proxy_manager_of(request)
-    proxy_manager.provider_store.apply_record(record, ptype.id)
-    await _publish(ptype.id, "updated")
+    await change_log_of(request).record(ChangeKind.DESCRIPTOR, ptype.id)
+    await _apply_stored(provider_store_of(request))
     logger.info("Provider descriptor updated", provider_id=ptype.id, actor=actor.username, hosts_changed=hosts_changed)
+    usage = await CredentialRepository(session).usage_by_type(ptype.id)
     refreshed = registry.get(ptype.id)
     if refreshed is None:
         # Disabled providers leave the registry; report from the stored record.
         return ProviderDetail(
-            **_summary(proxy_manager, ptype, record).model_dump(), spec=descriptor or ptype.descriptor, origin="database"
+            **_summary(ptype, usage, record).model_dump(), spec=descriptor or ptype.descriptor, origin="database"
         )
-    return _detail(proxy_manager, refreshed, record)
+    return _detail(refreshed, usage, record)
 
 
 @router.put("/{provider_id}", response_model=ProviderDetail)
@@ -508,7 +526,8 @@ async def update_provider(
     request: Request, session: DbDep, provider_id: str, body: ProviderUpdate, admin: RequireAdminDep
 ) -> ProviderDetail:
     """Update a custom provider descriptor (admin)."""
-    ptype = _editable_type(get_provider_registry(), provider_id)
+    await _read_through(request, session)
+    ptype = _editable_type(provider_registry_of(request), provider_id)
     descriptor = _parse_spec(body.spec) if body.spec is not None else None
     return await _update(request, session, ptype, descriptor, body.confirmed_hosts, body.enabled, admin)
 
@@ -518,9 +537,9 @@ async def delete_provider(
     request: Request, session: DbDep, provider_id: str, admin: RequireAdminDep
 ) -> None:
     """Delete a custom provider descriptor (admin). Refused while credentials use it."""
-    registry = get_provider_registry()
-    ptype = _editable_type(registry, provider_id)
-    credential_count, _ = _usage(proxy_manager_of(request), provider_id)
+    await _read_through(request, session)
+    ptype = _editable_type(provider_registry_of(request), provider_id)
+    credential_count, _ = (await CredentialRepository(session).usage_by_type(provider_id)).get(provider_id, (0, 0))
     if credential_count:
         raise HTTPException(
             status_code=400,
@@ -529,15 +548,16 @@ async def delete_provider(
     await ProviderDescriptorRepository(session).delete(provider_id)
     await _audit(session, provider_id, "deleted", admin, ptype.descriptor, hosts_changed=False)
     await session.commit()
-    registry.unregister(provider_id)
-    await _publish(provider_id, "removed")
+    await change_log_of(request).record(ChangeKind.DESCRIPTOR, provider_id)
+    await _apply_stored(provider_store_of(request))
     logger.info("Provider descriptor deleted", provider_id=provider_id, actor=admin.username)
 
 
 @router.get("/{provider_id}/export")
-async def export_provider(request: Request, provider_id: str, _admin: RequireAdminDep) -> Response:
-    """Download a descriptor as YAML (admin). Built-ins can be exported as a starting point."""
-    ptype = get_provider_registry().get(provider_id)
+async def export_provider(request: Request, provider_id: str, session: DbDep, _admin: RequireAdminDep) -> Response:
+    """Download a descriptor as YAML (admin), as stored. Built-ins can be exported as a starting point."""
+    await _read_through(request, session)
+    ptype = provider_registry_of(request).get(provider_id)
     if ptype is None or ptype.descriptor is None:
         raise HTTPException(status_code=404, detail="Provider not found")
     return Response(
@@ -559,15 +579,11 @@ async def provider_audit(
 async def test_provider(
     request: Request, provider_id: str, body: ProviderTestRequest, _admin: RequireAdminDep
 ) -> ProviderTestResponse:
-    """Exercise a descriptor with throwaway config (admin).
+    """Exercise a shipped or custom descriptor with throwaway config (admin), ``proxy_request`` fetching a URL through it.
 
-    Works for shipped and custom providers alike. Besides the vendor API calls,
-    ``proxy_request`` provisions one proxy endpoint in memory and fetches a URL
-    through it, so a provider can be tried end to end before any credential or
-    connector exists. ``spec`` lets the builder test an unsaved draft; static
-    egress checks still apply, so a draft cannot be used to probe private networks.
+    ``spec`` tests an unsaved draft, under the static egress checks, so a draft cannot probe private networks.
     """
-    registry = get_provider_registry()
+    registry = provider_registry_of(request)
     if body.spec is not None:
         descriptor = _parse_spec(body.spec)
         errors, _warnings = _static_checks(descriptor, registry)

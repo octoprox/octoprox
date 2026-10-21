@@ -1,39 +1,22 @@
 # Copyright 2026 Octoprox Authors
 # SPDX-License-Identifier: Apache-2.0
 
-"""Turns exit IP sightings into attributed proxies.
+"""Turns exit IP sightings into attributed proxies: the one writer of attribution onto a proxy row, whoever saw the exit.
 
-The attributor is the only thing that writes attribution onto a proxy. It
-learns about exit IPs the way the rest of Octoprox communicates, through
-signals:
-
-* ``exit_ip_observed``: the provider syncer after discovery, the health
-  checker after a check that reported the caller's address, preflight after
-  an echo through a pooled session slot.
-* ``proxy_added``: a manually added proxy of a static connector with no
-  country yet gets one request through it to the echo endpoint.
-* ``exit_location_mismatch``: preflight found a proxy exiting somewhere
-  other than the request required and the project refused it. Logged only:
-  what the exit does to the slot is decided by its sighting above.
-
-It reaches the proxy pool through the small :class:`ProxyStore` protocol,
-which the proxy manager satisfies, and resolves each proxy under the source
-policy of the project owning its connector.
+Each caller brings a :class:`ProxyStore` of the rows its batch names; nothing here touches Postgres or Redis.
 """
 
 from __future__ import annotations
 
-import asyncio
 from collections.abc import Sequence
+from datetime import UTC, datetime
 from typing import Protocol
 
 import structlog
 
-from api.core.config import Settings
-from api.core.event_bus import event_bus
-from api.core.signals import exit_ip_changed, exit_ip_observed, exit_location_mismatch, proxy_added
-from api.core.tasks import spawn_held
+from api.core import utc_now
 from api.geo.models import (
+    META_LOCATION_CHECKED_AT,
     META_LOCATION_CONFLICT,
     META_LOCATION_VERDICT,
     META_VENDOR_COUNTRY,
@@ -54,97 +37,140 @@ from api.providers.sdk.strategies import META_DISCOVERED_IP, META_SESSION_ID, is
 
 logger = structlog.get_logger()
 
-# Through-proxy lookups of newly added static proxies running at once.
-LOOKUP_CONCURRENCY = 5
 # Sources that report the same exit again and again; a repeat of a judged exit is not re-applied.
 REPEATING_SOURCES = (ObservationSource.HEALTH_CHECK, ObservationSource.PREFLIGHT)
+# Rows one page of a re-attribution pass reads, judges and writes, each page
+# its own transaction. A page costs three reads and one write transaction,
+# and every row on it records a judgement; 500 keeps a transaction to a
+# second or two and a pass over 10,000 proxies to twenty of them.
+REATTRIBUTE_PAGE_SIZE = 500
 
 
 class ProxyStore(Protocol):
-    """What the attributor needs from the proxy pool."""
+    """The rows one batch of attribution works on, loaded before the attributor judges them, and where its writes go.
 
-    @property
-    def proxies(self) -> list[Proxy]: ...
+    Each saved row is written only while it holds the stamp it was loaded with; ``rotate`` deletes it, ``drop_verdict`` its
+    cached preflight verdict.
+    """
 
-    def get_proxy(self, proxy_id: str) -> Proxy | None: ...
+    def get_proxy(self, proxy_id: str) -> Proxy | None:
+        """The loaded row, its credentials resolved (enrich requests through it); None when not loaded or rotated."""
+        ...
 
-    def get_connector(self, connector_id: str) -> Connector | None: ...
+    def get_connector(self, connector_id: str) -> Connector | None:
+        """The loaded row's connector."""
+        ...
 
-    def get_project(self, project_id: str) -> Project | None: ...
+    def get_project(self, project_id: str) -> Project | None:
+        """The loaded connector's project."""
+        ...
 
-    def resolve_proxy_credentials(self, proxy: Proxy) -> Proxy: ...
+    def save(self, proxy: Proxy, *, checked_at: datetime | None, rotate: bool = False, drop_verdict: bool = False) -> None:
+        """Queue the row's metadata as the attributor left it, judged from a sighting made at ``checked_at``.
 
-    async def update_proxy(self, proxy: Proxy, *, deferred: bool = False) -> None: ...
+        Args:
+            checked_at: None for a re-judgement of a row never stamped, which is never older than the row.
+            rotate: delete the row after its write.
+            drop_verdict: delete its cached preflight verdict, as the exit moved without preflight seeing it.
+        """
+        ...
 
-    async def update_proxies(self, proxies: list[Proxy]) -> None: ...
 
-    async def remove_proxy(self, proxy_id: str, *, deferred: bool = False) -> bool: ...
+class ProxyPages(ProxyStore, Protocol):
+    """A store a re-attribution pass reads a page at a time; each page is one batch."""
+
+    async def load_page(
+        self, after: str | None, limit: int, *, connector_id: str | None, project_id: str | None
+    ) -> list[Proxy]:
+        """The next ``limit`` rows after id ``after`` in id order, of one connector, one project or all, as the batch."""
+        ...
+
+    async def flush(self) -> None:
+        """Write the batch as :class:`ProxyStore` describes, and start an empty one."""
+        ...
 
 
 class ProxyAttributor:
-    """Applies attribution to proxies in response to exit IP sightings."""
+    """Applies attribution to proxies, one batch at a time; holds no proxy state of its own.
 
-    def __init__(self, geo_service: GeoService, settings: Settings) -> None:
+    Args:
+        lookup_enabled: whether a static proxy added with no country is looked up through itself (``geo_lookup_enabled``).
+    """
+
+    def __init__(self, geo_service: GeoService, *, lookup_enabled: bool = True) -> None:
         self._geo_service = geo_service
-        # Whether a manually added static proxy gets a request through it to learn its exit.
-        self.enabled = settings.geo_lookup_enabled
-        self._semaphore = asyncio.Semaphore(LOOKUP_CONCURRENCY)
-        self._proxy_store: ProxyStore | None = None
-        self._tasks: set[asyncio.Task[None]] = set()
-        self._reattribute_lock = asyncio.Lock()
+        self.lookup_enabled = lookup_enabled
 
-    # --- lifecycle -----------------------------------------------------------------
+    # --- rules on a row ------------------------------------------------------------
 
-    async def start(self, proxy_store: ProxyStore) -> None:
-        self._proxy_store = proxy_store
-        exit_ip_observed.connect(self._on_exit_ip_observed)
-        exit_location_mismatch.connect(self._on_exit_location_mismatch)
-        proxy_added.connect(self._on_proxy_added)
-        logger.info("Proxy attribution started", static_lookup=self.enabled, echo_url=self.url)
+    @staticmethod
+    def is_repeat(proxy: Proxy, ip: str, source: ObservationSource) -> bool:
+        """Whether a sighting only repeats what the row says: a health check or preflight of the exit it was judged on.
 
-    async def stop(self) -> None:
-        exit_ip_observed.disconnect(self._on_exit_ip_observed)
-        exit_location_mismatch.disconnect(self._on_exit_location_mismatch)
-        proxy_added.disconnect(self._on_proxy_added)
-        tasks = list(self._tasks)
-        for task in tasks:
-            task.cancel()
-        if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
-        self._tasks.clear()
+        A change of the project's decisions re-judges its rows through a re-attribution instead.
+        """
+        return (
+            source in REPEATING_SOURCES
+            and proxy.metadata.get(META_DISCOVERED_IP) == ip
+            and META_LOCATION_CONFLICT in proxy.metadata
+        )
 
-    @property
-    def in_flight(self) -> int:
-        """Through-proxy lookups running on this instance."""
-        return len(self._tasks)
+    @staticmethod
+    def is_refused_slot(proxy: Proxy, project: Project | None) -> bool:
+        """Whether a judged row is a pooled session slot its project will not use: contradicted under ``refuse``.
 
-    @property
-    def url(self) -> str:
-        return self._geo_service.settings.echo_url
+        Deleting it lets the provider sync provision a fresh session; fixed exits, open verdicts and skipped slots are
+        kept.
+        """
+        if project is None or is_dynamic_gateway(proxy) or not proxy.metadata.get(META_SESSION_ID):
+            return False
+        return (
+            proxy.metadata.get(META_LOCATION_VERDICT) == LocationVerdict.CONTRADICTED
+            and project.location_contradicted == ContradictedAction.REFUSE
+        )
+
+    @staticmethod
+    def needs_exit_lookup(proxy: Proxy, connector: Connector | None) -> bool:
+        """Whether a new row's exit is looked up through it: a static proxy with no country set by hand.
+
+        Every other row learns its exit from its vendor or its sightings.
+        """
+        return (
+            connector is not None
+            and connector.credential_type == CredentialType.STATIC_PROXY_PROVIDER.value
+            and proxy.country is None
+        )
+
+    @staticmethod
+    def checked_at(proxy: Proxy) -> datetime | None:
+        """When the row's exit was last seen (``location_checked_at``, naive UTC); None when never, or unreadable."""
+        raw = proxy.metadata.get(META_LOCATION_CHECKED_AT)
+        if not isinstance(raw, str):
+            return None
+        try:
+            stamp = datetime.fromisoformat(raw)
+        except ValueError:
+            return None
+        return stamp.astimezone(UTC).replace(tzinfo=None) if stamp.tzinfo is not None else stamp
 
     # --- policy --------------------------------------------------------------------
 
-    def _project_of(self, connector_id: str | None) -> Project | None:
-        if self._proxy_store is None or not connector_id:
-            return None
-        connector = self._proxy_store.get_connector(connector_id)
-        return self._proxy_store.get_project(connector.project_id) if connector is not None else None
+    @staticmethod
+    def project_of(store: ProxyStore, connector_id: str | None) -> Project | None:
+        """The project owning ``connector_id``, as the store loaded it."""
+        connector = store.get_connector(connector_id) if connector_id else None
+        return store.get_project(connector.project_id) if connector is not None else None
 
-    def policy_for(self, connector_id: str | None) -> SourcePolicy:
-        """The source policy of the project owning ``connector_id``, else the install default."""
+    def policy_for(self, project: Project | None) -> SourcePolicy:
+        """The source policy of ``project``, else the install default."""
         default = self._geo_service.default_policy
-        project = self._project_of(connector_id)
         return project.source_policy(default) if project is not None else default
 
-    def project_id_for(self, connector_id: str | None) -> str | None:
-        """The project owning ``connector_id``; observations carry it so project views can filter."""
-        project = self._project_of(connector_id)
-        return project.id if project is not None else None
+    # --- sightings -----------------------------------------------------------------
 
-    # --- observations --------------------------------------------------------------
-
-    async def observe(
+    def observe(
         self,
+        store: ProxyStore,
         proxy_id: str,
         ip: str,
         *,
@@ -152,27 +178,27 @@ class ProxyAttributor:
         endpoint: LocationTarget | None = None,
         session_id: str | None = None,
         candidates: Sequence[LocationCandidate] | None = None,
+        observed_at: datetime | None = None,
+        instance_id: str | None = None,
     ) -> Proxy | None:
-        """Attribute ``ip`` for the proxy and persist it when anything changed.
+        """Attribute one sighting of ``ip`` behind a proxy of ``store``'s batch, and save the row if it changed.
 
-        ``candidates`` is what the databases said about ``ip`` when the
-        caller looked it up already (preflight), so the lookup is not
-        repeated. A preflight sighting is on the request path: the row is
-        judged at once, so routing and the cache see it, but its persistence
-        and, under ``refuse``, its removal are scheduled by the pool rather
-        than awaited here.
+        A repeat (:meth:`is_repeat`) leaves the row as it is, though a repeated preflight still records the sighting;
+        returns the proxy, or None when ``ip`` is not an IP or the proxy is not in the batch.
 
-        The observation is stamped with the project owning the proxy's
-        connector and, when the sighting came from a client session
-        (preflight), with that ``session_id``. Health checks report the same
-        IP every minute, and preflight reports it once per session; those
-        are applied only when the IP moved or the proxy was never attributed.
+        Args:
+            session_id: the client session the sighting came from, stamped on the observation.
+            candidates: the databases' answers for ``ip`` at the sighting (a gateway's preflight); not looked up again.
+            observed_at: when the exit was seen, by default now; it stamps the row and bounds its write.
+            instance_id: the process that saw the exit, by default this one.
         """
-        if self._proxy_store is None or not is_ip(ip):
+        if not is_ip(ip):
             return None
-        proxy = self._proxy_store.get_proxy(proxy_id)
+        proxy = store.get_proxy(proxy_id)
         if proxy is None:
             return None
+        observed_at = observed_at or utc_now()
+        project = self.project_of(store, proxy.connector_id)
         if is_dynamic_gateway(proxy):
             # A dynamic-sessions gateway is not probed, so this is a sighting of
             # one vendor session's exit (Detect, or a plugin): record it for
@@ -181,143 +207,93 @@ class ProxyAttributor:
                 proxy,
                 ip,
                 source=source,
-                policy=self.policy_for(proxy.connector_id),
+                policy=self.policy_for(project),
                 endpoint=endpoint,
-                project_id=self.project_id_for(proxy.connector_id),
+                project_id=project.id if project else None,
                 session_id=proxy.metadata.get(META_SESSION_ID),
+                candidates=candidates,
+                observed_at=observed_at,
+                instance_id=instance_id,
             )
             return proxy
-        previous = proxy.metadata.get(META_DISCOVERED_IP)
-        if source in REPEATING_SOURCES and previous == ip and META_LOCATION_CONFLICT in proxy.metadata:
-            # Nothing new about the exit: the row stays as judged. A change of
-            # the project's decisions re-judges its rows (``reattribute_all``),
-            # which is where a slot contradicted before the project refused
-            # contradictions is replaced.
+        if self.is_repeat(proxy, ip, source):
             if source == ObservationSource.PREFLIGHT:
-                # One sighting per session keeps the exit's last-seen and its
-                # hand-outs honest when preflight is the only thing that sees
-                # the slot; a health check's repeat every minute records nothing.
                 self._geo_service.record_sighting(
                     proxy,
                     ip,
                     source=source,
-                    policy=self.policy_for(proxy.connector_id),
+                    policy=self.policy_for(project),
                     endpoint=endpoint,
-                    project_id=self.project_id_for(proxy.connector_id),
+                    project_id=project.id if project else None,
                     session_id=session_id,
                     candidates=candidates,
+                    observed_at=observed_at,
+                    instance_id=instance_id,
                 )
             return proxy
-        project_id = self.project_id_for(proxy.connector_id)
+        self._apply(
+            store, proxy, project, ip, source=source, endpoint=endpoint, session_id=session_id,
+            candidates=candidates, observed_at=observed_at, instance_id=instance_id, always_save=False,
+        )
+        return proxy
+
+    def _apply(
+        self,
+        store: ProxyStore,
+        proxy: Proxy,
+        project: Project | None,
+        ip: str,
+        *,
+        source: ObservationSource,
+        endpoint: LocationTarget | None,
+        session_id: str | None,
+        candidates: Sequence[LocationCandidate] | None,
+        observed_at: datetime,
+        instance_id: str | None,
+        always_save: bool,
+    ) -> None:
+        """Judge and record one sighting, then save the row when it changed, must rotate, or ``always_save``.
+
+        A move of the exit drops the cached preflight verdict, unless preflight saw it and has just cached the new one.
+        """
+        previous = proxy.metadata.get(META_DISCOVERED_IP)
         _, changed = self._geo_service.apply_observation(
             proxy,
             ip,
-            policy=self.policy_for(proxy.connector_id),
             source=source,
+            policy=self.policy_for(project),
             endpoint=endpoint,
-            project_id=project_id,
+            project_id=project.id if project else None,
             session_id=session_id,
             candidates=candidates,
+            observed_at=observed_at,
+            instance_id=instance_id,
         )
-        if await self._rotate_if_refused(proxy, deferred=source == ObservationSource.PREFLIGHT):
-            return proxy
-        if changed:
-            # On the request path (preflight) the row is judged here; its persistence is the pool's to schedule.
-            await self._proxy_store.update_proxy(proxy, deferred=source == ObservationSource.PREFLIGHT)
-        if isinstance(previous, str) and previous and previous != ip:
-            # The exit moved: whatever preflight concluded about the old one no longer holds.
-            await event_bus.publish(
-                exit_ip_changed, self, proxy_id=proxy.id, project_id=project_id, old_ip=previous, new_ip=ip
-            )
-        return proxy
+        rotate = self.is_refused_slot(proxy, project)
+        if not (changed or rotate or always_save):
+            return
+        moved = isinstance(previous, str) and bool(previous) and previous != ip
+        store.save(
+            proxy, checked_at=observed_at, rotate=rotate, drop_verdict=moved and source != ObservationSource.PREFLIGHT
+        )
+        if rotate:
+            self._log_rotation(proxy, project)
 
-    async def _rotate_if_refused(self, proxy: Proxy, *, deferred: bool = False) -> bool:
-        """Replace a pooled session slot whose claim was just contradicted, when its project refuses contradictions.
-
-        Such a project will not route to the slot, and nothing else would
-        ever move it: the vendor keeps the session where it is and the health
-        check keeps confirming the same exit. Removing the row makes the
-        provider sync provision a fresh session in its place. A project that
-        routes contradictions on the evidence or the vendor keeps the slot.
-        Fixed exits are left alone (the port refresh already drops an exit
-        that left its countries, and a static row is the operator's), and an
-        open verdict is not a contradiction: rotating on missing evidence
-        would churn a pool the databases do not cover, so such a slot waits,
-        ineligible where unknown exits are refused, for a sighting that
-        settles it.
-        """
-        if self._proxy_store is None or is_dynamic_gateway(proxy) or not proxy.metadata.get(META_SESSION_ID):
-            return False
-        project = self._project_of(proxy.connector_id)
-        if project is None:
-            return False
-        contradicted = proxy.metadata.get(META_LOCATION_VERDICT) == LocationVerdict.CONTRADICTED
-        if not contradicted or project.location_contradicted != ContradictedAction.REFUSE:
-            # A slot the declared-country rule skips is kept too: replacing it
-            # would let a database that mis-places the vendor's range spend a
-            # fresh session on every sighting, forever.
-            return False
+    @staticmethod
+    def _log_rotation(proxy: Proxy, project: Project | None) -> None:
         logger.info(
             "Replacing contradicted vendor session",
             proxy_id=proxy.id,
-            project_id=project.id,
+            project_id=project.id if project else None,
             claimed=proxy.metadata.get(META_VENDOR_COUNTRY),
             resolved=proxy.country,
         )
-        await self._proxy_store.remove_proxy(proxy.id, deferred=deferred)
-        return True
 
-    async def _on_exit_ip_observed(
-        self,
-        sender: object,
-        proxy_id: str,
-        ip: str,
-        source: str,
-        endpoint_country: str | None = None,
-        endpoint_state: str | None = None,
-        endpoint_city: str | None = None,
-        session_id: str | None = None,
-        candidates: Sequence[LocationCandidate] | None = None,
-        **_: object,
-    ) -> None:
-        try:
-            kind = ObservationSource(source)
-        except ValueError:
-            kind = ObservationSource.DISCOVERY
-        endpoint = LocationTarget.reported(endpoint_country, endpoint_state, endpoint_city)
-        try:
-            await self.observe(proxy_id, ip, source=kind, endpoint=endpoint, session_id=session_id, candidates=candidates)
-        except Exception as exc:
-            logger.warning("Attribution failed", proxy_id=proxy_id, ip=ip, error=str(exc))
+    # --- lookups through the proxy -------------------------------------------------
 
-    # --- static proxies: one request through them ----------------------------------
-
-    def wants_lookup(self, proxy: Proxy) -> bool:
-        """Static-connector proxies with no country yet get a lookup; everything else is left alone."""
-        if not self.enabled or self._proxy_store is None:
-            return False
-        connector = self._proxy_store.get_connector(proxy.connector_id)
-        if connector is None or connector.credential_type != CredentialType.STATIC_PROXY_PROVIDER.value:
-            return False
-        return proxy.country is None
-
-    async def _on_proxy_added(self, sender: object, proxy_id: str, connector_id: str, **_: object) -> None:
-        """proxy_added handler: schedule a lookup without holding up the publisher."""
-        if not self.enabled or self._proxy_store is None:
-            return
-        proxy = self._proxy_store.get_proxy(proxy_id)
-        if proxy is None or not self.wants_lookup(proxy):
-            return
-        spawn_held(self._tasks, self._enrich_guarded(proxy_id), name="locate-proxy", proxy_id=proxy_id)
-
-    async def _enrich_guarded(self, proxy_id: str) -> None:
-        async with self._semaphore:
-            try:
-                await self.enrich(proxy_id)
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                logger.warning("Exit location lookup errored", proxy_id=proxy_id, error=str(exc))
+    def wants_lookup(self, store: ProxyStore, proxy: Proxy) -> bool:
+        """Whether a proxy just added gets a lookup: one that needs it (:meth:`needs_exit_lookup`), lookups on."""
+        return self.lookup_enabled and self.needs_exit_lookup(proxy, store.get_connector(proxy.connector_id))
 
     async def locate(self, proxy: Proxy) -> tuple[str | None, LocationTarget | None]:
         """``(exit_ip, place the echo reported)`` for a proxy with resolved credentials; ip is None on failure."""
@@ -326,110 +302,73 @@ class ProxyAttributor:
         )
 
     async def enrich(
-        self, proxy_id: str, *, source: ObservationSource = ObservationSource.GEO_LOOKUP
+        self, store: ProxyStore, proxy_id: str, *, source: ObservationSource = ObservationSource.GEO_LOOKUP
     ) -> Proxy | None:
-        """Request through the proxy to learn its exit, then attribute and persist it.
+        """Request through a proxy of ``store``'s batch to learn its exit, then attribute it and save the row, changed or not.
 
-        Returns None when the proxy is gone or the request failed. A manually
-        set country is never overwritten by an empty result.
+        The judged row, a rotated slot's too (Detect shows it); None when the proxy is not in the batch or the request failed.
         """
-        if self._proxy_store is None:
-            return None
-        proxy = self._proxy_store.get_proxy(proxy_id)
+        proxy = store.get_proxy(proxy_id)
         if proxy is None:
             return None
-        ip, endpoint = await self.locate(self._proxy_store.resolve_proxy_credentials(proxy))
+        ip, endpoint = await self.locate(proxy)
         if ip is None:
             logger.info("Exit location lookup failed", proxy_id=proxy_id, host=proxy.host)
             return None
-        self._geo_service.apply_observation(
-            proxy,
-            ip,
-            policy=self.policy_for(proxy.connector_id),
-            source=source,
-            endpoint=endpoint,
-            project_id=self.project_id_for(proxy.connector_id),
+        self._apply(
+            store, proxy, self.project_of(store, proxy.connector_id), ip, source=source, endpoint=endpoint,
+            session_id=None, candidates=None, observed_at=utc_now(), instance_id=None, always_save=True,
         )
-        if await self._rotate_if_refused(proxy):
-            # The judged row is returned so the caller can show what was found;
-            # the slot itself is gone and the sync provisions a fresh one.
-            return proxy
-        await self._proxy_store.update_proxy(proxy)
         logger.info("Recorded exit location", proxy_id=proxy_id, ip=ip, country=proxy.country)
         return proxy
 
-    # --- preflight mismatches --------------------------------------------------------
+    # --- re-attribution ------------------------------------------------------------
 
-    async def _on_exit_location_mismatch(
-        self,
-        sender: object,
-        proxy_id: str,
-        expected: str,
-        observed: str | None = None,
-        ip: str | None = None,
-        **_: object,
-    ) -> None:
-        """A request was refused for its exit's location; nothing is done to the proxy here.
-
-        What the exit does to a pooled slot was already decided by the
-        sighting preflight published for it (``observe``): the row carries the
-        new exit and verdict, and under a refusing project the slot is gone. A
-        dynamic-sessions gateway stays, since the misplaced session was this
-        request's alone and the next request mints another.
-        """
-        logger.debug("Request refused for its exit location", proxy_id=proxy_id, expected=expected, observed=observed, ip=ip)
-
-    # --- offline re-attribution --------------------------------------------------------
-
-    async def reattribute_all(
-        self, connector_id: str | None = None, project_id: str | None = None, *, inheriting: Sequence[str] = ()
+    async def reattribute(
+        self, pages: ProxyPages, *, connector_id: str | None = None, project_id: str | None = None
     ) -> tuple[int, int]:
-        """Re-run attribution for every proxy with a known exit IP, without any request.
+        """Re-judge the exit of every proxy of one connector, one project or all, page by page; how many scanned and changed.
 
-        Used after a database is added, refreshed or removed, and for one
-        project after its location decisions, conflict rule or city radius
-        changed, since a row's routing value and verdict were written under
-        the settings of the time. ``inheriting`` names the project fields
-        (``location_conflict_rule``, ``location_city_radius_km``) whose
-        install default changed: a project that overrides every one of them
-        is skipped. Returns how many proxies were re-attributed and how many
-        of them changed as a result. Each records a judgement for its exit,
-        changed or not; none records a sighting, since nothing was observed.
+        Nothing is requested through the proxies, and each page is written against the stamps it was read with.
         """
-        if self._proxy_store is None:
-            return 0, 0
-        async with self._reattribute_lock:
-            return await self._reattribute(connector_id, project_id, tuple(inheriting))
+        scanned = changed = 0
+        after: str | None = None
+        while True:
+            page = await pages.load_page(after, REATTRIBUTE_PAGE_SIZE, connector_id=connector_id, project_id=project_id)
+            if not page:
+                break
+            page_scanned, page_changed = self._rejudge(pages, page)
+            await pages.flush()
+            scanned += page_scanned
+            changed += page_changed
+            if len(page) < REATTRIBUTE_PAGE_SIZE:
+                break
+            after = page[-1].id
+        logger.info(
+            "Proxies re-attributed", scanned=scanned, changed=changed, connector_id=connector_id, project_id=project_id
+        )
+        return scanned, changed
 
-    async def _reattribute(self, connector_id: str | None, project_id: str | None, inheriting: tuple[str, ...]) -> tuple[int, int]:
-        """One pass; ``reattribute_all`` holds the lock so passes never interleave on the same rows."""
-        assert self._proxy_store is not None
-        changed: list[Proxy] = []
-        scanned = 0
-        for proxy in self._proxy_store.proxies:
-            if connector_id and proxy.connector_id != connector_id:
-                continue
-            if project_id and self.project_id_for(proxy.connector_id) != project_id:
-                continue
-            if inheriting:
-                owner = self._project_of(proxy.connector_id)
-                if owner is not None and all(getattr(owner, field) is not None for field in inheriting):
-                    continue  # its own settings did not change
+    def _rejudge(self, store: ProxyStore, page: Sequence[Proxy]) -> tuple[int, int]:
+        """Re-judge one page; returns how many rows were scanned and how many changed and stay."""
+        scanned = changed = 0
+        for proxy in page:
             ip = proxy.metadata.get(META_DISCOVERED_IP) or proxy.display_host
             if not isinstance(ip, str) or not is_ip(ip):
                 continue
             scanned += 1
+            project = self.project_of(store, proxy.connector_id)
+            # Read before judging: a re-judgement keeps the stamp, and its write
+            # is refused when a sighting moved the row on since this page was read.
+            stamp = self.checked_at(proxy)
             _, did_change = self._geo_service.rejudge(
-                proxy,
-                ip,
-                policy=self.policy_for(proxy.connector_id),
-                endpoint=GeoService.endpoint_place_of(proxy),
+                proxy, ip, policy=self.policy_for(project), endpoint=GeoService.endpoint_place_of(proxy)
             )
-            if await self._rotate_if_refused(proxy, deferred=True):
-                continue  # out of routing now; the storage cleanup does not hold the pass
-            if did_change:
-                changed.append(proxy)
-        if changed:
-            await self._proxy_store.update_proxies(changed)
-        logger.info("Proxies re-attributed", changed=len(changed), scanned=scanned, connector_id=connector_id)
-        return scanned, len(changed)
+            rotate = self.is_refused_slot(proxy, project)
+            if did_change or rotate:
+                store.save(proxy, checked_at=stamp, rotate=rotate)
+            if rotate:
+                self._log_rotation(proxy, project)
+            elif did_change:
+                changed += 1
+        return scanned, changed

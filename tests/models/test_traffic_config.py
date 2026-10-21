@@ -8,7 +8,6 @@ from datetime import datetime
 import pytest
 from pydantic import ValidationError
 
-from api.core.traffic_limiter import period_bounds, usage_window
 from api.models.connector import (
     BYTES_PER_GB,
     Connector,
@@ -72,6 +71,30 @@ class TestTrafficConfig:
             TrafficConfig(price_per_gb=-1)
 
 
+class TestBlocksAlike:
+    """What a traffic decision depends on: an edit of anything else needs none."""
+
+    FIELDS: dict[str, object] = {
+        "limit_bytes": 1000, "action": "block", "period": "month", "reset_day": 2,
+        "warn_percent": 70, "limit_status": 509, "price_per_gb": 1.5, "currency": "EUR",
+    }
+
+    @pytest.mark.parametrize(
+        "change",
+        [{"limit_bytes": 2000}, {"limit_bytes": None}, {"action": "interrupt"}, {"period": "week"}, {"reset_day": 3}],
+    )
+    def test_the_limit_its_action_the_period_and_the_reset_day_decide_the_block(self, change: dict[str, object]) -> None:
+        before, after = TrafficConfig(**self.FIELDS), TrafficConfig(**{**self.FIELDS, **change})
+        assert not before.blocks_alike(after) and not after.blocks_alike(before)
+
+    @pytest.mark.parametrize(
+        "change", [{"warn_percent": 90}, {"limit_status": 429}, {"price_per_gb": None}, {"currency": "GBP"}]
+    )
+    def test_the_warning_line_the_status_and_the_price_decide_no_block(self, change: dict[str, object]) -> None:
+        before, after = TrafficConfig(**self.FIELDS), TrafficConfig(**{**self.FIELDS, **change})
+        assert before.blocks_alike(after) and after.blocks_alike(before)
+
+
 class TestValidateTrafficConfig:
     def test_empty_stays_empty(self) -> None:
         assert validate_traffic_config({}) == {}
@@ -115,49 +138,49 @@ class TestParsedTrafficConfig:
 
 class TestPeriodBounds:
     def test_day(self) -> None:
-        start, end = period_bounds(TrafficConfig(period="day"), datetime(2026, 9, 26, 15, 30))
+        start, end = TrafficConfig(period="day").period_bounds(datetime(2026, 9, 26, 15, 30))
         assert (start, end) == (datetime(2026, 9, 26), datetime(2026, 9, 27))
 
     def test_week_starts_on_reset_weekday(self) -> None:
         # 2026-09-26 is a Saturday; weeks reset on Monday by default.
-        start, end = period_bounds(TrafficConfig(period="week"), datetime(2026, 9, 26, 15, 30))
+        start, end = TrafficConfig(period="week").period_bounds(datetime(2026, 9, 26, 15, 30))
         assert (start, end) == (datetime(2026, 9, 21), datetime(2026, 9, 28))
         # Reset on Saturday: today is the first day.
-        start, end = period_bounds(TrafficConfig(period="week", reset_day=6), datetime(2026, 9, 26, 15, 30))
+        start, end = TrafficConfig(period="week", reset_day=6).period_bounds(datetime(2026, 9, 26, 15, 30))
         assert (start, end) == (datetime(2026, 9, 26), datetime(2026, 10, 3))
         # Reset on Sunday: the period started six days ago.
-        start, end = period_bounds(TrafficConfig(period="week", reset_day=7), datetime(2026, 9, 26))
+        start, end = TrafficConfig(period="week", reset_day=7).period_bounds(datetime(2026, 9, 26))
         assert (start, end) == (datetime(2026, 9, 20), datetime(2026, 9, 27))
 
     def test_month_from_reset_day(self) -> None:
         config = TrafficConfig(period="month", reset_day=15)
-        assert period_bounds(config, datetime(2026, 9, 26)) == (datetime(2026, 9, 15), datetime(2026, 10, 15))
-        assert period_bounds(config, datetime(2026, 9, 3)) == (datetime(2026, 8, 15), datetime(2026, 9, 15))
-        assert period_bounds(config, datetime(2026, 9, 15)) == (datetime(2026, 9, 15), datetime(2026, 10, 15))
+        assert config.period_bounds(datetime(2026, 9, 26)) == (datetime(2026, 9, 15), datetime(2026, 10, 15))
+        assert config.period_bounds(datetime(2026, 9, 3)) == (datetime(2026, 8, 15), datetime(2026, 9, 15))
+        assert config.period_bounds(datetime(2026, 9, 15)) == (datetime(2026, 9, 15), datetime(2026, 10, 15))
 
     def test_month_across_year_end(self) -> None:
         config = TrafficConfig(period="month", reset_day=1)
-        assert period_bounds(config, datetime(2026, 12, 31)) == (datetime(2026, 12, 1), datetime(2027, 1, 1))
-        assert period_bounds(config, datetime(2027, 1, 1)) == (datetime(2027, 1, 1), datetime(2027, 2, 1))
+        assert config.period_bounds(datetime(2026, 12, 31)) == (datetime(2026, 12, 1), datetime(2027, 1, 1))
+        assert config.period_bounds(datetime(2027, 1, 1)) == (datetime(2027, 1, 1), datetime(2027, 2, 1))
 
     def test_month_reset_day_28_survives_february(self) -> None:
         config = TrafficConfig(period="month", reset_day=28)
-        assert period_bounds(config, datetime(2027, 2, 10)) == (datetime(2027, 1, 28), datetime(2027, 2, 28))
-        assert period_bounds(config, datetime(2027, 2, 28)) == (datetime(2027, 2, 28), datetime(2027, 3, 28))
+        assert config.period_bounds(datetime(2027, 2, 10)) == (datetime(2027, 1, 28), datetime(2027, 2, 28))
+        assert config.period_bounds(datetime(2027, 2, 28)) == (datetime(2027, 2, 28), datetime(2027, 3, 28))
 
 
 class TestUsageWindow:
     def test_reset_inside_the_period_moves_the_start(self) -> None:
         config = TrafficConfig(period="month")
         reset_at = datetime(2026, 9, 10, 12)
-        assert usage_window(config, datetime(2026, 9, 26), reset_at) == (reset_at, datetime(2026, 10, 1))
+        assert config.usage_window(datetime(2026, 9, 26), reset_at) == (reset_at, datetime(2026, 10, 1))
 
     def test_reset_before_the_period_is_ignored(self) -> None:
         config = TrafficConfig(period="month")
-        assert usage_window(config, datetime(2026, 9, 26), datetime(2026, 8, 10)) == (
+        assert config.usage_window(datetime(2026, 9, 26), datetime(2026, 8, 10)) == (
             datetime(2026, 9, 1), datetime(2026, 10, 1)
         )
 
     def test_no_reset(self) -> None:
         config = TrafficConfig(period="day")
-        assert usage_window(config, datetime(2026, 9, 26, 5), None) == (datetime(2026, 9, 26), datetime(2026, 9, 27))
+        assert config.usage_window(datetime(2026, 9, 26, 5), None) == (datetime(2026, 9, 26), datetime(2026, 9, 27))

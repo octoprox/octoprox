@@ -37,7 +37,6 @@ Backend (Python):
 - httpx (BSD License) - https://github.com/encode/httpx
 - httpx-socks (Apache 2.0 License) - https://github.com/romis2012/httpx-socks
 - python-socks (Apache 2.0 License) - https://github.com/romis2012/python-socks
-- aiohttp (Apache 2.0 License) - https://github.com/aio-libs/aiohttp
 - SQLAlchemy (MIT License) - https://github.com/sqlalchemy/sqlalchemy
 - asyncpg (Apache 2.0 License) - https://github.com/MagicStack/asyncpg
 - Alembic (MIT License) - https://github.com/sqlalchemy/alembic

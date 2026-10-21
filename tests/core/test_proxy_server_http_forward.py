@@ -15,21 +15,25 @@ treatment so the client never sees the vendor's connection management.
 
 import asyncio
 import base64
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterator
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-import api.core.proxy_server
 from api.core.proxy_server import (
     HOP_BY_HOP_REQUEST_HEADERS,
     HOP_BY_HOP_RESPONSE_HEADERS,
     ProxyServer,
 )
 from api.core.signals import request_completed
-from api.core.traffic_limiter import TrafficMeter
 from api.models.location import LocationTarget
+from api.models.project import Project
 from api.models.proxy import Proxy, ProxyProtocol
+from api.routing.router import Router
+from tests.gateway.doubles import QuietMetering
+
+PROJECT = Project(id="project-1", name="Scraping", username="ivan", password="ivan")
 
 CLIENT_TOKEN = base64.b64encode(b"ivan-sessid-abcd-cc-us:ivan").decode()
 UPSTREAM_TOKEN = base64.b64encode(b"vendor-user:vendor-pass").decode()
@@ -114,26 +118,11 @@ class _ClientWriter:
         return self.buffer.split(b"\r\n\r\n", 1)[1]
 
 
-class _NoLimit:
-    """A limiter that never interrupts and swallows progress, for a metered server."""
-
-    def is_interrupted(self, connector_id: str) -> bool:
-        return False
-
-    def limit_status_for(self, connector_id: str) -> int:
-        return 509
-
-    def progress(self, *args: object) -> None:
-        pass
-
-
 def _server(proxy: Proxy) -> ProxyServer:
-    manager = MagicMock()
-    manager.get_project.return_value = None  # skips exit verification
-    manager.traffic_meter = lambda p, project_id, **kwargs: TrafficMeter(  # type: ignore[arg-type]
-        _NoLimit(), p.id, project_id, p.connector_id, target_host=kwargs.get("target_host")
-    )
-    server = ProxyServer(manager)
+    """A listener that routes every request to ``proxy``, with no exit verifier, metering without Redis."""
+    router = MagicMock(spec=Router)
+    metering = QuietMetering()
+    server = ProxyServer(router, metering, host="127.0.0.1", port=0, timeout=30.0)
     server._get_upstream_proxy = AsyncMock(return_value=proxy)  # type: ignore[method-assign]
     return server
 
@@ -165,17 +154,24 @@ async def _forward(
         target,
         "HTTP/1.1",
         dict(CLIENT_HEADERS if headers is None else headers),
-        project_id="project-1",
+        project=PROJECT,
         session_id=session_id,
         location=LocationTarget(country="US"),
     )
     return client_writer
 
 
-@pytest.fixture(autouse=True)
-def quiet_event_bus(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Keep request_completed from reaching receivers other tests left subscribed."""
-    monkeypatch.setattr("api.core.proxy_server.event_bus.publish", AsyncMock())
+@pytest.fixture
+def completed() -> Iterator[list[dict[str, Any]]]:
+    """Every ``request_completed`` the listener publishes while the test runs."""
+    calls: list[dict[str, Any]] = []
+
+    async def receive(_sender: object, **kwargs: Any) -> None:
+        calls.append(kwargs)
+
+    request_completed.connect(receive)
+    yield calls
+    request_completed.disconnect(receive)
 
 
 @pytest.fixture
@@ -218,16 +214,16 @@ class TestEndToEndHeaders:
 
 
 class TestCompletionEvent:
-    async def test_completion_names_the_destination_host(self, upstream: _Capture) -> None:
+    async def test_completion_names_the_destination_host(
+        self, upstream: _Capture, completed: list[dict[str, Any]]
+    ) -> None:
         # The host of the URL is what the request is counted under on the
         # Hosts page, and what the meter charges the bytes to as they flow.
         server = _server(_http_proxy(upstream.port))
         await _forward(server, "http://ip-api.com:8080/json")
-        publish = api.core.proxy_server.event_bus.publish
-        completed = [c for c in publish.await_args_list if c.args[0] is request_completed]  # type: ignore[attr-defined]
         assert len(completed) == 1
-        assert completed[0].kwargs["target_host"] == "ip-api.com"
-        assert completed[0].kwargs["project_id"] == "project-1"
+        assert completed[0]["target_host"] == "ip-api.com"
+        assert completed[0]["project_id"] == "project-1"
         assert server._get_upstream_proxy.await_args.kwargs["target_host"] == "ip-api.com"  # type: ignore[attr-defined]
 
 

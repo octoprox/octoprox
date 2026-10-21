@@ -20,7 +20,7 @@ from typing import Any
 import httpcore
 import httpx
 import structlog
-from httpx_socks import AsyncProxyTransport  # type: ignore[import-untyped]
+from httpx_socks import AsyncProxyTransport
 
 from api.models.location import LocationTarget
 from api.models.proxy import ProxyProtocol

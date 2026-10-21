@@ -46,7 +46,7 @@ def descriptor_from_dict(data: dict[str, Any]) -> ProviderDescriptor:
 def descriptor_to_yaml(descriptor: ProviderDescriptor) -> str:
     data = descriptor.model_dump(mode="json", exclude_none=True, exclude_defaults=True, by_alias=True)
     # Keep the identity fields first so exports read naturally.
-    ordered = {k: data.pop(k) for k in ("id", "name", "description", "version") if k in data}
+    ordered: dict[str, Any] = {k: data.pop(k) for k in ("id", "name", "description", "version") if k in data}
     ordered.update(data)
     return str(yaml.safe_dump(ordered, sort_keys=False, allow_unicode=True, width=100))
 

@@ -14,23 +14,27 @@ which one they are looking at.
 
 ## What is not metered today
 
-Only the proxy server's request path counts bytes: `_relay` and the plain
-HTTP path in `api/core/proxy_server.py` get a `TrafficMeter` from
-`ProxyManager.traffic_meter` and publish `request_completed`. Each of these
-opens its own httpx client to the upstream instead:
+Only the gateway's request path counts bytes: `_relay` and the plain HTTP
+path in `api/core/proxy_server.py` get a `TrafficMeter` from the gateway's
+`RequestMetering.meter` (`api/gateway/metering.py`) and publish
+`request_completed`. Each of these opens its own httpx client to the
+upstream instead:
 
-- Health checks, `_check_proxy` in `api/core/health_checker.py`. One per
+- Health checks, the health job in `api/jobs/health.py`, on workers. One per
   proxy per `health_check_interval` (60s in production), unhealthy rows
   included. Dynamic gateways are skipped.
-- Preflight, `PreflightChecker.check` in `api/geo/preflight.py` through
-  `IpDiscoverer.discover_with_place` in `api/providers/sdk/sources.py`. On
+- Preflight, `PreflightChecker.check` in `api/geo/preflight.py` (on
+  gateways) through `IpDiscoverer.discover_with_place` in
+  `api/providers/sdk/sources.py`. On
   a dynamic gateway, a rotating request with a location the project's rules
   can refuse is echoed every time, uncached. Each mismatch retry renders a
   new vendor session and echoes again, up to `preflight_max_attempts` (3),
   see `api/geo/verifier.py`. A refused request leaves only echoes at the
   vendor and is not counted as a request by octoprox.
-- Attribution echoes, `api/geo/attributor.py`, and strategy discovery,
-  `api/providers/sdk/strategies.py`, through the same discoverer.
+- Attribution echoes, `api/geo/attributor.py` (the exit lookup job on
+  workers, Detect on the api), and strategy discovery,
+  `api/providers/sdk/strategies.py` (sync jobs on workers), through the same
+  discoverer.
 
 Measured cost of one echo (Oct 2026): the TLS handshake to
 `octoprox.adthena.com` reads 5.8 KB and writes 1.6 KB, and `/echo` adds
@@ -52,8 +56,10 @@ Before building, check that echoes account for the whole difference:
    window or timezone mismatch.
 2. The vendor's breakdown by target domain, if it has one: the echo host's
    share (whatever `echo_url` is set to) is probe traffic.
-3. `preflight_checks` on `GET /api/geo/status` against requests per pod.
-   It is in memory per pod since that pod started, not a cluster total.
+3. `preflight_checks` on `GET /api/v1/geo/status` (summed over the live
+   gateways, each since it started; per gateway under `gateways`) or
+   `octoprox_gateway_preflight_checks_total` on each gateway's `/metrics`,
+   against `octoprox_gateway_requests_total`.
 
 ## Meter probe traffic
 
@@ -71,7 +77,11 @@ Before building, check that echoes account for the whole difference:
   `project_metrics` (requests, bytes sent, bytes received), or a
   `probe_metrics` table keyed by connector, project and purpose. Same
   pipeline as today: pending deltas, `flush_metric_deltas` in
-  `api/db/redis.py`, `MetricsFlusher`, compactor, backup.
+  `api/db/redis.py`, the controller's `MetricsFlusher`, compactor, backup.
+  Probes run on workers (health checks, exit lookups, sync discovery) and
+  the api (Detect) as well as gateways (preflight), so each of those
+  processes needs pending deltas and a flush loop like the gateway's
+  `RequestMetering`.
 - The Hosts page stays client traffic only: probes all go to the echo host
   and would crowd out real destinations.
 
@@ -91,8 +101,9 @@ Before building, check that echoes account for the whole difference:
 
 Open decision: should a connector's traffic limit count Total or client
 traffic? Total matches what the vendor charges, so it is the suggested
-default. If chosen, probe bytes must also reach `TrafficLimiter.record` in
-`api/core/traffic_limiter.py`.
+default. If chosen, probe bytes must reach the connector's Redis window and
+`connector_metrics`, which the controller's `TrafficDecider`
+(`api/controller/traffic.py`) and the api's usage view already read.
 
 ## TLS interception accounting
 

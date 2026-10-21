@@ -6,17 +6,18 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { KeyRound, Router } from 'lucide-react'
 import {
   fetchWireGuardSettings, rotateWireGuardServerKey, updateWireGuardSettings,
-  WireGuardServerSettings, WireGuardServerSettingsDoc, WireGuardStatus,
+  TunnelStatus, WireGuardServerSettings, WireGuardServerSettingsDoc,
 } from '../../api/client'
 import { useToast } from '../../contexts/ToastContext'
 import { Page } from '../../components/layout/Page'
+import { TunnelGatewaysCard, TunnelStateBadge, relayedLabel } from '../../components/TunnelGateways'
 import { formatDateTime } from '../../utils/format'
-import { Alert, Badge, Button, Card, CardHeader, ConfirmDialog, InfoTip, Input, Label } from '../../components/ui'
+import { Alert, Button, Card, CardHeader, ConfirmDialog, InfoTip, Input, Label } from '../../components/ui'
 
 /**
  * Admin page for the WireGuard endpoint: the install's identity and what every
- * device config says about reaching it, plus what the answering instance is
- * doing about the tunnel.
+ * device config says about reaching it, plus the tunnel on every gateway
+ * terminating it, from the heartbeats the gateways publish.
  */
 export default function WireGuardSection() {
   const queryClient = useQueryClient()
@@ -39,7 +40,7 @@ export default function WireGuardSection() {
     <Page
       title="WireGuard"
       subtitle="Devices without proxy support join a project's pool through a WireGuard tunnel terminated by Octoprox."
-      toolbar={data && <StateBadge status={data.status} />}
+      toolbar={data && <TunnelStateBadge status={data.status} />}
     >
       {isLoading || !data ? (
         <div className="text-sm text-fg-muted py-10 text-center">Loading…</div>
@@ -52,7 +53,7 @@ export default function WireGuardSection() {
                 title="Server identity"
                 action={<Button size="sm" variant="outline" onClick={() => setConfirmRotate(true)}><KeyRound className="w-3.5 h-3.5" /> Rotate key</Button>}
               />
-              <p className="text-sm text-fg-muted mt-1">One key pair for the whole install, shared by every instance. Devices pin this public key in their config.</p>
+              <p className="text-sm text-fg-muted mt-1">One key pair for the whole install, shared by every gateway. Devices pin this public key in their config.</p>
               <div className="mt-3 font-mono text-xs bg-surface-raised rounded-lg p-3 break-all select-all">{data.public_key}</div>
               <div className="text-xs text-fg-subtle mt-2">Last changed {formatDateTime(data.updated_at)}</div>
             </Card>
@@ -63,7 +64,7 @@ export default function WireGuardSection() {
       {confirmRotate && (
         <ConfirmDialog
           title="Rotate the server key?"
-          message="A new key pair replaces the current one on every instance. Every device config in every project stops working until it is downloaded or scanned again."
+          message="A new key pair replaces the current one on every gateway within a few seconds. Every device config in every project stops working until it is downloaded or scanned again."
           confirmLabel="Rotate key"
           onCancel={() => setConfirmRotate(false)}
           onConfirm={() => rotate.mutate()}
@@ -72,14 +73,6 @@ export default function WireGuardSection() {
       )}
     </Page>
   )
-}
-
-function StateBadge({ status }: { status: WireGuardStatus }) {
-  if (!status.enabled) return <Badge color="gray">Not terminating here</Badge>
-  const colors: Record<WireGuardStatus['state'], 'green' | 'yellow' | 'red' | 'gray'> = {
-    running: 'green', starting: 'yellow', failed: 'red', disabled: 'gray', stopped: 'gray',
-  }
-  return <Badge color={colors[status.state]}>{status.state}</Badge>
 }
 
 function EndpointForm({ settings }: { settings: WireGuardServerSettings }) {
@@ -114,15 +107,15 @@ function EndpointForm({ settings }: { settings: WireGuardServerSettings }) {
       )}
       <form className="mt-4 grid grid-cols-1 @lg:grid-cols-2 gap-4" onSubmit={(e) => { e.preventDefault(); save.mutate() }}>
         <div>
-          <Label htmlFor="wg-host" className="inline-flex items-center gap-1">Public endpoint host <InfoTip>The hostname or IP devices reach this install at over the internet, as written into every device config. Point it at the load balancer in a cluster, or at the instance itself otherwise.</InfoTip></Label>
+          <Label htmlFor="wg-host" className="inline-flex items-center gap-1">Public endpoint host <InfoTip>The hostname or IP devices reach this install at over the internet, as written into every device config. Point it at the load balancer in front of the gateways, or at the gateway's own address when there is only one.</InfoTip></Label>
           <Input id="wg-host" value={doc.endpoint_host} onChange={(e) => setDoc({ ...doc, endpoint_host: e.target.value })} placeholder="vpn.example.com" />
         </div>
         <div>
-          <Label htmlFor="wg-port" className="inline-flex items-center gap-1">UDP port <InfoTip>The port in device configs. Every instance terminating the tunnel listens on it too unless its wireguard.listen_port overrides that (port-mapping NAT).</InfoTip></Label>
+          <Label htmlFor="wg-port" className="inline-flex items-center gap-1">UDP port <InfoTip>The port in device configs. Every gateway terminating the tunnel listens on it too unless its wireguard.listen_port overrides that (port-mapping NAT).</InfoTip></Label>
           <Input id="wg-port" type="number" min={1} max={65535} value={doc.endpoint_port} onChange={(e) => setDoc({ ...doc, endpoint_port: Number(e.target.value) })} />
         </div>
         <div>
-          <Label htmlFor="wg-subnet" className="inline-flex items-center gap-1">Tunnel subnet <InfoTip>Devices get addresses from this network; its first host is the gateway devices use as DNS. It must not overlap the OpenVPN subnet. Changing it needs every device removed first, and a restart of the instances terminating the tunnel.</InfoTip></Label>
+          <Label htmlFor="wg-subnet" className="inline-flex items-center gap-1">Tunnel subnet <InfoTip>Devices get addresses from this network; its first host is the gateway devices use as DNS. It must not overlap the OpenVPN subnet. A new subnet must still hold every device's address, so devices outside it are removed first; the gateways move to it without a restart.</InfoTip></Label>
           <Input id="wg-subnet" value={doc.subnet} onChange={(e) => setDoc({ ...doc, subnet: e.target.value })} placeholder="10.66.0.0/16" className="font-mono text-xs" />
         </div>
         <div>
@@ -142,44 +135,26 @@ function EndpointForm({ settings }: { settings: WireGuardServerSettings }) {
   )
 }
 
-function StatusCard({ status }: { status: WireGuardStatus }) {
+function StatusCard({ status }: { status: TunnelStatus }) {
   return (
-    <Card className="p-5 h-fit">
-      <CardHeader title="This instance" action={<StateBadge status={status} />} />
-      {!status.enabled ? (
-        <p className="text-sm text-fg-muted mt-2">
-          This instance is not terminating the tunnel. Enable it with <span className="font-mono text-fg">OCTOPROX_WIREGUARD_ENABLED=true</span> (or <span className="font-mono text-fg">wireguard.enabled</span> in the config file) on every instance the public endpoint reaches; the bundled cluster compose does so on all replicas. Each needs CAP_NET_ADMIN and the UDP port published.
-        </p>
-      ) : status.state === 'failed' ? (
-        <Alert variant="error" className="text-sm mt-2 break-words">{status.error}</Alert>
-      ) : (
-        <p className="text-sm text-fg-muted mt-2">Tunnel traffic from devices is redirected into this instance's proxy path.</p>
-      )}
-      <dl className="mt-4 grid grid-cols-2 gap-x-4 gap-y-2 text-sm">
-        <Row label="Instance" value={status.instance_id} mono />
-        <Row label="Interface" value={status.interface} mono />
-        <Row label="Backend" value={status.backend ? (status.backend === 'kernel' ? 'kernel module' : 'wireguard-go') : '-'} />
-        <Row label="UDP port" value={status.listen_port ?? '-'} />
-        <Row label="Fake IP range" value={status.fake_ip_range} mono />
-        <Row label="Devices" value={`${status.peers_enabled} enabled of ${status.peers_total}`} />
-        <Row label="Online now" value={status.peers_online} />
-        <Row label="Open tunnels" value={status.active_connections} />
-        <Row label="Routed by address" value={status.connections_by_address} title="Connections of every device, all time, relayed by address because no destination name could be recovered. Each device's own count is on its row." />
-        <Row label="Encrypted DNS" value={status.block_encrypted_dns ? `blocked (${status.encrypted_dns_blocked})` : 'allowed'} title="Encrypted-DNS connections closed so devices keep the tunnel resolver: every device, all time." />
-      </dl>
+    <TunnelGatewaysCard
+      status={status}
+      notRunning={<>
+        No gateway is terminating the tunnel. Enable it with <span className="font-mono text-fg">OCTOPROX_WIREGUARD_ENABLED=true</span> (or <span className="font-mono text-fg">wireguard.enabled</span> in the config file) on the gateways the public endpoint reaches. Each needs CAP_NET_ADMIN and the UDP port published.
+      </>}
+      details={(gateway) => [
+        gateway.interface,
+        gateway.backend ? (gateway.backend === 'kernel' ? 'kernel module' : 'wireguard-go') : null,
+        gateway.listen_port != null ? `UDP ${gateway.listen_port}` : null,
+        relayedLabel(gateway),
+        gateway.fake_ip_range ? `fake IPs ${gateway.fake_ip_range}` : null,
+        gateway.block_encrypted_dns ? null : 'encrypted DNS allowed',
+      ]}
+    >
       <div className="mt-4 flex items-start gap-2 text-xs text-fg-muted">
         <Router className="w-4 h-4 flex-none mt-0.5" />
         <span>Devices are added per project under Devices, picking WireGuard as the tunnel. Each gets a config and a QR code.</span>
       </div>
-    </Card>
-  )
-}
-
-function Row({ label, value, mono, title }: { label: string; value: string | number; mono?: boolean; title?: string }) {
-  return (
-    <>
-      <dt className="text-fg-muted" title={title}>{label}</dt>
-      <dd className={mono ? 'font-mono text-xs truncate text-right' : 'text-right tabular-nums'} title={title ?? String(value)}>{value}</dd>
-    </>
+    </TunnelGatewaysCard>
   )
 }

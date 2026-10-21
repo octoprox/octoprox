@@ -3,14 +3,16 @@
 
 """Connector model definitions."""
 
-from datetime import datetime
-from enum import Enum
+import math
+from datetime import datetime, timedelta
+from enum import StrEnum
 from typing import Any, Literal
 from uuid import uuid4
 
 from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
 
 from api.core import utc_now
+from api.core.demand_tracker import DemandLevel
 from api.models.cloud_options import (
     AWS_INSTANCE_TYPES,
     AWS_REGIONS,
@@ -33,6 +35,9 @@ from api.models.cloud_options import (
 )
 from api.models.credential import CredentialType
 from api.models.location import normalize_country_list
+
+# Ceiling of a cloud connector's backoff after cloud errors, in minutes: 2^errors minutes up to this.
+MAX_ERROR_BACKOFF_MINUTES = 30
 
 # --- Typed Config Models for Validation ---
 
@@ -67,12 +72,25 @@ class CloudConnectorConfig(BaseModel):
     def _normalize_countries(cls, value: Any) -> list[str]:
         return normalize_country_list(value)
 
+    @property
+    def max_steps(self) -> tuple[int, int]:
+        """The most instances one scaling action adds and retires: a third and a sixth of the range, at least one."""
+        pool_range = self.max_proxies - self.min_proxies
+        return max(1, math.ceil(pool_range / 3)), max(1, math.ceil(pool_range / 6))
+
+    def target_count(self, level: DemandLevel) -> int:
+        """The pool size a demand level asks for: the minimum, the midpoint or the maximum."""
+        if level == DemandLevel.LOW:
+            return self.min_proxies
+        if level == DemandLevel.MEDIUM:
+            return (self.min_proxies + self.max_proxies) // 2
+        return self.max_proxies
+
 
 class AWSConnectorConfig(CloudConnectorConfig):
-    """Configuration for AWS connectors.
+    """Configuration for AWS connectors: where and what to launch.
 
-    Note: AMI is automatically determined based on region and instance type
-    (architecture). Ubuntu 24.04 LTS is used for all instances.
+    Every instance runs Ubuntu 24.04 LTS, its AMI picked by region and by the instance type's architecture.
     """
     instance_name: str
     region: str
@@ -106,10 +124,9 @@ class AWSConnectorConfig(CloudConnectorConfig):
 
 
 class GCPConnectorConfig(CloudConnectorConfig):
-    """Configuration for GCP connectors.
+    """Configuration for GCP connectors: where and what to create.
 
-    Note: Source image is automatically determined based on machine type
-    (architecture). Ubuntu 24.04 LTS is used for all instances.
+    Every instance runs Ubuntu 24.04 LTS, its source image picked by the machine type's architecture.
     """
     project_id: str
     instance_name: str
@@ -179,23 +196,15 @@ MAX_ROUTING_WEIGHT = 100
 
 
 class RoutingConfig(BaseModel):
-    """Routing configuration: domain filtering and the connector's traffic weight.
-
-    Controls which target domains can be routed through a connector's proxies.
-    Whitelist and blacklist are mutually exclusive (at most one can be non-empty).
-
-    Domain matching is hierarchical: entering 'bing.com' matches 'bing.com'
-    and all subdomains (www.bing.com, images.bing.com, etc.).
-
-    ``weight`` is the connector's relative share of the project's traffic
-    against the other connectors that can serve a request. It is a ratio,
-    not a percentage: weights 1 and 3 split requests 25/75. The share does
-    not depend on how many proxies the connector holds, so a dynamic
-    sessions gateway with one row and a pool with fifty slots split evenly
-    at equal weights.
-    """
+    """Routing configuration: the target domains a connector's proxies serve, and its share of the project's traffic."""
+    # The domains served, or refused; at most one of the two is set. An entry
+    # matches the domain and every subdomain: 'bing.com' matches 'www.bing.com'.
     domain_whitelist: list[str] = Field(default_factory=list)
     domain_blacklist: list[str] = Field(default_factory=list)
+    # The share of the project's traffic against the other connectors that can
+    # serve a request: a ratio, not a percentage (weights 1 and 3 split requests
+    # 25/75), whatever the proxies each holds, so a dynamic sessions gateway of
+    # one row and a pool of fifty slots split evenly at equal weights.
     weight: int = Field(default=DEFAULT_ROUTING_WEIGHT, ge=1, le=MAX_ROUTING_WEIGHT)
 
     @model_validator(mode='after')
@@ -210,22 +219,17 @@ class RoutingConfig(BaseModel):
 
 
 class RateLimitConfig(BaseModel):
-    """Rate limiting configuration for per-proxy request throttling.
+    """Per-proxy rate limiting: a proxy that handles ``max_requests`` within a sliding ``window_seconds`` is quarantined.
 
-    When enabled, tracks the number of requests each proxy handles within
-    a sliding time window. If a proxy exceeds max_requests within
-    window_seconds, it is quarantined for a random duration between
-    quarantine_seconds_min and quarantine_seconds_max.
-
-    When sticky_quarantine is True and the project uses sticky session routing,
-    a quarantined proxy will NOT be replaced by another proxy for the same
-    session. Instead the request is rejected (429), forcing the client to
-    start a new session if it wants a different IP.
+    The quarantine lasts a random time between ``quarantine_seconds_min`` and ``quarantine_seconds_max``.
     """
     max_requests: int = Field(ge=1)
     window_seconds: int = Field(ge=1, le=86400)
     quarantine_seconds_min: int = Field(ge=1, le=86400)
     quarantine_seconds_max: int = Field(ge=1, le=86400)
+    # Under sticky session routing, a quarantined proxy is not replaced for its
+    # session: the request is refused (429), so a client wanting another IP
+    # starts a new session.
     sticky_quarantine: bool = False
 
     @model_validator(mode='after')
@@ -236,22 +240,20 @@ class RateLimitConfig(BaseModel):
         return self
 
 
-class TrafficPeriod(str, Enum):
+class TrafficPeriod(StrEnum):
     """How often a connector's traffic usage starts over."""
     DAY = "day"
     WEEK = "week"
     MONTH = "month"
 
 
-class TrafficLimitAction(str, Enum):
-    """What happens when a connector's traffic reaches its limit.
-
-    ``alert`` keeps routing and only flags the connector. ``block`` stops
-    handing the connector new requests and lets running transfers finish.
-    ``interrupt`` also cuts the transfers that are still running.
-    """
+class TrafficLimitAction(StrEnum):
+    """What happens when a connector's traffic reaches its limit."""
+    # Keeps routing, and only flags the connector.
     ALERT = "alert"
+    # Hands the connector no new requests; running transfers finish.
     BLOCK = "block"
+    # Also cuts the transfers still running.
     INTERRUPT = "interrupt"
 
 
@@ -266,28 +268,21 @@ BYTES_PER_GB = 1_000_000_000
 
 
 class TrafficConfig(BaseModel):
-    """Traffic accounting, limit and pricing for one connector.
-
-    Bytes through the connector's proxies, both directions, are summed over
-    the current period: a calendar day, a week starting on ``reset_day``
-    (1 = Monday) or a month starting on ``reset_day`` of the month. The
-    period matches the vendor's billing cycle; ``reset_day`` is capped at 28
-    so every month has it.
-
-    ``limit_bytes`` is optional: without it the connector is only metered
-    and priced. With it, crossing ``warn_percent`` of the limit flags the
-    connector and reaching the limit applies ``action``. ``limit_status`` is
-    what clients get when no connector is left to serve them.
-
-    ``price_per_gb`` turns usage into spend at display time; it is never
-    stored with the metrics, so past periods are priced at the current rate.
-    """
+    """Traffic accounting, limit and pricing for one connector: the bytes its proxies carry both ways, summed per period."""
+    # None meters and prices only; past ``warn_percent`` of it the connector is
+    # flagged, and at it ``action`` applies.
     limit_bytes: int | None = Field(default=None, ge=1)
+    # The vendor's billing cycle: a calendar day, a week from ``reset_day``
+    # (1 = Monday), or a month from that day of the month, at most the 28th so
+    # every month has it.
     period: TrafficPeriod = TrafficPeriod.MONTH
     reset_day: int = Field(default=1, ge=1, le=28)
     action: TrafficLimitAction = TrafficLimitAction.ALERT
     warn_percent: int = Field(default=80, ge=1, le=100)
+    # What clients get when no connector is left to serve them.
     limit_status: int = DEFAULT_TRAFFIC_LIMIT_STATUS
+    # Turns usage into spend at display time, never stored with the metrics:
+    # past periods are priced at the current rate.
     price_per_gb: float | None = Field(default=None, ge=0)
     currency: str = "USD"
 
@@ -331,6 +326,39 @@ class TrafficConfig(BaseModel):
             return None
         return round(total_bytes / BYTES_PER_GB * self.price_per_gb, 4)
 
+    def blocks_alike(self, other: "TrafficConfig") -> bool:
+        """Whether ``other`` blocks a connector exactly when this config does: the same limit, action, period and reset day.
+
+        The price, the currency, the warning line and the status clients get while blocked decide no block.
+        """
+        mine = (self.limit_bytes, self.action, self.period, self.reset_day)
+        return mine == (other.limit_bytes, other.action, other.period, other.reset_day)
+
+    def period_bounds(self, now: datetime) -> tuple[datetime, datetime]:
+        """Start (inclusive) and end (exclusive) of the period containing ``now``, UTC."""
+        day = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        if self.period == TrafficPeriod.DAY:
+            return day, day + timedelta(days=1)
+        if self.period == TrafficPeriod.WEEK:
+            offset = (day.isoweekday() - self.reset_day) % 7
+            start = day - timedelta(days=offset)
+            return start, start + timedelta(days=7)
+        reset_day = self.reset_day
+        if day.day >= reset_day:
+            start = day.replace(day=reset_day)
+        else:
+            last_of_previous = day.replace(day=1) - timedelta(days=1)
+            start = last_of_previous.replace(day=reset_day)
+        following = (start.replace(day=1) + timedelta(days=32)).replace(day=reset_day)
+        return start, following
+
+    def usage_window(self, now: datetime, reset_at: datetime | None) -> tuple[datetime, datetime]:
+        """The span usage is summed over: the period containing ``now``, cut at a manual reset inside it."""
+        start, end = self.period_bounds(now)
+        if reset_at is not None and start < reset_at < end:
+            start = reset_at
+        return start, end
+
 
 class TrafficUsage(BaseModel):
     """A connector's traffic in the current period, against its limit and price."""
@@ -345,8 +373,12 @@ class TrafficUsage(BaseModel):
     percent: float | None = None
     action: TrafficLimitAction
     status: Literal["ok", "warning", "exceeded"]
-    # True while the connector takes no new requests because of its limit.
+    # True while the connector takes no new requests because of its limit: the
+    # block the traffic job stored, which gateways enforce.
     blocked: bool
+    # True from a traffic reset or a limit edit until a worker stores the
+    # traffic decision it asked for; blocked is the stored block meanwhile.
+    pending: bool
     price_per_gb: float | None = None
     currency: str
     cost: float | None = None
@@ -409,7 +441,7 @@ def validate_connector_config(credential_type: str, config: dict[str, Any]) -> d
 
     Descriptor-driven types are validated by the provider registry, not here.
     """
-    model = _CODE_CONNECTOR_MODELS.get(str(credential_type))
+    model = _CODE_CONNECTOR_MODELS.get(credential_type)
     if model is None:
         raise ValueError(f"Unknown credential type: {credential_type}")
     result = model(**config).model_dump(exclude_none=True)
@@ -422,18 +454,7 @@ def validate_connector_config(credential_type: str, config: dict[str, Any]) -> d
 def get_cloud_config(
     credential_type: str, config: dict[str, Any]
 ) -> CloudConnectorConfig | None:
-    """Get a typed cloud config model from a raw config dict.
-
-    Returns the appropriate CloudConnectorConfig subclass for cloud providers
-    (AWS, GCP, Azure), or None for non-cloud providers.
-
-    Args:
-        credential_type: The type of credential.
-        config: The raw configuration dictionary.
-
-    Returns:
-        A CloudConnectorConfig (or subclass) if it's a cloud provider, None otherwise.
-    """
+    """The typed cloud config a raw ``config`` holds, of the credential type's cloud; None for a type that is no cloud."""
     if credential_type == CredentialType.AWS:
         return AWSConnectorConfig(**config)
     elif credential_type == CredentialType.GCP:
@@ -478,6 +499,14 @@ class Connector(BaseModel):
         """Get the cloud config if this is a cloud connector, None otherwise."""
         return get_cloud_config(self.credential_type, self.config)
 
+    @property
+    def in_error_backoff(self) -> bool:
+        """Whether a cloud connector backs off after cloud errors: 2^errors minutes from the last, up to the ceiling."""
+        if self.last_error_at is None or self.consecutive_errors == 0:
+            return False
+        minutes = min(2 ** self.consecutive_errors, MAX_ERROR_BACKOFF_MINUTES)
+        return utc_now() < self.last_error_at + timedelta(minutes=minutes)
+
 
     @property
     def parsed_routing_config(self) -> RoutingConfig:
@@ -502,14 +531,10 @@ class Connector(BaseModel):
 
     @property
     def countries(self) -> list[str]:
-        """Countries this connector's proxies exit from, for ``-cc-`` routing (upper-case ISO codes).
+        """Countries the proxies exit from, for ``-cc-`` routing: ``config.countries`` or the provider's ``country_code``.
 
-        Read from ``config.countries`` (static and cloud connectors) or from
-        the provider's country field ``config.country_code`` (descriptor
-        connectors), which may hold one code or a list. Empty means the
-        connector declares no country: descriptor pools whose credentials
-        carry a country then serve any requested country on demand, and
-        other connectors are matched per proxy on the discovered country.
+        Empty when it declares none: a descriptor pool whose credentials carry a country then serves any country on
+        demand, and other connectors are matched per proxy on the discovered country.
         """
         if not self.config:
             return []
@@ -568,16 +593,13 @@ class ConnectorUpdate(BaseModel):
 
 
 class ProxyTarget(BaseModel):
-    """How many proxies a connector is meant to hold, and how that number comes about.
-
-    ``total`` is None when the connector has no target of its own (static
-    connectors, list-mode providers that mirror a vendor list). For
-    provider connectors the count applies per country: ``per_country`` times
-    the number of country groups, where ``countries`` are the groups that
-    exist (listed on the connector, or created on demand for an "all
-    countries" pool, the latter also in ``on_demand``).
-    """
+    """How many proxies a connector is meant to hold, and how that number comes about."""
+    # None when the connector has no target of its own (static connectors,
+    # list-mode providers mirroring a vendor list).
     total: int | None = None
+    # A provider connector's count per country group: the total is this times
+    # the groups that exist (``countries``: listed on the connector, or made on
+    # demand for an "all countries" pool, those also in ``on_demand``).
     per_country: int | None = None
     countries: list[str] = Field(default_factory=list)
     on_demand: list[str] = Field(default_factory=list)
@@ -616,13 +638,7 @@ class ConnectorResponse(BaseModel):
 # --- Options Response for Frontend ---
 
 class ConnectorOptionsResponse(BaseModel):
-    """Response containing available options for connector configuration.
-
-    All options are rich objects with metadata for frontend display:
-    - Regions/zones/locations include code and friendly name
-    - Instance types include code, vCPUs, memory, architecture, and description
-    - Countries include code and friendly name for provider geo-targeting
-    """
+    """Response containing available options for connector configuration, each a rich object for the frontend to show."""
     aws_regions: list[RegionOption] = Field(default_factory=lambda: AWS_REGIONS)
     aws_instance_types: list[InstanceTypeOption] = Field(default_factory=lambda: AWS_INSTANCE_TYPES)
     gcp_zones: list[RegionOption] = Field(default_factory=lambda: GCP_ZONES)

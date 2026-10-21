@@ -3,8 +3,10 @@
 
 """TLS certificate manager for MITM interception.
 
-Handles CA certificate generation/loading and per-domain certificate
-generation for TLS MITM proxying.
+Gateways load the CA from the shared CA volume and sign a certificate per
+intercepted host for the one key pair the process makes, so a new host costs a
+signature rather than a key; the api only reads the CA certificate to hand it
+to clients.
 """
 
 from __future__ import annotations
@@ -28,6 +30,8 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.x509.oid import NameOID
 
 from api.core.fileio import atomic_write
+from api.core.workers import LeaseName
+from api.db.redis import LEASE_KEY
 
 if TYPE_CHECKING:
     from api.db.redis import RedisClient
@@ -48,11 +52,10 @@ _MAX_CACHE_SIZE = 1000
 
 # CA bootstrap coordination (clustered startup).
 #
-# All instances share one CA volume, so on a fresh volume they would
+# All gateways share one CA volume, so on a fresh volume they would
 # otherwise race to each generate their own CA. Generation is gated behind a
-# short Redis lock (reusing the `lease:` keyspace) so exactly one instance
-# generates while its peers wait for the result and load it.
-_CA_BOOTSTRAP_LEASE_NAME = "ca-bootstrap"
+# short Redis lock (LeaseName.CA_BOOTSTRAP in the `lease:` keyspace) so
+# exactly one process generates while its peers wait for the result and load it.
 _CA_BOOTSTRAP_LOCK_TTL_MS = 30_000  # generation takes <1s; ample headroom
 _CA_BOOTSTRAP_TIMEOUT_S = 60.0  # how long a peer waits for the CA to appear
 _CA_BOOTSTRAP_POLL_S = 0.25
@@ -117,6 +120,11 @@ class TLSCertManager:
         self._ca_key_path = ca_key_path
         self._ca_cert: x509.Certificate | None = None
         self._ca_key: rsa.RSAPrivateKey | None = None
+        # The key pair every host certificate is issued for, made once with
+        # the CA and kept in memory only (see _generate_domain_cert), and its
+        # PEM, which each host's context loads.
+        self._leaf_key: rsa.RSAPrivateKey | None = None
+        self._leaf_key_pem = b""
         # Cache: hostname -> ssl.SSLContext (server-side), LRU via OrderedDict
         self._context_cache: OrderedDict[str, ssl.SSLContext] = OrderedDict()
         self._cache_lock = threading.Lock()
@@ -127,10 +135,9 @@ class TLSCertManager:
         return self._ca_cert_path
 
     @property
-    def cached_contexts(self) -> int:
-        """Number of per-host TLS server contexts currently cached."""
-        with self._cache_lock:
-            return len(self._context_cache)
+    def loaded(self) -> bool:
+        """Whether the CA is loaded, so intercepted hosts can be served; a gateway is not ready before."""
+        return self._ca_cert is not None and self._ca_key is not None
 
     async def bootstrap(
         self,
@@ -160,9 +167,7 @@ class TLSCertManager:
         if self._load_if_present():
             return
 
-        from api.db.redis import LEASE_KEY
-
-        lock_key = LEASE_KEY.format(name=_CA_BOOTSTRAP_LEASE_NAME)
+        lock_key = LEASE_KEY.format(name=LeaseName.CA_BOOTSTRAP)
         loop = asyncio.get_running_loop()
         deadline = loop.time() + timeout_s
 
@@ -191,10 +196,10 @@ class TLSCertManager:
                     # CA between our existence check and acquiring the lock.
                     if not self._load_if_present():
                         self._generate_ca()
-                        self._log_ca("Generated new")
+                        self._log_ca("Generated new MITM CA certificate")
                 finally:
                     with contextlib.suppress(Exception):
-                        await redis_client.client.eval(  # type: ignore[misc]
+                        await redis_client.client.eval(
                             _CA_LOCK_RELEASE, 1, lock_key, instance_id
                         )
                 return
@@ -206,17 +211,13 @@ class TLSCertManager:
         """Load the CA if both files exist. Returns True if loaded."""
         if self._ca_cert_path.exists() and self._ca_key_path.exists():
             self._load_ca()
-            self._log_ca("Loaded existing")
+            self._log_ca("Loaded existing MITM CA certificate")
             return True
         return False
 
-    def _log_ca(self, action: str) -> None:
+    def _log_ca(self, event: str) -> None:
         fingerprint = self._ca_cert.fingerprint(hashes.SHA256()).hex()  # type: ignore[union-attr]
-        logger.info(
-            f"{action} MITM CA certificate",
-            cert_path=str(self._ca_cert_path),
-            fingerprint=fingerprint,
-        )
+        logger.info(event, cert_path=str(self._ca_cert_path), fingerprint=fingerprint)
 
     def get_server_ssl_context(self, hostname: str) -> ssl.SSLContext:
         """Get an SSL context for serving TLS to the client for the given hostname.
@@ -230,7 +231,7 @@ class TLSCertManager:
                 self._context_cache.move_to_end(hostname)
                 return cached
 
-        # Generate outside the lock (RSA keygen is slow)
+        # Made outside the lock: signing and loading a context take a millisecond or two.
         ctx = self._create_server_context(hostname)
 
         with self._cache_lock:
@@ -328,6 +329,7 @@ class TLSCertManager:
 
         self._ca_cert = cert
         self._ca_key = key
+        self._make_leaf_key()
 
     def _load_ca(self) -> None:
         """Load CA certificate and private key from disk."""
@@ -336,16 +338,30 @@ class TLSCertManager:
 
         self._ca_cert = x509.load_pem_x509_certificate(cert_pem)
         self._ca_key = serialization.load_pem_private_key(key_pem, password=None)  # type: ignore[assignment]
+        self._make_leaf_key()
+
+    def _make_leaf_key(self) -> None:
+        """Make the key pair this process issues every host certificate for.
+
+        A key is the slow part of a certificate, so it is made once, and one key
+        serves every host because clients check a host's certificate against the
+        CA, never its key; each gateway makes its own.
+        """
+        self._leaf_key = rsa.generate_private_key(public_exponent=65537, key_size=_RSA_KEY_SIZE)
+        self._leaf_key_pem = self._leaf_key.private_bytes(
+            serialization.Encoding.PEM,
+            serialization.PrivateFormat.TraditionalOpenSSL,
+            serialization.NoEncryption(),
+        )
 
     def _generate_domain_cert(self, hostname: str) -> tuple[bytes, bytes]:
-        """Generate a certificate for a specific domain, signed by the CA.
+        """Generate a certificate for a specific domain, signed by the CA, for the process's leaf key.
 
         Returns (cert_pem_bytes, key_pem_bytes).
         """
         assert self._ca_cert is not None
         assert self._ca_key is not None
-
-        key = rsa.generate_private_key(public_exponent=65537, key_size=_RSA_KEY_SIZE)
+        assert self._leaf_key is not None
 
         now = datetime.now(UTC)
         cert = (
@@ -354,7 +370,7 @@ class TLSCertManager:
                 x509.NameAttribute(NameOID.COMMON_NAME, hostname),
             ]))
             .issuer_name(self._ca_cert.subject)
-            .public_key(key.public_key())
+            .public_key(self._leaf_key.public_key())
             .serial_number(x509.random_serial_number())
             .not_valid_before(now)
             .not_valid_after(now + timedelta(days=_DOMAIN_VALIDITY_DAYS))
@@ -369,11 +385,4 @@ class TLSCertManager:
             .sign(self._ca_key, hashes.SHA256())
         )
 
-        cert_pem = cert.public_bytes(serialization.Encoding.PEM)
-        key_pem = key.private_bytes(
-            serialization.Encoding.PEM,
-            serialization.PrivateFormat.TraditionalOpenSSL,
-            serialization.NoEncryption(),
-        )
-
-        return cert_pem, key_pem
+        return cert.public_bytes(serialization.Encoding.PEM), self._leaf_key_pem

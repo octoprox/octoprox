@@ -1,11 +1,18 @@
 # Copyright 2026 Octoprox Authors
 # SPDX-License-Identifier: Apache-2.0
 
-"""Tests for the provider catalog and admin descriptor endpoints."""
+"""Tests for the provider catalog and admin descriptor endpoints, on an api process, with a mock vendor API where one is called.
 
+A descriptor write appends a ``descriptor`` entry that every process follows and applies to the writing api at once; a
+write of another api's is stored here as that api would store it, announced or not as the test chooses.
+"""
+
+import time
+import uuid
 from collections.abc import Iterator
 from dataclasses import replace
 from typing import Any
+from unittest.mock import AsyncMock, patch
 
 import httpx
 import pytest
@@ -13,7 +20,13 @@ from sqlalchemy import create_engine, text
 from starlette.testclient import TestClient
 
 from api.core.config import Settings
+from api.db.redis import CHANGES_STREAM_KEY, RedisClient
+from api.db.repository import ProviderDescriptorRepository
+from api.db.session import SessionFactory
+from api.db.streams import ChangeKind, ChangeLog, ref_of
+from api.models.provider import ProviderRecord
 from api.providers.sdk.egress import EgressPolicy
+from tests.conftest import api_runtime, on_app_loop
 
 ACME_SPEC: dict[str, Any] = {
     "id": "acme",
@@ -92,7 +105,7 @@ def _proxied_client(proxy_url: str, timeout: float) -> httpx.AsyncClient:
 @pytest.fixture
 def mocked_vendor(authenticated_client: TestClient) -> Iterator[TestClient]:
     """Point the registry's SDK runtime at a mock Acme API and a mock proxy, and relax egress."""
-    registry = authenticated_client.app.state.proxy_manager.provider_registry
+    registry = api_runtime(authenticated_client).provider_registry
     original = registry._runtime
     registry._runtime = replace(
         original,
@@ -109,6 +122,56 @@ def _create_acme(client: TestClient, spec: dict[str, Any] | None = None) -> dict
     response = client.post("/api/v1/providers", json={"spec": spec or ACME_SPEC, "confirmed_hosts": ["api.acme.test"]})
     assert response.status_code == 201, response.text
     return response.json()
+
+
+class Unheard(ChangeLog):
+    """A change log that keeps what the routes give it: nothing reaches the stream, so no refresher hears of a write."""
+
+    def __init__(self) -> None:
+        # A client never connected: this log sends nothing.
+        super().__init__(RedisClient("redis://redis.invalid"))
+        self.entries: list[tuple[ChangeKind, str]] = []
+
+    async def record(self, kind: ChangeKind, *ids: str) -> None:
+        ref = ref_of(ids)
+        self.entries.append((kind, ref))
+
+
+def stream_head(client: TestClient) -> str:
+    """The changes stream's last entry ID ("0-0" before any): what the entries of a test's writes come after."""
+    redis = api_runtime(client).redis_client
+
+    async def head() -> str:
+        entries = await redis.client.xrevrange(CHANGES_STREAM_KEY, count=1)
+        return str(entries[0][0]) if entries else "0-0"
+
+    return on_app_loop(client, head)
+
+
+def announced_since(client: TestClient, after: str) -> list[tuple[str, str]]:
+    """The changes stream's entries after ``after`` (see :func:`stream_head`), as (kind, ref), oldest first."""
+    redis = api_runtime(client).redis_client
+
+    async def entries() -> list[tuple[str, str]]:
+        found = await redis.client.xrange(CHANGES_STREAM_KEY, min=f"({after}")
+        return [(fields["kind"], fields["ref"]) for _, fields in found]
+
+    return on_app_loop(client, entries)
+
+
+@pytest.fixture
+def unheard(monkeypatch: pytest.MonkeyPatch) -> Unheard:
+    """The descriptor routes announce their writes here instead: this api's refresher never hears of them."""
+    log = Unheard()
+    monkeypatch.setattr("api.routes.providers.change_log_of", lambda request: log)
+    return log
+
+
+def _create_unique_acme(client: TestClient) -> str:
+    """The Acme descriptor under an id of its own: credentials other tests left under ``acme`` do not use it."""
+    provider_id = f"acme_{uuid.uuid4().hex[:8]}"
+    _create_acme(client, dict(ACME_SPEC, id=provider_id))
+    return provider_id
 
 
 class TestCatalog:
@@ -148,6 +211,34 @@ class TestCatalog:
         assert response.status_code == 201, response.text
         oxylabs = authenticated_client.get("/api/v1/providers/oxylabs").json()
         assert oxylabs["credential_count"] >= 1
+
+    def test_usage_counts_credentials_and_their_connectors(
+        self, mocked_vendor: TestClient, created_project: dict[str, Any],
+    ) -> None:
+        client = mocked_vendor
+        provider_id = _create_unique_acme(client)
+        config = {"api_key": "good", "username": "u", "password": "p"}
+        credentials = []
+        for name in ("one", "two"):
+            response = client.post(
+                f"/api/v1/projects/{created_project['id']}/credentials",
+                json={"name": f"{provider_id}-{name}", "type": provider_id, "config": config},
+            )
+            assert response.status_code == 201, response.text
+            credentials.append(response.json()["id"])
+        response = client.post(
+            f"/api/v1/projects/{created_project['id']}/connectors",
+            json={"name": provider_id, "credential_id": credentials[0], "config": {"num_proxies": 1}},
+        )
+        assert response.status_code == 201, response.text
+
+        detail = client.get(f"/api/v1/providers/{provider_id}").json()
+        listed = {p["id"]: p for p in client.get("/api/v1/providers").json()["providers"]}[provider_id]
+
+        assert (detail["credential_count"], detail["connector_count"]) == (2, 1)
+        assert (listed["credential_count"], listed["connector_count"]) == (2, 1)
+        refused = client.delete(f"/api/v1/providers/{provider_id}")
+        assert refused.status_code == 400 and refused.json()["detail"] == "Cannot delete provider: 2 credential(s) use it"
 
 
 class TestAuthoring:
@@ -242,6 +333,197 @@ class TestAuthoring:
         assert client.get("/api/v1/providers/oxylabs/export", headers=viewer_auth_headers).status_code == 403
         # Editors may resolve options; viewers may not.
         assert client.post("/api/v1/providers/oxylabs/options/x", json={}, headers=viewer_auth_headers).status_code == 403
+
+
+class TestDefinitionsFollowPostgres:
+    """A descriptor is a row: every process follows its change entry, the writing api applies its write at once."""
+
+    def test_each_write_appends_one_descriptor_entry(self, authenticated_client: TestClient) -> None:
+        after = stream_head(authenticated_client)
+
+        provider_id = _create_unique_acme(authenticated_client)
+        renamed = dict(ACME_SPEC, id=provider_id, name="Acme Renamed")
+        assert authenticated_client.put(f"/api/v1/providers/{provider_id}", json={"spec": renamed}).status_code == 200
+        assert authenticated_client.delete(f"/api/v1/providers/{provider_id}").status_code == 204
+        disabled = _create_unique_acme(authenticated_client)
+        assert authenticated_client.put(f"/api/v1/providers/{disabled}", json={"enabled": False}).status_code == 200
+
+        assert announced_since(authenticated_client, after) == [
+            *[("descriptor", provider_id)] * 3,
+            *[("descriptor", disabled)] * 2,
+        ]
+
+    def test_a_refused_write_announces_nothing(self, authenticated_client: TestClient) -> None:
+        provider_id = _create_unique_acme(authenticated_client)
+        after = stream_head(authenticated_client)
+
+        # The id is taken; a builtin cannot change; the hosts are not confirmed.
+        taken, unconfirmed = dict(ACME_SPEC, id=provider_id), dict(ACME_SPEC, id="acme_new")
+        assert authenticated_client.post("/api/v1/providers", json={"spec": taken}).status_code == 409
+        assert authenticated_client.delete("/api/v1/providers/oxylabs").status_code == 409
+        assert authenticated_client.post("/api/v1/providers", json={"spec": unconfirmed}).status_code == 409
+
+        assert announced_since(authenticated_client, after) == []
+
+    def test_a_descriptor_stored_by_another_process_is_picked_up(self, authenticated_client: TestClient) -> None:
+        """Another api stored it and announced it: this one's definitions refresher reads it again as the entry lands.
+
+        Watched in the registry, not through a catalog read, which would apply the row itself.
+        """
+        provider_id = _store_elsewhere(authenticated_client, announce=True)
+        registry = api_runtime(authenticated_client).provider_registry
+
+        deadline = time.monotonic() + 10
+        while registry.get(provider_id) is None:
+            assert time.monotonic() < deadline, "the stored descriptor never reached this api's registry"
+            time.sleep(0.2)
+        assert authenticated_client.get(f"/api/v1/providers/{provider_id}").json()["source"] == "custom"
+
+
+class TestCatalogReadsFollowPostgres:
+    """Another api's write shows in this api's next catalog read: the read applies the rows before it answers.
+
+    The write is stored here as yet unannounced (its entry not here yet), and
+    the hourly reconcile is far off, so only the reads themselves can pick it up.
+    """
+
+    @pytest.fixture
+    def test_settings(self, test_settings: Settings) -> Settings:
+        test_settings.reconcile_interval = 3600.0
+        return test_settings
+
+    def test_one_provider_is_answered_as_stored(self, authenticated_client: TestClient) -> None:
+        provider_id = _store_elsewhere(authenticated_client)
+
+        response = authenticated_client.get(f"/api/v1/providers/{provider_id}")
+        assert response.status_code == 200, response.text
+        assert response.json()["source"] == "custom" and response.json()["updated_at"] is not None
+
+        _delete_elsewhere(authenticated_client, provider_id)
+        assert authenticated_client.get(f"/api/v1/providers/{provider_id}").status_code == 404
+
+    def test_the_catalog_is_answered_as_stored(self, authenticated_client: TestClient) -> None:
+        provider_id = _store_elsewhere(authenticated_client)
+
+        assert provider_id in _listed(authenticated_client)
+
+        _delete_elsewhere(authenticated_client, provider_id)
+        assert provider_id not in _listed(authenticated_client)
+
+    def test_an_export_is_answered_as_stored(self, authenticated_client: TestClient) -> None:
+        provider_id = _store_elsewhere(authenticated_client)
+
+        export = authenticated_client.get(f"/api/v1/providers/{provider_id}/export")
+        assert export.status_code == 200 and export.text.startswith(f"id: {provider_id}")
+
+
+class TestWritesFollowPostgres:
+    """A write decides from the stored rows: a descriptor another api stored a moment ago can be changed at once.
+
+    The other api's write is stored here as yet unannounced, and the hourly
+    reconcile is far off, so only the writes themselves can pick it up.
+    """
+
+    @pytest.fixture
+    def test_settings(self, test_settings: Settings) -> Settings:
+        test_settings.reconcile_interval = 3600.0
+        return test_settings
+
+    def test_an_update_finds_it(self, authenticated_client: TestClient) -> None:
+        provider_id = _store_elsewhere(authenticated_client)
+
+        response = authenticated_client.put(
+            f"/api/v1/providers/{provider_id}", json={"spec": dict(ACME_SPEC, id=provider_id, name="Acme Renamed")}
+        )
+        assert response.status_code == 200, response.text
+        assert response.json()["name"] == "Acme Renamed"
+
+    def test_an_update_asks_to_confirm_only_the_hosts_the_stored_row_lacks(self, authenticated_client: TestClient) -> None:
+        provider_id = _store_elsewhere(authenticated_client)
+        stored = dict(ACME_SPEC, id=provider_id)
+        added = dict(
+            stored, options={**stored["options"], "extra": {"call": {"url": "https://other.acme.test/x"}, "value": "id"}}
+        )
+
+        response = authenticated_client.put(f"/api/v1/providers/{provider_id}", json={"spec": added})
+        assert response.status_code == 409 and response.json()["detail"]["unconfirmed_hosts"] == ["other.acme.test"]
+
+    def test_a_delete_finds_it(self, authenticated_client: TestClient) -> None:
+        provider_id = _store_elsewhere(authenticated_client)
+
+        assert authenticated_client.delete(f"/api/v1/providers/{provider_id}").status_code == 204
+        assert provider_id not in _listed(authenticated_client)
+
+    def test_a_replacing_import_replaces_it(self, authenticated_client: TestClient) -> None:
+        provider_id = _store_elsewhere(authenticated_client)
+        yaml_text = authenticated_client.post(
+            "/api/v1/providers/validate", json={"spec": dict(ACME_SPEC, id=provider_id, name="Acme Two")}
+        ).json()["yaml"]
+
+        response = authenticated_client.post(
+            "/api/v1/providers/import", json={"yaml": yaml_text, "confirmed_hosts": ["api.acme.test"], "replace": True}
+        )
+        assert response.status_code == 201, response.text
+        assert response.json()["name"] == "Acme Two"
+
+
+
+class TestTheWritingApiAppliesAtOnce:
+    """The api that wrote a descriptor answers with it at once: it does not wait for its refresher.
+
+    Its writes are announced to a log no refresher follows (``unheard``), so
+    only the routes themselves can apply them here.
+    """
+
+    @pytest.fixture
+    def test_settings(self, test_settings: Settings) -> Settings:
+        test_settings.reconcile_interval = 3600.0
+        return test_settings
+
+    def test_a_created_descriptor_is_usable_at_once(
+        self, mocked_vendor: TestClient, created_project: dict[str, Any], unheard: Unheard
+    ) -> None:
+        provider_id = _create_unique_acme(mocked_vendor)
+        assert unheard.entries == [(ChangeKind.DESCRIPTOR, provider_id)]
+
+        assert provider_id in {p["id"] for p in mocked_vendor.get("/api/v1/providers").json()["providers"]}
+        response = mocked_vendor.post(
+            f"/api/v1/projects/{created_project['id']}/credentials",
+            json={"name": provider_id, "type": provider_id, "config": {"api_key": "good", "username": "u", "password": "p"}},
+        )
+        assert response.status_code == 201, response.text
+
+    def test_a_disabled_descriptor_leaves_the_catalog_at_once(
+        self, authenticated_client: TestClient, unheard: Unheard
+    ) -> None:
+        provider_id = _create_unique_acme(authenticated_client)
+
+        assert authenticated_client.put(f"/api/v1/providers/{provider_id}", json={"enabled": False}).status_code == 200
+
+        assert authenticated_client.get(f"/api/v1/providers/{provider_id}").status_code == 404
+
+    def test_a_deleted_descriptor_leaves_the_registry_at_once(
+        self, authenticated_client: TestClient, unheard: Unheard
+    ) -> None:
+        provider_id = _create_unique_acme(authenticated_client)
+
+        assert authenticated_client.delete(f"/api/v1/providers/{provider_id}").status_code == 204
+
+        assert authenticated_client.get(f"/api/v1/providers/{provider_id}").status_code == 404
+        assert api_runtime(authenticated_client).provider_registry.get(provider_id) is None
+
+    def test_an_apply_cut_by_a_deadline_is_logged_by_its_type(
+        self, authenticated_client: TestClient, unheard: Unheard, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The write stands, and a bare TimeoutError, which has no text, is named by its type."""
+        provider_id = _create_unique_acme(authenticated_client)
+        store = api_runtime(authenticated_client).provider_store
+        monkeypatch.setattr(store, "sync_all", AsyncMock(side_effect=TimeoutError))
+
+        with patch("api.routes.providers.logger") as log:
+            assert authenticated_client.delete(f"/api/v1/providers/{provider_id}").status_code == 204
+
+        log.warning.assert_called_once_with("Provider descriptors not applied after a write", error="TimeoutError")
 
 
 class TestBuiltinProviders:
@@ -407,3 +689,46 @@ class TestUsingACustomProvider:
             json={"name": "oxy-bad", "credential_id": credential.json()["id"], "config": {"num_proxies": 0}},
         )
         assert bad.status_code == 422
+
+
+async def _store_record(session_factory: SessionFactory, record: ProviderRecord) -> None:
+    """A descriptor row as another api process stores it."""
+    async with session_factory() as session:
+        await ProviderDescriptorRepository(session).create(record)
+        await session.commit()
+
+
+async def _delete_record(session_factory: SessionFactory, provider_id: str) -> None:
+    """A descriptor row as another api process deletes it."""
+    async with session_factory() as session:
+        await ProviderDescriptorRepository(session).delete(provider_id)
+        await session.commit()
+
+
+def _store_elsewhere(client: TestClient, *, announce: bool = False) -> str:
+    """Store the Acme descriptor under an id of its own, as another api would; announced when ``announce``.
+
+    Unannounced, nothing tells this api (the other's entry has not arrived);
+    announced, the other api's change log appends its ``descriptor`` entry.
+    """
+    provider_id = f"acme_{uuid.uuid4().hex[:8]}"
+    record = ProviderRecord(
+        id=provider_id, name="Acme Proxies", spec=dict(ACME_SPEC, id=provider_id), created_by="elsewhere"
+    )
+    runtime = api_runtime(client)
+    on_app_loop(client, _store_record, runtime.session_factory, record)
+    if announce:
+        on_app_loop(client, ChangeLog(runtime.redis_client).record, ChangeKind.DESCRIPTOR, provider_id)
+    return provider_id
+
+
+def _delete_elsewhere(client: TestClient, provider_id: str) -> None:
+    """Delete a descriptor row as another api would: nothing tells this one."""
+    on_app_loop(client, _delete_record, api_runtime(client).session_factory, provider_id)
+
+
+def _listed(client: TestClient) -> set[str]:
+    """The provider ids the catalog lists."""
+    response = client.get("/api/v1/providers")
+    assert response.status_code == 200, response.text
+    return {p["id"] for p in response.json()["providers"]}

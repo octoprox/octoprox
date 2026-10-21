@@ -2,9 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { useState } from 'react'
-import { useLocation, useNavigate } from 'react-router-dom'
+import { useLocation, useNavigate } from 'react-router'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { Plus, Server, Trash2, FolderOpen, Settings, Pencil, LogOut, Link2, Key } from 'lucide-react'
+import { Plus, Server, Trash2, FolderOpen, Settings, Pencil, LogOut, Link2, KeyRound } from 'lucide-react'
 import {
   fetchProjects, createProject, deleteProject, updateProject, logout,
   ProjectCreate, ProjectUpdate, ProjectSummary,
@@ -232,7 +232,7 @@ function ProjectCard({ project, active, canMutate, onOpen, onEdit, onDelete }: {
         <span className="inline-flex items-center gap-1.5"><span className={`w-2 h-2 rounded-full ${total === 0 ? 'bg-fg-subtle' : healthy === total ? 'bg-success' : healthy === 0 ? 'bg-danger' : 'bg-warning'}`} />{healthy} healthy</span>
         <span className="text-line-strong">·</span>
         <span className="inline-flex items-center gap-1" title="Connectors"><Link2 className="w-3.5 h-3.5" /> {project.connector_count}</span>
-        <span className="inline-flex items-center gap-1" title="Credentials"><Key className="w-3.5 h-3.5" /> {project.credential_count}</span>
+        <span className="inline-flex items-center gap-1" title="Credentials"><KeyRound className="w-3.5 h-3.5" /> {project.credential_count}</span>
       </div>
       <div className="flex items-center justify-between mt-auto pt-1">
         <Badge color="gray">{formatStrategy(project.routing_strategy)}</Badge>

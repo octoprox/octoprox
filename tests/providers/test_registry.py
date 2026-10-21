@@ -101,3 +101,71 @@ def test_custom_cannot_shadow_builtin(registry: ProviderRegistry) -> None:
     assert registry.get("oxylabs").source == "builtin"  # type: ignore[union-attr]
     with pytest.raises(ValueError, match="already taken"):
         registry.register_descriptor(_custom("aws"), "custom")
+
+
+
+OXYLABS = {"proxy_type": "residential", "username": "u", "password": "p"}
+
+
+class _OwnProvider:
+    """A plugin's own provider class: it syncs as a provider does, but is no descriptor provider."""
+
+    def __init__(self, connector: Connector, credential: Credential) -> None:
+        self.connector = connector
+
+
+def fail_to_build(registry: ProviderRegistry, type_id: str, error: Exception) -> None:
+    """Make every provider of ``type_id`` fail to build with ``error``, as a plugin's own provider class can."""
+    ptype = registry.get(type_id)
+    assert ptype is not None and ptype.descriptor is not None
+
+    class Failing:
+        def __init__(self, connector: Connector, credential: Credential) -> None:
+            raise error
+
+    registry.unregister(type_id)
+    registry.register_descriptor(ptype.descriptor, "plugin", provider_class=Failing)
+
+
+def _connector(credential_type: str) -> Connector:
+    return Connector(id="k", name="k", credential_id="c", credential_type=credential_type, project_id="p")
+
+
+def _credential(credential_type: str, config: dict[str, str] | None = None) -> Credential:
+    return Credential(id="c", name="c", type=credential_type, project_id="p", config=config or {})
+
+
+class TestDescriptorProvider:
+    """The one way the compiler, the routing snapshot, the read model and provision build a connector's provider."""
+
+    def test_a_descriptor_type_builds_its_provider(self, registry: ProviderRegistry) -> None:
+        provider = registry.descriptor_provider(_connector("oxylabs"), _credential("oxylabs", OXYLABS))
+
+        assert isinstance(provider, DescriptorProvider) and provider.proxy_type.key == "residential"
+
+    def test_none_without_a_credential(self, registry: ProviderRegistry) -> None:
+        assert registry.descriptor_provider(_connector("oxylabs"), None) is None
+
+    def test_none_for_a_code_type(self, registry: ProviderRegistry) -> None:
+        """A code type registers no factory: its connectors' rows carry everything."""
+        aws = registry.get("aws")
+        assert aws is not None and aws.factory is None
+
+        assert registry.descriptor_provider(_connector("aws"), _credential("aws")) is None
+
+    def test_none_for_a_provider_that_is_not_a_descriptor_provider(self, registry: ProviderRegistry) -> None:
+        registry.register_descriptor(_custom("own"), "plugin", provider_class=_OwnProvider)
+        connector, credential = _connector("own"), _credential("own", {"username": "u", "password": "p"})
+        assert isinstance(registry.create_provider(connector, credential), _OwnProvider)
+
+        assert registry.descriptor_provider(connector, credential) is None
+
+    def test_what_the_factory_raises_is_raised(self, registry: ProviderRegistry) -> None:
+        """Each caller keeps its own rule for a provider that cannot be built, so none is applied here."""
+        connector = _connector("oxylabs")
+        with pytest.raises(ValueError, match="unknown proxy type 'nonsense'"):
+            registry.descriptor_provider(connector, _credential("oxylabs", {**OXYLABS, "proxy_type": "nonsense"}))
+
+        fail_to_build(registry, "oxylabs", RuntimeError("the vendor SDK is broken"))
+        with pytest.raises(RuntimeError, match="the vendor SDK is broken"):
+            registry.descriptor_provider(connector, _credential("oxylabs", OXYLABS))

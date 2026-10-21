@@ -8,19 +8,20 @@ from collections.abc import AsyncIterator, Iterator
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import MagicMock
 
 import pytest
 from blinker import Signal
 
 from api.core.signals import request_completed, tunnel_encrypted_dns_blocked, tunnel_name_unresolved
-from api.core.traffic_limiter import TrafficMeter
 from api.models.location import LocationTarget
 from api.models.project import Project
 from api.models.proxy import Proxy, ProxyProtocol
+from api.routing.router import Router
 from api.tunnel.dns import FakeIpDirectory, FakeIpPool
 from api.tunnel.peers import AddressDirectory
 from api.tunnel.transparent import DOT_PORT, TransparentProxyServer
+from tests.gateway.doubles import RecordingMetering
 from tests.tunnel.test_sniff import client_hello
 
 
@@ -56,28 +57,6 @@ class _ConnectProxy:
         assert self.server is not None
         port: int = self.server.sockets[0].getsockname()[1]
         return port
-
-
-class _NoLimit:
-    def is_interrupted(self, connector_id: str) -> bool:
-        return False
-
-    def limit_status_for(self, connector_id: str) -> int:
-        return 509
-
-    def progress(self, *args: object) -> None:
-        pass
-
-
-class _MeterFactory:
-    """Stands in for ``ProxyManager.traffic_meter``, remembering what each meter was asked for."""
-
-    def __init__(self) -> None:
-        self.calls: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
-
-    def __call__(self, proxy: Proxy, project_id: str, **kwargs: Any) -> TrafficMeter:
-        self.calls.append(((proxy, project_id), kwargs))
-        return TrafficMeter(_NoLimit(), proxy.id, project_id, proxy.connector_id, kwargs.get("peer_id"))  # type: ignore[arg-type]
 
 
 PROJECT = Project(id="proj", name="TVs", username="tv", password="pw")
@@ -144,19 +123,23 @@ def encrypted_dns() -> Iterator[_Received]:
         yield received
 
 
-def _server(upstream: _ConnectProxy, destination: tuple[str, int] | None, pool: FakeIpPool, peers: AddressDirectory[_Peer]) -> tuple[TransparentProxyServer, MagicMock]:
-    manager = MagicMock()
-    manager.get_project.return_value = PROJECT
-    proxy = Proxy(host="127.0.0.1", port=upstream.port, protocol=ProxyProtocol.HTTP, connector_id="c1")
-    manager.select_proxy_for_project = AsyncMock(return_value=proxy)
-    manager.are_all_proxies_quarantined = AsyncMock(return_value=False)
-    manager.traffic_limit_status.return_value = None
-    manager.traffic_meter = _MeterFactory()
+def _server(
+    upstream: _ConnectProxy, destination: tuple[str, int] | None, pool: FakeIpPool, peers: AddressDirectory[_Peer]
+) -> tuple[TransparentProxyServer, MagicMock, RecordingMetering]:
+    """The listener with the gateway router's surface answering every request with ``upstream``, and recording metering."""
+    router = MagicMock(spec=Router)
+    router.get_project.return_value = PROJECT
+    router.select_proxy_for_project.return_value = Proxy(
+        host="127.0.0.1", port=upstream.port, protocol=ProxyProtocol.HTTP, connector_id="c1"
+    )
+    router.are_all_proxies_quarantined.return_value = False
+    router.traffic_limit_status.return_value = None
+    metering = RecordingMetering()
     server = TransparentProxyServer(
-        manager, peers, FakeIpDirectory(pool), port=0,
+        router, metering, peers, FakeIpDirectory(pool), port=0, timeout=30.0,
         destination_of=lambda writer: destination, sniff_timeout=0.2,
     )
-    return server, manager
+    return server, router, metering
 
 
 async def _roundtrip(server: TransparentProxyServer, payload: bytes) -> bytes:
@@ -175,7 +158,7 @@ async def test_fake_ip_destination_is_connected_by_name(upstream: _ConnectProxy)
     fake = str(pool.ip_for("media.example.net"))
     peers = PeerDirectory()
     peers.put(PEER)
-    server, manager = _server(upstream, (fake, 8443), pool, peers)
+    server, router, metering = _server(upstream, (fake, 8443), pool, peers)
     await server.listen("127.0.0.1")
     try:
         with _Received(request_completed) as completed:
@@ -184,7 +167,7 @@ async def test_fake_ip_destination_is_connected_by_name(upstream: _ConnectProxy)
     finally:
         await server.stop()
     assert upstream.targets == ["media.example.net:8443"]
-    manager.select_proxy_for_project.assert_awaited_once_with(
+    router.select_proxy_for_project.assert_awaited_once_with(
         "proj", "sofa", "media.example.net", LocationTarget(country="DE")
     )
     # The completion event names the device, so the request is metered on it
@@ -193,8 +176,8 @@ async def test_fake_ip_destination_is_connected_by_name(upstream: _ConnectProxy)
     assert [c["peer_id"] for c in completed.calls] == [PEER.id]
     assert completed.calls[0]["success"] is True and completed.calls[0]["project_id"] == "proj"
     assert completed.calls[0]["target_host"] == "media.example.net"
-    assert server._proxy_manager.traffic_meter.calls[0][1]["peer_id"] == PEER.id
-    assert server._proxy_manager.traffic_meter.calls[0][1]["target_host"] == "media.example.net"
+    asked = metering.meters[0]
+    assert (asked.peer_id, asked.target_host) == (PEER.id, "media.example.net")
 
 
 @pytest.mark.asyncio
@@ -202,7 +185,7 @@ async def test_literal_destination_uses_sni_and_keeps_the_hello(upstream: _Conne
     pool = FakeIpPool("198.18.0.0/15")
     peers = PeerDirectory()
     peers.put(PEER)
-    server, _ = _server(upstream, ("93.184.216.34", 443), pool, peers)
+    server, _, _ = _server(upstream, ("93.184.216.34", 443), pool, peers)
     await server.listen("127.0.0.1")
     hello = client_hello("example.com")
     try:
@@ -217,7 +200,7 @@ async def test_literal_destination_without_a_name_goes_by_address(upstream: _Con
     pool = FakeIpPool("198.18.0.0/15")
     peers = PeerDirectory()
     peers.put(PEER)
-    server, _ = _server(upstream, ("203.0.113.7", 22), pool, peers)
+    server, _, _ = _server(upstream, ("203.0.113.7", 22), pool, peers)
     await server.listen("127.0.0.1")
     try:
         # SSH: the client waits for the server banner, so sniffing times out and the address is used.
@@ -236,7 +219,7 @@ async def test_literal_destination_without_a_name_goes_by_address(upstream: _Con
 async def test_unknown_or_disabled_peer_is_closed_without_bytes(upstream: _ConnectProxy) -> None:
     pool = FakeIpPool("198.18.0.0/15")
     peers = PeerDirectory()
-    server, _ = _server(upstream, ("203.0.113.7", 80), pool, peers)
+    server, _, _ = _server(upstream, ("203.0.113.7", 80), pool, peers)
     await server.listen("127.0.0.1")
     try:
         reader, writer = await asyncio.open_connection("127.0.0.1", server.port)
@@ -258,8 +241,8 @@ async def test_no_upstream_closes_the_connection(upstream: _ConnectProxy) -> Non
     pool = FakeIpPool("198.18.0.0/15")
     peers = PeerDirectory()
     peers.put(PEER)
-    server, manager = _server(upstream, ("203.0.113.7", 80), pool, peers)
-    manager.select_proxy_for_project = AsyncMock(return_value=None)
+    server, router, _ = _server(upstream, ("203.0.113.7", 80), pool, peers)
+    router.select_proxy_for_project.return_value = None
     await server.listen("127.0.0.1")
     try:
         reader, writer = await asyncio.open_connection("127.0.0.1", server.port)
@@ -269,7 +252,7 @@ async def test_no_upstream_closes_the_connection(upstream: _ConnectProxy) -> Non
         writer.close()
     finally:
         await server.stop()
-    manager.traffic_limit_status.assert_called_once()
+    router.traffic_limit_status.assert_called_once()
 
 
 @pytest.mark.asyncio
@@ -277,7 +260,7 @@ async def test_expired_fake_ip_without_name_is_dropped(upstream: _ConnectProxy) 
     pool = FakeIpPool("198.18.0.0/15")
     peers = PeerDirectory()
     peers.put(PEER)
-    server, manager = _server(upstream, ("198.18.5.5", 443), pool, peers)
+    server, router, _ = _server(upstream, ("198.18.5.5", 443), pool, peers)
     await server.listen("127.0.0.1")
     try:
         reader, writer = await asyncio.open_connection("127.0.0.1", server.port)
@@ -286,7 +269,7 @@ async def test_expired_fake_ip_without_name_is_dropped(upstream: _ConnectProxy) 
         writer.close()
     finally:
         await server.stop()
-    manager.select_proxy_for_project.assert_not_awaited()
+    router.select_proxy_for_project.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -296,7 +279,7 @@ async def test_encrypted_dns_is_closed_and_counted(upstream: _ConnectProxy, encr
     peers = PeerDirectory()
     peers.put(PEER)
     # DoH: the device resolved the resolver's name through us, so the fake address names it.
-    server, manager = _server(upstream, (fake_doh, 443), pool, peers)
+    server, router, _ = _server(upstream, (fake_doh, 443), pool, peers)
     await server.listen("127.0.0.1")
     try:
         reader, writer = await asyncio.open_connection("127.0.0.1", server.port)
@@ -305,7 +288,7 @@ async def test_encrypted_dns_is_closed_and_counted(upstream: _ConnectProxy, encr
     finally:
         await server.stop()
     # DoT: a literal resolver address on port 853, named only by its SNI.
-    server2, _ = _server(upstream, ("1.1.1.1", DOT_PORT), pool, peers)
+    server2, _, _ = _server(upstream, ("1.1.1.1", DOT_PORT), pool, peers)
     await server2.listen("127.0.0.1")
     try:
         reader, writer = await asyncio.open_connection("127.0.0.1", server2.port)
@@ -317,7 +300,7 @@ async def test_encrypted_dns_is_closed_and_counted(upstream: _ConnectProxy, encr
         await server2.stop()
     assert upstream.targets == []
     assert encrypted_dns.calls == [{"peer_id": PEER.id}, {"peer_id": PEER.id}]
-    manager.select_proxy_for_project.assert_not_awaited()
+    router.select_proxy_for_project.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -325,7 +308,7 @@ async def test_encrypted_dns_passes_when_blocking_is_off(upstream: _ConnectProxy
     pool = FakeIpPool("198.18.0.0/15")
     peers = PeerDirectory()
     peers.put(PEER)
-    server, _ = _server(upstream, ("9.9.9.9", DOT_PORT), pool, peers)
+    server, _, _ = _server(upstream, ("9.9.9.9", DOT_PORT), pool, peers)
     server._block_encrypted_dns = False
     await server.listen("127.0.0.1")
     try:
@@ -341,7 +324,7 @@ async def test_by_address_connections_are_counted(upstream: _ConnectProxy, name_
     pool = FakeIpPool("198.18.0.0/15")
     peers = PeerDirectory()
     peers.put(PEER)
-    server, _ = _server(upstream, ("203.0.113.7", 22), pool, peers)
+    server, _, _ = _server(upstream, ("203.0.113.7", 22), pool, peers)
     await server.listen("127.0.0.1")
     try:
         reader, writer = await asyncio.open_connection("127.0.0.1", server.port)

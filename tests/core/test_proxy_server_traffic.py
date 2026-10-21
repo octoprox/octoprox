@@ -3,10 +3,9 @@
 
 """Tests for traffic metering on the proxy server's transfer paths.
 
-A tunnel counts its bytes as they flow, so a keep-alive tunnel is charged
-against the connector's limit while it is open, and a connector under the
-interrupt action cuts it mid-stream. The limiter is stubbed so the tests
-control when the connector counts as interrupted.
+A tunnel counts its bytes as they flow, so a keep-alive tunnel is charged against the connector's limit while it is open
+and a connector under the interrupt action cuts it mid-stream; the meters report to a recording request metering, so the
+tests control when the connector counts as interrupted.
 """
 
 import asyncio
@@ -19,32 +18,14 @@ import pytest
 
 from api.core.proxy_server import ProxyServer
 from api.core.traffic_limiter import PROGRESS_REPORT_BYTES, TrafficMeter
+from api.gateway.metering import RequestMetering
+from api.routing.router import Router
+from tests.gateway.doubles import RecordingMetering
 
 
-class StubLimiter:
-    """Just enough of TrafficLimiter for a meter to run against."""
-
-    def __init__(self) -> None:
-        self.interrupted = False
-        self.reports: list[tuple[int, int]] = []
-
-    def is_interrupted(self, connector_id: str) -> bool:
-        return self.interrupted
-
-    def limit_status_for(self, connector_id: str) -> int:
-        return 509
-
-    def progress(
-        self,
-        proxy_id: str,
-        project_id: str,
-        connector_id: str,
-        peer_id: str | None,
-        sent: int,
-        received: int,
-        target_host: str | None = None,
-    ) -> None:
-        self.reports.append((sent, received))
+def _server() -> ProxyServer:
+    """A listener whose transfer loops are driven directly; its router and metering are never asked."""
+    return ProxyServer(MagicMock(spec=Router), MagicMock(spec=RequestMetering), host="127.0.0.1", port=0, timeout=30.0)
 
 
 class Pipe:
@@ -102,9 +83,9 @@ async def _close(*writers: asyncio.StreamWriter) -> None:
 
 class TestTunnelMetering:
     async def test_bytes_are_reported_while_the_tunnel_is_open(self, pipes: list[Pipe]) -> None:
-        limiter = StubLimiter()
-        meter = TrafficMeter(limiter, "proxy", "project", "connector")  # type: ignore[arg-type]
-        server = ProxyServer(proxy_manager=MagicMock())
+        metering = RecordingMetering()
+        meter = TrafficMeter(metering, "proxy", "project", "connector")
+        server = _server()
         client, client_server, upstream_server, upstream_peer = await _tunnel_setup(pipes)
 
         tunnel = asyncio.create_task(server._tunnel(
@@ -119,7 +100,7 @@ class TestTunnelMetering:
         got = await client[0].readexactly(len(payload))
         await drain
         assert got == payload
-        assert sum(r for _s, r in limiter.reports) >= PROGRESS_REPORT_BYTES
+        assert metering.reported()[1] >= PROGRESS_REPORT_BYTES
         assert not tunnel.done()
 
         # Client sends a little upstream, then both sides close.
@@ -131,15 +112,15 @@ class TestTunnelMetering:
         assert (sent, received) == (5, len(payload))
         # Whatever was not reported during the tunnel comes out of finish, no more.
         rest_sent, rest_received = meter.finish()
-        reported_received = sum(r for _s, r in limiter.reports)
+        reported_sent, reported_received = metering.reported()
         assert reported_received + rest_received == len(payload)
-        assert sum(s for s, _r in limiter.reports) + rest_sent == 5
+        assert reported_sent + rest_sent == 5
         await _close(client_server[1], upstream_server[1])
 
     async def test_interrupt_cuts_both_directions(self, pipes: list[Pipe]) -> None:
-        limiter = StubLimiter()
-        meter = TrafficMeter(limiter, "proxy", "project", "connector")  # type: ignore[arg-type]
-        server = ProxyServer(proxy_manager=MagicMock())
+        metering = RecordingMetering()
+        meter = TrafficMeter(metering, "proxy", "project", "connector")
+        server = _server()
         client, client_server, upstream_server, upstream_peer = await _tunnel_setup(pipes)
 
         tunnel = asyncio.create_task(server._tunnel(
@@ -149,7 +130,7 @@ class TestTunnelMetering:
         await upstream_peer[1].drain()
         assert await client[0].readexactly(6) == b"before"
 
-        limiter.interrupted = True
+        metering.interrupted = True
         # The next chunk in either direction ends the tunnel, without anyone closing.
         upstream_peer[1].write(b"after")
         await upstream_peer[1].drain()
@@ -160,7 +141,7 @@ class TestTunnelMetering:
         await _close(client[1], upstream_peer[1])
 
     async def test_no_meter_keeps_the_old_contract(self, pipes: list[Pipe]) -> None:
-        server = ProxyServer(proxy_manager=MagicMock())
+        server = _server()
         client, client_server, upstream_server, upstream_peer = await _tunnel_setup(pipes)
         tunnel = asyncio.create_task(server._tunnel(
             client_server[0], client_server[1], upstream_server[0], upstream_server[1],
@@ -180,7 +161,7 @@ class TestTunnelMetering:
 class TestClosedLeg:
     async def test_bytes_for_a_leg_that_already_closed_end_the_tunnel_quietly(self) -> None:
         """uvloop raises RuntimeError, not an OSError, for a write to a closed transport."""
-        server = ProxyServer(proxy_manager=MagicMock())
+        server = _server()
         client_reader = asyncio.StreamReader()
         client_reader.feed_data(b"late bytes")
         client_reader.feed_eof()
@@ -200,9 +181,9 @@ class TestClosedLeg:
 
 class TestChunkedForwarding:
     async def test_chunked_body_is_metered_and_forwarded(self, pipes: list[Pipe]) -> None:
-        limiter = StubLimiter()
-        meter = TrafficMeter(limiter, "proxy", "project", "connector")  # type: ignore[arg-type]
-        server = ProxyServer(proxy_manager=MagicMock())
+        metering = RecordingMetering()
+        meter = TrafficMeter(metering, "proxy", "project", "connector")
+        server = _server()
         pipe = Pipe()
         pipes.append(pipe)
         (reader_side, writer_side), (peer_reader, peer_writer) = await pipe.open()

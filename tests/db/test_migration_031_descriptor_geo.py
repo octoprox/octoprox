@@ -10,11 +10,10 @@ from pathlib import Path
 
 import pytest
 from alembic import command
-from alembic.config import Config
 from sqlalchemy import create_engine, text
 
 from api.core.config import Settings
-from api.db.migrations import MIGRATIONS_DIR
+from api.db.migrations import MIGRATIONS_DIR, alembic_config
 from api.providers.sdk.loader import descriptor_from_dict
 from api.providers.sdk.templating import country_field_key
 
@@ -27,13 +26,6 @@ def _migration():
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
-
-
-def _alembic(url: str) -> Config:
-    cfg = Config(str(MIGRATIONS_DIR / "alembic.ini"))
-    cfg.set_main_option("script_location", str(MIGRATIONS_DIR))
-    cfg.set_main_option("sqlalchemy.url", url)
-    return cfg
 
 
 OLD_SPEC = {
@@ -115,7 +107,7 @@ class TestRewrite:
 @pytest.mark.usefixtures("db_session")  # migrations are at head and the tables are truncated afterwards
 def test_stored_descriptors_are_rewritten(test_settings: Settings) -> None:
     engine = create_engine(test_settings.database_url_sync)
-    cfg = _alembic(test_settings.database_url_sync)
+    cfg = alembic_config(test_settings.database_url_sync)
     ts = datetime(2026, 1, 1, tzinfo=UTC).replace(tzinfo=None)
     plain = {**OLD_SPEC, "id": "plain", "connector_fields": [{"key": "num_proxies", "label": "N", "type": "number"}]}
     try:

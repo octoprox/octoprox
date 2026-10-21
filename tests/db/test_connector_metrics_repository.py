@@ -8,6 +8,7 @@ from datetime import datetime, timedelta
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.core import utc_now
+from api.core.stats import MetricDelta
 from api.db.models import ConnectorMetricsModel
 from api.db.repository import (
     ConnectorRepository,
@@ -90,14 +91,14 @@ class TestConnectorMetrics:
         db_session: AsyncSession,
     ) -> None:
         _project, connector = await _connector(project_repo, credential_repo, connector_repo, db_session)
-        await metrics_repo.save_connector_metrics_snapshot(
-            connector_id=connector.id, request_count=4, success_count=3, failure_count=1,
-            avg_latency_ms=42.0, bytes_sent=100, bytes_received=900,
+        window = MetricDelta(
+            request_count=4, success_count=3, failure_count=1, latency_sum_ms=168.0, bytes_sent=100, bytes_received=900
         )
+        assert await metrics_repo.save_connector_metrics_snapshots({connector.id: window}) == []
         await db_session.commit()
         history = await metrics_repo.get_connector_metrics_history(connector.id)
         assert len(history) == 1
-        assert history[0]["request_count"] == 4
+        assert (history[0]["request_count"], history[0]["avg_latency_ms"]) == (4, 42.0)
         assert history[0]["bytes_received"] == 900
 
     async def test_totals_since_use_each_connectors_window(
@@ -154,14 +155,14 @@ class TestConnectorMetrics:
         connector_repo: ConnectorRepository,
         db_session: AsyncSession,
     ) -> None:
-        _project, connector = await _connector(project_repo, credential_repo, connector_repo, db_session)
+        project, connector = await _connector(project_repo, credential_repo, connector_repo, db_session)
         old = utc_now().replace(minute=0, second=0, microsecond=0) - timedelta(days=2)
         for i in range(6):
             await _insert(db_session, connector.id, old + timedelta(minutes=i), sent=7, received=11)
         await db_session.commit()
 
         deleted = await metrics_repo.compact_connector_metrics(
-            connector.id, older_than=utc_now() - timedelta(hours=24),
+            project.id, older_than=utc_now() - timedelta(hours=24),
             source_granularity=60, target_granularity=3600,
         )
         await db_session.commit()
@@ -175,7 +176,7 @@ class TestConnectorMetrics:
         totals = await metrics_repo.get_connector_totals_since({connector.id: old - timedelta(days=1)})
         assert totals[connector.id]["bytes_received"] == 66
 
-    async def test_retention_and_connector_ids(
+    async def test_retention(
         self,
         metrics_repo: MetricsRepository,
         project_repo: ProjectRepository,
@@ -187,7 +188,6 @@ class TestConnectorMetrics:
         await _insert(db_session, connector.id, utc_now() - timedelta(days=100))
         await _insert(db_session, connector.id, utc_now() - timedelta(hours=1))
         await db_session.commit()
-        assert await metrics_repo.get_connector_ids_for_project(project.id) == [connector.id]
         deleted = await metrics_repo.delete_connector_metrics_for_project_older_than(
             project.id, utc_now() - timedelta(days=90)
         )
@@ -223,11 +223,10 @@ class TestSnapshotsForGoneEntities:
         db_session: AsyncSession,
     ) -> None:
         _project, connector = await _connector(project_repo, credential_repo, connector_repo, db_session)
-        common = {"request_count": 1, "success_count": 1, "failure_count": 0, "avg_latency_ms": 1.0}
-        assert await metrics_repo.save_connector_metrics_snapshot(connector_id=connector.id, **common) is True
-        assert await metrics_repo.save_connector_metrics_snapshot(connector_id="gone", **common) is False
-        assert await metrics_repo.save_project_metrics_snapshot(project_id="gone", **common) is False
-        assert await metrics_repo.save_metrics_snapshot(proxy_id="gone", status="healthy", **common) is False
+        window = MetricDelta(request_count=1, success_count=1, latency_sum_ms=1.0)
+        assert await metrics_repo.save_connector_metrics_snapshots({connector.id: window, "gone": window}) == ["gone"]
+        assert await metrics_repo.save_project_metrics_snapshots({"gone": window}) == ["gone"]
+        assert await metrics_repo.save_proxy_metrics_snapshots({"gone": window}, {"gone": "healthy"}) == ["gone"]
         await db_session.commit()
         # The transaction survived the misses: the real row is there, nothing else.
         assert len(await metrics_repo.get_connector_metrics_history(connector.id)) == 1

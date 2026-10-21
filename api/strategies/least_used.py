@@ -1,28 +1,33 @@
 # Copyright 2026 Octoprox Authors
 # SPDX-License-Identifier: Apache-2.0
 
-"""Least-used routing strategy."""
+"""Least-used routing strategy: the proxy with the fewest transfers in flight on this gateway."""
 
+from __future__ import annotations
+
+import random
+from fractions import Fraction
 from typing import TYPE_CHECKING
 
 from api.models.proxy import Proxy
-from api.strategies.base import ProxyGroup, RoutingStrategy
+from api.routing.inflight import InFlight
+from api.strategies.base import ProxyGroup, RoutingStrategy, weighted_random_group
 
 if TYPE_CHECKING:
     from api.db.redis import RedisClient
 
 
 class LeastUsedStrategy(RoutingStrategy):
-    """Selects the proxy with the minimum request count.
+    """Picks the proxy with the fewest transfers open on this gateway.
 
-    Across connectors the weight acts as relative capacity: the connector
-    with the lowest ``requests / weight`` is picked, so a connector with
-    weight 3 is allowed three times the requests of one with weight 1
-    before it stops being the least used. The requests counted are the
-    connector's (``ProxyGroup.load``), not only those of the rows eligible
-    for this request, so a filtered request does not mistake a busy
-    connector with a few eligible rows for an idle one.
+    Across connectors it picks the one with the fewest per unit of weight; ties are broken at random, by weight.
+
+    Args:
+        inflight: this gateway's open transfers; None counts none, for a strategy no gateway serves through.
     """
+
+    def __init__(self, inflight: InFlight | None = None) -> None:
+        self._inflight = inflight if inflight is not None else InFlight()
 
     @property
     def name(self) -> str:
@@ -33,13 +38,17 @@ class LeastUsedStrategy(RoutingStrategy):
         proxies: list[Proxy],
         session_id: str | None = None,
         *,
-        redis_client: "RedisClient | None" = None,
+        redis_client: RedisClient | None = None,
         project_id: str | None = None,
     ) -> Proxy | None:
         if not proxies:
             return None
-
-        return min(proxies, key=lambda p: p.request_count)
+        counts = [self._inflight.of_proxy(proxy.id) for proxy in proxies]
+        fewest = min(counts)
+        return random.choice([proxy for proxy, count in zip(proxies, counts, strict=True) if count == fewest])
 
     def pick_group(self, groups: list[ProxyGroup], session_id: str | None) -> ProxyGroup:
-        return min(groups, key=lambda g: g.load / max(g.weight, 1))
+        loads = [Fraction(self._inflight.of_connector(group.key), max(group.weight, 1)) for group in groups]
+        lightest = min(loads)
+        tied = [group for group, load in zip(groups, loads, strict=True) if load == lightest]
+        return tied[0] if len(tied) == 1 else weighted_random_group(tied)

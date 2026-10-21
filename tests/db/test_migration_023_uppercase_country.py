@@ -9,24 +9,16 @@ from uuid import uuid4
 
 import pytest
 from alembic import command
-from alembic.config import Config
 from sqlalchemy import create_engine, text
 
 from api.core.config import Settings
-from api.db.migrations import MIGRATIONS_DIR
-
-
-def _alembic(url: str) -> Config:
-    cfg = Config(str(MIGRATIONS_DIR / "alembic.ini"))
-    cfg.set_main_option("script_location", str(MIGRATIONS_DIR))
-    cfg.set_main_option("sqlalchemy.url", url)
-    return cfg
+from api.db.migrations import alembic_config
 
 
 @pytest.mark.usefixtures("db_session")  # migrations are at head and the tables are truncated afterwards
 def test_existing_countries_are_upper_cased(test_settings: Settings) -> None:
     engine = create_engine(test_settings.database_url_sync)
-    cfg = _alembic(test_settings.database_url_sync)
+    cfg = alembic_config(test_settings.database_url_sync)
     project_id, credential_id, connector_id = str(uuid4()), str(uuid4()), str(uuid4())
     ts = datetime(2026, 1, 1, tzinfo=UTC).replace(tzinfo=None)
     rows = {

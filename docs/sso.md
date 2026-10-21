@@ -50,7 +50,7 @@ Two rules make this safe:
 
 The first successful sign-in links the provider account to the user: Octoprox stores the provider's stable id for the account, not the email. From then on the link is what signs the person in, so a changed email at the provider does not create a stranger, and the user's own email in Octoprox can be edited freely. A user may have one linked account per provider; linking a second one at the same provider is refused.
 
-Every instance in a cluster shares the per-login state through Redis, so a login that starts on one replica and returns on another completes normally.
+Every api process in a cluster shares the per-login state through Redis, so a login that starts on one and returns on another completes normally.
 
 ### Setting it up
 
@@ -120,7 +120,7 @@ Instead of adding every person, an admin writes rules under Settings, Sign-in, E
 
 ### Your own identity provider
 
-Any OpenID Connect provider (Okta, Entra ID, Auth0, Keycloak, Ping, Google Workspace, and others) is configured with its issuer URL, client ID and secret; discovery fills in the rest. Any SAML 2.0 provider (ADFS, Shibboleth, PingFederate, and the SAML side of Okta and Entra) is configured from its metadata XML or URL, and Octoprox publishes its own service-provider metadata at `/api/v1/auth/sso/saml/metadata` for the IdP to import. Several providers can be enabled at once, each with its own button and its own rules. The SAML signing key pair and certificate belong to the install and are shared by every instance.
+Any OpenID Connect provider (Okta, Entra ID, Auth0, Keycloak, Ping, Google Workspace, and others) is configured with its issuer URL, client ID and secret; discovery fills in the rest. Any SAML 2.0 provider (ADFS, Shibboleth, PingFederate, and the SAML side of Okta and Entra) is configured from its metadata XML or URL, and Octoprox publishes its own service-provider metadata at `/api/v1/auth/sso/saml/metadata` for the IdP to import. Several providers can be enabled at once, each with its own button and its own rules. The SAML signing key pair and certificate belong to the install and are shared by every api process.
 
 ### Group sync
 
@@ -146,4 +146,4 @@ A license names the organisation, an expiry and the number of seats. It is verif
 
 - Settings: `OCTOPROX_PUBLIC_URL` in [Configuration]({{ site.baseurl }}/configuration).
 - API: the sign-in, provider and token endpoints in the [API reference]({{ site.baseurl }}/api#authentication).
-- Redis keys `sso:state:*` (ten minutes) and `sso:login_code:*` (one minute) are the only state a sign-in keeps outside the database. The browser carries the same state in a short-lived cookie (`octoprox_sso_state`, scoped to the sign-in endpoints) so a callback can only complete in the browser that started it.
+- Redis keys `o6:sso:state:*` (ten minutes) and `o6:sso:login_code:*` (one minute) are the only state a sign-in keeps outside the database. The browser carries the same state in a short-lived cookie (`octoprox_sso_state`, scoped to the sign-in endpoints) so a callback can only complete in the browser that started it. An `o6:sso:login_code:*` entry is named by a digest of the one-time code and holds the token sealed with a key drawn from the code, so reading Redis yields no sign-in.

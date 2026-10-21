@@ -1,11 +1,17 @@
 # Copyright 2026 Octoprox Authors
 # SPDX-License-Identifier: Apache-2.0
 
-"""Tests for credential endpoints."""
+"""Tests for credential endpoints, on an api process: writes through the credential service, reads from Postgres."""
 
+from datetime import datetime
 from typing import Any
 
+from sqlalchemy import update
 from starlette.testclient import TestClient
+
+from api.db.models import CredentialModel
+from api.db.session import SessionFactory
+from tests.conftest import api_runtime, on_app_loop
 
 
 class TestCredentialEndpoints:
@@ -31,10 +37,10 @@ class TestCredentialEndpoints:
         created_project: dict[str, Any],
         sample_credential_data: dict[str, Any],
     ) -> None:
-        """Listing order does not depend on the instance's in-memory dict order.
+        """Listing order is creation order, whatever the order Postgres returns rows in.
 
         Timestamps are pinned equal to exercise the id tie-break, which is what
-        keeps bulk-imported entries ordered identically across instances.
+        keeps bulk-imported entries ordered identically on every api process.
         """
         project_id = created_project["id"]
 
@@ -56,11 +62,8 @@ class TestCredentialEndpoints:
 
         assert listed_ids() == created_ids
 
-        manager = authenticated_client.app.state.proxy_manager
-        pinned = manager._credentials[created_ids[0]].created_at
-        for cid in created_ids:
-            manager._credentials[cid].created_at = pinned
-        manager._credentials = dict(reversed(list(manager._credentials.items())))
+        pinned = datetime(2026, 1, 1)
+        on_app_loop(authenticated_client, _pin_created_at, api_runtime(authenticated_client).session_factory, created_ids, pinned)
 
         assert listed_ids() == sorted(created_ids)
 
@@ -178,7 +181,7 @@ class TestCredentialEndpoints:
         # Renaming onto an existing name is refused; keeping or changing case of your own name is not.
         rename = authenticated_client.patch(f"{url}/{other.json()['id']}", json={"name": sample_credential_data["name"]})
         assert rename.status_code == 400
-        # The rejected rename must not linger in the in-memory copy.
+        # The refused rename left the stored credential as it was.
         assert authenticated_client.get(f"{url}/{other.json()['id']}").json()["name"] == "Second"
         recase = authenticated_client.patch(f"{url}/{other.json()['id']}", json={"name": "SECOND"})
         assert recase.status_code == 200 and recase.json()["name"] == "SECOND"
@@ -335,6 +338,29 @@ class TestCredentialEndpoints:
         assert update_response.status_code == 200
         data = update_response.json()
         assert data["config"]["access_key"] == "AKIANEWKEY12345678"
+
+
+class TestCredentialProjectScope:
+    """A credential belongs to one project: under another project's path it is not found."""
+
+    def test_other_projects_credential_is_not_found(
+        self,
+        authenticated_client: TestClient,
+        created_credential: dict[str, Any],
+        sample_project_data: dict[str, Any],
+    ) -> None:
+        other = authenticated_client.post(
+            "/api/v1/projects",
+            json={**sample_project_data, "name": f"{sample_project_data['name']} B", "username": f"{sample_project_data['username']}_b"},
+        )
+        assert other.status_code == 201, other.text
+        url = f"/api/v1/projects/{other.json()['id']}/credentials/{created_credential['id']}"
+
+        assert authenticated_client.get(url).status_code == 404
+        assert authenticated_client.patch(url, json={"name": "Taken over"}).status_code == 404
+        assert authenticated_client.delete(url).status_code == 404
+        mine = f"/api/v1/projects/{created_credential['project_id']}/credentials/{created_credential['id']}"
+        assert authenticated_client.get(mine).json()["name"] == created_credential["name"]
 
 
 class TestCredentialRoleAccess:
@@ -501,10 +527,10 @@ class TestAWSCredentialAuthModes:
         assert response.json()["config"] == {"auth_mode": "host_role"}
 
     def test_catalog_describes_the_auth_mode_field(self, authenticated_client: TestClient) -> None:
-        response = authenticated_client.get("/api/v1/providers")
-        assert response.status_code == 200
-        aws = next(p for p in response.json()["providers"] if p["id"] == "aws")
-        fields = {f["key"]: f for f in aws["credential_fields"]}
+        """The AWS credential form the catalog serves: its fields as the api's registry declares them."""
+        aws = api_runtime(authenticated_client).provider_registry.require("aws")
+        # As the catalog serialises them: JSON, by alias.
+        fields = {f.key: f.model_dump(mode="json", by_alias=True) for f in aws.credential_fields}
 
         assert [o["value"] for o in fields["auth_mode"]["options"]] == ["access_keys", "host_role"]
         assert fields["auth_mode"]["default"] == "access_keys"
@@ -694,3 +720,12 @@ class TestAzureCredentialAuthModes:
 
         assert response.status_code == 422
         assert "client_secret" in response.json()["detail"]
+
+
+async def _pin_created_at(session_factory: SessionFactory, credential_ids: list[str], at: datetime) -> None:
+    """Give the credentials one creation time, as a bulk import can."""
+    async with session_factory() as session:
+        await session.execute(
+            update(CredentialModel).where(CredentialModel.id.in_(credential_ids)).values(created_at=at)
+        )
+        await session.commit()

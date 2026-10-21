@@ -40,7 +40,7 @@ export function NavigationGuardProvider({ children }: { children: ReactNode }) {
 
   const value = useMemo(() => ({ blocked, request, setGuard }), [blocked, request, setGuard])
   return (
-    <NavigationGuardContext.Provider value={value}>
+    <NavigationGuardContext value={value}>
       {children}
       {open && (
         <ConfirmDialog
@@ -51,7 +51,7 @@ export function NavigationGuardProvider({ children }: { children: ReactNode }) {
           onConfirm={() => { const go = pending.current; pending.current = null; setOpen(false); setBlocked(false); go?.() }}
         />
       )}
-    </NavigationGuardContext.Provider>
+    </NavigationGuardContext>
   )
 }
 

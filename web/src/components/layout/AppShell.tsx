@@ -2,10 +2,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { useEffect, useState, type ReactNode } from 'react'
-import { NavLink as RouterNavLink, Outlet, useLocation, useNavigate, useParams } from 'react-router-dom'
+import { NavLink as RouterNavLink, Outlet, useLocation, useNavigate, useParams } from 'react-router'
 import { useQuery } from '@tanstack/react-query'
 import {
-  BarChart3, Server, Link2, Key, Eye, Settings as SettingsIcon, LogOut, ChevronLeft, ChevronRight,
+  BarChart3, Server, Link2, KeyRound, Eye, Settings as SettingsIcon, LogOut, ChevronLeft, ChevronRight,
   ChevronsUpDown, FolderOpen, ArrowLeft, User as UserIcon, Palette, Users as UsersIcon, DatabaseBackup, Puzzle,
   Activity, Globe, Router, ShieldCheck, Target, LogIn, Plug, AlertTriangle,
 } from 'lucide-react'
@@ -17,7 +17,7 @@ import { useProject } from '../../contexts/ProjectContext'
 import { useAuth } from '../../contexts/AuthContext'
 import { useTheme } from '../../contexts/ThemeContext'
 import { useNavigationGuardContext } from '../../contexts/NavigationGuardContext'
-import { fetchProjectMetrics, fetchProjectScalingMetrics } from '../../api/client'
+import { fetchProjectMetrics, fetchProjectScalingMetrics, poolBreakdown } from '../../api/client'
 import { popSettingsOrigin, setSettingsOrigin } from '../../utils/settingsOrigin'
 import { HelpMenu } from '../HelpMenu'
 import { navItemBase, navItemCollapsed, navItemExpanded, navItemIdle } from './navStyles'
@@ -184,7 +184,7 @@ export default function AppShell({ onLogout }: { onLogout: () => void }) {
               <NavGroup label="Pool" collapsed={collapsed} />
               <NavItem to={`${base}/proxies`} icon={<Server />} label="Proxies" collapsed={collapsed} />
               <NavItem to={`${base}/connectors`} icon={<Link2 />} label="Connectors" collapsed={collapsed} />
-              <NavItem to={`${base}/credentials`} icon={<Key />} label="Credentials" collapsed={collapsed} />
+              <NavItem to={`${base}/credentials`} icon={<KeyRound />} label="Credentials" collapsed={collapsed} />
               <NavGroup label="Tools" collapsed={collapsed} />
               <NavItem to={`${base}/connect`} icon={<Plug />} label="Connect" collapsed={collapsed} />
               <NavItem to={`${base}/locations`} icon={<Globe />} label="Exit locations" collapsed={collapsed} />
@@ -330,11 +330,13 @@ function PoolTicker({ projectId }: { projectId: string }) {
   })
   const pool = metrics?.pool
   if (!pool) return null
+  // Each proxy once: the API also counts quarantined proxies inside unhealthy.
+  const { healthy, quarantined, unhealthy } = poolBreakdown(pool)
   return (
     <div className="flex items-center gap-2.5 text-xs text-fg-muted tabular-nums whitespace-nowrap">
-      <TickerDot className="bg-success" value={pool.healthy_proxies} title="Healthy" />
-      <TickerDot className="bg-orange-500" value={pool.quarantined_proxies} title="Quarantined" />
-      <TickerDot className="bg-danger" value={pool.unhealthy_proxies} title="Unhealthy" />
+      <TickerDot className="bg-success" value={healthy} title="Healthy" />
+      <TickerDot className="bg-orange-500" value={quarantined} title="Quarantined" />
+      <TickerDot className="bg-danger" value={unhealthy} title="Unhealthy, initializing or unknown" />
       <span className="text-line-strong">|</span>
       <span title="Average latency">{Math.round(pool.avg_latency_ms)} ms</span>
       {scaling && (
@@ -343,7 +345,10 @@ function PoolTicker({ projectId }: { projectId: string }) {
           <span title="Requests per minute">{scaling.requests_per_minute.toFixed(0)} req/min</span>
         </>
       )}
-      <span className="inline-flex items-center gap-1 px-1.5 py-px rounded-full bg-success-soft text-success text-[11px] font-medium">
+      <span
+        className="inline-flex items-center gap-1 px-1.5 py-px rounded-full bg-success-soft text-success text-[11px] font-medium"
+        title="Refreshed every 10 seconds from Postgres and Redis, the same whichever api process answers"
+      >
         <span className="w-1.5 h-1.5 rounded-full bg-success animate-pulse-soft" />
         live
       </span>

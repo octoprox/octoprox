@@ -43,7 +43,7 @@ export default function AccountSection() {
     },
   })
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = (e: React.SubmitEvent) => {
     e.preventDefault()
     setError(null)
     setSuccess(false)

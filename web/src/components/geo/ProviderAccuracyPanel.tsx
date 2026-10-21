@@ -7,7 +7,7 @@ import { ColumnDef } from '@tanstack/react-table'
 import { CheckCircle2, PanelRightOpen } from 'lucide-react'
 import { fetchGeoAccuracy, fetchGeoExits, fetchProjects, ConnectorAccuracy, ConnectorExits, LevelAccuracy } from '../../api/client'
 import { useTimeRange } from '../../contexts/TimeRangeContext'
-import { DataTable } from '../DataTable'
+import { DataTable, type DataTableFeatures } from '../DataTable'
 import { EmptyState } from '../layout/Page'
 import { Card, Segmented, Select } from '../ui'
 import { cn } from '../../utils/cn'
@@ -91,7 +91,7 @@ export function ProviderAccuracyPanel({ projectId, onInspect, inspecting }: {
     return merged
   }, [data, exits, projectNames])
 
-  const columns: ColumnDef<AccuracyRow>[] = useMemo(() => [
+  const columns: ColumnDef<DataTableFeatures, AccuracyRow>[] = useMemo(() => [
     {
       accessorKey: 'connector_name', header: 'Connector', meta: { filterVariant: 'text' as const },
       cell: ({ row }) => (

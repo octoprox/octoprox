@@ -387,8 +387,9 @@ def targeting_support(ptype: ProxyTypeSpec) -> TargetingSupport:
 def resolve_runtime_placeholders(text: str | None, values: dict[str, Any]) -> str | None:
     """Replace ``{key}`` runtime placeholders with concrete config values.
 
-    Mirrors ``ProxyManager.resolve_proxy_credentials`` so the SDK can build a
-    fully-resolved proxy URL for IP discovery without depending on the manager.
+    The building block of ``api.feed.sections.resolve_credentials``, which
+    resolves stored rows for routing; the SDK uses it directly to build a
+    fully-resolved proxy URL for IP discovery.
     """
     if text is None or "{" not in text:
         return text

@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { useEffect, useMemo, useState } from 'react'
-import { Link } from 'react-router-dom'
+import { Link } from 'react-router'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { ColumnDef } from '@tanstack/react-table'
 import { Check, Copy, Download, KeyRound, Plus, Router, ShieldCheck, Trash2 } from 'lucide-react'
@@ -21,7 +21,7 @@ import { useAuth } from '../contexts/AuthContext'
 import { useTheme } from '../contexts/ThemeContext'
 import { formatRangeTick, useTimeRange } from '../contexts/TimeRangeContext'
 import { useToast } from '../contexts/ToastContext'
-import { DataTable } from '../components/DataTable'
+import { DataTable, type DataTableFeatures } from '../components/DataTable'
 import { Page, EmptyState } from '../components/layout/Page'
 import { formatBytes, formatDateTime, parseApiDate, plural } from '../utils/format'
 import {
@@ -208,7 +208,7 @@ export default function DevicesPage() {
     onError: (e: Error) => { setPendingDelete(null); toast.show(e.message || 'Failed to remove device', 'error') },
   })
 
-  const columns: ColumnDef<Device>[] = useMemo(() => [
+  const columns: ColumnDef<DataTableFeatures, Device>[] = useMemo(() => [
     {
       accessorKey: 'name',
       header: 'Device',
@@ -269,12 +269,12 @@ export default function DevicesPage() {
       enableSorting: false,
       cell: ({ row }: { row: { original: Device } }) => (
         <div className="flex justify-end">
-          <button onClick={() => setPendingDelete(row.original)} className="p-1 rounded text-fg-subtle hover:text-danger hover:bg-danger-soft" title="Remove">
+          <button onClick={() => setPendingDelete(row.original)} className="p-1 rounded-sm text-fg-subtle hover:text-danger hover:bg-danger-soft" title="Remove">
             <Trash2 className="w-4 h-4" />
           </button>
         </div>
       ),
-    }] as ColumnDef<Device>[] : []),
+    }] as ColumnDef<DataTableFeatures, Device>[] : []),
   ], [canMutate])
 
   let panelNode: React.ReactNode = null
@@ -343,7 +343,7 @@ export default function DevicesPage() {
       {pendingDelete && (
         <ConfirmDialog
           title="Remove device?"
-          message={<>Remove <b className="text-fg">{pendingDelete.name}</b>. Its config stops working immediately and its tunnel address is freed.</>}
+          message={<>Remove <b className="text-fg">{pendingDelete.name}</b>. Its config stops working within a few seconds, as the gateways drop it, and its tunnel address is freed.</>}
           onCancel={() => setPendingDelete(null)}
           onConfirm={() => deleteMutation.mutate(pendingDelete)}
           isLoading={deleteMutation.isPending}
@@ -436,7 +436,7 @@ function NewDevicePanel({ unconfigured, onClose, onCreated }: { unconfigured: Pr
     onError: (e: Error) => toast.show(e.message || 'Failed to add device', 'error'),
   })
 
-  const submit = (e: React.FormEvent) => {
+  const submit = (e: React.SubmitEvent) => {
     e.preventDefault()
     mutation.mutate({
       name: name.trim(),
@@ -538,10 +538,11 @@ function DevicePanel({ device, serverConfigured, canMutate, onClose, onDelete, o
     || routing.city.replace(/\s+/g, '_').toLowerCase() !== (device.city ?? '')
 
   const credentialKey = device.credential.kind === 'keys' ? device.credential.public_key : device.credential.serial
+  // A config can carry the device's private key, so the API gives it to editors and admins only.
   const { data: config } = useQuery({
     queryKey: ['tunnel-device-config', device.protocol, selectedProjectId, device.id, credentialKey, serverConfigured],
     queryFn: () => adapter.config(selectedProjectId!, device.id),
-    enabled: !!selectedProjectId,
+    enabled: !!selectedProjectId && canMutate,
     refetchInterval: false,
   })
 
@@ -561,7 +562,7 @@ function DevicePanel({ device, serverConfigured, canMutate, onClose, onDelete, o
     onError: (e: Error) => { setConfirmRotate(false); toast.show(e.message || 'Failed to rotate', 'error') },
   })
 
-  const save = (e: React.FormEvent) => {
+  const save = (e: React.SubmitEvent) => {
     e.preventDefault()
     update.mutate({ name: name.trim(), session_id: routing.session_id, country: routing.country, state: routing.state, city: routing.city })
   }
@@ -595,7 +596,13 @@ function DevicePanel({ device, serverConfigured, canMutate, onClose, onDelete, o
         </div>
       )}
 
-      <ConfigSection config={config ?? null} device={device} adapter={adapter} serverConfigured={serverConfigured} />
+      {canMutate ? (
+        <ConfigSection config={config ?? null} device={device} adapter={adapter} serverConfigured={serverConfigured} />
+      ) : (
+        <InspectorSection title="Device configuration">
+          <p className="text-xs text-fg-muted">A device's {adapter.fileLabel} file can carry its private key, so only editors and admins can view or download it.</p>
+        </InspectorSection>
+      )}
 
       <form id="peer-form" onSubmit={save} className="space-y-4">
         <div>
@@ -630,13 +637,13 @@ function DevicePanel({ device, serverConfigured, canMutate, onClose, onDelete, o
       <InspectorSection title="Connection">
         <KeyValue
           label={isWireGuard ? 'Last handshake' : (device.status.online ? 'Connected since' : 'Last connected')}
-          value={<span title={device.status.live ? 'As the instance carrying the tunnel reports it right now' : 'The last sighting on record; no instance is reporting this device right now'}>{seen}{device.status.last_seen_at && !device.status.live ? <span className="text-fg-subtle"> · on record</span> : null}</span>}
+          value={<span title={device.status.live ? 'As the gateway carrying the tunnel reports it right now' : 'The last sighting on record; no gateway is reporting this device right now'}>{seen}{device.status.last_seen_at && !device.status.live ? <span className="text-fg-subtle"> · on record</span> : null}</span>}
         />
         <KeyValue label="From" value={device.status.endpoint ?? '-'} mono />
         <KeyValue
           label={isWireGuard ? 'Tunnel counters' : 'Session counters'}
           value={device.status.live
-            ? <span title={isWireGuard ? "The carrying instance's interface counters since it came up: wire bytes, handshakes and DNS included" : "The daemon's counters for the current session: wire bytes, control channel and DNS included"}>{formatBytes(device.status.rx_bytes)} in, {formatBytes(device.status.tx_bytes)} out</span>
+            ? <span title={isWireGuard ? "The carrying gateway's interface counters since it came up: wire bytes, handshakes and DNS included" : "The daemon's counters for the current session: wire bytes, control channel and DNS included"}>{formatBytes(device.status.rx_bytes)} in, {formatBytes(device.status.tx_bytes)} out</span>
             : <span className="text-fg-subtle">not carried right now</span>}
         />
         <KeyValue label="Added" value={formatDateTime(device.created_at)} />
@@ -713,7 +720,7 @@ function DeviceTrafficSection({ device, adapter, projectId }: { device: Device; 
   return (
     <InspectorSection title="Traffic">
       <p className="text-xs text-fg-muted">
-        What the pool relayed for this device, counted like any proxy request and kept as history. The totals are cluster-wide and survive restarts; the tunnel's own counters are under Connection.
+        What the pool relayed for this device, counted like any proxy request and kept as history. The totals add up every gateway that carried it and survive restarts; the tunnel's own counters are under Connection.
       </p>
       <KeyValue label="Relayed" value={<>{formatBytes(m.bytes_sent + m.bytes_received)} <span className="text-fg-subtle font-normal">· {formatBytes(m.bytes_sent)} up, {formatBytes(m.bytes_received)} down</span></>} />
       <KeyValue
@@ -732,11 +739,11 @@ function DeviceTrafficSection({ device, adapter, projectId }: { device: Device; 
           <p className="text-fg-subtle text-xs text-center h-[90px] flex items-center justify-center">No traffic in this range</p>
         ) : (
           <ResponsiveContainer width="100%" height={90}>
-            <AreaChart data={points} margin={{ top: 4, right: 4, left: -8, bottom: 0 }}>
+            <AreaChart data={points} margin={{ top: 4, right: 4, left: -8, bottom: 0 }} aria-label={`${seriesLabel} over time`}>
               <CartesianGrid strokeDasharray="2 4" stroke={gridColor} vertical={false} />
               <XAxis dataKey="time" type="number" scale="time" domain={['dataMin', 'dataMax']} tickFormatter={(v: number) => formatRangeTick(v, range)} tick={{ fontSize: 10, fill: tickColor }} axisLine={false} tickLine={false} minTickGap={40} />
               <YAxis tick={{ fontSize: 10, fill: tickColor }} axisLine={false} tickLine={false} tickFormatter={(v: number) => (series === 'bytes' ? formatBytes(v) : String(v))} width={52} allowDecimals={false} />
-              <Tooltip labelFormatter={(v: number) => new Date(v).toLocaleString()} formatter={(v: number) => [formatValue(v), seriesLabel]} contentStyle={tooltipStyle} />
+              <Tooltip labelFormatter={(v) => new Date(Number(v)).toLocaleString()} formatter={(v) => [formatValue(Number(v)), seriesLabel]} contentStyle={tooltipStyle} />
               <Area type="monotone" dataKey={series} name={seriesLabel} stroke={lineColor} strokeWidth={2} fill={lineColor} fillOpacity={0.08} />
             </AreaChart>
           </ResponsiveContainer>

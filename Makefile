@@ -15,9 +15,9 @@ help:
 	@echo "  setup-dev      - Setup with development dependencies"
 	@echo "  install        - Install dependencies only (assumes venv exists)"
 	@echo ""
-	@echo "Run targets:"
-	@echo "  run            - Run the API server (production mode)"
-	@echo "  run-dev        - Run the API server (development mode with reload)"
+	@echo "Run targets (every role in one process: OCTOPROX_ROLE defaults to all):"
+	@echo "  run            - Run Octoprox (production mode)"
+	@echo "  run-dev        - Run Octoprox (development mode with reload)"
 	@echo ""
 	@echo "Test & Quality targets:"
 	@echo "  test           - Run tests with coverage"
@@ -32,12 +32,16 @@ help:
 	@echo "Docker targets:"
 	@echo "  docker-build   - Build Docker image"
 	@echo "  docker-run     - Run Docker container"
-	@echo "  docker-compose-up   - Start all services with docker-compose (single instance)"
+	@echo "  docker-compose-up   - Start all services with docker-compose (single instance, role all)"
 	@echo "  docker-compose-down - Stop all services"
-	@echo "  cluster-up          - Start 3-instance cluster behind nginx (local build)"
+	@echo "  cluster-up          - Start the role cluster behind nginx (local build):"
+	@echo "                          api x2        API, web UI, /echo"
+	@echo "                          gateway x2    proxy listener, WireGuard, OpenVPN"
+	@echo "                          controller x2 one leads (routing feed, job timers), one stands by"
+	@echo "                          worker x2     jobs (health checks, syncs, scaling, attribution)"
 	@echo "  cluster-down        - Stop the cluster"
 	@echo "  cluster-logs        - Tail logs from the cluster"
-	@echo "  cluster-rebuild     - Rebuild images and restart the cluster"
+	@echo "  cluster-rebuild     - Rebuild the image and recreate the cluster"
 	@echo ""
 	@echo "Frontend targets:"
 	@echo "  web-install    - Install frontend dependencies"
@@ -103,18 +107,22 @@ docker-compose-up:
 docker-compose-down:
 	docker-compose down
 
-# Multi-instance cluster: 3 octoprox replicas behind nginx.
+# Role cluster behind nginx (docker-compose.cluster.yml): two each of api,
+# gateway, controller and worker, sharing Postgres and Redis.
 # API + Web UI:    http://localhost:8000
 # Proxy traffic:   localhost:8080  (HTTP/SOCKS via Proxy-Authorization)
 # WireGuard:       localhost:51820/udp
+# OpenVPN:         localhost:1194  (UDP, or TCP)
+# --remove-orphans stops and removes the containers of services the file no
+# longer names (a 5.x cluster's octoprox-{1,2,3}) before anything starts.
 cluster-up:
-	docker compose -f docker-compose.cluster.yml up -d --build
+	docker compose -f docker-compose.cluster.yml up -d --build --remove-orphans
 
 cluster-down:
-	docker compose -f docker-compose.cluster.yml down
+	docker compose -f docker-compose.cluster.yml down --remove-orphans
 
 cluster-rebuild:
-	docker compose -f docker-compose.cluster.yml up -d --build --force-recreate
+	docker compose -f docker-compose.cluster.yml up -d --build --force-recreate --remove-orphans
 
 cluster-logs:
 	docker compose -f docker-compose.cluster.yml logs -f --tail=100

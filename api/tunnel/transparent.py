@@ -1,14 +1,9 @@
 # Copyright 2026 Octoprox Authors
 # SPDX-License-Identifier: Apache-2.0
 
-"""The listener tunnel traffic is redirected to.
+"""The listener a gateway's tunnel traffic is redirected to: the proxy listener's CONNECT path, without its HTTP front.
 
-A connection arrives here because nftables rewrote its destination. The
-device thinks it is talking to the origin, so there is no request line and
-no ``Proxy-Authorization``: the peer's tunnel address is the credential (see
-:mod:`api.tunnel.peers`) and the original destination is read back from the
-socket. From there it is the CONNECT path: pick an upstream for the project,
-verify the exit, relay bytes.
+A device is known by its tunnel address, and the destination it connected to is read back from the socket.
 """
 
 from __future__ import annotations
@@ -21,9 +16,8 @@ from typing import TYPE_CHECKING
 
 import structlog
 
-from api.core.event_bus import event_bus
 from api.core.failure_log import RequestInfo, set_request_info
-from api.core.proxy_server import ProxyServer
+from api.core.proxy_server import ProxyServer, close_quietly
 from api.core.signals import tunnel_encrypted_dns_blocked, tunnel_name_unresolved
 from api.models.project import MitmMode
 from api.tunnel.dns import FakeIpDirectory
@@ -32,8 +26,9 @@ from api.tunnel.sniff import SniffResult, sniff, take_buffered
 
 if TYPE_CHECKING:
     from api.core.mitm import MitmHandler
-    from api.core.proxy_manager import ProxyManager
+    from api.gateway.metering import RequestMetering
     from api.geo.verifier import ExitVerifier
+    from api.routing.router import Router
 
 logger = structlog.get_logger()
 
@@ -78,23 +73,37 @@ def original_destination(writer: asyncio.StreamWriter) -> tuple[str, int] | None
 
 
 class TransparentProxyServer(ProxyServer):
-    """The proxy server's relay without its HTTP front: authenticated by address, addressed by NAT."""
+    """The proxy server's relay without its HTTP front: authenticated by address, addressed by NAT.
+
+    Args:
+        router, meters, timeout, mitm_handler, exit_verifier: As the proxy listener's (:class:`ProxyServer`).
+        peers: Turns a tunnel source address into its device.
+        fake_ips: Turns a fake destination address back into the name it stands for.
+        port: The local port connections are redirected to; 0 binds any free one.
+        destination_of: Reads a connection's pre-NAT destination; tests pass their own.
+        sniff_timeout: Seconds to wait for a connection's first bytes before routing it by address alone.
+        block_encrypted_dns: Close connections to encrypted-DNS resolvers.
+    """
 
     def __init__(
         self,
-        proxy_manager: ProxyManager,
+        router: Router,
+        meters: RequestMetering,
         peers: PeerLookup,
         fake_ips: FakeIpDirectory,
         *,
         port: int,
+        timeout: float,
         mitm_handler: MitmHandler | None = None,
         exit_verifier: ExitVerifier | None = None,
         destination_of: OriginalDestination = original_destination,
         sniff_timeout: float = 2.0,
         block_encrypted_dns: bool = True,
     ) -> None:
-        super().__init__(proxy_manager, mitm_handler=mitm_handler, exit_verifier=exit_verifier)
-        self._port = port
+        # No host of its own: it binds each tunnel gateway address through listen().
+        super().__init__(
+            router, meters, host="", port=port, timeout=timeout, mitm_handler=mitm_handler, exit_verifier=exit_verifier
+        )
         # One listening socket per tunnel gateway: nftables redirects a
         # connection to the primary address of the interface it came in on.
         self._servers: dict[str, asyncio.Server] = {}
@@ -177,9 +186,9 @@ class TransparentProxyServer(ProxyServer):
             if not peer.enabled:
                 logger.debug("Connection from a disabled peer", peer=peer.name)
                 return
-            project = self._proxy_manager.get_project(peer.project_id)
+            project = self._router.get_project(peer.project_id)
             if project is None:
-                logger.warning("Peer belongs to a project this instance does not know", peer_id=peer.id)
+                logger.warning("Peer belongs to a project this gateway does not know", peer_id=peer.id)
                 return
 
             destination = self._destination_of(client_writer)
@@ -206,7 +215,7 @@ class TransparentProxyServer(ProxyServer):
                 # Let the device fall back to the tunnel resolver rather than
                 # resolve elsewhere and connect to addresses we cannot name.
                 # Counted on the device, in the same pipeline as its requests.
-                await event_bus.publish(tunnel_encrypted_dns_blocked, self, peer_id=peer.id)
+                await tunnel_encrypted_dns_blocked.send_async(self, peer_id=peer.id)
                 logger.info(
                     "Blocked encrypted DNS from a tunnel device", peer=peer.name, target=target_host or dst_ip, port=dst_port
                 )
@@ -220,7 +229,7 @@ class TransparentProxyServer(ProxyServer):
                 # Relayed by address: domain filters see an address and the
                 # exit may differ from the one that resolved the name.
                 target_host = dst_ip
-                await event_bus.publish(tunnel_name_unresolved, self, peer_id=peer.id)
+                await tunnel_name_unresolved.send_async(self, peer_id=peer.id)
             session_id = peer.session_id
             location = peer.location
             set_request_info(RequestInfo(
@@ -265,8 +274,4 @@ class TransparentProxyServer(ProxyServer):
         except Exception as exc:
             logger.error("Error handling tunnel connection", error=str(exc), source=source)
         finally:
-            try:
-                client_writer.close()
-                await client_writer.wait_closed()
-            except Exception:
-                pass
+            await close_quietly(client_writer)

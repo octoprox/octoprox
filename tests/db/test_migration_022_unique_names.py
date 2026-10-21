@@ -8,26 +8,18 @@ from uuid import uuid4
 
 import pytest
 from alembic import command
-from alembic.config import Config
 from sqlalchemy import create_engine, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.core.config import Settings
-from api.db.migrations import MIGRATIONS_DIR
-
-
-def _alembic(url: str) -> Config:
-    cfg = Config(str(MIGRATIONS_DIR / "alembic.ini"))
-    cfg.set_main_option("script_location", str(MIGRATIONS_DIR))
-    cfg.set_main_option("sqlalchemy.url", url)
-    return cfg
+from api.db.migrations import alembic_config
 
 
 @pytest.mark.usefixtures("db_session")  # migrations are at head and the tables are truncated afterwards
 def test_duplicates_are_suffixed_oldest_first(test_settings: Settings) -> None:
     engine = create_engine(test_settings.database_url_sync)
-    cfg = _alembic(test_settings.database_url_sync)
+    cfg = alembic_config(test_settings.database_url_sync)
     project_id = str(uuid4())
     base = datetime(2026, 1, 1, tzinfo=UTC).replace(tzinfo=None)
     try:

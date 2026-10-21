@@ -1,32 +1,31 @@
 # Copyright 2026 Octoprox Authors
 # SPDX-License-Identifier: Apache-2.0
 
-"""Tests for the IP attribution repositories and the observation flusher against Postgres."""
+"""Tests for the IP attribution repositories against Postgres."""
 
 import asyncio
-import contextlib
 import os
 from datetime import datetime, timedelta
 from typing import Any
 
 import pytest
+import structlog
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.core import utc_now
 from api.db import geo_repository
 from api.db.geo_repository import (
+    ExitSighting,
     GeoDatabaseRepository,
     GeoSettingsRepository,
     ObservationRepository,
 )
-from api.db.redis import GEO_OBSERVATIONS_KEY, RedisClient
 from api.db.repository import (
     ConnectorRepository,
     CredentialRepository,
     ProjectRepository,
 )
-from api.geo import observations
 from api.geo.models import (
     ConflictRule,
     ExitJudgement,
@@ -37,11 +36,12 @@ from api.geo.models import (
     IpObservation,
     ObservationSource,
 )
-from api.geo.observations import ObservationFlusher, ObservationRecorder
 from api.models.connector import Connector
 from api.models.credential import Credential, CredentialType
 from api.models.project import Project
-from api.models.proxy import ProxyStatus
+
+# What the sweep logs when it rewrote the blob table and gave the disk back.
+RECLAIMED = "IP database storage reclaimed"
 
 
 async def _connectors(session: AsyncSession, *ids: str) -> None:
@@ -164,20 +164,26 @@ class TestGeoDatabases:
         async with db_engine.connect() as conn:
             await conn.execution_options(isolation_level="AUTOCOMMIT")
             # A compact table is left alone.
-            assert await geo_repository.reclaim_blob_space(conn) is False
+            with structlog.testing.capture_logs() as logs:
+                await geo_repository.reclaim_blob_space(conn)
+            assert RECLAIMED not in [log["event"] for log in logs]
 
             # Every replaced file stays on disk until the sweep.
             for _ in range(3):
                 await repo.update(record, blob=os.urandom(size))
                 await db_session.commit()
             assert await _blob_table_bytes(db_session) >= one_file + 2 * size
-            assert await geo_repository.reclaim_blob_space(conn) is True
+            with structlog.testing.capture_logs() as logs:
+                await geo_repository.reclaim_blob_space(conn)
+            assert [log["event"] for log in logs] == [RECLAIMED]
             assert await _blob_table_bytes(db_session) < one_file + size // 2
             assert len(await repo.get_blob(record.id) or b"") == size
 
             await repo.delete(record.id)
             await db_session.commit()
-            assert await geo_repository.reclaim_blob_space(conn) is True
+            with structlog.testing.capture_logs() as logs:
+                await geo_repository.reclaim_blob_space(conn)
+            assert [log["event"] for log in logs] == [RECLAIMED]
         assert await _blob_table_bytes(db_session) < size // 2
 
         # The plain pass after the rewrite leaves the system page nothing to report.
@@ -261,7 +267,6 @@ class TestObservations:
     async def test_exit_ips_upsert_summary_and_list(self, db_session: AsyncSession) -> None:
         await _connectors(db_session, "conn-1", "conn-2")
         repo = ObservationRepository(db_session)
-        from api.geo.observations import aggregate_exits
 
         day1 = datetime(2026, 9, 1, 8, 0, 0)
         day2 = datetime(2026, 9, 20, 8, 0, 0)
@@ -274,8 +279,8 @@ class TestObservations:
             _observation(ip="10.0.0.3", observed_at=day2, resolved_country="GB"),
             _observation(connector_id="conn-2", ip="10.0.0.1", observed_at=day2),
         ]
-        await repo.add_exit_ips(aggregate_exits([(o, True) for o in first]))
-        await repo.add_exit_ips(aggregate_exits([(o, True) for o in second]))
+        await repo.add_exit_ips(ExitSighting.fold([(o, True) for o in first]))
+        await repo.add_exit_ips(ExitSighting.fold([(o, True) for o in second]))
         # A later re-attribution of an existing exit by its holder rewrites its
         # verdict (claim now confirmed) and nothing else: no hand-out, no sighting time.
         applied = await repo.apply_judgements(
@@ -363,7 +368,7 @@ class TestObservations:
 
         # An older batch arriving late may add sightings but cannot roll the state back.
         late = [_observation(ip="10.0.0.2", observed_at=day1 - timedelta(hours=1), proxy_id="proxy-old")]
-        await repo.add_exit_ips(aggregate_exits([(o, True) for o in late]))
+        await repo.add_exit_ips(ExitSighting.fold([(o, True) for o in late]))
         await db_session.commit()
         (row,), _, _ = await repo.exit_ips(ip="10.0.0.2", connector_ids=["conn-1"])
         assert row["sightings"] == 2 and row["proxy_id"] == "proxy-1" and row["first_seen"] == day1 - timedelta(hours=1)
@@ -493,10 +498,9 @@ class TestObservations:
             _observation(ip="10.1.0.4", claimed_country="US", resolved_country=None, country_conflict=None, claimed_city="new_york", resolved_city="newark", city_conflict=True),
             _observation(ip="10.1.0.5", claimed_country=None, resolved_country="US", country_conflict=None),
         ]
-        from api.geo.observations import aggregate_exits
 
         await repo.insert_many(rows)
-        await repo.add_exit_ips(aggregate_exits([(o, True) for o in rows]))
+        await repo.add_exit_ips(ExitSighting.fold([(o, True) for o in rows]))
         await db_session.commit()
 
         def ips(page: list[dict[str, Any]]) -> set[str]:
@@ -508,6 +512,15 @@ class TestObservations:
             assert ips((await fetch(verdict="confirmed"))[0]) == {"10.1.0.1", "10.1.0.2", "10.1.0.3"}
             assert ips((await fetch(verdict="no_claim"))[0]) == {"10.1.0.5"}
             assert (await fetch())[1] == 5
+
+    async def test_a_session_or_instance_id_longer_than_its_column_is_cut(self, db_session: AsyncSession) -> None:
+        """A client's ``-sessid-`` can be any length: one too long would fail its whole batch at every delivery."""
+        repo = ObservationRepository(db_session)
+        assert await repo.insert_many([_observation(session_id="s" * 300, instance_id="i" * 100), _observation()]) == 2
+        await db_session.commit()
+
+        rows, _, _ = await repo.recent()
+        assert {(row["session_id"], row["instance_id"]) for row in rows} == {("s" * 255, "i" * 64), (None, "")}
 
     async def test_retention(self, db_session: AsyncSession) -> None:
         repo = ObservationRepository(db_session)
@@ -529,13 +542,12 @@ class TestStatementSize:
         monkeypatch.setattr(ObservationRepository, "_EXIT_UPSERT_ROWS", 2)
         monkeypatch.setattr(ObservationRepository, "_JUDGEMENT_ROWS", 1)
         repo = ObservationRepository(db_session)
-        from api.geo.observations import aggregate_exits
 
         day = datetime(2026, 9, 1, 8, 0, 0)
         sightings = [_observation(ip=f"10.9.0.{n}", observed_at=day) for n in range(5)]
-        await repo.add_exit_ips(aggregate_exits([(o, True) for o in sightings]))
+        await repo.add_exit_ips(ExitSighting.fold([(o, True) for o in sightings]))
         # The same exits again add to the rows, whichever statement they land in.
-        await repo.add_exit_ips(aggregate_exits([(o, True) for o in sightings]))
+        await repo.add_exit_ips(ExitSighting.fold([(o, True) for o in sightings]))
         # Two judgements of one row, out of order: the newer stays, and the row counts once.
         applied = await repo.apply_judgements([
             ExitJudgement(proxy_id="proxy-1", connector_id="conn-1", ip="10.9.0.0", judged_at=day + timedelta(hours=3), claimed_country="DE"),
@@ -550,268 +562,10 @@ class TestStatementSize:
         assert (rows["10.9.0.0"]["claimed_country"], rows["10.9.0.1"]["claimed_country"]) == ("DE", "FR")
 
 
-@pytest.mark.usefixtures("db_engine")
-class TestFlusher:
-    async def test_recorder_to_redis_to_postgres(
-        self,
-        db_session_factory: async_sessionmaker[AsyncSession],
-        redis_client: RedisClient,
-        db_session: AsyncSession,
-    ) -> None:
-        await _connectors(db_session, "conn-1")
-        # The flusher annotates the status hash the health checker owns; give proxy-1 one.
-        await redis_client.set_proxy_status("proxy-1", ProxyStatus.HEALTHY)
-        repo = ObservationRepository(db_session)
-        before = await repo.count_matching()
-        # Other test modules' apps publish to the same list; start from a clean queue.
-        await redis_client.client.delete(GEO_OBSERVATIONS_KEY)
-        recorder = ObservationRecorder(redis_client)
-        recorder.record(_observation())
-        recorder.record(_observation(ip="81.2.69.161", claimed_country="GB", country_conflict=False))
-        # A connector deleted before the flush: its raw rows are kept, its aggregates skipped.
-        recorder.record(_observation(connector_id="gone", ip="81.2.69.162"))
-        assert await recorder.publish() == 3
-        assert recorder.pending == 0 and recorder.published == 3
-        assert await redis_client.client.llen(GEO_OBSERVATIONS_KEY) == 3
-
-        flusher = ObservationFlusher(
-            db_session_factory, redis_client, "inst", retention_days=lambda: 7
-        )
-        assert await flusher.drain() == 3
-        exits, _, _ = await ObservationRepository(db_session).exit_ips(connector_ids=["conn-1"])
-        assert {e["ip"] for e in exits} >= {"81.2.69.160", "81.2.69.161"}
-        # The last counted exit went into the proxy's status hash, next to its health fields.
-        assert await redis_client.client.hget("proxy:status:proxy-1", "exit_ip") == "81.2.69.161"
-        status = await redis_client.get_proxy_status("proxy-1")
-        assert status is not None and status["status"] == ProxyStatus.HEALTHY
-
-        # The same exit reported again, by anyone, any time later: one raw row more, no hand-out.
-        recorder.record(_observation(ip="81.2.69.161", instance_id="another"))
-        await recorder.publish()
-        assert await flusher.drain() == 1
-        (row,), _, _ = await ObservationRepository(db_session).exit_ips(connector_ids=["conn-1"], ip="81.2.69.161")
-        assert row["sightings"] == 1
-        # A different exit for the same proxy is a hand-out and moves the recorded exit.
-        recorder.record(_observation(ip="81.2.69.170"))
-        await recorder.publish()
-        assert await flusher.drain() == 1
-        (row,), _, _ = await ObservationRepository(db_session).exit_ips(connector_ids=["conn-1"], ip="81.2.69.170")
-        assert row["sightings"] == 1
-        assert await redis_client.client.hget("proxy:status:proxy-1", "exit_ip") == "81.2.69.170"
-        # A judgement of that exit travels the same list: verdict rewritten, no log row, no sighting.
-        recorder.record(ExitJudgement(proxy_id="proxy-1", connector_id="conn-1", ip="81.2.69.170", claimed_country="US", resolved_country="GB", country_conflict=True))
-        recorder.record(ExitJudgement(proxy_id="proxy-x", connector_id="gone", ip="81.2.69.170"))  # deleted connector: skipped
-        await recorder.publish()
-        assert await flusher.drain() == 1  # one verdict rewritten; the skipped judgement is not work done
-        (row,), _, _ = await ObservationRepository(db_session).exit_ips(connector_ids=["conn-1"], ip="81.2.69.170")
-        assert row["sightings"] == 1 and row["country_conflict"] is True and row["source"] == "reattribute"
-        await redis_client.client.delete("proxy:status:proxy-1")
-        assert await ObservationRepository(db_session).exit_ips(connector_ids=["gone"]) == ([], 0, True)
-        assert await redis_client.client.llen(GEO_OBSERVATIONS_KEY) == 0
-        assert await flusher.drain() == 0
-
-        assert await repo.count_matching() == before + 5  # three sightings, then the repeat and the move
-        accuracy = {a["connector_id"]: a for a in await repo.exit_accuracy(connector_ids=["conn-1"])}
-        assert accuracy["conn-1"]["country"]["claimed"] >= 2
-        assert await repo.exit_accuracy(connector_ids=["gone"]) == []
-
-    async def test_exit_on_record_is_not_counted_again_when_redis_knows_nothing(
-        self,
-        db_session_factory: async_sessionmaker[AsyncSession],
-        redis_client: RedisClient,
-        db_session: AsyncSession,
-    ) -> None:
-        """After an upgrade or a Redis loss the exit table, not a seed, says what was counted before."""
-        await _connectors(db_session, "conn-1")
-        await redis_client.client.delete(GEO_OBSERVATIONS_KEY)
-        await redis_client.client.delete("proxy:status:proxy-7", "proxy:status:proxy-8", "proxy:status:proxy-9")
-        for proxy_id in ("proxy-7", "proxy-8", "proxy-9"):
-            await redis_client.set_proxy_status(proxy_id, ProxyStatus.HEALTHY)
-        from api.geo.observations import aggregate_exits
-
-        repo = ObservationRepository(db_session)
-        # Two exits already on record from before: one held by proxy-7, one from before per-proxy state existed.
-        held = _observation(proxy_id="proxy-7", ip="10.0.0.7", observed_at=datetime(2026, 9, 1))
-        legacy = _observation(proxy_id=None, ip="10.0.0.8", observed_at=datetime(2026, 9, 1))
-        await repo.add_exit_ips(aggregate_exits([(held, True), (legacy, True)]))
-        await db_session.commit()
-
-        recorder = ObservationRecorder(redis_client)
-        recorder.record(_observation(proxy_id="proxy-7", ip="10.0.0.7", source=ObservationSource.HEALTH_CHECK))  # same holder
-        recorder.record(_observation(proxy_id="proxy-8", ip="10.0.0.8", source=ObservationSource.HEALTH_CHECK))  # legacy row
-        recorder.record(_observation(proxy_id="proxy-9", ip="10.0.0.7", source=ObservationSource.HEALTH_CHECK))  # another proxy: reuse
-        recorder.record(_observation(proxy_id="proxy-8", ip="10.0.0.80", source=ObservationSource.HEALTH_CHECK))  # brand new exit
-        # A sighting of a proxy removed before the flush (its status hash is gone): counted
-        # for the connector's history, but no bookkeeping is written back, or the hash would return.
-        recorder.record(_observation(proxy_id="proxy-gone", ip="10.0.0.99", source=ObservationSource.HEALTH_CHECK))
-        await recorder.publish()
-        flusher = ObservationFlusher(db_session_factory, redis_client, "inst", retention_days=lambda: 7)
-        assert await flusher.drain() == 5
-        assert not await redis_client.client.exists("proxy:status:proxy-gone")
-        rows = {r["ip"]: r for r in (await repo.exit_ips(connector_ids=["conn-1"]))[0]}
-        assert rows["10.0.0.7"]["sightings"] == 2  # held before by proxy-7 (1), handed to proxy-9 (+1)
-        assert rows["10.0.0.8"]["sightings"] == 1  # legacy row, holder unknown: not counted again
-        assert rows["10.0.0.80"]["sightings"] == 1
-        # From here on Redis knows, and the table is not consulted for these proxies.
-        assert await redis_client.client.hget("proxy:status:proxy-7", "exit_ip") == "10.0.0.7"
-        assert await redis_client.client.hget("proxy:status:proxy-8", "exit_ip") == "10.0.0.80"
-        await redis_client.client.delete("proxy:status:proxy-7", "proxy:status:proxy-8", "proxy:status:proxy-9")
-
-    async def test_a_cycle_drains_full_batches_until_the_queue_is_short(
-        self,
-        db_session_factory: async_sessionmaker[AsyncSession],
-        redis_client: RedisClient,
-        db_session: AsyncSession,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """One batch per cycle let a backlog outgrow the flusher; a cycle now writes until a batch comes back short."""
-        await _connectors(db_session, "conn-1")
-        await redis_client.client.delete(GEO_OBSERVATIONS_KEY)
-        monkeypatch.setattr(observations, "FLUSH_BATCH_SIZE", 2)
-        recorder = ObservationRecorder(redis_client)
-        for n in range(5):
-            recorder.record(_observation(proxy_id=None, ip=f"10.1.0.{n}"))
-        await recorder.publish()
-        assert await recorder.queued() == 5
-
-        flusher = ObservationFlusher(db_session_factory, redis_client, "inst", retention_days=lambda: 7)
-        assert await flusher.drain() == 5  # batches of 2, 2 and 1
-        assert await recorder.queued() == 0
-        rows, _, _ = await ObservationRepository(db_session).exit_ips(connector_ids=["conn-1"], limit=1000)
-        assert {f"10.1.0.{n}" for n in range(5)} <= {r["ip"] for r in rows}
-        assert await flusher.drain() == 0
-
-    async def test_a_drain_stops_at_its_budget_or_a_lost_lease(
-        self,
-        db_session_factory: async_sessionmaker[AsyncSession],
-        redis_client: RedisClient,
-        db_session: AsyncSession,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        await _connectors(db_session, "conn-1")
-        await redis_client.client.delete(GEO_OBSERVATIONS_KEY)
-        monkeypatch.setattr(observations, "FLUSH_BATCH_SIZE", 2)
-        recorder = ObservationRecorder(redis_client)
-        for n in range(8):
-            recorder.record(_observation(proxy_id=None, ip=f"10.2.0.{n}"))
-        await recorder.publish()
-
-        # Out of time after the first batch: the rest waits for the next cycle.
-        no_time = ObservationFlusher(db_session_factory, redis_client, "inst", drain_budget=0, retention_days=lambda: 7)
-        assert await no_time.drain() == 2 and await recorder.queued() == 6
-
-        class LostLease:
-            def __init__(self, held_for: int) -> None:
-                self.held_for = held_for
-
-            async def confirm(self) -> bool:
-                self.held_for -= 1
-                return self.held_for >= 0
-
-        # Another instance holds the lease: not even a first batch is popped.
-        flusher = ObservationFlusher(db_session_factory, redis_client, "inst", retention_days=lambda: 7)
-        assert await flusher.drain(LostLease(0)) == 0  # type: ignore[arg-type]
-        assert await recorder.queued() == 6
-        # Lost after one batch: no more, so the queue is never written twice at once.
-        assert await flusher.drain(LostLease(1)) == 2  # type: ignore[arg-type]
-        assert await recorder.queued() == 4
-
-        class StoppedMidDrain:
-            async def confirm(self) -> bool:
-                flusher.stop()
-                return True
-
-        # Shutdown arrives while a batch is in hand: it is written, then the drain ends.
-        assert await flusher.drain(StoppedMidDrain()) == 2  # type: ignore[arg-type]
-        assert await recorder.queued() == 2
-        assert await flusher.drain() == 0  # a stopped flusher starts no batch
-        assert await recorder.queued() == 2
-        await asyncio.wait_for(flusher.settle(), 1)  # nothing in flight: returns at once
-        await redis_client.client.delete(GEO_OBSERVATIONS_KEY)
-
-    async def test_only_a_drain_cut_short_by_its_budget_leaves_a_backlog(
-        self,
-        db_session_factory: async_sessionmaker[AsyncSession],
-        redis_client: RedisClient,
-        db_session: AsyncSession,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        await _connectors(db_session, "conn-1")
-        await redis_client.client.delete(GEO_OBSERVATIONS_KEY)
-        monkeypatch.setattr(observations, "FLUSH_BATCH_SIZE", 2)
-        recorder = ObservationRecorder(redis_client)
-        for n in range(3):
-            recorder.record(_observation(proxy_id=None, ip=f"10.3.0.{n}"))
-        await recorder.publish()
-
-        no_time = ObservationFlusher(db_session_factory, redis_client, "inst", drain_budget=0, retention_days=lambda: 7)
-        assert await no_time.drain() == 2 and no_time.backlogged  # out of time, queue still full
-        assert await no_time.drain() == 1 and not no_time.backlogged  # a short batch: drained
-
-    async def test_a_backlog_is_drained_without_waiting_out_the_interval(
-        self,
-        db_session_factory: async_sessionmaker[AsyncSession],
-        redis_client: RedisClient,
-        db_session: AsyncSession,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """Sleeping 30 s after every 20 s drain left the flusher idle most of a burst while the queue grew."""
-        await _connectors(db_session, "conn-1")
-        await redis_client.client.delete(GEO_OBSERVATIONS_KEY)
-        monkeypatch.setattr(observations, "FLUSH_BATCH_SIZE", 2)
-
-        class HeldLease:
-            is_held = True
-
-            def __init__(self, *args: object, **kwargs: object) -> None:
-                pass
-
-            async def try_acquire(self) -> bool:
-                return True
-
-            async def confirm(self) -> bool:
-                return True
-
-            async def release(self) -> None:
-                pass
-
-        monkeypatch.setattr(observations, "Lease", HeldLease)
-        recorder = ObservationRecorder(redis_client)
-        for n in range(6):
-            recorder.record(_observation(proxy_id=None, ip=f"10.4.0.{n}"))
-        await recorder.publish()
-
-        # An hour between cycles, a batch per cycle: only back-to-back cycles drain it in time.
-        flusher = ObservationFlusher(
-            db_session_factory, redis_client, "inst", interval=3600, drain_budget=0, retention_days=lambda: 7
-        )
-        flusher.backlogged = True  # as a previous cycle that ran out of time would leave it
-        wanted = {f"10.4.0.{n}" for n in range(6)}
-        task = asyncio.create_task(flusher.run())
-        try:
-            # Waits on its own rows, not an empty queue: other test apps publish to the same list.
-            async with asyncio.timeout(5):
-                while not wanted <= await self._exits(db_session_factory):
-                    await asyncio.sleep(0.01)
-        finally:
-            flusher.stop()
-            task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await task
-            await redis_client.client.delete(GEO_OBSERVATIONS_KEY)
-
-    @staticmethod
-    async def _exits(session_factory: async_sessionmaker[AsyncSession]) -> set[str]:
-        async with session_factory() as session:
-            rows, _, _ = await ObservationRepository(session).exit_ips(connector_ids=["conn-1"], limit=1000)
-        return {r["ip"] for r in rows}
-
-
 class TestPlaceAccuracy:
     async def test_state_and_city_verdicts_per_connector(self, db_session: AsyncSession) -> None:
         await _connectors(db_session, "conn-1")
         repo = ObservationRepository(db_session)
-        from api.geo.observations import aggregate_exits
 
         when = datetime(2026, 9, 20, 8, 0, 0)
         sightings = [
@@ -830,7 +584,7 @@ class TestPlaceAccuracy:
                          claimed_state="SCT", resolved_state="IDF", state_conflict=True),
         ]
         await repo.insert_many(sightings)
-        await repo.add_exit_ips(aggregate_exits([(o, True) for o in sightings]))
+        await repo.add_exit_ips(ExitSighting.fold([(o, True) for o in sightings]))
         await db_session.commit()
 
         (row,) = await repo.exit_accuracy(connector_ids=["conn-1"])

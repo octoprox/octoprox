@@ -26,28 +26,12 @@ class ProxyGroup:
     key: str
     weight: int
     proxies: list[Proxy] = field(default_factory=list)
-    # Requests served by the whole connector, not only by ``proxies``: a
-    # request with a country or domain filter sees a slice of the connector,
-    # but its load is what all its rows have carried.
-    load: int = 0
 
 
 class RoutingStrategy(ABC):
-    """Abstract base class for proxy routing strategies.
+    """Spreads a project's requests: the connector by weight (:meth:`pick_group`), then the proxy in it (:meth:`select`).
 
-    ``select`` is async so strategies that need cross-instance state
-    (e.g. sticky session bindings in Redis) can do that I/O directly
-    without forcing the caller to know about it. Stateless strategies
-    (round-robin, random, least-used, health-based) ignore the
-    ``redis_client`` / ``project_id`` kwargs and run effectively
-    synchronously.
-
-    Selection across several connectors happens in two steps
-    (``select_weighted``): first a connector is picked using the
-    connectors' routing weights, then ``select`` runs over that
-    connector's proxies alone. With a single connector the first step
-    is skipped, so a one-connector project behaves exactly as ``select``
-    on the flat list.
+    Only sticky does I/O, its session bindings in Redis; the others route on memory alone.
     """
 
     @property
@@ -117,6 +101,19 @@ class RoutingStrategy(ABC):
 
     def forget_group(self, key: str) -> None:  # noqa: B027
         """Drop any per-connector state for ``key``; called when the connector is removed."""
+
+    async def settle(self) -> None:  # noqa: B027
+        """Wait for the writes this strategy has under way, none by default; called as the gateway stops."""
+
+    async def held_proxy(
+        self,
+        session_id: str,
+        *,
+        redis_client: "RedisClient | None" = None,
+        project_id: str | None = None,
+    ) -> str | None:
+        """The proxy this strategy holds ``session_id`` to, which the router keeps it on while quarantined; none by default."""
+        return None
 
     def allows_exit_reselection(self, session_id: str | None) -> bool:
         """Whether a request may move to another proxy after its selection was found misplaced.

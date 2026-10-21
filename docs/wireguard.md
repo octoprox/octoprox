@@ -20,7 +20,7 @@ Octoprox runs a WireGuard endpoint. A device connects to it, and everything the 
 ```mermaid
 sequenceDiagram
     participant D as Device<br/>(peer 10.66.0.2)
-    participant WG as wg0 on Octoprox
+    participant WG as wg0 on a gateway
     participant DNS as Fake-IP resolver
     participant NFT as nftables
     participant T as Transparent listener
@@ -51,23 +51,27 @@ flowchart LR
     end
     wgc -->|UDP 51820| iface
 
-    subgraph instance["Octoprox instance"]
+    subgraph gateway["Gateway with WireGuard enabled"]
         iface["wg0 interface<br/>one key pair for the install<br/>one /32 per device"]
-        nft["nftables table<br/>tcp → listener<br/>udp/tcp 53 → resolver<br/>other udp → reject"]
+        nft["nftables table<br/>tcp -> listener<br/>udp/tcp 53 -> resolver<br/>other udp -> reject"]
         dns["Fake-IP resolver<br/>198.18.0.0/15"]
         tp["Transparent listener"]
-        relay["ProxyServer relay<br/>selection, preflight,<br/>MITM, metering"]
+        relay["Proxy relay<br/>selection, preflight,<br/>MITM, metering"]
         iface --> nft
         nft -->|port 53| dns
         nft -->|TCP| tp --> relay
     end
 
     relay -->|CONNECT by name| pool["Project's upstream pool"]
-    redis[("Redis<br/>fake-IP mapping<br/>live peer status<br/>metrics window")]
+    redis[("Redis<br/>routing feed, fake-IP mapping,<br/>live peer status, metrics window")]
     dns <--> redis
     tp <--> redis
-    pg[("Postgres<br/>server key pair<br/>peers, last sightings<br/>device metrics history")]
-    pg -.->|load, change feed| iface
+    redis -.->|"routing feed: key pair, devices"| iface
+    api["api<br/>settings, devices, configs"] --> pg
+    controller["controller<br/>compiles the feed"] --> pg
+    controller --> redis
+    redis -.->|"live peer status"| worker["worker<br/>records last sightings"] --> pg
+    pg[("Postgres<br/>server key pair<br/>devices, last sightings<br/>device metrics history")]
 ```
 
 1. **The tunnel address is the credential.** Each device is a *peer* with its own key pair and a `/32` address from the tunnel subnet. WireGuard's cryptokey routing only delivers packets whose source address belongs to the sending peer, so the address a connection arrives from identifies the device, and through it the project and the routing it was given.
@@ -79,13 +83,13 @@ The same code paths serve the proxy port and the tunnel: proxy selection, exit p
 
 ## Enabling the endpoint
 
-The management side (settings, peers, configs) runs on every instance with no extra requirements. The tunnel itself comes up on every instance where `wireguard.enabled` is set: one instance in the single-instance setup, every replica in the bundled cluster. Each such instance needs:
+The management side (settings, devices, configs) runs on the api with no extra requirements. The tunnel itself comes up on every gateway where `wireguard.enabled` is set: the single instance, every gateway in the bundled cluster, or the tunnel gateways of a [Kubernetes]({{ site.baseurl }}/kubernetes#tunnel-gateways) install. Each such gateway needs:
 
 - **CAP_NET_ADMIN**, to create the interface and the nftables table. The image installs `iproute2`, `wireguard-tools`, `nftables` and `wireguard-go`, and gives `setpriv` the capability as a file capability; the process stays unprivileged and launches the tools through `setpriv`, which hands the capability on. The container still has to be granted the capability.
 - **A WireGuard implementation.** Any Linux 5.6 or later kernel has one built in and the container can use it. Where the host kernel has none, Octoprox falls back to `wireguard-go` in userspace, which needs `/dev/net/tun` passed into the container. Docker Desktop's Linux VM has the kernel implementation, so a cluster on a Mac or Windows machine runs it natively; some NAS boxes and older kernels fall back to userspace, with the same behaviour and a little more CPU per tunnel.
 - **The UDP port published**, 51820 by default.
 
-The cluster compose files (`docker-compose.cluster.yml`, `docker-compose.cluster.ghcr.yml`) already do all of this on every replica and publish the UDP port through nginx. For the single-instance files, uncomment the prepared lines in `docker-compose.yml` or `docker-compose.ghcr.yml`:
+The cluster compose files (`docker-compose.cluster.yml`, `docker-compose.cluster.ghcr.yml`) already do all of this on every gateway and publish the UDP port through nginx. For the single-instance files, uncomment the prepared lines in `docker-compose.yml` or `docker-compose.ghcr.yml`:
 
 ```yaml
     ports:
@@ -98,7 +102,7 @@ The cluster compose files (`docker-compose.cluster.yml`, `docker-compose.cluster
       - OCTOPROX_WIREGUARD_ENABLED=true
 ```
 
-Then, as an admin, open **Settings → WireGuard** and set the **public endpoint host**: the hostname or IP devices will reach the tunnel at (the balancer in a cluster, the instance itself otherwise). Device configs cannot be completed before this is set. The page also shows whether the answering instance is terminating the tunnel, with which backend (kernel or userspace), and the error if it failed to come up. A failure here never takes the proxy ports down; the page says what is missing.
+Then, as an admin, open **Settings → WireGuard** and set the **public endpoint host**: the hostname or IP devices will reach the tunnel at (the balancer in a cluster, the host itself otherwise). Device configs cannot be completed before this is set. The page also lists every gateway terminating the tunnel, from their heartbeats, with its backend (kernel or userspace) and the error if it failed to come up. A failure here never takes the proxy ports down; the page says what is missing.
 
 ### Process settings
 
@@ -106,9 +110,9 @@ The WireGuard side, in `config/*.yaml` under `wireguard:` or as `OCTOPROX_WIREGU
 
 | Setting | Default | Meaning |
 |---------|---------|---------|
-| `enabled` | `false` | Terminate the tunnel on this instance. |
-| `interface` | `wg0` | Name of the interface this instance creates. |
-| `listen_port` | endpoint port | Override the UDP port this instance binds when a port-mapping NAT sits in front of it. |
+| `enabled` | `false` | Terminate the tunnel on this gateway. |
+| `interface` | `wg0` | Name of the interface this gateway creates. |
+| `listen_port` | endpoint port | Override the UDP port this gateway binds when a port-mapping NAT sits in front of it. |
 | `mtu` | `1420` | MTU of the interface. |
 | `defaults` | | Seed for the install-wide row on a fresh install: `endpoint_host`, `endpoint_port`, `subnet`, `persistent_keepalive`, `client_mtu`. |
 
@@ -124,13 +128,13 @@ What happens to traffic once it is inside a tunnel does not depend on the tunnel
 
 ### Install-wide settings
 
-Edited under **Settings → WireGuard** and stored in Postgres so every instance agrees on them:
+Edited under **Settings → WireGuard**, stored in Postgres and carried to every gateway by the routing feed, so they all agree on them:
 
 | Setting | Default | Meaning |
 |---------|---------|---------|
 | Public endpoint host | empty | The `Endpoint` host in every device config. |
-| UDP port | `51820` | The `Endpoint` port, and what every terminating instance listens on unless its `listen_port` overrides it. |
-| Tunnel subnet | `10.66.0.0/16` | Devices get addresses from it; the first host is the gateway and the tunnel's DNS. Changing it requires removing every device first and restarting the terminating instances. |
+| UDP port | `51820` | The `Endpoint` port, and what every terminating gateway listens on unless its `listen_port` overrides it. |
+| Tunnel subnet | `10.66.0.0/16` | Devices get addresses from it; the first host is the gateway and the tunnel's DNS. A new subnet must still contain every device's address (remove the devices first to move to another range). Gateways apply a change live; devices learn the new DNS address with their next config. |
 | Persistent keepalive | `25` | Seconds between keepalives devices send, so NATs in front of them keep the mapping. |
 | Device MTU | unset | Written into device configs when set. |
 | Server key pair | generated | One pair for the whole install. **Rotate key** replaces it; every device then needs a new config. |
@@ -154,16 +158,16 @@ The config sends everything into the tunnel (`AllowedIPs = 0.0.0.0/0, ::/0`) and
 
 Each device's row shows whether it is **online** (a handshake within the last three minutes), when it last handshaked and from where, and how much traffic the pool has relayed for it. Two different things are behind those numbers:
 
-- **Where the device stands** comes from the WireGuard interface on the instance carrying its session. Every carrying instance publishes what its interface knows to Redis every ten seconds and the views merge them, so the status is right whichever instance answers and when several instances carry sessions. A handshake newer than the device's row knows is also written to the row, so when a device was last seen, and from where, survives the carrying instance restarting (its interface starts from zero) and is there when nothing is carrying the device at all; the device panel says *on record* when that is what it is showing. The interface's own byte counters (wire bytes, handshakes and DNS included) are shown while an instance carries the device, labelled as such.
-- **What the device's traffic amounted to** is metered on the proxy path: every connection a device opens is counted against the device as well as against the proxy, the connector and the project, with the same completion events, the same bytes-as-they-flow metering and the same history pipeline. Each device has totals (connections, bytes up and down, success rate, time to connect) that are cluster-wide and survive restarts, and a history at the same ranges and compaction tiers as a connector's, charted in the device panel and served by `GET /projects/{id}/wireguard/peers/{id}/metrics/history`. Removing a device removes its history; a project's retention applies to its devices' history as to the rest.
+- **Where the device stands** comes from the WireGuard interface on the gateway carrying its session. Every carrying gateway publishes what its interface knows to Redis every ten seconds and the views merge them, so the status is right whichever api answers and when several gateways carry sessions. A worker's `tunnel_last_seen` job writes a handshake newer than the device's row knows to the row, every ten seconds, so when a device was last seen, and from where, survives the carrying gateway restarting (its interface starts from zero) and is there when nothing is carrying the device at all; the device panel says *on record* when that is what it is showing. The interface's own byte counters (wire bytes, handshakes and DNS included) are shown while a gateway carries the device, labelled as such.
+- **What the device's traffic amounted to** is metered on the proxy path: every connection a device opens is counted against the device as well as against the proxy, the connector and the project, with the same completion events, the same bytes-as-they-flow metering and the same history pipeline. Each device has totals (connections, bytes up and down, success rate, time to connect) that are install-wide and survive restarts, and a history at the same ranges and compaction tiers as a connector's, charted in the device panel and served by `GET /projects/{id}/wireguard/peers/{id}/metrics/history`. Removing a device removes its history; a project's retention applies to its devices' history as to the rest.
 
 ### Disabling, rotating, removing
 
-- **Disable** keeps the device's config valid but refuses it at the tunnel; it drops out of the interface's peer list within a second.
+- **Disable** keeps the device's config valid but refuses it at the tunnel; it drops out of the gateways' peer lists within a couple of seconds.
 - **Rotate keys** issues a new pair (and preshared key); the old config stops working until the new one is loaded.
 - **Remove** frees the address. Deleting a project removes its devices.
 
-Changes reach every terminating instance through the same cross-instance change feed the proxy caches use, with the periodic full reload as the safety net.
+Changes reach every terminating gateway through the [routing feed]({{ site.baseurl }}/architecture#the-routing-feed), within moments, and every 30 seconds each gateway also compares its interface's peers with the device list and removes strays. The feed needs the controller and Redis: while either is down, a gateway keeps the devices it last applied, so a device disabled meanwhile stays connected until they are back.
 
 ## Encrypted DNS on devices
 
@@ -171,14 +175,15 @@ The scheme above depends on the device asking the tunnel resolver. A device that
 
 - **Firefox's canary.** Firefox asks the network resolver for `use-application-dns.net` before enabling DoH and keeps plain DNS when the answer is NXDOMAIN. The tunnel resolver answers it that way.
 - **Encrypted resolvers are closed** (`tunnel.block_encrypted_dns`, on by default): connections to port 853 and to the well-known public DoH resolvers (Google, Cloudflare, Quad9, NextDNS, AdGuard, OpenDNS and others) are closed instead of relayed, so a client in automatic mode falls back to the tunnel resolver. Chrome only upgrades to DoH when the system resolver is a known public one, which the tunnel gateway is not. Android's automatic Private DNS probes the gateway for DoT, finds none and uses plain DNS. A device with an **explicit** Private DNS hostname is the case this cannot fix: with port 853 closed it has no DNS at all. Set Private DNS to automatic or off on tunnel devices, or turn the block off.
-- **The degradation is counted.** Each device shows how many of its connections were routed by address and how many encrypted-DNS connections were closed. Both ride the device's metrics: they are cluster-wide, survive restarts and have history (the device's chart can show them per interval), and the WireGuard settings page shows the totals over every device. A device with a growing "routed by address" number is resolving somewhere else, or speaking a protocol without a name.
+- **The degradation is counted.** Each device shows how many of its connections were routed by address and how many encrypted-DNS connections were closed. Both ride the device's metrics: they are install-wide, survive restarts and have history (the device's chart can show them per interval), and the WireGuard settings page shows the totals over every device. A device with a growing "routed by address" number is resolving somewhere else, or speaking a protocol without a name.
 
 ## In a cluster
 
-Every replica terminates the tunnel. The balancer pins a device to one
-replica by source address; the key pair, peer list and fake-IP mapping
-are install-wide, so a device that is rehashed re-handshakes on another
-replica and its connections resolve there too.
+Every gateway with WireGuard enabled terminates the tunnel. The balancer
+pins a device to one gateway by source address; the key pair and device
+list reach every gateway through the routing feed and the fake-IP mapping
+is shared through Redis, so a device that is rehashed re-handshakes on
+another gateway and its connections resolve there too.
 
 ```mermaid
 flowchart LR
@@ -186,10 +191,11 @@ flowchart LR
     d2["Device B"] --> lb
     d3["Device C"] --> lb
     lb["nginx or L4 balancer<br/>UDP 51820<br/>consistent hash by source address"]
-    lb -->|A| r1["Replica 1<br/>wg0 + listener"]
-    lb -->|B| r2["Replica 2<br/>wg0 + listener"]
-    lb -->|C| r3["Replica 3<br/>wg0 + listener"]
-    r1 & r2 & r3 --> shared[("Postgres: key pair, peers, device history<br/>Redis: fake-IP mapping, live status, metrics window")]
+    lb -->|A| r1["Gateway 1<br/>wg0 + listener"]
+    lb -->|B| r2["Gateway 2<br/>wg0 + listener"]
+    lb -->|C| r3["Gateway 3<br/>wg0 + listener"]
+    r1 & r2 & r3 --> shared[("Redis: routing feed with the key pair and devices,<br/>fake-IP mapping, live status, metrics window")]
+    controller["controller<br/>compiles the feed from Postgres"] --> shared
     r1 & r2 & r3 --> pool["Upstream proxy pool"]
 ```
 
@@ -197,7 +203,7 @@ flowchart LR
 
 - **TCP only.** UDP other than DNS is rejected inside the tunnel. QUIC falls back to TCP on its own; a UDP-only application (some games, VoIP) does not work through the pool, because the upstream proxy protocols Octoprox speaks carry TCP.
 - **IPv4 inside the tunnel.** Device configs route `::/0` so nothing leaks around the tunnel, but with empty `AAAA` answers devices use IPv4 for everything.
-- **Clustering.** The bundled cluster compose fronts the replicas with nginx, which forwards the UDP port with consistent hashing by source address, and every replica terminates the tunnel. The key pair, peer list and fake-IP mapping are install-wide, so a device accepted by one replica is accepted by all and a connection that lands on another replica still knows its destination name. A flow that moves between replicas re-handshakes after a short stall. Details and the health-check caveat in [Deployment & Scaling](deployment#the-wireguard-endpoint-in-a-cluster).
+- **Clustering.** The bundled cluster compose fronts the gateways with nginx, which forwards the UDP port with consistent hashing by source address, and every gateway terminates the tunnel. The key pair, device list and fake-IP mapping are install-wide, so a device accepted by one gateway is accepted by all and a connection that lands on another gateway still knows its destination name. A flow that moves between gateways re-handshakes after a short stall. Details and the health-check caveat in [Deployment & Scaling](deployment#the-wireguard-endpoint-in-a-cluster).
 - **Names recovered from the stream** need a TLS ClientHello with SNI or an HTTP/1.x `Host` header. A device connecting to a literal address with some other protocol is routed by address; domain filters then see the address.
 - **MITM** applies to TLS connections of a project with interception on, exactly as on the proxy port, and the device must trust the Octoprox CA like any other client.
 - **Backups** include the server key pair and every device, private keys included. Treat backup files accordingly (they are encrypted with your passphrase).

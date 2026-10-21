@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import random
+from collections.abc import Iterable
 from dataclasses import dataclass
 
 from api.models.connector import Connector, ProxyTarget
@@ -320,12 +321,15 @@ class DescriptorProvider(ProxyProvider):
     def _target_countries(self, existing: list[Proxy]) -> list[str | None]:
         """Slot groups to keep in sync: the configured countries, or the ungeo-targeted
         group plus every country already provisioned on demand."""
+        return self._targets(proxy.metadata.get(META_GEO_COUNTRY) for proxy in existing)
+
+    def _targets(self, provisioned: Iterable[object]) -> list[str | None]:
+        """:meth:`_target_countries` from the slot groups the rows carry (each row's ``metadata.geo``)."""
         configured = self.countries
         if configured:
             return list(configured)
         targets: list[str | None] = [None]
-        for proxy in existing:
-            geo = proxy.metadata.get(META_GEO_COUNTRY)
+        for geo in provisioned:
             if isinstance(geo, str) and geo.strip() and geo.strip().upper() not in targets:
                 targets.append(geo.strip().upper())
         return targets
@@ -338,6 +342,15 @@ class DescriptorProvider(ProxyProvider):
 
     def proxy_target(self, existing_proxies: list[Proxy]) -> ProxyTarget:
         """Intended pool size given the proxies that exist, mirroring how sync groups them."""
+        return self.target_for_groups(proxy.metadata.get(META_GEO_COUNTRY) for proxy in existing_proxies)
+
+    def target_for_groups(self, provisioned: Iterable[object]) -> ProxyTarget:
+        """:meth:`proxy_target` from the slot groups the rows carry (each row's ``metadata.geo``), not the rows.
+
+        A read that only shows the target need not load a pool's rows: of
+        all a row holds, only an "All countries" pool's target depends on the
+        countries provisioned so far.
+        """
         per = self._slot_count()
         if self._ptype.mode == "list":
             # The vendor list decides; num_proxies is at most a cap.
@@ -347,7 +360,7 @@ class DescriptorProvider(ProxyProvider):
                 total=1, countries=list(self.countries), dynamic=True, exit_sample_percent=self.exit_sample_percent
             )
         if self._geo_targeted:
-            targets = self._target_countries(existing_proxies)
+            targets = self._targets(provisioned)
             configured = self.countries
             countries = [t for t in targets if t is not None]
             return ProxyTarget(

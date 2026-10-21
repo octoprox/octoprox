@@ -9,7 +9,7 @@ other vendor is a declarative descriptor executed by the provider SDK; see
 """
 
 from api.providers.base import ProxyProvider, SyncableProvider
-from api.providers.registry import ProviderRegistry, get_provider_registry
+from api.providers.registry import ProviderRegistry
 from api.providers.sdk.descriptor import ProviderDescriptor
 from api.providers.sdk.provider import DescriptorProvider
 from api.providers.static import StaticProvider
@@ -21,5 +21,4 @@ __all__ = [
     "ProviderDescriptor",
     "DescriptorProvider",
     "ProviderRegistry",
-    "get_provider_registry",
 ]

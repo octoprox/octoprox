@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { useState } from 'react'
-import { useParams, useNavigate } from 'react-router-dom'
+import { useParams, useNavigate } from 'react-router'
 import { Lock, AlertCircle, CheckCircle } from 'lucide-react'
 import octoproxLogo from '../assets/logos/octoprox_horizontal.svg'
 import octoproxLogoDark from '../assets/logos/octoprox_horizontal_dark.svg'
@@ -20,7 +20,7 @@ export default function SetPassword() {
   const [error, setError] = useState<string | null>(null)
   const [success, setSuccess] = useState(false)
 
-  const handleSubmit = async (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.SubmitEvent) => {
     e.preventDefault()
     setError(null)
 
@@ -70,7 +70,7 @@ export default function SetPassword() {
           {/* Success message */}
           {success && (
             <Alert variant="success" className="mb-6 flex items-center gap-3">
-              <CheckCircle className="w-5 h-5 text-green-500 flex-shrink-0" />
+              <CheckCircle className="w-5 h-5 text-green-500 shrink-0" />
               <p className="text-sm">Password set successfully! Redirecting...</p>
             </Alert>
           )}
@@ -78,7 +78,7 @@ export default function SetPassword() {
           {/* Error message */}
           {error && (
             <Alert variant="error" className="mb-6 flex items-center gap-3">
-              <AlertCircle className="w-5 h-5 text-red-500 flex-shrink-0" />
+              <AlertCircle className="w-5 h-5 text-red-500 shrink-0" />
               <p className="text-sm">{error}</p>
             </Alert>
           )}
@@ -127,7 +127,7 @@ export default function SetPassword() {
               <Button
                 type="submit"
                 disabled={isLoading}
-                className="w-full shadow-sm focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-ring"
+                className="w-full shadow-xs focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-ring"
               >
                 {isLoading ? 'Setting password...' : 'Set Password'}
               </Button>

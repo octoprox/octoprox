@@ -1,17 +1,11 @@
 # Copyright 2026 Octoprox Authors
 # SPDX-License-Identifier: Apache-2.0
 
-"""The OAuth round trip with a sign-in provider.
+"""The OAuth round trip with a sign-in provider, up to the identity it verifies.
 
-``start`` sends the browser to the provider with a fresh ``state``; what
-the callback will need (provider, nonce, PKCE verifier) waits in Redis
-under that state. ``complete`` takes the provider's answer, trades the code
-for tokens, verifies them and returns the identity. Nothing here touches
-the user table: matching the identity to a user is the route's job.
-
-Google and Microsoft are OpenID Connect: the ID token is verified against
-the provider's published keys and the nonce stored at start. GitHub is
-plain OAuth 2.0, so identity comes from its API, over the access token.
+What the callback needs, and the bearer token a sign-in parks for the browser,
+wait in Redis, which every role but echo reads, so the token is filed under a
+digest of its one-time code and sealed with a key drawn from the code.
 """
 
 from __future__ import annotations
@@ -19,6 +13,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import os
 import secrets
 import time
 from dataclasses import dataclass
@@ -27,6 +22,10 @@ from urllib.parse import urlencode
 
 import httpx
 import structlog
+from cryptography.exceptions import InvalidTag
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from jose import JWTError, jwt  # type: ignore[import-untyped]
 
 from api.db.redis import (
@@ -65,6 +64,16 @@ SCOPES: dict[AuthProviderKind, str] = {
 # login would make the provider's availability part of every sign-in twice.
 _METADATA_TTL_SECONDS = 3600
 _HTTP_TIMEOUT_SECONDS = 15.0
+
+# HKDF labels, one per value drawn from a login code: the digest its Redis
+# entry is filed under, and the key that seals the token in it. Separate
+# labels, so the name a Redis reader sees tells nothing about the key. The
+# code is 256 random bits, which is all the input key material HKDF needs.
+_LOGIN_CODE_ENTRY_INFO = b"octoprox-sso-login-code-entry-v1"
+_LOGIN_CODE_KEY_INFO = b"octoprox-sso-login-code-key-v1"
+# AES-GCM's standard 96-bit nonce, random per token. Each key seals a single
+# token, so no nonce is ever used twice with one key.
+_NONCE_BYTES = 12
 
 
 @dataclass
@@ -215,20 +224,38 @@ class SsoFlow:
     async def issue_login_code(self, bearer_token: str) -> str:
         """Park a freshly minted bearer token behind a one-time code for the browser to redeem.
 
-        The callback is a top-level navigation, which cannot write the SPA's
-        storage; a code in the redirect URL can be traded for the token with
-        one API call, and unlike the token itself it is useless a minute
-        later or a second time.
+        The callback, a top-level navigation, cannot write the SPA's storage,
+        so its redirect carries this code, which one API call trades for the
+        token once within a minute; Redis holds neither the code nor the token.
         """
         code = secrets.token_urlsafe(32)
-        await self._redis.client.set(
-            SSO_LOGIN_CODE_KEY.format(code=code), bearer_token, ex=SSO_LOGIN_CODE_TTL_SECONDS
-        )
+        nonce = os.urandom(_NONCE_BYTES)
+        sealed = AESGCM(_from_code(code, _LOGIN_CODE_KEY_INFO)).encrypt(nonce, bearer_token.encode(), None)
+        entry = base64.b64encode(nonce + sealed).decode("ascii")
+        await self._redis.client.set(_login_code_entry(code), entry, ex=SSO_LOGIN_CODE_TTL_SECONDS)
         return code
 
     async def redeem_login_code(self, code: str) -> str | None:
-        value = await self._redis.client.getdel(SSO_LOGIN_CODE_KEY.format(code=code))
-        return str(value) if value is not None else None
+        """The bearer token parked behind ``code``, once; None when the code is unknown, spent or expired.
+
+        An entry that does not open under the code's key was not written by
+        :meth:`issue_login_code` (planted or altered in Redis): it is spent
+        like any other and redeems nothing.
+        """
+        value = await self._redis.client.getdel(_login_code_entry(code))
+        if value is None:
+            return None
+        try:
+            raw = base64.b64decode(value, validate=True)
+            token = AESGCM(_from_code(code, _LOGIN_CODE_KEY_INFO)).decrypt(
+                raw[:_NONCE_BYTES], raw[_NONCE_BYTES:], None
+            )
+        except (InvalidTag, ValueError):
+            # Bad base64 and a value too short for its nonce are ValueErrors;
+            # a value sealed under another key, or altered, fails the tag.
+            logger.warning("Sign-in code entry could not be opened; nothing redeemed")
+            return None
+        return token.decode()
 
     # --- http ---------------------------------------------------------------------------
 
@@ -293,3 +320,13 @@ class SsoFlow:
 def _s256(verifier: str) -> str:
     digest = hashlib.sha256(verifier.encode("ascii")).digest()
     return base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
+
+
+def _from_code(code: str, info: bytes) -> bytes:
+    """A 256-bit value of its own for ``info``, drawn from a login code."""
+    return HKDF(algorithm=hashes.SHA256(), length=32, salt=None, info=info).derive(code.encode())
+
+
+def _login_code_entry(code: str) -> str:
+    """The Redis key a login code's token is parked under: named by a digest of the code, never the code."""
+    return SSO_LOGIN_CODE_KEY.format(digest=_from_code(code, _LOGIN_CODE_ENTRY_INFO).hex())

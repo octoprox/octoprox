@@ -1,11 +1,8 @@
 # Copyright 2026 Octoprox Authors
 # SPDX-License-Identifier: Apache-2.0
 
-"""The project failure log: why requests failed or were refused (the Failures page).
-
-Two sources: the summary reads the failure_metrics history (every failure,
-counted), the examples read the failure log streams (a sample, one stream
-per kind).
+"""The project failure log (the Failures page), served by the api role: examples from the failure log streams gateways
+append to in Redis, and a summary from the ``failure_metrics`` history the workers' metrics flush job writes.
 """
 
 import asyncio
@@ -18,14 +15,14 @@ from pydantic import BaseModel, Field
 
 from api.core import utc_now
 from api.core.auth import RequireEditorDep
-from api.core.config import settings
-from api.core.failure_log import FailureKind
-from api.db.repository import MetricsRepository
-from api.routes.common import proxy_manager_of, redis_client_of, require_project
+from api.core.stats import FailureKind
+from api.db.repository import ConnectorRepository, MetricsRepository
+from api.routes.common import redis_client_of, require_project, session_factory_of, settings_of
 from api.routes.metrics import HOST_HISTORY_BUCKETS, RANGE_CONFIG
 
 router = APIRouter(prefix="/projects/{project_id}/failures")
 
+# Every kind a failure is logged under, the streams a page reads across.
 ALL_KINDS = [kind.value for kind in FailureKind]
 
 
@@ -156,8 +153,9 @@ async def list_failures(
     ),
 ) -> FailureLogResponse:
     """A project's failure examples, newest first, across every kind or of one."""
-    require_project(request, project_id)
+    await require_project(request, project_id)
     redis_client = redis_client_of(request)
+    settings = settings_of(request)
     kinds = [kind.value] if kind else ALL_KINDS
     after: tuple[str, str] | None = None
     if cursor:
@@ -191,7 +189,7 @@ async def failure_log_head(
     kind: Annotated[FailureKind | None, Query(description="Only examples of this kind")] = None,
 ) -> FailureLogHead:
     """How many examples have been appended so far: two small reads, cheap enough to poll."""
-    require_project(request, project_id)
+    await require_project(request, project_id)
     redis_client = redis_client_of(request)
     kinds = [kind.value] if kind else ALL_KINDS
     total, appended = await asyncio.gather(
@@ -208,16 +206,16 @@ async def failure_summary(
     range: Literal["1h", "6h", "24h", "7d", "30d"] = Query("24h", alias="range"),
 ) -> FailureSummaryResponse:
     """Every failure of the window, from the flushed history (so it lags by up to one flush interval)."""
-    proxy_manager = proxy_manager_of(request)
-    require_project(request, project_id)
+    await require_project(request, project_id)
     delta, _limit, _bucket = RANGE_CONFIG[range]
     bucket_seconds = HOST_HISTORY_BUCKETS[range]
     now = utc_now()
     since = now - delta
-    async with proxy_manager._session_factory() as session:
+    async with session_factory_of(request)() as session:
         repo = MetricsRepository(session)
         breakdown = await repo.get_failure_breakdown(project_id, since)
         history = await repo.get_failure_history(project_id, since, bucket_seconds)
+        names = {c.id: c.name for c in await ConnectorRepository(session).get_by_project(project_id)}
 
     by_kind: dict[str, int] = {}
     statuses: dict[str, dict[int, int]] = {}
@@ -231,10 +229,6 @@ async def failure_summary(
         by_connector[row["connector_id"]] = by_connector.get(row["connector_id"], 0) + n
     ranked = sorted(by_kind, key=lambda k: (-by_kind[k], k))
 
-    def connector_name(connector_id: str | None) -> str | None:
-        connector = proxy_manager.get_connector(connector_id) if connector_id else None
-        return connector.name if connector else None
-
     # Every bucket of the window for every kind, zeros where it was quiet, so the series stack.
     first = int(since.replace(tzinfo=UTC).timestamp()) // bucket_seconds * bucket_seconds
     last = int(now.replace(tzinfo=UTC).timestamp())
@@ -245,7 +239,7 @@ async def failure_summary(
     points: dict[str, dict[datetime, int]] = {}
     for row in history:
         points.setdefault(row["kind"], {})[row["timestamp"]] = row["failure_count"]
-    # A row the leader stamped past this instance's clock (a few ms of skew at
+    # A row the controller stamped past this process's clock (a few ms of skew at
     # a bucket boundary) gets its bucket too, rather than missing from the chart.
     buckets = sorted({*buckets, *(row["timestamp"] for row in history)})
 
@@ -266,7 +260,7 @@ async def failure_summary(
             for k in ranked
         ],
         connectors=[
-            ConnectorFailureCount(connector_id=cid, name=connector_name(cid), count=n)
+            ConnectorFailureCount(connector_id=cid, name=names.get(cid) if cid else None, count=n)
             for cid, n in sorted(by_connector.items(), key=lambda item: -item[1])
         ],
         series=[
@@ -276,13 +270,13 @@ async def failure_summary(
             )
             for k in ranked
         ],
-        enabled=settings.failure_log_enabled,
+        enabled=settings_of(request).failure_log_enabled,
     )
 
 
 @router.delete("")
 async def clear_failures(request: Request, project_id: str, _guard: RequireEditorDep) -> dict[str, str]:
     """Empty a project's failure log (the examples). The counts in history stay; new failures keep being logged."""
-    require_project(request, project_id)
-    await redis_client_of(request).clear_failures(project_id)
+    await require_project(request, project_id)
+    await redis_client_of(request).clear_failures(project_id, ALL_KINDS)
     return {"status": "ok"}

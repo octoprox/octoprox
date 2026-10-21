@@ -61,7 +61,7 @@ export function Segmented<T extends string>({ options, value, onChange, size = '
           className={cn(
             'rounded-md font-medium transition-colors',
             size === 'sm' ? 'px-2.5 py-1 text-xs' : 'px-3 py-1.5 text-[13px]',
-            value === o.value ? 'bg-surface text-fg shadow-sm' : 'text-fg-muted hover:text-fg'
+            value === o.value ? 'bg-surface text-fg shadow-xs' : 'text-fg-muted hover:text-fg'
           )}
         >
           {o.label}

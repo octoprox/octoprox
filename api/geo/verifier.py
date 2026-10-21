@@ -3,54 +3,29 @@
 
 """Decides what to forward through when preflight disagrees with the selection.
 
-The proxy server hands the verifier the upstream it picked; the verifier
-returns the upstream to use or a rejection. Whether a verdict refuses the
-request is the project's two location decisions (``PreflightVerdict.acceptable``).
-Whether a refused request may move is the routing strategy's call: the
-verifier asks the :class:`ProxySelector` for another eligible proxy,
-excluding the ones that failed, up to ``preflight_max_attempts``, unless the
-strategy says the session must stay put (sticky sessions were promised one
-exit), in which case the request fails at once. What a mismatch does *to*
-the proxy is not decided here: the verifier emits ``exit_location_mismatch``
-and the attributor reacts.
+The project's two location decisions say whether a verdict refuses the
+request, and the routing strategy whether a refused one may move to another
+eligible proxy, up to ``preflight_max_attempts``; what a mismatch does to the
+proxy itself was decided by its sighting preflight, not here.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Protocol
+from typing import TYPE_CHECKING
 
 import structlog
 
-from api.core.event_bus import event_bus
-from api.core.signals import exit_location_mismatch
 from api.geo.preflight import PreflightChecker
 from api.models.location import LocationTarget
 from api.models.project import Project
 from api.models.proxy import Proxy
 from api.providers.sdk.strategies import is_dynamic_gateway
-from api.strategies.base import RoutingStrategy
+
+if TYPE_CHECKING:
+    from api.routing.router import Router
 
 logger = structlog.get_logger()
-
-
-class ProxySelector(Protocol):
-    """What the verifier needs from routing."""
-
-    async def select_proxy_for_project(
-        self,
-        project_id: str,
-        session_id: str | None = None,
-        target_host: str | None = None,
-        location: LocationTarget | None = None,
-        exclude: frozenset[str] | None = None,
-    ) -> Proxy | None: ...
-
-    def strategy_for_project(self, project_id: str) -> RoutingStrategy: ...
-
-    def declared_countries(self, connector_id: str) -> list[str]: ...
-
-    def get_proxy(self, proxy_id: str) -> Proxy | None: ...
 
 
 @dataclass(frozen=True)
@@ -68,9 +43,9 @@ class ExitDecision:
 class ExitVerifier:
     """Runs preflight for a selected upstream and applies the project's mode."""
 
-    def __init__(self, preflight_checker: PreflightChecker, proxy_selector: ProxySelector) -> None:
+    def __init__(self, preflight_checker: PreflightChecker, router: Router) -> None:
         self._preflight_checker = preflight_checker
-        self._proxy_selector = proxy_selector
+        self._router = router
 
     async def verify(
         self,
@@ -97,12 +72,12 @@ class ExitVerifier:
         # selecting the same row again mints a fresh vendor session, so the
         # row is not excluded and the strategy's promise about rows holds.
         rerender = is_dynamic_gateway(proxy) and not session_id
-        can_retry = rerender or self._proxy_selector.strategy_for_project(project.id).allows_exit_reselection(session_id)
+        can_retry = rerender or self._router.strategy_for_project(project.id).allows_exit_reselection(session_id)
         excluded: set[str] = set()
         attempts = 0
         while True:
             attempts += 1
-            allowed = self._proxy_selector.declared_countries(proxy.connector_id)
+            allowed = self._router.declared_countries(proxy.connector_id)
             try:
                 verdict = await self._preflight_checker.check(
                     project, proxy, session_id=session_id, requested=location, allowed=allowed
@@ -110,33 +85,30 @@ class ExitVerifier:
             except Exception as exc:
                 logger.warning("Preflight check errored", proxy_id=proxy.id, error=str(exc))
                 return ExitDecision(proxy)
-            if not rerender and self._proxy_selector.get_proxy(proxy.id) is None:
+            if not rerender and self._router.get_proxy(proxy.id) is None:
                 # The slot left the pool while it was being checked: its own
-                # sighting judged it out under ``refuse``, or a health check or
-                # the provider sync removed it meanwhile. The request's own
-                # place may have matched, but the slot is gone: drop the verdict
-                # just cached for it and treat the pick as refused.
+                # sighting judged it out under ``refuse`` and preflight retired
+                # it, or the feed dropped it meanwhile. The request's own place
+                # may have matched, but the slot is gone: drop the verdict just
+                # cached for it and treat the pick as refused.
                 await self._preflight_checker.invalidate(project.id, proxy.id)
                 verdict = verdict._replace(ok=False, replaced=True)
             elif verdict.acceptable(rules, allowed):
                 return ExitDecision(proxy)
-            # Every refusal is announced. The signal is a record of the
-            # refusal only: what the exit does to a pooled vendor session
-            # was decided by the sighting preflight published for it
-            # (``exit_ip_observed``, see ``PreflightChecker.check``).
-            await event_bus.publish(
-                exit_location_mismatch,
-                self,
+            logger.debug(
+                "Request refused for its exit location",
                 proxy_id=proxy.id,
                 project_id=project.id,
-                expected=verdict.expected.key if verdict.expected else "",
+                expected=verdict.expected.key if verdict.expected else None,
                 observed=verdict.observed.key if verdict.observed else None,
                 ip=verdict.ip,
+                replaced=verdict.replaced,
+                attempt=attempts,
             )
             if can_retry and attempts < self._preflight_checker.max_attempts:
                 if not rerender:
                     excluded.add(proxy.id)
-                replacement = await self._proxy_selector.select_proxy_for_project(
+                replacement = await self._router.select_proxy_for_project(
                     project.id, session_id, target_host, location, exclude=frozenset(excluded)
                 )
                 if replacement is not None:

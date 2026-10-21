@@ -4,12 +4,14 @@
 import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { Eye, EyeOff, Info, AlertTriangle, Shield, MapPin } from 'lucide-react'
-import { ProjectCreate, ProjectUpdate, ProjectSummary, downloadCaCertificate, fetchGeoSettings } from '../api/client'
+import { ProjectCreate, ProjectUpdate, ProjectSummary, downloadCaCertificate, fetchGeoDatabases, fetchGeoSettings } from '../api/client'
 import type { ConflictRule, ContradictedAction, UnknownAction } from '../api/client'
 import { locationExamples, scenarioSteps, ROW_KIND_FACTS } from './locationExamples'
 import type { RowKind, Ask } from './locationExamples'
 import { RichSelect, RichSelectOption } from './RichSelect'
 import { Button, Input, Select, Textarea, Label, Alert, Inspector, Tabs, Segmented, InfoTip } from './ui'
+import { isInUse } from '../utils/geo'
+import { useToast } from '../contexts/ToastContext'
 
 const engineOptions: RichSelectOption[] = [
   { value: 'curl_cffi', label: 'curl_cffi', description: 'C/libcurl - mature, Chrome-grade fingerprinting' },
@@ -88,8 +90,11 @@ interface ProjectFormProps {
  */
 export function ProjectForm({ project, onSave, error, formId }: ProjectFormProps) {
   const isEdit = !!project
+  const toast = useToast()
   // The install default the Location tab inherits, for the worked example; the form works without it.
   const { data: geo } = useQuery({ queryKey: ['geo-settings'], queryFn: fetchGeoSettings, staleTime: 60_000, retry: false })
+  // Which databases are open where requests are judged (the gateways), for the warnings about refusing unknown exits.
+  const { data: databases } = useQuery({ queryKey: ['geo-databases'], queryFn: fetchGeoDatabases, staleTime: 60_000, retry: false })
   const [formData, setFormData] = useState<ProjectCreate>({
     name: project?.name ?? '',
     description: project?.description ?? '',
@@ -214,13 +219,13 @@ export function ProjectForm({ project, onSave, error, formId }: ProjectFormProps
             </div>
           )}
           <div className={`flex gap-2 p-3 rounded-lg border text-xs leading-relaxed ${modeInfo.color}`}>
-            <ModeIcon className="w-4 h-4 flex-shrink-0 mt-0.5" />
+            <ModeIcon className="w-4 h-4 shrink-0 mt-0.5" />
             <span>{modeInfo.text}</span>
           </div>
           {currentMode !== 'off' && (
             <p className="text-xs text-warning">
               Clients must install the proxy CA certificate.{' '}
-              <button type="button" onClick={() => downloadCaCertificate()} className="underline hover:no-underline font-medium">
+              <button type="button" onClick={() => downloadCaCertificate().catch((e: Error) => toast.show(e.message || 'Failed to download the CA certificate', 'error'))} className="underline hover:no-underline font-medium">
                 Download CA certificate
               </button>
             </p>
@@ -290,8 +295,9 @@ export function ProjectForm({ project, onSave, error, formId }: ProjectFormProps
             const unknown: UnknownAction = formData.location_unknown ?? 'vendor'
             const inherited = !formData.location_conflict_rule
             // A GeoNames file ('places') answers no IP, so it does not count as a database here.
-            const noDatabases = geo !== undefined && !geo.databases_loaded.some((d) => d.kind !== 'places')
-            const noCityDatabase = geo !== undefined && !noDatabases && !geo.databases_loaded.some((d) => d.kind === 'city')
+            const inUse = (databases ?? []).filter(isInUse)
+            const noDatabases = databases !== undefined && !inUse.some((d) => d.kind !== 'places')
+            const noCityDatabase = databases !== undefined && !noDatabases && !inUse.some((d) => d.kind === 'city')
             const rows = locationExamples(rule, contradicted, unknown)
             const refuses = contradicted === 'refuse' || unknown === 'refuse'
             return (
@@ -383,7 +389,7 @@ export function ProjectForm({ project, onSave, error, formId }: ProjectFormProps
             )
           })()}
           <div className="flex gap-2 p-3 rounded-lg border border-line bg-surface-raised/50 text-xs leading-relaxed text-fg-muted">
-            <MapPin className="w-4 h-4 flex-shrink-0 mt-0.5" />
+            <MapPin className="w-4 h-4 shrink-0 mt-0.5" />
             <span>
               The routing value is the databases in their priority, then the echo endpoint, then the vendor's claim where nothing independent answers; the two decisions above say what a contradicted or an open claim does, on the row and at preflight alike. A proxy outside its connector's declared countries is never routed to, a row not judged yet always is, and a hand-pinned country is kept unless you <strong>refuse the proxy</strong> on a contradiction. Refusing unknown exits needs an IP database loaded. Whether a refused request moves is the routing strategy's call: a sticky session fails fast with 502, the other strategies try another proxy up to the install-wide attempt limit. Only <strong>refuse the proxy</strong> on a contradiction replaces a misplaced pooled vendor session.
             </span>

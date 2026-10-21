@@ -80,10 +80,32 @@ class OpenVpnPeerRepository:
         )
         return [self._to_domain(m) for m in result.scalars().all()]
 
+    async def get_by_project(self, project_id: str) -> list[OpenVpnPeer]:
+        """One project's devices, oldest first."""
+        result = await self._session.execute(
+            select(OpenVpnPeerModel)
+            .where(OpenVpnPeerModel.project_id == project_id)
+            .order_by(OpenVpnPeerModel.created_at, OpenVpnPeerModel.id)
+        )
+        return [self._to_domain(m) for m in result.scalars().all()]
+
     async def get_by_id(self, peer_id: str) -> OpenVpnPeer | None:
         result = await self._session.execute(select(OpenVpnPeerModel).where(OpenVpnPeerModel.id == peer_id))
         model = result.scalar_one_or_none()
         return self._to_domain(model) if model else None
+
+    async def get_in_project(self, project_id: str, peer_id: str) -> OpenVpnPeer | None:
+        """The device, or None when it does not exist or belongs to another project."""
+        result = await self._session.execute(
+            select(OpenVpnPeerModel).where(OpenVpnPeerModel.id == peer_id, OpenVpnPeerModel.project_id == project_id)
+        )
+        model = result.scalar_one_or_none()
+        return self._to_domain(model) if model else None
+
+    async def used_addresses(self) -> set[str]:
+        """Every tunnel address a device holds, for picking a new device's (see ``first_free_address``)."""
+        result = await self._session.execute(select(OpenVpnPeerModel.address))
+        return set(result.scalars().all())
 
     async def create(self, peer: OpenVpnPeer) -> OpenVpnPeer:
         self._session.add(
@@ -136,12 +158,7 @@ class OpenVpnPeerRepository:
         return bool(result.rowcount and result.rowcount > 0)  # type: ignore[attr-defined]
 
     async def record_last_seen(self, sightings: Sequence[Sighting]) -> int:
-        """Advance devices' last connections in one statement; the number of rows that moved.
-
-        Same contract as the WireGuard repository: the column only ever moves
-        forward, ``version`` is not bumped and ``updated_at`` is pinned (a
-        sighting is not an edit).
-        """
+        """Move each device's last connection forward to its sighting's, matched by id, in one statement; how many moved."""
         if not sightings:
             return 0
         seen = values(
@@ -159,6 +176,7 @@ class OpenVpnPeerRepository:
             .values(
                 last_connected_at=seen.c.connected_at,
                 last_endpoint=seen.c.endpoint,
+                # A sighting is not an edit: updated_at as it was.
                 updated_at=OpenVpnPeerModel.updated_at,
             )
         )

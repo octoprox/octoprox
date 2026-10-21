@@ -35,7 +35,7 @@ def _sort_proxies_healthy_first(proxies: list[Proxy]) -> list[Proxy]:
 
 @runtime_checkable
 class SyncableProvider(Protocol):
-    """Contract driven by ``ProxyProviderSyncer``.
+    """Contract driven by the worker's provider sync job (:class:`~api.jobs.sync.ProviderSyncJob`).
 
     Implemented by :class:`~api.providers.sdk.provider.DescriptorProvider` and
     by any plugin provider class registered through the ``octoprox.providers``
@@ -58,8 +58,8 @@ class SyncableProvider(Protocol):
         """Return ``(changed_proxies, proxy_ids_to_remove)`` after re-checking IPs.
 
         Only proxies whose definition changed (IP, credentials, country) need
-        to be returned; the syncer persists and announces each one. Returning
-        unchanged proxies is harmless but costs a write and an event apiece.
+        to be returned: the sync job writes each one, so an unchanged one costs
+        a write but does no harm.
         """
         ...
 

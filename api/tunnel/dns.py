@@ -3,20 +3,11 @@
 
 """Fake-IP DNS for the tunnel.
 
-A device inside the tunnel asks us for ``example.com`` and gets a synthetic
-address from a reserved range. When it then connects to that address, the
-transparent listener turns the address back into the name and hands the
-*name* to the upstream proxy, which resolves it where the exit is. Nothing
-is resolved on this host, so nothing leaks and the exit's view of DNS is the
-one that counts. AAAA answers are empty so devices stay on IPv4, and every
-other type is answered empty too: the tunnel carries proxied TCP, nothing
-else needs a record.
-
-The pool is a bounded LRU: a name keeps its address while it is in use, and
-the least recently used name is evicted when the range is exhausted. With
-the default /15 that is 130,000 names, far more than a device touches. In a
-cluster the mapping is shared through Redis (see :class:`FakeIpDirectory`),
-so whichever instance a device's connection lands on knows the name.
+Every name gets a synthetic address from a reserved range, kept in a bounded
+LRU pool that :class:`FakeIpDirectory` shares between gateways through Redis,
+and the transparent listener hands the name back to the upstream proxy, so
+nothing is resolved on this host and the exit's view of DNS is the one that
+counts.
 """
 
 from __future__ import annotations
@@ -66,11 +57,11 @@ _TCP_IDLE_SECONDS = 10.0
 
 
 class FakeIpPool:
-    """Names to synthetic IPv4 addresses and back, on one instance.
+    """Names to synthetic IPv4 addresses and back, on one gateway.
 
     Addresses are the network's hosts after the first (``.0`` of the first
-    block is skipped so no answer is a network address), identified by an
-    *offset* from the first usable one. Offsets are what the cluster shares.
+    block is skipped so no answer is a network address), each identified by an
+    *offset* from the first usable one, which is what the cluster shares.
     """
 
     def __init__(self, network: str, *, ttl: int = 60) -> None:
@@ -170,12 +161,10 @@ class FakeIpPool:
 class FakeIpDirectory:
     """The mapping as the tunnel sees it: the local pool, backed by Redis when the install has one.
 
-    With a store, every allocation is made cluster-wide and the local pool is
-    a cache of it, so a connection that lands on a different instance from
-    the one that answered the device's DNS query (a UDP balancer rehashing,
-    an instance taking over) still turns the address back into the name.
-    Without one, or when Redis is unreachable, the pool works alone and the
-    tunnel keeps serving; only the cross-instance property is lost.
+    With Redis every allocation is cluster-wide, so a connection that lands on
+    another gateway than the one that answered its DNS query still finds the
+    name; without it, or while it is unreachable, the pool works alone and the
+    tunnel keeps serving.
     """
 
     def __init__(self, pool: FakeIpPool, store: RedisClient | None = None) -> None:

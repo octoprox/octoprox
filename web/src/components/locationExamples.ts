@@ -196,7 +196,7 @@ export function scenarioSteps(i: ScenarioInput): ScenarioStep[] {
     steps.push({ title: `Evidence contradicts the vendor`, text: i.kind === 'pooled'
       ? i.declared
         ? `The slot is removed, and the provider sync mints a fresh session in its place.`
-        : `The slot is removed. The next request for that country that finds no slot mints a fresh one within the request.`
+        : `The slot is removed. While the country has other slots, the provider sync mints a fresh session in its place; once its last slot is gone, the next request for the country asks for a new group and waits a few seconds for it.`
       : i.kind === 'fixed'
         ? `The row is skipped for every request. ${kept}`
         : `The request is refused. ${kept}` })
@@ -239,7 +239,7 @@ export function scenarioSteps(i: ScenarioInput): ScenarioStep[] {
         : `502 at once, since sticky promised the session one exit. The refusal is cached, so the same -sessid- and place keep getting 502 for the preflight TTL: switch to a new -sessid-.` })
     } else {
       steps.push({ title: `On a refused request`, text: i.kind === 'pooled'
-        ? `The slot is excluded and another one for the country is tried, up to ${i.maxAttempts} attempts in all, then 502. ${i.declared ? `If no other slot serves the country, that is a 502 right away.` : `If no other slot serves the country, the retry mints a fresh one within the same request.`}`
+        ? `The slot is excluded and another one for the country is tried, up to ${i.maxAttempts} attempts in all, then 502. If no other slot serves the country, that is a 502 right away.${i.declared ? `` : ` The refused slot still counts as the country's group, so the retry asks for no new one.`}`
         : i.session
           ? `The gateway is excluded and another connector is tried with the same -sessid-, up to ${i.maxAttempts} attempts in all; with no other connector, 502.`
           : `The same gateway is tried again with a fresh vendor session, up to ${i.maxAttempts} attempts in all, then 502.` })

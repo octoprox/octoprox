@@ -130,7 +130,7 @@ export function CredentialForm({ type, credential, onSaved, formId }: Credential
 
   const scopes = { credential: values, connector: {} }
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = (e: React.SubmitEvent) => {
     e.preventDefault()
     setErrorMessage(null)
     if (!provider) return
@@ -145,6 +145,10 @@ export function CredentialForm({ type, credential, onSaved, formId }: Credential
 
   return (
     <form id={formId} onSubmit={handleSubmit} className="space-y-4" autoComplete="off">
+      {/* Hidden submit so Enter works; the visible button lives in the panel footer.
+          Kept first: space-y gives every child but the last a bottom margin, so a
+          hidden last child would leave a gap under the visible ones. */}
+      <button type="submit" className="hidden" disabled={createMutation.isPending || updateMutation.isPending} />
       {errorMessage && <Alert>{errorMessage}</Alert>}
       <div>
         <label className="block text-sm font-medium text-fg-muted mb-1">Name</label>
@@ -169,8 +173,6 @@ export function CredentialForm({ type, credential, onSaved, formId }: Credential
       />
       <EgressNotice provider={provider} />
       <p className="text-xs text-fg-subtle">Secrets are encrypted at rest.</p>
-      {/* Hidden submit so Enter works; the visible button lives in the panel footer. */}
-      <button type="submit" className="hidden" disabled={createMutation.isPending || updateMutation.isPending} />
     </form>
   )
 }

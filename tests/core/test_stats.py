@@ -3,25 +3,19 @@
 
 """Tests for stats helper functions."""
 
-from dataclasses import dataclass
+import pytest
 
-from api.core.stats import HOST_OVERFLOW, MetricDelta, TunnelPeerMetricDelta, normalize_host
-
-
-@dataclass
-class MockStatsObject:
-    """Mock object that implements HasStats protocol."""
-
-    request_count: int = 0
-    success_count: int = 0
-    failure_count: int = 0
-    avg_latency_ms: float = 0.0
-    bytes_sent: int = 0
-    bytes_received: int = 0
+from api.core.stats import (
+    HOST_OVERFLOW,
+    MetricDelta,
+    TunnelPeerMetricDelta,
+    fold_host_tail,
+    normalize_host,
+)
 
 
-class TestSummedAndSetOn:
-    """Hydration: history totals plus the Redis window, set on an entity."""
+class TestSummed:
+    """An entity's counters: its stored totals plus the Redis window not flushed yet."""
 
     def test_summed_weights_latency_by_count(self) -> None:
         pg = MetricDelta(request_count=100, success_count=90, failure_count=10, latency_sum_ms=20000.0, bytes_sent=50000, bytes_received=200000)
@@ -37,18 +31,6 @@ class TestSummedAndSetOn:
         assert MetricDelta.summed(None, only) == only
         assert MetricDelta.summed(None, None) == MetricDelta()
         assert MetricDelta.summed().avg_latency_ms == 0.0
-
-    def test_set_on_replaces_every_counter(self) -> None:
-        target = MockStatsObject(request_count=50, success_count=40, avg_latency_ms=9.0)
-        MetricDelta(request_count=100, success_count=90, failure_count=10, latency_sum_ms=15050.0, bytes_sent=50000, bytes_received=200000).set_on(target)
-        assert (target.request_count, target.success_count, target.failure_count) == (100, 90, 10)
-        assert target.avg_latency_ms == 150.5
-        assert (target.bytes_sent, target.bytes_received) == (50000, 200000)
-
-    def test_set_on_empty_clears(self) -> None:
-        target = MockStatsObject(request_count=50, success_count=40, avg_latency_ms=9.0, bytes_sent=5)
-        MetricDelta().set_on(target)
-        assert target == MockStatsObject()
 
 
 class TestMetricDelta:
@@ -99,103 +81,44 @@ class TestMetricDelta:
         assert dst == src
 
     def test_wire_round_trip(self) -> None:
-        deltas = {"a": MetricDelta(request_count=2, latency_sum_ms=10.5), "b": MetricDelta(bytes_sent=7)}
-        wire = MetricDelta.dump_many(deltas)
-        assert wire["a"] == {"request_count": 2, "success_count": 0, "failure_count": 0, "latency_sum_ms": 10.5, "bytes_sent": 0, "bytes_received": 0}
-        assert MetricDelta.parse_many(wire) == deltas
+        delta = MetricDelta(request_count=2, latency_sum_ms=10.5)
+        wire = delta.to_dict()
+        assert wire == {"request_count": 2, "success_count": 0, "failure_count": 0, "latency_sum_ms": 10.5, "bytes_sent": 0, "bytes_received": 0}
+        assert MetricDelta.from_dict(wire) == delta
 
-    def test_parse_tolerates_missing_fields_and_junk(self) -> None:
-        """A peer on a version with fewer fields still applies; garbage entries are dropped."""
-        parsed = MetricDelta.parse_many({"a": {"request_count": 2}, "b": {"request_count": "lots"}, "c": "nope"})
-        assert parsed == {"a": MetricDelta(request_count=2)}
-        assert MetricDelta.parse_many(None) == {}
-        assert MetricDelta.parse_many([1, 2]) == {}
-        # Numbers arriving as JSON strings or floats for int fields still land as the right types.
+    def test_from_dict_reads_missing_fields_as_zero_and_refuses_junk(self) -> None:
+        """A hash written with fewer fields still reads; a value that is not a number does not."""
+        assert MetricDelta.from_dict({"request_count": 2}) == MetricDelta(request_count=2)
+        with pytest.raises(ValueError):
+            MetricDelta.from_dict({"request_count": "lots"})
+        with pytest.raises(TypeError):
+            MetricDelta.from_dict("nope")
+        # Numbers arriving as strings (Redis hash values) or floats for int fields still land as the right types.
         coerced = MetricDelta.from_dict({"request_count": "3", "bytes_sent": 7.0, "latency_sum_ms": 5})
         assert coerced == MetricDelta(request_count=3, bytes_sent=7, latency_sum_ms=5.0)
         assert isinstance(coerced.latency_sum_ms, float) and isinstance(coerced.bytes_sent, int)
 
 
-class TestApplyTo:
-    """Tests for MetricDelta.apply_to() - applies a batch of N requests to a target."""
+class TestIncrements:
+    """What a window adds to its Redis hash: each counter that moved, typed and tagged by its field's declared type."""
 
-    def test_no_op_on_zero_requests(self) -> None:
-        target = MockStatsObject(request_count=42, avg_latency_ms=99.0)
-        MetricDelta().apply_to(target)
-        assert target.request_count == 42
-        assert target.avg_latency_ms == 99.0
+    def test_each_counter_that_moved_in_field_order_extras_included(self) -> None:
+        delta = TunnelPeerMetricDelta(request_count=2, latency_sum_ms=12.5, bytes_received=7, encrypted_dns_blocked=1)
 
-    def test_apply_to_empty_target(self) -> None:
-        target = MockStatsObject()
-        delta = MetricDelta()
-        # 3 successful requests, latency sum 300ms → avg 100
-        for _ in range(3):
-            delta.add_request(success=True, latency_ms=100.0, bytes_sent=10, bytes_received=20)
-        delta.apply_to(target)
-        assert target.request_count == 3
-        assert target.success_count == 3
-        assert target.failure_count == 0
-        assert target.avg_latency_ms == 100.0
-        assert target.bytes_sent == 30
-        assert target.bytes_received == 60
+        assert list(delta.increments()) == [
+            ("request_count", 2, False),
+            ("latency_sum_ms", 12.5, True),
+            ("bytes_received", 7, False),
+            ("encrypted_dns_blocked", 1, False),
+        ]
+        assert list(MetricDelta().increments()) == []
 
-    def test_weighted_average_across_batches(self) -> None:
-        """A batch added to a pre-existing target uses weighted-average latency."""
-        target = MockStatsObject(
-            request_count=10,
-            success_count=10,
-            failure_count=0,
-            avg_latency_ms=50.0,  # 10 requests at 50ms each → 500ms total
-        )
-        delta = MetricDelta()
-        # 5 more requests at 100ms each → 500ms sum
-        for _ in range(5):
-            delta.add_request(success=True, latency_ms=100.0)
-        delta.apply_to(target)
-        # Combined: 15 requests, total latency 500 + 500 = 1000ms → avg 66.67
-        assert target.request_count == 15
-        assert target.success_count == 15
-        assert abs(target.avg_latency_ms - (1000.0 / 15)) < 1e-9
+    def test_the_declared_type_decides_not_the_amount(self) -> None:
+        """Redis refuses HINCRBY once a field holds a fraction, so a whole latency still goes as a fraction."""
+        latency, sent = MetricDelta(latency_sum_ms=250, bytes_sent=3.0).increments()  # type: ignore[arg-type]
 
-    def test_progress_only_delta_moves_bytes_but_not_requests(self) -> None:
-        """A running transfer reports bytes without a request; latency and counts stay put."""
-        target = MockStatsObject(request_count=4, avg_latency_ms=80.0, bytes_sent=10, bytes_received=20)
-        delta = MetricDelta()
-        delta.add_bytes(100, 200)
-        delta.apply_to(target)
-        assert target.request_count == 4
-        assert target.avg_latency_ms == 80.0
-        assert (target.bytes_sent, target.bytes_received) == (110, 220)
-
-    def test_apply_preserves_existing_byte_counters(self) -> None:
-        target = MockStatsObject(bytes_sent=1000, bytes_received=2000)
-        delta = MetricDelta()
-        delta.add_request(success=True, latency_ms=10.0, bytes_sent=100, bytes_received=200)
-        delta.apply_to(target)
-        assert target.bytes_sent == 1100
-        assert target.bytes_received == 2200
-
-    def test_apply_handles_failures(self) -> None:
-        target = MockStatsObject()
-        delta = MetricDelta()
-        delta.add_request(success=True, latency_ms=100.0)
-        delta.add_request(success=False, latency_ms=200.0)
-        delta.apply_to(target)
-        assert target.success_count == 1
-        assert target.failure_count == 1
-        assert target.request_count == 2
-
-    def test_apply_from_partial_wire_form(self) -> None:
-        """Deltas deserialised from JSON may be missing optional keys; they read as zero."""
-        target = MockStatsObject()
-        delta = MetricDelta.from_dict({"request_count": 4, "success_count": 4, "latency_sum_ms": 400.0})
-        delta.apply_to(target)
-        assert target.request_count == 4
-        assert target.success_count == 4
-        assert target.failure_count == 0
-        assert target.avg_latency_ms == 100.0
-        assert target.bytes_sent == 0
-        assert target.bytes_received == 0
+        assert latency == ("latency_sum_ms", 250.0, True) and isinstance(latency[1], float)
+        assert sent == ("bytes_sent", 3, False) and isinstance(sent[1], int)
 
 
 class TestTunnelPeerMetricDelta:
@@ -204,12 +127,12 @@ class TestTunnelPeerMetricDelta:
     def test_extra_counters_travel_on_the_wire(self) -> None:
         d = TunnelPeerMetricDelta(by_address=2, encrypted_dns_blocked=1)
         d.add_request(success=True, latency_ms=20.0, bytes_sent=5, bytes_received=9)
-        wire = TunnelPeerMetricDelta.dump_many({"dev": d})
-        assert wire["dev"]["by_address"] == 2 and wire["dev"]["encrypted_dns_blocked"] == 1
-        assert wire["dev"]["request_count"] == 1 and wire["dev"]["bytes_received"] == 9
-        parsed = TunnelPeerMetricDelta.parse_many(wire)
-        assert parsed == {"dev": d}
-        assert isinstance(parsed["dev"], TunnelPeerMetricDelta)
+        wire = d.to_dict()
+        assert wire["by_address"] == 2 and wire["encrypted_dns_blocked"] == 1
+        assert wire["request_count"] == 1 and wire["bytes_received"] == 9
+        parsed = TunnelPeerMetricDelta.from_dict(wire)
+        assert parsed == d
+        assert isinstance(parsed, TunnelPeerMetricDelta)
 
     def test_merge_and_sum_include_the_extras(self) -> None:
         a = TunnelPeerMetricDelta(request_count=1, success_count=1, latency_sum_ms=10.0, by_address=1)
@@ -251,3 +174,65 @@ class TestNormalizeHost:
     def test_overlong_names_fold_into_the_overflow_row(self) -> None:
         assert normalize_host("a" * 300) == HOST_OVERFLOW
         assert normalize_host(HOST_OVERFLOW) == HOST_OVERFLOW
+
+
+class TestFoldHostTail:
+    """A window's host rows under a ceiling: the busiest named per project, the rest in one row per connector."""
+
+    def test_without_a_ceiling_every_host_is_named(self) -> None:
+        window = {("P", "c1", f"h{i}.example.com"): MetricDelta(request_count=1) for i in range(50)}
+        assert fold_host_tail(window, 0) is window
+
+    def test_the_busiest_hosts_are_kept_whatever_order_they_arrived_in(self) -> None:
+        window = {
+            ("P", "c1", "a.example.com"): MetricDelta(request_count=1, bytes_sent=1),
+            ("P", "c1", "b.example.com"): MetricDelta(request_count=1, bytes_sent=1),
+            ("P", "c1", "c.example.com"): MetricDelta(request_count=1, bytes_sent=1),
+            ("P", "c1", "d.example.com"): MetricDelta(request_count=2, bytes_sent=2),
+            ("P", "c1", "e.example.com"): MetricDelta(request_count=3, bytes_sent=3),
+        }
+        folded = fold_host_tail(window, 2)
+        assert {host: d.request_count for (_p, _c, host), d in folded.items()} == {
+            "e.example.com": 3, "d.example.com": 2, HOST_OVERFLOW: 3,
+        }
+        assert folded[("P", "c1", HOST_OVERFLOW)].bytes_sent == 3
+
+    def test_bytes_break_a_tie_in_requests(self) -> None:
+        window = {
+            ("P", "c1", "small.example.com"): MetricDelta(request_count=1, bytes_received=10),
+            ("P", "c1", "large.example.com"): MetricDelta(request_count=1, bytes_received=1000),
+        }
+        assert set(fold_host_tail(window, 1)) == {("P", "c1", "large.example.com"), ("P", "c1", HOST_OVERFLOW)}
+
+    def test_the_ceiling_is_per_project_and_keeps_connectors_apart(self) -> None:
+        one = MetricDelta(request_count=1, success_count=1)
+        window = {
+            # Project P: "big" is spread over two connectors (3 requests) and beats "small" (2 on one).
+            ("P", "c1", "big.example.com"): MetricDelta(request_count=1, success_count=1),
+            ("P", "c2", "big.example.com"): MetricDelta(request_count=2, success_count=2),
+            ("P", "c1", "small.example.com"): MetricDelta(request_count=2, success_count=2),
+            ("P", "c2", "tiny.example.com"): one,
+            # Project Q is ranked on its own.
+            ("Q", "c3", "only.example.com"): one,
+        }
+        folded = fold_host_tail(window, 1)
+        assert {k: d.request_count for k, d in folded.items()} == {
+            ("P", "c1", "big.example.com"): 1,
+            ("P", "c2", "big.example.com"): 2,
+            ("P", "c1", HOST_OVERFLOW): 2,
+            ("P", "c2", HOST_OVERFLOW): 1,
+            ("Q", "c3", "only.example.com"): 1,
+        }
+
+    def test_folding_never_writes_into_the_callers_deltas(self) -> None:
+        kept = MetricDelta(request_count=5)
+        window = {
+            ("P", "c1", "kept.example.com"): kept,
+            ("P", "c1", HOST_OVERFLOW): MetricDelta(request_count=1),
+            ("P", "c1", "tail.example.com"): MetricDelta(request_count=1),
+        }
+        folded = fold_host_tail(window, 1)
+        # The overflow row of an earlier fold is not a host, and takes in the new tail.
+        assert folded[("P", "c1", HOST_OVERFLOW)].request_count == 2
+        assert folded[("P", "c1", "kept.example.com")] is not kept
+        assert window[("P", "c1", HOST_OVERFLOW)].request_count == 1

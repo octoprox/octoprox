@@ -33,9 +33,11 @@ Whichever identity ends up calling Azure Resource Manager (the host identity, th
 
 Give the workload that runs Octoprox an identity:
 
-- **AKS:** enable workload identity on the cluster, create a user-assigned managed identity, add a federated credential on it for the Octoprox Kubernetes service account, and label the pod with `azure.workload.identity/use: "true"`. The webhook injects the `AZURE_*` variables the SDK reads.
+- **AKS:** enable workload identity on the cluster, create a user-assigned managed identity, add a federated credential on it for the Kubernetes service account the Octoprox worker pods run as, and label those pods with `azure.workload.identity/use: "true"`. The webhook injects the `AZURE_*` variables the SDK reads.
 - **VM or Container Apps:** enable a system-assigned managed identity, or attach a user-assigned one. If the host has several user-assigned identities, set `managed_identity_client_id` so Octoprox picks the right one.
 - **Elsewhere:** set `AZURE_TENANT_ID`, `AZURE_CLIENT_ID` and `AZURE_CLIENT_SECRET` on the Octoprox container, if you would rather supply credentials to the process than store them in Octoprox.
+
+Only the processes that launch, watch and terminate VMs call Azure Resource Manager: the single instance, or in a [role cluster]({{ site.baseurl }}/architecture) the workers, which run the scaling jobs. The api, gateways and controller never call Azure (the api checks a credential's fields without calling it), so they need no identity; giving them the workers' does no harm.
 
 Then assign the role from 1.1 to that identity on the target subscription or resource group:
 
@@ -298,6 +300,20 @@ curl -X POST http://localhost:8000/api/v1/projects/{project_id}/connectors \
 5. Fill in the configuration fields
 6. Click **Save**
 
+## How Octoprox Manages the Instances
+
+A worker's scale job runs for each Azure connector about every 30 seconds, and at once after the connector is created or edited. It creates, rotates, drains and deletes the connector's VMs. Each VM comes with a public IP (`<name>-pip`), a network interface (`<name>-nic`) and an OS disk (`<name>-osdisk`), created in that order, and a deleted VM takes its network interface and public IP with it.
+
+- **Names and tags.** Each VM is named `<instance_name>-<epoch seconds>-<6 hex>`, cut to 64 characters, the Linux VM name limit, so the names of its disk, interface and public IP stay within theirs. Every VM carries the tags `managed-by=octoprox`, `octoprox-connector=<connector id>` and the connector's own `tags`, which never replace `octoprox-connector`.
+- **No credentials in tags.** Each VM's proxy credentials are random and live only in its custom data, the start-up script that installs Squid, as in 5.x. No tag holds them, so whoever can read the VMs, the Reader role included, sees the connector's ID and nothing more.
+- **A listing when needed.** A run lists the VMs of the connector's resource group with one call, VMs only and no network reads, and keeps those tagged with the connector that are not being deleted and not `Failed`. It lists while a create is under way (or one a worker never finished is not settled yet) or the connector is being deleted, and otherwise once an hour: one call per cloud connector an hour, and one about every 30 seconds while it creates VMs.
+- **VMs without a row are deleted.** A tagged VM that has no proxy row in Octoprox, and that no worker is creating, is deleted with its network interface and public IP at the next listing, within the hour, and logged as `Terminating a cloud instance with no row`: its creator died, or Redis lost track of the create, before the row was saved. That includes a VM created by hand with the tag copied, so never copy the `octoprox-connector` tag onto VMs of your own. A VM whose create failed after Azure had made it (it runs without an address, or Octoprox could not save its row) has no row either: the create's error is recorded on the connector, and the VM is deleted at the next listing, within the hour. The VM list carries no power state, so a stopped or deallocated VM without a row is deleted too. A VM under a delete lock fails to delete, and that is logged at every listing. VMs 5.x created carry no `octoprox-connector` tag and are managed through their rows, as before.
+- **What a create can leave behind.** A worker that dies after creating a VM's public IP and network interface but before the VM, or a VM create that fails and whose clean-up fails too, leaves a `<name>-pip` and a `<name>-nic` in the resource group. A VM that ends up `Failed` is not listed either, so it stays, with its interface and public IP. Octoprox lists VMs only and never deletes these: find them now and then and delete them by hand, for example the network interfaces of the connector's name prefix attached to no VM (`az network nic list -g <resource group> --query "[?virtualMachine==null && starts_with(name, '<instance_name>-')].name"`) its public IPs attached to nothing (`az network public-ip list -g <resource group> --query "[?ipConfiguration==null && starts_with(name, '<instance_name>-')].name"`), and its VMs that `Failed` (`az vm list -g <resource group> --query "[?provisioningState=='Failed' && starts_with(name, '<instance_name>-')].name"`); delete such a VM before its interface and public IP, which it holds.
+
+Creates a worker never finished, the read of the connector before each create, deleting a cloud connector, and which failures are only logged work the same on every cloud: see [Cloud scaling]({{ site.baseurl }}/architecture#cloud-scaling).
+
+No permission beyond the role of 1.1 is needed.
+
 ## Configuration Reference
 
 ### Credential
@@ -329,7 +345,7 @@ The subscription VMs are created in always comes from the connector.
 | `ssh_public_key` | Yes | SSH public key for VM access | `ssh-rsa AAAA... user@host` |
 | `min_proxies` | No | Minimum proxy instances (default: 1) | `1` |
 | `max_proxies` | No | Maximum proxy instances (default: 10) | `10` |
-| `tags` | No | Custom tags for VMs | `{"environment": "prod"}` |
+| `tags` | No | Custom tags for VMs, beside `managed-by` and `octoprox-connector` | `{"environment": "prod"}` |
 
 > **Note:** The VM image is automatically selected. Octoprox uses Ubuntu 24.04 LTS for all instances.
 

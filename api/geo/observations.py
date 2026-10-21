@@ -1,477 +1,233 @@
 # Copyright 2026 Octoprox Authors
 # SPDX-License-Identifier: Apache-2.0
 
-"""The observation pipeline: request path to Postgres without touching Postgres on the way.
+"""IP observations from the path that saw an exit to Postgres: each process's recorder appends them to the observations stream, and the workers ingest them.
 
-Three stages, mirroring the request-metrics pipeline:
-
-1. :class:`ObservationRecorder` collects :class:`IpObservation` values in
-   memory on whichever path produced them (a lookup, a health check, a
-   preflight). Appending is a list append; nothing awaits.
-2. The recorder's publisher loop (every instance) pushes the buffer to one
-   Redis list in a single ``RPUSH`` every few seconds.
-3. :class:`ObservationFlusher` (leader only) pops batches off the list,
-   bulk-inserts the raw rows, decides which sightings are hand-outs, upserts
-   the per-connector exit table the accuracy and exit views read, and applies
-   retention. Each cycle keeps popping while batches come back full, so a
-   backlog is drained rather than outgrowing one batch per interval, and a
-   cycle that ran out of time with the queue still full is followed at once
-   by the next one rather than after the interval.
-
-Losing Redis loses at most a few seconds of observations. Nothing on the
-request path waits for a database.
+Every write the ingest makes only moves forward, so workers take batches in any order and a hand-out counts once whichever worker sees it first.
 """
 
 from __future__ import annotations
 
-import asyncio
-import contextlib
 import json
 import time
-from collections.abc import Awaitable, Callable
-from datetime import timedelta
-from typing import Any, cast
+from datetime import datetime, timedelta
+from enum import IntEnum
+from typing import TYPE_CHECKING
 
 import structlog
-from pydantic import ValidationError
 
-from api.core import utc_now
-from api.core.job_stats import job_stats
-from api.core.leadership import Lease
-from api.core.workers import LeaseName, WorkerName
+from api.core.consumers import GroupConsumer, decode_items
+from api.core.logging import error_text
+from api.core.publishers import ItemPublisher
+from api.core.workers import WorkerName
 from api.db.geo_repository import ExitSighting, ObservationRepository
-from api.db.redis import GEO_OBSERVATIONS_KEY, RedisClient
-from api.db.session import SessionFactory
+from api.db.redis import (
+    OBSERVATION_STREAM_KEY,
+    OBSERVATION_STREAM_MAXLEN,
+    PROXY_LAST_EXIT_KEY,
+    PROXY_LAST_EXIT_TTL_SECONDS,
+    BatchChannel,
+    RedisClient,
+)
 from api.geo.models import ExitJudgement, IpObservation
+
+if TYPE_CHECKING:
+    from redis.commands.core import AsyncScript
+
+    from api.db.session import SessionFactory
+    from api.db.streams import StreamEntry
 
 logger = structlog.get_logger()
 
-# Standby instances poll this often to see whether the flush lease has freed up.
-_LEASE_RETRY_SECONDS = 30.0
-# Rows popped from Redis per batch, each batch its own transaction. Bounded so
-# no transaction stays open for a minute after a traffic burst. A batch costs
-# about a dozen round trips, plus one per thousand exits upserted or judged,
-# and on a busy event loop each one waits its turn (a batch of 2000 took 4-5 s
-# at peak), so batches are large: rows per second grow with rows per batch.
-FLUSH_BATCH_SIZE = 5000
-# How long one cycle keeps writing batch after batch while they come back full.
-# A cycle that runs out of time with the queue still full is followed by the
-# next one at once (see ObservationFlusher.run), so the budget bounds how long
-# one run lasts in the job stats, not the drain rate.
-DRAIN_BUDGET_SECONDS = 20.0
-# Retention runs at most this often.
-_RETENTION_EVERY = timedelta(hours=1)
+# Entries one read of the observations stream takes, ingested in one
+# transaction. A batch costs about a dozen round trips plus one per thousand
+# exits upserted or judged, so rows per second grow with rows per batch.
+INGEST_BATCH_SIZE = 5000
+# Entry IDs a log line names at most.
+_LOGGED_IDS = 5
+# Naive UTC's epoch, and the unit a proxy's last counted exit is timed in.
+_EPOCH = datetime(1970, 1, 1)
+_MILLISECOND = timedelta(milliseconds=1)
+
+# Lua: the hand-out verdict of each observation of a proxy against the proxy's
+# last counted exit (PROXY_LAST_EXIT_KEY, "<observed_at epoch ms> <ip>"),
+# oldest first. KEYS[i] is observation i's key; ARGV[1] the key's TTL in
+# seconds, then observation i's IP at ARGV[2i] and its observed_at in epoch ms
+# at ARGV[2i + 1]. Returns per observation 1 when it is newer than the record
+# and of another IP, 0 when it is of the same IP or not newer, and -1 when
+# there is no record; the record moves to every newer observation, and to the
+# first one when there was none. Each verdict is made and recorded together,
+# so batches on any number of workers count each transition once.
+_HAND_OUTS_SCRIPT = """
+local verdicts = {}
+for i = 1, #KEYS do
+  local ip, at = ARGV[2 * i], ARGV[2 * i + 1]
+  local seen, held = string.match(redis.call('GET', KEYS[i]) or '', '^(%d+) (.+)$')
+  local newer = not seen or tonumber(at) > tonumber(seen)
+  if not seen then
+    verdicts[i] = -1
+  elseif newer and held ~= ip then
+    verdicts[i] = 1
+  else
+    verdicts[i] = 0
+  end
+  if newer then
+    redis.call('SET', KEYS[i], at .. ' ' .. ip, 'EX', ARGV[1])
+  end
+end
+return verdicts
+"""
 
 
-async def queue_length(redis_client: RedisClient) -> int | None:
-    """Entries every instance has published that the flusher has not popped yet; None when Redis cannot say.
+class HandOut(IntEnum):
+    """The hand-out script's verdict on one observation of a proxy, against the proxy's last counted exit."""
 
-    Sightings, and verdict rewrites after a re-attribution: both wait in the same list.
+    YES = 1  # newer than the record and of another IP: the proxy was handed a new exit
+    NO = 0  # of the same IP, or not newer: a repeat, or a late or redelivered sighting
+    NO_RECORD = -1  # nothing counted for the proxy (new, idle for a day, Redis wiped): the exit table decides
+
+
+class ObservationRecorder(ItemPublisher[IpObservation | ExitJudgement]):
+    """This process's observations and judgements, buffered off the request path and appended to the observations stream each interval.
+
+    Args:
+        max_buffer: the most items held, through a Redis outage too; when full the oldest goes, counted in ``dropped``.
     """
-    try:
-        return int(await cast("Awaitable[Any]", redis_client.client.llen(GEO_OBSERVATIONS_KEY)))
-    except Exception as exc:
-        logger.warning("Could not read the IP observation queue length", error=str(exc))
-        return None
-
-
-class ObservationRecorder:
-    """Per-instance buffer of observations and judgements, and the loop that publishes it to Redis."""
 
     def __init__(self, redis_client: RedisClient | None, *, max_buffer: int = 5000, interval: float = 5.0) -> None:
-        self._redis = redis_client
-        self._buffer: list[IpObservation | ExitJudgement] = []
-        self._max_buffer = max_buffer
-        self._interval = interval
-        self._running = False
-        self._early_push: asyncio.Task[None] | None = None
-        self.dropped = 0
-        self.published = 0
+        super().__init__(
+            redis_client,
+            name=WorkerName.GEO_OBSERVATION_PUBLISHER,
+            interval=interval,
+            channel=BatchChannel.OBSERVATION_APPENDS,
+            key=OBSERVATION_STREAM_KEY,
+            max_items=OBSERVATION_STREAM_MAXLEN,
+            max_pending=max_buffer,
+        )
 
-    @property
-    def pending(self) -> int:
-        return len(self._buffer)
+    def record(self, item: IpObservation | ExitJudgement) -> None:
+        """Buffer one observation or judgement, never waiting; at half a buffer the loop sends at once, unless a part is owed.
+
+        So only an unreachable Redis drops anything, and a Redis in trouble is sent to at the loop's pace, not per item.
+        """
+        self.push(item)
+        if self._windowed() >= self._max_pending // 2 and not self.owed:
+            self.wake()
 
     async def queued(self) -> int | None:
-        """The shared queue's length (see :func:`queue_length`); None without Redis."""
-        return await queue_length(self._redis) if self._redis is not None else None
-
-    def record(self, observation: IpObservation | ExitJudgement) -> None:
-        """Append one observation or judgement. Never blocks; drops the oldest when the buffer is full.
-
-        A burst that fills half the buffer triggers a push right away rather
-        than waiting for the next tick, so only an unreachable Redis can drop.
-        """
-        if len(self._buffer) >= self._max_buffer:
-            del self._buffer[0]
-            self.dropped += 1
-        self._buffer.append(observation)
-        if len(self._buffer) >= self._max_buffer // 2 and self._redis is not None and self._early_push is None:
-            try:
-                self._early_push = asyncio.create_task(self._push_early())
-            except RuntimeError:
-                self._early_push = None  # no running loop (tests calling record() synchronously)
-
-    async def _push_early(self) -> None:
+        """Entries on the observations stream, published and not ingested yet; None without Redis or when it cannot say."""
+        if self._redis is None:
+            return None
         try:
-            await self.publish()
-        finally:
-            self._early_push = None
-
-    async def publish(self) -> int:
-        """Push everything buffered so far to the Redis list. Returns the count pushed."""
-        if not self._buffer or self._redis is None:
-            return 0
-        batch, self._buffer = self._buffer, []
-        payloads = [o.model_dump_json() for o in batch]
-        try:
-            await cast("Awaitable[Any]", self._redis.client.rpush(GEO_OBSERVATIONS_KEY, *payloads))
+            return int(await self._redis.client.xlen(OBSERVATION_STREAM_KEY))
         except Exception as exc:
-            # Put them back (bounded) and try again next tick.
-            self._buffer = (batch + self._buffer)[-self._max_buffer :]
-            logger.warning("Publishing IP observations failed", error=str(exc), count=len(batch))
-            return 0
-        self.published += len(batch)
-        return len(batch)
-
-    async def run(self) -> None:
-        """Publisher loop: every instance runs one."""
-        self._running = True
-        job_stats.declare_interval(WorkerName.GEO_OBSERVATION_PUBLISHER, self._interval)
-        while self._running:
-            try:
-                await asyncio.sleep(self._interval)
-                with job_stats.track(WorkerName.GEO_OBSERVATION_PUBLISHER) as run:
-                    if await self.publish() == 0:
-                        run.idle()
-            except asyncio.CancelledError:
-                break
-            except Exception as exc:
-                logger.error("IP observation publisher error", error=str(exc))
-
-    def stop(self) -> None:
-        self._running = False
+            logger.warning("Could not read the IP observation stream's length", error=error_text(exc))
+            return None
 
 
-def decide_hand_outs(
-    observations: list[IpObservation],
-    previous: dict[str, str | None],
-    on_record: dict[tuple[str, str], str | None] | None = None,
-) -> tuple[list[tuple[IpObservation, bool]], dict[str, str]]:
-    """Mark which sightings are hand-outs: the proxy's exit differs from the last one counted.
+class ObservationIngest(GroupConsumer):
+    """Writes the observations stream into Postgres on the workers, a batch at a time in one transaction.
 
-    ``previous`` is the last counted exit per proxy (from the proxy status
-    hash). Sightings are walked in time order and each updates the running
-    exit, so two instances reporting the same IP for a proxy, however far
-    apart, yield one hand-out: the second sees the first's IP already
-    recorded.
-
-    ``on_record`` is the exit table's answer for proxies Redis knows nothing
-    about (after an upgrade or a Redis loss): the proxy that last held each
-    (connector, ip). An exit already on record with this proxy as its holder,
-    or with no holder recorded at all, is treated as counted before. That
-    errs on purpose: a proxy that left an exit and came back to it while
-    Redis knew nothing goes uncounted once, because the alternative is
-    counting every existing exit again on every upgrade. Sightings without a
-    proxy are never hand-outs; the count means hand-outs to a proxy. Returns
-    the marked sightings and the exit to record for every proxy seen.
+    A batch's hand-outs are decided first, by one script against each proxy's last counted exit; then its log rows, the
+    exit table and the judgements are written, each of them only moving forward.
     """
-    known: dict[str, str | None] = dict(previous)
-    marked: list[tuple[IpObservation, bool]] = []
-    for o in sorted(observations, key=lambda o: o.observed_at):
-        if not o.proxy_id:
-            marked.append((o, False))
-            continue
-        if known.get(o.proxy_id) is not None:
-            hand_out = known[o.proxy_id] != o.ip
-        else:
-            # Nothing counted for this proxy yet: consult what the exit table has.
-            key = (o.connector_id or "", o.ip)
-            if on_record is None or key not in on_record:
-                hand_out = True  # never seen this exit for this connector
-            else:
-                holder = on_record[key]
-                hand_out = holder is not None and holder != o.proxy_id  # someone else held it: reuse
-        known[o.proxy_id] = o.ip
-        marked.append((o, hand_out))
-    latest: dict[str, str] = {}
-    for proxy_id, ip in known.items():
-        if ip is not None and previous.get(proxy_id) != ip:
-            latest[proxy_id] = ip
-    return marked, latest
 
-
-def _latest_state(sighting: ExitSighting, o: IpObservation) -> None:
-    sighting.last_seen = o.observed_at
-    sighting.country = o.resolved_country or sighting.country
-    sighting.proxy_id = o.proxy_id
-    sighting.source = o.source.value
-    sighting.claimed_country = o.claimed_country
-    sighting.resolved_source = o.resolved_source.value if o.resolved_source else None
-    sighting.country_conflict = o.country_conflict
-    sighting.claimed_state = o.claimed_state
-    sighting.claimed_city = o.claimed_city
-    sighting.resolved_state = o.resolved_state
-    sighting.resolved_city = o.resolved_city
-    sighting.state_conflict = o.state_conflict
-    sighting.city_conflict = o.city_conflict
-
-
-def aggregate_exits(sightings: list[tuple[IpObservation, bool]]) -> dict[tuple[str, str], ExitSighting]:
-    """Fold a batch into one ExitSighting per (connector, IP).
-
-    Each item is an observation and whether :func:`decide_hand_outs` judged
-    it a hand-out. Every observation refreshes the exit's latest state (who
-    held it, what was claimed, how it was judged); only hand-outs move the
-    count.
-    """
-    exits: dict[tuple[str, str], ExitSighting] = {}
-    for o, hand_out in sightings:
-        if not o.connector_id:
-            continue
-        key = (o.connector_id, o.ip)
-        current = exits.get(key)
-        if current is None:
-            current = exits[key] = ExitSighting(
-                first_seen=o.observed_at, last_seen=o.observed_at, count=1 if hand_out else 0
-            )
-            _latest_state(current, o)
-            continue
-        if hand_out:
-            current.count += 1
-        if o.observed_at < current.first_seen:
-            current.first_seen = o.observed_at
-        if o.observed_at >= current.last_seen:
-            _latest_state(current, o)
-    return exits
-
-
-def decode_batch(raw: list[Any]) -> tuple[list[IpObservation], list[ExitJudgement]]:
-    """Parse popped Redis payloads into sightings and judgements, dropping anything malformed.
-
-    During a rolling upgrade the list can hold payloads from the other
-    version: an old instance's re-attribution rows and a new instance's
-    judgements are unreadable to the other side and are dropped here. Only
-    verdict rewrites are lost, never sightings, and the next re-attribution
-    restores them.
-    """
-    observations: list[IpObservation] = []
-    judgements: list[ExitJudgement] = []
-    for item in raw:
-        if isinstance(item, bytes):
-            item = item.decode("utf-8", errors="replace")
-        try:
-            data = json.loads(item)
-            if isinstance(data, dict) and data.get("kind") == "judgement":
-                judgements.append(ExitJudgement(**data))
-            else:
-                observations.append(IpObservation(**data))
-        except (TypeError, ValueError, ValidationError):
-            logger.debug("Skipping malformed IP observation")
-    return observations, judgements
-
-
-class ObservationFlusher:
-    """Leader-elected: Redis list to Postgres rows and aggregates, plus retention."""
-
-    def __init__(
-        self,
-        session_factory: SessionFactory,
-        redis_client: RedisClient,
-        instance_id: str,
-        *,
-        interval: float = 30.0,
-        drain_budget: float = DRAIN_BUDGET_SECONDS,
-        retention_days: Callable[[], int] | int = 7,
-        exit_ip_retention_days: Callable[[], int] | int = 0,
-    ) -> None:
+    def __init__(self, redis_client: RedisClient, session_factory: SessionFactory) -> None:
+        super().__init__(
+            redis_client, OBSERVATION_STREAM_KEY, name=WorkerName.OBSERVATION_INGEST, count=INGEST_BATCH_SIZE
+        )
         self._session_factory = session_factory
-        self._redis = redis_client
-        self._instance_id = instance_id
-        self._interval = interval
-        self._drain_budget = drain_budget
-        # Set by stop(): a drain in progress ends at the next batch boundary.
-        self._stopping = False
-        # Clear while a drain runs, so shutdown can let the batch in hand commit
-        # (see settle()) rather than cancel it after it was popped off the queue.
-        self._idle = asyncio.Event()
-        self._idle.set()
-        self._retention_days = retention_days
-        self._exit_ip_retention_days = exit_ip_retention_days
-        self._running = False
-        self._last_retention = utc_now() - _RETENTION_EVERY
-        # Set by drain() when it ran out of time with the queue still full:
-        # run() then starts the next drain at once instead of sleeping.
-        self.backlogged = False
+        self._script: AsyncScript | None = None
 
-    def _retention(self) -> int:
-        value = self._retention_days() if callable(self._retention_days) else self._retention_days
-        return int(value)
-
-    def _exit_retention(self) -> int:
-        value = self._exit_ip_retention_days() if callable(self._exit_ip_retention_days) else self._exit_ip_retention_days
-        return int(value)
-
-    async def run(self) -> None:
-        self._running = True
-        self._stopping = False
-        job_stats.declare_interval(WorkerName.GEO_OBSERVATION_FLUSHER, self._interval)
-        lease = Lease(self._redis, name=LeaseName.GEO_OBSERVATION_FLUSHER, owner_id=self._instance_id)
-        try:
-            while self._running:
-                try:
-                    if not lease.is_held and not await lease.try_acquire():
-                        await asyncio.sleep(_LEASE_RETRY_SECONDS)
-                        continue
-                    # Sleeping 30 s after every 20 s drain left the flusher
-                    # idle most of the time while a burst's backlog grew.
-                    if not self.backlogged:
-                        await asyncio.sleep(self._interval)
-                    if lease.is_held and self._running:
-                        with job_stats.track(WorkerName.GEO_OBSERVATION_FLUSHER) as run:
-                            if await self.drain(lease) == 0:
-                                run.idle()
-                except asyncio.CancelledError:
-                    break
-                except Exception as exc:
-                    logger.error("IP observation flush error", error=str(exc))
-        finally:
-            await lease.release()
-
-    async def drain(self, lease: Lease | None = None) -> int:
-        """Write batch after batch while they come back full. Returns how many rows were written or judged.
-
-        One batch per cycle would cap the pipeline at ``FLUSH_BATCH_SIZE``
-        per interval: under heavy preflight traffic the queue then grows
-        without bound and every exit lands in the tables later and later.
-        Each batch is still its own transaction. The loop stops at a short
-        batch (the queue is drained), after ``drain_budget`` seconds (the
-        rest waits for the next cycle, which then follows at once: see
-        ``backlogged``), once :meth:`stop` was called, or when ``lease`` can
-        no longer be confirmed. The lease is confirmed before every batch,
-        the first included, since hand-outs are only counted right when one
-        instance writes the queue in order.
-        """
-        started = time.monotonic()
-        deadline = started + self._drain_budget
-        written = judged = batches = 0
-        self.backlogged = False
-        self._idle.clear()
-        try:
-            while not self._stopping and (lease is None or await lease.confirm()):
-                popped, batch_written, batch_judged = await self._flush_batch()
-                written += batch_written
-                judged += batch_judged
-                batches += 1 if popped else 0
-                if popped < FLUSH_BATCH_SIZE:
-                    break
-                if time.monotonic() >= deadline:
-                    self.backlogged = True
-                    break
-        except Exception:
-            # The batches before the failing one are committed; say so next to the error.
-            if batches:
-                logger.warning(
-                    "IP observation flush stopped by an error", count=written, judged=judged, batches=batches
-                )
-            raise
-        finally:
-            self._idle.set()
-        if batches:
-            logger.info(
-                "IP observations flushed",
-                count=written,
-                judged=judged,
-                batches=batches,
-                duration_ms=round((time.monotonic() - started) * 1000),
-                queued=await queue_length(self._redis),
+    async def _handle(self, entries: list[StreamEntry]) -> None:
+        """Ingest one batch, its malformed entries logged and completed with it; raising leaves the whole batch pending."""
+        items, malformed = decode_items(entries, self.parse)
+        if malformed:
+            logger.warning(
+                "Malformed IP observations skipped",
+                count=len(malformed),
+                ids=[entry.id for entry in malformed[:_LOGGED_IDS]],
             )
-        return written + judged
-
-    async def _flush_batch(self) -> tuple[int, int, int]:
-        """Pop and write one batch. Returns how many entries were popped, written and judged."""
-        try:
-            raw = await cast("Awaitable[Any]", self._redis.client.lpop(GEO_OBSERVATIONS_KEY, FLUSH_BATCH_SIZE))
-        except Exception as exc:
-            logger.warning("Could not pop IP observations", error=str(exc))
-            return 0, 0, 0
-        if not raw:
-            await self._maybe_retain()
-            return 0, 0, 0
-        if not isinstance(raw, list):
-            raw = [raw]
-        observations, judgements = decode_batch(raw)
+        observations = [item for item in items if isinstance(item, IpObservation)]
+        judgements = [item for item in items if isinstance(item, ExitJudgement)]
         if not observations and not judgements:
-            return len(raw), 0, 0
+            return
+        started = time.monotonic()
+        verdicts = await self._verdicts(observations)
         async with self._session_factory() as session:
             repo = ObservationRepository(session)
-            written = await repo.insert_many(observations) if observations else 0
-            # The aggregates cascade with their connector; a connector deleted
-            # between sighting and flush must not fail the whole batch.
-            live = await repo.existing_connector_ids(
-                {o.connector_id for o in observations if o.connector_id}
-                | {j.connector_id for j in judgements if j.connector_id}
-            )
-            tracked = [o for o in observations if o.connector_id in live]
-            # Hand-outs are decided here, once, against each proxy's last counted
-            # exit: every instance's sightings pass through this leader in order.
-            previous = await self._redis.get_proxy_exit_ips(o.proxy_id for o in tracked if o.proxy_id)
-            # Redis knows nothing about a proxy after an upgrade or a Redis
-            # loss; the exit table, which only this flusher writes, then says
-            # whether the exit was counted before.
-            unknown = {
-                (o.connector_id, o.ip)
-                for o in tracked
-                if o.proxy_id and o.connector_id and previous.get(o.proxy_id) is None
-            }
-            on_record = await repo.exit_holders(unknown)
-            sightings, latest_exits = decide_hand_outs(tracked, previous, on_record)
-            await repo.add_exit_ips(aggregate_exits(sightings))
-            # Re-judgements rewrite verdicts on exits already on record: no log
-            # row, no hand-out, no movement of first or last seen.
-            judged = await repo.apply_judgements([j for j in judgements if j.connector_id in live])
+            written = await repo.insert_many(observations)
+            # The exit table cascades with its connector: one deleted since the sighting must not fail the batch,
+            # and a judgement of its exits finds no row to rewrite.
+            live = await repo.existing_connector_ids({o.connector_id for o in observations if o.connector_id})
+            sightings = await self._sightings(repo, observations, verdicts, live)
+            await repo.add_exit_ips(ExitSighting.fold(sightings))
+            judged = await repo.apply_judgements(judgements)
             await session.commit()
-        try:
-            # Written only into status hashes that exist: a proxy removed between
-            # sighting and flush has had its hash deleted and must stay deleted.
-            await self._redis.set_proxy_exit_ips(latest_exits)
-        except Exception as exc:
-            # The counts are committed; at worst the next sighting of these
-            # exits is counted once more. Logged rather than failing the batch.
-            logger.warning("Could not record last counted exits", error=str(exc))
-        await self._maybe_retain()
-        return len(raw), written, judged
+        logger.debug(
+            "IP observations ingested",
+            count=written,
+            hand_outs=sum(hand_out for _observation, hand_out in sightings),
+            judged=judged,
+            duration_ms=round((time.monotonic() - started) * 1000),
+        )
 
-    async def _maybe_retain(self) -> None:
-        if utc_now() - self._last_retention < _RETENTION_EVERY:
-            return
-        self._last_retention = utc_now()
-        days = self._retention()
-        exit_days = self._exit_retention()
-        if days <= 0 and exit_days <= 0:
-            return
-        async with self._session_factory() as session:
-            repo = ObservationRepository(session)
-            removed = await repo.delete_older_than(utc_now() - timedelta(days=days)) if days > 0 else 0
-            forgotten = (
-                await repo.delete_exit_ips_last_seen_before(utc_now() - timedelta(days=exit_days)) if exit_days > 0 else 0
-            )
-            await session.commit()
-        if removed or forgotten:
-            logger.info(
-                "Attribution history pruned", observations=removed, exit_ips=forgotten,
-                retention_days=days, exit_ip_retention_days=exit_days,
-            )
+    async def _verdicts(self, observations: list[IpObservation]) -> list[tuple[IpObservation, HandOut]]:
+        """Each observation of a proxy, oldest first, with its hand-out verdict, every record moved in one script call."""
+        timed = sorted(
+            ((_epoch_ms(o.observed_at), o) for o in observations if o.proxy_id and o.connector_id),
+            key=lambda pair: pair[0],
+        )
+        if not timed:
+            return []
+        if self._script is None:
+            self._script = self._redis.client.register_script(_HAND_OUTS_SCRIPT)
+        args: list[str | int] = [PROXY_LAST_EXIT_TTL_SECONDS]
+        for ms, o in timed:
+            args += [o.ip, ms]
+        replies = await self._script(keys=[PROXY_LAST_EXIT_KEY.format(proxy_id=o.proxy_id) for _ms, o in timed], args=args)
+        return [(o, HandOut(int(reply))) for (_ms, o), reply in zip(timed, replies, strict=True)]
 
-    def stop(self) -> None:
-        self._running = False
-        self._stopping = True
+    async def _sightings(
+        self,
+        repo: ObservationRepository,
+        observations: list[IpObservation],
+        verdicts: list[tuple[IpObservation, HandOut]],
+        live: set[str],
+    ) -> list[tuple[IpObservation, bool]]:
+        """Each observation of a connector that still exists, with whether it is a hand-out; one without a proxy never is."""
+        unknown = {
+            (o.connector_id or "", o.ip)
+            for o, verdict in verdicts
+            if verdict is HandOut.NO_RECORD and o.connector_id in live
+        }
+        holders = await repo.exit_holders(unknown)
+        sightings = [(o, self._hand_out(o, verdict, holders)) for o, verdict in verdicts if o.connector_id in live]
+        return sightings + [(o, False) for o in observations if not o.proxy_id and o.connector_id in live]
 
-    async def settle(self, timeout: float = 10.0) -> None:
-        """After :meth:`stop`, wait (bounded) for a drain in progress to commit its batch in hand.
+    @staticmethod
+    def parse(text: str) -> IpObservation | ExitJudgement:
+        """One observations stream item: a judgement when its ``kind`` says so, else an observation; ValueError when malformed."""
+        data = json.loads(text)
+        if isinstance(data, dict) and data.get("kind") == "judgement":
+            return ExitJudgement.model_validate(data)
+        return IpObservation.model_validate(data)
 
-        Cancelling the task mid-batch would roll back a batch already popped
-        off the queue and lose it.
+    @staticmethod
+    def _hand_out(observation: IpObservation, verdict: HandOut, holders: dict[tuple[str, str], str | None]) -> bool:
+        """Whether an observation is a hand-out: its verdict, or with no record kept, whether its exit is new to the connector or another proxy's.
+
+        An exit on record with this proxy as its holder, or with no holder (a row from before holders were kept), counts as counted before.
         """
-        with contextlib.suppress(TimeoutError):
-            await asyncio.wait_for(self._idle.wait(), timeout)
+        if verdict is not HandOut.NO_RECORD:
+            return verdict is HandOut.YES
+        key = (observation.connector_id or "", observation.ip)
+        if key not in holders:
+            return True
+        holder = holders[key]
+        return holder is not None and holder != observation.proxy_id
+
+
+def _epoch_ms(moment: datetime) -> int:
+    """A naive UTC time in epoch milliseconds, the unit a proxy's last counted exit is timed in."""
+    return (moment - _EPOCH) // _MILLISECOND

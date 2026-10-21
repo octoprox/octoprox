@@ -25,6 +25,10 @@ logger = structlog.get_logger()
 
 STOP_GRACE_SECONDS = 5.0
 _KEPT_LINES = 25
+# How the daemon echoes a command Octoprox sent on its management socket. The
+# endpoint asks for ``status`` every ten seconds, so logged at info these lines
+# were nearly all an idle gateway's log; they go to debug.
+_COMMAND_ECHO = "MANAGEMENT: CMD "
 
 
 class OpenVpnDaemon:
@@ -92,7 +96,9 @@ class OpenVpnDaemon:
                     continue
                 self._recent.append(line)
                 lowered = line.lower()
-                if "error" in lowered or "fatal" in lowered or "failed" in lowered:
+                if _COMMAND_ECHO in line:
+                    logger.debug("openvpn", line=line)
+                elif "error" in lowered or "fatal" in lowered or "failed" in lowered:
                     logger.warning("openvpn", line=line)
                 else:
                     # verb 3 is quiet in steady state and says what matters when

@@ -1,7 +1,9 @@
 # Copyright 2026 Octoprox Authors
 # SPDX-License-Identifier: Apache-2.0
 
-"""Alembic environment configuration."""
+"""Alembic environment, with an autogenerate that leaves alone the version columns only 5.x writes."""
+
+from typing import Any
 
 from alembic import context
 from sqlalchemy import create_engine, pool
@@ -27,24 +29,26 @@ config = context.config
 # for 'autogenerate' support
 target_metadata = Base.metadata
 
+# The tables whose version column 5.x still writes and 6.0 no longer maps.
+_FIVE_X_VERSIONED = frozenset({"projects", "credentials", "connectors", "proxies"})
+
+
+def include_object(item: Any, name: str | None, type_: str, reflected: bool, compare_to: Any) -> bool:
+    """Whether autogenerate compares a schema item: never a version column only 5.x writes."""
+    if type_ == "column" and name == "version":
+        return item.table.name not in _FIVE_X_VERSIONED
+    return True
+
 
 def run_migrations_offline() -> None:
-    """Run migrations in 'offline' mode.
-
-    This configures the context with just a URL
-    and not an Engine, though an Engine is acceptable
-    here as well.  By skipping the Engine creation
-    we don't even need a DBAPI to be available.
-
-    Calls to context.execute() here emit the given string to the
-    script output.
-    """
+    """Emit the migrations as SQL for the configured URL, with no database connection."""
     url = config.get_main_option("sqlalchemy.url")
     context.configure(
         url=url,
         target_metadata=target_metadata,
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
+        include_object=include_object,
     )
 
     with context.begin_transaction():
@@ -52,11 +56,7 @@ def run_migrations_offline() -> None:
 
 
 def run_migrations_online() -> None:
-    """Run migrations in 'online' mode.
-
-    In this scenario we need to create an Engine
-    and associate a connection with the context.
-    """
+    """Run the migrations on a connection of their own to the configured URL."""
     url = config.get_main_option("sqlalchemy.url")
     if url is None:
         raise RuntimeError("sqlalchemy.url is not set in alembic configuration")
@@ -70,6 +70,7 @@ def run_migrations_online() -> None:
             context.configure(
                 connection=connection,
                 target_metadata=target_metadata,
+                include_object=include_object,
             )
 
             with context.begin_transaction():
@@ -82,4 +83,3 @@ if context.is_offline_mode():
     run_migrations_offline()
 else:
     run_migrations_online()
-

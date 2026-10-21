@@ -1,60 +1,44 @@
 # Copyright 2026 Octoprox Authors
 # SPDX-License-Identifier: Apache-2.0
 
-"""Admin backup routes: export and import a full Octoprox setup.
+"""Admin backup routes: export and import a full Octoprox setup as a passphrase-encrypted file.
 
-Both endpoints are admin-only. Export streams back a passphrase-encrypted file;
-import replaces all existing data with the file's contents (in a transaction)
-and then rebuilds the live in-memory cache. The importing admin may opt to keep
-their own account so they are not locked out by a backup taken elsewhere.
+An import replaces every row in one transaction, appends one ``all`` change entry and deletes the keys only the removed
+projects used; the key derivation, compression and encryption run off the event loop.
 """
 
+from __future__ import annotations
+
+import asyncio
 from typing import Annotated
 
 import structlog
-from fastapi import APIRouter, Depends, Form, HTTPException, Request, Response, UploadFile
-from sqlalchemy.ext.asyncio import AsyncSession
+from fastapi import APIRouter, Form, HTTPException, Request, Response, UploadFile
 
 from api.core import utc_now
-from api.core.auth import RequireAdminDep
-from api.core.backup import (
-    BackupDecryptError,
-    BackupError,
-    BackupIncompatibleError,
-    build_backup_file,
-    check_compatibility,
-    decrypt_payload,
-    export_payload,
-    get_schema_version,
-    read_envelope,
-    replace_all,
-)
-from api.db.session import get_db
+from api.core.auth import DbDep, RequireAdminDep
+from api.core.backup import BackupError, BackupFile, BackupRepository, ImportResult
+from api.core.logging import error_text
+from api.db.streams import ChangeKind
 from api.models.backup import ExportRequest, ImportSummary
-from api.routes.common import (
-    geo_runtime_of,
-    openvpn_runtime_of,
-    proxy_manager_of,
-    wireguard_runtime_of,
-)
+from api.routes.common import change_log_of, geo_service_of, provider_store_of, redis_client_of
 
 logger = structlog.get_logger()
 
 router = APIRouter(prefix="/backup")
 
-DbDep = Annotated[AsyncSession, Depends(get_db)]
-
+# The shortest passphrase an import accepts, as the export model requires.
 MIN_PASSPHRASE_LENGTH = 8
 
 
 @router.post("/export")
-async def export_backup(
-    session: DbDep, data: ExportRequest, _admin: RequireAdminDep
-) -> Response:
+async def export_backup(session: DbDep, data: ExportRequest, admin: RequireAdminDep) -> Response:
     """Export the full setup as a downloadable, passphrase-encrypted file."""
-    schema_version = await get_schema_version(session)
-    payload = await export_payload(session, data.include_metrics, data.include_database_files)
-    file_bytes = build_backup_file(
+    repository = BackupRepository(session)
+    schema_version = await repository.schema_version()
+    payload = await repository.export(data.include_metrics, data.include_database_files)
+    backup = await asyncio.to_thread(
+        BackupFile.build,
         payload,
         data.passphrase,
         schema_version=schema_version,
@@ -65,13 +49,13 @@ async def export_backup(
     filename = f"octoprox-backup-{utc_now().date().isoformat()}.opbak"
     logger.info(
         "Backup exported",
-        admin=_admin.username,
+        admin=admin.username,
         include_metrics=data.include_metrics,
         include_database_files=data.include_database_files,
-        bytes=len(file_bytes),
+        bytes=len(backup.content),
     )
     return Response(
-        content=file_bytes,
+        content=backup.content,
         media_type="application/octet-stream",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
@@ -81,7 +65,7 @@ async def export_backup(
 async def import_backup(
     request: Request,
     session: DbDep,
-    _admin: RequireAdminDep,
+    admin: RequireAdminDep,
     file: UploadFile,
     passphrase: Annotated[str, Form()],
     mode: Annotated[str, Form()] = "replace",
@@ -101,51 +85,55 @@ async def import_backup(
         )
 
     raw = await file.read()
+    repository = BackupRepository(session)
 
-    # 1. Compatibility check first - before decryption, so an incompatible
-    #    file is rejected without needing the passphrase.
+    # 1. Compatibility first, before decryption, so an incompatible file is
+    #    refused without needing the passphrase. 2. Decrypt and validate.
     try:
-        envelope = read_envelope(raw)
-        current_schema = await get_schema_version(session)
-        check_compatibility(envelope, current_schema)
-        # 2. Decrypt + validate.
-        payload = decrypt_payload(envelope, passphrase)
-    except (BackupIncompatibleError, BackupDecryptError, BackupError) as exc:
+        backup = await asyncio.to_thread(BackupFile.read, raw)
+        backup.check_compatibility(await repository.schema_version())
+        payload = await asyncio.to_thread(backup.decrypt, passphrase)
+    except BackupError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    # 3. Transactional wipe + restore. Everything happens in one transaction,
-    #    so a failure rolls back and the instance is never left half-wiped.
+    # 3. Wipe and restore in one transaction: a failure rolls everything back.
     try:
-        result = await replace_all(
-            session, payload, keep_user_id=_admin.id if keep_current_user else None
-        )
+        result = await repository.replace_all(payload, keep_user_id=admin.id if keep_current_user else None)
     except BackupError as exc:
         await session.rollback()
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-    # Commit explicitly here (rather than relying on get_db's post-request
-    # commit) so the next step's full_reload - which uses a separate pooled
-    # connection - observes the restored rows instead of stale data.
+    # Committed here rather than after the response, so this process reads
+    # the imported definitions back below.
     await session.commit()
+    # Anything may have changed: every process reads every definition again.
+    await change_log_of(request).record(ChangeKind.ALL)
 
-    # 4. Purge stale Redis state for the replaced entities and rebuild the
-    #    live cache so the imported setup is immediately effective.
-    proxy_manager = proxy_manager_of(request)
-    await proxy_manager.apply_imported_state(
-        result.old_project_ids, result.old_proxy_ids, result.old_connector_ids
-    )
-    # Attribution settings and database rows were replaced too: reload them and
-    # reopen whatever database files came with the backup. The tunnel
-    # identities and devices likewise; an OpenVPN daemon here restarts under
-    # the restored CA. Peers catch up on their periodic reload.
-    await geo_runtime_of(request).geo_service.resync()
-    await wireguard_runtime_of(request).resync()
-    await openvpn_runtime_of(request).resync()
-
+    await _follow_import(request, result)
     logger.info(
         "Backup imported",
-        admin=_admin.username,
+        admin=admin.username,
         **result.summary.model_dump(exclude={"user_conflicts"}),
         user_conflicts=len(result.summary.user_conflicts),
     )
     return result.summary
+
+
+async def _follow_import(request: Request, result: ImportResult) -> None:
+    """What follows a committed import here: forget the removed projects' keys, and read the imported definitions.
+
+    Both are best effort: the import stands, the keys left behind are never
+    read again, and the definitions refresher reads what this misses when
+    the import's change entry reaches it.
+    """
+    if result.removed_project_ids:
+        redis = redis_client_of(request)
+        await redis.after_commit(
+            lambda: result.forget_removed_projects(redis),
+            "forget the removed projects' keys",
+            projects=len(result.removed_project_ids),
+        )
+    try:
+        await provider_store_of(request).sync_all()
+        await geo_service_of(request).resync()
+    except Exception as exc:
+        logger.warning("Imported definitions not read yet, left to the refresher", error=error_text(exc))

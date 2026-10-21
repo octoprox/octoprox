@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { useEffect, useRef, useState } from 'react'
-import { Link, useNavigate, useSearchParams } from 'react-router-dom'
+import { Link, useNavigate, useSearchParams } from 'react-router'
 import { AlertCircle } from 'lucide-react'
 import octoproxLogo from '../assets/logos/octoprox_horizontal.svg'
 import octoproxLogoDark from '../assets/logos/octoprox_horizontal_dark.svg'
@@ -48,7 +48,7 @@ export default function SsoComplete() {
           {error ? (
             <>
               <Alert variant="error" className="flex items-center gap-3">
-                <AlertCircle className="w-5 h-5 text-red-500 flex-shrink-0" />
+                <AlertCircle className="w-5 h-5 text-red-500 shrink-0" />
                 <p className="text-sm">{error}</p>
               </Alert>
               <p className="text-sm text-fg-muted text-center mt-4">

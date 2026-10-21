@@ -1,180 +1,94 @@
 # Copyright 2026 Octoprox Authors
 # SPDX-License-Identifier: Apache-2.0
 
-"""Builds and runs the attribution stack for one process.
+"""The attribution stack of one process: its two stores, its observation recorder, the service and the extraction rules.
 
-The lifespan constructs one :class:`GeoRuntime` right after Postgres and Redis
-are reachable and starts it. Everything that needs a piece of it is then
-composed in the lifespan, explicitly: the proxy manager receives the
-extraction rules, the two cross-instance handlers and the reload hook through
-its constructor; the attributor is started against the manager as its proxy
-store; the verifier is built from the preflight checker and the manager as
-its selector and handed to the proxy server. The admin routes read the whole
-runtime off ``app.state.geo_runtime``. The proxy manager imports nothing from this
-package but data types.
+Only the source of database files differs by role; the runtimes compose the rest, such as :meth:`GeoStack.updater`'s updater.
 """
 
 from __future__ import annotations
 
-import asyncio
-import contextlib
-from collections.abc import Coroutine, Sequence
-from typing import Any
-
-import structlog
+from dataclasses import dataclass
+from functools import partial
 
 from api.core.config import Settings
-from api.core.event_bus import event_bus
-from api.core.signals import geo_database_changed
-from api.core.tasks import spawn_held
-from api.core.workers import WorkerName
+from api.core.roles import JobKind
 from api.db.redis import RedisClient
 from api.db.session import SessionFactory
-from api.geo.attributor import ProxyAttributor
+from api.db.streams import ChangeLog
 from api.geo.extraction import EchoExtractionRules
-from api.geo.observations import ObservationFlusher, ObservationRecorder
-from api.geo.preflight import PreflightChecker
+from api.geo.observations import ObservationRecorder
 from api.geo.service import GeoService
 from api.geo.settings import GeoSettingsStore
-from api.geo.store import GeoDatabaseStore
+from api.geo.store import BlobSource, GeoDatabaseStore
 from api.geo.updater import GeoDatabaseUpdater
-from api.providers.sdk.egress import EgressPolicy
+from api.jobs.attribution import REATTRIBUTE_ALL
+from api.jobs.queue import JobQueue
+from api.providers.registry import egress_policy_from_settings
 
-logger = structlog.get_logger()
 
+@dataclass(frozen=True)
+class GeoStack:
+    """One process's attribution components, as :meth:`build` composes them."""
 
-class GeoRuntime:
-    """The attribution components of one instance and their lifecycle."""
+    settings_store: GeoSettingsStore
+    database_store: GeoDatabaseStore
+    observation_recorder: ObservationRecorder
+    geo_service: GeoService
+    extraction_rules: EchoExtractionRules
 
-    def __init__(
-        self,
+    @classmethod
+    def build(
+        cls,
         settings: Settings,
-        session_factory: SessionFactory,
-        redis_client: RedisClient,
-    ) -> None:
-        self._settings = settings
-        self.database_store = GeoDatabaseStore(session_factory, settings.geo_cache_dir, settings.geo_databases)
-        self.settings_store = GeoSettingsStore(settings, session_factory)
-        self.observation_recorder = ObservationRecorder(
+        *,
+        session_factory: SessionFactory | None,
+        redis_client: RedisClient | None,
+        blob_source: BlobSource | None,
+    ) -> GeoStack:
+        """The attribution stack of one process, nothing read yet: the Postgres roles load it with ``geo_service.resync()``, a gateway on its first feed.
+
+        Args:
+            session_factory: None on a gateway, whose stores the feed fills.
+        """
+        database_store = GeoDatabaseStore(
+            session_factory,
+            settings.geo_cache_dir,
+            settings.geo_databases,
+            blob_source=blob_source,
+            # The configured files are looked at on disk again with the hourly read of everything else.
+            config_check_interval=settings.reconcile_interval,
+        )
+        settings_store = GeoSettingsStore(settings, session_factory)
+        recorder = ObservationRecorder(
             redis_client,
             max_buffer=settings.geo_observation_max_buffer,
             interval=settings.geo_observation_publish_interval,
         )
-        self.geo_service = GeoService(settings, self.database_store, self.settings_store, self.observation_recorder)
-        self.observation_flusher = ObservationFlusher(
-            session_factory,
-            redis_client,
-            settings.instance_id,
-            interval=settings.geo_observation_flush_interval,
-            retention_days=lambda: self.geo_service.settings.observation_retention_days,
-            exit_ip_retention_days=lambda: self.geo_service.settings.exit_ip_retention_days,
+        geo_service = GeoService(settings, database_store, settings_store, recorder)
+        return cls(
+            settings_store=settings_store,
+            database_store=database_store,
+            observation_recorder=recorder,
+            geo_service=geo_service,
+            extraction_rules=EchoExtractionRules(geo_service),
         )
-        self.database_updater = GeoDatabaseUpdater(
-            session_factory,
-            redis_client,
-            settings.instance_id,
-            self.database_store,
-            self.publish_database_changed,
-            after_update=self._reattribute_after_update,
-            interval=settings.geo_updater_interval,
-            egress_policy=EgressPolicy(
-                allow_http=settings.provider_egress_allow_http,
-                allow_private=settings.provider_egress_allow_private,
-                pin_dns=not settings.provider_egress_allow_private,
-            ),
-        )
-        self.preflight_checker = PreflightChecker(self.geo_service, redis_client)
-        self.proxy_attributor = ProxyAttributor(self.geo_service, settings)
-        self.extraction_rules = EchoExtractionRules(self.geo_service)
-        self._tasks: list[asyncio.Task[None]] = []
-        self._passes: set[asyncio.Task[Any]] = set()
 
-    # --- lifecycle -----------------------------------------------------------------
+    def updater(
+        self, settings: Settings, *, session_factory: SessionFactory, changes: ChangeLog, jobs: JobQueue
+    ) -> GeoDatabaseUpdater:
+        """The database downloader over this stack's store: a worker's ``geo_update`` job ticks it, and the api refreshes by hand.
 
-    async def start(self) -> None:
-        """Load the policy and databases, then run the background loops."""
-        await self.settings_store.load()
-        await self.database_store.sync_all()
-        self._spawn(WorkerName.GEO_OBSERVATION_PUBLISHER, self.observation_recorder.run())
-        self._spawn(WorkerName.GEO_OBSERVATION_FLUSHER, self.observation_flusher.run())
-        self._spawn(WorkerName.GEO_DATABASE_UPDATER, self.database_updater.run())
-        self.preflight_checker.start()
-        logger.info("IP attribution started", databases=len(self.database_store.loaded))
-
-    # --- what the proxy manager runs on our behalf -----------------------------------
-
-    async def reload_database(self, database_id: str, op: str | None) -> None:
-        """Cross-instance handler for ``geo_database_changed``."""
-        await self.database_store.reload_one(database_id, op)
-
-    async def reload_settings(self, _entity_id: str, _op: str | None) -> None:
-        """Cross-instance handler for ``geo_settings_changed``."""
-        await self.geo_service.apply_settings_change()
-
-    async def _reattribute_after_update(self) -> None:
-        """A scheduled download stored a new build: re-judge every proxy with it, once, here on the leader."""
-        await self.proxy_attributor.reattribute_all()
-
-    def reattribute_later(self, project_id: str | None = None, *, inheriting: Sequence[str] = ()) -> None:
-        """Re-judge every row, or one project's rows, without holding the request that asked.
-
-        Used after a database changed, after the install's default conflict
-        rule or city radius changed (then only for projects that inherit one
-        of them, named by ``inheriting``), and after a
-        project's location decisions or rule changed: a row's value and
-        verdict were written under the settings of the time, and a sighting
-        of an unchanged exit is not re-applied. Passes never interleave: the
-        attributor runs one at a time, whatever asked for them, and nothing
-        is cancelled mid-way, since a pass judges rows in memory as it goes
-        and persists them at the end. The task is held here, apart from the
-        periodic loops, so it is neither collected before it runs nor left
-        behind at shutdown, and a finished pass is forgotten.
+        A new file of an enabled database asks ``jobs`` for every proxy to be judged again.
         """
-
-        spawn_held(
-            self._passes,
-            self.proxy_attributor.reattribute_all(project_id=project_id, inheriting=inheriting),
-            name="reattribute",
-            project_id=project_id,
+        return GeoDatabaseUpdater(
+            session_factory,
+            self.database_store,
+            changes=changes,
+            after_update=partial(jobs.request_now, JobKind.REATTRIBUTE, [REATTRIBUTE_ALL]),
+            egress_policy=egress_policy_from_settings(settings),
         )
 
-    async def resync(self) -> None:
-        """Reload hook: re-read settings and databases on the periodic full reload."""
-        await self.geo_service.resync()
-
-    async def stop(self) -> None:
-        """Stop the loops, hand the last observations to Redis, close the readers."""
-        # A re-judgement pass persists at its end; cancelling it would discard what it judged.
-        passes = list(self._passes)
-        if passes:
-            await asyncio.gather(*passes, return_exceptions=True)
-        await self.proxy_attributor.stop()
-        self.preflight_checker.stop()
-        self.observation_recorder.stop()
-        self.observation_flusher.stop()
-        self.database_updater.stop()
-        with contextlib.suppress(Exception):
-            await self.observation_recorder.publish()
-        # A drain in progress ends at its next batch boundary; cancelling it
-        # mid-batch would roll back a batch already popped off the queue.
-        await self.observation_flusher.settle()
-        for task in self._tasks:
-            task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await task
-        self._tasks.clear()
+    async def close(self) -> None:
+        """Close every reader; the node stops the observation recorder with its own loops, after the runtimes."""
         self.database_store.close_all()
-
-    def _spawn(self, name: str, coro: Coroutine[Any, Any, None]) -> None:
-        self._tasks.append(asyncio.create_task(coro, name=name))
-
-    @property
-    def background_tasks(self) -> list[asyncio.Task[None]]:
-        """The loops this runtime owns, for the admin workers view."""
-        return list(self._tasks)
-
-    # --- cross-instance changes ----------------------------------------------------
-
-    async def publish_database_changed(self, database_id: str, op: str) -> None:
-        """Tell every instance (this one included) that a database row changed."""
-        await event_bus.publish(geo_database_changed, self, entity_id=database_id, op=op)

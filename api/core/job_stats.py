@@ -1,54 +1,9 @@
 # Copyright 2026 Octoprox Authors
 # SPDX-License-Identifier: Apache-2.0
 
-"""Per-cycle accounting for the named background workers.
+"""Per-cycle accounting for the named background loops: runs, idle runs, failures and overruns, since this process started.
 
-A *job* here is one cycle of a background worker: one health-check sweep, one
-metrics flush, one peer message applied. The worker itself is a task that lives
-for the whole process, so "is the task still alive" (which
-:func:`api.core.system_stats.collect_tasks` reads off the asyncio task) says
-nothing about whether the work inside it is actually happening - a loop that
-raises on every cycle and swallows the error looks identical to a healthy one.
-These counters are what tells them apart.
-
-Process-local and in-memory by design: they describe the loops of *this*
-instance, reset with it, and are reported alongside ``workers.tasks``, which
-has the same scope. Cluster-wide counts would need a metrics backend, and the
-question this answers - "is this instance's worker doing its job" - is a
-per-instance question anyway.
-
-Granularity is the cycle, not the item. A worker that handles each item under
-its own ``try`` (the auto-scaler, per connector) records a successful cycle
-even when individual items failed; its own logs carry those.
-
-A cycle that found nothing to do is still a cycle - it proves the loop is
-alive - but it is also counted separately as an *idle* one. Without that split
-the two questions the counters answer collapse into one number: an install
-taking no traffic shows the metric-delta publisher at 17k runs a day, every one
-of them an early return over an empty buffer. Loops with a no-op path say so
-themselves::
-
-    with job_stats.track(WorkerName.METRIC_DELTA_PUBLISHER) as run:
-        if not await self._flush_pending_metrics():
-            run.idle()
-
-There is one registry per process, exposed via the ``@lru_cache``-d
-:func:`get_job_stats` factory and the ``job_stats`` alias - same pattern as
-``get_event_bus()`` / ``event_bus`` and ``get_settings()`` / ``settings``::
-
-    from api.core.job_stats import job_stats
-    from api.core.workers import WorkerName
-
-    job_stats.declare_interval(WorkerName.HEALTH_CHECKER, self._interval)
-    ...
-    with job_stats.track(WorkerName.HEALTH_CHECKER):
-        await self._check_all_proxies()
-
-:meth:`JobStatsRegistry.track` is a plain (synchronous) context manager: it
-starts a clock on entry and files the result on exit, neither of which needs to
-await anything, so it wraps an ``await`` inside a normal ``with``. Cancellation
-is not a failure: a cancelled cycle is shutdown, so it is left out of the
-counters entirely.
+A live task says nothing of whether its work happens; these counters, in memory, travel in the heartbeat and ``/metrics``.
 """
 
 from __future__ import annotations
@@ -62,6 +17,7 @@ from types import TracebackType
 from typing import Literal
 
 from api.core import utc_now
+from api.core.logging import error_label
 
 # Kept short so one error string cannot bloat the stats response.
 MAX_ERROR_CHARS = 300
@@ -73,20 +29,18 @@ class JobStats:
 
     name: str
     # The cadence the loop was started with, declared by the loop itself so it
-    # cannot drift from the value actually slept on. None for an event-driven
-    # loop (the pub/sub subscribers), which has no cadence to miss.
+    # cannot drift from the value actually slept on. None for a loop that
+    # declared none, which has no cadence to miss.
     interval_seconds: float | None = None
     runs: int = 0
-    # Cycles that ran but had nothing to do - the buffer was empty, this
-    # instance owned no proxies, the snapshot was not due yet. A subset of
-    # ``runs``, so ``runs`` keeps meaning "the loop ticked" and
-    # ``working_runs`` answers "and something came of it".
+    # Cycles that ran but had nothing to do: the buffer was empty, the head
+    # was applied already. A subset of ``runs``, so ``runs`` keeps meaning
+    # "the loop ticked" and ``working_runs`` answers "and something came of it".
     idle_runs: int = 0
     failures: int = 0
     # Cycles that took longer than the cadence. The loop cannot start the next
-    # one until this one returns, so its effective period has stretched: for
-    # the snapshotter that shows up as gaps in the trend charts, for the others
-    # as work happening less often than configured.
+    # one until this one returns, so its effective period has stretched: its
+    # work happens less often than configured.
     overruns: int = 0
     # Reset by the first cycle that fits inside the cadence again, so this is
     # "behind right now" while ``overruns`` keeps the lifetime record - one
@@ -146,20 +100,13 @@ class JobRun:
         return self
 
     def idle(self) -> None:
-        """Mark this cycle as having found nothing to do.
-
-        Call it from the loop body once it knows - typically right where the
-        work function reports an empty buffer. Cycles that raise are never
-        idle, however early they gave up.
-        """
+        """Mark this cycle as having found nothing to do, as the loop body learns it; a cycle that raises is never idle."""
         self._idle = True
 
     def fail(self, reason: str) -> None:
-        """Count this cycle as failed although it returned normally.
+        """Count this cycle as failed although it returned normally, as one that gave up on purpose rather than raising.
 
-        For a cycle that gave up on purpose rather than raising, such as a
-        flush rolled back because its lease could not be confirmed: the work
-        did not happen, and the system view should say so.
+        A heartbeat that found Postgres away, say: the work did not happen, and the System page should say so.
         """
         self._failure = reason
 
@@ -173,7 +120,7 @@ class JobRun:
         if exc_type is not None and issubclass(exc_type, asyncio.CancelledError):
             return False
         duration_ms = (time.perf_counter() - self._started) * 1000.0
-        error = f"{type(exc).__name__}: {exc}" if exc is not None else self._failure
+        error = error_label(exc) if exc is not None else self._failure
         self._registry.record(
             self._name, duration_ms, error, idle=self._idle and error is None
         )
@@ -193,13 +140,10 @@ class JobStatsRegistry:
         return JobRun(self, name)
 
     def declare_interval(self, name: str, interval_seconds: float) -> None:
-        """Record the cadence ``name`` was started with.
+        """Record the cadence ``name`` was started with, declared by the loop itself so it is the one in force.
 
-        Called by the loop itself, next to the sleep it describes, so the
-        reported cadence is the one in force rather than a config value read
-        somewhere else. Registering here also means a worker appears in the
-        system view with its cadence before its first cycle finishes - which
-        is the normal state of an hourly job, or of a singleton standing by.
+        The loop shows on the System page with its cadence before its first cycle ends, as an hourly loop or a standby
+        normally does.
         """
         self._stats.setdefault(name, JobStats(name=name)).interval_seconds = interval_seconds
 
@@ -211,13 +155,9 @@ class JobStatsRegistry:
         *,
         idle: bool = False,
     ) -> None:
-        """Record one finished cycle of ``name``.
+        """Record one finished cycle of ``name``, failed when ``error`` says why.
 
-        ``idle`` marks a cycle that found nothing to do. It counts as a run
-        (the loop ticked) but stays out of the timings, which describe the
-        work rather than the early return that skipped it. The overrun check
-        still applies: a no-op that somehow outlasted the cadence is worth
-        knowing about, and a fast one clears the streak like any other.
+        An ``idle`` cycle counts as a run but stays out of the timings, while the overrun check applies to it all the same.
         """
         stats = self._stats.setdefault(name, JobStats(name=name))
         stats.runs += 1
@@ -246,11 +186,9 @@ class JobStatsRegistry:
             stats.last_error_at = stats.last_run_at
 
     def standing_by(self, name: str) -> None:
-        """``name`` is a peer's to run now: a failure streak from before is history, not "failing now".
+        """``name`` is a peer's to run now, its lease having moved: a failure streak from before is history, not "failing now".
 
-        For a leased worker whose lease moved. Its standby polls record no
-        cycles, so without this the streak of the last cycle it ran stays up
-        until it leads again. The lifetime ``failures`` and ``last_error`` stay.
+        The lifetime ``failures`` and ``last_error`` stay.
         """
         stats = self._stats.get(name)
         if stats is not None:
@@ -271,15 +209,13 @@ class JobStatsRegistry:
 
 @lru_cache
 def get_job_stats() -> JobStatsRegistry:
-    """Return the process-wide :class:`JobStatsRegistry`.
+    """The process-wide :class:`JobStatsRegistry`, cached so every loop files into the registry the snapshot reads.
 
-    Cached (same pattern as ``get_settings`` / ``get_event_bus``) so every
-    worker files into the registry the system view reads. Reset between tests
-    via :meth:`JobStatsRegistry.reset` rather than rebuilding.
+    Tests reset it (:meth:`JobStatsRegistry.reset`) rather than rebuild it.
     """
     return JobStatsRegistry()
 
 
 # Module-level convenience alias to the cached singleton - mirrors how
-# ``api.core.event_bus`` exposes both ``get_event_bus()`` and ``event_bus``.
+# ``api.core.config`` exposes both ``get_settings()`` and ``settings``.
 job_stats = get_job_stats()

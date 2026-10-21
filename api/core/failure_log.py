@@ -1,43 +1,20 @@
 # Copyright 2026 Octoprox Authors
 # SPDX-License-Identifier: Apache-2.0
 
-"""The per-project failure log: why requests failed, for the Failures page.
+"""The per-project failure log: why requests failed, for the Failures page, written to Redis a window at a time.
 
-The request metrics count failures; this says what they were. Every request
-the proxy listener or a tunnel device could not complete is described as a
-:class:`RequestFailure` (what kind of failure, what the client was answered,
-the vendor's own answer when there was one, which connector and proxy) and
-published on the ``request_failed`` signal. :class:`FailureLog` collects
-them in memory and every few seconds writes two things to Redis in one
-round trip, the same shape as the IP observation pipeline, so nothing on the
-request path waits for Redis:
-
-- **Counts.** Every failure is counted by project, connector, kind and the
-  vendor's status, into hashes the leader flushes into the failure_metrics
-  history table like the other metrics. These are complete: the page's
-  summary and chart read them.
-- **Examples.** One capped stream per project and kind, so a flood of one
-  kind never pushes out the rare ones. Within a window, failures that differ
-  only in time and session are folded into one entry with a count; each
-  kind of a project gets at most ``max_per_window`` distinct entries per
-  window on each instance, the rest being counted only. Each stream keeps
-  ``max_entries`` entries for ``retention_hours``.
-
-Both are best effort. A window that cannot reach Redis is dropped, not
-retried.
+Each window counts every failure and keeps folded, capped examples per kind, so a flood of one never pushes out the rare.
 """
 
 from __future__ import annotations
 
-import asyncio
 import re
 import socket
 from collections import Counter
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import datetime
-from enum import StrEnum
 from typing import TYPE_CHECKING, Any
 from urllib.parse import quote
 
@@ -45,15 +22,14 @@ import structlog
 from python_socks import ProxyConnectionError, ProxyError
 
 from api.core import utc_now
-from api.core.job_stats import job_stats
-from api.core.signals import request_failed
-from api.core.stats import FailureCountKey
+from api.core.publishers import BatchPublisher
+from api.core.stats import FailureCountKey, FailureKind
 from api.core.workers import WorkerName
 from api.models.proxy import ProxyProtocol
 
 if TYPE_CHECKING:
     from api.core.config import Settings
-    from api.db.redis import RedisClient
+    from api.db.redis import BatchPart, RedisClient
     from api.models.proxy import Proxy
 
 logger = structlog.get_logger()
@@ -71,42 +47,11 @@ _URL_QUERY = re.compile(r"(https?://[^\s\"'?#]*)\?[^\s\"']*")
 _SOCKS_AUTH_REFUSALS = ("authentication failure", "no acceptable authentication methods")
 
 
-class FailureKind(StrEnum):
-    """What went wrong, from the client's side of the proxy.
-
-    The first group is what the request metrics count as failures: a proxy
-    was chosen and the request through it did not get going. The second is
-    requests Octoprox refused before using any proxy (the metrics count
-    those nowhere). The last is a request inside an intercepted connection,
-    whose connection the metrics already counted as a success.
-    """
-
-    # Counted as failures by the request metrics.
-    UPSTREAM_TIMEOUT = "upstream_timeout"
-    UPSTREAM_UNREACHABLE = "upstream_unreachable"
-    UPSTREAM_REJECTED = "upstream_rejected"
-    UPSTREAM_ERROR = "upstream_error"
-    CLIENT_CLOSED = "client_closed"
-    INTERRUPTED = "interrupted"
-    # Refused before a proxy was used (traffic_limit_exceeded can also cut a
-    # request that already had one, and is then counted).
-    NO_PROXY_AVAILABLE = "no_proxy_available"
-    ALL_PROXIES_QUARANTINED = "all_proxies_quarantined"
-    TRAFFIC_LIMIT_EXCEEDED = "traffic_limit_exceeded"
-    PREFLIGHT_MISMATCH = "preflight_mismatch"
-    INVALID_LOCATION = "invalid_location"
-    # One request inside an intercepted (MITM) connection.
-    INTERCEPTED_REQUEST_FAILED = "intercepted_request_failed"
-
-
 @dataclass(frozen=True)
 class RequestInfo:
-    """What the client asked for, set once per connection for the failures it may produce.
+    """What the client asked for, set once per connection for the failures it may produce; nothing routes on it.
 
-    Held in a context variable rather than passed down: each client
-    connection runs in its own task, and the places a request can fail are
-    many layers below where its target, session and location are known.
-    Descriptive only; nothing routes on it.
+    Held in a context variable, since a request can fail many layers below where its target and session are known.
     """
 
     target: str
@@ -176,12 +121,10 @@ def build_failure(
     method: str | None = None,
     target: str | None = None,
 ) -> RequestFailure:
-    """A failure filled in from the current connection's :class:`RequestInfo`.
+    """A failure filled in from the current connection's :class:`RequestInfo`, its message scrubbed of credentials and queries.
 
-    ``method`` and ``target`` override the connection's, for a request inside
-    an intercepted connection. The proxy's credentials are scrubbed from the
-    message, exception texts sometimes carry the upstream URL, and so are the
-    queries of any URLs it quotes.
+    Args:
+        method, target: the request's own, overriding the connection's, inside an intercepted connection.
     """
     info = _request_info.get()
     if proxy is not None:
@@ -211,10 +154,7 @@ def build_failure(
 def classify_upstream_error(exc: BaseException, proxy: Proxy) -> tuple[FailureKind, int | None]:
     """The kind of a failure on the upstream leg, and the vendor's HTTP status if it answered with one.
 
-    python-socks raises ProxyError when the upstream answered the handshake
-    with a refusal: an HTTP status for an HTTP upstream (407 bad
-    credentials, 502 no exit available...), a reply code for SOCKS. Only
-    the HTTP status is reported as one.
+    A refused handshake carries an HTTP status from an HTTP upstream and a reply code from SOCKS; only a status is reported.
     """
     if isinstance(exc, ProxyError):
         code = exc.error_code if isinstance(exc.error_code, int) else None
@@ -294,8 +234,12 @@ class _Entry:
         return {k: str(v) for k, v in values.items() if v is not None}
 
 
-class FailureLog:
-    """Per-instance window of failures, and the loop that writes it to Redis."""
+class FailureLog(BatchPublisher):
+    """A gateway's window of failed requests, folded and capped, and the publisher that writes it to Redis every ``interval``.
+
+    Args:
+        redis_client: takes each window on its ``failures`` batch channel, one writer per process; None keeps it.
+    """
 
     def __init__(
         self,
@@ -305,27 +249,16 @@ class FailureLog:
         connector_name: Callable[[str], str | None] = lambda _connector_id: None,
         interval: float = FAILURE_LOG_INTERVAL_SECONDS,
     ) -> None:
-        self._redis = redis_client
+        super().__init__(redis_client, name=WorkerName.FAILURE_LOG_PUBLISHER, interval=interval)
         self.enabled = settings.failure_log_enabled
         self._max_entries = settings.failure_log_max_entries
         self._retention_seconds = settings.failure_log_retention_hours * 3600
         self._max_per_window = settings.failure_log_max_per_window
         self._connector_name = connector_name
-        self._interval = interval
         self._pending: dict[tuple[Any, ...], _Entry] = {}
         # Distinct examples this window, per (project, kind).
         self._distinct: Counter[tuple[str, str]] = Counter()
         self._counts: Counter[FailureCountKey] = Counter()
-        self._running = False
-        # Windows lost because Redis could not be reached, since start.
-        self.dropped = 0
-
-    def subscribe_to_signals(self) -> None:
-        if self.enabled:
-            request_failed.connect(self._on_request_failed)
-
-    async def _on_request_failed(self, sender: object, failure: RequestFailure) -> None:
-        self.record(failure)
 
     def record(self, failure: RequestFailure) -> None:
         """Count one failure and keep it as an example unless the window has enough of its kind. Never blocks."""
@@ -341,53 +274,11 @@ class FailureLog:
         self._pending[key] = _Entry(failure)
         self._distinct[slot] += 1
 
-    async def publish(self) -> int:
-        """Write the window to Redis. Returns the number of examples and counts written."""
-        if self._redis is None or not self._counts:
-            return 0
-        pending, self._pending = self._pending, {}
-        counts, self._counts = self._counts, Counter()
-        self._distinct = Counter()
-
-        # Oldest first, so each stream (newest last) reads in the order things happened.
-        ordered = sorted(pending.values(), key=lambda e: e.last_at or e.first.at)
-        entries = [
-            (
-                e.first.project_id,
-                e.first.kind.value,
-                e.fields(self._connector_name(e.first.connector_id) if e.first.connector_id else None),
-            )
-            for e in ordered
-        ]
-        try:
-            await self._redis.append_failures(
-                entries, dict(counts), max_entries=self._max_entries, retention_seconds=self._retention_seconds
-            )
-        except Exception as exc:
-            self.dropped += 1
-            logger.warning(
-                "Writing the failure log failed", error=str(exc), entries=len(entries), failures=sum(counts.values())
-            )
-            return 0
-        return len(entries) + len(counts)
-
-    async def run(self) -> None:
-        """Publisher loop: every instance runs one."""
-        self._running = True
-        job_stats.declare_interval(WorkerName.FAILURE_LOG_PUBLISHER, self._interval)
-        while self._running:
-            try:
-                await asyncio.sleep(self._interval)
-                with job_stats.track(WorkerName.FAILURE_LOG_PUBLISHER) as run:
-                    if await self.publish() == 0:
-                        run.idle()
-            except asyncio.CancelledError:
-                break
-            except Exception as exc:
-                logger.error("Failure log publisher error", error=str(exc))
-
     def forget(self, project_id: str) -> None:
-        """Drop what the window holds for a project that is gone, so the next write does not recreate its keys."""
+        """Drop what the window holds for a project that is gone, so the next write does not recreate its keys.
+
+        A window already sent and owed goes as it was, so a project forgotten meanwhile lands once more.
+        """
         self._pending = {key: e for key, e in self._pending.items() if e.first.project_id != project_id}
         self._distinct = Counter({slot: n for slot, n in self._distinct.items() if slot[0] != project_id})
         self._counts = Counter({key: n for key, n in self._counts.items() if key[0] != project_id})
@@ -399,5 +290,25 @@ class FailureLog:
         """
         self._counts = Counter({key: n for key, n in self._counts.items() if key[1] != connector_id})
 
-    def stop(self) -> None:
-        self._running = False
+    def _windowed(self) -> int:
+        """The window's examples and counts."""
+        return len(self._pending) + len(self._counts)
+
+    def _cut(self, redis_client: RedisClient) -> Sequence[BatchPart]:
+        """The window as batch parts, its examples oldest first, and a new window begun."""
+        pending, self._pending = self._pending, {}
+        counts, self._counts = self._counts, Counter()
+        self._distinct = Counter()
+        # Oldest first, so each stream (newest last) reads in the order things happened.
+        ordered = sorted(pending.values(), key=lambda e: e.last_at or e.first.at)
+        entries = [
+            (
+                e.first.project_id,
+                e.first.kind.value,
+                e.fields(self._connector_name(e.first.connector_id) if e.first.connector_id else None),
+            )
+            for e in ordered
+        ]
+        return redis_client.failures_batch(
+            entries, dict(counts), max_entries=self._max_entries, retention_seconds=self._retention_seconds
+        )

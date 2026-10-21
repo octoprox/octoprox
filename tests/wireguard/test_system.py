@@ -97,3 +97,11 @@ async def test_stale_interface_is_removed_first_and_existing_address_tolerated()
     await iface.up(private_key="sk", listen_port=1, address="10.66.0.1/16", mtu=1420, peers=[])
     assert runner.calls[1] == ("ip", "link", "del", "dev", "wg0")
     assert iface.backend == "kernel"
+
+
+@pytest.mark.asyncio
+async def test_readdress_moves_the_interface_in_place() -> None:
+    runner = FakeRunner(exists=True)
+    iface = WireGuardInterface("wg0", runner)
+    await iface.readdress("10.77.0.1/24")
+    assert runner.calls == [("ip", "address", "flush", "dev", "wg0"), ("ip", "address", "add", "10.77.0.1/24", "dev", "wg0")]

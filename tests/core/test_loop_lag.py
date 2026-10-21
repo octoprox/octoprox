@@ -11,9 +11,12 @@ from unittest.mock import patch
 
 import pytest
 
+from api.core.config import Settings
 from api.core.job_stats import job_stats
-from api.core.loop_lag import LoopLagMonitor
+from api.core.loop_lag import LoopLagMonitor, LoopLagReading
+from api.core.roles import Role
 from api.core.workers import WorkerName
+from api.roles import Node
 
 
 @contextlib.asynccontextmanager
@@ -82,13 +85,15 @@ class TestLoopLagMonitor:
 
 
 @pytest.mark.parametrize("worst_ms", [0.0, 1234.5])
-def test_the_reading_reaches_the_system_view(worst_ms: float, test_settings: object) -> None:
-    from api.core.loop_lag import LoopLagReading, loop_lag
-    from api.core.system_stats import collect_runtime
+def test_the_reading_reaches_the_snapshot_and_the_metrics(worst_ms: float, test_settings: Settings) -> None:
+    """The node's own monitor is what its heartbeat publishes and its /metrics renders; an echo node builds no I/O."""
+    node = Node(test_settings.model_copy(update={"role": Role.ECHO}))
 
-    with patch.object(loop_lag, "last", LoopLagReading(max_ms=worst_ms, mean_ms=worst_ms / 10)):
-        runtime = collect_runtime(test_settings, None)  # type: ignore[arg-type]
-    assert (runtime.event_loop_lag_max_ms, runtime.event_loop_lag_mean_ms) == (worst_ms, worst_ms / 10)
-    with patch.object(loop_lag, "last", None):
-        runtime = collect_runtime(test_settings, None)  # type: ignore[arg-type]
-    assert runtime.event_loop_lag_max_ms is None
+    node.loop_lag.last = LoopLagReading(max_ms=worst_ms, mean_ms=worst_ms / 10)
+    runtime = node.snapshot().runtime
+    assert (runtime.loop_lag_max_ms, runtime.loop_lag_mean_ms) == (worst_ms, worst_ms / 10)
+    assert f'octoprox_event_loop_lag_max_seconds{{role="echo"}} {worst_ms / 1000}' in node.telemetry.render().decode()
+
+    node.loop_lag.last = None
+    assert node.snapshot().runtime.loop_lag_max_ms is None
+    assert "octoprox_event_loop_lag" not in node.telemetry.render().decode()

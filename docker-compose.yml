@@ -1,3 +1,6 @@
+# Single instance, built from this checkout: one process runs every role
+# (OCTOPROX_ROLE is left at its default, all). docker-compose.cluster.yml
+# runs the roles in separate containers behind nginx.
 services:
   api:
     build:
@@ -20,6 +23,7 @@ services:
       - OCTOPROX_AUTH_USERNAME=admin
       - OCTOPROX_AUTH_PASSWORD=admin
       - OCTOPROX_JWT_SECRET=change-me-in-production
+      - OCTOPROX_INTERNAL_SECRET=change-me-in-production
       # - OCTOPROX_PUBLIC_URL=https://proxy.example.com
       - OCTOPROX_ENV=production
       - OCTOPROX_REDIS_URL=redis://redis:6379/0
@@ -46,6 +50,7 @@ services:
       timeout: 10s
       retries: 3
       start_period: 10s
+    stop_grace_period: 60s
     restart: unless-stopped
 
   postgres:
@@ -67,10 +72,11 @@ services:
 
   redis:
     image: redis:7-alpine
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    tmpfs:
+      - /data
     ports:
       - "6379:6379"
-    volumes:
-      - redis_data:/data
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s
@@ -80,6 +86,5 @@ services:
 
 volumes:
   postgres_data:
-  redis_data:
   ca_data:
   geo_data:

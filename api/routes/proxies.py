@@ -1,17 +1,20 @@
 # Copyright 2026 Octoprox Authors
 # SPDX-License-Identifier: Apache-2.0
 
-"""Proxy management endpoints."""
+"""Proxy management endpoints, served by the api role: writes through :class:`~api.services.proxies.ProxyService`, reads
+from :class:`~api.services.read_model.RuntimeView`, and Detect (``/locate``) through the proxy from this process.
+"""
 
-import re
-from typing import Annotated, Any
+from dataclasses import replace
+from typing import Annotated
 
 from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
 from pydantic import BaseModel
 
 from api.core.auth import RequireEditorDep
+from api.core.stats import MetricDelta
+from api.db.repository import ConnectorRepository
 from api.geo.models import (
-    MANUAL_SOURCE,
     META_CITY_VERDICT,
     META_COUNTRY_SOURCE,
     META_LOCATION,
@@ -22,22 +25,19 @@ from api.geo.models import (
     ObservationSource,
 )
 from api.geo.service import GeoService
-from api.models.credential import CredentialType
-from api.models.location import set_manual_location
-from api.models.proxy import Proxy, ProxyCreate, ProxyProtocol, ProxyResponse, ProxyUpdate
-from api.providers.sdk.strategies import META_COUNTRY
-from api.routes.common import geo_runtime_of, proxy_manager_of
+from api.models.connector import Connector
+from api.models.proxy import Proxy, ProxyCreate, ProxyResponse, ProxyUpdate
+from api.routes.common import (
+    attribution_of,
+    proxy_service_of,
+    require_project,
+    runtime_view_of,
+    session_factory_of,
+)
+from api.routes.metrics import success_rate
+from api.services.read_model import ProxyView
 
 router = APIRouter(prefix="/projects/{project_id}/proxies")
-
-# Regex pattern to parse proxy URLs
-# Supports: protocol://[username:password@]host:port
-PROXY_URL_PATTERN = re.compile(
-    r'^(?P<protocol>https?|socks[45])://'
-    r'(?:(?P<username>[^:@]+):(?P<password>[^@]+)@)?'
-    r'(?P<host>[^:]+):(?P<port>\d+)$',
-    re.IGNORECASE
-)
 
 
 class ProxyListResponse(BaseModel):
@@ -45,11 +45,6 @@ class ProxyListResponse(BaseModel):
     total: int
     healthy: int
     proxies: list[ProxyResponse]
-
-
-class StrategyRequest(BaseModel):
-    """Request to change routing strategy."""
-    strategy: str
 
 
 class ProxyUploadError(BaseModel):
@@ -68,56 +63,31 @@ class ProxyUploadResponse(BaseModel):
     errors: list[ProxyUploadError]
 
 
-def _parse_proxy_url(url: str) -> dict[str, Any] | None:
-    """Parse a proxy URL and return its components."""
-    url = url.strip()
-    if not url:
-        return None
-
-    match = PROXY_URL_PATTERN.match(url)
-    if not match:
-        return None
-
-    return {
-        'protocol': match.group('protocol').lower(),
-        'username': match.group('username'),
-        'password': match.group('password'),
-        'host': match.group('host'),
-        'port': int(match.group('port')),
-    }
-
-
-def _proxy_to_response(
-    proxy: Proxy,
-    connector_name: str | None = None,
-    connector_enabled: bool = True,
-    quarantined: bool = False,
-    quarantine_remaining_seconds: float = 0.0,
-    connector_countries: list[str] | None = None,
-) -> ProxyResponse:
-    """Convert a Proxy to ProxyResponse."""
-    outside = GeoService.outside_declared_countries(proxy, connector_countries or [])
+def _proxy_to_response(view: ProxyView) -> ProxyResponse:
+    """A proxy as the API shows it: the stored row and its connector, its counters and its quarantine."""
+    proxy, connector, counters = view.proxy, view.connector, view.counters
+    location = proxy.metadata.get(META_LOCATION)
     return ProxyResponse(
         id=proxy.id,
         host=proxy.host,
         port=proxy.port,
-        protocol=proxy.protocol.value if hasattr(proxy.protocol, 'value') else proxy.protocol,
+        protocol=proxy.protocol.value,
         username=proxy.username,
         password=proxy.password,
         display_host=proxy.effective_display_host,
         connector_id=proxy.connector_id,
-        connector_name=connector_name,
-        connector_enabled=connector_enabled,
-        status=proxy.status.value if hasattr(proxy.status, 'value') else proxy.status,
-        request_count=proxy.request_count,
-        success_count=proxy.success_count,
-        failure_count=proxy.failure_count,
-        success_rate=proxy.success_rate,
-        avg_latency_ms=proxy.avg_latency_ms,
-        bytes_sent=proxy.bytes_sent,
-        bytes_received=proxy.bytes_received,
-        quarantined=quarantined,
-        quarantine_remaining_seconds=round(quarantine_remaining_seconds, 1),
+        connector_name=connector.name if connector else None,
+        connector_enabled=connector.enabled if connector else True,
+        status=proxy.status.value,
+        request_count=counters.request_count,
+        success_count=counters.success_count,
+        failure_count=counters.failure_count,
+        success_rate=success_rate(counters),
+        avg_latency_ms=counters.avg_latency_ms,
+        bytes_sent=counters.bytes_sent,
+        bytes_received=counters.bytes_received,
+        quarantined=view.quarantined,
+        quarantine_remaining_seconds=round(view.quarantine_remaining_seconds, 1),
         country=proxy.country,
         country_source=proxy.metadata.get(META_COUNTRY_SOURCE),
         vendor_country=proxy.metadata.get(META_VENDOR_COUNTRY),
@@ -125,8 +95,10 @@ def _proxy_to_response(
         location_verdict=proxy.metadata.get(META_LOCATION_VERDICT),
         state_verdict=proxy.metadata.get(META_STATE_VERDICT),
         city_verdict=proxy.metadata.get(META_CITY_VERDICT),
-        outside_declared_countries=outside,
-        location=proxy.metadata.get(META_LOCATION) if isinstance(proxy.metadata.get(META_LOCATION), dict) else None,
+        outside_declared_countries=GeoService.outside_declared_countries(
+            proxy, connector.countries if connector else []
+        ),
+        location=location if isinstance(location, dict) else None,
         state_code=proxy.state_code,
         state_source=proxy.state_source,
         city=proxy.city_slug,
@@ -136,45 +108,35 @@ def _proxy_to_response(
     )
 
 
+def _fresh(proxy: Proxy, connector: Connector | None) -> ProxyView:
+    """A row added a moment ago as the read model would show it: nothing counted, no quarantine, never checked."""
+    return ProxyView(
+        proxy=proxy, connector=connector, counters=MetricDelta(), health=None, quarantine_remaining_seconds=0.0
+    )
+
+
+async def _describe(request: Request, project_id: str, proxy_id: str) -> ProxyResponse:
+    """A proxy of the project as the API shows it; 404 when the project has no such proxy."""
+    view = await runtime_view_of(request).proxy(project_id, proxy_id)
+    if view is None:
+        raise HTTPException(status_code=404, detail="Proxy not found")
+    return _proxy_to_response(view)
+
+
 @router.get("", response_model=ProxyListResponse)
 async def list_proxies(request: Request, project_id: str) -> ProxyListResponse:
-    """List all proxies for a project (including those from disabled connectors)."""
-    proxy_manager = proxy_manager_of(request)
+    """Every proxy of the project, disabled connectors' included, in the stored order ``(created_at, id)``, the same
+    on every api.
 
-    project = proxy_manager.get_project(project_id)
-    if not project:
-        raise HTTPException(status_code=404, detail="Project not found")
-
-    # Get ALL proxies (including from disabled connectors) for display.
-    # The manager holds proxies in a dict whose insertion order differs per
-    # API instance (initial DB load order, pubsub reloads, provider syncs),
-    # so behind a round-robin load balancer consecutive polls would otherwise
-    # come back in different orders. Sort deterministically before responding.
-    all_proxies = sorted(
-        proxy_manager.get_all_proxies_for_project(project_id),
-        key=lambda p: (p.created_at, p.id),
-    )
-    # Get healthy proxies (only from enabled connectors) for the count
-    healthy_proxies = proxy_manager.get_healthy_proxies_for_project(project_id)
-
-    # Build responses with connector names, enabled status, and quarantine info
-    rate_limiter = proxy_manager.rate_limiter
-    responses = []
-    for p in all_proxies:
-        connector = proxy_manager.get_connector(p.connector_id)
-        connector_name = connector.name if connector else None
-        connector_enabled = connector.enabled if connector else True
-        responses.append(_proxy_to_response(
-            p, connector_name, connector_enabled,
-            connector_countries=connector.countries if connector else None,
-            quarantined=rate_limiter.is_quarantined(p.id),
-            quarantine_remaining_seconds=rate_limiter.get_quarantine_remaining(p.id),
-        ))
-
+    ``healthy`` counts what requests can be routed to: healthy and not
+    quarantined, on an enabled connector its traffic limit does not hold back.
+    """
+    await require_project(request, project_id)
+    listing = await runtime_view_of(request).proxies(project_id)
     return ProxyListResponse(
-        total=len(all_proxies),
-        healthy=len(healthy_proxies),
-        proxies=responses,
+        total=len(listing.proxies),
+        healthy=listing.healthy,
+        proxies=[_proxy_to_response(view) for view in listing.proxies],
     )
 
 
@@ -182,62 +144,15 @@ async def list_proxies(request: Request, project_id: str) -> ProxyListResponse:
 async def create_proxy(
     request: Request, proxy_data: ProxyCreate, project_id: str, _guard: RequireEditorDep
 ) -> ProxyResponse:
-    """Add a new proxy to the pool. Only allowed for STATIC_PROXY_PROVIDER connectors.
+    """Add a new proxy to the pool of a STATIC_PROXY_PROVIDER connector, the only kind that takes one.
 
-    Unless ``country`` is given, the exit IP and country are looked up
-    afterwards by the attributor, which reacts to the proxy_added signal
-    (``proxy.geo_lookup`` settings and the attribution echo endpoint).
+    Its first health check is asked for at once and, unless ``country`` is
+    given, a lookup of its exit IP and country through it (the ``enrich``
+    job, with the ``proxy.geo_lookup`` settings and the attribution echo
+    endpoint); the response waits for neither.
     """
-    proxy_manager = proxy_manager_of(request)
-
-    # Validate project exists
-    project = proxy_manager.get_project(project_id)
-    if not project:
-        raise HTTPException(status_code=404, detail="Project not found")
-
-    # Validate that the connector exists
-    connector = proxy_manager.get_connector(proxy_data.connector_id)
-    if connector is None:
-        raise HTTPException(status_code=404, detail="Connector not found")
-
-    # Validate connector belongs to this project
-    if connector.project_id != project_id:
-        raise HTTPException(status_code=400, detail="Connector does not belong to this project")
-
-    # Validate that the connector is a STATIC_PROXY_PROVIDER type
-    credential = proxy_manager.get_credential(connector.credential_id)
-    if credential is None:
-        raise HTTPException(status_code=400, detail="Connector's credential not found")
-
-    credential_type = credential.type
-    if credential_type != CredentialType.STATIC_PROXY_PROVIDER.value:
-        raise HTTPException(
-            status_code=400,
-            detail="Proxies can only be manually added to STATIC_PROXY_PROVIDER connectors"
-        )
-
-    metadata = dict(proxy_data.metadata)
-    if proxy_data.country:
-        metadata[META_COUNTRY] = proxy_data.country
-        metadata[META_COUNTRY_SOURCE] = MANUAL_SOURCE
-    set_manual_location(metadata, state=proxy_data.state, city=proxy_data.city)
-    proxy = Proxy(
-        host=proxy_data.host,
-        port=proxy_data.port,
-        protocol=proxy_data.protocol,
-        username=proxy_data.username,
-        password=proxy_data.password,
-        connector_id=proxy_data.connector_id,
-        tags=proxy_data.tags,
-        metadata=metadata,
-    )
-
-    await proxy_manager.add_proxy(proxy)
-
-    # Update connector proxy count
-    connector.proxy_count += 1
-
-    return _proxy_to_response(proxy, connector.name, connector.enabled, connector_countries=connector.countries)
+    proxy = await proxy_service_of(request).create(project_id, proxy_data)
+    return await _describe(request, project_id, proxy.id)
 
 
 @router.post("/upload", response_model=ProxyUploadResponse, status_code=201)
@@ -248,250 +163,97 @@ async def upload_proxies(
     connector_id: Annotated[str, Form(...)],
     _guard: RequireEditorDep,
 ) -> ProxyUploadResponse:
+    """Upload proxies from a file of one URL per line, ``protocol://[username:password@]host:port`` with protocol http, https, socks4 or socks5.
+
+    Lines that do not parse are reported and skipped; the rest are added in one transaction, so a refused upload (a
+    connector that is not static, say) adds nothing.
     """
-    Upload proxies from a CSV file.
-
-    The file should contain one proxy URL per line in the format:
-    protocol://[username:password@]host:port
-
-    Supported protocols: http, https, socks4, socks5
-
-    Examples:
-    - http://192.168.1.1:8080
-    - socks5://user:pass@10.0.0.1:1080
-    """
-    proxy_manager = proxy_manager_of(request)
-
-    # Validate project exists
-    project = proxy_manager.get_project(project_id)
-    if not project:
-        raise HTTPException(status_code=404, detail="Project not found")
-
-    # Validate that the connector exists
-    connector = proxy_manager.get_connector(connector_id)
-    if connector is None:
-        raise HTTPException(status_code=404, detail="Connector not found")
-
-    # Validate connector belongs to this project
-    if connector.project_id != project_id:
-        raise HTTPException(status_code=400, detail="Connector does not belong to this project")
-
-    # Validate that the connector is a STATIC_PROXY_PROVIDER type
-    credential = proxy_manager.get_credential(connector.credential_id)
-    if credential is None:
-        raise HTTPException(status_code=400, detail="Connector's credential not found")
-
-    credential_type = credential.type
-    if credential_type != CredentialType.STATIC_PROXY_PROVIDER.value:
-        raise HTTPException(
-            status_code=400,
-            detail="Proxies can only be uploaded to STATIC_PROXY_PROVIDER connectors"
-        )
-
-    # Read and parse the file
-    content = await file.read()
     try:
-        text = content.decode('utf-8')
-    except UnicodeDecodeError as e:
-        raise HTTPException(status_code=400, detail="File must be UTF-8 encoded") from e
-
-    lines = text.strip().split('\n')
-
-    successful_proxies: list[ProxyResponse] = []
-    errors: list[ProxyUploadError] = []
-
-    for line_number, line in enumerate(lines, start=1):
-        line = line.strip()
-        if not line:
-            continue
-
-        parsed = _parse_proxy_url(line)
-        if parsed is None:
-            errors.append(ProxyUploadError(
-                line_number=line_number,
-                line=line,
-                error="Invalid proxy URL format. Expected: protocol://[username:password@]host:port"
-            ))
-            continue
-
-        try:
-            protocol = ProxyProtocol(parsed['protocol'])
-        except ValueError:
-            errors.append(ProxyUploadError(
-                line_number=line_number,
-                line=line,
-                error=f"Unsupported protocol: {parsed['protocol']}"
-            ))
-            continue
-
-        proxy = Proxy(
-            host=parsed['host'],
-            port=parsed['port'],
-            protocol=protocol,
-            username=parsed['username'],
-            password=parsed['password'],
-            connector_id=connector_id,
-        )
-
-        await proxy_manager.add_proxy(proxy)
-        connector.proxy_count += 1
-        successful_proxies.append(_proxy_to_response(proxy, connector.name, connector.enabled, connector_countries=connector.countries))
-
+        text = (await file.read()).decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise HTTPException(status_code=400, detail="File must be UTF-8 encoded") from exc
+    upload = await proxy_service_of(request).upload(project_id, connector_id, text)
+    async with session_factory_of(request)() as session:
+        connector = await ConnectorRepository(session).get_in_project(project_id, connector_id)
     return ProxyUploadResponse(
-        total_lines=len([line for line in lines if line.strip()]),
-        successful=len(successful_proxies),
-        failed=len(errors),
-        proxies=successful_proxies,
-        errors=errors,
+        total_lines=upload.total_lines,
+        successful=len(upload.added),
+        failed=len(upload.errors),
+        proxies=[_proxy_to_response(_fresh(proxy, connector)) for proxy in upload.added],
+        errors=[
+            ProxyUploadError(line_number=error.line_number, line=error.line, error=error.error)
+            for error in upload.errors
+        ],
     )
 
 
 @router.get("/{proxy_id}", response_model=ProxyResponse)
-async def get_proxy(request: Request, proxy_id: str) -> ProxyResponse:
-    """Get a specific proxy by ID."""
-    proxy_manager = proxy_manager_of(request)
-    proxy = proxy_manager.get_proxy(proxy_id)
-
-    if proxy is None:
-        raise HTTPException(status_code=404, detail="Proxy not found")
-
-    connector = proxy_manager.get_connector(proxy.connector_id)
-    connector_name = connector.name if connector else None
-    connector_enabled = connector.enabled if connector else True
-    rate_limiter = proxy_manager.rate_limiter
-    return _proxy_to_response(
-        proxy, connector_name, connector_enabled,
-        connector_countries=connector.countries if connector else None,
-        quarantined=rate_limiter.is_quarantined(proxy.id),
-        quarantine_remaining_seconds=rate_limiter.get_quarantine_remaining(proxy.id),
-    )
+async def get_proxy(request: Request, project_id: str, proxy_id: str) -> ProxyResponse:
+    """Get a specific proxy of the project by ID."""
+    return await _describe(request, project_id, proxy_id)
 
 
 @router.patch("/{proxy_id}", response_model=ProxyResponse)
 async def update_proxy(
-    request: Request, proxy_id: str, proxy_data: ProxyUpdate, _guard: RequireEditorDep
+    request: Request, project_id: str, proxy_id: str, proxy_data: ProxyUpdate, _guard: RequireEditorDep
 ) -> ProxyResponse:
-    """Update a proxy."""
-    proxy_manager = proxy_manager_of(request)
-    proxy = proxy_manager.get_proxy(proxy_id)
+    """Update a proxy's definition; its status is the health checks' to move, never an edit's.
 
-    if proxy is None:
-        raise HTTPException(status_code=404, detail="Proxy not found")
-
-    # Update fields
-    if proxy_data.host is not None:
-        proxy.host = proxy_data.host
-    if proxy_data.port is not None:
-        proxy.port = proxy_data.port
-    if proxy_data.protocol is not None:
-        proxy.protocol = proxy_data.protocol
-    if proxy_data.username is not None:
-        proxy.username = proxy_data.username
-    if proxy_data.password is not None:
-        proxy.password = proxy_data.password
-    if proxy_data.tags is not None:
-        proxy.tags = proxy_data.tags
-    if proxy_data.metadata is not None:
-        proxy.metadata = proxy_data.metadata
-    if proxy_data.country is not None:
-        if proxy_data.country:
-            # Set by hand: attribution keeps it as the routing country and
-            # verifies the exit against it instead of overwriting it.
-            proxy.metadata[META_COUNTRY] = proxy_data.country
-            proxy.metadata[META_COUNTRY_SOURCE] = MANUAL_SOURCE
-        else:
-            proxy.metadata.pop(META_COUNTRY, None)
-            proxy.metadata.pop(META_COUNTRY_SOURCE, None)
-    # A state or city set by hand is what -st- and -city- routing matches
-    # this proxy on, ahead of the databases' record.
-    set_manual_location(proxy.metadata, state=proxy_data.state, city=proxy_data.city)
-
-    # Persist the update
-    await proxy_manager.update_proxy(proxy)
-
-    connector = proxy_manager.get_connector(proxy.connector_id)
-    connector_name = connector.name if connector else None
-    connector_enabled = connector.enabled if connector else True
-    rate_limiter = proxy_manager.rate_limiter
-    return _proxy_to_response(
-        proxy, connector_name, connector_enabled,
-        connector_countries=connector.countries if connector else None,
-        quarantined=rate_limiter.is_quarantined(proxy.id),
-        quarantine_remaining_seconds=rate_limiter.get_quarantine_remaining(proxy.id),
-    )
+    A country, state or city set here is pinned as what routing matches the
+    proxy on (an empty string unpins it), ahead of what attribution finds.
+    """
+    await proxy_service_of(request).update(project_id, proxy_id, proxy_data)
+    return await _describe(request, project_id, proxy_id)
 
 
 @router.delete("/{proxy_id}", status_code=204)
-async def delete_proxy(request: Request, proxy_id: str, _guard: RequireEditorDep) -> None:
-    """Remove a proxy from the pool.
+async def delete_proxy(request: Request, project_id: str, proxy_id: str, _guard: RequireEditorDep) -> None:
+    """Remove a proxy from the pool: a cloud provider's (AWS, GCP, Azure) is marked TERMINATING and the scale job
+    terminates its instance, then deletes the row.
 
-    If the proxy belongs to a cloud provider connector (AWS, GCP, Azure),
-    the proxy will be marked as TERMINATING and the auto-scaler will handle
-    the actual cloud instance termination.
-
-    For non-cloud proxies, the proxy is removed immediately.
+    Any other proxy is removed at once; a vendor slot is then brought back
+    fresh by a sync of its connector.
     """
-    proxy_manager = proxy_manager_of(request)
-
-    if not await proxy_manager.delete_proxy_async(proxy_id):
-        raise HTTPException(status_code=404, detail="Proxy not found")
+    await proxy_service_of(request).remove(project_id, proxy_id)
 
 
 @router.post("/{proxy_id}/locate", response_model=ProxyResponse)
-async def locate_proxy(request: Request, proxy_id: str, _guard: RequireEditorDep) -> ProxyResponse:
-    """Look up a proxy's exit IP and country now, by requesting through it.
+async def locate_proxy(
+    request: Request, project_id: str, proxy_id: str, _guard: RequireEditorDep
+) -> ProxyResponse:
+    """Look up a proxy's exit IP and country now by requesting through it, record it on the proxy and return it; 502
+    when the request fails.
 
-    Records the result on the proxy and returns it. Fails with 502 when the
-    request through the proxy does not succeed.
+    A session slot the project's location rules refuse is rotated, as any
+    sighting of it would; the answer still shows what was found.
     """
-    proxy_manager = proxy_manager_of(request)
-    proxy = proxy_manager.get_proxy(proxy_id)
-    if proxy is None:
+    view = await runtime_view_of(request).proxy(project_id, proxy_id)
+    if view is None:
         raise HTTPException(status_code=404, detail="Proxy not found")
-
-    updated = await geo_runtime_of(request).proxy_attributor.enrich(proxy_id, source=ObservationSource.MANUAL)
-    if updated is None:
+    attribution = attribution_of(request)
+    store = attribution.store()
+    await store.load([proxy_id])
+    judged = await attribution.attributor.enrich(store, proxy_id, source=ObservationSource.MANUAL)
+    await store.flush()
+    if judged is None:
         raise HTTPException(status_code=502, detail="Could not determine the exit location through this proxy")
-
-    connector = proxy_manager.get_connector(updated.connector_id)
-    rate_limiter = proxy_manager.rate_limiter
-    return _proxy_to_response(
-        updated,
-        connector.name if connector else None,
-        connector.enabled if connector else True,
-        connector_countries=connector.countries if connector else None,
-        quarantined=rate_limiter.is_quarantined(updated.id),
-        quarantine_remaining_seconds=rate_limiter.get_quarantine_remaining(updated.id),
-    )
+    located = await runtime_view_of(request).proxy(project_id, proxy_id)
+    if located is None:
+        # Rotated: the stored row is gone, so show the judgement on the row as it was
+        # (the judged copy carries its credentials filled in, never shown).
+        located = replace(view, proxy=view.proxy.model_copy(update={"metadata": judged.metadata}))
+    return _proxy_to_response(located)
 
 
 @router.post("/{proxy_id}/unquarantine", status_code=200)
 async def unquarantine_proxy(
-    request: Request, proxy_id: str, _guard: RequireEditorDep
+    request: Request, project_id: str, proxy_id: str, _guard: RequireEditorDep
 ) -> dict[str, str]:
-    """Forcefully remove a proxy from quarantine."""
-    proxy_manager = proxy_manager_of(request)
+    """Forcefully remove a proxy from quarantine and empty its rate-limit window.
 
-    proxy = proxy_manager.get_proxy(proxy_id)
-    if proxy is None:
-        raise HTTPException(status_code=404, detail="Proxy not found")
-
-    removed = await proxy_manager.rate_limiter.unquarantine(proxy_id)
-    if not removed:
+    Gateways route to it again once the controller publishes the change,
+    within a couple of seconds.
+    """
+    if not await proxy_service_of(request).unquarantine(project_id, proxy_id):
         raise HTTPException(status_code=400, detail="Proxy is not quarantined")
-
     return {"status": "ok", "proxy_id": proxy_id}
-
-
-@router.post("/strategy")
-async def set_strategy(
-    request: Request, strategy_req: StrategyRequest, _guard: RequireEditorDep
-) -> dict[str, str]:
-    """Change the routing strategy."""
-    proxy_manager = proxy_manager_of(request)
-
-    try:
-        proxy_manager.set_strategy(strategy_req.strategy)
-        return {"status": "ok", "strategy": strategy_req.strategy}
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e)) from None

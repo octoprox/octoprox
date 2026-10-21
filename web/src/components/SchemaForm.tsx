@@ -81,7 +81,7 @@ export function MultiCountryPicker({ options, value, onChange, disabled, placeho
           {selected.map((code) => (
             <span key={code} className="inline-flex items-center gap-1.5 pl-2 pr-1.5 py-0.5 rounded-full border border-line bg-surface-raised text-xs">
               <span className="font-mono font-medium">{code}</span>
-              <span className="text-fg-muted truncate max-w-[10rem]">{labelFor(code)}</span>
+              <span className="text-fg-muted truncate max-w-40">{labelFor(code)}</span>
               {!disabled && (
                 <button type="button" onClick={() => remove(code)} className="text-fg-subtle hover:text-fg" aria-label={`Remove ${code}`}>
                   <X className="w-3 h-3" />
@@ -197,7 +197,6 @@ function SchemaField({ provider, field, value, values, onChange, scopes, presets
   // Clamp the value when a sibling selection lowers the ceiling.
   useEffect(() => {
     if (dynamicMax != null && value !== '' && Number(value) > dynamicMax) onChange(String(dynamicMax))
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [dynamicMax])
 
   const label = (

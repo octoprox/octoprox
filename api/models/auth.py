@@ -10,7 +10,7 @@ self-registers. See docs/sso.md.
 """
 
 from datetime import datetime
-from enum import Enum
+from enum import StrEnum
 from uuid import uuid4
 
 from pydantic import BaseModel, Field, field_validator
@@ -18,7 +18,7 @@ from pydantic import BaseModel, Field, field_validator
 from api.core import utc_now
 
 
-class AuthProviderKind(str, Enum):
+class AuthProviderKind(StrEnum):
     """The sign-in providers an admin can set up."""
 
     GOOGLE = "google"

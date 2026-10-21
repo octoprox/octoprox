@@ -222,7 +222,7 @@ export function ValueSourceInput({ label, value, onChange, help, placeholder }: 
         <div className="rounded-lg border border-line p-2.5 space-y-2">
           <TextField label="Path" value={value.path} onChange={(v) => onChange({ ...value, path: v })} mono placeholder="type" />
           <div className="space-y-1.5">
-            <Label className="text-xs">Rules (first match wins)</Label>
+            <Label className="text-xs mb-1.5">Rules (first match wins)</Label>
             {(value.map ?? []).map((rule: Spec, i: number) => {
               const kind: 'equals' | 'starts_with' | 'regex' = rule.starts_with != null ? 'starts_with' : rule.regex != null ? 'regex' : 'equals'
               const setRule = (next: Spec) => { const n = [...value.map]; n[i] = next; onChange({ ...value, map: n }) }

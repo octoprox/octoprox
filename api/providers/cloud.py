@@ -1,11 +1,13 @@
 # Copyright 2026 Octoprox Authors
 # SPDX-License-Identifier: Apache-2.0
 
-"""Cloud provider integrations for dynamic proxy instances.
+"""Cloud providers: the AWS, GCP and Azure instances of a cloud connector, each a Squid proxy with credentials of its own.
 
-This module provides base classes and stubs for cloud provider integrations.
-Actual implementations require the 'cloud' optional dependencies.
+Every instance carries its connector's ID as a tag, so a scale run can list them and terminate one whose row was never
+saved; its credentials are in its start-up script alone.
 """
+
+from __future__ import annotations
 
 import asyncio
 import base64
@@ -13,26 +15,49 @@ import json
 import re
 import secrets
 import string
-from abc import abstractmethod
+from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 import structlog
 
-from api.models.connector import Connector
-from api.models.credential import AWSAuthMode, AzureAuthMode, Credential, GCPAuthMode
+from api.core.logging import error_text
+from api.models.connector import (
+    AWSConnectorConfig,
+    AzureConnectorConfig,
+    CloudConnectorConfig,
+    Connector,
+    GCPConnectorConfig,
+)
+from api.models.credential import (
+    AWSAuthMode,
+    AzureAuthMode,
+    Credential,
+    CredentialType,
+    GCPAuthMode,
+)
 from api.models.proxy import Proxy, ProxyStatus
 from api.providers.base import ProxyProvider
 
 logger = structlog.get_logger()
 
-# Standard proxy port for all cloud providers
+# The port Squid listens on, on every cloud.
 PROXY_PORT = 3128
+# The tag every instance carries (on GCP a label), its connector's ID, which a
+# scale run lists the connector's instances by.
+CONNECTOR_TAG = "octoprox-connector"
 
 # OAuth scope the Compute Engine clients request on google-auth credentials.
 _GCP_CLOUD_PLATFORM_SCOPE = "https://www.googleapis.com/auth/cloud-platform"
+# GCP instance statuses of an instance that is starting or running.
+_GCP_LIVE = frozenset({"PROVISIONING", "STAGING", "RUNNING"})
 # Scope of the host identity token exchanged for a federated app's token.
 _AZURE_TOKEN_EXCHANGE_SCOPE = "api://AzureADTokenExchange/.default"
+# The provisioning state of an Azure VM on its way out, and those of a VM that
+# is neither starting nor running for Octoprox.
+_AZURE_DELETING = "Deleting"
+_AZURE_DEAD = frozenset({_AZURE_DELETING, "Failed"})
 
 # Cached Squid setup script template
 _SQUID_SETUP_TEMPLATE: str | None = None
@@ -56,12 +81,19 @@ def _load_squid_setup_template() -> str:
     return _SQUID_SETUP_TEMPLATE
 
 
-def _generate_proxy_credentials() -> tuple[str, str]:
-    """Generate random username and password for proxy authentication."""
-    alphabet = string.ascii_letters + string.digits
-    username = "u" + "".join(secrets.choice(alphabet) for _ in range(7))
-    password = "".join(secrets.choice(alphabet) for _ in range(24))
-    return username, password
+@dataclass(frozen=True)
+class ProxyCredentials:
+    """An instance's proxy credentials, random per instance and baked into its start-up script, where its Squid checks them."""
+
+    username: str
+    password: str
+
+    @classmethod
+    def generate(cls) -> ProxyCredentials:
+        """New random credentials: a username of eight letters and digits, starting with ``u``, and a password of 24."""
+        alphabet = string.ascii_letters + string.digits
+        username = "u" + "".join(secrets.choice(alphabet) for _ in range(7))
+        return cls(username, "".join(secrets.choice(alphabet) for _ in range(24)))
 
 
 # Auth config: squid.conf directives for header-based authentication.
@@ -81,26 +113,19 @@ _NO_AUTH_CONFIG = """\
 http_access allow all"""
 
 
-def build_squid_setup_script(
-    username: str | None = None, password: str | None = None
-) -> str:
-    """Build a Squid setup script, optionally with per-instance authentication.
+def build_squid_setup_script(credentials: ProxyCredentials | None = None) -> str:
+    """The bash setup script of an instance's Squid, with its credentials baked in.
 
     Args:
-        username: Proxy auth username. If None, proxy allows all connections.
-        password: Proxy auth password. Required if username is provided.
-
-    Returns:
-        Complete bash setup script with auth configuration baked in.
+        credentials: None lets every connection through.
     """
     template = _load_squid_setup_template()
 
-    if username and password:
-        # Compute base64-encoded credentials for the Proxy-Authorization header
-        auth_b64 = base64.b64encode(f"{username}:{password}".encode()).decode()
-        # Escape regex-special chars in base64 output (+ is the only one possible)
-        auth_b64_escaped = auth_b64.replace("+", "\\+")
-        auth_config = _AUTH_CONFIG.format(auth_b64=auth_b64_escaped)
+    if credentials is not None:
+        # Squid matches the Proxy-Authorization header against the base64 of
+        # "username:password", + escaped: the one regex-special character base64 holds.
+        auth_b64 = base64.b64encode(f"{credentials.username}:{credentials.password}".encode()).decode()
+        auth_config = _AUTH_CONFIG.format(auth_b64=auth_b64.replace("+", "\\+"))
     else:
         auth_config = _NO_AUTH_CONFIG
 
@@ -108,33 +133,93 @@ def build_squid_setup_script(
     return script
 
 
-class CloudProvider(ProxyProvider):
-    """Abstract base class for cloud-based proxy providers.
+@dataclass(frozen=True)
+class CloudInstance:
+    """A connector's instance as its cloud lists it, booting or running: its creation name, and the ID its row has or would have."""
 
-    Cloud providers manage instances dynamically via create_instance/terminate_instance.
-    Each cloud provider implementation should define its own provider-specific
-    attributes (region, instance type, etc.) in its __init__ method.
+    name: str
+    proxy_id: str
+
+
+class CloudProvider(ProxyProvider, ABC):
+    """A cloud connector's account: creates, lists and terminates its instances, each a proxy once it runs.
+
+    Terminating is safe to repeat, so scale runs of one connector that overlap need not agree on who terminates.
     """
 
-    def __init__(self, connector: Connector, credential: Credential) -> None:
-        super().__init__(connector, credential)
+    # The longest creation name the cloud takes: its instance name limit, or
+    # on AWS the client token's.
+    NAME_LIMIT: ClassVar[int]
+    # The start of an instance's proxy ID; the rest is the instance's key: its
+    # ID on AWS and its name elsewhere.
+    ID_PREFIX: ClassVar[str]
+    # The tag an instance's row carries for its cloud, beside its place, and
+    # the metadata field its key is kept in.
+    ROW_TAG: ClassVar[str]
+    KEY_FIELD: ClassVar[str]
+    _config: AWSConnectorConfig | GCPConnectorConfig | AzureConnectorConfig
+
+    @staticmethod
+    def of(connector: Connector, credential: Credential) -> CloudProvider | None:
+        """The cloud API of the credential's type; None for a type that is no cloud."""
+        provider = _PROVIDERS.get(credential.type)
+        return provider(connector, credential) if provider is not None else None
+
+    @property
+    def config(self) -> CloudConnectorConfig:
+        """The connector's cloud config: its pool's size and rotation periods, and where and what to create."""
+        return self._config
+
+    @property
+    @abstractmethod
+    def place(self) -> str:
+        """Where the connector's instances run: its region, zone or location, which their rows are tagged with."""
+
+    def creation_name(self, now: float) -> str:
+        """A new instance's name, ``<instance_name>-<epoch s>-<6 hex>``, its prefix cut so the whole fits ``NAME_LIMIT``."""
+        suffix = f"-{int(now)}-{secrets.token_hex(3)}"
+        return self._config.instance_name[: self.NAME_LIMIT - len(suffix)] + suffix
 
     @abstractmethod
-    async def create_instance(self) -> Proxy | None:
-        """Create a new proxy instance in the cloud."""
-        ...
+    async def create_instance(self, name: str) -> Proxy:
+        """Create the instance ``name``, tagged with the connector, and wait until it runs; its proxy, raising when the cloud refuses or fails."""
 
     @abstractmethod
-    async def terminate_instance(self, instance_id: str) -> bool:
-        """Terminate a cloud proxy instance."""
-        ...
+    async def tagged_instances(self) -> list[CloudInstance]:
+        """Every pending or running instance tagged with this connector."""
+
+    @abstractmethod
+    async def terminate_instance(self, proxy_id: str) -> None:
+        """Terminate the instance ``proxy_id`` names, returning once the cloud reports it stopping; one gone or stopping already counts."""
+
+    def _proxy(self, key: str, host: str, credentials: ProxyCredentials, **metadata: str | None) -> Proxy:
+        """The row of the instance ``key`` as it is first saved, initializing until a health check judges it."""
+        return Proxy(
+            id=self._proxy_id(key),
+            host=host,
+            port=PROXY_PORT,
+            username=credentials.username,
+            password=credentials.password,
+            connector_id=self.connector.id,
+            status=ProxyStatus.INITIALIZING,
+            tags=[self.ROW_TAG, self.place],
+            metadata={self.KEY_FIELD: key, **metadata},
+        )
+
+    def _proxy_id(self, key: str) -> str:
+        """The ID of the row of the instance ``key``: ``ID_PREFIX``, then the instance's ID on AWS or its name elsewhere."""
+        return f"{self.ID_PREFIX}{key}"
+
+    def _key(self, proxy_id: str) -> str:
+        """The instance ``proxy_id`` names, as its cloud knows it: its ID on AWS, its name elsewhere."""
+        return proxy_id.removeprefix(self.ID_PREFIX)
 
 
 def _assumed_role_provider(fetcher: Any) -> Any:
     """botocore credential provider that yields refreshable credentials from ``fetcher``.
 
-    Holds only the fetcher, so the provider does not keep the session-building
-    scope alive for as long as the session exists.
+    Holds only the fetcher, so the provider does not keep the session-building scope alive for as long as the session
+    exists.
     """
     from botocore.credentials import (  # type: ignore[import-untyped]
         CredentialProvider,
@@ -157,34 +242,21 @@ def _assumed_role_provider(fetcher: Any) -> Any:
 
 
 class AWSProvider(CloudProvider):
-    """AWS EC2-based proxy provider.
+    """EC2 instances in the connector's region, on its Ubuntu 24.04 image, through boto3 (the ``cloud`` extra).
 
-    Requires boto3 to be installed (pip install octoprox[cloud]).
-
-    Connector config options:
-        - region: AWS region (default: us-east-1)
-        - instance_type: EC2 instance type (t3.* for x86_64, t4g.* for arm64)
-        - instance_name: Name prefix for created instances (required)
-        - security_group: Security group ID (required)
-        - key_pair_name: SSH key pair name (required)
-        - tags: Custom tags to apply to instances (optional, dict)
-
-    Note: AMI is automatically determined based on region and instance type.
-    Ubuntu 24.04 LTS is used for all instances.
-
-    Credential config:
-        - auth_mode: "access_keys" (stored IAM user keys) or "host_role" (the
-          identity of the host Octoprox runs on; nothing stored)
-        - access_key / secret_key: required in access_keys mode
-        - role_arn: optional role assumed with sts:AssumeRole from the base identity
-        - external_id: optional ExternalId for that AssumeRole call
+    The credential's ``auth_mode`` picks the base identity, stored keys or the host's role, from which ``role_arn``,
+    when set, is assumed.
     """
+
+    # RunInstances takes a client token of up to 64 characters.
+    NAME_LIMIT = 64
+    ID_PREFIX = "aws-"
+    ROW_TAG = "aws"
+    KEY_FIELD = "instance_id"
+    _config: AWSConnectorConfig
 
     def __init__(self, connector: Connector, credential: Credential) -> None:
         super().__init__(connector, credential)
-        # AWS-specific config from connector using typed cloud_config
-        from api.models.connector import AWSConnectorConfig
-
         cloud_config = connector.cloud_config
         if not isinstance(cloud_config, AWSConnectorConfig):
             raise ValueError("AWSProvider requires an AWS connector configuration")
@@ -193,18 +265,21 @@ class AWSProvider(CloudProvider):
         self._ec2_client = None
         self._ec2_resource = None
 
+    @property
+    def place(self) -> str:
+        """The connector's region."""
+        return self._config.region
+
     def _role_session_name(self) -> str:
         """sts:AssumeRole session name: ``octoprox-<credential id>``, within AWS limits."""
         raw = f"octoprox-{self.credential.id if self.credential else 'default'}"
         return re.sub(r"[^\w+=,.@-]", "-", raw)[:64]
 
     def _build_session(self, boto3: Any) -> Any:
-        """Create the boto3 session the EC2 clients are made from.
+        """The boto3 session the EC2 clients are made from, on the base identity of the credential's auth mode.
 
-        The base identity comes from the credential's auth mode. If the
-        credential names a role, the returned session carries botocore's
-        refreshable assume-role credentials, so every request is signed with
-        a live session token and re-assumes the role before expiry.
+        With a ``role_arn``, it carries botocore's refreshable assume-role credentials, which re-assume the role before
+        they expire.
         """
         cred_config = self.credential.config if self.credential else {}
         region = self._config.region
@@ -262,16 +337,11 @@ class AWSProvider(CloudProvider):
         return boto3.Session(botocore_session=assumed_session, region_name=region)
 
     def _get_boto3_clients(self) -> tuple[Any, Any]:
-        """Get or create boto3 clients.
-
-        Resolving the base identity may call the instance metadata service,
-        so callers on the event loop should run this in a thread.
-        """
+        """The EC2 client and resource, made on first use; resolving the identity may call the metadata service, so callers on the event loop run this in a thread."""
         try:
             import boto3  # type: ignore[import-untyped]
-        except ImportError:
-            logger.error("boto3 not installed. Install with: pip install octoprox[cloud]")
-            return None, None
+        except ImportError as exc:
+            raise RuntimeError("boto3 is not installed: install octoprox[cloud]") from exc
 
         if self._ec2_client is None:
             session = self._build_session(boto3)
@@ -279,170 +349,117 @@ class AWSProvider(CloudProvider):
             self._ec2_resource = session.resource("ec2")
         return self._ec2_client, self._ec2_resource
 
-    async def create_instance(self) -> Proxy | None:
-        """Create a new EC2 instance configured as a proxy."""
-        # Get the AMI for this region and instance type from the config
+    async def create_instance(self, name: str) -> Proxy:
+        """Launch an EC2 instance named ``name``, its client token too, and wait until it runs."""
         ami_id = self._config.get_ami()
         if not ami_id:
-            logger.error(
-                "No AMI found for region/instance type combination",
-                region=self._config.region,
-                instance_type=self._config.instance_type,
+            raise ValueError(
+                f"No Ubuntu image for region {self._config.region} and instance type {self._config.instance_type}"
             )
-            return None
-
-        logger.debug(
-            "AWS create_instance called",
-            connector_id=self.connector.id,
-            ami_id=ami_id,
-            security_group=self._config.security_group,
-            instance_name=self._config.instance_name,
-        )
-
         _, ec2_resource = await asyncio.to_thread(self._get_boto3_clients)
-        if not ec2_resource:
-            return None
-
-        import time
-
-        # Generate per-instance proxy credentials and build setup script
-        proxy_username, proxy_password = _generate_proxy_credentials()
-        user_data = build_squid_setup_script(proxy_username, proxy_password)
-
-        # Build instance name with timestamp for uniqueness
-        instance_name = f"{self._config.instance_name}-{int(time.time())}"
-
-        # Build tags: start with required tags, then add custom tags
-        tags = [
-            {"Key": "Name", "Value": instance_name},
-            {"Key": "ManagedBy", "Value": "octoprox"},
-        ]
-        # Add custom tags from connector config
-        for key, value in self._config.tags.items():
-            tags.append({"Key": key, "Value": str(value)})
-
-        run_args = {
+        credentials = ProxyCredentials.generate()
+        # The connector's own tags never replace the name or the tag a scale run lists by.
+        tags = {"ManagedBy": "octoprox", **self._config.tags, "Name": name, CONNECTOR_TAG: self.connector.id}
+        run_args: dict[str, Any] = {
             "ImageId": ami_id,
             "InstanceType": self._config.instance_type,
             "MinCount": 1,
             "MaxCount": 1,
-            "UserData": user_data,
+            "UserData": build_squid_setup_script(credentials),
+            # A launch retried with the same token gets the same instance back.
+            "ClientToken": name,
             "TagSpecifications": [
-                {
-                    "ResourceType": "instance",
-                    "Tags": tags,
-                }
+                {"ResourceType": "instance", "Tags": [{"Key": key, "Value": str(value)} for key, value in tags.items()]}
             ],
         }
-
-        # Handle security group configuration
-        # The security group determines which VPC the instance will be launched in
+        # The security group determines which VPC the instance is launched in.
         security_group = self._config.security_group.strip()
-
         if security_group:
             run_args["SecurityGroupIds"] = [security_group]
-
         if self._config.key_pair_name:
             run_args["KeyName"] = self._config.key_pair_name
-
         logger.debug(
-            "Creating EC2 instance",
-            ami_id=ami_id,
+            "Creating EC2 instance", connector_id=self.connector.id, name=name, ami_id=ami_id,
             instance_type=self._config.instance_type,
-            security_group=self._config.security_group,
         )
 
-        def _create_and_wait() -> Any:
-            instances = ec2_resource.create_instances(**run_args)
-            instance = instances[0]
+        def launch() -> Any:
+            instance = ec2_resource.create_instances(**run_args)[0]
             instance.wait_until_running()
             instance.reload()
             return instance
 
-        instance = await asyncio.to_thread(_create_and_wait)
-
+        instance = await asyncio.to_thread(launch)
         host = instance.public_ip_address or instance.private_ip_address
         if not host:
-            logger.error("Instance created but no IP address available")
-            return None
+            raise RuntimeError(f"AWS instance {instance.id} runs without an address")
+        logger.info("Created AWS proxy instance", instance_id=instance.id, name=name, host=host)
+        return self._proxy(instance.id, host, credentials)
 
-        proxy = Proxy(
-            id=f"aws-{instance.id}",
-            host=host,
-            port=PROXY_PORT,
-            username=proxy_username,
-            password=proxy_password,
-            connector_id=self.connector.id,
-            status=ProxyStatus.INITIALIZING,
-            tags=["aws", self._config.region],
-            metadata={"instance_id": instance.id},
-        )
+    async def tagged_instances(self) -> list[CloudInstance]:
+        """Every pending or running instance tagged with this connector, every page of them, each named by its client token (empty for one launched without)."""
 
-        logger.info("Created AWS proxy instance", instance_id=instance.id, host=host)
-        return proxy
+        def listed() -> list[CloudInstance]:
+            ec2_client, _ = self._get_boto3_clients()
+            filters = [
+                {"Name": f"tag:{CONNECTOR_TAG}", "Values": [self.connector.id]},
+                {"Name": "instance-state-name", "Values": ["pending", "running"]},
+            ]
+            return [
+                CloudInstance(instance.get("ClientToken", ""), self._proxy_id(instance["InstanceId"]))
+                for page in ec2_client.get_paginator("describe_instances").paginate(Filters=filters)
+                for reservation in page["Reservations"]
+                for instance in reservation["Instances"]
+            ]
 
-    async def terminate_instance(self, instance_id: str) -> bool:
-        """Terminate an EC2 instance."""
+        return await asyncio.to_thread(listed)
+
+    async def terminate_instance(self, proxy_id: str) -> None:
+        """Terminate the instance; AWS answers once it is shutting down, and an instance it no longer knows counts as terminated."""
+        instance_id = self._key(proxy_id)
         ec2_client, _ = await asyncio.to_thread(self._get_boto3_clients)
-        if not ec2_client:
-            return False
+        from botocore.exceptions import ClientError
 
-        # Remove aws- prefix if present
-        ec2_instance_id = instance_id.replace("aws-", "")
-        await asyncio.to_thread(
-            ec2_client.terminate_instances, InstanceIds=[ec2_instance_id]
-        )
-        logger.info("Terminated AWS instance", instance_id=ec2_instance_id)
-        return True
+        try:
+            await asyncio.to_thread(ec2_client.terminate_instances, InstanceIds=[instance_id])
+        except ClientError as exc:
+            if exc.response.get("Error", {}).get("Code") != "InvalidInstanceID.NotFound":
+                raise
+        logger.info("Terminated AWS instance", instance_id=instance_id)
 
 
 class GCPProvider(CloudProvider):
-    """Google Cloud Compute Engine proxy provider.
+    """Compute Engine instances in the connector's zone, on its Ubuntu 24.04 image, through google-cloud-compute (the ``cloud`` extra).
 
-    Requires google-cloud-compute to be installed (pip install octoprox[cloud]).
-
-    Connector config options:
-        - project_id: GCP project ID (required)
-        - zone: GCP zone (default: us-central1-a)
-        - machine_type: Machine type (e2-* for x86_64, t2a-* for arm64)
-        - instance_name: Name prefix for created instances (required)
-        - network: VPC network name (default: default)
-        - subnet: Subnet name (optional)
-        - tags: Custom labels to apply to instances (optional, dict)
-
-    Note: Source image is automatically determined based on machine type.
-    Ubuntu 24.04 LTS is used for all instances.
-
-    Credential config:
-        - auth_mode: "service_account_key" (stored JSON key) or "host_identity"
-          (Application Default Credentials of the host; nothing stored)
-        - service_account_json / project_id: required in service_account_key mode
-        - impersonate_service_account: optional service account impersonated
-          from the base identity through the IAM Credentials API
+    The credential's ``auth_mode`` picks a stored key or the host's identity, which may impersonate a service account.
     """
+
+    # Compute Engine instance names run to 63 characters.
+    NAME_LIMIT = 63
+    ID_PREFIX = "gcp-"
+    ROW_TAG = "gcp"
+    KEY_FIELD = "instance_name"
+    _config: GCPConnectorConfig
 
     def __init__(self, connector: Connector, credential: Credential) -> None:
         super().__init__(connector, credential)
-        # GCP-specific config from connector using typed cloud_config
-        from api.models.connector import GCPConnectorConfig
-
         cloud_config = connector.cloud_config
         if not isinstance(cloud_config, GCPConnectorConfig):
             raise ValueError("GCPProvider requires a GCP connector configuration")
 
         self._config = cloud_config
         self._instances_client = None
-        # The google-auth credentials the clients were built with; the
-        # operation poller needs them too.
-        self._gcp_credentials: Any = None
+
+    @property
+    def place(self) -> str:
+        """The connector's zone."""
+        return self._config.zone
 
     def _build_credentials(self) -> Any:
-        """Create the google-auth credentials the Compute Engine clients use.
+        """The google-auth credentials the Compute Engine client uses, on the base identity of the credential's auth mode.
 
-        The base identity comes from the credential's auth mode. If the
-        credential names a service account to impersonate, the returned
-        credentials mint short-lived tokens for it through the IAM
-        Credentials API and refresh them on their own.
+        With a service account to impersonate, they mint short-lived tokens for it through the IAM Credentials API and
+        refresh them on their own.
         """
         import google.auth
         from google.auth import impersonated_credentials
@@ -474,53 +491,30 @@ class GCPProvider(CloudProvider):
         )
 
     def _get_compute_client(self) -> Any:
-        """Get or create GCP compute client.
-
-        Resolving the host identity may call the metadata server, so callers
-        on the event loop should run this in a thread.
-        """
+        """The instances client, made on first use; resolving the host identity may call the metadata server, so callers on the event loop run this in a thread."""
         try:
             from google.cloud import compute_v1
-        except ImportError:
-            logger.error("google-cloud-compute not installed. Install with: pip install octoprox[cloud]")
-            return None
+        except ImportError as exc:
+            raise RuntimeError("google-cloud-compute is not installed: install octoprox[cloud]") from exc
 
         if self._instances_client is None:
-            self._gcp_credentials = self._build_credentials()
-            self._instances_client = compute_v1.InstancesClient(credentials=self._gcp_credentials)  # type: ignore[assignment]
+            self._instances_client = compute_v1.InstancesClient(credentials=self._build_credentials())  # type: ignore[assignment]
         return self._instances_client
 
-    async def create_instance(self) -> Proxy | None:
-        """Create a new GCP Compute Engine instance configured as a proxy."""
+    async def create_instance(self, name: str) -> Proxy:
+        """Create the instance ``name`` and wait for its insert operation."""
         client = await asyncio.to_thread(self._get_compute_client)
-        if not client:
-            return None
-
-        # Get the source image for this machine type from the config
-        source_image = self._config.get_source_image()
-
-        import time
-
         from google.cloud import compute_v1
 
-        # Build instance name with timestamp for uniqueness
-        instance_name = f"{self._config.instance_name}-{int(time.time())}"
-
-        # Generate per-instance proxy credentials and build setup script
-        proxy_username, proxy_password = _generate_proxy_credentials()
-        startup_script = build_squid_setup_script(proxy_username, proxy_password)
-
+        source_image = self._config.get_source_image()
+        credentials = ProxyCredentials.generate()
         logger.debug(
-            "GCP create_instance called",
-            connector_id=self.connector.id,
-            source_image=source_image,
+            "Creating GCP instance", connector_id=self.connector.id, name=name, source_image=source_image,
             zone=self._config.zone,
-            instance_name=instance_name,
         )
 
-        # Build instance config
         instance = compute_v1.Instance()
-        instance.name = instance_name
+        instance.name = name
         instance.machine_type = f"zones/{self._config.zone}/machineTypes/{self._config.machine_type}"
 
         # Boot disk
@@ -533,147 +527,107 @@ class GCPProvider(CloudProvider):
         disk.initialize_params = initialize_params
         instance.disks = [disk]
 
-        # Network interface
+        # Network interface, with an external IP
         network_interface = compute_v1.NetworkInterface()
         network_interface.network = f"global/networks/{self._config.network}"
-
-        # Add external IP
         access_config = compute_v1.AccessConfig()
         access_config.name = "External NAT"
         access_config.type_ = "ONE_TO_ONE_NAT"
         network_interface.access_configs = [access_config]
         instance.network_interfaces = [network_interface]
 
-        # Labels - start with required labels, then add custom labels from tags
-        # GCP labels must be lowercase with hyphens
-        labels = {
-            "managed-by": "octoprox",
-        }
-        # Add custom labels from connector config tags
+        # Labels: lowercase letters, digits, hyphens and underscores, at most
+        # 63 characters. The connector's own never replace the one a scale run
+        # lists by.
+        labels = {"managed-by": "octoprox"}
         for key, value in self._config.tags.items():
-            # GCP labels must be lowercase, max 63 chars, only lowercase letters, numbers, hyphens
             label_key = key.lower().replace(" ", "-").replace("_", "-")[:63]
-            label_value = str(value).lower().replace(" ", "-").replace("_", "-")[:63]
-            labels[label_key] = label_value
+            labels[label_key] = str(value).lower().replace(" ", "-").replace("_", "-")[:63]
+        labels[CONNECTOR_TAG] = self.connector.id
         instance.labels = labels
 
-        # Metadata with startup script
         metadata = compute_v1.Metadata()
-        metadata.items = [
-            compute_v1.Items(key="startup-script", value=startup_script)
-        ]
+        metadata.items = [compute_v1.Items(key="startup-script", value=build_squid_setup_script(credentials))]
         instance.metadata = metadata
 
-        # Create the instance and wait for completion in a thread to avoid
-        # blocking the event loop (GCP SDK is synchronous)
-        def _insert_and_wait() -> Any:
-            import time as _time
+        def insert() -> Any:
+            # The Compute Engine SDK is synchronous; result() waits for the
+            # insert operation and raises the error it ended with.
+            client.insert(project=self._config.project_id, zone=self._config.zone, instance_resource=instance).result()
+            return client.get(project=self._config.project_id, zone=self._config.zone, instance=name)
 
-            from google.cloud.compute_v1.services.zone_operations import (
-                ZoneOperationsClient,
-            )
-
-            operation = client.insert(
-                project=self._config.project_id,
-                zone=self._config.zone,
-                instance_resource=instance,
-            )
-            ops_client = ZoneOperationsClient(credentials=self._gcp_credentials)
-            while operation.status != compute_v1.Operation.Status.DONE:
-                _time.sleep(2)
-                operation = ops_client.get(
-                    project=self._config.project_id,
-                    zone=self._config.zone,
-                    operation=operation.name,
-                )
-            return client.get(
-                project=self._config.project_id,
-                zone=self._config.zone,
-                instance=instance_name,
-            )
-
-        created_instance = await asyncio.to_thread(_insert_and_wait)
-
-        # Get IP address
-        host = None
-        for interface in created_instance.network_interfaces:
-            for access_config in interface.access_configs:
-                if access_config.nat_i_p:
-                    host = access_config.nat_i_p
-                    break
-            if not host:
-                host = interface.network_i_p
-
+        created = await asyncio.to_thread(insert)
+        host = self._address(created)
         if not host:
-            logger.error("Instance created but no IP address available")
+            raise RuntimeError(f"GCP instance {name} runs without an address")
+        logger.info("Created GCP proxy instance", instance_name=name, host=host)
+        return self._proxy(name, host, credentials)
+
+    async def tagged_instances(self) -> list[CloudInstance]:
+        """Every provisioning, staging or running instance labelled with this connector."""
+        client = await asyncio.to_thread(self._get_compute_client)
+
+        def listed() -> list[Any]:
+            labelled = f'labels.{CONNECTOR_TAG} = "{self.connector.id}"'
+            return list(client.list(project=self._config.project_id, zone=self._config.zone, filter=labelled))
+
+        return [
+            CloudInstance(instance.name, self._proxy_id(instance.name))
+            for instance in await asyncio.to_thread(listed)
+            if instance.status in _GCP_LIVE
+        ]
+
+    async def terminate_instance(self, proxy_id: str) -> None:
+        """Delete the instance and wait for the delete operation; an instance gone, or stopping under another delete, counts as terminated."""
+        name = self._key(proxy_id)
+        client = await asyncio.to_thread(self._get_compute_client)
+        from google.api_core.exceptions import GoogleAPICallError
+
+        def delete() -> None:
+            try:
+                client.delete(project=self._config.project_id, zone=self._config.zone, instance=name).result()
+            except GoogleAPICallError:
+                instance = self._get(client, name)
+                if instance is not None and instance.status != "STOPPING":
+                    raise
+
+        await asyncio.to_thread(delete)
+        logger.info("Terminated GCP instance", instance_name=name)
+
+    def _get(self, client: Any, name: str) -> Any:
+        """The instance ``name``; None when the zone has none."""
+        from google.api_core.exceptions import NotFound
+
+        try:
+            return client.get(project=self._config.project_id, zone=self._config.zone, instance=name)
+        except NotFound:
             return None
 
-        proxy = Proxy(
-            id=f"gcp-{instance_name}",
-            host=host,
-            port=PROXY_PORT,
-            username=proxy_username,
-            password=proxy_password,
-            connector_id=self.connector.id,
-            status=ProxyStatus.INITIALIZING,
-            tags=["gcp", self._config.zone],
-            metadata={"instance_name": instance_name},
-        )
-
-        logger.info("Created GCP proxy instance", instance_name=instance_name, host=host)
-        return proxy
-
-    async def terminate_instance(self, instance_id: str) -> bool:
-        """Terminate a GCP Compute Engine instance."""
-        client = await asyncio.to_thread(self._get_compute_client)
-        if not client:
-            return False
-
-        # Remove gcp- prefix if present
-        instance_name = instance_id.replace("gcp-", "")
-        await asyncio.to_thread(
-            client.delete,
-            project=self._config.project_id,
-            zone=self._config.zone,
-            instance=instance_name,
-        )
-        logger.info("Terminated GCP instance", instance_name=instance_name)
-        return True
+    @staticmethod
+    def _address(instance: Any) -> str | None:
+        """An instance's external IP, or its internal one while it has none."""
+        interfaces = list(instance.network_interfaces)
+        external = (config.nat_i_p for interface in interfaces for config in interface.access_configs)
+        internal = (interface.network_i_p for interface in interfaces)
+        return next((address for address in (*external, *internal) if address), None)
 
 
 class AzureProvider(CloudProvider):
-    """Azure VM proxy provider.
+    """Azure VMs in the connector's resource group, on its Ubuntu 24.04 image, through azure-mgmt-compute and azure-identity.
 
-    Requires azure-mgmt-compute and azure-identity to be installed (pip install octoprox[cloud]).
-
-    Connector config options:
-        - subscription_id: Azure subscription ID (required)
-        - resource_group: Resource group name (required)
-        - location: Azure region (default: eastus)
-        - vm_size: VM size (B-series for x86_64, Bps v2 for arm64)
-        - instance_name: Name prefix for created VMs (required)
-        - vnet_name: Virtual network name (required for create)
-        - subnet_name: Subnet name (required for create)
-        - tags: Custom tags to apply to VMs (optional, dict)
-
-    Note: OS image is automatically determined based on VM size.
-    Ubuntu 24.04 LTS is used for all instances.
-
-    Credential config:
-        - auth_mode: "client_secret" (stored service principal secret) or
-          "host_identity" (managed or workload identity of the host; nothing stored)
-        - tenant_id / client_id / client_secret: required in client_secret mode
-        - managed_identity_client_id: optional, host mode, picks a user-assigned identity
-        - target_tenant_id / target_client_id: optional, host mode, an app
-          registration in another tenant that trusts the host identity through
-          a federated credential
+    The credential's ``auth_mode`` picks a stored secret or the host's identity, which may federate into another tenant.
     """
+
+    # Linux VM names run to 64 characters, and the -osdisk, -nic and -pip
+    # names made from them stay within their 80.
+    NAME_LIMIT = 64
+    ID_PREFIX = "azure-"
+    ROW_TAG = "azure"
+    KEY_FIELD = "vm_name"
+    _config: AzureConnectorConfig
 
     def __init__(self, connector: Connector, credential: Credential) -> None:
         super().__init__(connector, credential)
-        # Azure-specific config from connector using typed cloud_config
-        from api.models.connector import AzureConnectorConfig
-
         cloud_config = connector.cloud_config
         if not isinstance(cloud_config, AzureConnectorConfig):
             raise ValueError("AzureProvider requires an Azure connector configuration")
@@ -682,14 +636,16 @@ class AzureProvider(CloudProvider):
         self._compute_client = None
         self._network_client = None
 
-    def _build_credential(self) -> Any:
-        """Create the azure-identity credential the management clients use.
+    @property
+    def place(self) -> str:
+        """The connector's location."""
+        return self._config.location
 
-        The base identity comes from the credential's auth mode. In host mode
-        the credential may name an app registration in another tenant that
-        trusts the host identity through a federated credential; the host
-        identity's token is then exchanged for that app's token, and
-        azure-identity repeats the exchange whenever the token needs refreshing.
+    def _build_credential(self) -> Any:
+        """The azure-identity credential the management clients use, on the base identity of the credential's auth mode.
+
+        In host mode it may name an app registration of another tenant that trusts the host identity, whose token
+        azure-identity then exchanges the host's for, again whenever it needs refreshing.
         """
         from azure.identity import (
             ClientAssertionCredential,
@@ -743,7 +699,7 @@ class AzureProvider(CloudProvider):
         return ClientAssertionCredential(tenant_id=str(target_tenant_id), client_id=str(target_client_id), func=host_assertion)
 
     def _get_azure_clients(self) -> tuple[Any, Any]:
-        """Get or create Azure clients."""
+        """The compute and network management clients, made on first use."""
         try:
             from azure.mgmt.compute import ComputeManagementClient
             from azure.mgmt.network import NetworkManagementClient
@@ -752,11 +708,8 @@ class AzureProvider(CloudProvider):
                 # azure-identity is a separate package from azure-mgmt-*;
                 # _build_credential imports it, so keep it under this guard.
                 azure_credential = self._build_credential()
-        except ImportError:
-            logger.error(
-                "Azure SDK not installed. Install with: pip install octoprox[cloud]"
-            )
-            return None, None
+        except ImportError as exc:
+            raise RuntimeError("the Azure SDK is not installed: install octoprox[cloud]") from exc
 
         if self._compute_client is None:
             self._compute_client = ComputeManagementClient(  # type: ignore[assignment]
@@ -767,54 +720,30 @@ class AzureProvider(CloudProvider):
             )
         return self._compute_client, self._network_client
 
-    async def create_instance(self) -> Proxy | None:
-        """Create a new Azure VM configured as a proxy."""
+    async def create_instance(self, name: str) -> Proxy:
+        """Create the VM ``name`` with its public IP and network interface, and wait until it is provisioned."""
         compute_client, network_client = self._get_azure_clients()
-        if not compute_client or not network_client:
-            return None
-
         if not self._config.vnet_name or not self._config.subnet_name:
-            logger.error("vnet_name and subnet_name required for VM creation")
-            return None
+            raise ValueError("vnet_name and subnet_name are required to create a VM")
 
-        # Get the image reference for this VM size from the config
         image_reference = self._config.get_image_reference()
-
-        # Track created resources for cleanup on failure
-        pip_name: str | None = None
-        nic_name: str | None = None
+        pip_name = f"{name}-pip"
+        nic_name = f"{name}-nic"
+        logger.debug(
+            "Creating Azure VM", connector_id=self.connector.id, vm_name=name, image_reference=image_reference,
+            location=self._config.location,
+        )
+        credentials = ProxyCredentials.generate()
+        custom_data_b64 = base64.b64encode(build_squid_setup_script(credentials).encode()).decode()
+        # The connector's own tags never replace the one a scale run lists by.
+        tags = {"managed-by": "octoprox", **self._config.tags, CONNECTOR_TAG: self.connector.id}
 
         try:
-            import base64
-            import time
-
-            # Build VM name with timestamp for uniqueness
-            vm_name = f"{self._config.instance_name}-{int(time.time())}"
-
-            logger.debug(
-                "Azure create_instance called",
-                connector_id=self.connector.id,
-                image_reference=image_reference,
-                location=self._config.location,
-                vm_name=vm_name,
-            )
-
-            # Generate per-instance proxy credentials and build setup script
-            proxy_username, proxy_password = _generate_proxy_credentials()
-            custom_data = build_squid_setup_script(proxy_username, proxy_password)
-            custom_data_b64 = base64.b64encode(custom_data.encode()).decode()
-
-            # Build tags: start with required tags, then add custom tags
-            tags = {
-                "managed-by": "octoprox",
-            }
-            # Add custom tags from connector config
-            for key, value in self._config.tags.items():
-                tags[key] = str(value)
-
             # Run all blocking Azure SDK calls in a thread to avoid blocking
             # the event loop. Each .result() call blocks waiting for the Azure
-            # operation to complete (5-30+ seconds each).
+            # operation to complete (5-30+ seconds each). The request bodies
+            # are the REST API's JSON (camelCase, nested under "properties"):
+            # the SDK sends a dict as it is, without mapping attribute names.
             def _provision_vm() -> tuple[Any, str | None]:
                 # Get subnet
                 subnet = network_client.subnets.get(
@@ -827,7 +756,7 @@ class AzureProvider(CloudProvider):
                 pip_params = {
                     "location": self._config.location,
                     "sku": {"name": "Standard"},
-                    "public_ip_allocation_method": "Static",
+                    "properties": {"publicIPAllocationMethod": "Static"},
                 }
                 pip_result = network_client.public_ip_addresses.begin_create_or_update(
                     self._config.resource_group, pip_name, pip_params
@@ -836,13 +765,17 @@ class AzureProvider(CloudProvider):
                 # Create NIC
                 nic_params = {
                     "location": self._config.location,
-                    "ip_configurations": [
-                        {
-                            "name": "ipconfig1",
-                            "subnet": {"id": subnet.id},
-                            "public_ip_address": {"id": pip_result.id},
-                        }
-                    ],
+                    "properties": {
+                        "ipConfigurations": [
+                            {
+                                "name": "ipconfig1",
+                                "properties": {
+                                    "subnet": {"id": subnet.id},
+                                    "publicIPAddress": {"id": pip_result.id},
+                                },
+                            }
+                        ],
+                    },
                 }
                 nic_result = network_client.network_interfaces.begin_create_or_update(
                     self._config.resource_group, nic_name, nic_params
@@ -852,39 +785,41 @@ class AzureProvider(CloudProvider):
                 vm_params = {
                     "location": self._config.location,
                     "tags": tags,
-                    "hardware_profile": {"vm_size": self._config.vm_size},
-                    "storage_profile": {
-                        "image_reference": image_reference,
-                        "os_disk": {
-                            "name": f"{vm_name}-osdisk",
-                            "caching": "ReadWrite",
-                            "create_option": "FromImage",
-                            "managed_disk": {"storage_account_type": "Standard_LRS"},
-                        },
-                    },
-                    "os_profile": {
-                        "computer_name": vm_name,
-                        "admin_username": "octoprox",
-                        "custom_data": custom_data_b64,
-                        "linux_configuration": {
-                            "disable_password_authentication": bool(self._config.ssh_public_key),
-                            "ssh": {
-                                "public_keys": [
-                                    {
-                                        "path": "/home/octoprox/.ssh/authorized_keys",
-                                        "key_data": self._config.ssh_public_key,
-                                    }
-                                ] if self._config.ssh_public_key else [],
+                    "properties": {
+                        "hardwareProfile": {"vmSize": self._config.vm_size},
+                        "storageProfile": {
+                            "imageReference": image_reference,
+                            "osDisk": {
+                                "name": f"{name}-osdisk",
+                                "caching": "ReadWrite",
+                                "createOption": "FromImage",
+                                "managedDisk": {"storageAccountType": "Standard_LRS"},
                             },
                         },
-                    },
-                    "network_profile": {
-                        "network_interfaces": [{"id": nic_result.id, "primary": True}]
+                        "osProfile": {
+                            "computerName": name,
+                            "adminUsername": "octoprox",
+                            "customData": custom_data_b64,
+                            "linuxConfiguration": {
+                                "disablePasswordAuthentication": bool(self._config.ssh_public_key),
+                                "ssh": {
+                                    "publicKeys": [
+                                        {
+                                            "path": "/home/octoprox/.ssh/authorized_keys",
+                                            "keyData": self._config.ssh_public_key,
+                                        }
+                                    ] if self._config.ssh_public_key else [],
+                                },
+                            },
+                        },
+                        "networkProfile": {
+                            "networkInterfaces": [{"id": nic_result.id, "properties": {"primary": True}}]
+                        },
                     },
                 }
 
                 vm_result = compute_client.virtual_machines.begin_create_or_update(
-                    self._config.resource_group, vm_name, vm_params
+                    self._config.resource_group, name, vm_params
                 ).result()
 
                 # Get public IP (may need to wait for allocation)
@@ -898,29 +833,7 @@ class AzureProvider(CloudProvider):
 
                 return vm_result, host
 
-            pip_name = f"{vm_name}-pip"
-            nic_name = f"{vm_name}-nic"
-
             vm_result, host = await asyncio.to_thread(_provision_vm)
-
-            if not host:
-                logger.error("VM created but no IP address available")
-                return None
-
-            proxy = Proxy(
-                id=f"azure-{vm_name}",
-                host=host,
-                port=PROXY_PORT,
-                username=proxy_username,
-                password=proxy_password,
-                connector_id=self.connector.id,
-                status=ProxyStatus.INITIALIZING,
-                tags=["azure", self._config.location],
-                metadata={"vm_name": vm_name, "vm_id": vm_result.vm_id},
-            )
-
-            logger.info("Created Azure proxy VM", vm_name=vm_name, host=host)
-            return proxy
 
         except Exception:
             # Clean up any resources that were created before the failure
@@ -928,106 +841,126 @@ class AzureProvider(CloudProvider):
             # Azure reserves the NIC for 180 seconds after a failed VM creation,
             # so we wait and retry to ensure cleanup
             nic_deleted = False
-            if nic_name:
-                # Try immediately first, then wait 180 seconds and retry if needed
-                for attempt in range(2):
-                    try:
-                        if attempt > 0:
-                            logger.info(
-                                "Waiting 180 seconds for Azure NIC reservation to expire",
-                                nic_name=nic_name,
-                            )
-                            await asyncio.sleep(180)
-                        logger.debug("Cleaning up NIC after VM creation failure", nic_name=nic_name)
-                        await asyncio.to_thread(
-                            lambda: network_client.network_interfaces.begin_delete(
-                                self._config.resource_group, nic_name
-                            ).result()
-                        )
-                        nic_deleted = True
-                        logger.info("Successfully cleaned up NIC", nic_name=nic_name)
-                        break
-                    except Exception as cleanup_error:
-                        error_str = str(cleanup_error)
-                        if "NicReservedForAnotherVm" in error_str and attempt == 0:
-                            # Azure reserves NIC for 180 seconds, will retry after wait
-                            continue
-                        logger.warning(
-                            "Failed to clean up NIC after VM creation failure",
+            # Try immediately first, then wait 180 seconds and retry if needed
+            for attempt in range(2):
+                try:
+                    if attempt > 0:
+                        logger.info(
+                            "Waiting 180 seconds for Azure NIC reservation to expire",
                             nic_name=nic_name,
-                            error=error_str,
                         )
-
-            if pip_name:
-                if not nic_deleted:
-                    # If NIC wasn't deleted, we can't delete the public IP either
-                    logger.warning(
-                        "Cannot clean up public IP because NIC cleanup failed",
-                        pip_name=pip_name,
-                        nic_name=nic_name,
+                        await asyncio.sleep(180)
+                    logger.debug("Cleaning up NIC after VM creation failure", nic_name=nic_name)
+                    await asyncio.to_thread(
+                        lambda: network_client.network_interfaces.begin_delete(
+                            self._config.resource_group, nic_name
+                        ).result()
                     )
-                else:
-                    try:
-                        logger.debug("Cleaning up public IP after VM creation failure", pip_name=pip_name)
-                        await asyncio.to_thread(
-                            lambda: network_client.public_ip_addresses.begin_delete(
-                                self._config.resource_group, pip_name
-                            ).result()
-                        )
-                        logger.info("Successfully cleaned up public IP", pip_name=pip_name)
-                    except Exception as cleanup_error:
-                        logger.warning(
-                            "Failed to clean up public IP after VM creation failure",
-                            pip_name=pip_name,
-                            error=str(cleanup_error),
-                        )
+                    nic_deleted = True
+                    logger.info("Successfully cleaned up NIC", nic_name=nic_name)
+                    break
+                except Exception as cleanup_error:
+                    error_str = str(cleanup_error)
+                    if "NicReservedForAnotherVm" in error_str and attempt == 0:
+                        # Azure reserves NIC for 180 seconds, will retry after wait
+                        continue
+                    logger.warning(
+                        "Failed to clean up NIC after VM creation failure",
+                        nic_name=nic_name,
+                        error=error_str,
+                    )
+
+            if not nic_deleted:
+                # If NIC wasn't deleted, we can't delete the public IP either
+                logger.warning(
+                    "Cannot clean up public IP because NIC cleanup failed",
+                    pip_name=pip_name,
+                    nic_name=nic_name,
+                )
+            else:
+                try:
+                    logger.debug("Cleaning up public IP after VM creation failure", pip_name=pip_name)
+                    await asyncio.to_thread(
+                        lambda: network_client.public_ip_addresses.begin_delete(
+                            self._config.resource_group, pip_name
+                        ).result()
+                    )
+                    logger.info("Successfully cleaned up public IP", pip_name=pip_name)
+                except Exception as cleanup_error:
+                    logger.warning(
+                        "Failed to clean up public IP after VM creation failure",
+                        pip_name=pip_name,
+                        error=str(cleanup_error),
+                    )
 
             raise
 
-    async def terminate_instance(self, instance_id: str) -> bool:
-        """Terminate an Azure VM."""
+        if not host:
+            raise RuntimeError(f"Azure VM {name} runs without an address")
+        logger.info("Created Azure proxy VM", vm_name=name, host=host)
+        return self._proxy(name, host, credentials, vm_id=vm_result.vm_id)
+
+    async def tagged_instances(self) -> list[CloudInstance]:
+        """Every VM of the resource group tagged with this connector, unless it is being deleted or failed to provision."""
+        compute_client, _ = self._get_azure_clients()
+
+        def listed() -> list[CloudInstance]:
+            return [
+                CloudInstance(vm.name, self._proxy_id(vm.name))
+                for vm in compute_client.virtual_machines.list(self._config.resource_group)
+                if (vm.tags or {}).get(CONNECTOR_TAG) == self.connector.id and vm.provisioning_state not in _AZURE_DEAD
+            ]
+
+        return await asyncio.to_thread(listed)
+
+    async def terminate_instance(self, proxy_id: str) -> None:
+        """Delete the VM and wait until it is gone, then its network interface and public IP; a VM gone, or under another delete, counts as terminated."""
+        from azure.core.exceptions import HttpResponseError
+
+        name = self._key(proxy_id)
         compute_client, network_client = self._get_azure_clients()
-        if not compute_client:
-            return False
 
-        # Remove azure- prefix if present
-        vm_name = instance_id.replace("azure-", "")
-
-        # Run all blocking Azure SDK delete calls in a thread
-        def _delete_vm_resources() -> None:
-            # Delete VM
-            compute_client.virtual_machines.begin_delete(
-                self._config.resource_group, vm_name
-            ).result()
-
-            # Clean up NIC and public IP
-            nic_name = f"{vm_name}-nic"
-            pip_name = f"{vm_name}-pip"
-
+        def delete() -> None:
             try:
-                network_client.network_interfaces.begin_delete(
-                    self._config.resource_group, nic_name
-                ).result()
-            except Exception as cleanup_error:
-                logger.warning(
-                    "Failed to clean up NIC during VM termination",
-                    nic_name=nic_name,
-                    error=str(cleanup_error),
-                )
+                compute_client.virtual_machines.begin_delete(self._config.resource_group, name).result()
+            except HttpResponseError:
+                state = self._provisioning_state(compute_client, name)
+                if state == _AZURE_DELETING:
+                    # The other delete removes the network resources once the VM is gone.
+                    return
+                if state is not None:
+                    raise
+            # The interface goes first: it holds the public IP.
+            for operations, resource in (
+                (network_client.network_interfaces, f"{name}-nic"),
+                (network_client.public_ip_addresses, f"{name}-pip"),
+            ):
+                try:
+                    operations.begin_delete(self._config.resource_group, resource).result()
+                except Exception as cleanup_error:
+                    logger.warning(
+                        "Failed to clean up a network resource of a terminated VM",
+                        resource=resource,
+                        error=error_text(cleanup_error),
+                    )
 
-            try:
-                network_client.public_ip_addresses.begin_delete(
-                    self._config.resource_group, pip_name
-                ).result()
-            except Exception as cleanup_error:
-                logger.warning(
-                    "Failed to clean up public IP during VM termination",
-                    pip_name=pip_name,
-                    error=str(cleanup_error),
-                )
+        await asyncio.to_thread(delete)
+        logger.info("Terminated Azure VM", vm_name=name)
 
-        await asyncio.to_thread(_delete_vm_resources)
+    def _provisioning_state(self, compute_client: Any, name: str) -> str | None:
+        """The VM's provisioning state; None when the resource group has no such VM."""
+        from azure.core.exceptions import ResourceNotFoundError
 
-        logger.info("Terminated Azure VM", vm_name=vm_name)
-        return True
+        try:
+            vm = compute_client.virtual_machines.get(self._config.resource_group, name)
+        except ResourceNotFoundError:
+            return None
+        return str(vm.provisioning_state or "")
 
+
+# The cloud API of each cloud credential type.
+_PROVIDERS: dict[str, type[CloudProvider]] = {
+    CredentialType.AWS: AWSProvider,
+    CredentialType.GCP: GCPProvider,
+    CredentialType.AZURE: AzureProvider,
+}

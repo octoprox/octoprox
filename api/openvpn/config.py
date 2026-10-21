@@ -9,9 +9,11 @@ told can be tested without either.
 
 from __future__ import annotations
 
+import ipaddress
 import re
+from typing import Protocol
 
-from api.models.openvpn import OpenVpnPeer, OpenVpnServerSettings
+from api.models.openvpn import OpenVpnPeer, OpenVpnProtocol, OpenVpnServerSettings
 
 # The ciphers both the daemon and every current client negotiate from. The
 # fallback is for a client too old to negotiate (none that can import our
@@ -22,12 +24,43 @@ _UNSAFE = re.compile(r"[^a-zA-Z0-9_.-]+")
 _FILENAME_LIMIT = 64
 
 
+class DaemonIdentity(Protocol):
+    """What the daemon is started with: the stored settings row, or the feed's copy a gateway runs (no CA key)."""
+
+    @property
+    def ca_cert(self) -> str: ...
+
+    @property
+    def server_cert(self) -> str: ...
+
+    @property
+    def server_key(self) -> str: ...
+
+    @property
+    def tls_crypt_key(self) -> str: ...
+
+    @property
+    def protocol(self) -> OpenVpnProtocol: ...
+
+    @property
+    def keepalive_interval(self) -> int: ...
+
+    @property
+    def keepalive_timeout(self) -> int: ...
+
+    @property
+    def network(self) -> ipaddress.IPv4Network: ...
+
+    @property
+    def gateway(self) -> str: ...
+
+
 def _inline(tag: str, body: str) -> list[str]:
     return [f"<{tag}>", body.strip(), f"</{tag}>"]
 
 
 def render_server_conf(
-    server: OpenVpnServerSettings,
+    server: DaemonIdentity,
     *,
     interface: str,
     port: int,

@@ -8,7 +8,7 @@ import { Plus, Puzzle, Trash2 } from 'lucide-react'
 import { deleteProvider, fetchProvider, ProviderDetail, ProviderSpec, ProviderSummary } from '../../api/client'
 import { useProviders } from '../../hooks/useProviders'
 import { useToast } from '../../contexts/ToastContext'
-import { DataTable } from '../../components/DataTable'
+import { DataTable, type DataTableFeatures } from '../../components/DataTable'
 import { Page, EmptyState } from '../../components/layout/Page'
 import { ProviderLogo } from '../../components/ProviderLogo'
 import { ProviderBuilder, duplicateSpec } from '../../components/providers/ProviderBuilder'
@@ -48,7 +48,7 @@ export default function ProvidersSection() {
     onError: (e: Error) => { setPendingDelete(null); toast.show(e.message || 'Failed to delete provider', 'error') },
   })
 
-  const columns: ColumnDef<ProviderSummary>[] = useMemo(() => [
+  const columns: ColumnDef<DataTableFeatures, ProviderSummary>[] = useMemo(() => [
     {
       accessorKey: 'name',
       header: 'Provider',
@@ -98,7 +98,7 @@ export default function ProvidersSection() {
       enableSorting: false,
       cell: ({ row }) => row.original.editable ? (
         <div className="flex justify-end">
-          <button onClick={(e) => { e.stopPropagation(); setPendingDelete(row.original) }} className="p-1 rounded text-fg-subtle hover:text-danger hover:bg-danger-soft" title="Delete">
+          <button onClick={(e) => { e.stopPropagation(); setPendingDelete(row.original) }} className="p-1 rounded-sm text-fg-subtle hover:text-danger hover:bg-danger-soft" title="Delete">
             <Trash2 className="w-4 h-4" />
           </button>
         </div>

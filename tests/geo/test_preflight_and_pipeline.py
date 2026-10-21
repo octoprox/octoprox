@@ -1,11 +1,9 @@
 # Copyright 2026 Octoprox Authors
 # SPDX-License-Identifier: Apache-2.0
 
-"""Tests for the preflight check and the observation pipeline's pure parts."""
+"""Tests for the preflight check and its verdict cache."""
 
-import json
-from collections.abc import Iterator
-from datetime import datetime, timedelta
+import asyncio
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -13,23 +11,13 @@ import httpx
 import pytest
 
 from api.core.config import Settings
-from api.core.event_bus import event_bus
-from api.core.signals import exit_ip_changed, exit_ip_observed
 from api.db.redis import GEO_PREFLIGHT_KEY, RedisClient
 from api.geo.models import (
     ContradictedAction,
-    ExitJudgement,
-    IpObservation,
     LocationRules,
-    ObservationSource,
     UnknownAction,
 )
-from api.geo.observations import (
-    ObservationRecorder,
-    aggregate_exits,
-    decide_hand_outs,
-    decode_batch,
-)
+from api.geo.observations import ObservationRecorder
 from api.geo.preflight import PreflightChecker, PreflightVerdict
 from api.geo.service import GeoService
 from api.geo.settings import GeoSettingsStore
@@ -38,12 +26,20 @@ from api.models.location import LocationTarget
 from api.models.project import Project
 from api.models.proxy import Proxy
 from api.providers.sdk.sources import IpDiscoverer
+from tests.geo.doubles import Retired, Sightings
 from tests.geo.test_readers import MAXMIND_RECORD, write_mmdb
 
 GB_IP = "81.2.69.160"
 
 
-def _checker(geo_service: GeoService, payload: object, status: int = 200, calls: list[str] | None = None) -> PreflightChecker:
+def _checker(
+    geo_service: GeoService,
+    payload: object,
+    status: int = 200,
+    calls: list[str] | None = None,
+    sightings: Sightings | None = None,
+    retired: Retired | None = None,
+) -> PreflightChecker:
     """A checker whose echo requests answer ``payload`` without a network."""
 
     def factory(proxy_url: str, timeout: float) -> httpx.AsyncClient:
@@ -54,7 +50,7 @@ def _checker(geo_service: GeoService, payload: object, status: int = 200, calls:
         )
 
     geo_service.discoverer = lambda: IpDiscoverer(geo_service.echo_spec(), client_factory=factory)  # type: ignore[method-assign]
-    return PreflightChecker(geo_service, None)
+    return PreflightChecker(geo_service, None, sightings=sightings or Sightings(), exclusions=retired or Retired())
 
 
 @pytest.fixture
@@ -92,16 +88,9 @@ def _proxy(**metadata: object) -> Proxy:
 
 
 @pytest.fixture
-def sightings() -> Iterator[list[dict]]:
-    """The ``exit_ip_observed`` sightings preflight hands to the attributor for pooled slots."""
-    events: list[dict] = []
-
-    async def receive(sender: object, **kwargs: object) -> None:
-        events.append(kwargs)
-
-    exit_ip_observed.connect(receive)
-    yield events
-    exit_ip_observed.disconnect(receive)
+def sightings() -> Sightings:
+    """The sightings preflight hands the gateway's sighting publisher for the workers' attribution, for pooled slots."""
+    return Sightings()
 
 
 class TestPreflight:
@@ -140,24 +129,40 @@ class TestPreflight:
         # A pin is judged on the row, never at preflight.
         assert PreflightChecker.requirement(None, _proxy(session_id="s", country="GB", country_source="manual")) == (None, None)
 
-    async def test_match(self, geo_service: GeoService, sightings: list[dict]) -> None:
+    async def test_match(self, geo_service: GeoService, sightings: Sightings) -> None:
         calls: list[str] = []
-        checker = _checker(geo_service, {"ip": GB_IP, "country": "GB"}, calls=calls)
+        checker = _checker(geo_service, {"ip": GB_IP, "country": "GB"}, calls=calls, sightings=sightings)
         slot = _proxy()
         verdict = await checker.check(VERIFIED, slot, session_id="s", requested=LocationTarget(country="GB"))
         assert verdict.ok and verdict.observed == LocationTarget(country="GB") and verdict.expected == LocationTarget(country="GB") and verdict.reason == "match"
         assert calls == ["http://u:p@gw:8000"]
         assert checker.checks == 1 and checker.rejections == 0
-        # The slot's sighting goes to the attributor, which judges the slot's own claim and records it.
+        # The slot's sighting goes to a worker's attribution, which judges the slot's own claim and
+        # records it: the gateway records nothing.
         assert geo_service.observation_recorder.pending == 0
-        assert len(sightings) == 1
-        sighting = dict(sightings[0])
-        # The databases' answer travels with the sighting, so the attributor does not look the IP up again.
-        assert [c.country for c in sighting.pop("candidates")] == ["GB"]
-        assert sighting == {
+        (sighting,) = sightings.messages
+        # The databases' answer travels with the sighting, so the worker does not look the IP up again,
+        # and so do when and where the exit was seen.
+        assert [c.country for c in sighting.candidates] == ["GB"]
+        assert sighting.instance_id == "t" and sighting.observed_at is not None
+        assert sighting.model_dump(exclude={"candidates", "observed_at", "instance_id"}) == {
             "proxy_id": slot.id, "ip": GB_IP, "source": "preflight",
             "endpoint_country": "GB", "endpoint_state": None, "endpoint_city": None, "session_id": "s",
         }
+
+    async def test_a_slot_judged_out_is_retired_here_and_never_changed(self, geo_service: GeoService, sightings: Sightings) -> None:
+        """Its own claim is judged on a copy: a refusing project's contradicted slot leaves this gateway's routing now."""
+        retired = Retired()
+        checker = _checker(geo_service, {"ip": GB_IP}, sightings=sightings, retired=retired)
+        slot = _proxy(session_id="slot-1", geo="US")
+        before = slot.model_copy(deep=True)
+        verdict = await checker.check(VERIFIED, slot, session_id="s", requested=LocationTarget(country="GB"))
+        assert verdict.ok  # the request's own place matched
+        assert retired.ids == [slot.id] and slot == before and len(sightings.messages) == 1
+        # A project that routes contradictions on the evidence keeps the slot.
+        kept = _checker(geo_service, {"ip": GB_IP}, retired=(evidence := Retired()))
+        await kept.check(_project(LOCATING), _proxy(session_id="slot-2", geo="US"), session_id="s", requested=LocationTarget(country="GB"))
+        assert evidence.ids == []
 
     async def test_mismatch(self, geo_service: GeoService) -> None:
         checker = _checker(geo_service, {"ip": GB_IP, "country": "GB"})
@@ -168,10 +173,10 @@ class TestPreflight:
         assert checker.rejections == 1
         assert "requested US" in PreflightChecker.rejection_message(verdict, VERIFYING)
 
-    async def test_pooled_promise_is_judged_on_the_row_not_at_preflight(self, geo_service: GeoService, sightings: list[dict]) -> None:
-        checker = _checker(geo_service, {"ip": GB_IP})
+    async def test_pooled_promise_is_judged_on_the_row_not_at_preflight(self, geo_service: GeoService, sightings: Sightings) -> None:
+        checker = _checker(geo_service, {"ip": GB_IP}, sightings=sightings)
         verdict = await checker.check(OBSERVE, _proxy(session_id="s", geo="US"), session_id=None, requested=None)
-        assert verdict.reason == "not applicable" and checker.checks == 0 and sightings == []
+        assert verdict.reason == "not applicable" and checker.checks == 0 and sightings.messages == []
         # A dynamic gateway's rendered country is the vendor's promise and is verified.
         rendered = _proxy(dynamic_sessions="true", session_id="abc", geo="US")
         verdict = await checker.check(OBSERVE, rendered, session_id="order-1", requested=None)
@@ -191,11 +196,11 @@ class TestPreflight:
         assert not verdict.acceptable(LOCATING) and not verdict.acceptable(STRICT)
         assert PreflightChecker.rejection_message(verdict, STRICT) == "Exit country not confirmed: requested US, observed unknown (203.0.113.5)"
 
-    async def test_echo_failure_is_ok(self, geo_service: GeoService, sightings: list[dict]) -> None:
-        checker = _checker(geo_service, {}, status=503)
+    async def test_echo_failure_is_ok(self, geo_service: GeoService, sightings: Sightings) -> None:
+        checker = _checker(geo_service, {}, status=503, sightings=sightings)
         verdict = await checker.check(VERIFIED, _proxy(), session_id=None, requested=LocationTarget(country="US"))
         assert verdict.ok and verdict.reason == "echo request failed"
-        assert geo_service.observation_recorder.pending == 0 and sightings == []
+        assert geo_service.observation_recorder.pending == 0 and sightings.messages == []
         # An echo outage is never a refusal, whatever the level.
         assert all(verdict.acceptable(rules) for rules in ALL_RULES)
 
@@ -385,100 +390,50 @@ class TestPreflight:
         assert PreflightVerdict.from_json('{"ok": true, "expected": "GB", "observed": "GB", "ip": "1.1.1.1", "reason": "match"}') is None
 
 
-@pytest.mark.usefixtures("db_engine")
 class TestPreflightCache:
-    async def test_exit_change_drops_the_cached_verdict(self, redis_client: RedisClient) -> None:
-        checker = PreflightChecker(MagicMock(), redis_client)
-        checker.start()
+    async def test_invalidate_drops_only_that_proxys_verdict(self, redis_client: RedisClient) -> None:
+        """What the verifier does for a slot replaced while checked; a worker drops the same key when an exit moves."""
+        checker = PreflightChecker(MagicMock(spec=GeoService), redis_client, sightings=Sightings(), exclusions=Retired())
+        verdict = PreflightVerdict(ok=True, expected=LocationTarget(country="GB"), observed=LocationTarget(country="GB"), ip="81.2.69.160", reason="match")
+        key = GEO_PREFLIGHT_KEY.format(project_id="p", proxy_id="x")
+        other = GEO_PREFLIGHT_KEY.format(project_id="p", proxy_id="other")
+        await checker._store(key, verdict, ttl=600)
+        await checker._store(other, verdict, ttl=600)
+        assert await checker._cached(key) == verdict
+        await checker.invalidate("p", "x")
+        assert await checker._cached(key) is None and await checker._cached(other) == verdict
+
+    async def test_a_cache_without_redis_is_a_miss(self) -> None:
+        checker = PreflightChecker(MagicMock(spec=GeoService), None, sightings=Sightings(), exclusions=Retired())
+        await checker.invalidate("p", "x")
+        assert await checker._cached(GEO_PREFLIGHT_KEY.format(project_id="p", proxy_id="x")) is None
+
+    async def test_a_redis_that_does_not_answer_costs_each_cache_call_its_deadline(
+        self, redis_client: RedisClient, test_redis_url: str
+    ) -> None:
+        """A request waits on the cache: a stuck Redis must cost it a miss, not the client's reply bound."""
+        client = RedisClient(test_redis_url, request_timeout=0.2)
+        await client.connect()
+        checker = PreflightChecker(MagicMock(spec=GeoService), client, sightings=Sightings(), exclusions=Retired())
+        gb = LocationTarget(country="GB")
+        verdict = PreflightVerdict(ok=True, expected=gb, observed=gb, ip=GB_IP, reason="match")
+        key = GEO_PREFLIGHT_KEY.format(project_id="p", proxy_id="x")
         try:
-            key = GEO_PREFLIGHT_KEY.format(project_id="p", proxy_id="x")
-            verdict = PreflightVerdict(ok=True, expected=LocationTarget(country="GB"), observed=LocationTarget(country="GB"), ip="81.2.69.160", reason="match")
             await checker._store(key, verdict, ttl=600)
-            assert await checker._cached(key) is not None
-            # Another proxy moving leaves this verdict alone.
-            await event_bus.publish(exit_ip_changed, None, proxy_id="other", project_id="p", old_ip="1.1.1.1", new_ip="2.2.2.2")
-            assert await checker._cached(key) is not None
-            await event_bus.publish(exit_ip_changed, None, proxy_id="x", project_id="p", old_ip="81.2.69.160", new_ip="2.2.2.2")
+            await redis_client.client.client_pause(2000, all=True)
+            loop = asyncio.get_running_loop()
+            for call in (
+                lambda: checker._cached(key),
+                lambda: checker._store(key, verdict, ttl=600),
+                lambda: checker.invalidate("p", "x"),
+            ):
+                started = loop.time()
+                await call()
+                assert loop.time() - started < 0.6
             assert await checker._cached(key) is None
-            # No owning project: nothing was ever cached under a project-less key; must not raise.
-            await event_bus.publish(exit_ip_changed, None, proxy_id="x", project_id=None, old_ip="a", new_ip="b")
         finally:
-            checker.stop()
+            await client.close()
+        # Once Redis answers again the verdict cached before is there: the drop cut short never ran.
+        await redis_client.client.ping()
+        assert PreflightVerdict.from_json(await redis_client.client.get(key)) == verdict
 
-
-class TestRecorder:
-    def test_buffer_is_bounded(self) -> None:
-        recorder = ObservationRecorder(None, max_buffer=3)
-        for i in range(5):
-            recorder.record(IpObservation(source=ObservationSource.MANUAL, ip=f"10.0.0.{i}"))
-        assert recorder.pending == 3 and recorder.dropped == 2
-        assert recorder._buffer[0].ip == "10.0.0.2"
-
-    async def test_publish_without_redis(self) -> None:
-        recorder = ObservationRecorder(None)
-        recorder.record(IpObservation(source=ObservationSource.MANUAL, ip="10.0.0.1"))
-        assert await recorder.publish() == 0
-        assert recorder.pending == 1
-
-
-class TestAggregate:
-    def test_exits_fold_per_connector_and_ip(self) -> None:
-        early = datetime(2026, 9, 21, 10, 0, 0)
-        late = datetime(2026, 9, 21, 12, 0, 0)
-        sightings = [
-            (IpObservation(observed_at=late, connector_id="c1", source=ObservationSource.HEALTH_CHECK, ip="1.1.1.1", resolved_country="GB"), True),
-            (IpObservation(observed_at=early, connector_id="c1", source=ObservationSource.DISCOVERY, ip="1.1.1.1", resolved_country="DE"), True),
-            (IpObservation(observed_at=early, connector_id="c1", source=ObservationSource.DISCOVERY, ip="1.1.1.2"), True),
-            (IpObservation(observed_at=early, connector_id=None, source=ObservationSource.MANUAL, ip="1.1.1.3"), True),
-            # Preflight re-verifying an exit the proxy already had: latest state, no hand-out.
-            (IpObservation(observed_at=late, connector_id="c1", source=ObservationSource.PREFLIGHT, ip="1.1.1.1", proxy_id="p1"), False),
-        ]
-        exits = aggregate_exits(sightings)
-        assert set(exits) == {("c1", "1.1.1.1"), ("c1", "1.1.1.2")}
-        first = exits[("c1", "1.1.1.1")]
-        assert first.count == 2 and first.first_seen == early and first.last_seen == late and first.country == "GB"
-        assert first.source == "preflight" and first.proxy_id == "p1"  # newest observation wins the state
-        assert exits[("c1", "1.1.1.2")].count == 1 and exits[("c1", "1.1.1.2")].country is None
-
-    def test_hand_outs_are_decided_against_the_last_counted_exit(self) -> None:
-        """Two instances reporting the same exit, however far apart, are one hand-out; a change is one more."""
-        t = datetime(2026, 9, 22, 9, 29, 9)
-        hc = ObservationSource.HEALTH_CHECK
-        a = IpObservation(observed_at=t, proxy_id="p1", connector_id="c1", source=ObservationSource.DISCOVERY, ip="1.1.1.1", instance_id="octoprox-2")
-        b = IpObservation(observed_at=t + timedelta(seconds=50), proxy_id="p1", connector_id="c1", source=hc, ip="1.1.1.1", instance_id="octoprox-3")
-        moved = IpObservation(observed_at=t + timedelta(minutes=5), proxy_id="p1", connector_id="c1", source=hc, ip="2.2.2.2")
-        back = IpObservation(observed_at=t + timedelta(minutes=9), proxy_id="p1", connector_id="c1", source=hc, ip="1.1.1.1")
-        fresh = IpObservation(observed_at=t, proxy_id="p2", connector_id="c1", source=hc, ip="1.1.1.1")
-        known = IpObservation(observed_at=t, proxy_id="p4", connector_id="c1", source=hc, ip="4.4.4.4")
-
-        marked, latest = decide_hand_outs([back, b, moved, a, fresh, known], previous={"p4": "4.4.4.4"})
-        by_obs = {id(o): hand_out for o, hand_out in marked}
-        assert by_obs[id(a)] is True and by_obs[id(b)] is False  # the same exit, from another instance, later
-        assert by_obs[id(moved)] is True and by_obs[id(back)] is True  # a real change, and a real change back
-        assert by_obs[id(fresh)] is True  # never counted before
-        assert by_obs[id(known)] is False  # already the last counted exit
-        # A sighting with no proxy cannot be a hand-out to one.
-        orphan = IpObservation(observed_at=t, connector_id="c1", source=hc, ip="9.9.9.9")
-        assert decide_hand_outs([orphan], previous={})[0][0][1] is False
-        # What to record: every proxy whose exit is new or moved, nothing for the unchanged one.
-        assert latest == {"p1": "1.1.1.1", "p2": "1.1.1.1"}
-
-        exits = aggregate_exits(marked)
-        assert exits[("c1", "1.1.1.1")].count == 3  # a, back, fresh
-        assert exits[("c1", "2.2.2.2")].count == 1
-
-        # Redis knows nothing (upgrade, Redis loss): the exit table decides.
-        legacy = IpObservation(observed_at=t, proxy_id="p5", connector_id="c1", source=hc, ip="5.5.5.5")
-        on_record = {("c1", "1.1.1.1"): "p1", ("c1", "5.5.5.5"): None}
-        cold, _ = decide_hand_outs([a, fresh, legacy], previous={}, on_record=on_record)
-        cold_by_obs = {id(o): hand_out for o, hand_out in cold}
-        assert cold_by_obs[id(a)] is False  # p1 already holds 1.1.1.1 on record
-        assert cold_by_obs[id(fresh)] is True  # p2 taking an IP p1 held is a hand-out
-        assert cold_by_obs[id(legacy)] is False  # a row from before per-proxy state: counted before
-
-    def test_decode_batch_splits_sightings_from_judgements_and_skips_garbage(self) -> None:
-        good = IpObservation(source=ObservationSource.MANUAL, ip="1.1.1.1").model_dump_json()
-        judgement = ExitJudgement(proxy_id="p1", connector_id="c1", ip="1.1.1.1", country_conflict=True).model_dump_json()
-        observations, judgements = decode_batch([good.encode(), judgement.encode(), b"not json", json.dumps({"ip": "x"}).encode()])
-        assert len(observations) == 1 and observations[0].ip == "1.1.1.1"
-        assert len(judgements) == 1 and judgements[0].proxy_id == "p1" and judgements[0].country_conflict is True

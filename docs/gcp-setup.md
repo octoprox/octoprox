@@ -38,23 +38,28 @@ compute.instances.create
 compute.instances.delete
 compute.instances.get
 compute.instances.list
+compute.instances.setLabels
 compute.instances.setMetadata
 compute.instances.setTags
 compute.disks.create
 compute.subnetworks.use
 compute.subnetworks.useExternalIp
 compute.networks.use
+compute.networks.useExternalIp
+compute.zoneOperations.get
 ```
 
 ### 1.2 Option A: Host identity (recommended)
 
 Give the workload that runs Octoprox a service account with the roles above:
 
-- **GKE:** enable Workload Identity Federation for GKE on the cluster and grant the roles to the Octoprox Kubernetes service account's principal, or bind that Kubernetes service account to a Google service account that has them.
+- **GKE:** enable Workload Identity Federation for GKE on the cluster and grant the roles to the principal of the Kubernetes service account the Octoprox worker pods run as, or bind that Kubernetes service account to a Google service account that has them.
 - **GCE:** attach the service account to the VM with the `cloud-platform` access scope.
 - **Elsewhere:** point `GOOGLE_APPLICATION_CREDENTIALS` on the Octoprox container at a key file or a Workload Identity Federation configuration file, if you would rather supply credentials to the process than store them in Octoprox.
 
 Octoprox picks the identity up through Application Default Credentials, so no Octoprox-side configuration is needed beyond choosing the mode.
+
+Only the processes that launch, watch and terminate instances call Compute Engine: the single instance, or in a [role cluster]({{ site.baseurl }}/architecture) the workers, which run the scaling jobs. The api, gateways and controller never call GCP (the api checks a credential's fields without calling it), so they need no identity; giving them the workers' does no harm.
 
 Credential config: `{"auth_mode": "host_identity"}`.
 
@@ -241,6 +246,19 @@ curl -X POST http://localhost:8000/api/v1/projects/{project_id}/connectors \
 5. Fill in the configuration fields
 6. Click **Save**
 
+## How Octoprox Manages the Instances
+
+A worker's scale job runs for each GCP connector about every 30 seconds, and at once after the connector is created or edited. It creates, rotates, drains and deletes the connector's instances.
+
+- **Names and labels.** Each instance is named `<instance_name>-<epoch seconds>-<6 hex>`, cut to 63 characters. Every instance carries the labels `managed-by=octoprox`, `octoprox-connector=<connector id>` and the connector's own `tags` as labels (lower-cased), which never replace `octoprox-connector`.
+- **No credentials in labels.** Each instance's proxy credentials are random and live only in its `startup-script` metadata item, the start-up script that installs Squid, as in 5.x. No label and no other metadata item holds them; whoever can read an instance's metadata (`compute.instances.get`, which Compute Viewer grants) can read its start-up script, and with it the credentials, as with 5.x.
+- **A listing when needed.** A run lists the connector's instances with one `instances.list` call in its zone, filtered by the `octoprox-connector` label (instances that are provisioning, staging or running count), while a create is under way (or one a worker never finished is not settled yet) or the connector is being deleted, and otherwise once an hour. That is one call per cloud connector an hour, and one about every 30 seconds while it creates instances.
+- **Instances without a row are deleted.** A labelled instance that has no proxy row in Octoprox, and that no worker is creating, is deleted at the next listing, within the hour, and logged as `Terminating a cloud instance with no row`: its creator died, or Redis lost track of the create, before the row was saved. That includes an instance created by hand with the label copied, so never copy the `octoprox-connector` label onto instances of your own. An instance whose create failed after Google had made it (it runs without an address, or Octoprox could not save its row) has no row either: the create's error is recorded on the connector, and the instance is deleted at the next listing, within the hour. A stopped instance is not listed, so it is never deleted this way. Instances 5.x created carry no `octoprox-connector` label and are managed through their rows, as before.
+
+Creates a worker never finished, the read of the connector before each create, deleting a cloud connector, and which failures are only logged work the same on every cloud: see [Cloud scaling]({{ site.baseurl }}/architecture#cloud-scaling).
+
+The roles of 1.1 cover the listing (`compute.instances.list`) and the labels, which are set when the instance is created and need `compute.instances.setLabels`. 5.x set its `managed-by` label the same way, so a role that served 5.x already has it.
+
 ## Configuration Reference
 
 ### Credential
@@ -265,7 +283,7 @@ curl -X POST http://localhost:8000/api/v1/projects/{project_id}/connectors \
 | `max_proxies` | No | Maximum proxy instances (default: 10) | `10` |
 | `min_rotation_period_minutes` | No | Minimum instance lifetime (default: 60) | `60` |
 | `max_rotation_period_minutes` | No | Maximum instance lifetime (default: 1440) | `1440` |
-| `tags` | No | Custom labels for instances | `{"environment": "prod"}` |
+| `tags` | No | Custom labels for instances, beside `managed-by` and `octoprox-connector` | `{"environment": "prod"}` |
 
 > **Note:** The source image is automatically selected based on machine type. Octoprox uses Ubuntu 24.04 LTS for all instances.
 

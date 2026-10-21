@@ -1,23 +1,17 @@
 # Copyright 2026 Octoprox Authors
 # SPDX-License-Identifier: Apache-2.0
 
-"""Provider registry: the single lookup table for every provider type.
+"""The provider registry: one lookup table for every provider type a credential can name, whatever its origin.
 
-A *provider type* is anything a credential's ``type`` can point at: the four
-code-implemented types (static, AWS, GCP, Azure), the descriptors shipped in
-``api/providers/builtin``, descriptors mounted by the operator, plugin entry
-points, and admin-authored descriptors stored in Postgres. The registry hides
-those origins behind one interface used by routes (form schemas, validation),
-the provider syncer (provider factories) and the proxy manager (cloud checks).
+Each process builds one at start (:func:`registry_from_settings`) and hands it to whatever needs providers.
 """
 
 from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from functools import lru_cache
 from pathlib import Path
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 import structlog
 
@@ -35,6 +29,9 @@ from api.providers.sdk.loader import (
 )
 from api.providers.sdk.provider import DescriptorProvider, SdkRuntime
 from api.providers.sdk.validation import FieldSetValidator
+
+if TYPE_CHECKING:
+    from api.core.config import Settings
 
 logger = structlog.get_logger()
 
@@ -245,9 +242,6 @@ class ProviderRegistry:
     def ids(self) -> set[str]:
         return set(self._types)
 
-    def is_known(self, type_id: str) -> bool:
-        return type_id in self._types
-
     def is_syncable(self, type_id: str) -> bool:
         ptype = self._types.get(type_id)
         return bool(ptype and ptype.syncable)
@@ -261,6 +255,16 @@ class ProviderRegistry:
         if ptype is None or ptype.factory is None:
             return None
         return ptype.factory(connector, credential)
+
+    def descriptor_provider(self, connector: Connector, credential: Credential | None) -> DescriptorProvider | None:
+        """The connector's descriptor provider, built from ``credential``; raises what the type's factory raises.
+
+        None without a credential, for a type with no factory, and for a provider that is not a descriptor provider.
+        """
+        if credential is None:
+            return None
+        provider = self.create_provider(connector, credential)
+        return provider if isinstance(provider, DescriptorProvider) else None
 
     # --- validation -------------------------------------------------------------
 
@@ -319,48 +323,29 @@ def build_registry(
     return registry
 
 
+def egress_policy_from_settings(settings: Any) -> EgressPolicy:
+    """The egress guard's knobs from application settings, for descriptor calls and IP database downloads alike."""
+    return EgressPolicy(
+        allow_http=bool(settings.provider_egress_allow_http),
+        allow_private=bool(settings.provider_egress_allow_private),
+        pin_dns=not bool(settings.provider_egress_allow_private),
+    )
+
+
 def runtime_from_settings(settings: Any) -> SdkRuntime:
     """Build the SDK runtime from application settings."""
     return SdkRuntime(
-        egress_policy=EgressPolicy(
-            allow_http=bool(settings.provider_egress_allow_http),
-            allow_private=bool(settings.provider_egress_allow_private),
-            pin_dns=not bool(settings.provider_egress_allow_private),
-        ),
+        egress_policy=egress_policy_from_settings(settings),
         http_timeout_seconds=float(settings.provider_http_timeout_seconds),
         max_response_bytes=int(settings.provider_http_max_response_bytes),
     )
 
 
-@lru_cache
-def get_provider_registry() -> ProviderRegistry:
-    """Process-wide registry, built from settings on first use.
+def registry_from_settings(settings: Settings) -> ProviderRegistry:
+    """The registry a process builds at start: the code types and the built-in, operator and plugin descriptors.
 
-    Custom (database) descriptors are loaded separately by
-    :class:`api.providers.store.ProviderStore` once a session factory exists.
+    The provider store applies the custom (database) descriptors to it afterwards, and again whenever they change.
     """
-    from api.core.config import settings
-
     providers_dir = Path(settings.providers_dir) if settings.providers_dir else None
     return build_registry(runtime=runtime_from_settings(settings), providers_dir=providers_dir)
 
-
-def reset_provider_registry() -> None:
-    """Drop the cached registry (tests)."""
-    get_provider_registry.cache_clear()
-
-
-# --- compatibility shims used by the syncer -------------------------------------
-
-
-def get_provider(
-    credential_type: str, connector: Connector, credential: Credential
-) -> SyncableProvider | None:
-    """Instantiate a provider for ``credential_type`` (``None`` when not syncable)."""
-    if credential.type != credential_type:
-        credential = credential.model_copy(update={"type": credential_type})
-    return get_provider_registry().create_provider(connector, credential)
-
-
-def is_syncable_credential_type(credential_type: str) -> bool:
-    return get_provider_registry().is_syncable(credential_type)

@@ -1,7 +1,7 @@
 // Copyright 2026 Octoprox Authors
 // SPDX-License-Identifier: Apache-2.0
 
-import { forwardRef, type ButtonHTMLAttributes } from 'react'
+import { type ComponentProps } from 'react'
 import { cn } from '../../utils/cn'
 
 const baseClasses =
@@ -23,18 +23,16 @@ const sizes = {
   icon: 'p-2',
 } as const
 
-interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
+interface ButtonProps extends ComponentProps<'button'> {
   variant?: keyof typeof variants
   size?: keyof typeof sizes
 }
 
-export const Button = forwardRef<HTMLButtonElement, ButtonProps>(
-  ({ className, variant = 'primary', size = 'md', ...props }, ref) => (
+export function Button({ className, variant = 'primary', size = 'md', ...props }: ButtonProps) {
+  return (
     <button
-      ref={ref}
       className={cn(baseClasses, variants[variant], sizes[size], className)}
       {...props}
     />
   )
-)
-Button.displayName = 'Button'
+}

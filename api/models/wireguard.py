@@ -3,18 +3,15 @@
 
 """WireGuard models: the install's server identity and the devices that may connect.
 
-A device joins a project by becoming a *peer*: it gets a tunnel address, and
-everything it sends through the tunnel is routed as if it had authenticated
-with that project's proxy credentials. What a proxy client would put in its
-username (``-sessid-``, ``-cc-``, ``-st-``, ``-city-``) is stored on the peer,
-because a TV or a router cannot say it any other way. See docs/wireguard.md.
+A device joins a project as a peer: what it sends is routed as if it had signed in with the project's proxy credentials.
 """
 
 from __future__ import annotations
 
 import ipaddress
+from collections.abc import Iterable, Mapping
 from datetime import datetime
-from typing import Any, Literal
+from typing import Any
 from uuid import uuid4
 
 from pydantic import BaseModel, Field, ValidationInfo, field_validator, model_validator
@@ -23,15 +20,14 @@ from api.core import utc_now
 from api.models.location import LocationTarget, normalize_level
 from api.models.tunnel import (
     TunnelPeerMetrics,
+    TunnelStatus,
     clean_optional,
+    naive_utc,
     validate_endpoint_host,
     validate_tunnel_subnet,
 )
 from api.wireguard import keys
 
-# Reserved RFC 2544 benchmarking range, the conventional pool for synthetic
-# "fake IP" DNS answers (sing-box and Clash use it too).
-DEFAULT_FAKE_IP_RANGE = "198.18.0.0/15"
 DEFAULT_SUBNET = "10.66.0.0/16"
 DEFAULT_ENDPOINT_PORT = 51820
 
@@ -104,39 +100,6 @@ class WireGuardServerSettingsDoc(BaseModel):
         return validate_endpoint_host(value)
 
 
-WireGuardState = Literal["disabled", "starting", "running", "failed", "stopped"]
-
-
-class WireGuardStatus(BaseModel):
-    """What the instance answering the request is doing about the tunnel.
-
-    In a cluster this describes the instance the API load balancer picked,
-    which may or may not be one carrying the tunnel. ``peers_online`` is
-    merged from what every carrying instance publishes to Redis and is
-    cluster-wide.
-    """
-
-    enabled: bool
-    state: WireGuardState
-    error: str | None = None
-    instance_id: str
-    interface: str
-    backend: Literal["kernel", "userspace"] | None = None
-    listen_port: int | None = None
-    transparent_port: int
-    dns_port: int
-    fake_ip_range: str
-    active_connections: int = 0
-    peers_total: int = 0
-    peers_enabled: int = 0
-    peers_online: int = 0
-    # Degradation signals summed over every device, all time, cluster-wide
-    # (see docs/wireguard.md); each device's own numbers are in its metrics.
-    connections_by_address: int = 0
-    encrypted_dns_blocked: int = 0
-    block_encrypted_dns: bool = True
-
-
 class WireGuardServerSettingsResponse(BaseModel):
     public_key: str
     endpoint_host: str
@@ -147,7 +110,8 @@ class WireGuardServerSettingsResponse(BaseModel):
     client_mtu: int | None
     configured: bool
     updated_at: datetime
-    status: WireGuardStatus
+    # The tunnel on every gateway carrying it, and the devices.
+    status: TunnelStatus
 
 
 # --- peers -----------------------------------------------------------------------------------
@@ -248,24 +212,60 @@ class WireGuardPeerUpdate(BaseModel):
         return value.strip() if isinstance(value, str) else value
 
 
+class WireGuardPeerReading(BaseModel):
+    """One device as a gateway's interface reports it, published every status tick under its public key.
+
+    The one format of the gateway that writes it, the api that shows it and the workers' last-seen job.
+    """
+
+    # When the device last completed a handshake with this gateway, unix
+    # seconds; 0 when it never has since the interface came up.
+    latest_handshake: int = 0
+    # The interface's counters for the device since it came up.
+    rx_bytes: int = 0
+    tx_bytes: int = 0
+    # Where the device's packets come from (host:port), as wg last saw it.
+    endpoint: str | None = None
+
+    @property
+    def handshake_at(self) -> datetime | None:
+        """The last handshake as naive UTC; None when there has been none."""
+        return naive_utc(self.latest_handshake) if self.latest_handshake else None
+
+    @classmethod
+    def latest(cls, published: Iterable[Mapping[str, str]]) -> dict[str, WireGuardPeerReading]:
+        """Each device's reading from the gateway it handshaked with last, by public key; an entry that does not parse is skipped.
+
+        Behind a UDP load balancer several gateways publish each device: its traffic lands where it last handshaked.
+        """
+        latest: dict[str, WireGuardPeerReading] = {}
+        for carrier in published:
+            for public_key, payload in carrier.items():
+                try:
+                    reading = cls.model_validate_json(payload)
+                except ValueError:
+                    continue
+                current = latest.get(public_key)
+                if current is None or reading.latest_handshake > current.latest_handshake:
+                    latest[public_key] = reading
+        return latest
+
+
 class WireGuardPeerStatus(BaseModel):
     """Where a device stands: its last handshake, and the tunnel counters while it is carried.
 
-    ``last_handshake_at`` and ``endpoint`` come from the instance carrying
-    the session when one is publishing, else from what was persisted the
-    last time one did, so a device's last sighting survives a restart.
-    ``rx_bytes`` / ``tx_bytes`` are the interface's own counters on the
-    current carrier since its interface came up: wire bytes, handshakes
-    and DNS included, zero when nothing is carrying the device. What the
-    device's traffic amounted to is in its metrics (``TunnelPeerMetrics``).
+    Its traffic is in its metrics (``TunnelPeerMetrics``).
     """
 
     online: bool = False
+    # From the carrying instance while one publishes, else as persisted the last time one did.
     last_handshake_at: datetime | None = None
     endpoint: str | None = None
     # True when a carrying instance published this reading within the last
     # half minute; False when it is the persisted last sighting.
     live: bool = False
+    # The current carrier's interface counters (wire bytes, handshakes and DNS
+    # included); zero when nothing carries the device.
     rx_bytes: int = 0
     tx_bytes: int = 0
 

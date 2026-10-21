@@ -9,8 +9,9 @@ from uuid import uuid4
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.core import utc_now
-from api.core.stats import TunnelPeerMetricDelta
+from api.core.stats import MetricDelta, TunnelPeerMetricDelta
 from api.db.models import TunnelPeerMetricsModel
+from api.db.redis import TUNNEL_PEER_WINDOWS
 from api.db.repository import MetricsRepository, ProjectRepository
 from api.db.wireguard_repository import WireGuardPeerRepository
 from api.models.project import Project
@@ -38,6 +39,12 @@ async def _peer(
     return project, peer
 
 
+async def _history_totals(metrics_repo: MetricsRepository, peer_id: str) -> MetricDelta | None:
+    """What a device's history adds up to, recomputed from its rows as a backup import does; None without rows."""
+    await metrics_repo.rebuild_totals()
+    return (await metrics_repo.get_totals(TUNNEL_PEER_WINDOWS, [peer_id])).get(peer_id)
+
+
 async def _insert(
     session: AsyncSession, project_id: str, peer_id: str, ts: datetime, *, sent: int = 10, received: int = 20,
     requests: int = 1, by_address: int = 0, blocked: int = 0, granularity: int = 60,
@@ -58,7 +65,7 @@ class TestSnapshots:
         project, peer = await _peer(project_repo, db_session)
         delta = TunnelPeerMetricDelta(request_count=4, success_count=3, failure_count=1, latency_sum_ms=168.0,
                                       bytes_sent=100, bytes_received=900, by_address=2, encrypted_dns_blocked=1)
-        assert await metrics_repo.save_tunnel_peer_metrics_snapshot(peer.id, delta) is True
+        assert await metrics_repo.save_tunnel_peer_metrics_snapshots({peer.id: delta}) == []
         await db_session.commit()
         history = await metrics_repo.get_tunnel_peer_metrics_history(project.id, peer.id)
         assert len(history) == 1
@@ -75,12 +82,12 @@ class TestSnapshots:
         self, metrics_repo: MetricsRepository, project_repo: ProjectRepository, db_session: AsyncSession
     ) -> None:
         project, peer = await _peer(project_repo, db_session)
-        assert await metrics_repo.save_tunnel_peer_metrics_snapshot("gone", TunnelPeerMetricDelta(request_count=1)) is False
-        assert await metrics_repo.save_tunnel_peer_metrics_snapshot(peer.id, TunnelPeerMetricDelta(request_count=1)) is True
+        window = TunnelPeerMetricDelta(request_count=1)
+        assert await metrics_repo.save_tunnel_peer_metrics_snapshots({"gone": window, peer.id: window}) == ["gone"]
         await db_session.commit()
         assert len(await metrics_repo.get_tunnel_peer_metrics_history(project.id, peer.id)) == 1
 
-    async def test_cumulative_totals_per_device(
+    async def test_history_adds_up_per_device(
         self, metrics_repo: MetricsRepository, project_repo: ProjectRepository, db_session: AsyncSession
     ) -> None:
         project, a = await _peer(project_repo, db_session, "A")
@@ -90,12 +97,12 @@ class TestSnapshots:
         await _insert(db_session, project.id, a.id, now - timedelta(hours=1), sent=10, received=20, blocked=3)
         await _insert(db_session, b.project_id, b.id, now - timedelta(hours=1), sent=100, received=200, requests=5)
         await db_session.commit()
-        totals = await metrics_repo.get_cumulative_tunnel_peer_metrics()
-        assert totals[a.id] == TunnelPeerMetricDelta(
+        assert await _history_totals(metrics_repo, a.id) == TunnelPeerMetricDelta(
             request_count=2, success_count=2, latency_sum_ms=200.0, bytes_sent=11, bytes_received=21,
             by_address=1, encrypted_dns_blocked=3,
         )
-        assert totals[b.id].request_count == 5 and totals[b.id].bytes_received == 200
+        totals_b = await _history_totals(metrics_repo, b.id)
+        assert totals_b is not None and (totals_b.request_count, totals_b.bytes_received) == (5, 200)
 
 
 class TestHistoryAndCompaction:
@@ -138,8 +145,9 @@ class TestHistoryAndCompaction:
         assert hourly_a[0]["bytes_sent"] == 42 and hourly_a[0]["connections_by_address"] == 6
         assert hourly_b[0]["bytes_received"] == 6 and hourly_b[0]["encrypted_dns_blocked"] == 12
         assert hourly_b[0]["request_count"] == 6
-        totals = await metrics_repo.get_cumulative_tunnel_peer_metrics()
-        assert totals[a.id].bytes_received == 66 and totals[a.id].by_address == 6
+        totals = await _history_totals(metrics_repo, a.id)
+        assert isinstance(totals, TunnelPeerMetricDelta)
+        assert (totals.bytes_received, totals.by_address) == (66, 6)
 
     async def test_retention(
         self, metrics_repo: MetricsRepository, project_repo: ProjectRepository, db_session: AsyncSession
@@ -164,7 +172,7 @@ class TestRowsFollowTheDevice:
         assert await WireGuardPeerRepository(db_session).delete(peer.id)
         await db_session.commit()
         assert await metrics_repo.get_tunnel_peer_metrics_history(project.id, peer.id) == []
-        assert peer.id not in await metrics_repo.get_cumulative_tunnel_peer_metrics()
+        assert await _history_totals(metrics_repo, peer.id) is None
 
     async def test_rows_go_with_the_project(
         self, metrics_repo: MetricsRepository, project_repo: ProjectRepository, db_session: AsyncSession
@@ -174,11 +182,11 @@ class TestRowsFollowTheDevice:
         await db_session.commit()
         assert await project_repo.delete(project.id)
         await db_session.commit()
-        assert peer.id not in await metrics_repo.get_cumulative_tunnel_peer_metrics()
+        assert await _history_totals(metrics_repo, peer.id) is None
 
 
 class TestLastSeen:
-    async def test_last_seen_only_moves_forward(
+    async def test_last_seen_only_moves_forward_matched_by_public_key(
         self, project_repo: ProjectRepository, db_session: AsyncSession
     ) -> None:
         project, peer = await _peer(project_repo, db_session)
@@ -187,11 +195,18 @@ class TestLastSeen:
         await repo.create(other)
         first = utc_now().replace(microsecond=0) - timedelta(minutes=5)
         assert await repo.record_last_seen([]) == 0
-        # One statement for the batch: both devices move, the unknown one is ignored.
-        assert await repo.record_last_seen([(peer.id, first, "1.2.3.4:5"), (other.id, first, None), ("gone", first, None)]) == 2
+        # One statement for the batch: both devices move by their public keys. A key no device holds
+        # matches nothing, and neither does a device's ID: gateways know a device by its key alone.
+        sightings = [
+            (peer.public_key, first, "1.2.3.4:5"),
+            (other.public_key, first, None),
+            (_unique_key(), first, None),
+            (peer.id, first + timedelta(minutes=2), "by id"),
+        ]
+        assert await repo.record_last_seen(sightings) == 2
         # Older sightings do not regress a row; newer ones advance it.
-        assert await repo.record_last_seen([(peer.id, first - timedelta(minutes=1), "old")]) == 0
-        assert await repo.record_last_seen([(peer.id, first + timedelta(minutes=1), "5.6.7.8:9")]) == 1
+        assert await repo.record_last_seen([(peer.public_key, first - timedelta(minutes=1), "old")]) == 0
+        assert await repo.record_last_seen([(peer.public_key, first + timedelta(minutes=1), "5.6.7.8:9")]) == 1
         await db_session.commit()
         loaded = await repo.get_by_id(peer.id)
         assert loaded is not None

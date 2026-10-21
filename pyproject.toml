@@ -8,32 +8,32 @@ license = { text = "Apache-2.0 AND LicenseRef-Octoprox-Provider-Descriptors" }
 authors = [{ name = "Octoprox Team" }]
 
 dependencies = [
-    "fastapi==0.128.7",
-    "uvicorn[standard]==0.40.0",
+    "fastapi==0.146.0",
+    "starlette==1.9.0",
+    "uvicorn[standard]==0.54.0",
     "httpx==0.28.1",
-    "httpx-socks[asyncio]==0.11.0",
-    "python-socks[asyncio]==2.8.0",
-    "pydantic==2.10.6",
-    "pydantic-settings==2.12.0",
-    "pyyaml==6.0.2",
-    "aiohttp==3.11.13",
-    "redis==7.1.1",
-    "structlog==25.2.0",
-    "prometheus-client==0.21.1",
-    "python-multipart==0.0.20",
+    "httpx-socks[asyncio]==0.13.1",
+    "python-socks[asyncio]==3.1.1",
+    "pydantic==2.14.1",
+    "pydantic-settings==2.16.0",
+    "pyyaml==6.0.3",
+    "redis==8.1.0",
+    "structlog==26.1.0",
+    "prometheus-client==0.26.0",
+    "python-multipart==0.0.32",
     "python-jose[cryptography]==3.5.0",
-    "sqlalchemy[asyncio]==2.0.46",
-    "asyncpg==0.31.0",
-    "alembic==1.18.4",
-    "psycopg2-binary==2.9.11",
-    "boto3==1.42.49",
-    "google-cloud-compute==1.43.0",
-    "azure-mgmt-compute==37.2.0",
-    "azure-mgmt-network==30.1.0",
-    "azure-identity==1.25.2",
+    "sqlalchemy[asyncio]==2.1.5",
+    "asyncpg==0.32.0",
+    "alembic==1.20.0",
+    "psycopg2-binary==2.9.13",
+    "boto3==1.43.114",
+    "google-cloud-compute==1.56.0",
+    "azure-mgmt-compute==38.4.0",
+    "azure-mgmt-network==33.1.0",
+    "azure-identity==1.26.0",
     "blinker==1.9.0",
-    "cryptography==46.0.5",
-    "curl_cffi==0.14.0",
+    "cryptography==50.0.2",
+    "curl_cffi==0.16.3",
     "rnet==2.4.2",
     "h11==0.16.0",
     "bcrypt==5.0.0",
@@ -44,20 +44,20 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
-    "pytest==8.3.5",
-    "pytest-asyncio==0.25.3",
-    "pytest-cov==6.0.0",
-    "ruff==0.9.6",
-    "mypy==1.15.0",
+    "pytest==9.1.1",
+    "pytest-asyncio==1.4.0",
+    "pytest-cov==7.1.0",
+    "ruff==0.17.1",
+    "mypy==2.4.0",
     "httpx==0.28.1",
-    "testcontainers[postgres,redis]==4.14.1",
+    "httpx2==2.14.0",
+    "testcontainers[postgres,redis]==4.15.0",
     "types-jmespath==1.1.0.20260724",
     "mmdb_writer==0.2.7",
 ]
 
 [project.scripts]
 octoprox = "api.main:run"
-octoprox-echo = "api.echo_main:run"
 
 # Third-party provider plugins register here. Each entry point resolves to a
 # ProviderDescriptor, a descriptor dict, a YAML path, or a provider class with

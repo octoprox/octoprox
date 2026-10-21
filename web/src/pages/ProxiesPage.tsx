@@ -3,7 +3,7 @@
 
 import { useState, useRef, useMemo, useCallback, useEffect } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { ColumnDef, VisibilityState } from '@tanstack/react-table'
+import { ColumnDef, ColumnVisibilityState } from '@tanstack/react-table'
 import { Plus, Trash2, Upload, Lock, ShieldOff, MapPin, AlertTriangle, HelpCircle } from 'lucide-react'
 import {
   fetchProjectProxies, fetchProjectConnectors, createProjectProxy, updateProjectProxy, deleteProjectProxy,
@@ -12,7 +12,7 @@ import {
 import { useProject } from '../contexts/ProjectContext'
 import { useAuth } from '../contexts/AuthContext'
 import { useToast } from '../contexts/ToastContext'
-import { DataTable, createSelectionColumn } from '../components/DataTable'
+import { DataTable, createSelectionColumn, type DataTableFeatures } from '../components/DataTable'
 import { Page } from '../components/layout/Page'
 import { ProxyStatusDot, ProxyStatusBadge, formatQuarantineRemaining } from '../components/ProxyStatus'
 import { ProviderLogo } from '../components/ProviderLogo'
@@ -62,7 +62,7 @@ export default function ProxiesPage() {
 
   const unquarantineMutation = useMutation({
     mutationFn: (id: string) => unquarantineProjectProxy(selectedProjectId!, id),
-    onSuccess: () => { invalidate(); toast.show('Released from quarantine') },
+    onSuccess: () => { invalidate(); toast.show('Released from quarantine; the gateways route to it again within a few seconds') },
     onError: (e: Error) => toast.show(e.message || 'Failed to release proxy', 'error'),
   })
 
@@ -86,10 +86,9 @@ export default function ProxiesPage() {
   // If the open proxy disappears (deleted elsewhere), close the panel.
   useEffect(() => {
     if (panel?.kind === 'proxy' && data && !proxies.some((p) => p.id === panel.id)) setPanel(null)
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [data])
 
-  const columns: ColumnDef<Proxy>[] = useMemo(() => [
+  const columns: ColumnDef<DataTableFeatures, Proxy>[] = useMemo(() => [
     ...(canMutate ? [createSelectionColumn<Proxy>()] : []),
     {
       accessorFn: (row: Proxy) => `${row.display_host}:${row.port}`,
@@ -184,7 +183,7 @@ export default function ProxiesPage() {
           {row.original.quarantined && (
             <button
               onClick={() => unquarantineMutation.mutate(row.original.id)}
-              className="p-1 rounded text-warning hover:bg-warning-soft"
+              className="p-1 rounded-sm text-warning hover:bg-warning-soft"
               title="Release from quarantine"
             >
               <ShieldOff className="w-4 h-4" />
@@ -192,19 +191,19 @@ export default function ProxiesPage() {
           )}
           <button
             onClick={() => setPendingDelete([row.original])}
-            className="p-1 rounded text-fg-subtle hover:text-danger hover:bg-danger-soft"
+            className="p-1 rounded-sm text-fg-subtle hover:text-danger hover:bg-danger-soft"
             title="Delete"
           >
             <Trash2 className="w-4 h-4" />
           </button>
         </div>
       ),
-    }] as ColumnDef<Proxy>[] : []),
+    }] as ColumnDef<DataTableFeatures, Proxy>[] : []),
   ], [canMutate, unquarantineMutation])
 
   // With the panel open there is less room. Connector and traffic are shown in the
   // panel itself, so the table keeps host, status and the per-proxy numbers.
-  const columnVisibility = useMemo<VisibilityState>(
+  const columnVisibility = useMemo<ColumnVisibilityState>(
     () => (panel
       ? { protocol: false, connector_name: false, traffic: false, actions: false }
       : { protocol: true, connector_name: true, traffic: true, actions: true }),
@@ -242,7 +241,7 @@ export default function ProxiesPage() {
       <NewProxyPanel
         connectors={staticConnectors}
         onClose={() => setPanel(null)}
-        onCreated={() => { invalidate(); setPanel(null); toast.show('Proxy added - health check running') }}
+        onCreated={() => { invalidate(); setPanel(null); toast.show('Proxy added - health check queued') }}
       />
     )
   } else if (panel?.kind === 'upload') {
@@ -467,19 +466,19 @@ function ProxyPanel({ proxy, connectorType, canMutate, onClose, onRelease, onDel
         {proxy.city && <KeyValue label="City" value={<span className="inline-flex items-center gap-1.5">{proxy.city}{proxy.city_source && <span className="text-fg-subtle font-sans text-xs">via {proxy.city_source}</span>}</span>} mono />}
         {proxy.location_conflict && (
           <div className="flex gap-2 p-2.5 rounded-lg bg-danger-soft text-danger text-xs leading-relaxed">
-            <AlertTriangle className="w-3.5 h-3.5 flex-shrink-0 mt-0.5" />
+            <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
             <span>The vendor's declared location is contradicted by attribution. A project set to refuse the proxy on a contradiction skips it, and replaces it when it is a pooled session; one set to route on the evidence routes to it on the real place; one set to route on the vendor's claim routes to it on the claimed place and keeps the flag.</span>
           </div>
         )}
         {proxy.outside_declared_countries && (
           <div className="flex gap-2 p-2.5 rounded-lg bg-warning-soft text-warning text-xs leading-relaxed">
-            <AlertTriangle className="w-3.5 h-3.5 flex-shrink-0 mt-0.5" />
+            <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
             <span>The exit is outside the connector's declared countries, so routing never uses this proxy. It is kept, not replaced: only a project set to refuse the proxy on a contradiction spends a fresh session. Widen the connector's countries, or wait for the vendor to move the exit.</span>
           </div>
         )}
         {!proxy.location_conflict && proxy.location_verdict === 'open' && (
           <div className="flex gap-2 p-2.5 rounded-lg bg-warning-soft text-warning text-xs leading-relaxed">
-            <HelpCircle className="w-3.5 h-3.5 flex-shrink-0 mt-0.5" />
+            <HelpCircle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
             <span>The vendor's declared location could not be judged: the independent sources disagree, or none of them knows this IP. A project set to refuse the proxy for an unknown exit skips it until a later sighting places it; one set to trust the vendor serves it on the vendor's word.</span>
           </div>
         )}
@@ -604,7 +603,7 @@ function UploadPanel({ connectors, onClose, onUploaded }: { connectors: { id: st
     onError: (e: Error) => { setError(e.message || 'Upload failed'); setResult(null) },
   })
 
-  const submit = (e: React.FormEvent) => {
+  const submit = (e: React.SubmitEvent) => {
     e.preventDefault()
     const file = fileInputRef.current?.files?.[0]
     if (file && connectorId) uploadMutation.mutate({ file, connectorId })
@@ -640,7 +639,7 @@ function UploadPanel({ connectors, onClose, onUploaded }: { connectors: { id: st
           <label className="block border border-dashed border-line-strong rounded-[10px] p-5 text-center cursor-pointer hover:border-primary hover:bg-primary-soft/40 transition-colors">
             <Upload className="w-5 h-5 mx-auto text-fg-subtle mb-1.5" />
             <span className="block text-sm">{fileName ? <span className="font-medium text-fg">{fileName}</span> : <><span className="font-medium text-fg">Choose a file</span> <span className="text-fg-muted">or drop it here</span></>}</span>
-            <span className="block text-xs text-fg-muted mt-1">One proxy per line: <code className="bg-surface-raised px-1 rounded font-mono">protocol://[user:pass@]host:port</code></span>
+            <span className="block text-xs text-fg-muted mt-1">One proxy per line: <code className="bg-surface-raised px-1 rounded-sm font-mono">protocol://[user:pass@]host:port</code></span>
             <input ref={fileInputRef} type="file" accept=".csv,.txt" className="sr-only" onChange={(e) => setFileName(e.target.files?.[0]?.name ?? null)} required />
           </label>
         </form>

@@ -1,63 +1,77 @@
 # Copyright 2026 Octoprox Authors
 # SPDX-License-Identifier: Apache-2.0
 
-"""HTTP Proxy Server for Octoprox.
+"""The gateway's proxy listener: authenticate the client, route, verify the exit, relay.
 
-This module implements a real HTTP proxy server that can be used directly
-by HTTP clients (e.g., via http_proxy environment variable).
-
-It supports:
-- HTTP CONNECT method for HTTPS tunneling
-- Regular HTTP request forwarding
-- Upstream proxy selection via ProxyManager strategies
-- Project-based authentication via HTTP Basic Auth (Proxy-Authorization header)
-
-Emits request_completed signals instead of directly calling ProxyManager.
+It routes on the gateway's snapshot alone, never Postgres; what it learns of each request leaves as in-process signals.
 """
+
+from __future__ import annotations
 
 import asyncio
 import base64
 import errno
+import hmac
 import time
 from collections.abc import Callable
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import structlog
 from python_socks import ProxyConnectionError, ProxyError
 from python_socks.async_.asyncio import Proxy as SocksProxy
 
-from api.core.config import settings
 from api.core.error_response import (
     BANDWIDTH_LIMIT_PROXY_STATUS,
     reason_phrase,
     refusal_message,
     upstream_proxy_status,
 )
-from api.core.event_bus import event_bus
 from api.core.failure_log import (
-    FailureKind,
     RequestFailure,
     RequestInfo,
     build_failure,
     classify_upstream_error,
     set_request_info,
 )
+from api.core.keepalive import set_keepalive
+from api.core.logging import error_text
 from api.core.signals import request_completed, request_failed, request_rejected
-from api.core.traffic_limiter import TrafficMeter
+from api.core.stats import FailureKind
 from api.core.username_params import AuthResult, parse_username_params
-from api.geo.verifier import ExitVerifier
-from api.models.location import LocationTarget
 from api.models.project import MitmMode, Project
 from api.models.proxy import Proxy, ProxyProtocol
 
 if TYPE_CHECKING:
     from api.core.mitm import MitmHandler
-    from api.core.proxy_manager import ProxyManager
+    from api.core.traffic_limiter import TrafficMeter
+    from api.gateway.metering import RequestMetering
+    from api.geo.verifier import ExitVerifier
+    from api.models.location import LocationTarget
+    from api.routing.router import Router
 
 logger = structlog.get_logger()
 
-# Buffer size for tunneling
+# Bytes read per chunk on each leg of a relay: a busy tunnel moves in a few
+# reads per round trip, and an idle connection holds little memory.
 BUFFER_SIZE = 65536
+
+# How long closing a connection may wait for its last buffered bytes to
+# leave, in seconds. A peer that stopped reading never takes them; past this
+# the connection is aborted, so the peer cannot hold its handler, and with it
+# the gateway's shutdown, for as long as it stays silent.
+CLOSE_TIMEOUT_SECONDS = 5.0
+
+# TCP keepalive on every leg the gateway relays: the kernel probes a leg idle
+# for KEEPALIVE_IDLE_SECONDS, every KEEPALIVE_INTERVAL_SECONDS, and gives the
+# connection up after KEEPALIVE_PROBES unanswered probes. A peer that vanished
+# without a FIN or RST (a load balancer or NAT that forgot the flow, a node
+# that died) is noticed in about two minutes instead of never: the relay's
+# read fails, the transfer ends and its in-flight count, which least_used
+# routes on, is released. A live idle tunnel stays open, and its probes keep
+# middleboxes that drop idle flows (an AWS NLB after 350 s) from dropping it.
+KEEPALIVE_IDLE_SECONDS = 60
+KEEPALIVE_INTERVAL_SECONDS = 15
+KEEPALIVE_PROBES = 4
 
 # Reason phrases for the statuses a traffic limit can answer with.
 TRAFFIC_LIMIT_REASONS = {429: "Too Many Requests", 509: "Bandwidth Limit Exceeded"}
@@ -100,22 +114,36 @@ class _ClientStalledError(TimeoutError):
 
 
 class ProxyServer:
-    """HTTP Proxy Server that forwards requests through managed upstream proxies."""
+    """The proxy listener: forwards each authenticated client's requests through an upstream the router picks.
+
+    Args:
+        router: Authenticates projects and picks each request's upstream.
+        meters: Hands each transfer the meter its bytes are counted with.
+        host, port: Where to listen (``host``, ``proxy_port``); port 0 binds any free port.
+        timeout: Seconds an upstream connect, and each read the listener waits on, may take (``connection_timeout``).
+        mitm_handler: Intercepts TLS for projects whose MITM mode is on; None intercepts nothing.
+        exit_verifier: Verifies the exit before forwarding; None skips preflight.
+    """
 
     def __init__(
         self,
-        proxy_manager: "ProxyManager",
-        mitm_handler: "MitmHandler | None" = None,
+        router: Router,
+        meters: RequestMetering,
+        *,
+        host: str,
+        port: int,
+        timeout: float,
+        mitm_handler: MitmHandler | None = None,
         exit_verifier: ExitVerifier | None = None,
     ) -> None:
-        self._proxy_manager = proxy_manager
+        self._router = router
+        self._meters = meters
         self._mitm_handler = mitm_handler
-        # Exit verification before forwarding; None disables preflight entirely.
         self._exit_verifier = exit_verifier
         self._server: asyncio.Server | None = None
-        self._host = settings.host
-        self._port = settings.proxy_port
-        self._timeout = settings.connection_timeout
+        self._host = host
+        self._port = port
+        self._timeout = timeout
         self._client_tasks: set[asyncio.Task[None]] = set()
 
     @property
@@ -178,11 +206,12 @@ class ProxyServer:
         client_reader: asyncio.StreamReader,
         client_writer: asyncio.StreamWriter,
     ) -> None:
-        """Wrapper to track client handler tasks."""
+        """Wrapper to track client handler tasks; every accepted connection is kept alive (``keep_alive``)."""
         task = asyncio.current_task()
         if task:
             self._client_tasks.add(task)
         try:
+            keep_alive(client_writer)
             await self._handle_client(client_reader, client_writer)
         finally:
             if task:
@@ -217,9 +246,7 @@ class ProxyServer:
         Returns:
             Selected proxy or None if no healthy proxies available.
         """
-        return await self._proxy_manager.select_proxy_for_project(
-            project_id, session_id, target_host, location
-        )
+        return await self._router.select_proxy_for_project(project_id, session_id, target_host, location)
 
     def _authenticate_project(self, headers: dict[str, str]) -> AuthResult | None:
         """Authenticate a client request using Proxy-Authorization header.
@@ -258,13 +285,13 @@ class ProxyServer:
         real_username = params.username
 
         # Look up project by the real username (without parameter suffixes)
-        project = self._proxy_manager.get_project_by_username(real_username)
+        project = self._router.get_project_by_username(real_username)
         if not project:
             logger.debug("Project not found for username", username=real_username)
             return None
 
-        # Verify password (plain text comparison as per requirements)
-        if project.password != password:
+        # Project passwords are stored as given; compared in constant time.
+        if not hmac.compare_digest(project.password.encode(), password.encode()):
             logger.debug("Invalid password for project", project_id=project.id)
             return None
 
@@ -296,19 +323,15 @@ class ProxyServer:
         status was chosen. Anything else is a 502: nothing is configured
         for this request.
         """
-        if await self._proxy_manager.are_all_proxies_quarantined(
-            project_id, target_host, session_id, location
-        ):
+        if await self._router.are_all_proxies_quarantined(project_id, target_host, session_id, location):
             message = "All proxies are temporarily rate-limited. Retry later."
             await self._send_error(client_writer, 429, "Too Many Requests", message)
-            await event_bus.publish(request_rejected,
-                self, project_id=project_id, reason="all_proxies_quarantined"
-            )
+            await request_rejected.send_async(self, project_id=project_id, reason="all_proxies_quarantined")
             await self._publish_failure(
                 build_failure(project_id, FailureKind.ALL_PROXIES_QUARANTINED, 429, message)
             )
             return
-        limit_status = self._proxy_manager.traffic_limit_status(project_id, target_host, location)
+        limit_status = self._router.traffic_limit_status(project_id, target_host, location)
         if limit_status is not None:
             message = "Every connector that could serve this request has reached its traffic limit."
             await self._send_error(
@@ -316,23 +339,19 @@ class ProxyServer:
                 message,
                 extra_headers=[TRAFFIC_LIMIT_PROXY_STATUS],
             )
-            await event_bus.publish(request_rejected,
-                self, project_id=project_id, reason="traffic_limit_exceeded"
-            )
+            await request_rejected.send_async(self, project_id=project_id, reason="traffic_limit_exceeded")
             await self._publish_failure(
                 build_failure(project_id, FailureKind.TRAFFIC_LIMIT_EXCEEDED, limit_status, message)
             )
             return
         message = self._no_proxy_message(location)
         await self._send_error(client_writer, 502, "Bad Gateway", message)
-        await event_bus.publish(request_rejected,
-            self, project_id=project_id, reason="no_proxy_available"
-        )
+        await request_rejected.send_async(self, project_id=project_id, reason="no_proxy_available")
         await self._publish_failure(build_failure(project_id, FailureKind.NO_PROXY_AVAILABLE, 502, message))
 
     async def _publish_failure(self, failure: RequestFailure) -> None:
         """Hand a failure to the project's failure log."""
-        await event_bus.publish(request_failed, self, failure=failure)
+        await request_failed.send_async(self, failure=failure)
 
     def _upstream_failure(
         self, exc: BaseException, project_id: str, proxy: Proxy, latency_ms: float, status: int
@@ -400,7 +419,7 @@ class ProxyServer:
             return decision.proxy
         message = decision.rejection or "Exit location mismatch"
         await self._send_error(client_writer, 502, "Bad Gateway", message)
-        await event_bus.publish(request_rejected, self, project_id=project.id, reason="preflight_mismatch")
+        await request_rejected.send_async(self, project_id=project.id, reason="preflight_mismatch")
         await self._publish_failure(
             build_failure(project.id, FailureKind.PREFLIGHT_MISMATCH, 502, message, proxy=proxy)
         )
@@ -484,7 +503,6 @@ class ProxyServer:
 
             # Authenticate project using Proxy-Authorization header
             auth_result = self._authenticate_project(headers)
-            logger.debug("Authenticated project", headers=headers, auth_result=auth_result)
             if not auth_result:
                 await self._send_error(
                     client_writer,
@@ -518,7 +536,7 @@ class ProxyServer:
                 # A state or city without a country: nothing could serve it
                 # faithfully, and routing it anywhere would be a silent widening.
                 await self._send_error(client_writer, 400, "Bad Request", auth_result.location_error)
-                await event_bus.publish(request_rejected, self, project_id=project_id, reason="invalid_location")
+                await request_rejected.send_async(self, project_id=project_id, reason="invalid_location")
                 await self._publish_failure(
                     build_failure(project_id, FailureKind.INVALID_LOCATION, 400, auth_result.location_error)
                 )
@@ -530,7 +548,7 @@ class ProxyServer:
                 )
             else:
                 await self._handle_http(
-                    client_reader, client_writer, method, target, version, headers, project_id,
+                    client_reader, client_writer, method, target, version, headers, project,
                     session_id, location,
                 )
 
@@ -551,11 +569,7 @@ class ProxyServer:
         except Exception as e:
             logger.error("Error handling client", error=str(e), client_addr=client_addr, exc_info=True)
         finally:
-            try:
-                client_writer.close()
-                await client_writer.wait_closed()
-            except Exception:
-                pass
+            await close_quietly(client_writer)
 
     def _target_of(self, method: str, target: str) -> str:
         """host:port of a request line's target, for the failure log; the path and query are left out."""
@@ -687,19 +701,15 @@ class ProxyServer:
         client_head: bytes = b"",
         peer_id: str | None = None,
     ) -> None:
-        """Open the upstream leg to ``target_host:target_port`` and relay until either side is done.
+        """Open the upstream leg to ``target_host:target_port``, relay until either side is done, then close that leg.
 
-        The tail of a CONNECT and the whole of a transparent tunnel connection:
-        the client has been authenticated and the proxy selected and verified.
-        ``established`` is written to the client once the upstream leg is up
-        (the CONNECT 200 line); None for a transparent client, which believes
-        it is talking to the origin and must hear nothing from us. With
-        ``use_mitm`` the MITM handler takes both legs over after that;
-        ``client_head`` is whatever of the client's TLS stream the caller has
-        already taken off the socket, which the handshake must be fed.
-        ``peer_id`` names the tunnel device the connection came from, so the
-        transfer is metered on the device as well as on the proxy, the
-        connector and the project.
+        The tail of a CONNECT and the whole of a transparent tunnel connection, once the proxy is selected and verified.
+
+        Args:
+            established: written to the client once the upstream leg is up (the CONNECT 200 line); None writes nothing.
+            use_mitm: the MITM handler relays both legs once the upstream leg is up.
+            client_head: the start of the client's TLS stream the caller already read off the socket, for the handshake.
+            peer_id: the tunnel device the connection came from, whose counts take the transfer too.
         """
         target = f"{target_host}:{target_port}"
         start_time = time.monotonic()
@@ -708,7 +718,7 @@ class ProxyServer:
         latency_ms = 0.0
         # Counts the tunnel's bytes as they flow; the completion event below
         # carries only what the meter has not reported yet.
-        meter = self._proxy_manager.traffic_meter(proxy, project.id, peer_id=peer_id, target_host=target_host)
+        meter = self._meters.meter(proxy, project.id, peer_id=peer_id, target_host=target_host)
         upstream_writer: asyncio.StreamWriter | None = None
         failure: RequestFailure | None = None
 
@@ -717,17 +727,25 @@ class ProxyServer:
             upstream_reader, upstream_writer = await self._connect_via_proxy(
                 proxy, target_host, target_port
             )
+            keep_alive(upstream_writer)
 
             # Measure latency up to connection establishment (before tunneling)
             latency_ms = (time.monotonic() - start_time) * 1000
 
+            if use_mitm:
+                # The handshake must find the client's ClientHello still in the
+                # socket. start_tls takes the transport over only a loop turn
+                # after it is called, and uvloop hands bytes that arrive
+                # meanwhile (the client answering the 200 while the host's
+                # certificate is made) to the stream reader, where the
+                # handshake never sees them. start_tls resumes reading.
+                cast("asyncio.Transport", client_writer.transport).pause_reading()
             if established is not None:
                 client_writer.write(established)
                 await client_writer.drain()
             success = True
 
             if use_mitm:
-                # MITM handler takes ownership of upstream connection
                 await self._mitm_handler.handle(  # type: ignore[union-attr]
                     client_reader, client_writer, target_host, target_port,
                     proxy, project,
@@ -736,7 +754,6 @@ class ProxyServer:
                     meter=meter,
                     client_head=client_head,
                 )
-                upstream_writer = None  # MitmHandler/relay owns it now
             else:
                 await self._tunnel(
                     client_reader,
@@ -791,12 +808,17 @@ class ProxyServer:
                     failure = self._upstream_failure(e, project.id, proxy, latency_ms, 502)
                     await self._send_upstream_error(client_writer, failure, "Bad Gateway")
         finally:
+            if client_disconnected:
+                # No completion will carry the remainder; hand it over now so
+                # the bytes are not lost with the meter.
+                meter.report()
+            # Finished before anything below can fail: finishing ends the
+            # transfer's in-flight count, whatever else happens.
+            bytes_sent, bytes_received = meter.finish()
             if upstream_writer:
-                upstream_writer.close()
-                await upstream_writer.wait_closed()
-            if proxy and not client_disconnected:
-                bytes_sent, bytes_received = meter.finish()
-                await event_bus.publish(request_completed,
+                await close_quietly(upstream_writer)
+            if not client_disconnected:
+                await request_completed.send_async(
                     self,
                     proxy_id=proxy.id,
                     project_id=project.id,
@@ -810,10 +832,6 @@ class ProxyServer:
                 # Exactly the requests counted as failures above are logged.
                 if not success:
                     await self._publish_failure(failure or self._interrupted_failure(project.id, proxy, start_time))
-            else:
-                # Nothing will report the remainder; hand it over now so the
-                # bytes are not lost with the meter.
-                meter.report()
 
     async def _tunnel(
         self,
@@ -949,11 +967,12 @@ class ProxyServer:
         target: str,
         version: str,
         headers: dict[str, str],
-        project_id: str,
+        project: Project,
         session_id: str | None = None,
         location: LocationTarget | None = None,
     ) -> None:
         """Handle regular HTTP request forwarding."""
+        project_id = project.id
         # Parse target host before proxy selection (needed for domain filtering)
         parsed_host, _, _ = self._parse_http_url(target)
 
@@ -965,17 +984,15 @@ class ProxyServer:
             await self._reject_no_proxy(client_writer, project_id, parsed_host, session_id, location)
             return
 
-        project = self._proxy_manager.get_project(project_id)
-        if project is not None:
-            verified = await self._verify_exit(project, proxy, session_id, location, parsed_host, client_writer)
-            if verified is None:
-                return
-            proxy = verified
+        verified = await self._verify_exit(project, proxy, session_id, location, parsed_host, client_writer)
+        if verified is None:
+            return
+        proxy = verified
 
         start_time = time.monotonic()
         success = False
         latency_ms = 0.0
-        meter = self._proxy_manager.traffic_meter(proxy, project_id, target_host=parsed_host)
+        meter = self._meters.meter(proxy, project_id, target_host=parsed_host)
         upstream_writer: asyncio.StreamWriter | None = None
         failure: RequestFailure | None = None
 
@@ -1002,6 +1019,7 @@ class ProxyServer:
 
             # At this point upstream_writer is always assigned
             assert upstream_writer is not None
+            keep_alive(upstream_writer)
 
             request_line_bytes = request_line.encode()
             upstream_writer.write(request_line_bytes)
@@ -1154,23 +1172,22 @@ class ProxyServer:
                 failure = self._upstream_failure(e, project_id, proxy, latency_ms, 502)
                 await self._send_upstream_error(client_writer, failure, "Bad Gateway")
         finally:
+            # Finished first, as on the CONNECT path: it ends the in-flight count.
+            bytes_sent, bytes_received = meter.finish()
             if upstream_writer:
-                upstream_writer.close()
-                await upstream_writer.wait_closed()
-            if proxy:
-                bytes_sent, bytes_received = meter.finish()
-                await event_bus.publish(request_completed,
-                    self,
-                    proxy_id=proxy.id,
-                    project_id=project_id,
-                    success=success,
-                    latency_ms=latency_ms,
-                    bytes_sent=bytes_sent,
-                    bytes_received=bytes_received,
-                    target_host=parsed_host,
-                )
-                if not success:
-                    await self._publish_failure(failure or self._interrupted_failure(project_id, proxy, start_time))
+                await close_quietly(upstream_writer)
+            await request_completed.send_async(
+                self,
+                proxy_id=proxy.id,
+                project_id=project_id,
+                success=success,
+                latency_ms=latency_ms,
+                bytes_sent=bytes_sent,
+                bytes_received=bytes_received,
+                target_host=parsed_host,
+            )
+            if not success:
+                await self._publish_failure(failure or self._interrupted_failure(project_id, proxy, start_time))
 
     async def _forward_chunked(
         self,
@@ -1225,3 +1242,31 @@ class ProxyServer:
         await writer.drain()
         return total_bytes
 
+
+def keep_alive(writer: asyncio.StreamWriter) -> None:
+    """Have the kernel probe the peer of a relayed leg while it is idle, so one that vanished ends the relay.
+
+    Best effort: a socket that takes no TCP options (a test's stand-in, a
+    Unix socket) is left as it is.
+    """
+    sock = writer.get_extra_info("socket")
+    if sock is None:
+        return
+    try:
+        set_keepalive(
+            sock, idle=KEEPALIVE_IDLE_SECONDS, interval=KEEPALIVE_INTERVAL_SECONDS, probes=KEEPALIVE_PROBES
+        )
+    except OSError as exc:
+        logger.debug("TCP keepalive not set", error=error_text(exc))
+
+
+async def close_quietly(writer: asyncio.StreamWriter) -> None:
+    """Close a leg that is done with, never raising; one still open after ``CLOSE_TIMEOUT_SECONDS`` is aborted."""
+    writer.close()
+    try:
+        async with asyncio.timeout(CLOSE_TIMEOUT_SECONDS):
+            await writer.wait_closed()
+    except TimeoutError:
+        writer.transport.abort()
+    except Exception:
+        pass

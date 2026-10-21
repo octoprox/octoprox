@@ -18,7 +18,7 @@ const AuthContext = createContext<AuthContextValue>({
   isViewer: false,
 })
 
-export const AuthProvider = AuthContext.Provider
+export const AuthProvider = AuthContext
 
 export function useAuth(): AuthContextValue {
   return useContext(AuthContext)

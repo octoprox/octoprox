@@ -50,7 +50,7 @@ export function InfoTip({ children, className, label = 'More information' }: { c
         onFocus={() => setOpen(true)}
         onBlur={() => setOpen(false)}
         onClick={() => setOpen((v) => !v)}
-        className="p-0.5 -m-0.5 rounded text-fg-subtle hover:text-fg focus:outline-none focus:ring-1 focus:ring-ring"
+        className="p-0.5 -m-0.5 rounded-sm text-fg-subtle hover:text-fg focus:outline-hidden focus:ring-1 focus:ring-ring"
       >
         <Info className="w-3.5 h-3.5" />
       </button>
@@ -59,7 +59,7 @@ export function InfoTip({ children, className, label = 'More information' }: { c
           id={id}
           role="tooltip"
           style={{ position: 'fixed', left: pos.left, top: pos.top, width: BUBBLE_WIDTH }}
-          className="z-[100] block rounded-lg border border-line bg-surface p-2.5 text-xs font-normal leading-relaxed text-fg shadow-lg normal-case"
+          className="z-100 block rounded-lg border border-line bg-surface p-2.5 text-xs font-normal leading-relaxed text-fg shadow-lg normal-case"
         >
           {children}
         </span>,

@@ -6,45 +6,74 @@ import {
   ColumnDef,
   ColumnFiltersState,
   Column,
+  ColumnVisibilityState,
   ExpandedState,
+  RowData,
   SortingState,
   RowSelectionState,
-  VisibilityState,
-  FilterFn,
+  columnFacetingFeature,
+  columnFilteringFeature,
+  columnSizingFeature,
+  columnVisibilityFeature,
+  createFacetedRowModel,
+  createFacetedUniqueValues,
+  createFilteredRowModel,
+  createPaginatedRowModel,
+  createSortedRowModel,
+  filterFn_equalsString,
+  filterFn_includesString,
+  filterFn_weakEquals,
   flexRender,
-  getCoreRowModel,
-  getExpandedRowModel,
-  getFilteredRowModel,
-  getFacetedRowModel,
-  getFacetedUniqueValues,
-  getSortedRowModel,
-  getPaginationRowModel,
-  useReactTable,
+  metaHelper,
+  rowExpandingFeature,
+  rowPaginationFeature,
+  rowSelectionFeature,
+  rowSortingFeature,
+  sortFn_alphanumeric,
+  sortFn_text,
+  tableFeatures,
+  useTable,
 } from '@tanstack/react-table'
 import { ChevronUp, ChevronDown, ChevronsUpDown, ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight, X } from 'lucide-react'
 import { cn } from '../utils/cn'
 
-declare module '@tanstack/react-table' {
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  interface ColumnMeta<TData extends unknown, TValue> {
-    filterVariant?: 'text' | 'select' | 'range'
-    /** Fixed choices for a select filter; without them the choices are the values present in the loaded rows. */
-    filterOptions?: { value: string; label: string }[]
-    /** Right-align numeric columns. */
-    align?: 'left' | 'right'
-  }
-  interface FilterFns {
-    range: FilterFn<unknown>
-  }
+interface DataTableColumnMeta {
+  filterVariant?: 'text' | 'select'
+  /** Fixed choices for a select filter; without them the choices are the values present in the loaded rows. */
+  filterOptions?: { value: string; label: string }[]
+  /** Right-align numeric columns. */
+  align?: 'left' | 'right'
 }
 
-const rangeFilterFn: FilterFn<unknown> = (row, columnId, filterValue: [number | '', number | '']) => {
-  const value = row.getValue<number>(columnId)
-  const [min, max] = filterValue
-  if (min !== '' && value < min) return false
-  if (max !== '' && value > max) return false
-  return true
-}
+// What every table here can do. 'auto' filtering and sorting only pick from the
+// functions registered below: strings filter with includesString and sort with
+// alphanumeric or text, and a column with no values filters with weakEquals.
+// Numbers have no 'auto' filter: a filtered number column names one, as the
+// status columns do with equalsString.
+const features = tableFeatures({
+  columnFilteringFeature,
+  columnFacetingFeature,
+  columnSizingFeature,
+  columnVisibilityFeature,
+  rowExpandingFeature,
+  rowPaginationFeature,
+  rowSelectionFeature,
+  rowSortingFeature,
+  filteredRowModel: createFilteredRowModel(),
+  facetedRowModel: createFacetedRowModel(),
+  facetedUniqueValues: createFacetedUniqueValues(),
+  paginatedRowModel: createPaginatedRowModel(),
+  sortedRowModel: createSortedRowModel(),
+  filterFns: {
+    includesString: filterFn_includesString,
+    equalsString: filterFn_equalsString,
+    weakEquals: filterFn_weakEquals,
+  },
+  sortFns: { alphanumeric: sortFn_alphanumeric, text: sortFn_text },
+  columnMeta: metaHelper<DataTableColumnMeta>(),
+})
+
+export type DataTableFeatures = typeof features
 
 /** Room a column with no explicit size is guaranteed before the table starts scrolling sideways. */
 const UNSIZED_COLUMN_MIN_WIDTH = 170
@@ -68,8 +97,8 @@ export interface ManualFiltering {
   onColumnFiltersChange: (filters: ColumnFiltersState) => void
 }
 
-interface DataTableProps<TData, TValue> {
-  columns: ColumnDef<TData, TValue>[]
+interface DataTableProps<TData extends RowData> {
+  columns: ColumnDef<DataTableFeatures, TData>[]
   data: TData[]
   /** When set, the table shows `data` as one page of `total` rows and asks for other pages instead of slicing. */
   manualPagination?: ManualPagination
@@ -87,13 +116,13 @@ interface DataTableProps<TData, TValue> {
   /** Row id (from getRowId) currently open in the inspector; gets a highlight. */
   activeRowId?: string | null
   /** Controlled column visibility, e.g. to drop columns while a panel is open. */
-  columnVisibility?: VisibilityState
+  columnVisibility?: ColumnVisibilityState
   /** Renders in the footer while rows are selected. */
   bulkActions?: (selected: TData[], clearSelection: () => void) => ReactNode
   className?: string
 }
 
-export function DataTable<TData, TValue>({
+export function DataTable<TData extends RowData>({
   columns,
   data,
   manualPagination,
@@ -110,7 +139,7 @@ export function DataTable<TData, TValue>({
   columnVisibility,
   bulkActions,
   className,
-}: DataTableProps<TData, TValue>) {
+}: DataTableProps<TData>) {
   const [sorting, setSorting] = useState<SortingState>([])
   const [rowSelection, setRowSelection] = useState<RowSelectionState>({})
   const [ownColumnFilters, setOwnColumnFilters] = useState<ColumnFiltersState>([])
@@ -123,18 +152,11 @@ export function DataTable<TData, TValue>({
   }
   const showColumnFilters = enableColumnFilters || !!manualFiltering
 
-  const table = useReactTable({
+  const table = useTable({
+    features,
     data,
     columns,
-    filterFns: { range: rangeFilterFn },
-    getCoreRowModel: getCoreRowModel(),
-    getExpandedRowModel: renderExpandedRow ? getExpandedRowModel() : undefined,
     getRowCanExpand: renderExpandedRow ? () => true : undefined,
-    getFilteredRowModel: getFilteredRowModel(),
-    getFacetedRowModel: getFacetedRowModel(),
-    getFacetedUniqueValues: getFacetedUniqueValues(),
-    getSortedRowModel: getSortedRowModel(),
-    getPaginationRowModel: getPaginationRowModel(),
     onSortingChange: setSorting,
     onRowSelectionChange: setRowSelection,
     onColumnFiltersChange: setColumnFilters,
@@ -142,6 +164,10 @@ export function DataTable<TData, TValue>({
     enableRowSelection,
     getRowId,
     autoResetPageIndex: false,
+    // Refetches replace `data`; open detail rows stay open.
+    autoResetExpanded: false,
+    // A shift-click toggles one row, like any other click.
+    enableRowRangeSelection: false,
     ...(manualFiltering ? { manualFiltering: true } : {}),
     ...(manualPagination
       ? {
@@ -165,6 +191,7 @@ export function DataTable<TData, TValue>({
     },
     initialState: {
       pagination: {
+        pageIndex: 0,
         pageSize: defaultPageSize,
       },
     },
@@ -172,7 +199,7 @@ export function DataTable<TData, TValue>({
 
   // If the current page becomes invalid after data changes, go to the last page.
   const pageCount = table.getPageCount()
-  const currentPageIndex = table.getState().pagination.pageIndex
+  const currentPageIndex = table.state.pagination.pageIndex
   useEffect(() => {
     if (pageCount > 0 && currentPageIndex >= pageCount) {
       table.setPageIndex(pageCount - 1)
@@ -182,10 +209,9 @@ export function DataTable<TData, TValue>({
   const selectedRows = table.getFilteredSelectedRowModel().rows.map((row) => row.original)
   useEffect(() => {
     onSelectionChange?.(selectedRows)
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [rowSelection, onSelectionChange])
 
-  const pageSize = table.getState().pagination.pageSize
+  const pageSize = table.state.pagination.pageSize
   const totalRows = manualPagination ? manualPagination.total : table.getFilteredRowModel().rows.length
   const totalExact = manualPagination?.totalExact ?? true
   const countAll = manualPagination?.countAll
@@ -268,7 +294,7 @@ export function DataTable<TData, TValue>({
                         'h-9 transition-colors',
                         onRowClick && 'cursor-pointer',
                         isActive
-                          ? 'bg-primary-soft shadow-[inset_2px_0_0_rgb(var(--color-primary))]'
+                          ? 'bg-primary-soft shadow-[inset_2px_0_0_var(--color-primary)]'
                           : row.getIsSelected()
                             ? 'bg-primary-soft/40 hover:bg-primary-soft/60'
                             : 'hover:bg-surface-raised/60'
@@ -360,7 +386,7 @@ export function DataTable<TData, TValue>({
               <select
                 value={pageSize}
                 onChange={(e) => table.setPageSize(Number(e.target.value))}
-                className="px-1.5 py-0.5 border border-line-strong rounded bg-surface text-fg text-xs focus:outline-none focus:ring-1 focus:ring-ring"
+                className="px-1.5 py-0.5 border border-line-strong rounded-sm bg-surface text-fg text-xs focus:outline-hidden focus:ring-1 focus:ring-ring"
               >
                 {[10, 20, 50, 100].map((size) => (
                   <option key={size} value={size}>{size}</option>
@@ -385,7 +411,7 @@ function PagerButton({ children, className, ...props }: React.ButtonHTMLAttribut
   return (
     <button
       type="button"
-      className={cn('p-1 rounded text-fg-muted hover:bg-surface-raised hover:text-fg disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-transparent', className)}
+      className={cn('p-1 rounded-sm text-fg-muted hover:bg-surface-raised hover:text-fg disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-transparent', className)}
       {...props}
     >
       {children}
@@ -394,12 +420,12 @@ function PagerButton({ children, className, ...props }: React.ButtonHTMLAttribut
 }
 
 const filterInputClasses =
-  'w-full px-1.5 py-1 text-xs border border-line-strong rounded bg-surface text-fg focus:outline-none focus:ring-1 focus:ring-ring placeholder:text-fg-subtle'
+  'w-full px-1.5 py-1 text-xs border border-line-strong rounded-sm bg-surface text-fg focus:outline-hidden focus:ring-1 focus:ring-ring placeholder:text-fg-subtle'
 
-function ColumnFilter<TData>({ column }: { column: Column<TData, unknown> }) {
+function ColumnFilter<TData extends RowData>({ column }: { column: Column<DataTableFeatures, TData, unknown> }) {
   const filterVariant = column.columnDef.meta?.filterVariant
   const fixedOptions = column.columnDef.meta?.filterOptions
-  // Only faceted (select) filters need the unique-value model; asking other columns throws.
+  // Only faceted (select) filters need the unique-value model, so other columns skip building it.
   const facets = filterVariant === 'select' && !fixedOptions ? column.getFacetedUniqueValues() : null
   const options = useMemo(
     () =>
@@ -413,28 +439,6 @@ function ColumnFilter<TData>({ column }: { column: Column<TData, unknown> }) {
     [fixedOptions, facets],
   )
   if (!filterVariant) return null
-
-  if (filterVariant === 'range') {
-    const filterValue = (column.getFilterValue() as [number | '', number | '']) ?? ['', '']
-    return (
-      <div className="flex gap-1">
-        <input
-          type="number"
-          value={filterValue[0]}
-          onChange={(e) => column.setFilterValue([e.target.value === '' ? '' : Number(e.target.value), filterValue[1]])}
-          placeholder="Min"
-          className={filterInputClasses}
-        />
-        <input
-          type="number"
-          value={filterValue[1]}
-          onChange={(e) => column.setFilterValue([filterValue[0], e.target.value === '' ? '' : Number(e.target.value)])}
-          placeholder="Max"
-          className={filterInputClasses}
-        />
-      </div>
-    )
-  }
 
   if (filterVariant === 'select') {
     return (
@@ -465,12 +469,11 @@ function ColumnFilter<TData>({ column }: { column: Column<TData, unknown> }) {
 }
 
 // Selection column with "select all pages" support
-export function createSelectionColumn<TData>(): ColumnDef<TData, unknown> {
+export function createSelectionColumn<TData extends RowData>(): ColumnDef<DataTableFeatures, TData, unknown> {
   return {
     id: 'select',
     size: 40,
     header: ({ table }) => {
-      const isAllRowsSelected = table.getIsAllRowsSelected()
       const isAllPageRowsSelected = table.getIsAllPageRowsSelected()
       const isSomeRowsSelected = table.getIsSomeRowsSelected()
       const totalRows = table.getFilteredRowModel().rows.length
@@ -488,7 +491,7 @@ export function createSelectionColumn<TData>(): ColumnDef<TData, unknown> {
               }
             }}
             onChange={table.getToggleAllPageRowsSelectedHandler()}
-            className="w-4 h-4 rounded border-line-strong bg-surface text-primary focus:ring-ring cursor-pointer"
+            className="w-4 h-4 rounded-sm border-line-strong bg-surface text-primary focus:ring-ring cursor-pointer"
             aria-label="Select all on page"
           />
           {hasMultiplePages && (
@@ -500,7 +503,9 @@ export function createSelectionColumn<TData>(): ColumnDef<TData, unknown> {
               >
                 <ChevronDown className="w-3 h-3" />
               </button>
-              <div className="absolute left-0 top-full mt-1 bg-surface border border-line-strong rounded shadow-lg opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all z-50 whitespace-nowrap normal-case tracking-normal font-normal">
+              {/* group-[:hover], not group-hover: Tailwind's hover variants only apply where the pointer can
+                  hover, and a tap must still open this menu on touch screens. */}
+              <div className="absolute left-0 top-full mt-1 bg-surface border border-line-strong rounded-sm shadow-lg opacity-0 invisible group-[:hover]:opacity-100 group-[:hover]:visible transition-all z-50 whitespace-nowrap normal-case tracking-normal font-normal">
                 <button
                   type="button"
                   onClick={() => table.toggleAllPageRowsSelected(true)}
@@ -515,7 +520,7 @@ export function createSelectionColumn<TData>(): ColumnDef<TData, unknown> {
                 >
                   Select all ({totalRows})
                 </button>
-                {(isAllRowsSelected || isSomeRowsSelected) && (
+                {isSomeRowsSelected && (
                   <button
                     type="button"
                     onClick={() => table.toggleAllRowsSelected(false)}
@@ -536,7 +541,7 @@ export function createSelectionColumn<TData>(): ColumnDef<TData, unknown> {
         checked={row.getIsSelected()}
         disabled={!row.getCanSelect()}
         onChange={row.getToggleSelectedHandler()}
-        className="w-4 h-4 rounded border-line-strong bg-surface text-primary focus:ring-ring cursor-pointer"
+        className="w-4 h-4 rounded-sm border-line-strong bg-surface text-primary focus:ring-ring cursor-pointer"
         aria-label="Select row"
       />
     ),

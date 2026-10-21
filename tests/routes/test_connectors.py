@@ -1,13 +1,42 @@
 # Copyright 2026 Octoprox Authors
 # SPDX-License-Identifier: Apache-2.0
 
-"""Tests for connector endpoints."""
+"""Tests for connector endpoints, on an api process: writes through the connector service, reads from the read model.
 
+The app runs no worker, so a write that starts work is checked by the job
+it asks for (its key on its kind's job stream), not by the job's effect.
+"""
+
+import time
+import uuid
+from datetime import datetime
 from typing import Any
 
+from sqlalchemy import update
 from starlette.testclient import TestClient
 
-from api.core.entity_index import ConnectorIndex
+from api.core.roles import JobKind
+from api.db.models import ConnectorModel
+from api.db.redis import JOB_STREAM_KEY, QUARANTINE_KEY
+from api.db.repository import ProxyRepository
+from api.db.session import SessionFactory
+from api.models.proxy import Proxy, ProxyProtocol, ProxyStatus
+from tests.conftest import api_runtime, on_app_loop, queued_jobs
+
+# A vendor session pool of two slots per country listing no country: a provider that syncs.
+OXYLABS_CREDENTIAL = {"proxy_type": "residential", "username": "alice", "password": "s3cret"}
+OXYLABS_POOL = {"num_proxies": 2, "session_duration_minutes": 10}
+# Cloud instances the scale job creates and terminates.
+AWS_CREDENTIAL = {"access_key": "AKIAIOSFODNN7EXAMPLE", "secret_key": "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"}
+AWS_CONNECTOR = {
+    "instance_name": "octo",
+    "region": "us-east-1",
+    "instance_type": "t3.micro",
+    "key_pair_name": "octo",
+    "security_group": "octo",
+    "min_proxies": 1,
+    "max_proxies": 4,
+}
 
 
 class TestConnectorEndpoints:
@@ -35,10 +64,10 @@ class TestConnectorEndpoints:
         created_credential: dict[str, Any],
         sample_connector_data: dict[str, Any],
     ) -> None:
-        """Listing order does not depend on the instance's in-memory dict order.
+        """Listing order is creation order, whatever the order Postgres returns rows in.
 
         Timestamps are pinned equal to exercise the id tie-break, which is what
-        keeps bulk-imported entries ordered identically across instances.
+        keeps bulk-imported entries ordered identically on every api process.
         """
         project_id = created_project["id"]
 
@@ -61,11 +90,8 @@ class TestConnectorEndpoints:
 
         assert listed_ids() == created_ids
 
-        manager = authenticated_client.app.state.proxy_manager
-        pinned = manager._connectors[created_ids[0]].created_at
-        for cid in created_ids:
-            manager._connectors[cid].created_at = pinned
-        manager._connectors = ConnectorIndex(reversed(list(manager._connectors.items())))
+        pinned = datetime(2026, 1, 1)
+        on_app_loop(authenticated_client, _pin_created_at, api_runtime(authenticated_client).session_factory, created_ids, pinned)
 
         assert listed_ids() == sorted(created_ids)
 
@@ -192,7 +218,7 @@ class TestConnectorEndpoints:
         assert other.status_code == 201, other.text
         rename = authenticated_client.patch(f"{url}/{other.json()['id']}", json={"name": body["name"]})
         assert rename.status_code == 400
-        # The rejected rename must not linger in the in-memory copy.
+        # The refused rename left the stored connector as it was.
         assert authenticated_client.get(f"{url}/{other.json()['id']}").json()["name"] == "Second"
         assert authenticated_client.patch(f"{url}/{other.json()['id']}", json={"name": "second"}).status_code == 200
 
@@ -413,6 +439,140 @@ class TestConnectorEndpoints:
         assert isinstance(data, dict)
 
 
+class TestConnectorJobs:
+    """What a connector write asks the workers for, and the Redis state it changes."""
+
+    def _credential(self, client: TestClient, project: dict[str, Any], type_: str, config: dict[str, Any]) -> str:
+        response = client.post(
+            f"/api/v1/projects/{project['id']}/credentials",
+            json={"name": f"{type_}-{uuid.uuid4().hex[:6]}", "type": type_, "config": config},
+        )
+        assert response.status_code == 201, response.text
+        credential_id: str = response.json()["id"]
+        return credential_id
+
+    def _connector(
+        self, client: TestClient, project: dict[str, Any], credential_id: str, config: dict[str, Any], **fields: Any
+    ) -> dict[str, Any]:
+        response = client.post(
+            f"/api/v1/projects/{project['id']}/connectors",
+            json={"name": f"connector-{uuid.uuid4().hex[:6]}", "credential_id": credential_id, "config": config, **fields},
+        )
+        assert response.status_code == 201, response.text
+        data: dict[str, Any] = response.json()
+        return data
+
+    def test_a_syncing_provider_is_synced_on_create_and_edit(
+        self, authenticated_client: TestClient, created_project: dict[str, Any]
+    ) -> None:
+        credential_id = self._credential(authenticated_client, created_project, "oxylabs", OXYLABS_CREDENTIAL)
+        connector = self._connector(authenticated_client, created_project, credential_id, OXYLABS_POOL)
+
+        assert connector["proxy_count"] == 0
+        assert connector["id"] in queued_jobs(authenticated_client, JobKind.SYNC)
+        assert connector["id"] not in queued_jobs(authenticated_client, JobKind.SCALE)
+
+        # Taken by a worker meanwhile; an edit asks again.
+        redis = api_runtime(authenticated_client).redis_client
+        on_app_loop(authenticated_client, redis.client.delete, JOB_STREAM_KEY.format(kind=JobKind.SYNC))
+        url = f"/api/v1/projects/{created_project['id']}/connectors/{connector['id']}"
+        assert authenticated_client.patch(url, json={"config": {**OXYLABS_POOL, "num_proxies": 3}}).status_code == 200
+        assert connector["id"] in queued_jobs(authenticated_client, JobKind.SYNC)
+
+    def test_a_static_connector_asks_for_nothing(
+        self, authenticated_client: TestClient, created_connector: dict[str, Any]
+    ) -> None:
+        assert created_connector["id"] not in queued_jobs(authenticated_client, JobKind.SYNC)
+        assert created_connector["id"] not in queued_jobs(authenticated_client, JobKind.SCALE)
+
+    def test_a_cloud_connector_is_scaled_on_create_and_drained_on_delete(
+        self, authenticated_client: TestClient, created_project: dict[str, Any]
+    ) -> None:
+        credential_id = self._credential(authenticated_client, created_project, "aws", AWS_CREDENTIAL)
+        connector = self._connector(authenticated_client, created_project, credential_id, AWS_CONNECTOR)
+        assert connector["target"]["total"] == 4
+        assert connector["id"] in queued_jobs(authenticated_client, JobKind.SCALE)
+        proxy = _add_proxy(authenticated_client, connector["id"], ProxyStatus.HEALTHY)
+
+        url = f"/api/v1/projects/{created_project['id']}/connectors/{connector['id']}"
+        redis = api_runtime(authenticated_client).redis_client
+        on_app_loop(authenticated_client, redis.client.delete, JOB_STREAM_KEY.format(kind=JobKind.SCALE))
+        assert authenticated_client.delete(url).status_code == 204
+
+        # Not deleted yet: disabled, its instances terminating, and the scale job asked to finish it.
+        data = authenticated_client.get(url).json()
+        assert data["enabled"] is False and data["proxy_count"] == 1
+        assert connector["id"] in queued_jobs(authenticated_client, JobKind.SCALE)
+        stored = on_app_loop(authenticated_client, _stored_status, api_runtime(authenticated_client).session_factory, proxy.id)
+        assert stored == ProxyStatus.TERMINATING
+
+    def test_a_rate_limit_change_lifts_the_connectors_quarantines(
+        self, authenticated_client: TestClient, created_project: dict[str, Any], created_connector: dict[str, Any]
+    ) -> None:
+        proxy = _add_proxy(authenticated_client, created_connector["id"], ProxyStatus.HEALTHY)
+        redis = api_runtime(authenticated_client).redis_client
+        on_app_loop(authenticated_client, redis.client.zadd, QUARANTINE_KEY, {proxy.id: time.time() + 600})
+        url = f"/api/v1/projects/{created_project['id']}/connectors/{created_connector['id']}"
+
+        assert authenticated_client.patch(url, json={"name": "Renamed"}).status_code == 200
+        assert on_app_loop(authenticated_client, redis.client.zscore, QUARANTINE_KEY, proxy.id) is not None
+
+        response = authenticated_client.patch(
+            url,
+            json={"rate_limit_config": {
+                "max_requests": 10, "window_seconds": 60, "quarantine_seconds_min": 30, "quarantine_seconds_max": 60,
+            }},
+        )
+        assert response.status_code == 200, response.text
+        assert on_app_loop(authenticated_client, redis.client.zscore, QUARANTINE_KEY, proxy.id) is None
+
+
+class TestConnectorProjectScope:
+    """A connector belongs to one project: under another project's path it is not found."""
+
+    def test_other_projects_connector_is_not_found(
+        self,
+        authenticated_client: TestClient,
+        created_connector: dict[str, Any],
+        sample_project_data: dict[str, Any],
+    ) -> None:
+        other = authenticated_client.post(
+            "/api/v1/projects",
+            json={**sample_project_data, "name": f"{sample_project_data['name']} B", "username": f"{sample_project_data['username']}_b"},
+        )
+        assert other.status_code == 201, other.text
+        url = f"/api/v1/projects/{other.json()['id']}/connectors/{created_connector['id']}"
+
+        assert authenticated_client.get(url).status_code == 404
+        assert authenticated_client.patch(url, json={"name": "Taken over"}).status_code == 404
+        assert authenticated_client.post(f"{url}/traffic/reset").status_code == 404
+        assert authenticated_client.get(f"{url}/metrics/history").status_code == 404
+        assert authenticated_client.delete(url).status_code == 404
+        mine = f"/api/v1/projects/{created_connector['project_id']}/connectors/{created_connector['id']}"
+        assert authenticated_client.get(mine).json()["name"] == created_connector["name"]
+
+    def test_a_credential_of_another_project_is_refused(
+        self,
+        authenticated_client: TestClient,
+        created_credential: dict[str, Any],
+        sample_project_data: dict[str, Any],
+        sample_connector_data: dict[str, Any],
+    ) -> None:
+        other = authenticated_client.post(
+            "/api/v1/projects",
+            json={**sample_project_data, "name": f"{sample_project_data['name']} B", "username": f"{sample_project_data['username']}_b"},
+        )
+        assert other.status_code == 201, other.text
+
+        response = authenticated_client.post(
+            f"/api/v1/projects/{other.json()['id']}/connectors",
+            json={**sample_connector_data, "credential_id": created_credential["id"]},
+        )
+
+        assert response.status_code == 400
+        assert response.json()["detail"] == "Credential does not belong to this project"
+
+
 class TestConnectorRoleAccess:
     """Tests for role-based access control on connector endpoints."""
 
@@ -486,3 +646,25 @@ class TestConnectorWeight:
         response = authenticated_client.patch(url, json={"routing_config": {}})
         assert response.status_code == 200
         assert response.json()["routing_config"] == {}
+
+
+async def _pin_created_at(session_factory: SessionFactory, connector_ids: list[str], at: datetime) -> None:
+    """Give the connectors one creation time, as a bulk import can."""
+    async with session_factory() as session:
+        await session.execute(update(ConnectorModel).where(ConnectorModel.id.in_(connector_ids)).values(created_at=at))
+        await session.commit()
+
+
+def _add_proxy(client: TestClient, connector_id: str, status: ProxyStatus) -> Proxy:
+    """A proxy stored with ``status``, as a job adds one (the proxies routes are another module's)."""
+    proxy = Proxy(host=f"{uuid.uuid4().hex[:8]}.example.com", port=8080, protocol=ProxyProtocol.HTTP,
+                  connector_id=connector_id, status=status)
+    on_app_loop(client, api_runtime(client).proxy_service.add, proxy)
+    return proxy
+
+
+async def _stored_status(session_factory: SessionFactory, proxy_id: str) -> ProxyStatus | None:
+    """The status column of a proxy row."""
+    async with session_factory() as session:
+        proxy = await ProxyRepository(session).get_by_id(proxy_id)
+    return proxy.status if proxy is not None else None

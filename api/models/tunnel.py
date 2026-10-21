@@ -1,22 +1,39 @@
 # Copyright 2026 Octoprox Authors
 # SPDX-License-Identifier: Apache-2.0
 
-"""What every tunnel protocol's devices report about their traffic.
+"""What every tunnel protocol shares: device traffic, gateway endpoints, addresses and errors.
 
 A device's requests are metered on the proxy path like any other, keyed by
-the device (see ``TunnelPeerMetricDelta``), so these shapes do not depend on
-the protocol the device arrived through. WireGuard uses them today; another
-tunnel protocol reports the same.
+the device (see ``TunnelPeerMetricDelta``), so the traffic shapes do not
+depend on the protocol the device arrived through. Neither does the rest of
+what is here:
+
+- how a gateway reports the endpoint it runs for a protocol
+  (:class:`TunnelEndpointState`, carried in its heartbeat) and how the api
+  shows a protocol across every gateway (:class:`TunnelStatus`);
+- how a new device gets its tunnel address (:func:`first_free_address`);
+- the errors the protocols' services raise for the admin API to map.
 """
 
 from __future__ import annotations
 
 import ipaddress
-from datetime import datetime
+from collections.abc import Awaitable, Callable, Container, Mapping, Sequence
+from datetime import UTC, datetime
+from typing import Any, Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from api.core.stats import TunnelPeerMetricDelta
+
+# The tunnel protocols, as they name their tables, their Redis status keys and
+# their endpoint states.
+TunnelProtocol = Literal["wireguard", "openvpn"]
+
+# What a gateway's endpoint is doing: bringing the tunnel up (also while it
+# waits for the feed to carry the protocol's settings), carrying it, failed
+# (it says why, and tries again), or stopped with the gateway.
+TunnelEndpointPhase = Literal["starting", "running", "failed", "stopped"]
 
 
 def clean_optional(value: str | None) -> str | None:
@@ -54,6 +71,63 @@ def validate_tunnel_subnet(value: str, example: str) -> str:
     if network.is_loopback or network.is_multicast:
         raise ValueError("subnet must be a unicast network")
     return str(network)
+
+
+def first_free_address(network: ipaddress.IPv4Network, used: Container[str]) -> str:
+    """The lowest host of ``network`` no device holds, skipping the gateway (the first host).
+
+    ``used`` is every address the protocol's devices hold, read from Postgres
+    in the transaction that inserts the new device: the unique index on the
+    address column turns a device created elsewhere at the same moment into
+    an integrity error rather than a shared address. Raises
+    :class:`TunnelAddressError` when every host is taken.
+    """
+    hosts = network.hosts()
+    next(hosts, None)
+    for candidate in hosts:
+        address = str(candidate)
+        if address not in used:
+            return address
+    raise TunnelAddressError(f"no free address left in {network}")
+
+
+def naive_utc(epoch: int) -> datetime:
+    """Unix seconds as naive UTC, like every other timestamp the API serialises."""
+    return datetime.fromtimestamp(epoch, UTC).replace(tzinfo=None)
+
+
+def device_changes(update: BaseModel) -> dict[str, Any]:
+    """The fields a partial device update sets, as either protocol's update model carries them.
+
+    Only the fields the request named. An empty string clears an optional
+    field (session, country, state, city); name and enabled cannot be
+    cleared, so an explicit null for them is ignored rather than becoming a
+    NOT NULL error.
+    """
+    return {
+        key: (None if value == "" else value)
+        for key, value in update.model_dump(exclude_unset=True).items()
+        if not (value is None and key in ("name", "enabled"))
+    }
+
+
+class TunnelValidationError(ValueError):
+    """A device or settings change the install cannot take as asked.
+
+    A name or public key another device holds, a location without its
+    country, or a subnet that overlaps the other protocol's or would strand
+    a device. The admin API answers 400 with the message, which is written
+    for the operator.
+    """
+
+
+class TunnelAddressError(RuntimeError):
+    """No tunnel address for a new device.
+
+    Either the subnet is full, or a device created at the same moment took
+    the address this one was given. The admin API answers 409 with the
+    message; in the second case trying again succeeds.
+    """
 
 
 class TunnelPeerMetrics(BaseModel):
@@ -99,3 +173,68 @@ class TunnelPeerMetricsSnapshot(TunnelPeerMetrics):
 
 class TunnelPeerMetricsHistoryResponse(BaseModel):
     snapshots: list[TunnelPeerMetricsSnapshot]
+
+
+# --- endpoints and status --------------------------------------------------------------------
+
+
+class TunnelEndpointState(BaseModel):
+    """What one gateway's endpoint for one tunnel protocol is doing.
+
+    Every gateway with a protocol enabled runs an endpoint for it and puts
+    this in its heartbeat snapshot, so the api can show the protocol per
+    gateway without asking any of them. Everything here is the gateway's own
+    view: its listener, its daemon, its counters since it started.
+    """
+
+    protocol: TunnelProtocol
+    instance_id: str
+    state: TunnelEndpointPhase
+    # Why the tunnel is not up, or what last went wrong applying a change to
+    # it (with the daemon's last output for OpenVPN); None while all is well.
+    error: str | None = None
+    # WireGuard: the kernel module or wireguard-go, once the interface is up.
+    backend: Literal["kernel", "userspace"] | None = None
+    # The port devices reach this gateway on: its own override, else the
+    # install's endpoint port; None until the feed carries the settings.
+    listen_port: int | None = None
+    # Connections the gateway's tunnel listener is relaying right now, every
+    # tunnel protocol included (the listener is shared).
+    active_connections: int = 0
+    # OpenVPN: times the daemon exited on its own and was started again, and
+    # connections refused at admission, since the gateway started.
+    restarts: int = 0
+    denied: int = 0
+    daemon_version: str | None = None
+    # The gateway's tunnel configuration: the interface it creates, the range
+    # its resolver answers from, and whether it closes encrypted-DNS
+    # connections. Per gateway, since each is set on the gateway's process.
+    interface: str | None = None
+    fake_ip_range: str | None = None
+    block_encrypted_dns: bool = True
+
+
+class TunnelStatus(BaseModel):
+    """A tunnel protocol across the install: every gateway carrying it, and its devices."""
+
+    # One entry per live gateway that runs the protocol's endpoint, by instance
+    # id; empty when no gateway does.
+    gateways: list[TunnelEndpointState] = Field(default_factory=list)
+    peers_total: int = 0
+    peers_enabled: int = 0
+    # Devices a gateway currently carries (OpenVPN) or that handshaked
+    # recently (WireGuard), merged across gateways.
+    peers_online: int = 0
+    # Degradation signals summed over every device of the protocol, all time
+    # (see docs/wireguard.md); each device's own numbers are in its metrics.
+    connections_by_address: int = 0
+    encrypted_dns_blocked: int = 0
+
+
+# Every live gateway's endpoint states, as their heartbeats report them
+# (instance_stats:*), whatever the protocol; the api's composition reads them.
+EndpointStates = Callable[[], Awaitable[list[TunnelEndpointState]]]
+# Each device's traffic totals by device id: Postgres totals plus the current
+# Redis window, as the api's read model computes them for every metered
+# entity. Devices without traffic may be left out.
+DeviceTotals = Callable[[Sequence[str]], Awaitable[Mapping[str, TunnelPeerMetricDelta]]]

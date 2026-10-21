@@ -1,7 +1,7 @@
 // Copyright 2026 Octoprox Authors
 // SPDX-License-Identifier: Apache-2.0
 
-import { createContext, useContext, useState, useEffect, ReactNode } from 'react'
+import { createContext, useCallback, useContext, useState, useEffect, ReactNode } from 'react'
 import { ProjectSummary, fetchProject } from '../api/client'
 
 const PROJECT_KEY = 'octoprox_selected_project'
@@ -23,7 +23,9 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
   const [selectedProject, setSelectedProject] = useState<ProjectSummary | null>(null)
   const [isLoading, setIsLoading] = useState(false)
 
-  const setSelectedProjectId = (id: string | null) => {
+  // Stable, so effects that list it (AppShell's URL sync) only re-run when the
+  // project changes, not on every render of this provider.
+  const setSelectedProjectId = useCallback((id: string | null) => {
     setSelectedProjectIdState(id)
     if (id) {
       localStorage.setItem(PROJECT_KEY, id)
@@ -31,7 +33,7 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
       localStorage.removeItem(PROJECT_KEY)
       setSelectedProject(null)
     }
-  }
+  }, [])
 
   const refreshProject = async () => {
     if (!selectedProjectId) {
@@ -58,7 +60,7 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
   }, [selectedProjectId])
 
   return (
-    <ProjectContext.Provider
+    <ProjectContext
       value={{
         selectedProjectId,
         selectedProject,
@@ -68,7 +70,7 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
       }}
     >
       {children}
-    </ProjectContext.Provider>
+    </ProjectContext>
   )
 }
 

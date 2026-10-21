@@ -56,6 +56,17 @@ When `sticky_quarantine` is set to `true`, this fallback is disabled: a session 
 
 This is useful when you need strict IP-session affinity and want the client to explicitly control when to switch IPs.
 
+## With Several Gateways
+
+The window and the quarantine are shared by every gateway, through Redis:
+
+- Every gateway counts its completed requests into the same per-proxy window, so the limit applies to the proxy's traffic across the install, not per gateway.
+- The gateway whose request fills the window takes the proxy out of its own selection at once and adds it to one sorted set of quarantines in Redis, `o6:proxy:quarantined`. The controller carries the quarantine to every other gateway in the [routing feed]({{ site.baseurl }}/architecture#per-key-request-state), so they stop selecting the proxy within a fraction of a second; a request or two may reach it on another gateway meanwhile. The tripping gateway keeps the proxy out on its own for at most ten seconds; after that the routing feed decides there too.
+- Releasing a proxy by hand removes it from the set; every gateway, the one that tripped included, routes to it again within moments.
+- Changing a connector's rate limit releases its quarantined proxies.
+
+If Redis cannot be reached, a gateway lets requests through rather than refuse them for want of a count. If Redis is emptied, the windows and quarantines in it are gone, so every proxy starts with a fresh window.
+
 ## Monitoring
 
 - **Proxy list** - Quarantined proxies show an orange "quarantined" badge with a countdown showing when the proxy becomes available again.

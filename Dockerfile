@@ -1,8 +1,8 @@
 # Build stage for frontend
-FROM node:20-alpine AS frontend-builder
+FROM node:24-alpine AS frontend-builder
 
 WORKDIR /app/web
-COPY web/package*.json ./
+COPY web/package*.json web/.npmrc ./
 RUN npm ci
 COPY web/ ./
 RUN npm run build
@@ -12,15 +12,17 @@ FROM python:3.12-slim
 
 WORKDIR /app
 
-# Install system dependencies. The tunnel endpoints need iproute2 and
-# nftables; WireGuard (docs/wireguard.md) wireguard-tools, plus wireguard-go
-# for hosts whose kernel has no WireGuard; OpenVPN (docs/openvpn.md) the
-# openvpn daemon. The process runs unprivileged, so the tools are launched
-# through setpriv, which carries CAP_NET_ADMIN as a file capability and
-# hands it on as an ambient capability. (A file capability on ip itself is
-# not enough: iproute2 drops its capabilities when run by a non-root user
-# unless they are inheritable.) The container still has to be granted the
-# capability (cap_add: [NET_ADMIN]), and /dev/net/tun for OpenVPN.
+# Install system dependencies. The tunnel endpoints (on a gateway, or in
+# role all) need iproute2 and nftables; WireGuard (docs/wireguard.md)
+# wireguard-tools, plus wireguard-go for hosts whose kernel has no
+# WireGuard; OpenVPN (docs/openvpn.md) the openvpn daemon. Every role runs
+# this one image, so the tools are installed even where no tunnel runs.
+# The process runs unprivileged, so the tools are launched through setpriv,
+# which carries CAP_NET_ADMIN as a file capability and hands it on as an
+# ambient capability. (A file capability on ip itself is not enough:
+# iproute2 drops its capabilities when run by a non-root user unless they
+# are inheritable.) The container still has to be granted the capability
+# (cap_add: [NET_ADMIN]), and /dev/net/tun for OpenVPN.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     iproute2 \
@@ -51,14 +53,18 @@ RUN useradd -m -u 1000 octoprox \
     && chown -R octoprox:octoprox /app /run/wireguard
 USER octoprox
 
-# Expose ports (51820/udp is the WireGuard endpoint, 1194 the OpenVPN one;
-# each is used only where its endpoint is enabled)
+# Expose ports (8000 is served by every role; 8080 is the proxy listener of
+# a gateway; 51820/udp is the WireGuard endpoint, 1194 the OpenVPN one, each
+# used only by a gateway with its endpoint enabled; role all has them all)
 EXPOSE 8000 8080 51820/udp 1194/udp 1194/tcp
 
-# Health check
+# Health check: every role answers /health on 8000, with 503 until it is
+# ready (a gateway before its first routing feed, for one)
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
     CMD curl -f http://localhost:8000/health || exit 1
 
-# Run the application
+# Run the application. Every role runs this same command; OCTOPROX_ROLE
+# (all by default, or api, gateway, controller, worker, echo) picks what
+# the process does.
 CMD ["uvicorn", "api.main:app", "--host", "0.0.0.0", "--port", "8000"]
 

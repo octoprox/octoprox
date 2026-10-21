@@ -19,9 +19,8 @@ from typing import Literal
 
 import structlog
 
-from api.models.wireguard import WireGuardPeer
 from api.tunnel.system import CommandError, CommandRunner
-from api.wireguard.config import render_server_conf
+from api.wireguard.config import InterfacePeer, render_server_conf
 
 logger = structlog.get_logger()
 
@@ -67,7 +66,7 @@ class WireGuardInterface:
         listen_port: int,
         address: str,
         mtu: int,
-        peers: Iterable[WireGuardPeer],
+        peers: Iterable[InterfacePeer],
     ) -> None:
         """Create the interface, give it our key, address and peers, and bring it up.
 
@@ -96,12 +95,23 @@ class WireGuardInterface:
         await self._runner.run("ip", "link", "set", "mtu", str(mtu), "up", "dev", self.name)
         logger.info("WireGuard interface up", interface=self.name, backend=self.backend, address=address, port=listen_port)
 
-    async def sync(self, *, private_key: str, listen_port: int, peers: Iterable[WireGuardPeer]) -> None:
+    async def sync(self, *, private_key: str, listen_port: int, peers: Iterable[InterfacePeer]) -> None:
         """Apply the peer set (and key or port) without disturbing sessions that did not change."""
         await self._configure("syncconf", private_key, listen_port, peers)
 
+    async def readdress(self, address: str) -> None:
+        """Move the interface to a new address (a new subnet) in place.
+
+        The peers and their sessions stay: WireGuard admits a device by its
+        key and its own tunnel address, neither of which changes. Flushing
+        first drops the old address and the route that came with it.
+        """
+        await self._runner.run("ip", "address", "flush", "dev", self.name)
+        await self._runner.run("ip", "address", "add", address, "dev", self.name)
+        logger.info("WireGuard interface re-addressed", interface=self.name, address=address)
+
     async def _configure(
-        self, command: str, private_key: str, listen_port: int, peers: Iterable[WireGuardPeer]
+        self, command: str, private_key: str, listen_port: int, peers: Iterable[InterfacePeer]
     ) -> None:
         # wg reads keys from a file, never from the command line, so the server
         # private key touches disk only for the length of the call, in a file

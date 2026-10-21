@@ -1,76 +1,67 @@
 # Copyright 2026 Octoprox Authors
 # SPDX-License-Identifier: Apache-2.0
 
-"""Collectors behind the admin system view.
+"""Collectors behind the admin System view: the cluster and the stores as Postgres and Redis describe them.
 
-Each section is gathered independently and every collector is failure-tolerant:
-a Redis outage or a Postgres role without ``pg_database_size`` rights degrades
-that one card to an ``error`` string instead of failing the whole request - an
-admin looking at a partly broken instance is exactly who needs this page.
-
-Cost notes, since this runs on a polling UI:
-
-* Entity counts are exact ``count(*)`` over the small operational tables.
-* Table sizes use catalog metadata and ``pg_class.reltuples``, so the
-  metric tables (millions of rows) stay cheap at the price of an estimate
-  that is unknown until autovacuum first analyses the table.
-* The Redis keyspace breakdown is a bounded ``SCAN``; past
-  :data:`REDIS_SCAN_LIMIT` keys it reports a sample and sets ``truncated``.
+The Redis sections and the database sizes each carry an ``error`` rather than fail the page, and nothing comes from
+the answering process's memory.
 """
 
 from __future__ import annotations
 
 import asyncio
-import os
-import platform
-import sys
 from collections import Counter
-from datetime import datetime
+from dataclasses import dataclass, field
+from itertools import batched
 from typing import TYPE_CHECKING, Any
 
 import structlog
+from pydantic import ValidationError
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncSession
 
-from api import __version__
 from api.core import utc_now
-from api.core.config import Settings
-from api.core.job_stats import job_stats
-from api.core.loop_lag import loop_lag
-from api.core.workers import LEASE_KINDS, LEASE_WORKERS, worker_info
+from api.core.logging import error_text
+from api.core.roles import Role
+from api.core.workers import LeaseName
 from api.db.redis import (
+    CHANGES_STREAM_KEY,
+    FEED_HEAD_KEY,
+    INSTANCE_INDEX_KEY,
     INSTANCE_REGISTRY_KEY,
     INSTANCE_STATS_KEY,
     INSTANCE_TTL_SECONDS,
-    LEASE_SCAN,
-    SCAN_COUNT,
-    RedisClient,
+    LEASE_KEY,
+    WORK_STREAMS,
+    WORKER_GROUP,
+    StreamId,
     classify_key,
+    is_missing_key,
 )
+from api.db.repository import ProxyRepository
+from api.feed.models import FeedHead
 from api.models.system import (
-    CacheStats,
+    ControllerStatus,
     DatabaseStats,
+    FeedStatus,
+    GatewayFeedStatus,
+    GatewaySnapshot,
     InstanceInfo,
     InstanceSnapshot,
     InventoryStats,
-    LeaseInfo,
     ProjectUsage,
     RedisKeyGroup,
     RedisStats,
-    RuntimeStats,
     SystemStats,
     TableStats,
-    WorkerStats,
-    WorkerTask,
+    WorkStream,
+    WorkStreams,
 )
 
 if TYPE_CHECKING:
-    from api.core.proxy_manager import ProxyManager
-    from api.core.proxy_server import ProxyServer
-    from api.core.tls_cert_manager import TLSCertManager
-    from api.geo.runtime import GeoRuntime
-    from api.openvpn.runtime import OpenVpnRuntime
-    from api.wireguard.runtime import WireGuardRuntime
+    from sqlalchemy.ext.asyncio import AsyncSession
+
+    from api.db.redis import RedisClient
+    from api.providers.registry import ProviderRegistry
 
 logger = structlog.get_logger()
 
@@ -83,42 +74,8 @@ REDIS_SCAN_BATCH = 1_000
 MAX_PROJECT_ROWS = 50
 
 
-
-# --- runtime ------------------------------------------------------------------------
-
-
-def collect_runtime(
-    settings: Settings, started_at: datetime | None, proxy_port: int | None = None
-) -> RuntimeStats:
-    """Describe the process that is serving this request.
-
-    ``proxy_port`` is the port the listener actually bound, which is the
-    interesting one when the configuration asked for 0 (OS-assigned).
-    """
-    uptime = (utc_now() - started_at).total_seconds() if started_at else 0.0
-    lag = loop_lag.last
-    return RuntimeStats(
-        version=__version__,
-        instance_id=settings.instance_id,
-        role=settings.role,
-        environment=settings.env,
-        python_version=sys.version.split()[0],
-        platform=f"{platform.system()} {platform.machine()}",
-        pid=os.getpid(),
-        started_at=started_at,
-        uptime_seconds=round(uptime, 1),
-        api_port=settings.api_port,
-        proxy_port=proxy_port if proxy_port is not None else settings.proxy_port,
-        log_level=settings.log_level.upper(),
-        health_check_interval=settings.health_check_interval,
-        metrics_flush_interval=settings.metrics_flush_interval,
-        ip_refresh_interval=settings.ip_refresh_interval,
-        event_loop_lag_max_ms=lag.max_ms if lag else None,
-        event_loop_lag_mean_ms=lag.mean_ms if lag else None,
-    )
-
-
 # --- postgres -----------------------------------------------------------------------
+
 
 _INVENTORY_SQL = text(
     """
@@ -188,452 +145,398 @@ _DB_SIZE_SQL = text(
 )
 
 
-async def collect_inventory(
-    session: AsyncSession, proxy_manager: ProxyManager | None
-) -> InventoryStats:
-    """Exact entity counts from Postgres, plus live health from the pool."""
-    row = (await session.execute(_INVENTORY_SQL)).one()
-    roles = {str(r[0]): int(r[1]) for r in (await session.execute(_USER_ROLES_SQL)).all()}
+# --- the cluster ---------------------------------------------------------------------
 
-    statuses: Counter[str] = Counter()
-    builtin = 0
-    if proxy_manager is not None:
-        for proxy in proxy_manager.proxies:
-            statuses[proxy.status.value] += 1
-        builtin = sum(
-            1 for ptype in proxy_manager.provider_registry.list() if ptype.source != "custom"
+
+@dataclass(frozen=True)
+class ClusterReading:
+    """What Redis holds about the cluster's processes and their coordination, as one read found it."""
+
+    # Every listed process whose registry key is alive, sorted by instance id.
+    instances: list[InstanceInfo] = field(default_factory=list)
+    # Who holds the controller lease.
+    leader: str | None = None
+    # The routing feed's head, and why it could not be read when it is there.
+    head: FeedHead | None = None
+    head_error: str | None = None
+    # The changes stream's newest entry ID; None while there is no stream.
+    changes_head: str | None = None
+    # Why nothing could be read: Redis did not answer.
+    error: str | None = None
+
+    def by_role(self) -> dict[str, list[InstanceInfo]]:
+        """The processes by the role they registered with: roles in :class:`Role` order (any other last), ids sorted."""
+        rank = {str(role): position for position, role in enumerate(Role)}
+        groups: dict[str, list[InstanceInfo]] = {}
+        for instance in sorted(self.instances, key=lambda i: (rank.get(i.role, len(rank)), i.role, i.instance_id)):
+            groups.setdefault(instance.role, []).append(instance)
+        return groups
+
+    def controller_status(self) -> ControllerStatus:
+        """The lease holder and, from its heartbeat, how far its last compile read the changes stream, against its head."""
+        leader = next(
+            (
+                instance.snapshot.controller
+                for instance in self.instances
+                if instance.instance_id == self.leader
+                and instance.snapshot is not None
+                and instance.snapshot.controller is not None
+            ),
+            None,
         )
-    custom = int(row.providers_custom)
-
-    return InventoryStats(
-        projects=int(row.projects),
-        credentials=int(row.credentials),
-        connectors=int(row.connectors),
-        connectors_enabled=int(row.connectors_enabled),
-        connectors_failing=int(row.connectors_failing),
-        proxies=int(row.proxies),
-        users=int(row.users),
-        users_active=int(row.users_active),
-        users_by_role=roles,
-        providers_total=builtin + custom,
-        providers_builtin=builtin,
-        providers_custom=custom,
-        custom_providers_enabled=int(row.providers_custom_enabled),
-        proxies_by_status=dict(sorted(statuses.items())),
-    )
-
-
-async def collect_project_usage(session: AsyncSession) -> list[ProjectUsage]:
-    """Per-project inventory, busiest first."""
-    rows = (await session.execute(_PROJECT_USAGE_SQL, {"limit": MAX_PROJECT_ROWS})).all()
-    return [
-        ProjectUsage(
-            id=str(r[0]),
-            name=str(r[1]),
-            credentials=int(r[2]),
-            connectors=int(r[3]),
-            proxies=int(r[4]),
+        return ControllerStatus(
+            leader=self.leader,
+            changes=leader.changes if leader is not None else None,
+            compiled_at=leader.compiled_at if leader is not None else None,
+            changes_head=self.changes_head,
+            error=self.error,
         )
-        for r in rows
-    ]
 
-
-async def collect_database(session: AsyncSession) -> DatabaseStats:
-    """Database and per-table sizes, with connection-pool usage for this process."""
-    stats = DatabaseStats()
-    try:
-        row = (await session.execute(_DB_SIZE_SQL)).one()
-        stats.name = str(row.name)
-        stats.size_bytes = int(row.size_bytes)
-        stats.backends = int(row.backends)
-        stats.tables = [
-            TableStats(
-                name=str(r[0]),
-                # Postgres stores -1 for a relation that has never been analysed.
-                row_estimate=int(r[1]) if int(r[1]) >= 0 else None,
-                total_bytes=int(r[2]),
-                table_bytes=int(r[3]),
-                index_bytes=int(r[4]),
-                dead_rows=int(r[5]),
-                last_vacuum_at=r[6],
-            )
-            for r in (await session.execute(_TABLE_SIZES_SQL)).all()
+    def feed_status(self) -> FeedStatus:
+        """The head in Redis and every live gateway against it."""
+        head = self.head
+        gateways = [
+            self._gateway_feed(instance.instance_id, instance.snapshot.gateway, instance.age_seconds, head)
+            for instance in self.instances
+            if instance.snapshot is not None and instance.snapshot.gateway is not None
         ]
-    except Exception as exc:  # pragma: no cover - depends on grants
-        logger.warning("Database stats unavailable", error=str(exc))
-        stats.error = str(exc)
-
-    pool = getattr(session.get_bind(), "pool", None)
-    try:
-        if pool is not None:
-            stats.pool_size = int(pool.size())
-            stats.pool_checked_out = int(pool.checkedout())
-    except Exception:  # pragma: no cover - pool class without size()/checkedout()
-        logger.debug("Connection pool does not expose sizing", exc_info=True)
-
-    return stats
-
-
-# --- redis --------------------------------------------------------------------------
-
-
-async def collect_redis(redis_client: RedisClient, *, scan_keyspace: bool = True) -> RedisStats:
-    """Redis memory, throughput and a bounded breakdown of the keyspace.
-
-    Everything but the breakdown comes from ``INFO`` and ``DBSIZE``, which are
-    O(1). Pass ``scan_keyspace=False`` to skip the ``SCAN`` - the periodic
-    snapshotter only records memory and key count, and walking the keyspace
-    every few minutes to derive numbers it discards would not pay for itself.
-    """
-    stats = RedisStats()
-    try:
-        client = redis_client.client
-        info: dict[str, Any] = await client.info()
-        stats.version = str(info.get("redis_version", ""))
-        stats.uptime_seconds = int(info.get("uptime_in_seconds", 0))
-        stats.used_memory_bytes = int(info.get("used_memory", 0))
-        stats.used_memory_peak_bytes = int(info.get("used_memory_peak", 0))
-        stats.used_memory_rss_bytes = int(info.get("used_memory_rss", 0))
-        stats.maxmemory_bytes = int(info.get("maxmemory", 0))
-        stats.connected_clients = int(info.get("connected_clients", 0))
-        stats.ops_per_sec = int(info.get("instantaneous_ops_per_sec", 0))
-        stats.keyspace_hits = int(info.get("keyspace_hits", 0))
-        stats.keyspace_misses = int(info.get("keyspace_misses", 0))
-        stats.total_keys = int(await client.dbsize())
-
-        if not scan_keyspace:
-            return stats
-
-        counts: Counter[str] = Counter()
-        scanned = 0
-        cursor = 0
-        while True:
-            cursor, keys = await client.scan(cursor=cursor, count=REDIS_SCAN_BATCH)
-            for key in keys:
-                counts[classify_key(key if isinstance(key, str) else key.decode())] += 1
-            scanned += len(keys)
-            if cursor == 0 or scanned >= REDIS_SCAN_LIMIT:
-                break
-        stats.scanned_keys = scanned
-        stats.truncated = cursor != 0
-        stats.groups = [
-            RedisKeyGroup(label=label, keys=n)
-            for label, n in sorted(counts.items(), key=lambda kv: -kv[1])
-        ]
-    except Exception as exc:
-        logger.warning("Redis stats unavailable", error=str(exc))
-        stats.error = str(exc)
-    return stats
-
-
-async def _collect_leases(redis_client: RedisClient, instance_id: str) -> list[LeaseInfo]:
-    """Who currently holds each singleton-worker lease, cluster-wide."""
-    client = redis_client.client
-    keys = [
-        k if isinstance(k, str) else k.decode()
-        async for k in client.scan_iter(match=LEASE_SCAN, count=SCAN_COUNT)
-    ]
-    if not keys:
-        return []
-    pipe = client.pipeline()
-    for key in keys:
-        pipe.get(key)
-        pipe.pttl(key)
-    results = await pipe.execute()
-
-    leases: list[LeaseInfo] = []
-    for i, key in enumerate(keys):
-        holder, ttl = results[2 * i], results[2 * i + 1]
-        if holder is None:
-            continue  # expired between the scan and the read
-        name = key.split(":", 1)[1] if ":" in key else key
-        kind, _, target = name.partition(":")
-        leases.append(
-            LeaseInfo(
-                name=name,
-                kind=LEASE_KINDS.get(kind, kind),
-                worker=LEASE_WORKERS.get(kind, ""),
-                target=target or None,
-                holder=str(holder),
-                held_by_self=str(holder) == instance_id,
-                ttl_ms=max(0, int(ttl)),
-            )
+        return FeedStatus(
+            digest=head.digest if head is not None else None,
+            changes=head.changes if head is not None else None,
+            compiled_at=head.compiled_at if head is not None else None,
+            sections=head.sections if head is not None else None,
+            gateways=gateways,
+            error=self.error or self.head_error,
         )
-    return sorted(leases, key=lambda lease: (lease.kind, lease.target or ""))
 
-
-def _parse_snapshot(raw: Any, instance_id: str) -> InstanceSnapshot | None:
-    """Decode a peer's published snapshot, tolerating anything unreadable.
-
-    A malformed or older-schema payload costs that one instance its card, not
-    the whole page - the same failure-tolerance the other collectors have.
-    """
-    if raw is None:
-        return None
-    try:
-        return InstanceSnapshot.model_validate_json(raw)
-    except Exception as exc:
-        logger.warning("Unreadable instance snapshot", peer=instance_id, error=str(exc))
-        return None
-
-
-async def _collect_instances(redis_client: RedisClient, instance_id: str) -> list[InstanceInfo]:
-    """Every Octoprox process currently advertising itself, and what it reports.
-
-    Two keys per instance: the registry key that proves it is alive, and the
-    snapshot key holding what only that process can see. Both are read in one
-    pipeline, and the snapshot is optional - an instance running a version
-    that predates snapshots is still listed as a member. The instances are
-    found through the instance index, so an instance on a version that
-    predates the index is not listed.
-    """
-    client = redis_client.client
-    idents = await redis_client.live_instance_ids()
-    if not idents:
-        return []
-    keys = [INSTANCE_REGISTRY_KEY.format(instance_id=ident) for ident in idents]
-    pipe = client.pipeline()
-    for key, ident in zip(keys, idents, strict=True):
-        pipe.get(key)
-        pipe.ttl(key)
-        pipe.get(INSTANCE_STATS_KEY.format(instance_id=ident))
-        pipe.ttl(INSTANCE_STATS_KEY.format(instance_id=ident))
-    results = await pipe.execute()
-
-    instances: list[InstanceInfo] = []
-    for i, ident in enumerate(idents):
-        role, ttl, raw_snapshot, snapshot_ttl = results[4 * i : 4 * i + 4]
-        if role is None:
-            continue  # expired between the scan and the read
-        snapshot = _parse_snapshot(raw_snapshot, ident)
-        instances.append(
-            InstanceInfo(
-                instance_id=ident,
-                role=str(role),
-                is_self=ident == instance_id,
-                ttl_seconds=max(0, int(ttl)),
-                snapshot=snapshot,
-                # How long ago it was written, read off the TTL it was written
-                # with. No clock comparison, so host skew cannot make a fresh
-                # snapshot look stale.
-                age_seconds=(
-                    None
-                    if snapshot is None
-                    else max(0.0, float(INSTANCE_TTL_SECONDS - max(0, int(snapshot_ttl))))
-                ),
-            )
+    @staticmethod
+    def _gateway_feed(
+        instance_id: str, gateway: GatewaySnapshot, snapshot_age: float | None, head: FeedHead | None
+    ) -> GatewayFeedStatus:
+        """One gateway's applied feed against the head; its age carried forward by its snapshot's own age."""
+        age = None
+        if gateway.feed_age_seconds is not None:
+            age = round(gateway.feed_age_seconds + (snapshot_age or 0.0), 1)
+        return GatewayFeedStatus(
+            instance_id=instance_id,
+            digest=gateway.feed_digest,
+            changes=gateway.feed_changes,
+            in_sync=head is not None and gateway.feed_digest == head.digest,
+            age_seconds=age,
         )
-    # This instance first, then stable by id so the list does not jump around.
-    return sorted(instances, key=lambda inst: (not inst.is_self, inst.instance_id))
 
 
-# --- process-local state ------------------------------------------------------------
+class ClusterReader:
+    """Reads what Redis holds about the cluster: heartbeats, the controller lease, the feed head, the work streams."""
 
+    def __init__(self, redis_client: RedisClient) -> None:
+        self._redis_client = redis_client
 
-def collect_cache(
-    proxy_manager: ProxyManager | None, cert_manager: TLSCertManager | None
-) -> CacheStats:
-    """Sizes of the caches this instance keeps in memory."""
-    if proxy_manager is None:
-        return CacheStats()
-    sizes = proxy_manager.cache_sizes()
-    return CacheStats(
-        **sizes,
-        tls_contexts=cert_manager.cached_contexts if cert_manager else 0,
-        provider_types=len(proxy_manager.provider_registry.list()),
-    )
+    async def read(self) -> ClusterReading:
+        """Every live process's heartbeat, the controller lease, the feed head and the changes stream's head, in three round trips.
 
-
-def _task_state(task: asyncio.Task[Any]) -> tuple[str, str | None]:
-    if not task.done():
-        return "running", None
-    if task.cancelled():
-        return "cancelled", None
-    exc = task.exception()
-    if exc is not None:
-        return "failed", f"{type(exc).__name__}: {exc}"
-    return "done", None
-
-
-def collect_tasks(
-    proxy_manager: ProxyManager | None,
-    geo_runtime: GeoRuntime | None = None,
-    wireguard_runtime: WireGuardRuntime | None = None,
-    openvpn_runtime: OpenVpnRuntime | None = None,
-) -> list[WorkerTask]:
-    """The background loops of this process: alive, elected, and doing work.
-
-    ``state`` comes from the asyncio task, the counters from
-    :mod:`api.core.job_stats`. Both are needed: the task says the loop exists,
-    the counters say the cycles inside it are completing. A singleton worker
-    standing by without the lease is legitimately at zero runs - the lease
-    list says who does have it.
-    """
-    handles = list(proxy_manager.background_tasks) if proxy_manager is not None else []
-    if geo_runtime is not None:
-        handles.extend(geo_runtime.background_tasks)
-    if wireguard_runtime is not None:
-        handles.extend(wireguard_runtime.background_tasks)
-    if openvpn_runtime is not None:
-        handles.extend(openvpn_runtime.background_tasks)
-    if not handles:
-        return []
-    runs = job_stats.snapshot()
-    tasks: list[WorkerTask] = []
-    for task in handles:
-        name = task.get_name()
-        state, error = _task_state(task)
-        info = worker_info(name)
-        stats = runs.get(name)
-        tasks.append(
-            WorkerTask(
-                name=name,
-                description=info.description if info else "",
-                scope=info.scope if info else "instance",
-                lease=info.lease if info else None,
-                lease_per_resource=info.per_resource if info else False,
-                state=state,
-                error=error,
-                interval_seconds=stats.interval_seconds if stats else None,
-                runs=stats.runs if stats else 0,
-                idle_runs=stats.idle_runs if stats else 0,
-                failures=stats.failures if stats else 0,
-                overruns=stats.overruns if stats else 0,
-                consecutive_overruns=stats.consecutive_overruns if stats else 0,
-                last_overrun_at=stats.last_overrun_at if stats else None,
-                consecutive_failures=stats.consecutive_failures if stats else 0,
-                last_run_at=stats.last_run_at if stats else None,
-                last_duration_ms=_round_ms(stats.last_duration_ms) if stats else None,
-                avg_duration_ms=_round_ms(stats.avg_duration_ms) if stats else None,
-                max_duration_ms=_round_ms(stats.max_duration_ms) if stats else None,
-                last_error=stats.last_error if stats else None,
-                last_error_at=stats.last_error_at if stats else None,
-            )
-        )
-    return tasks
-
-
-def _round_ms(value: float | None) -> float | None:
-    """Sub-microsecond precision on a timing nobody reads that closely."""
-    return None if value is None else round(value, 3)
-
-
-async def collect_workers(
-    proxy_manager: ProxyManager | None,
-    proxy_server: ProxyServer | None,
-    redis_client: RedisClient | None,
-    instance_id: str,
-    geo_runtime: GeoRuntime | None = None,
-    wireguard_runtime: WireGuardRuntime | None = None,
-    openvpn_runtime: OpenVpnRuntime | None = None,
-) -> WorkerStats:
-    """Local task health plus the cluster-wide lease and membership picture."""
-    leases: list[LeaseInfo] = []
-    instances: list[InstanceInfo] = []
-    if redis_client is not None:
+        A process whose registry key has expired is left out, and one whose snapshot is missing or unreadable is listed
+        without it.
+        """
         try:
-            leases, instances = await asyncio.gather(
-                _collect_leases(redis_client, instance_id),
-                _collect_instances(redis_client, instance_id),
-            )
+            pipe = self._redis_client.client.pipeline(transaction=False)
+            pipe.smembers(INSTANCE_INDEX_KEY)
+            pipe.get(LEASE_KEY.format(name=LeaseName.CONTROLLER))
+            pipe.get(FEED_HEAD_KEY)
+            members, leader, raw_head = await pipe.execute()
+            changes_head = await self._redis_client.stream_head(CHANGES_STREAM_KEY)
+            instances = await self._read_instances(sorted(str(member) for member in members))
         except Exception as exc:
-            logger.warning("Worker lease/instance scan failed", error=str(exc))
+            logger.warning("Cluster state unavailable", error=error_text(exc))
+            return ClusterReading(error=error_text(exc))
+        head, head_error = self._parse_head(raw_head)
+        return ClusterReading(
+            instances=instances,
+            leader=str(leader) if leader is not None else None,
+            head=head,
+            head_error=head_error,
+            changes_head=changes_head,
+        )
 
-    return WorkerStats(
-        tasks=collect_tasks(proxy_manager, geo_runtime, wireguard_runtime, openvpn_runtime),
-        leases=leases,
-        instances=instances,
-        proxy_server_listening=proxy_server.is_listening if proxy_server else False,
-        proxy_server_connections=proxy_server.active_connections if proxy_server else 0,
-        geo_lookup_enabled=geo_runtime.proxy_attributor.enabled if geo_runtime else False,
-        geo_lookups_in_flight=geo_runtime.proxy_attributor.in_flight if geo_runtime else 0,
-        geo_databases=[d.id for d in geo_runtime.database_store.loaded] if geo_runtime else [],
-        geo_pending_observations=geo_runtime.observation_recorder.pending if geo_runtime else 0,
-    )
+    async def instances(self) -> list[InstanceInfo]:
+        """Every live process's heartbeat, sorted by id: its role and, when this release can read one, its snapshot.
+
+        Every reader of the heartbeats goes through it, so all agree on who is alive; two round trips whatever the
+        number of processes, raising when Redis cannot be read.
+        """
+        members = await self._redis_client.client.smembers(INSTANCE_INDEX_KEY)
+        return await self._read_instances(sorted(str(member) for member in members))
+
+    async def streams(self) -> WorkStreams:
+        """Each work stream's length, the workers' group on it and its oldest entry's age, in one pipeline with Redis's clock.
+
+        A missing stream or group reads as zeros; any other failure leaves the section empty, with its ``error``.
+        """
+        try:
+            pipe = self._redis_client.client.pipeline(transaction=False)
+            for key in WORK_STREAMS.values():
+                pipe.xlen(key)
+                pipe.xinfo_groups(key)
+                pipe.xrange(key, count=1)
+            pipe.time()
+            *replies, clock = await pipe.execute(raise_on_error=False)
+            seconds, microseconds = self._checked(clock)
+            now_ms = int(seconds) * 1000 + int(microseconds) // 1000
+            by_name = {
+                name: self._work_stream(length, groups, first, now_ms=now_ms)
+                for name, (length, groups, first) in zip(WORK_STREAMS, batched(replies, 3), strict=True)
+            }
+        except Exception as exc:
+            logger.warning("Work streams unavailable", error=error_text(exc))
+            return WorkStreams(error=error_text(exc))
+        return WorkStreams(by_name=by_name)
+
+    async def _read_instances(self, members: list[str]) -> list[InstanceInfo]:
+        """The listed processes whose registry key is alive, with their snapshots; one pipeline."""
+        if not members:
+            return []
+        pipe = self._redis_client.client.pipeline(transaction=False)
+        for member in members:
+            pipe.get(INSTANCE_REGISTRY_KEY.format(instance_id=member))
+            pipe.get(INSTANCE_STATS_KEY.format(instance_id=member))
+            pipe.pttl(INSTANCE_STATS_KEY.format(instance_id=member))
+        results = await pipe.execute()
+        instances: list[InstanceInfo] = []
+        for i, member in enumerate(members):
+            role, raw_snapshot, ttl_ms = results[3 * i : 3 * i + 3]
+            if role is None:
+                continue  # expired since it was listed
+            snapshot = self._parse_snapshot(member, raw_snapshot)
+            instances.append(
+                InstanceInfo(
+                    instance_id=member,
+                    role=str(role),
+                    snapshot=snapshot,
+                    age_seconds=self._snapshot_age(int(ttl_ms)) if snapshot is not None else None,
+                )
+            )
+        return instances
+
+    @staticmethod
+    def _parse_snapshot(instance_id: str, raw: str | None) -> InstanceSnapshot | None:
+        """A process's published snapshot, or None when it published none or this release cannot read it.
+
+        An unreadable payload costs that process its details, not the page, and is logged at debug: the page says so on
+        every poll.
+        """
+        if raw is None:
+            return None
+        try:
+            return InstanceSnapshot.model_validate_json(raw)
+        except ValidationError as exc:
+            logger.debug("Unreadable instance snapshot", peer=instance_id, errors=exc.error_count())
+            return None
+
+    @staticmethod
+    def _snapshot_age(ttl_ms: int) -> float | None:
+        """How long ago a snapshot was written, read off the TTL it was written with; None for a key without one.
+
+        No clock comparison, so host skew cannot make a fresh snapshot look stale.
+        """
+        if ttl_ms < 0:
+            return None
+        return round(max(0.0, INSTANCE_TTL_SECONDS - ttl_ms / 1000), 1)
+
+    @staticmethod
+    def _parse_head(raw: str | None) -> tuple[FeedHead | None, str | None]:
+        """The feed head and, when one is there that this release cannot read, why not."""
+        if raw is None:
+            return None, None
+        try:
+            return FeedHead.model_validate_json(raw), None
+        except ValidationError as exc:
+            logger.debug("Unreadable routing feed head", errors=exc.error_count())
+            return None, "The routing feed head in Redis cannot be read by this release"
+
+    @classmethod
+    def _work_stream(cls, length: Any, groups: Any, first: Any, *, now_ms: int) -> WorkStream:
+        """One stream from its ``XLEN``, ``XINFO GROUPS`` and first-entry replies, its age against ``now_ms`` on Redis's clock."""
+        if is_missing_key(groups):
+            groups = []  # no stream: its length reads 0 and it has no entry
+        group = next((info for info in cls._checked(groups) if info["name"] == WORKER_GROUP), None)
+        entries = cls._checked(first)
+        oldest = max(0.0, (now_ms - StreamId.of(str(entries[0][0])).ms) / 1000) if entries else None
+        return WorkStream(
+            length=int(cls._checked(length)),
+            pending=int(group["pending"]) if group is not None else 0,
+            consumers=int(group["consumers"]) if group is not None else 0,
+            oldest_seconds=oldest,
+        )
+
+    @staticmethod
+    def _checked(reply: Any) -> Any:
+        """A pipelined reply read with ``raise_on_error=False``; the error Redis answered with is raised."""
+        if isinstance(reply, Exception):
+            raise reply
+        return reply
 
 
-def build_instance_snapshot(
-    settings: Settings,
-    started_at: datetime | None,
-    *,
-    proxy_manager: ProxyManager | None = None,
-    proxy_server: ProxyServer | None = None,
-    cert_manager: TLSCertManager | None = None,
-    geo_runtime: GeoRuntime | None = None,
-    wireguard_runtime: WireGuardRuntime | None = None,
-    openvpn_runtime: OpenVpnRuntime | None = None,
-) -> InstanceSnapshot:
-    """Assemble what this process publishes about itself on its heartbeat.
+# --- the System view -----------------------------------------------------------------
 
-    Exactly the sections of ``/system/stats`` that describe one process, so a
-    peer's card is built from the same collectors as the local one. Every
-    collector here reads in-memory state - no Postgres, no Redis - which is
-    what makes this cheap enough to run on a five-second loop.
+
+class SystemReader:
+    """Reads the admin System view: the inventory and the stores from Postgres and Redis, and the cluster from Redis.
+
+    Args:
+        registry: knows the provider types not stored as rows (built-in, file and plugin ones); without it they count as none.
     """
-    return InstanceSnapshot(
-        runtime=collect_runtime(
-            settings, started_at, proxy_port=proxy_server.port if proxy_server else None
-        ),
-        cache=collect_cache(proxy_manager, cert_manager),
-        tasks=collect_tasks(proxy_manager, geo_runtime, wireguard_runtime, openvpn_runtime),
-        proxy_server_listening=proxy_server.is_listening if proxy_server else False,
-        proxy_server_connections=proxy_server.active_connections if proxy_server else 0,
-        geo_lookup_enabled=geo_runtime.proxy_attributor.enabled if geo_runtime else False,
-        geo_lookups_in_flight=geo_runtime.proxy_attributor.in_flight if geo_runtime else 0,
-        geo_databases=[d.id for d in geo_runtime.database_store.loaded] if geo_runtime else [],
-        geo_pending_observations=geo_runtime.observation_recorder.pending if geo_runtime else 0,
-    )
 
+    def __init__(
+        self, session: AsyncSession, redis_client: RedisClient, registry: ProviderRegistry | None = None
+    ) -> None:
+        self._session = session
+        self._redis_client = redis_client
+        self._registry = registry
 
-# --- entry point --------------------------------------------------------------------
+    async def read(self) -> SystemStats:
+        """Every section of the view: the Postgres queries share the session, so they run in sequence (the database sizes
+        last), and the Redis reads run alongside them.
+        """
+        cluster = ClusterReader(self._redis_client)
+        (inventory, projects, database), redis_stats, reading, streams = await asyncio.gather(
+            self._postgres(),
+            self.redis(),
+            cluster.read(),
+            cluster.streams(),
+        )
+        return SystemStats(
+            generated_at=utc_now(),
+            instances=reading.by_role(),
+            controller=reading.controller_status(),
+            feed=reading.feed_status(),
+            streams=streams,
+            inventory=inventory,
+            projects=projects,
+            database=database,
+            redis=redis_stats,
+        )
 
+    async def inventory(self) -> InventoryStats:
+        """Exact entity counts from Postgres, proxies per status from their column, and the provider types known."""
+        session = self._session
+        row = (await session.execute(_INVENTORY_SQL)).one()
+        roles = {str(r[0]): int(r[1]) for r in (await session.execute(_USER_ROLES_SQL)).all()}
+        statuses = await ProxyRepository(session).count_by_status()
+        registry = self._registry
+        builtin = 0 if registry is None else sum(1 for ptype in registry.list() if ptype.source != "custom")
+        custom = int(row.providers_custom)
 
-async def collect_system_stats(
-    session: AsyncSession,
-    settings: Settings,
-    *,
-    proxy_manager: ProxyManager | None = None,
-    proxy_server: ProxyServer | None = None,
-    cert_manager: TLSCertManager | None = None,
-    redis_client: RedisClient | None = None,
-    started_at: datetime | None = None,
-    geo_runtime: GeoRuntime | None = None,
-    wireguard_runtime: WireGuardRuntime | None = None,
-    openvpn_runtime: OpenVpnRuntime | None = None,
-) -> SystemStats:
-    """Gather every section of the admin system view.
+        return InventoryStats(
+            projects=int(row.projects),
+            credentials=int(row.credentials),
+            connectors=int(row.connectors),
+            connectors_enabled=int(row.connectors_enabled),
+            connectors_failing=int(row.connectors_failing),
+            proxies=int(row.proxies),
+            users=int(row.users),
+            users_active=int(row.users_active),
+            users_by_role=roles,
+            providers_total=builtin + custom,
+            providers_builtin=builtin,
+            providers_custom=custom,
+            custom_providers_enabled=int(row.providers_custom_enabled),
+            proxies_by_status=dict(sorted(statuses.items())),
+        )
 
-    The Postgres queries share one session so they run in sequence; the Redis
-    work happens alongside them.
-    """
+    async def project_usage(self) -> list[ProjectUsage]:
+        """Per-project inventory, busiest first."""
+        rows = (await self._session.execute(_PROJECT_USAGE_SQL, {"limit": MAX_PROJECT_ROWS})).all()
+        return [
+            ProjectUsage(
+                id=str(r[0]),
+                name=str(r[1]),
+                credentials=int(r[2]),
+                connectors=int(r[3]),
+                proxies=int(r[4]),
+            )
+            for r in rows
+        ]
 
-    async def _postgres() -> tuple[InventoryStats, list[ProjectUsage], DatabaseStats]:
-        inventory = await collect_inventory(session, proxy_manager)
-        projects = await collect_project_usage(session)
-        database = await collect_database(session)
+    async def database(self) -> DatabaseStats:
+        """Database and per-table sizes, and the connections to the database.
+
+        Run it last on a shared session: a role without the rights it needs
+        leaves the transaction aborted, which only this section reports.
+        """
+        session = self._session
+        stats = DatabaseStats()
+        try:
+            row = (await session.execute(_DB_SIZE_SQL)).one()
+            stats.name = str(row.name)
+            stats.size_bytes = int(row.size_bytes)
+            stats.backends = int(row.backends)
+            stats.tables = [
+                TableStats(
+                    name=str(r[0]),
+                    # Postgres stores -1 for a relation that has never been analysed.
+                    row_estimate=int(r[1]) if int(r[1]) >= 0 else None,
+                    total_bytes=int(r[2]),
+                    table_bytes=int(r[3]),
+                    index_bytes=int(r[4]),
+                    dead_rows=int(r[5]),
+                    last_vacuum_at=r[6],
+                )
+                for r in (await session.execute(_TABLE_SIZES_SQL)).all()
+            ]
+        except Exception as exc:  # pragma: no cover - depends on grants
+            logger.warning("Database stats unavailable", error=str(exc))
+            stats.error = str(exc)
+        return stats
+
+    async def redis(self, *, scan_keyspace: bool = True) -> RedisStats:
+        """Redis memory, throughput and, unless ``scan_keyspace`` is False, a bounded breakdown of the keyspace.
+
+        Everything but the breakdown comes from ``INFO`` and ``DBSIZE``, which are O(1); the snapshot job skips the
+        ``SCAN``, since it records only memory and key count.
+        """
+        stats = RedisStats()
+        try:
+            client = self._redis_client.client
+            info: dict[str, Any] = await client.info()
+            stats.version = str(info.get("redis_version", ""))
+            stats.uptime_seconds = int(info.get("uptime_in_seconds", 0))
+            stats.used_memory_bytes = int(info.get("used_memory", 0))
+            stats.used_memory_peak_bytes = int(info.get("used_memory_peak", 0))
+            stats.used_memory_rss_bytes = int(info.get("used_memory_rss", 0))
+            stats.maxmemory_bytes = int(info.get("maxmemory", 0))
+            stats.connected_clients = int(info.get("connected_clients", 0))
+            stats.ops_per_sec = int(info.get("instantaneous_ops_per_sec", 0))
+            stats.keyspace_hits = int(info.get("keyspace_hits", 0))
+            stats.keyspace_misses = int(info.get("keyspace_misses", 0))
+            stats.total_keys = int(await client.dbsize())
+
+            if not scan_keyspace:
+                return stats
+
+            counts: Counter[str] = Counter()
+            scanned = 0
+            cursor = 0
+            while True:
+                cursor, keys = await client.scan(cursor=cursor, count=REDIS_SCAN_BATCH)
+                for key in keys:
+                    counts[classify_key(key if isinstance(key, str) else key.decode())] += 1
+                scanned += len(keys)
+                if cursor == 0 or scanned >= REDIS_SCAN_LIMIT:
+                    break
+            stats.scanned_keys = scanned
+            stats.truncated = cursor != 0
+            stats.groups = [
+                RedisKeyGroup(label=label, keys=n)
+                for label, n in sorted(counts.items(), key=lambda kv: -kv[1])
+            ]
+        except Exception as exc:
+            logger.warning("Redis stats unavailable", error=str(exc))
+            stats.error = str(exc)
+        return stats
+
+    async def _postgres(self) -> tuple[InventoryStats, list[ProjectUsage], DatabaseStats]:
+        """The Postgres sections, one after another on the shared session, the database sizes last."""
+        inventory = await self.inventory()
+        projects = await self.project_usage()
+        database = await self.database()
         return inventory, projects, database
-
-    async def _redis() -> RedisStats:
-        return await collect_redis(redis_client) if redis_client else RedisStats()
-
-    (inventory, projects, database), redis_stats, workers = await asyncio.gather(
-        _postgres(),
-        _redis(),
-        collect_workers(
-            proxy_manager, proxy_server, redis_client, settings.instance_id, geo_runtime, wireguard_runtime,
-            openvpn_runtime,
-        ),
-    )
-
-    return SystemStats(
-        generated_at=utc_now(),
-        runtime=collect_runtime(
-            settings, started_at, proxy_port=proxy_server.port if proxy_server else None
-        ),
-        inventory=inventory,
-        projects=projects,
-        database=database,
-        redis=redis_stats,
-        cache=collect_cache(proxy_manager, cert_manager),
-        workers=workers,
-    )

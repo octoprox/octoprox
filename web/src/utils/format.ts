@@ -5,6 +5,17 @@
 export const plural = (n: number, one: string, many: string) => (n === 1 ? one : many)
 
 /**
+ * Shorten a long identifier by cutting its middle rather than its end. Process
+ * ids are a host name plus a random suffix, and in Kubernetes the host name is a
+ * long pod name whose tail is what tells two apart.
+ */
+export function elideMiddle(text: string, max: number): string {
+  if (text.length <= max) return text
+  const tail = Math.ceil((max - 1) / 2)
+  return `${text.slice(0, max - 1 - tail)}…${text.slice(-tail)}`
+}
+
+/**
  * Format bytes as human-readable string (e.g., "1.5 MB")
  */
 export function formatBytes(bytes: number): string {

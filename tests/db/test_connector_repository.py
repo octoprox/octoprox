@@ -3,8 +3,11 @@
 
 """Tests for ConnectorRepository."""
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
+from api.db.models import ConnectorModel
 from api.db.repository import (
     ConnectorRepository,
     CredentialRepository,
@@ -204,7 +207,7 @@ class TestConnectorRepository:
         connector.name = "Updated"
         connector.enabled = False
         connector.config = {"updated": True}
-        await connector_repo.update(connector)
+        saved = await connector_repo.update(connector)
         await db_session.commit()
 
         result = await connector_repo.get_by_id(connector.id)
@@ -212,6 +215,49 @@ class TestConnectorRepository:
         assert result.name == "Updated"
         assert result.enabled is False
         assert result.config == {"updated": True}
+        # The answer is the row as stored, its updated_at stamped by the write.
+        assert saved == result and saved.updated_at > connector.updated_at
+
+    async def test_an_update_answers_the_credential_the_connector_moved_to(
+        self,
+        connector_repo: ConnectorRepository,
+        credential_repo: CredentialRepository,
+        project_repo: ProjectRepository,
+        db_session: AsyncSession,
+    ) -> None:
+        project, credential = await self._create_project_and_credential(project_repo, credential_repo, db_session)
+        aws = Credential(name="AWS", type=CredentialType.AWS, project_id=project.id, config={})
+        await credential_repo.create(aws)
+        connector = Connector(
+            name="Moving",
+            credential_id=credential.id,
+            credential_type=CredentialType.STATIC_PROXY_PROVIDER,
+            project_id=project.id,
+            config={},
+        )
+        await connector_repo.create(connector)
+        await db_session.commit()
+        # The session holds the row with its old credential loaded, as a caller that read it in the session may.
+        held = await db_session.scalar(
+            select(ConnectorModel)
+            .where(ConnectorModel.id == connector.id)
+            .options(selectinload(ConnectorModel.credential))
+        )
+        assert held is not None and held.credential.id == credential.id
+
+        saved = await connector_repo.update(connector.model_copy(update={"credential_id": aws.id}))
+
+        assert saved is not None and (saved.credential_id, saved.credential_type) == (aws.id, CredentialType.AWS)
+
+    async def test_an_update_of_a_connector_that_is_gone_answers_none(self, connector_repo: ConnectorRepository) -> None:
+        gone = Connector(
+            name="Gone",
+            credential_id="credential-1",
+            credential_type=CredentialType.STATIC_PROXY_PROVIDER,
+            project_id="project-1",
+            config={},
+        )
+        assert await connector_repo.update(gone) is None
 
     async def test_create_connector_with_routing_config(
         self,
@@ -352,3 +398,59 @@ class TestConnectorRepository:
         result = await connector_repo.get_by_id(connector.id)
         assert result is None
 
+
+    async def test_one_with_its_credential_in_one_read(
+        self,
+        connector_repo: ConnectorRepository,
+        credential_repo: CredentialRepository,
+        project_repo: ProjectRepository,
+        db_session: AsyncSession,
+    ) -> None:
+        """The connector with its credential; None for one that is gone, or that is not in the project asked for."""
+        project, credential = await self._create_project_and_credential(project_repo, credential_repo, db_session)
+        connector = Connector(
+            name="One",
+            credential_id=credential.id,
+            credential_type=CredentialType.STATIC_PROXY_PROVIDER,
+            project_id=project.id,
+            config={},
+        )
+        await connector_repo.create(connector)
+        await db_session.commit()
+
+        found = await connector_repo.get_with_credential(connector.id)
+
+        assert found is not None and (found[0].id, found[1]) == (connector.id, credential)
+        assert await connector_repo.get_with_credential(connector.id, project_id=project.id) == found
+        assert await connector_repo.get_with_credential(connector.id, project_id="another-project") is None
+        assert await connector_repo.get_with_credential("unknown") is None
+
+    async def test_many_with_their_credentials_in_one_read(
+        self,
+        connector_repo: ConnectorRepository,
+        credential_repo: CredentialRepository,
+        project_repo: ProjectRepository,
+        db_session: AsyncSession,
+    ) -> None:
+        """The connectors asked for that exist, in id order, each with its credential; an unknown id is left out."""
+        project, credential = await self._create_project_and_credential(project_repo, credential_repo, db_session)
+        connectors = [
+            Connector(
+                name=f"Many {i}",
+                credential_id=credential.id,
+                credential_type=CredentialType.STATIC_PROXY_PROVIDER,
+                project_id=project.id,
+                config={},
+            )
+            for i in range(3)
+        ]
+        for connector in connectors:
+            await connector_repo.create(connector)
+        await db_session.commit()
+        wanted = [connectors[2].id, "unknown", connectors[0].id]
+
+        pairs = await connector_repo.get_many_with_credentials(wanted)
+
+        assert [(c.id, cred.id) for c, cred in pairs] == [(cid, credential.id) for cid in sorted(wanted[::2])]
+        assert [c.id for c in await connector_repo.get_many(wanted)] == sorted(wanted[::2])
+        assert await connector_repo.get_many([]) == []

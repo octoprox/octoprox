@@ -5,7 +5,8 @@
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from api.db.repository import CredentialRepository, ProjectRepository
+from api.db.repository import ConnectorRepository, CredentialRepository, ProjectRepository
+from api.models.connector import Connector
 from api.models.credential import Credential, CredentialType
 from api.models.project import Project
 
@@ -163,13 +164,21 @@ class TestCredentialRepository:
 
         credential.name = "Updated"
         credential.config = {"updated": True}
-        await credential_repo.update(credential)
+        saved = await credential_repo.update(credential)
         await db_session.commit()
 
         result = await credential_repo.get_by_id(credential.id)
         assert result is not None
         assert result.name == "Updated"
         assert result.config == {"updated": True}
+        # The answer is the row as stored, its updated_at stamped by the write.
+        assert saved == result and saved.updated_at > credential.updated_at
+
+    async def test_an_update_of_a_credential_that_is_gone_answers_none(
+        self, credential_repo: CredentialRepository
+    ) -> None:
+        gone = Credential(name="Gone", type=CredentialType.STATIC_PROXY_PROVIDER, project_id="project-1", config={})
+        assert await credential_repo.update(gone) is None
 
     async def test_delete_credential(
         self,
@@ -225,3 +234,35 @@ class TestCredentialRepository:
         credentials = await credential_repo.get_all()
         assert len(credentials) == len(types)
 
+
+    async def test_usage_by_type_counts_credentials_and_the_connectors_on_them(
+        self,
+        credential_repo: CredentialRepository,
+        project_repo: ProjectRepository,
+        db_session: AsyncSession,
+    ) -> None:
+        project = await self._create_project(project_repo, db_session)
+        static = [
+            Credential(name=f"Static {i}", type=CredentialType.STATIC_PROXY_PROVIDER, project_id=project.id, config={})
+            for i in range(2)
+        ]
+        aws = Credential(name="AWS", type=CredentialType.AWS, project_id=project.id, config={})
+        for credential in (*static, aws):
+            await credential_repo.create(credential)
+        await ConnectorRepository(db_session).create(
+            Connector(
+                name="On static",
+                credential_id=static[0].id,
+                credential_type=CredentialType.STATIC_PROXY_PROVIDER,
+                project_id=project.id,
+                config={},
+            )
+        )
+        await db_session.commit()
+
+        assert await credential_repo.usage_by_type() == {
+            CredentialType.STATIC_PROXY_PROVIDER.value: (2, 1),
+            CredentialType.AWS.value: (1, 0),
+        }
+        assert await credential_repo.usage_by_type(CredentialType.AWS.value) == {CredentialType.AWS.value: (1, 0)}
+        assert await credential_repo.usage_by_type("unused") == {}

@@ -12,7 +12,8 @@ from api.core.error_response import (
     refusal_message,
     upstream_proxy_status,
 )
-from api.core.failure_log import FailureKind, RequestFailure
+from api.core.failure_log import RequestFailure
+from api.core.stats import FailureKind
 
 
 def _failure(kind: FailureKind, upstream_status: int | None = None) -> RequestFailure:

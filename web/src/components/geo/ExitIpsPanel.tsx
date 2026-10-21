@@ -7,7 +7,7 @@ import { ColumnDef, ColumnFiltersState } from '@tanstack/react-table'
 import { Network } from 'lucide-react'
 import { countGeoExitIps, fetchGeoExitIps, fetchProjectConnectors, fetchProjects, ExitIp, ExitIpFilters, ObservationVerdict } from '../../api/client'
 import { useCountAll } from '../../hooks/useCountAll'
-import { DataTable } from '../DataTable'
+import { DataTable, type DataTableFeatures } from '../DataTable'
 import { EmptyState } from '../layout/Page'
 import { Badge, Card, Select } from '../ui'
 import { formatDateTime, relativeTime } from '../../utils/format'
@@ -79,11 +79,10 @@ export function ExitIpsPanel({ projectId }: { projectId?: string }) {
       .sort((a, b) => a.name.localeCompare(b.name))
       .map((c) => ({ value: c.id, label: c.name })),
     // Keyed on when each query last delivered data: the query objects change identity every render.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
     [connectorQueries.map((q) => q.dataUpdatedAt).join()],
   )
 
-  const columns: ColumnDef<ExitIp>[] = useMemo(() => [
+  const columns: ColumnDef<DataTableFeatures, ExitIp>[] = useMemo(() => [
     {
       id: 'connector', accessorFn: (e: ExitIp) => e.connector_id, size: 190, header: 'Connector', enableSorting: false,
       meta: { filterVariant: 'select' as const, filterOptions: connectorOptions },

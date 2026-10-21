@@ -4,16 +4,13 @@
 """Tests for the per-cycle counters behind the admin worker list."""
 
 import asyncio
-import re
-from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
 from api.core.job_stats import MAX_ERROR_CHARS, JobStats, get_job_stats, job_stats
-from api.core.proxy_manager import ProxyManager
-from api.core.system_stats import collect_tasks
-from api.core.workers import LEASE_KINDS, LEASE_WORKERS, WORKERS, WorkerName
+from api.core.roles import JobKind, Role
+from api.core.workers import WORKERS, LeaseName, WorkerName, job_producer_name, job_runner_name
 
 
 @pytest.fixture(autouse=True)
@@ -191,7 +188,7 @@ class TestTrack:
         assert stats.last_overrun_at is not None
 
     async def test_a_worker_without_a_cadence_never_overruns(self) -> None:
-        """The pub/sub subscribers run on arrival, so there is nothing to miss."""
+        """A stream consumer waits on its stream, so it has no cadence to miss."""
         job_stats.record("worker", 10_000.0)
 
         stats = job_stats.get("worker")
@@ -223,67 +220,122 @@ class TestTrack:
         assert job_stats.snapshot()["b"].failures == 1
 
 
-class TestCollectTasks:
-    """The worker list is the join of the asyncio task and its counters."""
-
-    async def test_reports_description_scope_and_counters(self) -> None:
-        async def loop() -> None:
-            await asyncio.Event().wait()
-
-        task = asyncio.create_task(loop(), name=WorkerName.METRICS_FLUSHER)
-        job_stats.record(WorkerName.METRICS_FLUSHER, 12.0)
-        # Only ``background_tasks`` is read, so a real manager is overkill.
-        manager: Any = SimpleNamespace(background_tasks=[task])
-        try:
-            (reported,) = collect_tasks(manager)
-        finally:
-            task.cancel()
-
-        assert reported.state == "running"
-        assert reported.description == WORKERS[WorkerName.METRICS_FLUSHER].description
-        assert reported.scope == "singleton"
-        assert reported.lease == "metrics_flusher"
-        assert reported.runs == 1
-        assert reported.idle_runs == 0
-        assert reported.avg_duration_ms == 12.0
-
-    async def test_a_worker_that_has_not_run_reports_zeroes_not_nulls(self) -> None:
-        async def loop() -> None:
-            await asyncio.Event().wait()
-
-        task = asyncio.create_task(loop(), name=WorkerName.HEALTH_CHECKER)
-        # Only ``background_tasks`` is read, so a real manager is overkill.
-        manager: Any = SimpleNamespace(background_tasks=[task])
-        try:
-            (reported,) = collect_tasks(manager)
-        finally:
-            task.cancel()
-
-        assert (reported.runs, reported.idle_runs, reported.failures) == (0, 0, 0)
-        assert reported.last_run_at is None
-        assert reported.avg_duration_ms is None
-
-
 class TestWorkerRegistry:
-    def test_every_spawned_loop_is_described(self) -> None:
-        """A loop added to ``start`` without a WORKERS entry is a blank row."""
-        import inspect
+    """Checked against the catalogue itself: loops are spawned by ``WorkerName`` only, so every name needs an entry."""
 
-        spawned = {
-            WorkerName[member]
-            for member in re.findall(
-                r"_spawn\(\s*WorkerName\.([A-Z_]+)", inspect.getsource(ProxyManager.start)
-            )
+    def test_every_loop_is_described_and_runs_somewhere(self) -> None:
+        assert set(WORKERS) == set(WorkerName)
+        for name, info in WORKERS.items():
+            assert info.description, name
+            assert info.roles, name
+
+    def test_descriptions_read_as_ui_copy(self) -> None:
+        """The System page renders them verbatim: a capitalised sentence, no closing period, plain ASCII."""
+        for name, info in WORKERS.items():
+            assert info.description[0].isupper(), name
+            assert not info.description.endswith("."), name
+            assert info.description.isascii(), name
+
+    def test_each_role_runs_the_loops_of_the_split(self) -> None:
+        # Spelled out rather than derived: these names are the wire contract
+        # of the System page, so renaming one or moving it to another role
+        # should fail here.
+        expected = {
+            Role.API: {
+                "heartbeat",
+                "loop_lag_monitor",
+                "geo_observation_publisher",
+                "definitions_refresher",
+                "geo_database_retry",
+            },
+            Role.GATEWAY: {
+                "heartbeat",
+                "loop_lag_monitor",
+                "feed_follower",
+                "request_metering",
+                "failure_log_publisher",
+                "geo_observation_publisher",
+                "sighting_publisher",
+                "wireguard_status_publisher",
+                "openvpn_status_publisher",
+                "openvpn_supervisor",
+                "tunnel_reconciler",
+                "geo_database_sync",
+                "geo_database_retry",
+            },
+            Role.CONTROLLER: {
+                "heartbeat",
+                "loop_lag_monitor",
+                "feed_builder",
+                "job_producer_health",
+                "job_producer_sync",
+                "job_producer_scale",
+                "job_producer_metrics_flush",
+                "job_producer_compaction",
+                "job_producer_snapshot",
+                "job_producer_geo_update",
+                "job_producer_tunnel_last_seen",
+                "job_producer_index_hygiene",
+            },
+            Role.WORKER: {
+                "heartbeat",
+                "loop_lag_monitor",
+                "geo_observation_publisher",
+                "definitions_refresher",
+                "geo_database_retry",
+                "job_runner_health",
+                "job_runner_sync",
+                "job_runner_scale",
+                "job_runner_provision",
+                "job_runner_reattribute",
+                "job_runner_enrich",
+                "job_runner_traffic",
+                "job_runner_metrics_flush",
+                "job_runner_compaction",
+                "job_runner_snapshot",
+                "job_runner_geo_update",
+                "job_runner_tunnel_last_seen",
+                "job_runner_index_hygiene",
+                "sighting_ingest",
+                "observation_ingest",
+            },
+            Role.ECHO: {"loop_lag_monitor"},
         }
 
-        assert spawned, "no _spawn calls found - the regex needs updating"
-        assert spawned <= set(WORKERS), f"undescribed workers: {spawned - set(WORKERS)}"
+        for role, names in expected.items():
+            assert {name for name, info in WORKERS.items() if role in info.roles} == names, role
 
-    def test_lease_names_resolve_back_to_their_worker(self) -> None:
-        for lease, worker in LEASE_WORKERS.items():
-            assert WORKERS[worker].lease == lease
-            assert LEASE_KINDS[lease], f"{lease} has no human label"
+    def test_no_loop_names_role_all(self) -> None:
+        """``all`` composes every role's runtime, so it runs every loop through the roles the catalogue names."""
+        assert not any(Role.ALL in info.roles for info in WORKERS.values())
 
-    def test_singleton_workers_are_exactly_the_leased_ones(self) -> None:
-        singletons = {name for name, info in WORKERS.items() if info.scope == "singleton"}
-        assert singletons == set(LEASE_WORKERS.values())
+    def test_a_loop_runs_in_the_roles_it_lists_and_every_loop_in_role_all(self) -> None:
+        for name, info in WORKERS.items():
+            assert {role for role in Role if info.runs_in(role)} == {*info.roles, Role.ALL}, name
+
+    def test_every_job_kind_has_a_runner_on_the_workers(self) -> None:
+        for kind in JobKind:
+            name = job_runner_name(kind)
+            assert name == f"job_runner_{kind}"
+            assert WORKERS[name].roles == {Role.WORKER}
+
+    def test_every_periodic_kind_has_a_producer_on_the_controller_under_its_lease(self) -> None:
+        periodic = {
+            JobKind.HEALTH, JobKind.SYNC, JobKind.SCALE, JobKind.METRICS_FLUSH, JobKind.COMPACTION, JobKind.SNAPSHOT,
+            JobKind.GEO_UPDATE, JobKind.TUNNEL_LAST_SEEN, JobKind.INDEX_HYGIENE,
+        }
+        for kind in periodic:
+            name = job_producer_name(kind)
+            assert name == f"job_producer_{kind}"
+            assert (WORKERS[name].roles, WORKERS[name].lease) == ({Role.CONTROLLER}, LeaseName.CONTROLLER)
+        # Asked for only, never on a timer.
+        for kind in set(JobKind) - periodic:
+            with pytest.raises(ValueError):
+                job_producer_name(kind)
+
+    def test_only_the_controllers_loops_are_singletons_under_its_lease(self) -> None:
+        """The controller's loops run in the one process holding its lease, the rest in every process of their roles."""
+        for name, info in WORKERS.items():
+            controller = info.roles == {Role.CONTROLLER}
+            assert (info.scope == "singleton") == controller, name
+            assert (info.lease is LeaseName.CONTROLLER) == controller, name

@@ -1,27 +1,9 @@
 # Copyright 2026 Octoprox Authors
 # SPDX-License-Identifier: Apache-2.0
 
-"""Sticky session routing strategy.
+"""Sticky session routing: a session keeps one upstream proxy, bound in memory here and in Redis for the other gateways.
 
-A given ``session_id`` always resolves to the same upstream proxy.
-The binding lives in two places:
-
-* ``_session_map`` is the in-process cache (hot path, no Redis I/O).
-* ``sticky:<project_id>:<session_id>`` in Redis (cross-instance source
-  of truth, written by ``select`` after assigning a new proxy).
-
-When a request lands on a peer instance for the first time, the peer's
-``select`` reads the Redis binding and warms its own local cache - so
-session affinity survives across instances.
-
-Both copies live for ``STICKY_BINDING_TTL_SECONDS`` from the session's
-last request. The local expiry is pushed out on every request; the Redis
-copy is rewritten at most once per half TTL per session, so an active
-session never lets its Redis binding lapse without putting Redis I/O on
-every request. Were it to lapse, a peer would re-hash the session over
-whatever proxies are eligible at that moment and could bind it to a
-different exit than this instance still serves. Without the local expiry
-an instance would keep every session it ever saw.
+A binding lives ``STICKY_BINDING_TTL_SECONDS`` past the session's last request, and Redis failing never fails a request.
 """
 
 import hashlib
@@ -32,11 +14,17 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+import structlog
+
+from api.core.logging import error_text
+from api.core.tasks import HeldTasks
 from api.models.proxy import Proxy
 from api.strategies.base import ProxyGroup, RoutingStrategy, weighted_random_group
 
 if TYPE_CHECKING:
     from api.db.redis import RedisClient
+
+logger = structlog.get_logger()
 
 # How long a session keeps its proxy after its last request, local and in Redis.
 STICKY_BINDING_TTL_SECONDS = 300
@@ -76,10 +64,16 @@ class StickySessionStrategy(RoutingStrategy):
         self._ttl = ttl_seconds
         self._clock = clock
         self._bindings_since_sweep = 0
+        # Binding writes on their way to Redis, held so none is collected before it runs.
+        self._writes = HeldTasks()
 
     @property
     def name(self) -> str:
         return "sticky"
+
+    async def settle(self) -> None:
+        """Wait for the binding writes under way; the gateway calls it once its listeners are closed."""
+        await self._writes.settle()
 
     async def select(
         self,
@@ -102,9 +96,7 @@ class StickySessionStrategy(RoutingStrategy):
             return cached
 
         selected = self._consistent_hash_pick(proxies, session_id)
-        await self._remember_binding(
-            redis_client, project_id, session_id, selected
-        )
+        self._remember_binding(redis_client, project_id, session_id, selected)
         return selected
 
     async def select_weighted(
@@ -132,7 +124,7 @@ class StickySessionStrategy(RoutingStrategy):
 
         group = self.pick_group(groups, session_id)
         selected = self._consistent_hash_pick(group.proxies, session_id)
-        await self._remember_binding(redis_client, project_id, session_id, selected)
+        self._remember_binding(redis_client, project_id, session_id, selected)
         return selected
 
     def pick_group(self, groups: list[ProxyGroup], session_id: str | None) -> ProxyGroup:
@@ -146,12 +138,25 @@ class StickySessionStrategy(RoutingStrategy):
         binding = self._live_binding(session_id)
         return binding.proxy_id if binding is not None else None
 
+    async def held_proxy(
+        self,
+        session_id: str,
+        *,
+        redis_client: "RedisClient | None" = None,
+        project_id: str | None = None,
+    ) -> str | None:
+        """The proxy ``session_id`` is bound to: this instance's binding, else the one Redis holds, remembered here."""
+        bound = self.bound_proxy_id(session_id)
+        if bound is None and redis_client is not None and project_id is not None:
+            bound = await self.stored_binding(redis_client, project_id, session_id)
+            if bound is not None:
+                self.remember(session_id, bound)
+        return bound
+
     def remember(self, session_id: str, proxy_id: str) -> _Binding:
         """Bind ``session_id`` to ``proxy_id`` on this instance, or push out the expiry of that binding.
 
-        Local only: ``select`` calls it for its own picks and for bindings
-        read from Redis, and the proxy manager for a binding it learned from
-        Redis outside ``select``, so later local checks do not go back there.
+        Local only: the picks and the bindings read from Redis are remembered, so later local checks do not go back there.
         """
         now = self._clock()
         binding = self._session_map.get(session_id)
@@ -182,23 +187,40 @@ class StickySessionStrategy(RoutingStrategy):
             if binding.expires_at <= now:
                 del self._session_map[session_id]
 
-    async def _refresh_redis(
+    def _refresh_redis(
         self,
         redis_client: "RedisClient | None",
         project_id: str | None,
         session_id: str,
         binding: _Binding,
     ) -> None:
-        """Rewrite the Redis copy when it is new or half its TTL has passed since the last write."""
+        """Rewrite the Redis copy in the background when it is new or half its TTL has passed since the last write."""
         if redis_client is None or project_id is None:
             return
         now = self._clock()
         if binding.redis_due_at > now:
             return
         binding.redis_due_at = now + self._ttl / 2
-        await redis_client.set_sticky_binding(
-            project_id, session_id, binding.proxy_id, ttl_seconds=max(1, int(self._ttl))
+        self._writes.spawn(
+            self._store(redis_client, project_id, session_id, binding.proxy_id),
+            name="sticky_binding_write",
+            project_id=project_id,
         )
+
+    async def _store(self, redis_client: "RedisClient", project_id: str, session_id: str, proxy_id: str) -> None:
+        """Write one binding to Redis; one Redis does not take stays local until its next rewrite."""
+        try:
+            await redis_client.set_sticky_binding(project_id, session_id, proxy_id, ttl_seconds=max(1, int(self._ttl)))
+        except Exception as exc:
+            logger.debug("Sticky binding could not be stored", project_id=project_id, error=error_text(exc))
+
+    async def stored_binding(self, redis_client: "RedisClient", project_id: str, session_id: str) -> str | None:
+        """The proxy Redis has ``session_id`` bound to, by any gateway; None when unbound or unreadable."""
+        try:
+            return await redis_client.get_sticky_binding(project_id, session_id)
+        except Exception as exc:
+            logger.debug("Sticky binding could not be read", project_id=project_id, error=error_text(exc))
+            return None
 
     async def _lookup_binding(
         self,
@@ -208,17 +230,13 @@ class StickySessionStrategy(RoutingStrategy):
         proxies: list[Proxy],
     ) -> Proxy | None:
         """Local cache first, then Redis (if available)."""
-        cached_proxy_id = self.bound_proxy_id(session_id)
-        if cached_proxy_id is None and redis_client is not None and project_id is not None:
-            cached_proxy_id = await redis_client.get_sticky_binding(
-                project_id, session_id
-            )
+        cached_proxy_id = await self.held_proxy(session_id, redis_client=redis_client, project_id=project_id)
         if not cached_proxy_id:
             return None
         for proxy in proxies:
             if proxy.id == cached_proxy_id:
                 binding = self.remember(session_id, cached_proxy_id)
-                await self._refresh_redis(redis_client, project_id, session_id, binding)
+                self._refresh_redis(redis_client, project_id, session_id, binding)
                 return proxy
         # Bound proxy is no longer in the eligible set - drop the stale cache
         # entry so the next call re-binds via consistent hashing.
@@ -230,7 +248,7 @@ class StickySessionStrategy(RoutingStrategy):
         hash_value = int(hashlib.md5(session_id.encode()).hexdigest(), 16)
         return proxies[hash_value % len(proxies)]
 
-    async def _remember_binding(
+    def _remember_binding(
         self,
         redis_client: "RedisClient | None",
         project_id: str | None,
@@ -238,7 +256,7 @@ class StickySessionStrategy(RoutingStrategy):
         proxy: Proxy,
     ) -> None:
         binding = self.remember(session_id, proxy.id)
-        await self._refresh_redis(redis_client, project_id, session_id, binding)
+        self._refresh_redis(redis_client, project_id, session_id, binding)
 
     def allows_exit_reselection(self, session_id: str | None) -> bool:
         """A session under sticky routing was promised one exit; a misplaced exit fails it rather than moving it."""

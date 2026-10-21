@@ -1,7 +1,13 @@
 # Copyright 2026 Octoprox Authors
 # SPDX-License-Identifier: Apache-2.0
 
-"""Tests for the failure log: describing a failure, counting it, folding a burst, capping a window, writing to Redis."""
+"""Tests for the failure log: describing a failure, counting it, folding a burst, capping a window, writing to Redis.
+
+The window's shape is read off what the log hands the client's
+``failures_batch``, on a stand-in client; what Redis ends up holding, and
+what becomes of a window Redis does not answer for, against the real Redis
+test container.
+"""
 
 import asyncio
 import socket
@@ -9,14 +15,14 @@ import ssl
 from datetime import timedelta
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
+import pytest
 from python_socks import ProxyConnectionError, ProxyError, ProxyTimeoutError
 
 from api.core import utc_now
 from api.core.failure_log import (
     MAX_MESSAGE_CHARS,
-    FailureKind,
     FailureLog,
     RequestFailure,
     RequestInfo,
@@ -24,13 +30,21 @@ from api.core.failure_log import (
     classify_upstream_error,
     set_request_info,
 )
+from api.core.job_stats import job_stats
+from api.core.stats import FailureKind
+from api.core.workers import WorkerName
 from api.db.redis import (
     FAILURE_LOG_KEY,
+    FAILURE_WINDOWS,
+    BatchChannel,
+    BatchId,
+    BatchOutcome,
+    BatchPart,
+    BatchReply,
     RedisClient,
-    failure_metrics_key,
-    parse_failure_metrics_key,
 )
 from api.models.proxy import Proxy, ProxyProtocol
+from tests.waits import running, until
 
 
 def _settings(**overrides: Any) -> Any:
@@ -53,6 +67,19 @@ def _proxy(protocol: ProxyProtocol = ProxyProtocol.HTTP) -> Proxy:
         password="s3cret-pass",
         connector_id="connector-1",
     )
+
+
+def _recording_redis() -> MagicMock:
+    """A client that takes every window whole: ``failures_batch`` records what it is handed, every part lands."""
+
+    def prepare(entries: list[Any], counts: dict[Any, int], **_: Any) -> list[BatchPart]:
+        items = len(entries) + len(counts)
+        return [BatchPart(BatchId(BatchChannel.FAILURES, 1), (), (), items)] if items else []
+
+    redis = MagicMock(spec=RedisClient)
+    redis.failures_batch.side_effect = prepare
+    redis.send_batch = AsyncMock(side_effect=lambda parts: [BatchReply(BatchOutcome.APPLIED, 1) for _ in parts])
+    return redis
 
 
 def _failure(**overrides: Any) -> RequestFailure:
@@ -181,14 +208,14 @@ class TestClassifyUpstreamError:
 
 class TestWindow:
     async def test_a_burst_of_the_same_failure_is_one_example_and_counted_in_full(self) -> None:
-        redis = AsyncMock()
+        redis = _recording_redis()
         log = FailureLog(redis, _settings())
         start = utc_now()
         for i in range(500):
             log.record(_failure(at=start + timedelta(milliseconds=i), latency_ms=float(1000 + i % 2 * 2000)))
 
-        assert await log.publish() == 2  # one example, one count
-        (entries, counts), kwargs = redis.append_failures.await_args
+        assert await log.flush() == 2  # one example, one count
+        (entries, counts), kwargs = redis.failures_batch.call_args
         assert kwargs == {"max_entries": 1000, "retention_seconds": 168 * 3600}
         project_id, kind, fields = entries[0]
         assert (project_id, kind) == ("project-1", "upstream_timeout")
@@ -199,18 +226,18 @@ class TestWindow:
         assert counts == {("project-1", "connector-1", "upstream_timeout", None): 500}
 
     async def test_the_session_does_not_split_a_burst_but_the_target_does(self) -> None:
-        redis = AsyncMock()
+        redis = _recording_redis()
         log = FailureLog(redis, _settings())
         log.record(_failure(session_id="a"))
         log.record(_failure(session_id="b"))
         log.record(_failure(target="other.example:443"))
 
-        await log.publish()
-        entries = redis.append_failures.await_args.args[0]
+        await log.flush()
+        entries = redis.failures_batch.call_args.args[0]
         assert sorted(fields["count"] for _, _, fields in entries) == ["1", "2"]
 
     async def test_past_the_cap_failures_are_counted_but_not_kept(self) -> None:
-        redis = AsyncMock()
+        redis = _recording_redis()
         log = FailureLog(redis, _settings(failure_log_max_per_window=2))
         for i in range(5):
             log.record(_failure(target=f"host{i}.example:443"))
@@ -218,8 +245,8 @@ class TestWindow:
         log.record(_failure(kind=FailureKind.UPSTREAM_REJECTED, upstream_status=407))
         log.record(_failure(project_id="project-2"))
 
-        await log.publish()
-        entries, counts = redis.append_failures.await_args.args
+        await log.flush()
+        entries, counts = redis.failures_batch.call_args.args
         kept = [(project_id, kind) for project_id, kind, _ in entries]
         assert kept.count(("project-1", "upstream_timeout")) == 2
         assert kept.count(("project-1", "upstream_rejected")) == 1
@@ -231,86 +258,95 @@ class TestWindow:
         }
 
     async def test_a_flood_of_one_kind_leaves_room_for_another(self) -> None:
-        redis = AsyncMock()
+        redis = _recording_redis()
         log = FailureLog(redis, _settings(failure_log_max_per_window=10))
         for i in range(1000):
             log.record(_failure(target=f"host{i}.example:443"))
         log.record(_failure(kind=FailureKind.UPSTREAM_REJECTED, upstream_status=407, message="407"))
 
-        await log.publish()
-        kinds = [kind for _, kind, _ in redis.append_failures.await_args.args[0]]
+        await log.flush()
+        kinds = [kind for _, kind, _ in redis.failures_batch.call_args.args[0]]
         assert kinds.count("upstream_timeout") == 10
         assert kinds.count("upstream_rejected") == 1
 
     async def test_a_failure_without_a_connector_is_counted_without_one(self) -> None:
-        redis = AsyncMock()
+        redis = _recording_redis()
         log = FailureLog(redis, _settings())
         log.record(_failure(connector_id=None, proxy_id=None, proxy=None, kind=FailureKind.NO_PROXY_AVAILABLE))
-        await log.publish()
-        assert redis.append_failures.await_args.args[1] == {("project-1", None, "no_proxy_available", None): 1}
+        await log.flush()
+        assert redis.failures_batch.call_args.args[1] == {("project-1", None, "no_proxy_available", None): 1}
 
     async def test_a_publish_starts_a_new_window(self) -> None:
-        redis = AsyncMock()
+        redis = _recording_redis()
         log = FailureLog(redis, _settings(failure_log_max_per_window=1))
         log.record(_failure())
-        await log.publish()
+        await log.flush()
         log.record(_failure(target="next.example:443"))
-        assert await log.publish() == 2
-        assert redis.append_failures.await_args.args[0][0][2]["target"] == "next.example:443"
-        assert await log.publish() == 0
+        assert await log.flush() == 2
+        assert redis.failures_batch.call_args.args[0][0][2]["target"] == "next.example:443"
+        assert await log.flush() == 0
 
     async def test_connector_names_are_written_in(self) -> None:
-        redis = AsyncMock()
+        redis = _recording_redis()
         log = FailureLog(redis, _settings(), connector_name=lambda cid: {"connector-1": "Bright Data"}.get(cid))
         log.record(_failure())
         log.record(_failure(connector_id=None, proxy_id=None, proxy=None, kind=FailureKind.NO_PROXY_AVAILABLE))
-        await log.publish()
-        entries = redis.append_failures.await_args.args[0]
+        await log.flush()
+        entries = redis.failures_batch.call_args.args[0]
         names = {kind: f.get("connector_name") for _, kind, f in entries}
         assert names == {"upstream_timeout": "Bright Data", "no_proxy_available": None}
 
     async def test_a_removed_project_is_forgotten(self) -> None:
-        redis = AsyncMock()
+        redis = _recording_redis()
         log = FailureLog(redis, _settings(failure_log_max_per_window=1))
         log.record(_failure())
         log.record(_failure(target="over.example:443"))
         log.record(_failure(project_id="project-2"))
         log.forget("project-1")
 
-        await log.publish()
-        entries, counts = redis.append_failures.await_args.args
+        await log.flush()
+        entries, counts = redis.failures_batch.call_args.args
         assert [p for p, _, _ in entries] == ["project-2"]
         assert {key[0] for key in counts} == {"project-2"}
 
     async def test_a_removed_connector_loses_its_counts_but_not_its_examples(self) -> None:
-        redis = AsyncMock()
+        redis = _recording_redis()
         log = FailureLog(redis, _settings())
         log.record(_failure(connector_id="gone"))
         log.record(_failure(connector_id="kept", target="other.example:443"))
         log.forget_connector("gone")
 
-        await log.publish()
-        entries, counts = redis.append_failures.await_args.args
+        await log.flush()
+        entries, counts = redis.failures_batch.call_args.args
         assert len(entries) == 2
         assert {key[1] for key in counts} == {"kept"}
 
-    async def test_an_unreachable_redis_drops_the_window(self) -> None:
-        redis = AsyncMock()
-        redis.append_failures.side_effect = ConnectionError("down")
+    async def test_a_publish_with_nothing_counted_sends_nothing(self) -> None:
+        redis = _recording_redis()
         log = FailureLog(redis, _settings())
-        log.record(_failure())
-        assert await log.publish() == 0
-        assert log.dropped == 1
-        redis.append_failures.side_effect = None
-        assert await log.publish() == 0  # nothing kept for a retry
+        assert await log.flush() == 0
+        assert not redis.send_batch.called
 
-    async def test_disabled_log_does_not_subscribe(self) -> None:
-        from api.core.signals import request_failed
+    async def test_examples_left_without_counts_still_go(self) -> None:
+        """A connector forgotten after its failures were kept: its examples belong to the project and still go."""
+        redis = _recording_redis()
+        log = FailureLog(redis, _settings())
+        log.record(_failure(connector_id="gone"))
+        log.forget_connector("gone")
+        await log.flush()
+        entries, counts = redis.failures_batch.call_args.args
+        assert (len(entries), counts) == (1, {})
 
-        log = FailureLog(AsyncMock(), _settings(failure_log_enabled=False))
-        before = len(request_failed.receivers)
-        log.subscribe_to_signals()
-        assert len(request_failed.receivers) == before
+
+    async def test_pending_is_the_window_s_examples_and_counts(self) -> None:
+        """What a stop that cannot reach Redis reports as lost."""
+        log = FailureLog(None, _settings())
+        for _ in range(3):
+            log.record(_failure())
+        log.record(_failure(kind=FailureKind.UPSTREAM_REJECTED, upstream_status=407))
+
+        # Two examples, two counts.
+        assert log.pending == 4
 
 
 class TestCountKeys:
@@ -319,21 +355,62 @@ class TestCountKeys:
             ("p-1", "c-1", "upstream_rejected", 407),
             ("p-1", None, "no_proxy_available", None),
         ]:
-            assert parse_failure_metrics_key(failure_metrics_key(key)) == key
+            assert FAILURE_WINDOWS.entity(FAILURE_WINDOWS.key(key)) == key
 
     def test_foreign_keys_are_ignored(self) -> None:
-        assert parse_failure_metrics_key("host:metrics:p:c:example.com") is None
-        assert parse_failure_metrics_key("failure:metrics:p:c:kind") is None
-        assert parse_failure_metrics_key("failure:metrics:p:c:kind:abc") is None
+        assert FAILURE_WINDOWS.entity("o6:host:metrics:p:c:example.com") is None
+        assert FAILURE_WINDOWS.entity("o6:failure:metrics:p:c:kind") is None
+        assert FAILURE_WINDOWS.entity("o6:failure:metrics:p:c:kind:abc") is None
+        assert FAILURE_WINDOWS.entity("o6:failure:metrics:p::kind:407") is None
+        assert FAILURE_WINDOWS.entity("failure:metrics:p:c:kind:407") is None  # a 5.x key
+        assert FAILURE_WINDOWS.entity("p:c:kind:407") is None  # the shape without the prefix
 
 
 ALL_KINDS = [kind.value for kind in FailureKind]
 
 
-async def _drain_failures(redis_client: RedisClient, failures: dict[Any, int]) -> None:
-    await redis_client.drain_flushed_metrics(
-        proxies={}, projects={}, connectors={}, tunnel_peers={}, hosts={}, failures=failures,
-    )
+async def _counted(redis_client: RedisClient) -> dict[Any, int]:
+    """The failure counts Redis holds by key, as the metrics flush takes them, left in place."""
+    counts: dict[Any, int] = {}
+    for key in await redis_client.client.smembers(FAILURE_WINDOWS.index):
+        count = int(await redis_client.client.hget(key, "failure_count") or 0)
+        if count > 0:
+            counts[FAILURE_WINDOWS.entity(key)] = count
+    return counts
+
+
+class Outage:
+    """Makes the batch sends fail, as an unreachable Redis does, while it is on; records every send.
+
+    With ``reply_lost`` the send is applied and only its reply lost, and ``refusals`` is how many of the next sends Redis
+    refuses every part of, running none, as it does while another script overruns (``BUSY``).
+    """
+
+    def __init__(self, redis_client: RedisClient, monkeypatch: pytest.MonkeyPatch) -> None:
+        self.on = False
+        self.reply_lost = False
+        self.refusals = 0
+        self.sends: list[list[BatchPart]] = []
+        real = redis_client.send_batch
+
+        async def send(parts: list[BatchPart]) -> list[BatchReply]:
+            self.sends.append(list(parts))
+            if self.refusals:
+                self.refusals -= 1
+                return [BatchReply(BatchOutcome.REFUSED) for _ in parts]
+            if self.on and not self.reply_lost:
+                raise ConnectionError("Error 111 connecting to redis:6379. Connection refused.")
+            replies = await real(parts)
+            if self.on:
+                raise ConnectionError("Connection closed by server.")
+            return replies
+
+        monkeypatch.setattr(redis_client, "send_batch", send)
+
+
+@pytest.fixture
+def outage(redis_client: RedisClient, monkeypatch: pytest.MonkeyPatch) -> Outage:
+    return Outage(redis_client, monkeypatch)
 
 
 class TestRedisStreams:
@@ -343,7 +420,7 @@ class TestRedisStreams:
         log.record(_failure(target="first.example:443", at=start))
         log.record(_failure(target="second.example:443", at=start + timedelta(seconds=1),
                             kind=FailureKind.UPSTREAM_REJECTED, upstream_status=407))
-        await log.publish()
+        await log.flush()
 
         records = await redis_client.get_failures("project-1", ALL_KINDS)
         assert [r["target"] for r in records] == ["second.example:443", "first.example:443"]
@@ -378,7 +455,7 @@ class TestRedisStreams:
         log = FailureLog(redis_client, _settings())
         log.record(_failure(target="ours.example:443"))
         log.record(_failure(target="also-ours.example:443", kind=FailureKind.NO_PROXY_AVAILABLE))
-        await log.publish()
+        await log.flush()
 
         targets = {r["target"] for r in await redis_client.get_failures("project-1", ALL_KINDS)}
         assert targets == {"peer", "ours.example:443", "also-ours.example:443"}
@@ -387,10 +464,10 @@ class TestRedisStreams:
     async def test_each_kind_keeps_its_own_examples(self, redis_client: RedisClient) -> None:
         log = FailureLog(redis_client, _settings(failure_log_max_entries=3, failure_log_max_per_window=1000))
         log.record(_failure(kind=FailureKind.UPSTREAM_REJECTED, upstream_status=407))
-        await log.publish()
+        await log.flush()
         for i in range(10):
             log.record(_failure(target=f"host{i}.example:443"))
-        await log.publish()
+        await log.flush()
 
         kinds = [r["kind"] for r in await redis_client.get_failures("project-1", ALL_KINDS, count=50)]
         assert kinds.count("upstream_timeout") == 3
@@ -399,7 +476,7 @@ class TestRedisStreams:
     async def test_the_log_expires_after_the_retention(self, redis_client: RedisClient) -> None:
         log = FailureLog(redis_client, _settings(failure_log_retention_hours=2))
         log.record(_failure())
-        await log.publish()
+        await log.flush()
         ttl = await redis_client.client.ttl(FAILURE_LOG_KEY.format(project_id="project-1", kind="upstream_timeout"))
         assert 0 < ttl <= 7200
 
@@ -408,38 +485,211 @@ class TestRedisStreams:
         for _ in range(3):
             log.record(_failure(kind=FailureKind.UPSTREAM_REJECTED, upstream_status=407))
         log.record(_failure(connector_id=None, proxy_id=None, proxy=None, kind=FailureKind.NO_PROXY_AVAILABLE))
-        await log.publish()
+        await log.flush()
 
-        counts = await redis_client.get_all_failure_metrics()
+        counts = await _counted(redis_client)
         assert counts == {
             ("project-1", "connector-1", "upstream_rejected", 407): 3,
             ("project-1", None, "no_proxy_available", None): 1,
         }
-        await redis_client.reset_failure_metrics_for_connector("connector-1")
-        assert await redis_client.get_all_failure_metrics() == {("project-1", None, "no_proxy_available", None): 1}
-        await redis_client.reset_failure_metrics_for_project("project-1")
-        assert await redis_client.get_all_failure_metrics() == {}
-
-    async def test_draining_keeps_what_was_counted_since_the_read(self, redis_client: RedisClient) -> None:
-        key = ("project-1", "connector-1", "upstream_rejected", 407)
-        await redis_client.append_failures([], {key: 3}, max_entries=10, retention_seconds=60)
-        flushed = await redis_client.get_all_failure_metrics()
-        # An instance keeps counting while the flush transaction runs.
-        await redis_client.append_failures([], {key: 2}, max_entries=10, retention_seconds=60)
-        await _drain_failures(redis_client, flushed)
-        assert await redis_client.get_all_failure_metrics() == {key: 2}
-
-        await _drain_failures(redis_client, {key: 2})
-        assert not await redis_client.client.exists(failure_metrics_key(key))
-        # A hash deleted meanwhile (its connector went) is not left behind below zero.
-        await _drain_failures(redis_client, {key: 5})
-        assert not await redis_client.client.exists(failure_metrics_key(key))
 
     async def test_clear_drops_the_examples_but_not_the_counts(self, redis_client: RedisClient) -> None:
         log = FailureLog(redis_client, _settings())
         log.record(_failure())
-        await log.publish()
-        await redis_client.clear_failures("project-1")
+        await log.flush()
+        await redis_client.clear_failures("project-1", ALL_KINDS)
         assert await redis_client.get_failures("project-1", ALL_KINDS) == []
         assert await redis_client.failures_appended("project-1") == {}
-        assert await redis_client.get_all_failure_metrics() != {}
+        assert await _counted(redis_client) != {}
+
+
+class TestOutage:
+    """A window Redis does not answer for is owed: sent again as it was, never lost to a blip, never counted twice."""
+
+    async def test_a_window_redis_did_not_take_lands_with_the_one_counted_since(
+        self, redis_client: RedisClient, outage: Outage
+    ) -> None:
+        log = FailureLog(redis_client, _settings())
+        log.record(_failure(target="first.example:443"))
+        outage.on = True
+        with pytest.raises(ConnectionError):
+            await log.flush()
+        assert await _counted(redis_client) == {}
+        log.record(_failure(target="second.example:443"))
+
+        outage.on = False
+        assert await log.flush() == 2 + 2
+
+        targets = [r["target"] for r in await redis_client.get_failures("project-1", ALL_KINDS)]
+        assert targets == ["second.example:443", "first.example:443"]
+        assert await _counted(redis_client) == {
+            ("project-1", "connector-1", "upstream_timeout", None): 2
+        }
+        assert log.dropped == 0
+
+    async def test_a_window_redis_applied_but_did_not_answer_for_lands_once(
+        self, redis_client: RedisClient, outage: Outage
+    ) -> None:
+        """The reply lost on its way back: sent again, the window is known by its identity and not added twice."""
+        log = FailureLog(redis_client, _settings())
+        for _ in range(3):
+            log.record(_failure())
+        outage.on, outage.reply_lost = True, True
+        with pytest.raises(ConnectionError):
+            await log.flush()
+
+        outage.on = False
+        await log.flush()
+        first, second = outage.sends
+        assert second == first
+
+        assert await redis_client.count_failures("project-1", ALL_KINDS) == 1
+        assert await redis_client.failures_appended("project-1") == {"upstream_timeout": 1}
+        assert await _counted(redis_client) == {
+            ("project-1", "connector-1", "upstream_timeout", None): 3
+        }
+
+    async def test_failures_keep_collecting_under_the_cap_while_a_window_is_owed(
+        self, redis_client: RedisClient, outage: Outage
+    ) -> None:
+        log = FailureLog(redis_client, _settings(failure_log_max_per_window=2))
+        for i in range(5):
+            log.record(_failure(target=f"early{i}.example:443"))
+        outage.on = True
+        with pytest.raises(ConnectionError):
+            await log.flush()
+        for i in range(5):
+            log.record(_failure(target=f"late{i}.example:443"))
+        with pytest.raises(ConnectionError):
+            await log.flush()
+        # Only what was owed went again; the second window waits behind it.
+        assert outage.sends[1] == outage.sends[0]
+
+        outage.on = False
+        await log.flush()
+
+        # Two windows of two examples each, every failure counted.
+        assert await redis_client.count_failures("project-1", ALL_KINDS) == 4
+        assert await _counted(redis_client) == {
+            ("project-1", "connector-1", "upstream_timeout", None): 10
+        }
+
+    async def test_a_window_waits_while_what_is_owed_keeps_being_refused(
+        self, redis_client: RedisClient, outage: Outage
+    ) -> None:
+        """Sent beside a part refused again, the window would take the part's place in what is owed, and lose it."""
+        log = FailureLog(redis_client, _settings())
+        log.record(_failure(target="first.example:443"))
+        outage.refusals = 2
+        assert await log.flush() == 0
+        log.record(_failure(target="second.example:443"))
+        assert await log.flush() == 0
+        assert [len(parts) for parts in outage.sends] == [1, 1]
+
+        assert await log.flush() == 2 + 2
+        assert await redis_client.count_failures("project-1", ALL_KINDS) == 2
+        assert await _counted(redis_client) == {
+            ("project-1", "connector-1", "upstream_timeout", None): 2
+        }
+
+    async def test_a_part_redis_refused_to_run_goes_again_under_a_new_sequence(
+        self, redis_client: RedisClient, outage: Outage
+    ) -> None:
+        """The script cache was flushed between two windows: Redis runs nothing of the part and says NOSCRIPT."""
+        log = FailureLog(redis_client, _settings())
+        log.record(_failure(target="first.example:443"))
+        await log.flush()
+        await redis_client.client.script_flush()
+        log.record(_failure(target="second.example:443"))
+
+        assert await log.flush() == 0
+        assert await log.flush() == 2
+
+        refused, resent = outage.sends[1:]
+        assert (refused[0].keys, refused[0].args) == (resent[0].keys, resent[0].args)
+        assert resent[0].id.sequence > refused[0].id.sequence
+        assert await redis_client.count_failures("project-1", ALL_KINDS) == 2
+        assert await _counted(redis_client) == {
+            ("project-1", "connector-1", "upstream_timeout", None): 2
+        }
+
+    async def test_a_window_whose_script_failed_part_way_is_dropped_and_counted(
+        self, redis_client: RedisClient, outage: Outage
+    ) -> None:
+        """Its mark moved before it wrote anything: sent again it would be skipped, and it may have written half."""
+        count_key = ("project-1", "connector-1", "upstream_timeout", None)
+        # A key of the wrong type where the window's count goes: the script fails after its examples.
+        await redis_client.client.set(FAILURE_WINDOWS.key(count_key), "not a hash")
+        log = FailureLog(redis_client, _settings())
+        log.record(_failure())
+
+        assert await log.flush() == 0
+        # Its example and its count.
+        assert log.dropped == 2
+        assert await log.flush() == 0
+        assert len(outage.sends) == 1
+
+    async def test_one_send_at_a_time_so_no_window_overtakes_an_older_one(
+        self, redis_client: RedisClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A newer window sent first would mark the older one applied, and Redis would skip it."""
+        entered, released = asyncio.Event(), asyncio.Event()
+        real = redis_client.send_batch
+
+        async def slow_send(parts: list[BatchPart]) -> list[BatchReply]:
+            if not entered.is_set():
+                entered.set()
+                await released.wait()
+            return await real(parts)
+
+        monkeypatch.setattr(redis_client, "send_batch", slow_send)
+        log = FailureLog(redis_client, _settings())
+        log.record(_failure(target="first.example:443"))
+        first = asyncio.create_task(log.flush())
+        await asyncio.wait_for(entered.wait(), 2)
+        # The gateway stops while the loop's flush is on its way: its last flush waits for it.
+        log.record(_failure(target="second.example:443"))
+        last = asyncio.create_task(log.flush())
+        await asyncio.sleep(0.05)
+        assert not last.done()
+
+        released.set()
+        await asyncio.wait_for(asyncio.gather(first, last), 2)
+        assert await redis_client.count_failures("project-1", ALL_KINDS) == 2
+        assert await _counted(redis_client) == {
+            ("project-1", "connector-1", "upstream_timeout", None): 2
+        }
+
+    async def test_the_loop_counts_a_window_redis_did_not_take_as_a_failed_cycle(
+        self, redis_client: RedisClient, outage: Outage
+    ) -> None:
+        job_stats.reset()
+        log = FailureLog(redis_client, _settings(), interval=0.02)
+        log.record(_failure())
+        outage.on = True
+        try:
+            async with running(log):
+                await until(
+                    lambda: (stats := job_stats.get(WorkerName.FAILURE_LOG_PUBLISHER)) is not None and stats.failures >= 2
+                )
+                outage.on = False
+                await until(lambda: log.owed == 0 and len(outage.sends) >= 3)
+        finally:
+            job_stats.reset()
+        assert await _counted(redis_client) == {
+            ("project-1", "connector-1", "upstream_timeout", None): 1
+        }
+
+
+    async def test_a_stop_sends_the_window_once_more(self, redis_client: RedisClient) -> None:
+        """The gateway stops its loops once its listeners are closed: what the last seconds failed still lands."""
+        log = FailureLog(redis_client, _settings())
+        task = asyncio.create_task(log.run())
+        await asyncio.sleep(0.01)
+        log.record(_failure())
+
+        await log.stop()
+
+        await asyncio.wait_for(task, 1)
+        assert await redis_client.count_failures("project-1", ALL_KINDS) == 1
+        assert await _counted(redis_client) == {("project-1", "connector-1", "upstream_timeout", None): 1}

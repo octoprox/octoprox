@@ -4,7 +4,7 @@
 import { useMemo, useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { ColumnDef } from '@tanstack/react-table'
-import { Key, Plus, Trash2 } from 'lucide-react'
+import { KeyRound, Plus, Trash2 } from 'lucide-react'
 import {
   fetchProjectCredentials, fetchProjectCredential, fetchProjectConnectors, deleteProjectCredential,
   Credential, CredentialDetail,
@@ -12,7 +12,7 @@ import {
 import { useProject } from '../contexts/ProjectContext'
 import { useAuth } from '../contexts/AuthContext'
 import { useToast } from '../contexts/ToastContext'
-import { DataTable } from '../components/DataTable'
+import { DataTable, type DataTableFeatures } from '../components/DataTable'
 import { Page } from '../components/layout/Page'
 import { CredentialForm, NewCredentialPanel, TypeCard } from '../components/CredentialForm'
 import { useProviders } from '../hooks/useProviders'
@@ -60,7 +60,7 @@ export default function CredentialsPage() {
     onError: (e: Error) => { setPendingDelete(null); toast.show(e.message || 'Failed to delete credential', 'error') },
   })
 
-  const columns: ColumnDef<Credential>[] = useMemo(() => [
+  const columns: ColumnDef<DataTableFeatures, Credential>[] = useMemo(() => [
     {
       accessorKey: 'name',
       header: 'Credential',
@@ -100,12 +100,12 @@ export default function CredentialsPage() {
       enableSorting: false,
       cell: ({ row }: { row: { original: Credential } }) => (
         <div className="flex justify-end">
-          <button onClick={() => setPendingDelete(row.original)} className="p-1 rounded text-fg-subtle hover:text-danger hover:bg-danger-soft" title="Delete">
+          <button onClick={() => setPendingDelete(row.original)} className="p-1 rounded-sm text-fg-subtle hover:text-danger hover:bg-danger-soft" title="Delete">
             <Trash2 className="w-4 h-4" />
           </button>
         </div>
       ),
-    }] as ColumnDef<Credential>[] : []),
+    }] as ColumnDef<DataTableFeatures, Credential>[] : []),
   ], [canMutate, labelFor, usedBy])
 
   let panelNode: React.ReactNode = null
@@ -174,7 +174,7 @@ export default function CredentialsPage() {
 function EmptyCredentials({ canMutate, onAdd }: { canMutate: boolean; onAdd: () => void }) {
   return (
     <div className="bg-surface rounded-lg border border-line p-10 text-center">
-      <Key className="w-10 h-10 text-fg-subtle mx-auto mb-3" />
+      <KeyRound className="w-10 h-10 text-fg-subtle mx-auto mb-3" />
       <h3 className="text-base font-medium">No credentials yet</h3>
       <p className="text-sm text-fg-muted mt-1 max-w-md mx-auto">Add a cloud account or proxy provider login. Connectors use credentials to provision proxies.</p>
       {canMutate && <Button size="sm" className="mt-4" onClick={onAdd}><Plus className="w-3.5 h-3.5" /> Add credential</Button>}

@@ -68,7 +68,6 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
 
     // Best-effort sync to server. Silently ignore failures (e.g. unauthenticated).
     updateSelf({ theme_preference: theme }).catch((err) => {
-      // eslint-disable-next-line no-console
       console.debug('Theme sync failed', err)
     })
   }, [theme])
@@ -89,9 +88,9 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
   const isDark = getThemeMeta(theme).mode === 'dark'
 
   return (
-    <ThemeContext.Provider value={{ theme, setTheme, applyServerTheme, isDark, availableThemes: THEMES }}>
+    <ThemeContext value={{ theme, setTheme, applyServerTheme, isDark, availableThemes: THEMES }}>
       {children}
-    </ThemeContext.Provider>
+    </ThemeContext>
   )
 }
 

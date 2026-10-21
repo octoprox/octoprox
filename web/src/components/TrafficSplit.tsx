@@ -23,15 +23,15 @@ export const formatShare = (v: number | null | undefined): string => {
 export function strategyExplanation(strategy: string): string {
   switch (strategy) {
     case 'round_robin':
-      return 'Round robin interleaves connectors in a fixed pattern by weight (weights 3 and 1 give A A B A, three A for every B), then cycles the proxies inside the chosen connector.'
+      return 'Round robin interleaves connectors in a fixed pattern by weight (weights 3 and 1 give A A B A, three A for every B), then cycles the proxies inside the chosen connector. Each gateway keeps its own sequence.'
     case 'random':
       return 'Random draws a connector with probability proportional to its weight, then a random proxy inside it.'
     case 'least_used':
-      return 'Least used treats weight as capacity: the connector with the fewest requests per unit of weight is picked, then its least-used proxy.'
+      return 'Least used treats weight as capacity: the connector with the fewest transfers open on the gateway per unit of weight is picked, then its proxy with the fewest open transfers. Each gateway counts its own.'
     case 'sticky':
       return 'Sticky places each new session on a connector by hashing its id, weighted, so the same session always lands on the same connector. Sessions already bound keep their proxy; weight changes only steer new sessions.'
     case 'health_based':
-      return 'Health based draws a connector by weight, then prefers the healthiest proxies inside it. Weight is not adjusted for health.'
+      return 'Health based draws a connector by weight, then prefers the proxies inside it with the best success rate and latency on this gateway, still trying the ones it has seen fewer than 10 outcomes from. Weight is not adjusted for health.'
     default:
       return 'The connector is chosen by weight first, then a proxy inside it by the strategy.'
   }
