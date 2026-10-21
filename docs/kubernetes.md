@@ -27,10 +27,10 @@ Postgres and Redis are yours: a managed service or your own. The names above are
 ```mermaid
 flowchart TD
     ui["Ingress or LoadBalancer<br/>web UI and API, 443"] --> api["octoprox-api"]
-    proxy["LoadBalancer Service octoprox-proxy<br/>TCP 8080, or TLS on 443"] --> gateway["octoprox-gateway"]
+    proxy["LoadBalancer Service octoprox-gateway<br/>TCP 8080, or TLS on 443"] --> gateway["octoprox-gateway"]
     tunnel["LoadBalancer Service octoprox-tunnel<br/>UDP 51820, 1194"] --> tgateway["octoprox-gateway-tunnel"]
     echo["Public Service octoprox-echo"] --> echopods["octoprox-echo"]
-    internal["ClusterIP Service octoprox-api, 8000"] --> api
+    internal["ClusterIP Service octoprox-internal-api, 8000"] --> api
     gateway -->|"OCTOPROX_INTERNAL_API_URL"| internal
     tgateway --> internal
     controller["octoprox-controller x 2"]
@@ -45,10 +45,11 @@ flowchart TD
 ## Services
 
 - **Web UI and API.** An Ingress or a LoadBalancer Service in front of `octoprox-api` port 8000. No session affinity is needed: every api process reads projects, connectors, proxies and the other entities from Postgres on each request, and the provider catalog and the attribution settings it shows as well, so any replica answers with the latest write. Each api also keeps the custom provider descriptors, the attribution settings and the IP database list in memory for its checks, previews and lookups; those follow a change made through another api as soon as the change stream announces it. Set `OCTOPROX_PUBLIC_URL` on the api to the address users reach it at.
-- **Internal.** A ClusterIP Service named `octoprox-api` on port 8000, which gateways use as `OCTOPROX_INTERNAL_API_URL` (`http://octoprox-api:8000`) to fetch IP database files. The internal endpoint (`/internal/v1/...`) requires a token derived from `OCTOPROX_INTERNAL_SECRET`; since only gateways call it, you may also keep `/internal/` off the public Ingress, and `/metrics` too, which Prometheus scrapes from inside the cluster.
+- **Internal.** A ClusterIP Service named `octoprox-internal-api` on port 8000, which gateways use as `OCTOPROX_INTERNAL_API_URL` (`http://octoprox-internal-api:8000`) to fetch IP database files. The internal endpoint (`/internal/v1/...`) requires a token derived from `OCTOPROX_INTERNAL_SECRET`; since only gateways call it, you may also keep `/internal/` off the public Ingress, and `/metrics` too, which Prometheus scrapes from inside the cluster.
 - **Proxy.** A LoadBalancer Service (an L4 balancer: AWS NLB, GCP passthrough, Azure LB) on the gateways' port 8080. Point the balancer's target health check at port 8000, path `/ready`: a gateway answers 503 until it has a routing feed, and a gateway is the only role that needs to be checked for proxy traffic. A balancer that terminates TLS in front of 8080 makes it an HTTPS proxy; set `OCTOPROX_PROXY_PUBLIC_URL` on the api to the URL clients use (see [Connecting Clients]({{ site.baseurl }}/connecting#endpoint)).
 - **Tunnels.** A LoadBalancer Service for UDP 51820 and UDP or TCP 1194 on the tunnel gateways, with `externalTrafficPolicy: Local` so a device's source address reaches the gateway, and `sessionAffinity: ClientIP` so a device stays on one gateway.
 - **Echo.** Health checks and preflight request the echo URL *through* the proxies, from the vendors' exits, so it must be reachable from the internet. Either expose `/echo` on the api's public address, or run the echo role behind a public Service and point `echo_url` (**Settings → IP attribution**) at it. List the balancer's addresses in `geo.echo.trusted_proxies` so the client address is read from `X-Forwarded-For`. Let workers reach the echo URL directly too: a failed health check against an echo that does not answer is not counted (see [Echo endpoint]({{ site.baseurl }}/deployment#echo-endpoint)).
+- **Names to avoid.** A Service named `octoprox-api`, `octoprox-proxy` or `octoprox-db` stops every role at start. Kubernetes gives each pod in the namespace variables named after every Service (for `octoprox-api`, `OCTOPROX_API_PORT=tcp://10.0.0.12:8000`), and Octoprox reads one as its own setting when the name matches (`api_port`, `proxy_port`, `db_port`).
 
 ## Probes
 
@@ -159,7 +160,7 @@ spec:
           env:
             - {name: OCTOPROX_ROLE, value: gateway}
             - {name: OCTOPROX_ENV, value: production}
-            - {name: OCTOPROX_INTERNAL_API_URL, value: "http://octoprox-api:8000"}
+            - {name: OCTOPROX_INTERNAL_API_URL, value: "http://octoprox-internal-api:8000"}
             - name: OCTOPROX_INTERNAL_SECRET
               valueFrom: {secretKeyRef: {name: octoprox-internal, key: secret}}
             - name: OCTOPROX_REDIS_URL

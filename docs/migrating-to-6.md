@@ -100,7 +100,7 @@ The 6.0 roles run as Deployments of their own, under new names (see [Running on 
    ```
 
 2. **The switch.** One release deletes the 5.x Deployment and creates the api, gateway, controller and worker Deployments under their new names. In the same release the proxy Service selects the gateways (and a tunnel Service the tunnel gateways), and the web UI's Ingress or Service the api. The first api, controller or worker pod to start runs 048; give their startup probes room for it (see [Probes]({{ site.baseurl }}/kubernetes#probes)), and a `helm upgrade --wait` a `--timeout` that covers it. The proxy is down until the gateways are ready (once they have the first routing feed) and the balancer has them.
-   - **Leave `--atomic` off.** Its automatic rollback would start 5.x on the migrated database, where 5.x does not start. If the release fails once 048 has run, run the [way back](#the-way-back)'s `UPDATE` first, then roll back.
+   - **Leave `--atomic` off** on every release until one on 6.0 has deployed, fix-forward releases included. Until then the last deployed release is 5.x's, and the automatic rollback would start 5.x on the migrated database, where 5.x does not start. If the release fails once 048 has run, run the [way back](#the-way-back)'s `UPDATE` first, then roll back.
 
 **After the [checks](#checks), delete 5.x's keys.** 6.0 never reads them, but until they go, [the way back](#the-way-back) finds them: 5.0.11 resumes with its proxy statuses and flushes the counts it left unflushed. A Redis that keeps no data loses them in a restart, which 6.0 repairs on its own; otherwise, on a Redis that holds nothing but Octoprox:
 
@@ -266,7 +266,7 @@ A single instance needs nothing new to run: the compose files keep their service
 |----------|------|---------|---------|---------|
 | `OCTOPROX_ROLE` | | `all` | every process | What the process runs: `all`, `api`, `gateway`, `controller`, `worker` or `echo` |
 | `OCTOPROX_INTERNAL_SECRET` | | placeholder | api, gateway, controller | Encrypts and authenticates the routing feed, and signs gateway calls to the api. The same value on each |
-| `OCTOPROX_INTERNAL_API_URL` | | `http://localhost:8000` | gateway | Where gateways reach the api, such as `http://octoprox-api:8000` |
+| `OCTOPROX_INTERNAL_API_URL` | | `http://localhost:8000` | gateway | Where gateways reach the api, such as `http://octoprox-internal-api:8000` |
 | `OCTOPROX_WORKER_JOBS` | | every kind | worker | Comma-separated job kinds this worker takes: `health`, `sync`, `scale`, `provision`, `reattribute`, `enrich`, `traffic`, `metrics_flush`, `compaction`, `snapshot`, `geo_update`, `tunnel_last_seen`, `index_hygiene` |
 | `OCTOPROX_FEED_COMPILE_INTERVAL` | `feed.compile_interval_seconds` | `1` | controller | The least time between two compiles of the routing feed: a change after a quiet spell is compiled at once, and changes that arrive sooner are compiled together |
 | `OCTOPROX_RECONCILE_INTERVAL` | `feed.reconcile_interval_seconds` | `3600` | api, gateway, controller, worker | How often every process reads in full what it follows, whatever the change stream announced: the net for a write that announced nothing |
