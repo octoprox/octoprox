@@ -103,7 +103,7 @@ export const KIND_INFO: Record<string, KindInfo> = {
     label: 'Wrong exit location',
     group: 'refused',
     color: '#4f46e5',
-    hint: 'Exit verification found the proxy exiting somewhere other than the requested location, and the request was refused rather than sent from the wrong place. See Exit locations.',
+    hint: 'Exit verification found the proxy exiting somewhere other than the requested location, and the request was refused rather than sent from the wrong place. A message starting "Exit location not checked" means the echo through the proxy failed, so where it exits is unknown. See Exit locations.',
   },
   invalid_location: {
     label: 'Invalid location',

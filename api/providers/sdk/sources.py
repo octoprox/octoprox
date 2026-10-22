@@ -21,6 +21,7 @@ import httpcore
 import httpx
 import structlog
 from httpx_socks import AsyncProxyTransport
+from python_socks import ProxyError
 
 from api.models.location import LocationTarget
 from api.models.proxy import ProxyProtocol
@@ -133,16 +134,20 @@ class IpDiscoverer:
         ``city_path`` yield.
         """
         context = log_context or {}
-        # A failed preflight echo fails its request, which the Failures page
-        # counts; at one echo per request a warning each would flood the log.
+        # A failed preflight echo refuses its request wherever the project's
+        # rules could have, which the Failures page counts; at one echo per
+        # request a warning each would flood the log.
         log_failure = logger.debug if context.get("preflight") else logger.warning
+        # A SOCKS upstream fails with python-socks' own errors (ProxyError,
+        # and OSError subclasses for a refused or timed-out connect), which
+        # httpx does not wrap.
         try:
             async with self._client_factory(proxy_url, self._spec.timeout_seconds) as client:
                 response = await client.get(self._spec.url)
-        except httpx.TimeoutException:
+        except (httpx.TimeoutException, TimeoutError):
             log_failure("IP discovery timed out", **context)
             return None, None
-        except httpx.HTTPError as exc:
+        except (httpx.HTTPError, ProxyError, OSError) as exc:
             log_failure("IP discovery request failed", error=str(exc), **context)
             return None, None
         if response.status_code != 200:
@@ -150,7 +155,7 @@ class IpDiscoverer:
             return None, None
         ip, place = self._extract(response)
         if not ip:
-            logger.warning("IP discovery response had no IP", **context)
+            log_failure("IP discovery response had no IP", **context)
         return ip, place
 
     def _extract(self, response: httpx.Response) -> tuple[str | None, LocationTarget | None]:

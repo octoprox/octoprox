@@ -80,13 +80,16 @@ class PreflightVerdict(NamedTuple):
     replaced: bool = False
 
     def acceptable(self, rules: LocationRules, allowed: Sequence[str] = ()) -> bool:
-        """Whether this verdict lets the request through under the project's ``rules``; one with no exit or no requirement never refuses.
+        """Whether this verdict lets the request through under the project's ``rules``; one with no requirement never refuses.
 
         A client's requirement is exact, as is a vendor's promise when contradictions are refused; else a promise holds
-        the exit to the declared countries (``allowed``).
+        the exit to the declared countries (``allowed``). A failed echo checked nothing, so it refuses where
+        :meth:`can_refuse` says an answer could have.
         """
-        if self.expected is None or self.ip is None:
+        if self.expected is None:
             return True
+        if self.ip is None:
+            return not self.can_refuse(rules, self.expected, self.required_by, allowed)
         contradicted = not self.ok
         unplaced = self.country_conflict is None
         refuse_unknown = rules.unknown == UnknownAction.REFUSE
@@ -104,6 +107,28 @@ class PreflightVerdict(NamedTuple):
             return True
         observed = self.observed.country if self.observed else None
         return not allowed or observed in allowed
+
+    @staticmethod
+    def can_refuse(rules: LocationRules, expected: LocationTarget, required_by: str | None, allowed: Sequence[str]) -> bool:
+        """Whether a verdict on this requirement could refuse under ``rules``, judged on the two worst an echo could give.
+
+        By choice, under ``evidence`` a vendor's promise is held to the connector's declared countries only by an answer
+        that placed the exit, so the list decides nothing here: whether every such request is echoed, and whether a
+        failed echo refuses it, follow ``location_unknown`` alone.
+        """
+        if required_by == REQUIRED_BY_VENDOR and rules.contradicted == ContradictedAction.EVIDENCE:
+            allowed = ()
+        # ``ZZ`` is a user-assigned code no connector declares: an exit placed, and outside every list. Both carry
+        # an ip, so judging them never comes back here.
+        contradicted = PreflightVerdict(
+            ok=False, expected=expected, observed=LocationTarget(country="ZZ"), ip="?", reason="mismatch",
+            country_conflict=True, required_by=required_by,
+        )
+        unplaced = PreflightVerdict(
+            ok=True, expected=expected, observed=None, ip="?", reason="location unknown",
+            country_conflict=None, required_by=required_by,
+        )
+        return not (contradicted.acceptable(rules, allowed) and unplaced.acceptable(rules, allowed))
 
     @property
     def open_levels(self) -> tuple[str, ...]:
@@ -299,7 +324,7 @@ class PreflightChecker:
         # Sampling only thins observation. When a location was asked or promised
         # and the project's rules can refuse, every request is verified: a
         # refusal is a guarantee, and a sampled guarantee is none.
-        guaranteed = expected is not None and self._can_refuse(project.location_rules, expected, required_by, allowed)
+        guaranteed = expected is not None and PreflightVerdict.can_refuse(project.location_rules, expected, required_by, allowed)
         if rotating and not guaranteed and not self._sample_rotating(proxy):
             return SKIP
 
@@ -487,28 +512,10 @@ class PreflightChecker:
             logger.debug("Could not cache preflight verdict", error=error_text(exc))
 
     @staticmethod
-    def _can_refuse(rules: LocationRules, expected: LocationTarget, required_by: str | None, allowed: Sequence[str]) -> bool:
-        """Whether a verdict on this requirement could refuse under ``rules``, judged on the two worst an echo could give.
-
-        By choice, under ``evidence`` a vendor's promise is bound to the connector's declared countries only on the
-        requests that are sampled, so the list decides nothing here.
-        """
-        if required_by == REQUIRED_BY_VENDOR and rules.contradicted == ContradictedAction.EVIDENCE:
-            allowed = ()
-        # ``ZZ`` is a user-assigned code no connector declares: an exit placed, and outside every list.
-        contradicted = PreflightVerdict(
-            ok=False, expected=expected, observed=LocationTarget(country="ZZ"), ip="?", reason="mismatch",
-            country_conflict=True, required_by=required_by,
-        )
-        unplaced = PreflightVerdict(
-            ok=True, expected=expected, observed=None, ip="?", reason="location unknown",
-            country_conflict=None, required_by=required_by,
-        )
-        return not (contradicted.acceptable(rules, allowed) and unplaced.acceptable(rules, allowed))
-
-    @staticmethod
     def rejection_message(verdict: PreflightVerdict, rules: LocationRules, allowed: Sequence[str] = ()) -> str:
         expected = verdict.expected.describe() if verdict.expected else "?"
+        if verdict.ip is None:
+            return f"Exit location not checked, echo request failed: requested {expected}"
         observed = verdict.observed.describe() if verdict.observed else "unknown"
         if rules.contradicted == ContradictedAction.EVIDENCE and verdict.required_by == REQUIRED_BY_VENDOR and verdict.observed is not None:
             exit_country = verdict.observed.country

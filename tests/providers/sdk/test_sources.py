@@ -9,6 +9,7 @@ from unittest.mock import patch
 
 import httpx
 import pytest
+from python_socks import ProxyConnectionError, ProxyError, ProxyTimeoutError
 
 from api.providers.sdk.descriptor import IpDiscoverySpec
 from api.providers.sdk.sources import (
@@ -60,7 +61,7 @@ def _refusing_discoverer() -> IpDiscoverer:
 @pytest.mark.parametrize(
     ("log_context", "level"),
     [
-        # One echo per request: its failure fails the request, which the Failures page counts.
+        # One echo per request: its failure refuses the request wherever the rules could have, which the Failures page counts.
         ({"proxy_id": "p1", "preflight": True}, "debug"),
         # The health checker and attribution check a proxy now and then: still worth a warning.
         ({"proxy_id": "p1"}, "warning"),
@@ -73,3 +74,23 @@ async def test_a_failed_preflight_echo_is_logged_at_debug(log_context: dict[str,
     assert ip is None
     getattr(logger, level).assert_called_once_with("IP discovery returned an error", status_code=400, **log_context)
     assert not getattr(logger, "warning" if level == "debug" else "debug").called
+
+
+@pytest.mark.parametrize(
+    "error",
+    [ProxyError("General SOCKS server failure"), ProxyConnectionError(None, "Couldn't connect to proxy"), ProxyTimeoutError("Proxy connection timed out")],
+    ids=["refused", "unreachable", "timeout"],
+)
+async def test_a_failed_socks_echo_is_a_failure_not_an_exception(error: Exception) -> None:
+    """python-socks raises its own errors, which httpx does not wrap; they fail the echo like any other."""
+
+    def raising(request: httpx.Request) -> httpx.Response:
+        raise error
+
+    def factory(proxy_url: str, timeout: float) -> httpx.AsyncClient:
+        return httpx.AsyncClient(transport=httpx.MockTransport(raising), timeout=timeout)
+
+    ip, place = await IpDiscoverer(IpDiscoverySpec(), client_factory=factory).discover_with_place(
+        "socks5://u:p@proxy:1080", log_context={"preflight": True}
+    )
+    assert (ip, place) == (None, None)

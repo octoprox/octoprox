@@ -270,6 +270,17 @@ PREFLIGHT_CASES: list[
 
 OUTSIDE = "outside the connector's countries"
 
+# A failed echo, by who required the place and the connector's declared countries: whether each setting forwards the
+# request, and the 502 text when not.
+ECHO_OUTAGE_CASES: list[tuple[str, LocationTarget | None, dict[str, object], list[str], dict[LocationRules, bool], str]] = [
+    # The client's place is exact: only trusting the vendor over every answer forwards it.
+    ("request-city", LocationTarget(country="US", city="austin"), {}, [], _serves(lambda r: r == LocationRules(VENDOR_CLAIM, TRUST)), "Exit location not checked, echo request failed: requested US, city austin"),
+    # A vendor's promise under evidence or vendor is only held to a placed exit, unless unknown exits are refused.
+    ("promise-country", None, {"dynamic_sessions": "true", "geo": "GB"}, [], _serves(lambda r: r.contradicted != REFUSE and r.unknown == TRUST), "Exit location not checked, echo request failed: requested GB"),
+    # The declared countries change nothing: under evidence they hold back only an exit an answer placed outside them.
+    ("promise-country-declared", None, {"dynamic_sessions": "true", "geo": "US"}, ["US"], _serves(lambda r: r.contradicted != REFUSE and r.unknown == TRUST), "Exit location not checked, echo request failed: requested US"),
+]
+
 
 @pytest.fixture
 async def geo_service(tmp_path: Path) -> GeoService:
@@ -284,13 +295,14 @@ async def geo_service(tmp_path: Path) -> GeoService:
     return GeoService(settings, store, GeoSettingsStore(settings, None), ObservationRecorder(None))
 
 
-def _checker(geo_service: GeoService, exit_ip: str) -> PreflightChecker:
-    """A checker whose echo lands on ``exit_ip`` and reports no country of its own."""
+def _checker(geo_service: GeoService, exit_ip: str | None) -> PreflightChecker:
+    """A checker whose echo lands on ``exit_ip`` and reports no country of its own; None makes the echo fail."""
+
+    def answer(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(503) if exit_ip is None else httpx.Response(200, json={"ip": exit_ip})
 
     def factory(proxy_url: str, timeout: float) -> httpx.AsyncClient:
-        return httpx.AsyncClient(
-            transport=httpx.MockTransport(lambda request: httpx.Response(200, json={"ip": exit_ip})), timeout=timeout
-        )
+        return httpx.AsyncClient(transport=httpx.MockTransport(answer), timeout=timeout)
 
     geo_service.discoverer = lambda: IpDiscoverer(geo_service.echo_spec(), client_factory=factory)  # type: ignore[method-assign]
     return PreflightChecker(geo_service, None, sightings=Sightings(), exclusions=Retired())
@@ -350,15 +362,21 @@ class TestPreflightMatrix:
             expected = message.replace("{outside}", outside)
             assert (decision.rejection or "").startswith(expected), decision.rejection
 
-    async def test_echo_outage_never_refuses(self, geo_service: GeoService, refusals: Refusals) -> None:
-        def factory(proxy_url: str, timeout: float) -> httpx.AsyncClient:
-            return httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(503)), timeout=timeout)
-
-        geo_service.discoverer = lambda: IpDiscoverer(geo_service.echo_spec(), client_factory=factory)  # type: ignore[method-assign]
-        checker = PreflightChecker(geo_service, None, sightings=Sightings(), exclusions=Retired())
-        for rules in SETTINGS:
-            decision = await ExitVerifier(checker, _sticky_router([])).verify(
-                _project(rules), _slot(), session_id="s", location=LocationTarget(country="US", city="austin"), target_host="x"
-            )
-            assert not decision.rejected
-        assert refusals.events == []
+    # A failed echo checked nothing: refused where can_refuse says an answer could have refused.
+    @pytest.mark.parametrize("rules", SETTINGS, ids=[f"{r.contradicted}-{r.unknown}" for r in SETTINGS])
+    @pytest.mark.parametrize(
+        ("name", "requested", "metadata", "allowed", "serves", "message"), ECHO_OUTAGE_CASES, ids=[c[0] for c in ECHO_OUTAGE_CASES]
+    )
+    async def test_echo_outage(
+        self, geo_service: GeoService, refusals: Refusals, rules: LocationRules, name: str,
+        requested: LocationTarget | None, metadata: dict[str, object], allowed: list[str],
+        serves: dict[LocationRules, bool], message: str,
+    ) -> None:
+        checker = _checker(geo_service, None)
+        decision = await ExitVerifier(checker, _sticky_router(allowed)).verify(
+            _project(rules), _slot(**metadata), session_id="s", location=requested, target_host="x"
+        )
+        assert decision.rejected is (not serves[rules]), f"{name} under {rules}: {decision.rejection}"
+        assert bool(refusals.events) is decision.rejected
+        if decision.rejected:
+            assert decision.rejection == message

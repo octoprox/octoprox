@@ -62,8 +62,9 @@ class ExitVerifier:
         back to the selector on a retry so a dynamic-sessions row keeps the
         same vendor session.
 
-        An echo outage never refuses anything: a verdict without an exit lets
-        the request through under every level.
+        A failed echo checked nothing: it refuses the request wherever the
+        project's rules could have refused on an answer, and lets it through
+        elsewhere.
         """
         if not PreflightChecker.applies(project, location, proxy):
             return ExitDecision(proxy)

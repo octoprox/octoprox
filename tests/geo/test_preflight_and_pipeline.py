@@ -196,13 +196,15 @@ class TestPreflight:
         assert not verdict.acceptable(LOCATING) and not verdict.acceptable(STRICT)
         assert PreflightChecker.rejection_message(verdict, STRICT) == "Exit country not confirmed: requested US, observed unknown (203.0.113.5)"
 
-    async def test_echo_failure_is_ok(self, geo_service: GeoService, sightings: Sightings) -> None:
+    async def test_echo_failure_refuses_where_an_answer_could(self, geo_service: GeoService, sightings: Sightings) -> None:
         checker = _checker(geo_service, {}, status=503, sightings=sightings)
         verdict = await checker.check(VERIFIED, _proxy(), session_id=None, requested=LocationTarget(country="US"))
         assert verdict.ok and verdict.reason == "echo request failed"
         assert geo_service.observation_recorder.pending == 0 and sightings.messages == []
-        # An echo outage is never a refusal, whatever the level.
-        assert all(verdict.acceptable(rules) for rules in ALL_RULES)
+        # Nothing was checked: the client's place is refused under every setting that could refuse an answer.
+        assert verdict.acceptable(TRUSTING)
+        assert not verdict.acceptable(VERIFYING) and not verdict.acceptable(LOCATING) and not verdict.acceptable(STRICT)
+        assert PreflightChecker.rejection_message(verdict, STRICT) == "Exit location not checked, echo request failed: requested US"
 
     def test_acceptable_per_level(self) -> None:
         expected = LocationTarget(country="US")

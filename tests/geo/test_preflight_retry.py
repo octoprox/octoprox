@@ -33,16 +33,16 @@ GB_IP = "81.2.69.160"
 US_IP = "203.0.113.9"  # not in the test database; the echo endpoint's country decides
 
 
-def use_echo_by_proxy(geo_service: GeoService, exits: dict[str, tuple[str, str]]) -> None:
-    """Make the service's echo requests answer per proxy host: host -> (ip, country)."""
+def use_echo_by_proxy(geo_service: GeoService, exits: dict[str, tuple[str, str] | None]) -> None:
+    """Make the service's echo requests answer per proxy host: host -> (ip, country), or None for an echo that fails."""
 
     def factory(proxy_url: str, timeout: float) -> httpx.AsyncClient:
-        host = proxy_url.rsplit("@", 1)[-1].split(":")[0]
-        ip, country = exits[host]
-        return httpx.AsyncClient(
-            transport=httpx.MockTransport(lambda request: httpx.Response(200, json={"ip": ip, "country": country})),
-            timeout=timeout,
-        )
+        exit_ = exits[proxy_url.rsplit("@", 1)[-1].split(":")[0]]
+
+        def answer(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(503) if exit_ is None else httpx.Response(200, json={"ip": exit_[0], "country": exit_[1]})
+
+        return httpx.AsyncClient(transport=httpx.MockTransport(answer), timeout=timeout)
 
     geo_service.discoverer = lambda: IpDiscoverer(geo_service.echo_spec(), client_factory=factory)  # type: ignore[method-assign]
 
@@ -190,6 +190,15 @@ class TestVerify:
         # The same exit passes where unknown exits are trusted.
         decision = await ExitVerifier(checker, _router()).verify(_project(VERIFYING), _proxy("unknown"), session_id="sess", location=LocationTarget(country="GB"), target_host="x")
         assert not decision.rejected
+
+    async def test_a_failed_echo_moves_like_any_refusal(self, checker: PreflightChecker, refusals: Refusals) -> None:
+        """A failed echo checked nothing: refused where an answer could have been, then moved when the strategy allows."""
+        use_echo_by_proxy(checker._geo_service, {"down": None, "gb": (GB_IP, "GB")})
+        router = _router(picks=[_proxy("gb")])
+        decision = await ExitVerifier(checker, router).verify(_project(), _proxy("down"), session_id=None, location=LocationTarget(country="GB"), target_host="x")
+        assert not decision.rejected and decision.proxy is not None and decision.proxy.id == "gb"
+        assert router.select_proxy_for_project.await_args.kwargs["exclude"] == frozenset({"down"})
+        assert len(refusals.events) == 1 and refusals.events[0]["proxy_id"] == "down"
 
 
 class TestStrategyHook:
