@@ -11,7 +11,7 @@ from typing import Any
 import pytest
 import structlog
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from api.core import utc_now
 from api.db import geo_repository
@@ -596,6 +596,35 @@ class TestStatementSize:
         rows = {r["ip"]: r for r in (await repo.exit_ips(connector_ids=["conn-1"], limit=1000))[0]}
         assert all(rows[f"10.9.0.{n}"]["sightings"] == 2 for n in range(5))
         assert (rows["10.9.0.0"]["claimed_country"], rows["10.9.0.1"]["claimed_country"]) == ("DE", "FR")
+
+
+class TestLockOrder:
+    async def test_two_workers_writing_the_same_exits_wait_rather_than_deadlock(
+        self, db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+    ) -> None:
+        """Two ingest batches sharing exits, the second listing them the other way round; each upserts in key order."""
+        await _connectors(db_session, "conn-1")
+        low, high = _observation(ip="10.0.0.1"), _observation(ip="10.0.0.2")
+
+        async with db_session_factory() as first, db_session_factory() as second:
+            await ObservationRepository(first).add_exit_ips(ExitSighting.fold([(low, True)]))
+            waiting = asyncio.create_task(
+                ObservationRepository(second).add_exit_ips(ExitSighting.fold([(high, True), (low, True)]))
+            )
+            # The second batch asks for the low exit first and waits on it, holding nothing the first wants next.
+            for _ in range(100):
+                if (await db_session.execute(text("SELECT count(*) FROM pg_locks WHERE NOT granted"))).scalar():
+                    break
+                await asyncio.sleep(0.05)
+            else:
+                pytest.fail("The second batch never waited on the first")
+            await ObservationRepository(first).add_exit_ips(ExitSighting.fold([(high, True)]))
+            await first.commit()
+            await asyncio.wait_for(waiting, 5)
+            await second.commit()
+
+        rows, _, _ = await ObservationRepository(db_session).exit_ips(connector_ids=["conn-1"], limit=10)
+        assert {row["ip"]: row["sightings"] for row in rows} == {"10.0.0.1": 2, "10.0.0.2": 2}
 
 
 class TestPlaceAccuracy:

@@ -1,7 +1,7 @@
 # Copyright 2026 Octoprox Authors
 # SPDX-License-Identifier: Apache-2.0
 
-"""How the proxy listener keeps and ends the connections it relays: TCP keepalive on every leg, and closes that never wait.
+"""How the proxy listener takes, keeps and ends the connections it relays: a deep accept queue, TCP keepalive on every leg, and closes that never wait.
 
 Real sockets throughout: a listener with a stand-in router and metering without Redis, and clients that misbehave on purpose.
 """
@@ -20,6 +20,7 @@ from api.core.proxy_server import (
     KEEPALIVE_IDLE_SECONDS,
     KEEPALIVE_INTERVAL_SECONDS,
     KEEPALIVE_PROBES,
+    LISTEN_BACKLOG,
     USER_TIMEOUT_MS,
     ProxyServer,
     keep_alive,
@@ -95,6 +96,17 @@ async def vendor() -> AsyncIterator[int]:
     server = await asyncio.start_server(serve, "127.0.0.1", 0)
     yield server.sockets[0].getsockname()[1]
     server.close()
+
+
+class TestListening:
+    async def test_a_burst_of_new_connections_can_wait_to_be_accepted(self, vendor: int) -> None:
+        server = _server(vendor, InFlight())
+
+        with patch.object(asyncio, "start_server", wraps=asyncio.start_server) as start_server:
+            await server.start()
+        await server.stop()
+
+        assert start_server.call_args.kwargs["backlog"] == LISTEN_BACKLOG
 
 
 class TestKeepAlive:

@@ -711,6 +711,8 @@ class ObservationRepository:
         """
         if not exits:
             return
+        # In key order, so two workers writing overlapping exits lock them in the same order: one waits for the
+        # other, where opposite orders would each hold a row the other wants, a deadlock Postgres ends by failing one.
         rows = [
             {
                 "connector_id": connector_id,
@@ -721,7 +723,7 @@ class ObservationRepository:
                 "country": sighting.country,
                 **{name: getattr(sighting, name) for name in self._LATEST_STATE},
             }
-            for (connector_id, ip), sighting in exits.items()
+            for (connector_id, ip), sighting in sorted(exits.items(), key=lambda item: item[0])
         ]
         for start in range(0, len(rows), self._EXIT_UPSERT_ROWS):
             await self._upsert_exit_rows(rows[start:start + self._EXIT_UPSERT_ROWS])
@@ -777,7 +779,8 @@ class ObservationRepository:
                 j.state_conflict,
                 j.city_conflict,
             )
-            for j in newest.values()
+            # In key order, like the exit upserts in the same transaction.
+            for _key, j in sorted(newest.items(), key=lambda item: item[0])
         ]
         rewritten = 0
         for start in range(0, len(data), self._JUDGEMENT_ROWS):

@@ -61,6 +61,13 @@ BUFFER_SIZE = 65536
 # the gateway's shutdown, for as long as it stays silent.
 CLOSE_TIMEOUT_SECONDS = 5.0
 
+# How many new connections may wait for the listener to accept them. A fleet
+# of clients scaling up opens thousands a second, and a busy event loop
+# accepts between turns: asyncio's default of 100 fills, and the kernel drops
+# the rest before the gateway sees them. Linux caps it at net.core.somaxconn,
+# 4096 by default since 5.4.
+LISTEN_BACKLOG = 4096
+
 # TCP keepalive and, on Linux, a user timeout on every leg the gateway relays
 # itself (the curl_cffi and rnet MITM engines open their own upstream
 # connections): an idle leg is probed after KEEPALIVE_IDLE_SECONDS, every
@@ -178,6 +185,7 @@ class ProxyServer:
             self._handle_client_wrapper,
             self._host,
             self._port,
+            backlog=LISTEN_BACKLOG,
         )
         logger.info(
             "Proxy server started",
