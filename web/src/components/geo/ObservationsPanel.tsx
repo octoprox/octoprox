@@ -9,7 +9,7 @@ import { countGeoObservations, fetchGeoObservations, fetchProjectConnectors, fet
 import { useCountAll } from '../../hooks/useCountAll'
 import { DataTable, type DataTableFeatures } from '../DataTable'
 import { EmptyState } from '../layout/Page'
-import { Badge, Card, Select } from '../ui'
+import { Alert, Badge, Card, Select } from '../ui'
 import { formatDateTime, relativeTime } from '../../utils/format'
 import { HeaderWithTip, TIPS, VerdictCell, countryVerdict, placeLabel } from './columns'
 import { UntilPicker } from './UntilPicker'
@@ -69,10 +69,13 @@ export function ObservationsPanel({ projectId }: { projectId?: string }) {
   useEffect(() => { setPageIndex(0) }, [scope, applied, pageSize, until])
 
   const filters: ObservationFilters = { ...applied, project_id: scope, until }
-  const { data, isLoading } = useQuery({
+  // A page the server called off for its time limit is not asked for again
+  // until the filters or the page change: each try reads for the whole limit.
+  const { data, isLoading, isError, error } = useQuery({
     queryKey: ['geo-observations', filters, pageIndex, pageSize],
     queryFn: () => fetchGeoObservations({ ...filters, limit: pageSize, offset: pageIndex * pageSize }),
-    refetchInterval: 30_000,
+    refetchInterval: (query) => (query.state.status === 'error' ? false : 30_000),
+    retry: false,
     placeholderData: (previous) => previous,
   })
 
@@ -166,8 +169,11 @@ export function ObservationsPanel({ projectId }: { projectId?: string }) {
           )}
         </div>
       </div>
+      {isError && (
+        <Alert variant="error">Could not load the observation log{error instanceof Error && error.message ? `: ${error.message}` : ''}</Alert>
+      )}
       <Card className="p-0 overflow-hidden">
-        {!isLoading && rows.length === 0 && !filtering ? (
+        {!isLoading && !isError && rows.length === 0 && !filtering ? (
           <EmptyState icon={<Globe className="w-5 h-5" />} title="No observations yet" description="Observations arrive as proxies are discovered, health-checked, located or preflighted. They are written in batches, so allow a minute." />
         ) : (
           <DataTable

@@ -293,15 +293,16 @@ def test_a_statement_whose_lock_is_not_granted_in_time_is_tried_again(at_047: Co
         assert _status_columns(conn) == STATUS_COLUMNS
 
 
-# A migration after 048 that records the lock timeout its statements run under.
-PROBE_049 = '''"""Probe.
+# A migration after 048 that records the lock timeout its statements run under,
+# on a branch of its own so it never stands in for the real next revision.
+PROBE = '''"""Probe.
 
-Revision ID: 049
+Revision ID: probe
 Revises: 048
 """
 from alembic import op
 
-revision = "049"
+revision = "probe"
 down_revision = "048"
 branch_labels = None
 depends_on = None
@@ -322,10 +323,10 @@ def test_a_later_migration_in_the_same_run_waits_for_its_locks_as_long_as_it_nee
     """048's half-second lock timeout ends with 048."""
     scripts = tmp_path / "migrations"
     shutil.copytree(MIGRATIONS_DIR, scripts, ignore=shutil.ignore_patterns("__pycache__"))
-    (scripts / "versions" / "049_probe.py").write_text(PROBE_049)
+    (scripts / "versions" / "probe.py").write_text(PROBE)
     at_047.set_main_option("script_location", str(scripts))
     try:
-        command.upgrade(at_047, "049")
+        command.upgrade(at_047, "probe")
         with engine.begin() as conn:
             assert conn.execute(text("SELECT value FROM lock_timeout_probe")).scalar_one() == "0"
     finally:

@@ -463,8 +463,8 @@ class TestObservations:
         assert (await repo.recent(limit=5, offset=5))[1:] == (8, True)
         assert await repo.count_matching() == 8
 
-    async def test_an_exact_count_past_its_time_is_called_off(self, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Counting a filter no index serves reads the table; past the limit it gives up and the session stays usable."""
+    async def test_an_exact_count_or_a_page_past_its_time_is_called_off(self, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Counting a filter no index serves reads the table, as can a page under a value with no recent rows; past the limit each gives up and the session stays usable."""
         await db_session.execute(
             text(
                 "INSERT INTO ip_observations (observed_at, source, ip, candidates, instance_id) "
@@ -476,11 +476,14 @@ class TestObservations:
         repo = ObservationRepository(db_session)
         # Work the caller has not committed yet survives the count, finished or called off.
         await repo.insert_many([_observation()])
-        monkeypatch.setattr(geo_repository, "EXACT_COUNT_TIMEOUT_MS", 1)
+        monkeypatch.setattr(geo_repository, "READ_TIMEOUT_MS", 1)
         assert await repo.count_matching(source="discovery") is None
-        monkeypatch.setattr(geo_repository, "EXACT_COUNT_TIMEOUT_MS", 30_000)
+        assert await repo.recent(source="discovery") is None
+        monkeypatch.setattr(geo_repository, "READ_TIMEOUT_MS", 30_000)
         assert await repo.count_matching(source="discovery") == 1
-        # Neither count leaves its time limit on the transaction.
+        page = await repo.recent(source="discovery")
+        assert page is not None and page[1] == 1
+        # None of them leaves its time limit on the transaction.
         assert (await db_session.execute(text("SHOW statement_timeout"))).scalar() == "0"
 
     async def test_verdict_filter_is_the_country_verdict(self, db_session: AsyncSession) -> None:
@@ -530,6 +533,39 @@ class TestObservations:
         assert await repo.delete_older_than(utc_now() - timedelta(days=7)) == 1
         await db_session.commit()
         assert await repo.count_matching() == 1
+
+    async def test_the_log_is_planned_for_its_own_filter_values(self, db_session: AsyncSession) -> None:
+        """A cached generic plan would sort a busy proxy's every row, or walk the whole history for a rare one."""
+        repo = ObservationRepository(db_session)
+
+        async def plan_cache_mode() -> str:
+            return str((await db_session.execute(text("SHOW plan_cache_mode"))).scalar())
+
+        await repo.recent(proxy_id="proxy-1")
+        assert await plan_cache_mode() == "force_custom_plan"
+        await db_session.rollback()
+        await repo.count_matching(proxy_id="proxy-1")
+        assert await plan_cache_mode() == "force_custom_plan"
+        # The setting ends with the transaction, so nothing else on the connection is planned that way.
+        await db_session.rollback()
+        assert await plan_cache_mode() == "auto"
+
+    async def test_an_exit_s_updates_write_no_index(self, db_session: AsyncSession) -> None:
+        """Every batch moves an exit's last_seen and latest state; with neither indexed, each update is HOT."""
+        await _connectors(db_session, "conn-1")
+        repo = ObservationRepository(db_session)
+        await repo.add_exit_ips(ExitSighting.fold([(_observation(ip="10.0.0.1", observed_at=datetime(2026, 9, 1)), True)]))
+        await db_session.commit()
+
+        later = _observation(ip="10.0.0.1", observed_at=datetime(2026, 9, 2), proxy_id="proxy-2")
+        await repo.add_exit_ips(ExitSighting.fold([(later, True)]))
+        assert await repo.apply_judgements([ExitJudgement(proxy_id="proxy-2", connector_id="conn-1", ip="10.0.0.1", claimed_country="GB")]) == 1
+        updated, hot = (
+            await db_session.execute(
+                text("SELECT n_tup_upd, n_tup_hot_upd FROM pg_stat_xact_user_tables WHERE relname = 'connector_exit_ips'")
+            )
+        ).one()
+        assert (updated, hot) == (2, 2)
 
 
 @pytest.mark.usefixtures("db_engine")

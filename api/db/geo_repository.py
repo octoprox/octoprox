@@ -5,7 +5,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, cast
@@ -64,9 +64,10 @@ logger = structlog.get_logger()
 # paging without meeting an end, and a short index read however large the
 # history grows. The exact total is a separate count, asked for explicitly.
 COUNT_CAP = 10_000
-# An exact count under a filter no index serves reads the whole table; past
-# this it is called off rather than left to load the database.
-EXACT_COUNT_TIMEOUT_MS = 30_000
+# An exact count under a filter no index serves reads the whole table, and a
+# log page under a value with no recent rows reads all the newer history; past
+# this either is called off rather than left to load the database.
+READ_TIMEOUT_MS = 30_000
 _QUERY_CANCELED = "57014"
 
 
@@ -505,28 +506,49 @@ class ObservationRepository:
         head = matching.limit(offset).subquery()
         return int((await self._session.execute(select(func.count()).select_from(head))).scalar_one()), True
 
-    async def _exact_total(self, matching: Select[Any]) -> int | None:
-        """How many rows ``matching`` selects, or None when counting ran past ``EXACT_COUNT_TIMEOUT_MS``.
+    async def _time_limited[T](self, read: Callable[[], Awaitable[T]]) -> T | None:
+        """What ``read`` returns, or None when one of its statements ran past ``READ_TIMEOUT_MS``.
 
         The time limit lives in a savepoint that is always rolled back, so the caller's transaction is left as it was.
         """
         savepoint = await self._session.begin_nested()
         try:
-            await self._session.execute(select(func.set_config("statement_timeout", str(EXACT_COUNT_TIMEOUT_MS), True)))
-            total = int((await self._session.execute(select(func.count()).select_from(matching.subquery()))).scalar_one())
+            await self._session.execute(select(func.set_config("statement_timeout", str(READ_TIMEOUT_MS), True)))
+            result = await read()
         except DBAPIError as exc:
             await savepoint.rollback()
             if getattr(exc.orig, "sqlstate", None) != _QUERY_CANCELED:
                 raise
             return None
         await savepoint.rollback()
-        return total
+        return result
 
-    async def recent(self, *, limit: int = 100, offset: int = 0, **filters: Any) -> tuple[list[dict[str, Any]], int, bool]:
-        """One page of observations, newest first, how many match, and whether that count is exact.
+    async def _exact_total(self, matching: Select[Any]) -> int | None:
+        """How many rows ``matching`` selects, or None when counting ran past ``READ_TIMEOUT_MS``."""
 
-        Both are short index reads at any table size: the count stops ``COUNT_CAP`` rows past the page.
+        async def count() -> int:
+            return int((await self._session.execute(select(func.count()).select_from(matching.subquery()))).scalar_one())
+
+        return await self._time_limited(count)
+
+    async def _plan_for_the_values(self) -> None:
+        """Plan the transaction's further queries for their own filter values, never from a cached generic plan.
+
+        A generic plan picks one way for every value: it would sort all of a busy proxy's rows, or walk the whole history for a rare one.
         """
+        await self._session.execute(select(func.set_config("plan_cache_mode", "force_custom_plan", True)))
+
+    async def recent(
+        self, *, limit: int = 100, offset: int = 0, **filters: Any
+    ) -> tuple[list[dict[str, Any]], int, bool] | None:
+        """One page of observations, newest first, how many match, and whether that count is exact; None past ``READ_TIMEOUT_MS``.
+
+        The count stops ``COUNT_CAP`` rows past the page.
+        """
+        await self._plan_for_the_values()
+        return await self._time_limited(lambda: self._page(limit=limit, offset=offset, **filters))
+
+    async def _page(self, *, limit: int, offset: int, **filters: Any) -> tuple[list[dict[str, Any]], int, bool]:
         m = IpObservationModel
         page = self._filtered(select(m), **filters).order_by(m.observed_at.desc(), m.id.desc()).offset(offset).limit(limit)
         found = (await self._session.execute(page)).scalars().all()
@@ -563,6 +585,7 @@ class ObservationRepository:
 
     async def count_matching(self, **filters: Any) -> int | None:
         """The exact number of observations under ``filters`` (see :meth:`_exact_total`)."""
+        await self._plan_for_the_values()
         return await self._exact_total(self._filtered(select(literal_column("1")).select_from(IpObservationModel), **filters))
 
     async def exit_accuracy(

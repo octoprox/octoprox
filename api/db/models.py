@@ -717,15 +717,16 @@ class IpObservationModel(Base):
     """
 
     __tablename__ = "ip_observations"
-    # The log reads newest first under one filter at a time, so each index
-    # leads with a filter and then the time: a page is a short read however
-    # rare the value. Built concurrently by migration 046.
+    # The log's project, connector, proxy and IP filters each have an index on
+    # the column alone, which stores a repeated value once; autovacuum keeps
+    # pace with the hourly retention delete. See migration 049 for why.
     __table_args__ = (
-        Index("ix_ip_observations_project_observed", "project_id", "observed_at"),
-        Index("ix_ip_observations_connector_observed", "connector_id", "observed_at"),
-        Index("ix_ip_observations_proxy_observed", "proxy_id", "observed_at"),
-        Index("ix_ip_observations_ip_observed", "ip", "observed_at"),
+        Index("ix_ip_observations_project_id", "project_id"),
+        Index("ix_ip_observations_connector_id", "connector_id"),
+        Index("ix_ip_observations_proxy_id", "proxy_id"),
+        Index("ix_ip_observations_ip", "ip"),
         Index("ix_ip_observations_contradicted", "observed_at", postgresql_where=text("country_conflict IS TRUE")),
+        {"postgresql_with": {"autovacuum_vacuum_scale_factor": 0.02, "autovacuum_vacuum_insert_scale_factor": 0.02}},
     )
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
@@ -765,13 +766,13 @@ class ConnectorExitIpModel(Base):
     )
     ip: Mapped[str] = mapped_column(String(45), primary_key=True)
     first_seen: Mapped[datetime] = mapped_column(DateTime, nullable=False)
-    last_seen: Mapped[datetime] = mapped_column(DateTime, nullable=False, index=True)
+    last_seen: Mapped[datetime] = mapped_column(DateTime, nullable=False)
     sightings: Mapped[int] = mapped_column(BigInteger, nullable=False, default=1)
     # The country attribution resolved the last time the IP was seen.
     country: Mapped[str | None] = mapped_column(String(2), nullable=True)
     # The rest of the latest observation: which proxy held the exit, how it
     # was seen, what the vendor claimed and how the claim was judged. Kept
-    # here so the exit IPs view is one indexed table, not a join into millions
+    # here so the exit IPs view is one small table, not a join into millions
     # of raw rows.
     proxy_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     source: Mapped[str | None] = mapped_column(String(20), nullable=True)
@@ -785,5 +786,7 @@ class ConnectorExitIpModel(Base):
     state_conflict: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     city_conflict: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
 
-    # Provider accuracy groups a connector's exits by when they were last seen.
-    __table_args__ = (Index("ix_connector_exit_ips_connector_last_seen", "connector_id", "last_seen"),)
+    # Only the primary key is indexed, and new pages keep a fifth free, so the
+    # ingest's updates of last_seen and the latest state rewrite a row in place
+    # without index writes. See migration 049 for why.
+    __table_args__ = ({"postgresql_with": {"fillfactor": 80}},)

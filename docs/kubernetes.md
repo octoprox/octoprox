@@ -55,7 +55,7 @@ flowchart TD
 
 Every role answers four paths on port 8000 (see [Deployment & Scaling]({{ site.baseurl }}/deployment#health-endpoints)): `/live` while the process serves, `/ready` while it can do its work (503 with the reasons otherwise), `/health` (the same check with the process's identity in the body) and `/metrics`.
 
-The api, controller and worker run the database migrations before they serve, one process at a time through a lock; until a process has migrated and started, it answers nothing at all. Give every Postgres role a `startupProbe` whose budget covers the longest migration you expect, so Kubernetes does not kill a pod that is migrating or waiting for another one to finish. After an upgrade that adds a migration, that can be minutes on a long metrics history.
+The api, controller and worker run the database migrations before they serve, one process at a time through a lock; until a process has migrated and started, it answers nothing at all. Give every Postgres role a `startupProbe` whose budget covers the longest migration you expect, so Kubernetes does not kill a pod that is migrating or waiting for another one to finish. After an upgrade that adds a migration, that can be minutes on a long metrics history or a large observation log, whose indexes a migration may build again.
 
 ```yaml
 startupProbe:

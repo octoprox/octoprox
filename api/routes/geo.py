@@ -26,7 +26,7 @@ from api.core.auth import CurrentUserDep, DbDep, RequireAdminDep
 from api.core.logging import error_text
 from api.core.roles import JobKind
 from api.db.geo_repository import (
-    EXACT_COUNT_TIMEOUT_MS,
+    READ_TIMEOUT_MS,
     GeoDatabaseRepository,
     ObservationRepository,
 )
@@ -843,7 +843,14 @@ def _naive_utc(value: datetime | None) -> datetime | None:
 def _count_timed_out() -> HTTPException:
     return HTTPException(
         status_code=504,
-        detail=f"Counting took longer than {EXACT_COUNT_TIMEOUT_MS // 1000} s. Narrow the filters first.",
+        detail=f"Counting took longer than {READ_TIMEOUT_MS // 1000} s. Narrow the filters first.",
+    )
+
+
+def _log_timed_out() -> HTTPException:
+    return HTTPException(
+        status_code=504,
+        detail=f"Reading the log took longer than {READ_TIMEOUT_MS // 1000} s. If these filters match only older rows, set Until to around then.",
     )
 
 
@@ -920,12 +927,15 @@ async def observations(
 ) -> ObservationsResponse:
     """One page of IP observations, newest first, filtered on the server (:func:`_observation_filters`).
 
-    The total is counted no further than 10,000 rows past the page, so the page stays a short read at any table size;
-    ``/observations/count`` is the exact count.
+    The total is counted no further than 10,000 rows past the page; ``/observations/count`` is the exact count. A page
+    that reads past the time limit, as one under a value with no recent rows can, is called off with a 504.
     """
     limit = max(1, min(limit, 1000))
     offset = max(0, offset)
-    rows, total, exact = await ObservationRepository(session).recent(**filters, limit=limit, offset=offset)
+    page = await ObservationRepository(session).recent(**filters, limit=limit, offset=offset)
+    if page is None:
+        raise _log_timed_out()
+    rows, total, exact = page
     # A deleted connector or project shows its id only.
     connectors = await _connectors_of(session, (row["connector_id"] for row in rows))
     projects = await _project_names(session, (row["project_id"] for row in rows))
