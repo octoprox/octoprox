@@ -52,6 +52,7 @@ from api.models.system import (
     RedisKeyGroup,
     RedisStats,
     SystemStats,
+    SystemTopology,
     TableStats,
     WorkStream,
     WorkStreams,
@@ -291,6 +292,17 @@ class ClusterReader:
             return WorkStreams(error=error_text(exc))
         return WorkStreams(by_name=by_name)
 
+    async def topology(self) -> SystemTopology:
+        """The cluster as one answer: :meth:`read` and :meth:`streams` side by side, each failure kept in its section."""
+        reading, streams = await asyncio.gather(self.read(), self.streams())
+        return SystemTopology(
+            generated_at=utc_now(),
+            instances=reading.by_role(),
+            controller=reading.controller_status(),
+            feed=reading.feed_status(),
+            streams=streams,
+        )
+
     async def _read_instances(self, members: list[str]) -> list[InstanceInfo]:
         """The listed processes whose registry key is alive, with their snapshots; one pipeline."""
         if not members:
@@ -397,19 +409,13 @@ class SystemReader:
         """Every section of the view: the Postgres queries share the session, so they run in sequence (the database sizes
         last), and the Redis reads run alongside them.
         """
-        cluster = ClusterReader(self._redis_client)
-        (inventory, projects, database), redis_stats, reading, streams = await asyncio.gather(
+        (inventory, projects, database), redis_stats, topology = await asyncio.gather(
             self._postgres(),
             self.redis(),
-            cluster.read(),
-            cluster.streams(),
+            ClusterReader(self._redis_client).topology(),
         )
         return SystemStats(
-            generated_at=utc_now(),
-            instances=reading.by_role(),
-            controller=reading.controller_status(),
-            feed=reading.feed_status(),
-            streams=streams,
+            **dict(topology),
             inventory=inventory,
             projects=projects,
             database=database,

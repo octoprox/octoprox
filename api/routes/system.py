@@ -15,10 +15,16 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.core import utc_now
 from api.core.auth import RequireAdminDep
-from api.core.system_stats import SystemReader
+from api.core.system_stats import ClusterReader, SystemReader
 from api.db.repository import SystemMetricsRepository
 from api.db.session import get_db
-from api.models.system import SystemMetricsHistory, SystemMetricsPoint, SystemStats, TableGrowth
+from api.models.system import (
+    SystemMetricsHistory,
+    SystemMetricsPoint,
+    SystemStats,
+    SystemTopology,
+    TableGrowth,
+)
 from api.routes.common import provider_registry_of, redis_client_of, settings_of
 
 router = APIRouter(prefix="/system")
@@ -35,6 +41,16 @@ async def get_system_stats(request: Request, session: DbDep, _admin: RequireAdmi
     rest is read from Postgres and Redis directly.
     """
     return await SystemReader(session, redis_client_of(request), provider_registry_of(request)).read()
+
+
+@router.get("/topology", response_model=SystemTopology)
+async def get_system_topology(request: Request, _admin: RequireAdminDep) -> SystemTopology:
+    """Return the cluster sections of ``/stats`` alone: every live process, the controller, the feed and the work streams.
+
+    Read from Redis only, without the keyspace scan and the table sizes, so the
+    topology view can poll it on the heartbeats' cadence.
+    """
+    return await ClusterReader(redis_client_of(request)).topology()
 
 
 # (window, bucket width). A null bucket returns raw snapshots; anything longer

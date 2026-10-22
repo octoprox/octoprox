@@ -2343,7 +2343,8 @@ export interface SystemWorkStreams {
   error: string | null
 }
 
-export interface SystemStats {
+/** The cluster alone, all from Redis: what the topology view polls, without the stores' heavier reads. */
+export interface SystemTopology {
   generated_at: string
   /**
    * Every live process by the role it registered with, in the order all,
@@ -2356,6 +2357,9 @@ export interface SystemStats {
   feed: SystemFeed
   /** The work the workers take: each job kind's stream, the sightings and the observations. */
   streams: SystemWorkStreams
+}
+
+export interface SystemStats extends SystemTopology {
   inventory: SystemInventory
   projects: SystemProjectUsage[]
   database: SystemDatabase
@@ -2364,6 +2368,11 @@ export interface SystemStats {
 
 export const fetchSystemStats = async (): Promise<SystemStats> => {
   const response = await api.get('/system/stats')
+  return response.data
+}
+
+export const fetchSystemTopology = async (): Promise<SystemTopology> => {
+  const response = await api.get('/system/topology')
   return response.data
 }
 

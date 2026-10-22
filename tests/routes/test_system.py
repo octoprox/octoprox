@@ -63,6 +63,7 @@ from api.services.proxies import StatusMove
 from tests.conftest import api_runtime, on_app_loop
 
 ENDPOINT = "/api/v1/system/stats"
+TOPOLOGY = "/api/v1/system/topology"
 HISTORY = "/api/v1/system/stats/history"
 
 # Positions on the changes stream (entry IDs: milliseconds since the epoch,
@@ -71,18 +72,19 @@ COMPILED_THROUGH = "1792281600000-0"
 EARLIER = "1792281300000-0"
 
 
+@pytest.mark.parametrize("endpoint", [ENDPOINT, TOPOLOGY])
 class TestSystemStatsAccessControl:
-    def test_unauthenticated_is_rejected(self, async_client: TestClient) -> None:
-        assert async_client.get(ENDPOINT).status_code == 401
+    def test_unauthenticated_is_rejected(self, async_client: TestClient, endpoint: str) -> None:
+        assert async_client.get(endpoint).status_code == 401
 
-    def test_viewer_is_forbidden(self, viewer_client: TestClient) -> None:
-        assert viewer_client.get(ENDPOINT).status_code == 403
+    def test_viewer_is_forbidden(self, viewer_client: TestClient, endpoint: str) -> None:
+        assert viewer_client.get(endpoint).status_code == 403
 
-    def test_editor_is_forbidden(self, editor_client: TestClient) -> None:
-        assert editor_client.get(ENDPOINT).status_code == 403
+    def test_editor_is_forbidden(self, editor_client: TestClient, endpoint: str) -> None:
+        assert editor_client.get(endpoint).status_code == 403
 
-    def test_admin_is_allowed(self, authenticated_client: TestClient) -> None:
-        assert authenticated_client.get(ENDPOINT).status_code == 200
+    def test_admin_is_allowed(self, authenticated_client: TestClient, endpoint: str) -> None:
+        assert authenticated_client.get(endpoint).status_code == 200
 
 
 # --- Playing the rest of the cluster ------------------------------------------------------------
@@ -160,12 +162,15 @@ def cluster(authenticated_client: TestClient) -> Iterator[Cluster]:
 
 
 def stats_when(
-    client: TestClient, condition: Callable[[dict[str, Any]], bool], timeout: float = 10.0
+    client: TestClient,
+    condition: Callable[[dict[str, Any]], bool],
+    timeout: float = 10.0,
+    endpoint: str = ENDPOINT,
 ) -> dict[str, Any]:
     """The System view once ``condition`` holds for it: the app's own heartbeat runs on its own loop."""
     deadline = time.monotonic() + timeout
     while True:
-        response = client.get(ENDPOINT)
+        response = client.get(endpoint)
         assert response.status_code == 200
         data: dict[str, Any] = response.json()
         if condition(data):
@@ -501,6 +506,48 @@ class TestControllerAndFeed:
 
         assert feed["digest"] is None
         assert feed["error"] == "The routing feed head in Redis cannot be read by this release"
+
+
+class TestTopology:
+    """The cluster sections of the System view alone, which the topology view polls on the heartbeats' cadence."""
+
+    def test_the_cluster_sections_alone_read_as_the_view_reads_them(
+        self, authenticated_client: TestClient, cluster: Cluster
+    ) -> None:
+        cluster.head(head("digest-now"))
+        cluster.heartbeat("gw-1", "gateway", gateway("gw-1", digest="digest-now", changes=COMPILED_THROUGH, age=2.0))
+        cluster.heartbeat("ctl-1", "controller", controller("ctl-1", leading=True, changes=COMPILED_THROUGH))
+        cluster.lease("ctl-1")
+        cluster.job_stream(JobKind.PROVISION, 5, delivered=2)
+
+        data = stats_when(authenticated_client, lists("gateway", "gw-1"), endpoint=TOPOLOGY)
+        stats = authenticated_client.get(ENDPOINT).json()
+
+        # No inventory, project, database or Redis section: nothing that reads Postgres or scans the keyspace.
+        assert set(data) == {"generated_at", "instances", "controller", "feed", "streams"}
+        assert data["controller"]["leader"] == stats["controller"]["leader"] == "ctl-1"
+        assert data["controller"]["changes"] == COMPILED_THROUGH
+        gw = instance_of(data, "gateway", "gw-1")
+        assert gw is not None and gw["snapshot"]["gateway"]["requests"] == 10
+        assert [g["in_sync"] for g in data["feed"]["gateways"] if g["instance_id"] == "gw-1"] == [True]
+        assert list(data["streams"]["by_name"]) == list(stats["streams"]["by_name"])
+        provision = data["streams"]["by_name"]["jobs.provision"]
+        assert (provision["length"], provision["pending"], provision["queued"]) == (5, 2, 3)
+
+    async def test_an_unreachable_redis_leaves_each_section_with_its_error(self) -> None:
+        with socket.socket() as probe:
+            probe.bind(("127.0.0.1", 0))
+            port = probe.getsockname()[1]
+        unreachable = RedisClient(f"redis://127.0.0.1:{port}/0", socket_timeout=0.5)
+        await unreachable.connect()
+        try:
+            topology = await ClusterReader(unreachable).topology()
+        finally:
+            await unreachable.close()
+
+        assert topology.instances == {}
+        for section in (topology.controller, topology.feed, topology.streams):
+            assert section.error, section
 
 
 class TestClusterReading:

@@ -263,10 +263,16 @@ select:-webkit-autofill:focus {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.35; }
 }
+/* Dashes running along a topology arrow while traffic or work moves on it; the dash pattern is 10 long. */
+@keyframes edge-flow {
+  from { stroke-dashoffset: 10; }
+  to { stroke-dashoffset: 0; }
+}
 .animate-panel-in { animation: panel-in 0.18s ease-out; }
 .animate-toast-in { animation: toast-in 0.2s ease-out; }
 .animate-pulse-soft { animation: pulse-soft 1.6s ease-in-out infinite; }
+.animate-edge-flow { animation: edge-flow 0.8s linear infinite; }
 
 @media (prefers-reduced-motion: reduce) {
-  .animate-panel-in, .animate-toast-in, .animate-pulse-soft { animation: none; }
+  .animate-panel-in, .animate-toast-in, .animate-pulse-soft, .animate-edge-flow { animation: none; }
 }

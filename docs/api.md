@@ -1238,6 +1238,16 @@ takes, beside `sighting_ingest` and `observation_ingest`.
 - **Positions are times.** Every "how far" is an entry ID of a stream, shown as the time it carries: the leader's compile, the feed head's, each gateway's applied feed, and each api's and worker's definitions (their **Definitions** rows: how far the process has read the change stream, and how often it read in full instead, by reason). A position at or past `changes_head` is *in sync*; one behind it reads *behind, at <time>*, where the process has read through, coloured as late only once the newest change is 30 seconds older than the process's snapshot, so the moment between a save and the next heartbeat is not flagged. `0-0` reads *before any change*. IDs compare as two numbers, milliseconds then sequence, never as text.
 - **The takeover** is worded from `standby_poll_ms` and `lease_ttl_ms`: within a poll of the leader stopping cleanly, or within the TTL and a poll of it failing, each rounded up to whole seconds.
 
+### System Topology
+
+```bash
+GET /api/v1/system/topology
+```
+
+Admin-only. The cluster sections of `/system/stats` alone, `generated_at`, `instances`, `controller`, `feed` and `streams`, in the same shape. It reads Redis only, without the keyspace breakdown and the table sizes, so it is cheap enough to poll every 5 seconds, the heartbeats' cadence. The System page's **Topology** view polls it while the view is open.
+
+**How the Topology view reads it.** Every live process sits in the column of each runtime its snapshot carries, so a process of role `all` shows in all four. The arrows are the streams between the roles: the change stream from the api to the leading controller, the routing feed from the controller to the gateways, and the work streams from the api, the controller and the gateways to the workers. Rates (requests and bytes per second for a gateway, job runs per second for a worker) are the difference between two of a process's snapshots over the difference of their `uptime_seconds`, so they are timed on the process's own clock and a snapshot read twice counts once.
+
 ### System Trends
 
 ```bash

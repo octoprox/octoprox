@@ -432,6 +432,22 @@ class WorkStreams(BaseModel):
     error: str | None = None
 
 
+class SystemTopology(BaseModel):
+    """The cluster alone, all from Redis: what the System view's topology polls, without the stores' heavier reads."""
+
+    generated_at: datetime
+    # Every live process, by the role it registered with (``all``, ``api``,
+    # ``gateway``, ``controller``, ``worker`` in that order, then any other),
+    # each list sorted by instance id. A role with no live process is absent;
+    # echo processes do not heartbeat. Empty when Redis could not be read
+    # (``controller.error`` says why).
+    instances: dict[str, list[InstanceInfo]] = Field(default_factory=dict)
+    controller: ControllerStatus
+    feed: FeedStatus
+    # The work streams: each job kind's, the sightings and the observations.
+    streams: WorkStreams = Field(default_factory=WorkStreams)
+
+
 # --- System view: the stores -------------------------------------------------------------------
 
 
@@ -525,20 +541,9 @@ class RedisStats(BaseModel):
     error: str | None = None
 
 
-class SystemStats(BaseModel):
+class SystemStats(SystemTopology):
     """Everything the admin System view renders: the cluster and the stores, the same from every api process."""
 
-    generated_at: datetime
-    # Every live process, by the role it registered with (``all``, ``api``,
-    # ``gateway``, ``controller``, ``worker`` in that order, then any other),
-    # each list sorted by instance id. A role with no live process is absent;
-    # echo processes do not heartbeat. Empty when Redis could not be read
-    # (``controller.error`` says why).
-    instances: dict[str, list[InstanceInfo]] = Field(default_factory=dict)
-    controller: ControllerStatus
-    feed: FeedStatus
-    # The work streams: each job kind's, the sightings and the observations.
-    streams: WorkStreams = Field(default_factory=WorkStreams)
     inventory: InventoryStats
     projects: list[ProjectUsage] = Field(default_factory=list)
     database: DatabaseStats

@@ -17,6 +17,8 @@ interface PageProps {
   title: ReactNode
   subtitle?: ReactNode
   count?: number | string
+  /** Under the title and its subtitle (a view switch). */
+  belowTitle?: ReactNode
   /** Right-aligned header controls. */
   actions?: ReactNode
   /** Rendered inline after the title (filters, segmented controls). */
@@ -27,7 +29,7 @@ interface PageProps {
   contentClassName?: string
 }
 
-export function Page({ title, subtitle, count, actions, toolbar, panel, children, contentClassName }: PageProps) {
+export function Page({ title, subtitle, count, belowTitle, actions, toolbar, panel, children, contentClassName }: PageProps) {
   return (
     <div className="flex flex-1 min-h-0 min-w-0">
       <div className="@container flex-1 min-w-0 overflow-y-auto">
@@ -40,6 +42,7 @@ export function Page({ title, subtitle, count, actions, toolbar, panel, children
                   {count !== undefined && <span className="text-sm font-medium text-fg-subtle tabular-nums">{count}</span>}
                 </h1>
                 {subtitle && <p className="text-[12.5px] text-fg-muted mt-0.5">{subtitle}</p>}
+                {belowTitle && <div className="mt-2.5">{belowTitle}</div>}
               </div>
               {toolbar}
             </div>

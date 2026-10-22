@@ -1,18 +1,18 @@
 // Copyright 2026 Octoprox Authors
 // SPDX-License-Identifier: Apache-2.0
 
-import { useMemo, useState, type ReactNode } from 'react'
-import { useQuery } from '@tanstack/react-query'
+import { useLayoutEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from 'react'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts'
 import {
-  AlertTriangle, CheckCircle2, CircleOff, Crown, Database, GitBranch, HardDrive, ListChecks,
-  RefreshCw, Server, TrendingUp,
+  AlertTriangle, CheckCircle2, CircleOff, Cog, Crown, Database, GitBranch, Globe, HardDrive, ListChecks,
+  MonitorSmartphone, Network, RefreshCw, Server, TrendingUp, Users,
 } from 'lucide-react'
 import {
-  fetchGeoDatabases, fetchSystemStats, fetchSystemHistory, parseStreamId, streamIdBefore, FullReadReason,
+  fetchGeoDatabases, fetchSystemStats, fetchSystemHistory, fetchSystemTopology, parseStreamId, streamIdBefore, FullReadReason,
   JOB_KINDS, JobKind, StreamId, SystemApiSnapshot, SystemControllerSnapshot, SystemControllerStatus, SystemDatabase, SystemGatewayFeed,
   SystemGatewaySnapshot, SystemInstance, SystemInstanceRuntime, SystemInstanceSnapshot, SystemInventory,
-  SystemMetricsHistory, SystemMetricsPoint, SystemProjectUsage, SystemRedis, SystemStats, SystemStreamState,
+  SystemMetricsHistory, SystemMetricsPoint, SystemProjectUsage, SystemRedis, SystemStreamState, SystemTopology,
   SystemWorkStream, SystemWorkerSnapshot, SystemWorkerTask, SystemHistoryRange, SYSTEM_HISTORY_RANGES,
   TunnelEndpointState, WorkerState,
 } from '../../api/client'
@@ -21,10 +21,16 @@ import { Page } from '../../components/layout/Page'
 import { useTheme } from '../../contexts/ThemeContext'
 import { useTimeRange } from '../../contexts/TimeRangeContext'
 import { bytesShort, elideMiddle, formatBytes, formatDateTime, parseApiDate, plural, relativeTime } from '../../utils/format'
-import { Alert, Badge, Button, Card, CardHeader, Inspector, InspectorSection, KeyValue, Segmented } from '../../components/ui'
+import {
+  Alert, Badge, Button, Card, CardHeader, FlowDiagram, FlowNode, Inspector, InspectorSection, KeyValue, Segmented,
+  type FlowAnchor, type FlowEdge, type FlowTone,
+} from '../../components/ui'
 import { cn } from '../../utils/cn'
 
 const REFRESH_MS = 30_000
+// The topology reads only the heartbeats, the lease, the feed head and the
+// work streams, so it can follow the heartbeats' own 5 s cadence.
+const TOPOLOGY_REFRESH_MS = 5_000
 
 /**
  * The install for admins: every process by its role, the controller and the
@@ -37,56 +43,101 @@ const REFRESH_MS = 30_000
  * page says how old; picking one opens its whole snapshot beside the list.
  */
 export default function SystemSection() {
+  const queryClient = useQueryClient()
+  const [view, setView] = useClusterView()
   const { data, error, isLoading, isFetching, dataUpdatedAt, refetch } = useQuery({
     queryKey: ['system-stats'],
     queryFn: fetchSystemStats,
     refetchInterval: REFRESH_MS,
   })
+  const topologyQuery = useQuery({
+    queryKey: ['system-topology'],
+    queryFn: fetchSystemTopology,
+    refetchInterval: TOPOLOGY_REFRESH_MS,
+    enabled: view === 'topology',
+  })
+  // The cluster as the view on screen shows it: the topology's own reading,
+  // fresher than the page's, until it arrives.
+  const cluster = view === 'topology' ? topologyQuery.data ?? data : data
+  const updatedAt = view === 'topology' ? topologyQuery.dataUpdatedAt : dataUpdatedAt
 
   // Kept by id rather than as the object, so the panel follows the process
   // across refreshes and says so when it has left rather than showing another.
   const [selectedId, setSelectedId] = useState<string | null>(null)
-  const selected = data && selectedId ? allProcesses(data).find((i) => i.instance_id === selectedId) ?? null : null
+  const selected = cluster && selectedId ? allProcesses(cluster).find((i) => i.instance_id === selectedId) ?? null : null
 
   return (
     <Page
       title="System"
       subtitle="Every process of this Octoprox install by role, the routing feed, the work streams, and what Postgres and Redis hold."
+      belowTitle={
+        <Segmented
+          size="sm"
+          options={[{ value: 'list', label: 'List' }, { value: 'topology', label: 'Topology' }]}
+          value={view}
+          onChange={(next) => {
+            // A reading kept from an earlier visit would seed the rates and the backlog ages across the gap.
+            if (next === 'topology' && view !== 'topology') queryClient.resetQueries({ queryKey: ['system-topology'], exact: true })
+            setView(next)
+          }}
+        />
+      }
       actions={
         <div className="flex items-center gap-3 flex-wrap justify-end">
-          {dataUpdatedAt > 0 && (
+          {updatedAt > 0 && (
             <span className="text-xs text-fg-muted tabular-nums">
-              Updated {relativeTime(new Date(dataUpdatedAt).toISOString())}
+              Updated {relativeTime(new Date(updatedAt).toISOString())}
             </span>
           )}
-          <Button variant="outline" size="sm" onClick={() => refetch()} disabled={isFetching}>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => {
+              refetch()
+              if (view === 'topology') topologyQuery.refetch()
+            }}
+            disabled={isFetching}
+          >
+            {/* The page's own query only: the topology's 5 s polls would spin it and disable it every few seconds. */}
             <RefreshCw className={cn('w-3.5 h-3.5', isFetching && 'animate-spin')} /> Refresh
           </Button>
         </div>
       }
-      panel={data && selectedId ? (
+      panel={cluster && selectedId ? (
         <ProcessPanel
           key={selectedId}
           instanceId={selectedId}
           instance={selected}
-          data={data}
+          data={cluster}
           onClose={() => setSelectedId(null)}
         />
       ) : null}
     >
       {error && <Alert variant="error">{(error as Error).message || 'Failed to load system statistics'}</Alert>}
+      {view === 'topology' && (
+        <TopologyCard
+          data={topologyQuery.data}
+          error={topologyQuery.error}
+          selectedId={selectedId}
+          onSelect={setSelectedId}
+        />
+      )}
       {!data ? (
         <p className="text-sm text-fg-muted py-8 text-center">{isLoading ? 'Loading…' : 'No data'}</p>
       ) : (
         <>
-          <ProcessesCard data={data} selectedId={selectedId} onSelect={setSelectedId} />
+          {view === 'list' && (
+            <>
+              <ProcessesCard data={data} selectedId={selectedId} onSelect={setSelectedId} />
 
-          <div className="grid grid-cols-1 @4xl:grid-cols-2 gap-4 items-start">
-            <ControllerCard data={data} onSelect={setSelectedId} />
-            <FeedCard data={data} onSelect={setSelectedId} />
-          </div>
+              <div className="grid grid-cols-1 @4xl:grid-cols-2 gap-4 items-start">
+                <ControllerCard data={data} onSelect={setSelectedId} />
+                <FeedCard data={data} onSelect={setSelectedId} />
+              </div>
 
-          <WorkStreamsCard data={data} />
+              <WorkStreamsCard data={data} />
+            </>
+          )}
 
           <InventoryTiles inventory={data.inventory} />
           <TrendsSection />
@@ -104,6 +155,22 @@ export default function SystemSection() {
       )}
     </Page>
   )
+}
+
+type ClusterView = 'list' | 'topology'
+
+const VIEW_KEY = 'octoprox_system_view'
+
+/** Which view of the cluster the page shows, remembered in this browser. */
+function useClusterView(): [ClusterView, (view: ClusterView) => void] {
+  const [view, setView] = useState<ClusterView>(() => {
+    try { return localStorage.getItem(VIEW_KEY) === 'topology' ? 'topology' : 'list' } catch { return 'list' }
+  })
+  const choose = (next: ClusterView) => {
+    setView(next)
+    try { localStorage.setItem(VIEW_KEY, next) } catch { /* ignore */ }
+  }
+  return [view, choose]
 }
 
 // --- roles and processes -----------------------------------------------------------------
@@ -151,7 +218,7 @@ function roleName(role: string): string {
 }
 
 /** The roles with live processes, in page order. */
-function roleGroups(data: SystemStats): [string, SystemInstance[]][] {
+function roleGroups(data: SystemTopology): [string, SystemInstance[]][] {
   const rank = (role: string) => {
     const i = ROLE_ORDER.indexOf(role)
     return i === -1 ? ROLE_ORDER.length : i
@@ -159,7 +226,7 @@ function roleGroups(data: SystemStats): [string, SystemInstance[]][] {
   return Object.entries(data.instances).sort((a, b) => rank(a[0]) - rank(b[0]))
 }
 
-function allProcesses(data: SystemStats): SystemInstance[] {
+function allProcesses(data: SystemTopology): SystemInstance[] {
   return roleGroups(data).flatMap(([, list]) => list)
 }
 
@@ -235,7 +302,7 @@ function processFacts(instance: SystemInstance, feed: SystemGatewayFeed | undefi
     for (const tunnel of gateway.tunnels) facts.push(`${TUNNEL_LABEL[tunnel.protocol] ?? tunnel.protocol} ${tunnel.state}`)
   }
   if (worker) {
-    const inFlight = Object.values(worker.jobs).reduce((sum, stats) => sum + (stats?.in_flight ?? 0), 0)
+    const inFlight = jobsInFlight(worker)
     facts.push(`${formatCount(inFlight)} ${plural(inFlight, 'job', 'jobs')} in flight`)
     const kinds = Object.keys(worker.jobs)
     if (kinds.length === 0) facts.push('takes no jobs')
@@ -246,32 +313,25 @@ function processFacts(instance: SystemInstance, feed: SystemGatewayFeed | undefi
   return facts
 }
 
+/** The entries a worker holds now, over every job kind it takes. */
+function jobsInFlight(worker: SystemWorkerSnapshot): number {
+  return Object.values(worker.jobs).reduce((sum, stats) => sum + (stats?.in_flight ?? 0), 0)
+}
+
 function ProcessesCard({ data, selectedId, onSelect }: {
-  data: SystemStats
+  data: SystemTopology
   selectedId: string | null
   onSelect: (id: string) => void
 }) {
   const groups = roleGroups(data)
   const processes = groups.flatMap(([, list]) => list)
   const feeds = new Map(data.feed.gateways.map((g) => [g.instance_id, g]))
-  const health = processes.map(processHealth)
-  const failing = health.filter((h) => h.health === 'failing').length
-  const unready = health.filter((h) => h.health === 'unready').length
-  const unknown = health.filter((h) => h.health === 'unknown').length
 
   return (
     <Card className="px-4 py-3">
       <CardHeader
         title={<span className="inline-flex items-center gap-2"><Server className="w-4 h-4 text-fg-muted" />Processes</span>}
-        action={
-          <div className="flex items-center gap-2 flex-wrap">
-            {failing > 0 && <Badge color="red">{failing} with failing loops</Badge>}
-            {unready > 0 && <Badge color="yellow">{unready} not ready</Badge>}
-            {unknown > 0 && <Badge color="gray">{unknown} without a snapshot</Badge>}
-            {processes.length > 0 && failing + unready + unknown === 0 && <Badge color="green">all ready</Badge>}
-            <span className="text-xs text-fg-muted tabular-nums">{processes.length} live</span>
-          </div>
-        }
+        action={<HealthBadges processes={processes} />}
         className="mb-2"
       />
       {processes.length === 0 ? (
@@ -315,6 +375,23 @@ function ProcessesCard({ data, selectedId, onSelect }: {
         is waiting for.
       </p>
     </Card>
+  )
+}
+
+/** How many processes have a problem, by kind, or that all are ready; and how many are live. */
+function HealthBadges({ processes }: { processes: SystemInstance[] }) {
+  const health = processes.map(processHealth)
+  const failing = health.filter((h) => h.health === 'failing').length
+  const unready = health.filter((h) => h.health === 'unready').length
+  const unknown = health.filter((h) => h.health === 'unknown').length
+  return (
+    <div className="flex items-center gap-2 flex-wrap">
+      {failing > 0 && <Badge color="red">{failing} with failing loops</Badge>}
+      {unready > 0 && <Badge color="yellow">{unready} not ready</Badge>}
+      {unknown > 0 && <Badge color="gray">{unknown} without a snapshot</Badge>}
+      {processes.length > 0 && failing + unready + unknown === 0 && <Badge color="green">all ready</Badge>}
+      <span className="text-xs text-fg-muted tabular-nums">{processes.length} live</span>
+    </div>
   )
 }
 
@@ -376,7 +453,7 @@ function ProcessRow({ instance, feed, selected, onSelect }: {
 function ProcessPanel({ instanceId, instance, data, onClose }: {
   instanceId: string
   instance: SystemInstance | null
-  data: SystemStats
+  data: SystemTopology
   onClose: () => void
 }) {
   if (!instance) {
@@ -757,7 +834,7 @@ const FULL_READS: { reason: FullReadReason; one: string; many: string }[] = [
 function DefinitionsSection({ changes, instance, data }: {
   changes: SystemStreamState | undefined
   instance: SystemInstance
-  data: SystemStats
+  data: SystemTopology
 }) {
   const at = standing(changes?.position ?? null, data.controller.changes_head, snapshotMs(data, instance))
   const words = at ? standingText(at, 'Read') : null
@@ -984,7 +1061,7 @@ function takeover(status: SystemControllerStatus): string {
   return `within ${seconds(status.standby_poll_ms)} of the leader stopping cleanly, or within ${seconds(status.lease_ttl_ms + status.standby_poll_ms)} of it failing`
 }
 
-function ControllerCard({ data, onSelect }: { data: SystemStats; onSelect: (id: string) => void }) {
+function ControllerCard({ data, onSelect }: { data: SystemTopology; onSelect: (id: string) => void }) {
   const { controller } = data
   const processes = allProcesses(data)
   const leader = controller.leader ? processes.find((i) => i.instance_id === controller.leader) ?? null : null
@@ -1048,7 +1125,7 @@ function ControllerCard({ data, onSelect }: { data: SystemStats; onSelect: (id: 
   )
 }
 
-function FeedCard({ data, onSelect }: { data: SystemStats; onSelect: (id: string) => void }) {
+function FeedCard({ data, onSelect }: { data: SystemTopology; onSelect: (id: string) => void }) {
   const { feed } = data
   const inSync = feed.gateways.filter((g) => g.in_sync).length
   const total = feed.gateways.length
@@ -1187,12 +1264,12 @@ function standingText(at: Standing, verb: string): { text: string; title: string
 }
 
 /** When the api made this answer (ms, its clock); the browser's clock if the time cannot be read. */
-function readingMs(data: SystemStats): number {
+function readingMs(data: SystemTopology): number {
   return parseApiDate(data.generated_at)?.getTime() ?? Date.now()
 }
 
 /** When a process published the snapshot this answer carries (ms, the api's clock). */
-function snapshotMs(data: SystemStats, instance: SystemInstance): number {
+function snapshotMs(data: SystemTopology, instance: SystemInstance): number {
   return readingMs(data) - (instance.age_seconds ?? 0) * 1000
 }
 
@@ -1259,7 +1336,7 @@ function streamHint(stream: SystemWorkStream, takers: number, queuedFor: number)
 }
 
 /** The heartbeats of the live workers, every process running a worker runtime whose snapshot the page can read. */
-function liveWorkers(data: SystemStats): SystemWorkerSnapshot[] {
+function liveWorkers(data: SystemTopology): SystemWorkerSnapshot[] {
   return allProcesses(data).flatMap((instance) => (instance.snapshot?.worker ? [instance.snapshot.worker] : []))
 }
 
@@ -1280,7 +1357,7 @@ function takersOf(workers: SystemWorkerSnapshot[], name: string): number {
  * every reading this page made; a stream with none queued in the latest
  * reading is absent.
  */
-function useQueuedSince(data: SystemStats): Record<string, number> {
+function useQueuedSince(data: SystemTopology): Record<string, number> {
   const [seen, setSeen] = useState(() => ({ at: data.generated_at, since: queuedSince({}, data) }))
   if (seen.at === data.generated_at) return seen.since
   // A new reading: carry each backlog's start over while it lasts (React's
@@ -1290,7 +1367,7 @@ function useQueuedSince(data: SystemStats): Record<string, number> {
   return next.since
 }
 
-function queuedSince(previous: Record<string, number>, data: SystemStats): Record<string, number> {
+function queuedSince(previous: Record<string, number>, data: SystemTopology): Record<string, number> {
   const at = readingMs(data)
   const since: Record<string, number> = {}
   for (const [name, stream] of Object.entries(data.streams.by_name)) {
@@ -1299,16 +1376,9 @@ function queuedSince(previous: Record<string, number>, data: SystemStats): Recor
   return since
 }
 
-function WorkStreamsCard({ data }: { data: SystemStats }) {
+function WorkStreamsCard({ data }: { data: SystemTopology }) {
   const { streams } = data
-  const since = useQueuedSince(data)
-  const at = readingMs(data)
-  const workers = liveWorkers(data)
-  const rows = Object.entries(streams.by_name).map(([name, stream]) => ({
-    name,
-    stream,
-    hint: streamHint(stream, takersOf(workers, name), since[name] != null ? (at - since[name]) / 1000 : 0),
-  }))
+  const rows = streamRows(data, useQueuedSince(data))
   const groups = [
     { label: 'Jobs', rows: rows.filter((row) => row.name.startsWith(JOB_STREAM_PREFIX)) },
     { label: 'Ingest', rows: rows.filter((row) => !row.name.startsWith(JOB_STREAM_PREFIX)) },
@@ -1387,6 +1457,762 @@ function WorkStreamRow({ name, stream, hint }: { name: string; stream: SystemWor
 /** An entry's age: under a second reads as such rather than as 0s. */
 function formatAge(seconds: number): string {
   return seconds < 1 ? '<1s' : formatDuration(seconds)
+}
+
+// --- topology ------------------------------------------------------------------------
+
+/*
+ * The cluster as a picture: a box per role with its processes, and arrows for
+ * what passes between them. No process calls another, so every arrow between
+ * two roles is a Redis stream or Postgres, and the ones that matter say what
+ * this reading found on them.
+ */
+
+// The runtimes a process can run, one box of the picture each.
+const RUNTIMES = ['api', 'controller', 'gateway', 'worker'] as const
+type Runtime = (typeof RUNTIMES)[number]
+
+/**
+ * The boxes a process sits in: each runtime its snapshot carries, so a process
+ * of role 'all' shows in all four; by its role while it has no snapshot, or
+ * one that carries no section yet.
+ */
+function runtimesOf(instance: SystemInstance): Runtime[] {
+  const snapshot = instance.snapshot
+  const carried = snapshot ? RUNTIMES.filter((runtime) => snapshot[runtime] != null) : []
+  if (carried.length > 0) return carried
+  if (instance.role === 'all') return [...RUNTIMES]
+  return RUNTIMES.filter((runtime) => runtime === instance.role)
+}
+
+/** A process's counters per second, between two of its snapshots. */
+interface ProcessRates {
+  requests: number
+  bytes: number
+  runs: number
+}
+
+interface RateSample extends ProcessRates {
+  uptime: number
+}
+
+interface RateState {
+  at: string | null
+  samples: Record<string, RateSample>
+  rates: Record<string, ProcessRates>
+}
+
+// Two snapshots closer than this on the process's clock are one snapshot read
+// twice: the topology polls at about the heartbeat's own cadence.
+const SAME_SNAPSHOT_SECONDS = 1
+
+function rateSample(snapshot: SystemInstanceSnapshot): RateSample {
+  const gateway = snapshot.gateway
+  return {
+    uptime: snapshot.runtime.uptime_seconds,
+    requests: gateway?.requests ?? 0,
+    bytes: (gateway?.bytes_sent ?? 0) + (gateway?.bytes_received ?? 0),
+    runs: Object.values(snapshot.worker?.jobs ?? {}).reduce((sum, stats) => sum + (stats?.runs ?? 0), 0),
+  }
+}
+
+/**
+ * Each process's rates, from counters that run since it started: the change
+ * between two of its snapshots over the change in its uptime, so they are
+ * timed on the process's own clock and a snapshot read twice counts once. A
+ * process has none until its second snapshot, and starts over after a restart.
+ */
+function useProcessRates(data: SystemTopology): Record<string, ProcessRates> {
+  const [seen, setSeen] = useState(() => nextRates({ at: null, samples: {}, rates: {} }, data))
+  if (seen.at === data.generated_at) return seen.rates
+  // A new reading (React's pattern for state that follows a prop).
+  const next = nextRates(seen, data)
+  setSeen(next)
+  return next.rates
+}
+
+function nextRates(seen: RateState, data: SystemTopology): RateState {
+  const samples: Record<string, RateSample> = {}
+  const rates: Record<string, ProcessRates> = {}
+  for (const instance of allProcesses(data)) {
+    if (!instance.snapshot) continue
+    const id = instance.instance_id
+    const sample = rateSample(instance.snapshot)
+    const prev = seen.samples[id]
+    const span = prev ? sample.uptime - prev.uptime : -1
+    if (prev && span >= 0 && span < SAME_SNAPSHOT_SECONDS) {
+      samples[id] = prev
+      if (seen.rates[id]) rates[id] = seen.rates[id]
+    } else if (prev && span > 0 && sample.requests >= prev.requests && sample.bytes >= prev.bytes && sample.runs >= prev.runs) {
+      samples[id] = sample
+      rates[id] = {
+        requests: (sample.requests - prev.requests) / span,
+        bytes: (sample.bytes - prev.bytes) / span,
+        runs: (sample.runs - prev.runs) / span,
+      }
+    } else {
+      samples[id] = sample
+    }
+  }
+  return { at: data.generated_at, samples, rates }
+}
+
+/** A rate in a few characters: one decimal below 10, whole above. */
+function formatRate(perSecond: number): string {
+  if (perSecond <= 0) return '0'
+  if (perSecond < 0.1) return '<0.1'
+  return perSecond < 10 ? perSecond.toFixed(1).replace(/\.0$/, '') : compactCount(Math.round(perSecond))
+}
+
+function formatByteRate(perSecond: number): string {
+  return `${bytesShort(Math.round(perSecond))}/s`
+}
+
+/** The sum of one rate over the processes that have one; null when none has yet. */
+function sumRates(instances: SystemInstance[], rates: Record<string, ProcessRates>, key: keyof ProcessRates): number | null {
+  const known = instances.flatMap((instance) => (rates[instance.instance_id] ? [rates[instance.instance_id][key]] : []))
+  return known.length > 0 ? known.reduce((sum, n) => sum + n, 0) : null
+}
+
+function TopologyCard({ data, error, selectedId, onSelect }: {
+  data: SystemTopology | undefined
+  error: unknown
+  selectedId: string | null
+  onSelect: (id: string) => void
+}) {
+  return (
+    <Card className="px-4 py-3">
+      <CardHeader
+        title={<span className="inline-flex items-center gap-2"><Network className="w-4 h-4 text-fg-muted" />Topology</span>}
+        action={data && <HealthBadges processes={allProcesses(data)} />}
+        className="mb-3"
+      />
+      {error != null && <Alert variant="error" className="mb-3">{(error as Error).message || 'Failed to load the topology'}</Alert>}
+      {data?.controller.error && <Alert variant="error" className="mb-3">{data.controller.error}</Alert>}
+      {!data ? (
+        <p className="text-xs text-fg-muted py-8 text-center">{error ? 'No data' : 'Loading…'}</p>
+      ) : (
+        <Topology data={data} selectedId={selectedId} onSelect={onSelect} />
+      )}
+      <p className="text-[11px] text-fg-subtle mt-3">
+        Every arrow between two roles is a Redis stream or Postgres: no process calls another. Read every 5 seconds; a rate is the change
+        between two heartbeats of a process, so it shows within 10 seconds of opening the view. Pick a process to see
+        its snapshot.
+      </p>
+    </Card>
+  )
+}
+
+// Where the arrows between boxes in a row meet them: the middle of the box's
+// header, which every box has the same height of, so those arrows run level.
+const HEADER_MID = 19
+
+// The work streams box lists the busiest streams, this many at most.
+const STREAM_ROWS = 6
+
+type TopologyLayout = 'wide' | 'tall'
+
+// Five columns with labelled arrows between them need about this much room.
+// Below it the same picture turns a quarter and runs top to bottom, three
+// columns wide, so no box is left out and still no arrow crosses another.
+const WIDE_MIN_PX = 1040
+
+type BoxId = 'admins' | 'api' | 'controller' | 'gateway' | 'clients' | 'streams' | 'postgres' | 'worker' | 'upstream'
+
+const GRID: Record<TopologyLayout, string> = {
+  wide: 'grid-cols-[96px_1fr_1fr_1fr_112px] gap-x-[84px]',
+  tall: 'grid-cols-3 gap-x-10',
+}
+
+// Where each box sits. The tall layout reads the wide one's rows as columns.
+const PLACE: Record<TopologyLayout, Record<BoxId, string>> = {
+  wide: {
+    admins: 'col-start-1 row-start-1',
+    api: 'col-start-2 row-start-1',
+    controller: 'col-start-3 row-start-1',
+    gateway: 'col-start-4 row-start-1',
+    clients: 'col-start-5 row-start-1',
+    streams: 'col-start-3 row-start-2',
+    postgres: 'col-start-2 row-start-3',
+    worker: 'col-start-3 row-start-3',
+    upstream: 'col-start-5 row-start-3',
+  },
+  tall: {
+    admins: 'col-start-1 row-start-1',
+    api: 'col-start-1 row-start-2',
+    controller: 'col-start-1 row-start-3',
+    gateway: 'col-start-1 row-start-4',
+    clients: 'col-start-1 row-start-5',
+    streams: 'col-start-2 row-start-3',
+    postgres: 'col-start-3 row-start-2',
+    worker: 'col-start-3 row-start-3',
+    upstream: 'col-start-3 row-start-5',
+  },
+}
+
+type EdgeId =
+  | 'admins' | 'changes' | 'feed' | 'clients' | 'upstream' | 'run-now' | 'periodic' | 'ingest' | 'work'
+  | 'api-postgres' | 'worker-postgres' | 'worker-upstream'
+
+/** An arrow end level with the box's header, for arrows between boxes of one row. */
+function header(node: BoxId, side: FlowAnchor['side']): FlowAnchor {
+  return { node, side, px: HEADER_MID }
+}
+
+/** An arrow end along a side, as a fraction of it (the middle by default). */
+function along(node: BoxId, side: FlowAnchor['side'], at?: number): FlowAnchor {
+  return { node, side, at }
+}
+
+// Each arrow's ends in each layout: in the tall one, every side is the wide one's turned a quarter.
+const ANCHORS: Record<TopologyLayout, Record<EdgeId, Pick<FlowEdge, 'from' | 'to'>>> = {
+  wide: {
+    admins: { from: header('admins', 'right'), to: header('api', 'left') },
+    changes: { from: header('api', 'right'), to: header('controller', 'left') },
+    feed: { from: header('controller', 'right'), to: header('gateway', 'left') },
+    clients: { from: header('clients', 'left'), to: header('gateway', 'right') },
+    upstream: { from: along('gateway', 'bottom', 0.85), to: along('upstream', 'top') },
+    'run-now': { from: along('api', 'bottom', 0.7), to: header('streams', 'left') },
+    periodic: { from: along('controller', 'bottom'), to: along('streams', 'top') },
+    ingest: { from: along('gateway', 'bottom', 0.3), to: header('streams', 'right') },
+    work: { from: along('streams', 'bottom'), to: along('worker', 'top') },
+    'api-postgres': { from: along('api', 'bottom', 0.3), to: along('postgres', 'top', 0.3) },
+    'worker-postgres': { from: header('worker', 'left'), to: header('postgres', 'right') },
+    'worker-upstream': { from: header('worker', 'right'), to: header('upstream', 'left') },
+  },
+  tall: {
+    admins: { from: along('admins', 'bottom'), to: along('api', 'top') },
+    changes: { from: along('api', 'bottom'), to: along('controller', 'top') },
+    feed: { from: along('controller', 'bottom'), to: along('gateway', 'top') },
+    clients: { from: along('clients', 'top'), to: along('gateway', 'bottom') },
+    upstream: { from: along('gateway', 'right', 0.85), to: header('upstream', 'left') },
+    'run-now': { from: along('api', 'right', 0.7), to: along('streams', 'top') },
+    periodic: { from: header('controller', 'right'), to: header('streams', 'left') },
+    ingest: { from: along('gateway', 'right', 0.3), to: along('streams', 'bottom') },
+    work: { from: header('streams', 'right'), to: header('worker', 'left') },
+    'api-postgres': { from: header('api', 'right'), to: header('postgres', 'left') },
+    'worker-postgres': { from: along('worker', 'top'), to: along('postgres', 'bottom') },
+    'worker-upstream': { from: along('worker', 'bottom'), to: along('upstream', 'top') },
+  },
+}
+
+/** An element's width, kept current as it resizes; measured before the first paint. */
+function useWidth(): [RefObject<HTMLDivElement | null>, number] {
+  const ref = useRef<HTMLDivElement>(null)
+  const [width, setWidth] = useState(0)
+  useLayoutEffect(() => {
+    const el = ref.current
+    if (!el) return
+    const read = () => setWidth(el.clientWidth)
+    read()
+    const observer = new ResizeObserver(read)
+    observer.observe(el)
+    return () => observer.disconnect()
+  }, [])
+  return [ref, width]
+}
+
+function Topology({ data, selectedId, onSelect }: {
+  data: SystemTopology
+  selectedId: string | null
+  onSelect: (id: string) => void
+}) {
+  const [ref, width] = useWidth()
+  const layout: TopologyLayout = width >= WIDE_MIN_PX ? 'wide' : 'tall'
+  const place = PLACE[layout]
+  const rates = useProcessRates(data)
+  const since = useQueuedSince(data)
+  const processes = allProcesses(data)
+  const boxes = Object.fromEntries(
+    RUNTIMES.map((runtime) => [runtime, processes.filter((instance) => runtimesOf(instance).includes(runtime))]),
+  ) as Record<Runtime, SystemInstance[]>
+  const others = processes.filter((instance) => runtimesOf(instance).length === 0)
+  const streams = streamRows(data, since)
+  const feeds = new Map(data.feed.gateways.map((g) => [g.instance_id, g]))
+  const tunnels = boxes.gateway.some((instance) => (instance.snapshot?.gateway?.tunnels.length ?? 0) > 0)
+  const box = { rates, feeds, selectedId, onSelect }
+
+  return (
+    <div ref={ref} className="overflow-x-auto -mx-1 px-1 py-1">
+      <FlowDiagram
+        edges={topologyEdges(data, layout, boxes, rates, streams)}
+        className={cn('grid min-w-[480px] gap-y-12 items-start', GRID[layout])}
+      >
+        <ExternalBox id="admins" icon={Users} lines={['Admins', 'API clients']} className={place.admins} />
+        <RoleBox runtime="api" icon={Server} instances={boxes.api} className={place.api} {...box} />
+        <RoleBox
+          runtime="controller"
+          icon={Crown}
+          instances={boxes.controller}
+          status={!data.controller.leader && !data.controller.error && (
+            <Badge color="red" className="px-1.5 py-0 text-[10px]" title="No controller holds the lease: none is running, or a failover is under way.">no leader</Badge>
+          )}
+          className={place.controller}
+          {...box}
+        />
+        <RoleBox
+          runtime="gateway"
+          icon={Network}
+          instances={boxes.gateway}
+          footer={gatewayTotals(boxes.gateway, rates)}
+          className={place.gateway}
+          {...box}
+        />
+        <ExternalBox
+          id="clients"
+          icon={MonitorSmartphone}
+          lines={tunnels ? ['Proxy clients', 'Tunnel devices'] : ['Proxy clients']}
+          className={place.clients}
+        />
+        <StreamsBox rows={streams} error={data.streams.error} className={place.streams} />
+        <TopologyBox id="postgres" icon={Database} title="Postgres" className={place.postgres}>
+          <p className="text-[11px] text-fg-subtle px-1.5 py-1">
+            Definitions, proxy status and history. The controller reads it; gateways hold no credentials for it.
+          </p>
+        </TopologyBox>
+        <RoleBox
+          runtime="worker"
+          icon={Cog}
+          instances={boxes.worker}
+          footer={workerTotals(boxes.worker, rates)}
+          className={place.worker}
+          {...box}
+        />
+        <ExternalBox id="upstream" icon={Globe} lines={['Upstream proxies', 'Vendor and cloud APIs']} className={place.upstream} />
+      </FlowDiagram>
+      {others.length > 0 && (
+        <div className="flex items-center gap-2 flex-wrap mt-3 text-[11px] text-fg-subtle">
+          Also live:
+          {others.map((instance) => (
+            <button
+              key={instance.instance_id}
+              type="button"
+              onClick={() => onSelect(instance.instance_id)}
+              className="font-mono text-[11.5px] text-primary hover:brightness-110"
+              title={`${instance.instance_id} (role ${instance.role})`}
+            >
+              {shortId(instance.instance_id, 28)}
+            </button>
+          ))}
+        </div>
+      )}
+      {processes.some((instance) => instance.role === 'all') && (
+        <p className="text-[11px] text-fg-subtle mt-3">
+          A process of role all runs every runtime, so it shows in each of the four boxes.
+        </p>
+      )}
+    </div>
+  )
+}
+
+function TopologyBox({ id, icon: Icon, title, count, status, footer, className, children }: {
+  id: string
+  icon: typeof Server
+  title: string
+  count?: number
+  status?: ReactNode
+  footer?: ReactNode
+  className?: string
+  children: ReactNode
+}) {
+  return (
+    <FlowNode id={id} className={cn('min-w-0 rounded-lg border border-line bg-surface shadow-xs', className)}>
+      <div className="flex items-center gap-1.5 h-9 px-2.5 border-b border-line min-w-0">
+        <Icon className="w-3.5 h-3.5 text-fg-muted flex-none" />
+        <span className="text-[12.5px] font-semibold truncate">{title}</span>
+        {count !== undefined && <span className="text-[11px] text-fg-subtle tabular-nums flex-none">{count}</span>}
+        <span className="flex-1" />
+        {status}
+      </div>
+      <div className="p-1">{children}</div>
+      {footer && <div className="px-2.5 py-1.5 border-t border-line text-[11px] text-fg-subtle tabular-nums">{footer}</div>}
+    </FlowNode>
+  )
+}
+
+/** Where traffic and requests come from or go to, outside Octoprox. */
+function ExternalBox({ id, icon: Icon, lines, className }: { id: string; icon: typeof Server; lines: string[]; className?: string }) {
+  const [first, ...rest] = lines
+  return (
+    <FlowNode id={id} className={cn('min-w-0 rounded-lg border border-dashed border-line-strong text-[11px] leading-tight text-fg-muted', className)}>
+      <div className="flex items-center gap-1.5 h-9 px-2 min-w-0">
+        <Icon className="w-3.5 h-3.5 flex-none" />
+        <span className="min-w-0">{first}</span>
+      </div>
+      {rest.map((line) => <div key={line} className="px-2 pb-2 -mt-1">{line}</div>)}
+    </FlowNode>
+  )
+}
+
+function RoleBox({ runtime, icon, instances, status, footer, className, rates, feeds, selectedId, onSelect }: {
+  runtime: Runtime
+  icon: typeof Server
+  instances: SystemInstance[]
+  status?: ReactNode
+  footer?: ReactNode
+  className?: string
+  rates: Record<string, ProcessRates>
+  feeds: Map<string, SystemGatewayFeed>
+  selectedId: string | null
+  onSelect: (id: string) => void
+}) {
+  return (
+    <TopologyBox id={runtime} icon={icon} title={roleLabel(runtime)} count={instances.length} status={status} footer={footer} className={className}>
+      {instances.length === 0 ? (
+        <p className="text-[11px] text-fg-subtle px-1.5 py-1">None live</p>
+      ) : (
+        instances.map((instance) => (
+          <TopologyProcess
+            key={instance.instance_id}
+            instance={instance}
+            runtime={runtime}
+            fact={topologyFact(instance, runtime, rates[instance.instance_id], feeds.get(instance.instance_id))}
+            selected={instance.instance_id === selectedId}
+            onSelect={onSelect}
+          />
+        ))
+      )}
+    </TopologyBox>
+  )
+}
+
+function TopologyProcess({ instance, runtime, fact, selected, onSelect }: {
+  instance: SystemInstance
+  runtime: Runtime
+  fact: TopologyFact
+  selected: boolean
+  onSelect: (id: string) => void
+}) {
+  const { health, title } = processHealth(instance)
+  const style = HEALTH_STYLE[health]
+  const Icon = style.icon
+  const leads = runtime === 'controller' && (instance.snapshot?.controller?.is_leader ?? false)
+  return (
+    <button
+      type="button"
+      onClick={() => onSelect(instance.instance_id)}
+      aria-pressed={selected}
+      title={`${instance.instance_id}: ${title}`}
+      className={cn(
+        'flex items-start gap-1.5 w-full min-w-0 text-left px-1.5 py-1 rounded-md transition-colors',
+        selected ? 'bg-surface-raised' : 'hover:bg-surface-raised',
+      )}
+    >
+      <Icon className={cn('w-3 h-3 mt-[3px] flex-none', style.className)} />
+      <span className="min-w-0 flex-1">
+        <span className="flex items-center gap-1 min-w-0">
+          <ProcessId id={instance.instance_id} />
+          {leads && <Crown className="w-3 h-3 text-success flex-none" aria-label="leader" />}
+        </span>
+        {fact.warning
+          ? <span className="block text-[11px] text-warning truncate">{fact.warning}</span>
+          : <Parts parts={fact.parts} className="text-[11px] text-fg-subtle tabular-nums" />}
+      </span>
+    </button>
+  )
+}
+
+// Characters of an id kept whole when its box is too narrow for all of it:
+// what tells two processes apart is its end (a pod's suffix, a replica number).
+const ID_TAIL = 8
+
+/** A process id elided in the middle by its box's width rather than by a count, so its tail always shows. */
+function ProcessId({ id }: { id: string }) {
+  const cut = Math.max(0, id.length - ID_TAIL)
+  return (
+    <span className="flex min-w-0 font-mono text-[11.5px]">
+      <span className="truncate">{id.slice(0, cut)}</span>
+      <span className="flex-none">{id.slice(cut)}</span>
+    </span>
+  )
+}
+
+/**
+ * Facts that wrap whole onto the next line rather than being cut, with a dot
+ * between two on one line: each part leads with its dot, and the row is
+ * shifted left by a dot's width inside a clipped box, so the dot of the first
+ * part on every line falls outside it.
+ */
+function Parts({ parts, className }: { parts: string[]; className?: string }) {
+  return (
+    <span className={cn('block overflow-hidden', className)}>
+      <span className="flex flex-wrap -ml-3">
+        {parts.map((part, i) => (
+          <span key={i} className="whitespace-nowrap before:content-['·'] before:inline-block before:w-3 before:text-center">{part}</span>
+        ))}
+      </span>
+    </span>
+  )
+}
+
+/** What a process's line says: a few facts, or the one thing wrong with it. */
+interface TopologyFact {
+  parts: string[]
+  warning?: string
+}
+
+/** The line under a process in one box: what it is doing as that runtime, or what is wrong with it. */
+function topologyFact(
+  instance: SystemInstance,
+  runtime: Runtime,
+  rate: ProcessRates | undefined,
+  feed: SystemGatewayFeed | undefined,
+): TopologyFact {
+  const snapshot = instance.snapshot
+  const warn = (warning: string): TopologyFact => ({ parts: [], warning })
+  const plain = (...parts: (string | null)[]): TopologyFact => ({ parts: parts.filter((part) => part != null) })
+  if (!snapshot) return plain('no readable snapshot')
+  if (!snapshot.ready) return warn(snapshot.reasons[0] ?? 'not ready')
+  const lag = snapshot.runtime.loop_lag_max_ms
+  if (lag != null && lag >= LOOP_LAG_WARN_MS) return warn(`loop ${formatLag(lag)} behind`)
+  switch (runtime) {
+    case 'api': {
+      const api = snapshot.api
+      return api ? plain(`pool ${api.pool_checked_out ?? '-'} of ${api.pool_size ?? '-'} in use`) : plain('starting')
+    }
+    case 'controller': {
+      const controller = snapshot.controller
+      if (!controller) return plain('starting')
+      if (!controller.is_leader) return plain('standing by')
+      const failing = controller.compile_error ? 'compile failing' : controller.publish_error ? 'publish failing' : null
+      return failing ? warn(failing) : plain('leading', `${compactCount(controller.sections)} ${plural(controller.sections, 'section', 'sections')}`)
+    }
+    case 'gateway': {
+      const gateway = snapshot.gateway
+      if (!gateway) return plain('starting')
+      if (!gateway.listening) return warn('not listening')
+      const failed = gateway.tunnels.find((tunnel) => tunnel.state === 'failed')
+      if (failed) return warn(`${TUNNEL_LABEL[failed.protocol] ?? failed.protocol} failed`)
+      return plain(
+        `${compactCount(gateway.active_connections)} conn`,
+        rate ? `${formatRate(rate.requests)} req/s` : null,
+        feed && !feed.in_sync ? 'feed behind' : null,
+      )
+    }
+    case 'worker': {
+      const worker = snapshot.worker
+      if (!worker) return plain('starting')
+      const inFlight = jobsInFlight(worker)
+      return plain(`${compactCount(inFlight)} in flight`, rate ? `${formatRate(rate.runs)} runs/s` : null)
+    }
+  }
+}
+
+/** The gateways' proxy connections open now, and their request and byte rates; a rate is null until one has it. */
+function gatewaySums(gateways: SystemInstance[], rates: Record<string, ProcessRates>) {
+  return {
+    conns: gateways.reduce((sum, instance) => sum + (instance.snapshot?.gateway?.active_connections ?? 0), 0),
+    requests: sumRates(gateways, rates, 'requests'),
+    bytes: sumRates(gateways, rates, 'bytes'),
+  }
+}
+
+function gatewayTotals(gateways: SystemInstance[], rates: Record<string, ProcessRates>): ReactNode {
+  if (gateways.length === 0) return null
+  const { conns, requests, bytes } = gatewaySums(gateways, rates)
+  const parts = [`${compactCount(conns)} conn`]
+  if (requests != null) parts.push(`${formatRate(requests)} req/s`)
+  if (bytes != null) parts.push(formatByteRate(bytes))
+  return <Parts parts={parts} />
+}
+
+function workerTotals(workers: SystemInstance[], rates: Record<string, ProcessRates>): ReactNode {
+  if (workers.length === 0) return null
+  const inFlight = workers.reduce((sum, instance) => sum + (instance.snapshot?.worker ? jobsInFlight(instance.snapshot.worker) : 0), 0)
+  const runs = sumRates(workers, rates, 'runs')
+  const parts = [`${compactCount(inFlight)} in flight`]
+  if (runs != null) parts.push(`${formatRate(runs)} runs/s`)
+  return <Parts parts={parts} />
+}
+
+interface StreamRow {
+  name: string
+  stream: SystemWorkStream
+  hint: StreamHint | null
+}
+
+/** Every work stream with what it says about its workers, the same hints as the work streams table. */
+function streamRows(data: SystemTopology, since: Record<string, number>): StreamRow[] {
+  const at = readingMs(data)
+  const workers = liveWorkers(data)
+  return Object.entries(data.streams.by_name).map(([name, stream]) => ({
+    name,
+    stream,
+    hint: streamHint(stream, takersOf(workers, name), since[name] != null ? (at - since[name]) / 1000 : 0),
+  }))
+}
+
+function StreamsBox({ rows, error, className }: { rows: StreamRow[]; error: string | null; className?: string }) {
+  const busy = rows
+    .filter((row) => row.stream.length > 0)
+    .sort((a, b) => b.stream.queued - a.stream.queued || b.stream.pending - a.stream.pending)
+  const shown = busy.slice(0, STREAM_ROWS)
+  const queued = rows.reduce((sum, row) => sum + row.stream.queued, 0)
+  const pending = rows.reduce((sum, row) => sum + row.stream.pending, 0)
+  const noWorker = rows.filter((row) => row.hint?.tone === 'danger').length
+  const tooFew = rows.filter((row) => row.hint?.tone === 'warning').length
+  return (
+    <TopologyBox
+      id="streams"
+      icon={ListChecks}
+      title="Work streams"
+      count={rows.length}
+      status={noWorker > 0
+        ? <Badge color="red" className="px-1.5 py-0 text-[10px] whitespace-nowrap" title={`${noWorker} ${plural(noWorker, 'stream', 'streams')} with no worker`}>no worker</Badge>
+        : tooFew > 0 && <Badge color="yellow" className="px-1.5 py-0 text-[10px] whitespace-nowrap" title={`${tooFew} ${plural(tooFew, 'stream', 'streams')} short of workers`}>short</Badge>}
+      footer={!error && <Parts parts={[`${compactCount(queued)} queued`, `${compactCount(pending)} pending`]} />}
+      className={className}
+    >
+      {error ? (
+        <p className="text-[11px] text-danger px-1.5 py-1 wrap-break-word">{error}</p>
+      ) : shown.length === 0 ? (
+        <p className="text-[11px] text-fg-subtle px-1.5 py-1">Nothing queued or running</p>
+      ) : (
+        <div className="px-1.5 py-0.5 text-[11.5px]">
+          <div className="flex gap-2 text-[10px] text-fg-subtle">
+            <span className="flex-1" />
+            <span className="w-10 text-right">queued</span>
+            <span className="w-10 text-right">pending</span>
+          </div>
+          {shown.map(({ name, stream, hint }) => {
+            const info = streamInfo(name)
+            const tone = hint ? (hint.tone === 'danger' ? 'text-danger' : 'text-warning') : null
+            return (
+              <div key={name} className="flex items-baseline gap-2 py-0.5 tabular-nums" title={hint ? `${info.label}: ${hint.text}` : info.description || name}>
+                <span className={cn('flex-1 min-w-0 truncate', tone)}>{info.label}</span>
+                <span className={cn('w-10 text-right', tone ?? 'text-fg-muted')} title={stream.queued.toLocaleString()}>{compactCount(stream.queued)}</span>
+                <span className="w-10 text-right text-fg-muted" title={stream.pending.toLocaleString()}>{compactCount(stream.pending)}</span>
+              </div>
+            )
+          })}
+          {busy.length > shown.length && <div className="text-[11px] text-fg-subtle pt-0.5">+{busy.length - shown.length} more in the list view</div>}
+        </div>
+      )}
+    </TopologyBox>
+  )
+}
+
+const LABEL_TONE: Record<FlowTone, string> = {
+  quiet: 'text-fg-muted',
+  ok: 'text-success',
+  warning: 'text-warning',
+  danger: 'text-danger',
+  active: 'text-primary',
+}
+
+/** What an arrow's label and colour say: its tone, whether something moves on it, and the words. */
+type EdgeState = Pick<FlowEdge, 'tone' | 'flowing' | 'label' | 'title'>
+
+function edgeState(name: string, value: string, tone: FlowTone, title?: string, flowing = false): EdgeState {
+  return {
+    tone,
+    flowing,
+    title,
+    label: (
+      <>
+        <span className="block text-[9.5px] uppercase tracking-wider text-fg-subtle">{name}</span>
+        <span className={cn('block font-medium', LABEL_TONE[tone])}>{value}</span>
+      </>
+    ),
+  }
+}
+
+/** The process holding the controller lease, while it is live. */
+function leaderProcess(data: SystemTopology): SystemInstance | undefined {
+  const { leader } = data.controller
+  return leader ? allProcesses(data).find((instance) => instance.instance_id === leader) : undefined
+}
+
+/** The change stream from the api to the leading controller: whether its compile has caught up with the newest change. */
+function changesEdge(data: SystemTopology): EdgeState {
+  const { controller } = data
+  if (controller.error) return edgeState('changes', 'unreadable', 'danger', controller.error)
+  if (!controller.leader) return edgeState('changes', 'no leader', 'danger', 'No controller holds the lease, so nothing compiles the changes.')
+  const leader = leaderProcess(data)
+  const failing = leader?.snapshot?.controller?.compile_error
+  if (failing) return edgeState('changes', 'compile failing', 'danger', failing)
+  const compiled = leader ? standing(controller.changes, controller.changes_head, snapshotMs(data, leader)) : null
+  if (!compiled) return edgeState('changes', 'not compiled', 'quiet', 'The leader has not reported a compile yet.')
+  const { title } = standingText(compiled, 'Compiled')
+  if (compiled.late) return edgeState('changes', 'behind', 'warning', title)
+  // Behind for the moment after each save: the change is on its way.
+  if (compiled.behind) return edgeState('changes', 'compiling', 'active', title, true)
+  return edgeState('changes', 'in sync', 'ok', title)
+}
+
+/** The routing feed from the controller to the gateways: how many route on the head. */
+function feedEdge(data: SystemTopology): EdgeState {
+  const { feed } = data
+  if (feed.error) return edgeState('feed', 'unreadable', 'danger', feed.error)
+  const failing = leaderProcess(data)?.snapshot?.controller?.publish_error
+  if (failing) return edgeState('feed', 'publish failing', 'danger', failing)
+  if (!feed.digest) return edgeState('feed', 'no feed', 'danger', 'No controller has published a feed yet, or Redis lost it and the leader has not written it again yet.')
+  const total = feed.gateways.length
+  if (total === 0) return edgeState('feed', 'no gateways', 'quiet')
+  const inSync = feed.gateways.filter((g) => g.in_sync).length
+  const value = `${inSync}/${total} in sync`
+  if (inSync === total) return edgeState('feed', value, 'ok', 'Every gateway routes on the head.')
+  // A gateway reads behind after each publish until its next heartbeat reports
+  // the apply; behind a head this much older than the reading, it is stuck.
+  const compiledAt = parseApiDate(feed.compiled_at)?.getTime()
+  const stuck = compiledAt != null && readingMs(data) - compiledAt > BEHIND_WARN_SECONDS * 1000
+  return stuck
+    ? edgeState('feed', value, 'warning', 'A gateway has stayed behind the head; its snapshot says why.')
+    : edgeState('feed', value, 'active', 'A new feed was published: the gateways apply it within a heartbeat.', true)
+}
+
+/** The work streams to the workers: the worst hint, else whether anything is running. */
+function workEdge(rows: StreamRow[], error: string | null): EdgeState {
+  if (error) return edgeState('work', 'unreadable', 'danger', error)
+  const queued = rows.reduce((sum, row) => sum + row.stream.queued, 0)
+  const pending = rows.reduce((sum, row) => sum + row.stream.pending, 0)
+  const value = queued > 0 ? `${compactCount(queued)} queued` : pending > 0 ? `${compactCount(pending)} pending` : 'idle'
+  const worst = rows.find((row) => row.hint?.tone === 'danger') ?? rows.find((row) => row.hint?.tone === 'warning')
+  if (worst?.hint) return edgeState('work', value, worst.hint.tone, `${streamInfo(worst.name).label}: ${worst.hint.text}`, pending > 0)
+  return edgeState('work', value, pending > 0 ? 'active' : 'quiet', 'Entries queued for the workers, and delivered to one and not acknowledged yet', pending > 0)
+}
+
+function topologyEdges(
+  data: SystemTopology,
+  layout: TopologyLayout,
+  boxes: Record<Runtime, SystemInstance[]>,
+  rates: Record<string, ProcessRates>,
+  streams: StreamRow[],
+): FlowEdge[] {
+  const edge = (id: EdgeId, state: EdgeState): FlowEdge => ({ id, ...ANCHORS[layout][id], ...state })
+  const quiet = (title: string): EdgeState => ({ tone: 'quiet', title })
+  const { conns, requests, bytes } = gatewaySums(boxes.gateway, rates)
+  const serving = (requests ?? 0) > 0 || conns > 0
+  const carrying = (bytes ?? 0) > 0
+  return [
+    edge('admins', quiet('The admin API and the web UI')),
+    edge('changes', changesEdge(data)),
+    edge('feed', feedEdge(data)),
+    edge('clients', edgeState(
+      'requests',
+      requests != null ? `${formatRate(requests)}/s` : `${compactCount(conns)} conn`,
+      serving ? 'active' : 'quiet',
+      `${conns.toLocaleString()} proxy connections open now`,
+      serving,
+    )),
+    edge('upstream', edgeState(
+      'traffic',
+      bytes != null ? formatByteRate(bytes) : '-',
+      carrying ? 'active' : 'quiet',
+      'Bytes sent and received through the upstreams, all gateways',
+      carrying,
+    )),
+    edge('run-now', quiet('Runs asked for after a save: syncs, scale checks, health checks of new proxies')),
+    edge('periodic', {
+      tone: data.controller.leader ? 'quiet' : 'danger',
+      title: 'The periodic jobs, which the leading controller publishes on its timers',
+    }),
+    edge('ingest', quiet('Preflight sightings, IP observations, and traffic decisions from metering')),
+    edge('work', workEdge(streams, data.streams.error)),
+    edge('api-postgres', quiet('The api writes definitions and reads everything it shows')),
+    edge('worker-postgres', quiet('Workers write proxy status, metrics and history')),
+    edge('worker-upstream', quiet('Health checks, vendor and cloud APIs, IP database downloads')),
+  ]
 }
 
 // --- inventory -----------------------------------------------------------------------
@@ -2055,6 +2881,13 @@ const bandFormatter = new Intl.NumberFormat(undefined, { notation: 'compact', ma
 
 function formatCount(value: number): string {
   return Math.abs(value) < BAND_FROM ? value.toLocaleString() : bandFormatter.format(value)
+}
+
+// A topology box is one column wide, so its counts band ten times sooner.
+const COMPACT_FROM = 10_000
+
+function compactCount(value: number): string {
+  return Math.abs(value) < COMPACT_FROM ? value.toLocaleString() : bandFormatter.format(value)
 }
 
 function formatDuration(seconds: number): string {
