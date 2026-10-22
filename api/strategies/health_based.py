@@ -38,7 +38,7 @@ class HealthBasedStrategy(RoutingStrategy):
 
     @staticmethod
     def score(requests: int, successes: int, latency_sum_ms: float) -> float:
-        """A proxy's score from its outcomes, higher is better: 60% success share, 40% connect latency.
+        """A proxy's score from its outcomes, higher is better: 60% success share, 40% latency.
 
         The latency part is 100 points at 0 ms falling to none at 1000 ms; a
         proxy whose latency was never measured gets a neutral 50.

@@ -17,7 +17,7 @@ Octoprox supports multiple routing strategies for distributing requests across p
 | `least_used` | Routes to the proxy with the fewest transfers open on the gateway serving the request |
 | `random` | Randomly selects a healthy proxy for each request |
 | `sticky` | Routes requests carrying the same `-sessid-` to the same proxy; requests without one are routed like `random` |
-| `health_based` | Prefers the proxies with the best success rate and connect latency on the gateway serving the request, and keeps trying the ones it has too few results for |
+| `health_based` | Prefers the proxies with the best success rate and latency on the gateway serving the request, and keeps trying the ones it has too few results for |
 
 Every strategy picks in two steps when a project has more than one connector: first a **connector**, by its [weight](#connector-weights), then a proxy inside that connector, by the strategy. A project with a single connector skips the first step.
 

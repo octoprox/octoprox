@@ -142,7 +142,7 @@ When [TLS interception](tls-interception) is enabled, Octoprox terminates the cl
 This counting behavior also affects:
 
 - **Rate limiting** - Rate limits are evaluated per CONNECT tunnel, not per HTTP request within a tunnel. A client sending 100 requests over a single keep-alive connection only triggers one rate limit check. [Traffic limits]({{ site.baseurl }}/traffic-limits) are unaffected: they count bytes, which are metered inside the tunnel.
-- **Latency tracking** - `avg_latency_ms` reflects the time to establish the CONNECT tunnel to the upstream proxy, not the latency of individual HTTP requests within the tunnel.
+- **Latency tracking** - `avg_latency_ms` is the time from Octoprox taking a request until its tunnel through the upstream proxy is up (the first response line for plain HTTP), or until it is refused or fails. Choosing the proxy and the exit verification echo are part of it, as they are part of the client's wait. It is not the latency of individual HTTP requests within the tunnel, nor how long the tunnel stays open.
 
 ## Workarounds
 

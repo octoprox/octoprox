@@ -429,15 +429,17 @@ class ProxyServer:
         target_host: str | None,
         client_writer: asyncio.StreamWriter,
         peer_id: str | None = None,
+        *,
+        started: float,
     ) -> Proxy | None:
         """Hand the selected upstream to preflight; None when the request was answered here.
 
         A refusal, or the upstream failing the echo, is one failed request however many proxies preflight tried. The
-        upstream's failure is answered and counted as its own connection's would be, against that proxy.
+        upstream's failure is answered and counted as its own connection's would be, against that proxy, with the
+        latency since ``started``, as a forwarded request's.
         """
         if self._exit_verifier is None:
             return proxy
-        started = time.monotonic()
         decision = await self._exit_verifier.verify(
             project, proxy, session_id=session_id, location=location, target_host=target_host
         )
@@ -720,6 +722,8 @@ class ProxyServer:
             target_host = target
             target_port = 443  # Default HTTPS port
 
+        # The request's latency runs from here: selecting and verifying its exit are part of the client's wait.
+        started = time.monotonic()
         # Select upstream proxy scoped to the authenticated project
         proxy = await self._get_upstream_proxy(
             project_id=project.id, session_id=session_id, target_host=target_host, location=location,
@@ -728,12 +732,15 @@ class ProxyServer:
             await self._reject_no_proxy(client_writer, project.id, target_host, session_id, location)
             return
 
-        verified = await self._verify_exit(project, proxy, session_id, location, target_host, client_writer)
+        verified = await self._verify_exit(
+            project, proxy, session_id, location, target_host, client_writer, started=started
+        )
         if verified is None:
             return
 
         await self._relay(
             client_reader, client_writer, verified, project, target_host, target_port,
+            started=started,
             established=b"HTTP/1.1 200 Connection Established\r\n\r\n",
             use_mitm=project.tls_mitm_mode != MitmMode.OFF and self._mitm_handler is not None,
         )
@@ -747,6 +754,7 @@ class ProxyServer:
         target_host: str,
         target_port: int,
         *,
+        started: float,
         established: bytes | None,
         use_mitm: bool,
         client_head: bytes = b"",
@@ -757,13 +765,14 @@ class ProxyServer:
         The tail of a CONNECT and the whole of a transparent tunnel connection, once the proxy is selected and verified.
 
         Args:
+            started: when Octoprox began on the request (``time.monotonic()``), which its latency runs from.
             established: written to the client once the upstream leg is up (the CONNECT 200 line); None writes nothing.
             use_mitm: the MITM handler relays both legs once the upstream leg is up.
             client_head: the start of the client's TLS stream the caller already read off the socket, for the handshake.
             peer_id: the tunnel device the connection came from, whose counts take the transfer too.
         """
         target = f"{target_host}:{target_port}"
-        start_time = time.monotonic()
+        start_time = started
         success = False
         client_disconnected = False
         latency_ms = 0.0
@@ -780,7 +789,7 @@ class ProxyServer:
             )
             keep_alive(upstream_writer)
 
-            # Measure latency up to connection establishment (before tunneling)
+            # Latency: from taking the request up to connection establishment (before tunneling)
             latency_ms = (time.monotonic() - start_time) * 1000
 
             if use_mitm:
@@ -1037,6 +1046,8 @@ class ProxyServer:
         # Parse target host before proxy selection (needed for domain filtering)
         parsed_host, _, _ = self._parse_http_url(target)
 
+        # The request's latency runs from here, as on the CONNECT path.
+        start_time = time.monotonic()
         # Select upstream proxy scoped to the authenticated project
         proxy = await self._get_upstream_proxy(
             project_id=project_id, session_id=session_id, target_host=parsed_host, location=location,
@@ -1045,12 +1056,13 @@ class ProxyServer:
             await self._reject_no_proxy(client_writer, project_id, parsed_host, session_id, location)
             return
 
-        verified = await self._verify_exit(project, proxy, session_id, location, parsed_host, client_writer)
+        verified = await self._verify_exit(
+            project, proxy, session_id, location, parsed_host, client_writer, started=start_time
+        )
         if verified is None:
             return
         proxy = verified
 
-        start_time = time.monotonic()
         success = False
         latency_ms = 0.0
         meter = self._meters.meter(proxy, project_id, target_host=parsed_host)
@@ -1153,7 +1165,7 @@ class ProxyServer:
             )
             meter.add_received(len(response_line))
 
-            # Measure latency up to first response (connection establishment)
+            # Latency: from taking the request up to the first response line (connection establishment)
             latency_ms = (time.monotonic() - start_time) * 1000
             success = True
 

@@ -18,7 +18,7 @@ class LocalOutcomes:
         self._proxies: dict[str, MetricDelta] = {}
 
     def record(self, proxy_id: str, success: bool, latency_ms: float) -> None:
-        """Count one finished request through the proxy, with its upstream connect latency in milliseconds."""
+        """Count one finished request through the proxy, with its latency in milliseconds: until its tunnel was up or it was answered."""
         self._proxies.setdefault(proxy_id, MetricDelta()).add_request(success, latency_ms)
 
     def of_proxy(self, proxy_id: str) -> tuple[int, int, float]:

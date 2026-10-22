@@ -13,6 +13,7 @@ import contextlib
 import errno
 import socket
 import struct
+import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from dataclasses import dataclass, field
 from typing import Any
@@ -233,10 +234,15 @@ class TestRefused:
         assert _failures(publish) == []
 
 
-def _verifier(decision: ExitDecision) -> MagicMock:
-    """An exit verifier that decides every request the same way."""
+def _verifier(decision: ExitDecision, *, takes: float = 0.0) -> MagicMock:
+    """An exit verifier that decides every request the same way, after ``takes`` seconds of checking."""
+
+    async def verify(*_args: Any, **_kwargs: Any) -> ExitDecision:
+        await asyncio.sleep(takes)
+        return decision
+
     verifier = MagicMock()
-    verifier.verify = AsyncMock(return_value=decision)
+    verifier.verify = AsyncMock(side_effect=verify)
     return verifier
 
 
@@ -316,6 +322,54 @@ class TestPreflight:
         assert failure.kind is FailureKind.UPSTREAM_REJECTED
         (completed,) = _completions(publish)
         assert (completed["success"], completed["target_host"]) == (False, "example.com")
+
+
+class TestLatency:
+    """A request's latency is the client's wait: from Octoprox taking it, exit check included, until it can talk."""
+
+    async def test_a_forwarded_request_includes_its_exit_check(self, listen: Any, publish: _Published) -> None:
+        async with _vendor(b"HTTP/1.1 200 Connection established\r\n\r\n") as port:
+            upstream = _upstream(port)
+            server = await listen(upstream, exit_verifier=_verifier(ExitDecision(upstream), takes=0.2))
+            response = await _exchange(server, f"CONNECT example.com:443 HTTP/1.1\r\n{_auth()}\r\n", then=b"hello")
+
+        assert response.startswith(b"HTTP/1.1 200")
+        (completed,) = _completions(publish)
+        assert completed["success"] is True and completed["latency_ms"] >= 200
+
+    async def test_a_request_whose_tunnel_fails_after_its_exit_check_is_reported_once(
+        self, listen: Any, publish: _Published
+    ) -> None:
+        """Preflight passes and reports nothing; the relay's own failure is the request's one report, timed from the start."""
+        async with _vendor(b"HTTP/1.1 502 Bad Gateway\r\n\r\n") as port:
+            upstream = _upstream(port)
+            server = await listen(upstream, exit_verifier=_verifier(ExitDecision(upstream), takes=0.2))
+            await _exchange(server, f"CONNECT example.com:443 HTTP/1.1\r\n{_auth()}\r\n")
+
+        (completed,) = _completions(publish)
+        assert completed["success"] is False and completed["latency_ms"] >= 200
+        (failure,) = _failures(publish)
+        assert failure.kind is FailureKind.UPSTREAM_REJECTED
+
+    async def test_a_refused_request_is_measured_the_same_way(self, listen: Any, publish: _Published) -> None:
+        upstream = _upstream(_closed_port())
+        refusal = ExitDecision(upstream, "Exit country mismatch: requested US, observed GB (81.2.69.160)")
+        server = await listen(upstream, exit_verifier=_verifier(refusal, takes=0.2))
+        await _exchange(server, f"CONNECT example.com:443 HTTP/1.1\r\n{_auth()}\r\n")
+
+        (completed,) = _completions(publish)
+        assert completed["success"] is False and completed["latency_ms"] >= 200
+        (failure,) = _failures(publish)
+        assert failure.latency_ms is not None and failure.latency_ms >= 200
+
+    async def test_a_plain_http_request_includes_its_exit_check(self, listen: Any, publish: _Published) -> None:
+        async with _vendor(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n") as port:
+            upstream = _upstream(port)
+            server = await listen(upstream, exit_verifier=_verifier(ExitDecision(upstream), takes=0.2))
+            await _exchange(server, f"GET http://example.com/ HTTP/1.1\r\nHost: example.com\r\n{_auth()}\r\n")
+
+        (completed,) = _completions(publish)
+        assert completed["success"] is True and completed["latency_ms"] >= 200
 
 
 class TestUpstreamFailures:
@@ -567,7 +621,7 @@ class TestUpstreamFailures:
         ):
             await server._relay(
                 MagicMock(spec=asyncio.StreamReader), client_writer, _upstream(8080), PROJECT, "example.com", 443,
-                established=None, use_mitm=False,
+                started=time.monotonic(), established=None, use_mitm=False,
             )
 
         assert _completions(publish) == [] and _failures(publish) == []
@@ -597,7 +651,7 @@ class TestUpstreamFailures:
             await asyncio.wait_for(
                 server._relay(
                     device, client_writer, _upstream(8080), PROJECT, "example.com", 443,
-                    established=None, use_mitm=False,
+                    started=time.monotonic(), established=None, use_mitm=False,
                 ),
                 5,
             )

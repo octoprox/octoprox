@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import socket
 import sys
+import time
 from collections.abc import Callable
 from typing import TYPE_CHECKING
 
@@ -249,6 +250,8 @@ class TransparentProxyServer(ProxyServer):
                 location=location.key if location else None,
             )
 
+            # The connection's latency runs from here, as a proxy client's request does.
+            started = time.monotonic()
             proxy = await self._get_upstream_proxy(
                 project_id=project.id, session_id=session_id, target_host=target_host, location=location
             )
@@ -256,7 +259,7 @@ class TransparentProxyServer(ProxyServer):
                 await self._reject_no_proxy(client_writer, project.id, target_host, session_id, location)
                 return
             verified = await self._verify_exit(
-                project, proxy, session_id, location, target_host, client_writer, peer_id=peer.id
+                project, proxy, session_id, location, target_host, client_writer, peer_id=peer.id, started=started
             )
             if verified is None:
                 return
@@ -264,6 +267,7 @@ class TransparentProxyServer(ProxyServer):
             use_mitm = sniffed.tls and mitm_possible
             await self._relay(
                 client_reader, client_writer, verified, project, target_host, dst_port,
+                started=started,
                 established=None,
                 use_mitm=use_mitm,
                 # The peeked ClientHello is in the reader, not the socket; the
