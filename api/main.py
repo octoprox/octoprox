@@ -20,35 +20,13 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from api import __version__
-from api.core.auth import require_auth
 from api.core.config import Settings, get_settings
 from api.core.logging import setup_logging
 from api.core.request_context import REQUEST_ID_HEADER, RequestContextMiddleware
 from api.core.roles import Role
 from api.roles import Node
 from api.roles.echo import Lifespan, create_echo_app
-from api.routes import (
-    auth,
-    backup,
-    connectors,
-    credentials,
-    echo,
-    failures,
-    geo,
-    health,
-    internal,
-    metrics,
-    mitm,
-    openvpn,
-    projects,
-    providers,
-    proxies,
-    sso,
-    system,
-    users,
-    wireguard,
-)
-from api.routes.common import install_error_handlers
+from api.routes import health
 
 # The built web UI the api serves, when the image (or a local build) has it.
 WEB_DIST = Path(__file__).resolve().parent.parent / "web" / "dist"
@@ -114,7 +92,33 @@ def _lifespan(settings: Settings) -> Lifespan:
 
 
 def _include_api(app: FastAPI) -> None:
-    """The admin API, the public echo and the internal endpoints of an api or all process."""
+    """The admin API, the public echo and the internal endpoints of an api or all process.
+
+    Imported here, so the other roles never load the route modules they do not serve.
+    """
+    from api.core.auth import require_auth
+    from api.routes import (
+        auth,
+        backup,
+        connectors,
+        credentials,
+        echo,
+        failures,
+        geo,
+        internal,
+        metrics,
+        mitm,
+        openvpn,
+        projects,
+        providers,
+        proxies,
+        sso,
+        system,
+        users,
+        wireguard,
+    )
+    from api.routes.common import install_error_handlers
+
     install_error_handlers(app)
     # Echo endpoint (public by nature: the caller is a proxy exit)
     app.include_router(echo.router, tags=["Echo"])
