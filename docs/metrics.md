@@ -69,18 +69,18 @@ The **Failures** page (under Overview in the web UI) says what the failure count
 |------|---------------|-----------------|
 | Upstream timeout | The upstream proxy did not answer within `proxy.connection.timeout_seconds` | 504 |
 | Proxy unreachable | The connection to the upstream proxy was refused, or its host could not be reached | 502 |
-| Refused by the vendor | The upstream proxy answered the CONNECT (or SOCKS handshake) with an error. For an HTTP upstream the vendor's status is kept (407 means it rejected the connector's credentials), and so is what it said about it: its error headers, such as `x-brd-error`, and the text of its error page | 502, with the vendor's answer in the reason phrase and a `Proxy-Status` header |
+| Refused by the vendor | The upstream proxy answered the CONNECT (or SOCKS handshake) with an error, the request's own or its exit verification echo's. For an HTTP upstream the vendor's status is kept (407 means it rejected the connector's credentials), and so is what it said about it: its error headers, such as `x-brd-error`, and the text of its error page | 502, with the vendor's answer in the reason phrase and a `Proxy-Status` header |
 | Upstream error | The upstream leg failed another way, for example a reset mid-handshake | 502 |
 | Client went away | The client closed the connection, or stopped sending, before sending the whole request body | 502 (504 when it stopped) |
 | Interrupted | Octoprox stopped while the request was being set up | - |
+| Wrong exit location | Exit verification found the proxy exiting somewhere other than the requested location, or got no answer that placed it (`Exit location not checked`), and the request was refused | 502 |
 | No proxy available | No healthy proxy matched the host's domain filters and the requested location | 502 |
 | All proxies quarantined | Every proxy that could serve the request is resting after its rate limit | 429 |
 | Traffic limit reached | The connectors that could serve the request are over their period's traffic | 509 (or as configured) |
-| Wrong exit location | Exit verification found the proxy exiting somewhere other than the requested location | 502 |
 | Invalid location | The username named a state or city without a country | 400 |
 | Intercepted request failed | With [TLS interception]({{ site.baseurl }}/tls-interception), one request inside the connection could not be relayed upstream. When the upstream proxy refused the engine's tunnel, the vendor's status is kept as for a refusal | 502 |
 
-The first six are exactly the requests Overview counts as failures, so the summary's upstream failures match Overview's failure count for the same window, apart from traffic limits that cut a request already under way: Overview counts those too, and the summary lists them with the refusals. The next five are requests Octoprox refused before using any proxy, which the request metrics do not count at all (a traffic limit that cuts a request already under way is the exception). The last is a request inside an intercepted connection; the connection itself is counted, as a success. A connection from a tunnel device is closed rather than answered, so for one the status is what a proxy client would have been told.
+The first seven are exactly the requests Overview counts as failures, so the summary's upstream failures match Overview's failure count for the same window, apart from traffic limits that cut a request already under way: Overview counts those too, and the summary lists them with the refusals. The next four are requests Octoprox refused before using any proxy, which the request metrics do not count at all (a traffic limit that cuts a request already under way is the exception). The last is a request inside an intercepted connection; the connection itself is counted, as a success. A connection from a tunnel device is closed rather than answered, so for one the status is what a proxy client would have been told.
 
 Two things are not recorded: a request with wrong credentials, which belongs to no project, and a request that went through and got an error status from the target site, which is the site's answer rather than a failure of the pool.
 

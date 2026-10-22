@@ -122,6 +122,15 @@ class TestExclusions:
             selected = await router.select_proxy_for_project("p", exclude=frozenset({"p1"}))
             assert selected is not None and selected.id == "p2"
 
+    async def test_exclude_connectors_drops_every_proxy_of_them(self) -> None:
+        feed = _feed("random")
+        _add_connector(feed, "other")
+        router = feed.router()
+        for _ in range(10):
+            selected = await router.select_proxy_for_project("p", exclude_connectors=frozenset({"conn"}))
+            assert selected is not None and selected.id == "other-0"
+        assert await router.select_proxy_for_project("p", exclude_connectors=frozenset({"conn", "other"})) is None
+
 
 class TestEligibility:
     @pytest.mark.parametrize("status", [s for s in ProxyStatus if s != ProxyStatus.HEALTHY])

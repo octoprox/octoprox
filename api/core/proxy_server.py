@@ -428,21 +428,48 @@ class ProxyServer:
         location: LocationTarget | None,
         target_host: str | None,
         client_writer: asyncio.StreamWriter,
+        peer_id: str | None = None,
     ) -> Proxy | None:
-        """Hand the selected upstream to preflight; None when the request was refused."""
+        """Hand the selected upstream to preflight; None when the request was answered here.
+
+        A refusal, or the upstream failing the echo, is one failed request however many proxies preflight tried. The
+        upstream's failure is answered and counted as its own connection's would be, against that proxy.
+        """
         if self._exit_verifier is None:
             return proxy
+        started = time.monotonic()
         decision = await self._exit_verifier.verify(
             project, proxy, session_id=session_id, location=location, target_host=target_host
         )
-        if not decision.rejected:
+        error = decision.upstream_error
+        if error is None and not decision.rejected:
             return decision.proxy
-        message = decision.rejection or "Exit location mismatch"
-        await self._send_error(client_writer, 502, "Bad Gateway", message)
-        await request_rejected.send_async(self, project_id=project.id, reason="preflight_mismatch")
-        await self._publish_failure(
-            build_failure(project.id, FailureKind.PREFLIGHT_MISMATCH, 502, message, proxy=proxy)
+        latency_ms = (time.monotonic() - started) * 1000
+        # The proxy whose echo decided it, a replacement preflight moved to among them.
+        proxy = decision.proxy or proxy
+        if error is not None:
+            status, phrase, message = _upstream_answer(error)
+            failure = self._upstream_failure(error, project.id, proxy, latency_ms, status)
+            await self._send_upstream_error(client_writer, failure, phrase, message)
+        else:
+            # Counted as demand by its completion below, so not also as a rejection.
+            message = decision.rejection or "Exit location mismatch"
+            failure = build_failure(
+                project.id, FailureKind.PREFLIGHT_MISMATCH, 502, message, proxy=proxy, latency_ms=latency_ms
+            )
+            await self._send_error(client_writer, 502, "Bad Gateway", message)
+        await request_completed.send_async(
+            self,
+            proxy_id=proxy.id,
+            project_id=project.id,
+            success=False,
+            latency_ms=latency_ms,
+            bytes_sent=0,
+            bytes_received=0,
+            peer_id=peer_id,
+            target_host=target_host,
         )
+        await self._publish_failure(failure)
         return None
 
     async def _connect_via_proxy(
@@ -1296,6 +1323,15 @@ def keep_alive(writer: asyncio.StreamWriter) -> None:
         )
     except OSError as exc:
         logger.debug("TCP keepalive not set", error=error_text(exc))
+
+
+def _upstream_answer(error: BaseException) -> tuple[int, str, str | None]:
+    """The status, reason and message for a request whose upstream failed to connect, as the relay words them."""
+    if isinstance(error, TimeoutError):
+        return 504, "Gateway Timeout", "Connection to upstream proxy timed out"
+    if isinstance(error, ConnectionRefusedError):
+        return 502, "Bad Gateway", "Upstream proxy refused connection"
+    return 502, "Bad Gateway", None
 
 
 async def close_quietly(writer: asyncio.StreamWriter) -> None:

@@ -23,6 +23,7 @@ import structlog
 from httpx_socks import AsyncProxyTransport
 from python_socks import ProxyError
 
+from api.core.http_tunnel import TunnelTransport
 from api.models.location import LocationTarget
 from api.models.proxy import ProxyProtocol
 from api.providers.sdk.descriptor import IpDiscoverySpec, KnownIpsSpec, ListSourceSpec
@@ -33,6 +34,13 @@ from api.providers.sdk.templating import RenderContext
 logger = structlog.get_logger()
 
 ProxiedClientFactory = Callable[[str, float], httpx.AsyncClient]
+
+# What an upstream proxy failing an echo raises before the echo is sent: python-socks' errors, from a SOCKS upstream
+# and from Octoprox's own CONNECT (a vendor's refusal among them), and OSError for one out of reach or silent
+# (TimeoutError is one). httpx wraps every failure of its own. On a SOCKS upstream python-socks also runs the echo
+# endpoint's TLS handshake, so a bare ssl.SSLError there is the endpoint's (``discover_with_place`` keeps it), and a
+# timeout can be either.
+UPSTREAM_ERRORS = (ProxyError, OSError)
 
 
 @cache
@@ -79,6 +87,23 @@ def default_proxied_client_factory(proxy_url: str, timeout: float) -> httpx.Asyn
     return httpx.AsyncClient(proxy=httpx_proxy(proxy_url), verify=context, timeout=timeout)
 
 
+def echo_client_factory(proxy_url: str, timeout: float) -> httpx.AsyncClient:
+    """Client for an echo through ``proxy_url``: an https:// echo through an http:// proxy goes over Octoprox's own CONNECT.
+
+    So a vendor refusing the echo's tunnel is worded as it is on a client's own request, with what the vendor said.
+    Any other pair goes as :func:`default_proxied_client_factory` sends it.
+    """
+    if not proxy_url.startswith("http://"):
+        return default_proxied_client_factory(proxy_url, timeout)
+    context = shared_ssl_context()
+    return httpx.AsyncClient(
+        proxy=httpx_proxy(proxy_url),
+        mounts={"https://": TunnelTransport(proxy_url, context)},
+        verify=context,
+        timeout=timeout,
+    )
+
+
 def extract_ip_and_place(
     response: httpx.Response,
     ip_path: str,
@@ -123,32 +148,35 @@ class IpDiscoverer:
     ) -> None:
         self._spec = spec
         self._extractor = extractor or ValueExtractor()
-        self._client_factory = client_factory or default_proxied_client_factory
+        self._client_factory = client_factory or echo_client_factory
 
     async def discover_with_place(
-        self, proxy_url: str, *, log_context: dict[str, Any] | None = None
+        self, proxy_url: str, *, log_context: dict[str, Any] | None = None, raise_upstream: bool = False
     ) -> tuple[str | None, LocationTarget | None]:
         """Return ``(ip, place)``; ip is ``None`` on failure, place is None when nothing was reported.
 
         The place holds what the spec's ``country_path``, ``state_path`` and
         ``city_path`` yield.
+
+        Args:
+            raise_upstream: raise the upstream proxy failing the echo (:data:`UPSTREAM_ERRORS`) instead of returning
+                no IP, for preflight, whose request through it would fail the same way.
         """
         context = log_context or {}
-        # A failed preflight echo refuses its request wherever the project's
-        # rules could have, which the Failures page counts; at one echo per
-        # request a warning each would flood the log.
+        # A failed preflight echo is its request's failure or refusal, which
+        # the Failures page counts; at one echo per request a warning each
+        # would flood the log.
         log_failure = logger.debug if context.get("preflight") else logger.warning
-        # A SOCKS upstream fails with python-socks' own errors (ProxyError,
-        # and OSError subclasses for a refused or timed-out connect), which
-        # httpx does not wrap.
         try:
             async with self._client_factory(proxy_url, self._spec.timeout_seconds) as client:
                 response = await client.get(self._spec.url)
-        except (httpx.TimeoutException, TimeoutError):
-            log_failure("IP discovery timed out", **context)
-            return None, None
-        except (httpx.HTTPError, ProxyError, OSError) as exc:
-            log_failure("IP discovery request failed", error=str(exc), **context)
+        except (httpx.HTTPError, *UPSTREAM_ERRORS) as exc:
+            if raise_upstream and isinstance(exc, UPSTREAM_ERRORS) and not isinstance(exc, ssl.SSLError):
+                raise
+            if isinstance(exc, httpx.TimeoutException | TimeoutError):
+                log_failure("IP discovery timed out", **context)
+            else:
+                log_failure("IP discovery request failed", error=str(exc), **context)
             return None, None
         if response.status_code != 200:
             log_failure("IP discovery returned an error", status_code=response.status_code, **context)

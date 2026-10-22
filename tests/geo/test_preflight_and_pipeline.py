@@ -11,6 +11,7 @@ import httpx
 import pytest
 
 from api.core.config import Settings
+from api.core.http_tunnel import TunnelRefusedError
 from api.db.redis import GEO_PREFLIGHT_KEY, RedisClient
 from api.geo.models import (
     ContradictedAction,
@@ -205,6 +206,30 @@ class TestPreflight:
         assert verdict.acceptable(TRUSTING)
         assert not verdict.acceptable(VERIFYING) and not verdict.acceptable(LOCATING) and not verdict.acceptable(STRICT)
         assert PreflightChecker.rejection_message(verdict, STRICT) == "Exit location not checked, echo request failed: requested US"
+
+    async def test_the_upstream_failing_the_echo_is_raised_and_not_cached(self, geo_service: GeoService) -> None:
+        """It is the request's own failure: the next request through the same session asks the vendor again."""
+        refusal = TunnelRefusedError(400, "Bad Request", "no upstream available")
+
+        def factory(proxy_url: str, timeout: float) -> httpx.AsyncClient:
+            def refuse(request: httpx.Request) -> httpx.Response:
+                raise refusal
+
+            return httpx.AsyncClient(transport=httpx.MockTransport(refuse), timeout=timeout)
+
+        geo_service.discoverer = lambda: IpDiscoverer(geo_service.echo_spec(), client_factory=factory)  # type: ignore[method-assign]
+        checker = PreflightChecker(geo_service, None, sightings=Sightings(), exclusions=Retired())
+        stored: dict[str, str] = {}
+
+        async def store(key: str, verdict: PreflightVerdict, ttl: int) -> None:
+            stored[key] = verdict.to_json()
+
+        checker._store = store  # type: ignore[method-assign]
+        rendered = _proxy(dynamic_sessions="true", session_id="abc123", geo="GB")
+        for _ in range(2):
+            with pytest.raises(TunnelRefusedError):
+                await checker.check(VERIFIED, rendered, session_id="order-1", requested=LocationTarget(country="GB"))
+        assert stored == {} and checker.checks == 2
 
     def test_acceptable_per_level(self) -> None:
         expected = LocationTarget(country="US")

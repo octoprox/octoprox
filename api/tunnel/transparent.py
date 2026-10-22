@@ -255,7 +255,9 @@ class TransparentProxyServer(ProxyServer):
             if proxy is None:
                 await self._reject_no_proxy(client_writer, project.id, target_host, session_id, location)
                 return
-            verified = await self._verify_exit(project, proxy, session_id, location, target_host, client_writer)
+            verified = await self._verify_exit(
+                project, proxy, session_id, location, target_host, client_writer, peer_id=peer.id
+            )
             if verified is None:
                 return
 

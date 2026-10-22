@@ -15,7 +15,7 @@ export const GROUP_INFO: Record<FailureGroup, { label: string; heading: string; 
     label: 'Upstream failure',
     heading: 'Upstream failures',
     color: 'red',
-    note: 'A proxy was chosen and the request through it did not get going. These are the failures Overview counts.',
+    note: 'A proxy was chosen and the request through it did not get going, or its echo found the exit in the wrong place. These are the failures Overview counts.',
   },
   refused: {
     label: 'Refused by Octoprox',
@@ -101,9 +101,9 @@ export const KIND_INFO: Record<string, KindInfo> = {
   },
   preflight_mismatch: {
     label: 'Wrong exit location',
-    group: 'refused',
+    group: 'upstream',
     color: '#4f46e5',
-    hint: 'Exit verification found the proxy exiting somewhere other than the requested location, and the request was refused rather than sent from the wrong place. A message starting "Exit location not checked" means the echo through the proxy failed, so where it exits is unknown. See Exit locations.',
+    hint: 'Exit verification found the proxy exiting somewhere other than the requested location, and the request was refused rather than sent from the wrong place. A message starting "Exit location not checked" means the echo got through the proxy but no answer placed the exit; a vendor failing the echo itself is listed under its own kind, such as Refused by the vendor. See Exit locations.',
   },
   invalid_location: {
     label: 'Invalid location',

@@ -21,8 +21,9 @@ from blinker import signal
 request_completed = signal("request-completed")
 
 # Emitted when a request is refused before it reaches an upstream proxy (no
-# proxy available, every candidate quarantined, the traffic limit reached, a
-# preflight mismatch or an invalid location); counted as demand.
+# proxy available, every candidate quarantined, the traffic limit reached or
+# an invalid location); counted as demand. A preflight mismatch came after its
+# echo through the proxy, so it completes as a failed request instead.
 # Sender: ProxyServer
 # Args: project_id (str), reason (str)
 request_rejected = signal("request-rejected")

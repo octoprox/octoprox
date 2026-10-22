@@ -194,6 +194,7 @@ class Router:
         target_host: str | None = None,
         location: LocationTarget | None = None,
         exclude: frozenset[str] | None = None,
+        exclude_connectors: frozenset[str] | None = None,
     ) -> Proxy | None:
         """The proxy for one request of the project, credentials filled in; None when nothing serves it.
 
@@ -203,6 +204,7 @@ class Router:
         Args:
             session_id: the client's ``-sessid-``, which sticky projects route by and a dynamic gateway's session derives from.
             exclude: proxies dropped before the strategy runs (preflight's retry); a session bound to one is re-bound.
+            exclude_connectors: connectors whose proxies are all dropped the same way (preflight's retry after a vendor's 4xx).
         """
         if await self._is_sticky_quarantine_blocked(project_id, session_id):
             return None
@@ -220,6 +222,8 @@ class Router:
             routable = self._eligible_proxies(snapshot, project_id, target_host, target, include_quarantined=False)
         if exclude:
             routable = [proxy for proxy in routable if proxy.id not in exclude]
+        if exclude_connectors:
+            routable = [proxy for proxy in routable if proxy.connector_id not in exclude_connectors]
         # The connector by routing weight, then the proxy inside it. Sticky
         # reads and writes its Redis binding inside; the others need no I/O.
         selected = await self.strategy_for_project(project_id).select_weighted(

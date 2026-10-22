@@ -7,6 +7,9 @@ python-socks reads a refusal whole but keeps only its status line. Vendors
 explain a refusal in headers of their own (Bright Data's ``x-brd-error``,
 for one) or in the body, and that is what tells a 403 for a blocked target
 from a 403 for a closed zone. SOCKS upstreams stay on python-socks.
+
+httpx's own proxying keeps only the status line as well, so the preflight
+echo goes through :class:`TunnelTransport`, which opens its tunnel here.
 """
 
 import asyncio
@@ -14,8 +17,13 @@ import base64
 import contextlib
 import html
 import re
+import ssl
+from collections.abc import Iterable
+from typing import Any
 
-from python_socks import ProxyConnectionError, ProxyError
+import httpcore
+import httpx
+from python_socks import ProxyConnectionError, ProxyError, ProxyTimeoutError
 
 # Longest head a refusal may have; past it the answer is not an HTTP proxy's.
 MAX_HEAD_BYTES = 65536
@@ -203,3 +211,120 @@ def _says_more(text: str, status: int, reason: str) -> bool:
     if reason:
         rest = rest.replace(reason.lower(), " ")
     return _WORD.search(rest) is not None
+
+
+class TunnelTransport(httpx.AsyncBaseTransport):
+    """An httpx transport to any host through the HTTP proxy at ``proxy_url``, on Octoprox's own CONNECT.
+
+    The upstream failing the CONNECT raises what :func:`open_http_tunnel` raises, a :class:`TunnelRefusedError` with
+    what the vendor said among them, as a client's own request through it would; whatever fails once the tunnel is up
+    is httpx's error.
+    """
+
+    def __init__(self, proxy_url: str, ssl_context: ssl.SSLContext) -> None:
+        proxy = httpx.URL(proxy_url)
+        backend = _TunnelBackend(proxy.host, proxy.port or 80, proxy.username or None, proxy.password or None)
+        self._pool = httpcore.AsyncConnectionPool(ssl_context=ssl_context, network_backend=backend)
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        url = httpcore.URL(
+            scheme=request.url.raw_scheme, host=request.url.raw_host, port=request.url.port, target=request.url.raw_path
+        )
+        try:
+            response = await self._pool.request(
+                request.method, url,
+                headers=request.headers.raw, content=await request.aread(), extensions=request.extensions,
+            )
+        except httpcore.TimeoutException as e:
+            raise httpx.TimeoutException(str(e), request=request) from e
+        except (httpcore.NetworkError, httpcore.ProtocolError, httpcore.UnsupportedProtocol) as e:
+            raise httpx.TransportError(str(e), request=request) from e
+        return httpx.Response(
+            response.status, headers=response.headers, content=response.content, extensions=response.extensions
+        )
+
+    async def aclose(self) -> None:
+        await self._pool.aclose()
+
+
+class _TunnelBackend(httpcore.AsyncNetworkBackend):
+    """Dials each of httpcore's connections as a tunnel through one HTTP upstream proxy."""
+
+    def __init__(self, host: str, port: int, username: str | None, password: str | None) -> None:
+        self._host = host
+        self._port = port
+        self._username = username
+        self._password = password
+
+    async def connect_tcp(
+        self,
+        host: str,
+        port: int,
+        timeout: float | None = None,
+        local_address: str | None = None,
+        socket_options: Iterable[Any] | None = None,
+    ) -> httpcore.AsyncNetworkStream:
+        # Left as python-socks words them, a timeout too: the upstream failed, not the request.
+        try:
+            async with asyncio.timeout(timeout):
+                reader, writer = await open_http_tunnel(
+                    self._host, self._port, self._username, self._password, host, port
+                )
+        except TimeoutError as e:
+            # The deadline's own carries no words; say which one it was, as python-socks does.
+            raise ProxyTimeoutError(str(e) or f"Proxy connection timed out: {timeout}") from e
+        return _TunnelStream(reader, writer)
+
+    async def sleep(self, seconds: float) -> None:
+        await asyncio.sleep(seconds)
+
+
+class _TunnelStream(httpcore.AsyncNetworkStream):
+    """An open tunnel as httpcore reads and writes it, failing with httpcore's errors."""
+
+    def __init__(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        self._reader = reader
+        self._writer = writer
+
+    async def read(self, max_bytes: int, timeout: float | None = None) -> bytes:
+        try:
+            async with asyncio.timeout(timeout):
+                return await self._reader.read(max_bytes)
+        except TimeoutError as e:
+            raise httpcore.ReadTimeout(str(e)) from e
+        except OSError as e:
+            raise httpcore.ReadError(str(e)) from e
+
+    async def write(self, buffer: bytes, timeout: float | None = None) -> None:
+        try:
+            self._writer.write(buffer)
+            async with asyncio.timeout(timeout):
+                await self._writer.drain()
+        except TimeoutError as e:
+            raise httpcore.WriteTimeout(str(e)) from e
+        except OSError as e:
+            raise httpcore.WriteError(str(e)) from e
+
+    async def aclose(self) -> None:
+        self._writer.transport.abort()
+
+    async def start_tls(
+        self, ssl_context: ssl.SSLContext, server_hostname: str | None = None, timeout: float | None = None
+    ) -> httpcore.AsyncNetworkStream:
+        try:
+            async with asyncio.timeout(timeout):
+                await self._writer.start_tls(ssl_context, server_hostname=server_hostname)
+        except TimeoutError as e:
+            raise httpcore.ConnectTimeout(str(e)) from e
+        except OSError as e:  # ssl.SSLError among them
+            raise httpcore.ConnectError(str(e)) from e
+        return self
+
+    def get_extra_info(self, info: str) -> Any:
+        if info in ("ssl_object", "socket"):
+            return self._writer.get_extra_info(info)
+        if info == "server_addr":
+            return self._writer.get_extra_info("peername")
+        if info == "client_addr":
+            return self._writer.get_extra_info("sockname")
+        return None

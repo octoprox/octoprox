@@ -19,15 +19,18 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from python_socks import ProxyTimeoutError
 
 from api.core.failure_log import RequestFailure
+from api.core.http_tunnel import TunnelRefusedError
 from api.core.mitm.base import UpstreamRefusedError
 from api.core.mitm.handler import MitmHandler
 from api.core.proxy_server import ProxyServer
-from api.core.signals import request_completed, request_failed
+from api.core.signals import request_completed, request_failed, request_rejected
 from api.core.stats import FailureKind
 from api.core.traffic_limiter import TrafficMeter
 from api.gateway.metering import RequestMetering
+from api.geo.verifier import ExitDecision
 from api.models.project import MitmMode, Project
 from api.models.proxy import Proxy, ProxyProtocol
 from api.routing.inflight import InFlight
@@ -102,9 +105,12 @@ def inflight() -> InFlight:
 async def listen(inflight: InFlight) -> AsyncIterator[Callable[..., Awaitable[ProxyServer]]]:
     servers: list[ProxyServer] = []
 
-    async def start(proxy: Proxy | None, *, quarantined: bool = False, timeout: float = 30.0) -> ProxyServer:
+    async def start(
+        proxy: Proxy | None, *, quarantined: bool = False, timeout: float = 30.0, exit_verifier: Any = None
+    ) -> ProxyServer:
         server = ProxyServer(
-            _router(proxy, quarantined=quarantined), QuietMetering(inflight), host="127.0.0.1", port=0, timeout=timeout
+            _router(proxy, quarantined=quarantined), QuietMetering(inflight), host="127.0.0.1", port=0, timeout=timeout,
+            exit_verifier=exit_verifier,
         )
         await server.start()
         servers.append(server)
@@ -225,6 +231,91 @@ class TestRefused:
 
         assert response.startswith(b"HTTP/1.1 407")
         assert _failures(publish) == []
+
+
+def _verifier(decision: ExitDecision) -> MagicMock:
+    """An exit verifier that decides every request the same way."""
+    verifier = MagicMock()
+    verifier.verify = AsyncMock(return_value=decision)
+    return verifier
+
+
+NO_UPSTREAM = "no upstream available requested City xyzzy"
+
+
+class TestPreflight:
+    """A request preflight answers is one failed request, counted against the proxy its failure names."""
+
+    async def test_a_location_refusal_is_a_counted_failure(self, listen: Any, publish: _Published) -> None:
+        selected, refused = _upstream(_closed_port()), _upstream(_closed_port())
+        refusal = "Exit country mismatch: requested US, observed GB (81.2.69.160)"
+        server = await listen(selected, exit_verifier=_verifier(ExitDecision(refused, refusal)))
+        rejected: list[dict[str, Any]] = []
+
+        async def on_rejected(_sender: object, **kwargs: Any) -> None:
+            rejected.append(kwargs)
+
+        with request_rejected.connected_to(on_rejected):
+            response = await _exchange(server, f"CONNECT example.com:443 HTTP/1.1\r\n{_auth()}\r\n")
+
+        status_line, headers = _head(response)
+        assert status_line == f"HTTP/1.1 502 Bad Gateway ({refusal})"
+        assert "proxy-status" not in headers
+        # Counted against the proxy whose echo refused it, a replacement preflight moved to.
+        (failure,) = _failures(publish)
+        assert (failure.kind, failure.status, failure.proxy_id) == (FailureKind.PREFLIGHT_MISMATCH, 502, refused.id)
+        (completed,) = _completions(publish)
+        assert (completed["proxy_id"], completed["project_id"], completed["success"]) == (refused.id, PROJECT.id, False)
+        assert (completed["bytes_sent"], completed["bytes_received"], completed["target_host"]) == (0, 0, "example.com")
+        # Its completion counts it as demand; a rejection as well would count it twice.
+        assert rejected == []
+
+    async def test_the_vendor_refusing_the_echo_answers_the_request(self, listen: Any, publish: _Published) -> None:
+        selected, failed = _upstream(_closed_port()), _upstream(_closed_port())
+        error = TunnelRefusedError(400, "Bad Request", NO_UPSTREAM)
+        server = await listen(selected, exit_verifier=_verifier(ExitDecision(failed, upstream_error=error)))
+        response = await _exchange(server, f"CONNECT example.com:443 HTTP/1.1\r\n{_auth()}\r\n")
+
+        status_line, headers = _head(response)
+        assert status_line == (
+            f"HTTP/1.1 502 Bad Gateway (Upstream proxy refused the tunnel: 400 Bad Request. The vendor said: {NO_UPSTREAM})"
+        )
+        assert headers["proxy-status"] == f'octoprox; error=connection_refused; received-status=400; details="{NO_UPSTREAM}"'
+        (failure,) = _failures(publish)
+        assert (failure.kind, failure.upstream_status, failure.upstream_message) == (
+            FailureKind.UPSTREAM_REJECTED, 400, NO_UPSTREAM,
+        )
+        # Counted against the upstream that failed, a replacement preflight moved to included.
+        assert failure.proxy_id == failed.id
+        (completed,) = _completions(publish)
+        assert (completed["proxy_id"], completed["success"]) == (failed.id, False)
+
+    async def test_a_silent_upstream_at_the_echo_is_a_timeout(self, listen: Any, publish: _Published) -> None:
+        upstream = _upstream(_closed_port())
+        error = ProxyTimeoutError("Proxy connection timed out")
+        server = await listen(upstream, exit_verifier=_verifier(ExitDecision(upstream, upstream_error=error)))
+        response = await _exchange(server, f"CONNECT example.com:443 HTTP/1.1\r\n{_auth()}\r\n")
+
+        status_line, headers = _head(response)
+        assert status_line == "HTTP/1.1 504 Gateway Timeout (Connection to upstream proxy timed out)"
+        assert headers["proxy-status"] == "octoprox; error=connection_timeout"
+        (failure,) = _failures(publish)
+        assert (failure.kind, failure.status) == (FailureKind.UPSTREAM_TIMEOUT, 504)
+        (completed,) = _completions(publish)
+        assert completed["success"] is False
+
+    async def test_a_plain_http_request_is_answered_the_same(self, listen: Any, publish: _Published) -> None:
+        upstream = _upstream(_closed_port())
+        error = TunnelRefusedError(400, "Bad Request", NO_UPSTREAM)
+        server = await listen(upstream, exit_verifier=_verifier(ExitDecision(upstream, upstream_error=error)))
+        response = await _exchange(server, f"GET http://example.com/ HTTP/1.1\r\nHost: example.com\r\n{_auth()}\r\n")
+
+        status_line, _headers = _head(response)
+        assert status_line.startswith("HTTP/1.1 502 Bad Gateway (Upstream proxy refused the tunnel: 400 Bad Request.")
+        (failure,) = _failures(publish)
+        assert failure.kind is FailureKind.UPSTREAM_REJECTED
+        (completed,) = _completions(publish)
+        assert (completed["success"], completed["target_host"]) == (False, "example.com")
 
 
 class TestUpstreamFailures:

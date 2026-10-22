@@ -310,6 +310,9 @@ class PreflightChecker:
 
         Args:
             allowed: the connector's declared countries, which with the rules decide whether a vendor's promise can refuse.
+
+        Raises:
+            The upstream's error (:data:`~api.providers.sdk.sources.UPSTREAM_ERRORS`) when it failed the echo.
         """
         expected, required_by = self.requirement(requested, proxy)
         dynamic = is_dynamic_gateway(proxy)
@@ -344,9 +347,12 @@ class PreflightChecker:
             return cached
 
         self.checks += 1
+        # An upstream failing the echo raises here, uncached: it is the
+        # request's own failure, and the next request asks the vendor again.
         ip, endpoint = await self._geo_service.discoverer().discover_with_place(
             proxy.url,
             log_context={"proxy_id": proxy.id, "project_id": project.id, "preflight": True},
+            raise_upstream=True,
         )
         observed_at = utc_now()
         if ip is None:

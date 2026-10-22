@@ -56,7 +56,8 @@ class FailureKind(StrEnum):
     """What went wrong, from the client's side of the proxy, in three groups: the request metrics' failures, refusals, interception.
 
     A refusal came before any proxy was used, so the metrics count it nowhere, and an intercepted request's connection
-    the metrics counted as a success already.
+    the metrics counted as a success already. A preflight refusal came after its echo through the proxy, so it is
+    counted as a failure.
     """
 
     # Counted as failures by the request metrics.
@@ -66,12 +67,12 @@ class FailureKind(StrEnum):
     UPSTREAM_ERROR = "upstream_error"
     CLIENT_CLOSED = "client_closed"
     INTERRUPTED = "interrupted"
+    PREFLIGHT_MISMATCH = "preflight_mismatch"
     # Refused before a proxy was used (traffic_limit_exceeded can also cut a
     # request that already had one, and is then counted).
     NO_PROXY_AVAILABLE = "no_proxy_available"
     ALL_PROXIES_QUARANTINED = "all_proxies_quarantined"
     TRAFFIC_LIMIT_EXCEEDED = "traffic_limit_exceeded"
-    PREFLIGHT_MISMATCH = "preflight_mismatch"
     INVALID_LOCATION = "invalid_location"
     # One request inside an intercepted (MITM) connection.
     INTERCEPTED_REQUEST_FAILED = "intercepted_request_failed"
