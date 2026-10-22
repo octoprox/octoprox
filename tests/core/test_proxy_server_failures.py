@@ -139,11 +139,12 @@ def _head(response: bytes) -> tuple[str, dict[str, str]]:
 
 
 @contextlib.asynccontextmanager
-async def _vendor(answer: bytes | None, *, reset_after: int = 0) -> AsyncIterator[int]:
+async def _vendor(answer: bytes | None, *, reset_after: int = 0, keep_open: bool = False) -> AsyncIterator[int]:
     """An upstream HTTP proxy that answers each CONNECT with ``answer``, or never answers when None.
 
     With ``reset_after`` it then takes that many tunnel bytes and resets the
-    connection, as a vendor dropping a session does.
+    connection, as a vendor dropping a session does; with ``keep_open`` it
+    holds the connection open after answering.
     """
     held: list[asyncio.StreamWriter] = []
 
@@ -155,6 +156,9 @@ async def _vendor(answer: bytes | None, *, reset_after: int = 0) -> AsyncIterato
             return
         writer.write(answer)
         await writer.drain()
+        if keep_open:
+            held.append(writer)
+            return
         if reset_after:
             await reader.readexactly(reset_after)
             writer.get_extra_info("socket").setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
@@ -241,7 +245,8 @@ class TestUpstreamFailures:
         assert failure.kind is FailureKind.UPSTREAM_REJECTED
         assert (failure.status, failure.upstream_status) == (502, 407)
         assert "407" in failure.message
-        assert failure.error_type == "ProxyError"
+        assert failure.error_type == "TunnelRefusedError"
+        assert failure.upstream_message is None  # nothing said beyond the status line
         assert failure.proxy == f"127.0.0.1:{port}"
         assert failure.connector_id == "connector-1"
         assert failure.latency_ms is not None
@@ -258,6 +263,55 @@ class TestUpstreamFailures:
         assert headers["proxy-status"] == "octoprox; error=connection_refused; received-status=429"
         (failure,) = _failures(publish)
         assert (failure.kind, failure.status, failure.upstream_status) == (FailureKind.UPSTREAM_REJECTED, 502, 429)
+
+    async def test_what_the_vendor_says_reaches_the_log_and_the_client(self, listen: Any, publish: _Published) -> None:
+        body = b"<html><head><title>403 Forbidden</title></head><body><h1>Zone &quot;resi&quot; is closed</h1></body></html>"
+        answer = (
+            b"HTTP/1.1 403 Forbidden\r\nx-brd-error: zone closed\r\nServer: vendor\r\nContent-Type: text/html\r\n"
+            b"Content-Length: " + str(len(body)).encode() + b"\r\n\r\n" + body
+        )
+        async with _vendor(answer) as port:
+            server = await listen(_upstream(port))
+            response = await _exchange(server, f"CONNECT example.com:443 HTTP/1.1\r\n{_auth()}\r\n")
+
+        said = 'x-brd-error: zone closed; 403 Forbidden Zone "resi" is closed'
+        (failure,) = _failures(publish)
+        assert (failure.kind, failure.upstream_status, failure.upstream_message) == (
+            FailureKind.UPSTREAM_REJECTED, 403, said,
+        )
+        assert failure.message == "403 Forbidden"
+        status_line, headers = _head(response)
+        assert status_line == f"HTTP/1.1 502 Bad Gateway (Upstream proxy refused the tunnel: 403 Forbidden. The vendor said: {said})"
+        assert headers["proxy-status"] == (
+            'octoprox; error=connection_refused; received-status=403; details="'
+            + said.replace('"', '\\"') + '"'
+        )
+        assert response.endswith(f"\r\n\r\nUpstream proxy refused the tunnel: 403 Forbidden. The vendor said: {said}".encode())
+
+    async def test_a_refusal_whose_body_never_ends_is_answered_without_waiting_for_it(
+        self, listen: Any, publish: _Published
+    ) -> None:
+        answer = b"HTTP/1.1 429 Too Many Requests\r\nContent-Type: text/plain\r\n\r\nSlow down, zone limit 10/s"
+        async with _vendor(answer, keep_open=True) as port:
+            server = await listen(_upstream(port))
+            started = asyncio.get_running_loop().time()
+            await _exchange(server, f"CONNECT example.com:443 HTTP/1.1\r\n{_auth()}\r\n")
+            waited = asyncio.get_running_loop().time() - started
+
+        (failure,) = _failures(publish)
+        assert failure.upstream_message == "Slow down, zone limit 10/s"
+        assert waited < 3
+
+    async def test_bytes_the_vendor_sends_right_after_its_200_reach_the_client(
+        self, listen: Any, publish: _Published
+    ) -> None:
+        """The target's first bytes can arrive with the vendor's answer: they belong to the tunnel."""
+        async with _vendor(b"HTTP/1.1 200 Connection established\r\n\r\nSSH-2.0-banner\r\n") as port:
+            server = await listen(_upstream(port))
+            response = await _exchange(server, f"CONNECT example.com:22 HTTP/1.1\r\n{_auth()}\r\n")
+
+        assert response.endswith(b"\r\n\r\nSSH-2.0-banner\r\n")
+        assert _failures(publish) == []
 
     async def test_unreachable_upstream(self, listen: Any, publish: _Published) -> None:
         server = await listen(_upstream(_closed_port()))

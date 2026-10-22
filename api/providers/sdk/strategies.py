@@ -25,7 +25,7 @@ from api.geo.models import (
     META_VENDOR_STATE,
 )
 from api.models.location import LocationTarget
-from api.models.proxy import Proxy, ProxyStatus
+from api.models.proxy import Proxy, ProxyStatus, proxy_url
 from api.providers.base import _sort_proxies_healthy_first
 from api.providers.sdk.descriptor import ProviderDescriptor, ProxyTypeSpec, check_port_range
 from api.providers.sdk.session_ids import SessionIdGenerator
@@ -228,8 +228,7 @@ class ProxyBuilder:
         values: dict[str, Any] = {**ctx.credential, **ctx.connector}
         username = resolve_runtime_placeholders(proxy.username, values)
         password = resolve_runtime_placeholders(proxy.password, values)
-        auth = f"{username}:{password}@" if username and password else ""
-        return f"{proxy.protocol.value}://{auth}{proxy.host}:{proxy.port}"
+        return proxy_url(proxy.protocol, proxy.host, proxy.port, username, password)
 
 
 class SyncStrategy(ABC):

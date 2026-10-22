@@ -23,7 +23,7 @@ from api.core.config import Settings
 from api.core.roles import Role
 from api.core.stats import MetricDelta
 from api.db.redis import (
-    FAILURE_LOG_APPENDED_KEY,
+    FAILURE_LOG_DATA_KEY,
     MITM_REQUESTS_KEY,
     PROJECT_WINDOWS,
     PROXY_WINDOWS,
@@ -271,11 +271,11 @@ class TestBackupRoundTrip:
         kept_capture = MITM_REQUESTS_KEY.format(project_id=created_project["id"])
         removed_keys = [
             MITM_REQUESTS_KEY.format(project_id=removed["id"]),
-            FAILURE_LOG_APPENDED_KEY.format(project_id=removed["id"]),
+            FAILURE_LOG_DATA_KEY.format(project_id=removed["id"], kind="upstream_timeout"),
         ]
         on_app_loop(authenticated_client, redis.xadd, kept_capture, {"method": "GET"})
         on_app_loop(authenticated_client, redis.xadd, removed_keys[0], {"method": "GET"})
-        on_app_loop(authenticated_client, redis.hset, removed_keys[1], "upstream_timeout", 1)
+        on_app_loop(authenticated_client, redis.hset, removed_keys[1], "f1", "{}")
 
         assert _import(authenticated_client, file_bytes).status_code == 200
         # The project the file carries keeps its captures; the one it removed leaves nothing behind.

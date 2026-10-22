@@ -288,11 +288,11 @@ failure_log:
 | Setting | Description | Default |
 |---------|-------------|---------|
 | `failure_log.enabled` | Count failures and keep examples. Off records neither | `true` |
-| `failure_log.max_entries` | How many examples each project keeps of each kind of failure, newest first (at least 10) | `1000` |
-| `failure_log.retention_hours` | How long examples are kept; a kind that stops failing loses its examples this long after the last one. The counts follow the metrics retention instead | `168` |
+| `failure_log.max_entries` | How many distinct examples each project keeps of each kind of failure, the ones seen last (at least 10) | `1000` |
+| `failure_log.retention_hours` | How long an example is kept after the failure last happened. The counts follow the metrics retention instead | `168` |
 | `failure_log.max_per_window` | How many distinct examples of each kind one gateway keeps per project in each 5-second window. Beyond that, failures are only counted | `100` |
 
-An example is a few hundred bytes, so a kind that fills its stream at the default takes a few hundred kilobytes of Redis, and a project takes that for each kind it actually sees. Lower `max_entries` on an install with many projects: the counts stay complete whatever it is set to. The settings can also be set as `OCTOPROX_FAILURE_LOG_ENABLED`, `OCTOPROX_FAILURE_LOG_MAX_ENTRIES`, `OCTOPROX_FAILURE_LOG_RETENTION_HOURS` and `OCTOPROX_FAILURE_LOG_MAX_PER_WINDOW`; gateways record the failures and the api shows them, so set them alike on both.
+An example is a few hundred bytes, so a kind that fills its examples at the default takes a few hundred kilobytes of Redis, and a project takes that for each kind it actually sees. Lower `max_entries` on an install with many projects: the counts stay complete whatever it is set to. The settings can also be set as `OCTOPROX_FAILURE_LOG_ENABLED`, `OCTOPROX_FAILURE_LOG_MAX_ENTRIES`, `OCTOPROX_FAILURE_LOG_RETENTION_HOURS` and `OCTOPROX_FAILURE_LOG_MAX_PER_WINDOW`; gateways record the failures and the api shows them, so set them alike on both.
 
 ## Database Configuration
 

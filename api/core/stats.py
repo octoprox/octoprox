@@ -22,6 +22,26 @@ MAX_HOST_LENGTH = 255
 # vendor's HTTP status when it refused the request (else None).
 type FailureCountKey = tuple[str, str | None, str, int | None]
 
+
+@dataclass(frozen=True, slots=True)
+class FailureExample:
+    """One failure log example as a gateway's window hands it to Redis: what failed, and how often and when.
+
+    Every gateway's windows add up in the one row its ``fingerprint`` names; ``fields`` (JSON) describe it, written
+    when the row is new. Times are epoch milliseconds.
+    """
+
+    project_id: str
+    kind: str
+    fingerprint: str
+    fields: str
+    count: int
+    first_ms: int
+    last_ms: int
+    latency_total: float = 0.0
+    latency_n: int = 0
+
+
 # What one host row is counted under (the Hosts page): project, connector,
 # and the host as ``normalize_host`` gives it (or ``HOST_OVERFLOW``).
 type HostKey = tuple[str, str, str]

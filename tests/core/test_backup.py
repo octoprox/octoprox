@@ -39,7 +39,13 @@ from api.db.models import (
     ProxyModel,
     UserModel,
 )
-from api.db.redis import FAILURE_LOG_APPENDED_KEY, MITM_REQUESTS_KEY, RedisClient, project_keys
+from api.db.redis import (
+    FAILURE_LOG_DATA_KEY,
+    FAILURE_LOG_KEY,
+    MITM_REQUESTS_KEY,
+    RedisClient,
+    project_keys,
+)
 from api.db.repository import ProjectRepository
 from api.models.backup import BackupPayload, ImportSummary
 from api.models.project import Project
@@ -280,24 +286,26 @@ class TestUserConflictResolution:
 class TestForgetProjects:
     def test_a_projects_keys_are_its_captures_and_failure_log(self) -> None:
         keys = project_keys("p1")
-        assert len(keys) == len(set(keys)) == 2 + len(FailureKind)
+        assert len(keys) == len(set(keys)) == 1 + 2 * len(FailureKind)
         assert all(":p1:" in key or key.endswith(":p1") for key in keys)
         assert MITM_REQUESTS_KEY.format(project_id="p1") in keys
-        assert FAILURE_LOG_APPENDED_KEY.format(project_id="p1") in keys
+        assert FAILURE_LOG_KEY.format(project_id="p1", kind="upstream_timeout") in keys
+        assert FAILURE_LOG_DATA_KEY.format(project_id="p1", kind="upstream_timeout") in keys
 
     async def test_deletes_only_the_removed_projects_keys_in_batches(self, redis_client: RedisClient) -> None:
         # Enough projects that their key names fill more than one DEL.
         removed = [f"gone-{n}" for n in range(80)]
         for project_id in [*removed, "kept"]:
             await redis_client.client.xadd(MITM_REQUESTS_KEY.format(project_id=project_id), {"method": "GET"})
-            appended = FAILURE_LOG_APPENDED_KEY.format(project_id=project_id)
-            await redis_client.client.hset(appended, "upstream_timeout", 1)
+            examples = FAILURE_LOG_DATA_KEY.format(project_id=project_id, kind="upstream_timeout")
+            await redis_client.client.hset(examples, "f1", "{}")
 
         result = ImportResult(ImportSummary(), removed_project_ids=removed)
         assert await result.forget_removed_projects(redis_client) == 2 * len(removed)
         assert await redis_client.client.exists(MITM_REQUESTS_KEY.format(project_id="gone-7")) == 0
         assert await redis_client.client.exists(
-            MITM_REQUESTS_KEY.format(project_id="kept"), FAILURE_LOG_APPENDED_KEY.format(project_id="kept")
+            MITM_REQUESTS_KEY.format(project_id="kept"),
+            FAILURE_LOG_DATA_KEY.format(project_id="kept", kind="upstream_timeout"),
         ) == 2
         assert await ImportResult(ImportSummary()).forget_removed_projects(redis_client) == 0
 

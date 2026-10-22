@@ -286,8 +286,8 @@ class TestServing:
         assert received.startswith(b"HTTP/1.1 502")
         assert gateway.snapshot().failures_by_kind == {"no_proxy_available": 1}
         await gateway.stop()
-        stream = FAILURE_LOG_KEY.format(project_id="project-1", kind="no_proxy_available")
-        assert await redis_client.client.xlen(stream) == 1
+        examples = FAILURE_LOG_KEY.format(project_id="project-1", kind="no_proxy_available")
+        assert await redis_client.client.zcard(examples) == 1
 
     async def test_a_disabled_failure_log_keeps_no_examples_but_the_kind_is_counted(
         self, gateways: Gateways, feed: FeedBuilder, publish: Any, redis_client: RedisClient
@@ -304,8 +304,8 @@ class TestServing:
         # No publisher loop runs for it.
         assert WorkerName.FAILURE_LOG_PUBLISHER not in [task.get_name() for task in gateway.background_tasks]
         await gateway.stop()
-        stream = FAILURE_LOG_KEY.format(project_id="project-1", kind="no_proxy_available")
-        assert await redis_client.client.xlen(stream) == 0
+        examples = FAILURE_LOG_KEY.format(project_id="project-1", kind="no_proxy_available")
+        assert await redis_client.client.zcard(examples) == 0
 
     async def test_the_proxy_port_refuses_connections_until_a_feed_is_applied(
         self, gateways: Gateways, feed: FeedBuilder, publish: Any, upstream: _ConnectProxy

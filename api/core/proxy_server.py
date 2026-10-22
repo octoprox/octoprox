@@ -33,6 +33,7 @@ from api.core.failure_log import (
     classify_upstream_error,
     set_request_info,
 )
+from api.core.http_tunnel import TunnelRefusedError, open_http_tunnel
 from api.core.keepalive import set_keepalive
 from api.core.logging import error_text
 from api.core.signals import request_completed, request_failed, request_rejected
@@ -377,6 +378,7 @@ class ProxyServer:
             kind, upstream_status = FailureKind.CLIENT_CLOSED, None
         else:
             kind, upstream_status = classify_upstream_error(exc, proxy)
+        upstream_message = exc.vendor_message if isinstance(exc, TunnelRefusedError) else None
         message = str(exc)
         if not message:
             if kind is FailureKind.UPSTREAM_TIMEOUT:
@@ -385,7 +387,8 @@ class ProxyServer:
                 message = type(exc).__name__
         return build_failure(
             project_id, kind, status, message,
-            proxy=proxy, exc=exc, latency_ms=latency_ms, upstream_status=upstream_status,
+            proxy=proxy, exc=exc, latency_ms=latency_ms,
+            upstream_status=upstream_status, upstream_message=upstream_message,
         )
 
     async def _send_upstream_error(
@@ -397,12 +400,13 @@ class ProxyServer:
         build_failure has scrubbed of the upstream's credentials. A client
         that stalled is told its own doing, not the upstream's. A vendor's
         refusal is worded as one, so "429 Too Many Requests" under a 502
-        reads as the vendor's answer, not ours.
+        reads as the vendor's answer, not ours, followed by what the vendor
+        said about it.
         """
         if message is None or failure.kind is FailureKind.CLIENT_CLOSED:
             message = failure.message
         if failure.kind is FailureKind.UPSTREAM_REJECTED:
-            message = refusal_message(message)
+            message = refusal_message(message, failure.upstream_message)
         status = upstream_proxy_status(failure)
         await self._send_error(
             writer, failure.status, phrase, message,
@@ -449,8 +453,8 @@ class ProxyServer:
     ) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
         """Connect to target through upstream proxy.
 
-        Uses python-socks library to handle SOCKS4, SOCKS5, and HTTP CONNECT
-        proxy protocols.
+        An HTTP upstream gets Octoprox's own CONNECT, which keeps what the
+        vendor says when it refuses; python-socks handles SOCKS4 and SOCKS5.
 
         Args:
             proxy: The upstream proxy to connect through
@@ -464,11 +468,15 @@ class ProxyServer:
             ConnectionError: If connection or handshake fails
             TimeoutError: If connection times out
         """
-        # Create proxy instance from URL (handles all protocol types). The
-        # target name travels to the proxy unresolved on every protocol:
+        # The target name travels to the proxy unresolved on every protocol:
         # SOCKS5 and HTTP CONNECT carry names natively, and rdns makes SOCKS4
         # use its 4a form instead of resolving here, so no path looks a
         # target up on this host.
+        if proxy.protocol is ProxyProtocol.HTTP:
+            return await asyncio.wait_for(
+                open_http_tunnel(proxy.host, proxy.port, proxy.username, proxy.password, target_host, target_port),
+                timeout=self._timeout,
+            )
         socks_proxy = SocksProxy.from_url(proxy.url, rdns=True)
 
         # Connect through the proxy - returns a socket with tunnel established

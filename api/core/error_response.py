@@ -36,38 +36,46 @@ _UPSTREAM_ERROR_TYPES = {
 _NOT_PRINTABLE = re.compile(r"[^\x21-\x7e]+")
 
 
+def _folded(text: str) -> str:
+    """``text`` as printable ASCII on one line, cut to ``MAX_REASON_DETAIL_CHARS``."""
+    folded = unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode()
+    folded = _NOT_PRINTABLE.sub(" ", folded).strip()
+    if len(folded) > MAX_REASON_DETAIL_CHARS:
+        folded = folded[: MAX_REASON_DETAIL_CHARS - 3].rstrip() + "..."
+    return folded
+
+
 def reason_phrase(phrase: str, detail: str = "") -> str:
     """The status line's reason phrase: ``phrase``, then ``detail`` in parentheses.
 
     The detail is folded to printable ASCII on one line: it can quote a
     vendor's answer, and a line break in it would end the status line.
     """
-    folded = unicodedata.normalize("NFKD", detail).encode("ascii", "ignore").decode()
-    folded = _NOT_PRINTABLE.sub(" ", folded).strip()
-    if not folded:
-        return phrase
-    if len(folded) > MAX_REASON_DETAIL_CHARS:
-        folded = folded[: MAX_REASON_DETAIL_CHARS - 3].rstrip() + "..."
-    return f"{phrase} ({folded})"
+    folded = _folded(detail)
+    return f"{phrase} ({folded})" if folded else phrase
 
 
-def refusal_message(answer: str) -> str:
-    """What the client is told when the upstream proxy refused the tunnel with ``answer``."""
-    return f"Upstream proxy refused the tunnel: {answer}" if answer else "Upstream proxy refused the tunnel"
+def refusal_message(answer: str, vendor_message: str | None = None) -> str:
+    """What the client is told when the upstream proxy refused the tunnel with ``answer``, and said ``vendor_message``."""
+    message = f"Upstream proxy refused the tunnel: {answer}" if answer else "Upstream proxy refused the tunnel"
+    return f"{message}. The vendor said: {vendor_message}" if vendor_message else message
 
 
-def proxy_status(error: str, received_status: int | None = None) -> str:
-    """A Proxy-Status value naming ``error``, an RFC 9209 error type, and the next hop's status."""
+def proxy_status(error: str, received_status: int | None = None, details: str | None = None) -> str:
+    """A Proxy-Status value naming ``error``, an RFC 9209 error type, the next hop's status, and ``details``."""
     value = f"{PROXY_NAME}; error={error}"
     if received_status is not None:
         value += f"; received-status={received_status}"
+    if details and (folded := _folded(details)):
+        escaped = folded.replace("\\", "\\\\").replace('"', '\\"')
+        value += f'; details="{escaped}"'
     return value
 
 
 def upstream_proxy_status(failure: RequestFailure) -> str | None:
-    """The Proxy-Status value for a failure of the upstream leg; None when there is nothing to name."""
+    """The Proxy-Status value for a failure of the upstream leg, with what the vendor said; None when there is nothing to name."""
     error = _UPSTREAM_ERROR_TYPES.get(failure.kind)
-    return None if error is None else proxy_status(error, failure.upstream_status)
+    return None if error is None else proxy_status(error, failure.upstream_status, failure.upstream_message)
 
 
 def refused_proxy_status(received_status: int | None) -> str:

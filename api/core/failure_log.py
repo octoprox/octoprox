@@ -4,17 +4,20 @@
 """The per-project failure log: why requests failed, for the Failures page, written to Redis a window at a time.
 
 Each window counts every failure and keeps folded, capped examples per kind, so a flood of one never pushes out the rare.
+In Redis every gateway's windows add up in one row per distinct failure.
 """
 
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 import socket
 from collections import Counter
 from collections.abc import Callable, Sequence
 from contextvars import ContextVar
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 from urllib.parse import quote
 
@@ -23,7 +26,7 @@ from python_socks import ProxyConnectionError, ProxyError
 
 from api.core import utc_now
 from api.core.publishers import BatchPublisher
-from api.core.stats import FailureCountKey, FailureKind
+from api.core.stats import FailureCountKey, FailureExample, FailureKind
 from api.core.workers import WorkerName
 from api.models.proxy import ProxyProtocol
 
@@ -91,17 +94,23 @@ class RequestFailure:
     connector_id: str | None = None
     # host:port Octoprox dials for the upstream, never its credentials
     proxy: str | None = None
-    # The vendor's HTTP status when an HTTP upstream refused the request.
+    # The vendor's HTTP status when an HTTP upstream refused the request, and
+    # what it said about it besides (its explaining headers and body text).
     upstream_status: int | None = None
+    upstream_message: str | None = None
     latency_ms: float | None = None
     at: datetime = field(default_factory=utc_now)
 
     def coalesce_key(self) -> tuple[Any, ...]:
         """Failures equal in everything but time and session are folded into one entry."""
         return (
-            self.project_id, self.kind, self.status, self.upstream_status, self.error_type, self.message,
-            self.method, self.target, self.location, self.peer_id, self.proxy_id,
+            self.project_id, self.kind, self.status, self.upstream_status, self.upstream_message, self.error_type,
+            self.message, self.method, self.target, self.location, self.peer_id, self.proxy_id,
         )
+
+    def fingerprint(self) -> str:
+        """The coalesce key as a short hash, the same on every gateway: the row in Redis this failure adds to."""
+        return hashlib.blake2b(json.dumps(self.coalesce_key()).encode(), digest_size=8).hexdigest()
 
     def count_key(self) -> FailureCountKey:
         """What the failure is counted under in failure_metrics."""
@@ -118,6 +127,7 @@ def build_failure(
     exc: BaseException | None = None,
     latency_ms: float | None = None,
     upstream_status: int | None = None,
+    upstream_message: str | None = None,
     method: str | None = None,
     target: str | None = None,
 ) -> RequestFailure:
@@ -129,7 +139,10 @@ def build_failure(
     info = _request_info.get()
     if proxy is not None:
         message = _scrub(message, proxy)
+        upstream_message = _scrub(upstream_message, proxy) if upstream_message else upstream_message
     message = _URL_QUERY.sub(r"\1", message)
+    if upstream_message:
+        upstream_message = _URL_QUERY.sub(r"\1", upstream_message)[:MAX_MESSAGE_CHARS]
     return RequestFailure(
         project_id=project_id,
         kind=kind,
@@ -147,6 +160,7 @@ def build_failure(
         # The address dialled, as error texts name it; not the discovered exit IP.
         proxy=f"{proxy.host}:{proxy.port}" if proxy else None,
         upstream_status=upstream_status,
+        upstream_message=upstream_message or None,
         latency_ms=round(latency_ms, 1) if latency_ms is not None else None,
     )
 
@@ -207,11 +221,10 @@ class _Entry:
             self.latency_total += failure.latency_ms
             self.latency_n += 1
 
-    def fields(self, connector_name: str | None) -> dict[str, str]:
+    def example(self, connector_name: str | None) -> FailureExample:
+        """The window's part of the example: the first failure's description, and how often and when."""
         f = self.first
-        latency = self.latency_total / self.latency_n if self.latency_n else None
         values: dict[str, Any] = {
-            "kind": f.kind.value,
             "status": f.status,
             "message": f.message,
             "error_type": f.error_type,
@@ -226,12 +239,24 @@ class _Entry:
             "connector_name": connector_name,
             "proxy": f.proxy,
             "upstream_status": f.upstream_status,
-            "latency_ms": round(latency, 1) if latency is not None else None,
-            "count": self.count,
-            "first_at": f.at.isoformat(),
-            "last_at": (self.last_at or f.at).isoformat(),
+            "upstream_message": f.upstream_message,
         }
-        return {k: str(v) for k, v in values.items() if v is not None}
+        return FailureExample(
+            project_id=f.project_id,
+            kind=f.kind.value,
+            fingerprint=f.fingerprint(),
+            fields=json.dumps({k: v for k, v in values.items() if v is not None}),
+            count=self.count,
+            first_ms=_epoch_ms(f.at),
+            last_ms=_epoch_ms(self.last_at or f.at),
+            latency_total=round(self.latency_total, 1),
+            latency_n=self.latency_n,
+        )
+
+
+def _epoch_ms(at: datetime) -> int:
+    """A naive UTC time (``utc_now``) in epoch milliseconds."""
+    return int(at.replace(tzinfo=UTC).timestamp() * 1000)
 
 
 class FailureLog(BatchPublisher):
@@ -295,20 +320,14 @@ class FailureLog(BatchPublisher):
         return len(self._pending) + len(self._counts)
 
     def _cut(self, redis_client: RedisClient) -> Sequence[BatchPart]:
-        """The window as batch parts, its examples oldest first, and a new window begun."""
+        """The window as batch parts, and a new window begun."""
         pending, self._pending = self._pending, {}
         counts, self._counts = self._counts, Counter()
         self._distinct = Counter()
-        # Oldest first, so each stream (newest last) reads in the order things happened.
-        ordered = sorted(pending.values(), key=lambda e: e.last_at or e.first.at)
-        entries = [
-            (
-                e.first.project_id,
-                e.first.kind.value,
-                e.fields(self._connector_name(e.first.connector_id) if e.first.connector_id else None),
-            )
-            for e in ordered
+        examples = [
+            e.example(self._connector_name(e.first.connector_id) if e.first.connector_id else None)
+            for e in pending.values()
         ]
         return redis_client.failures_batch(
-            entries, dict(counts), max_entries=self._max_entries, retention_seconds=self._retention_seconds
+            examples, dict(counts), max_entries=self._max_entries, retention_seconds=self._retention_seconds
         )

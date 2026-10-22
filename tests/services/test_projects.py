@@ -15,7 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from api.core.roles import JobKind
 from api.core.stats import FailureKind, MetricDelta
 from api.db.redis import (
-    FAILURE_LOG_APPENDED_KEY,
+    FAILURE_LOG_DATA_KEY,
     FAILURE_LOG_KEY,
     MITM_REQUESTS_KEY,
     PROJECT_METRICS_KEY,
@@ -204,8 +204,8 @@ class TestDelete:
         """Keyed deletes only: the metrics window goes with the next flush, which drops a gone project's counts."""
         owned = [
             MITM_REQUESTS_KEY.format(project_id=project.id),
-            FAILURE_LOG_APPENDED_KEY.format(project_id=project.id),
             *(FAILURE_LOG_KEY.format(project_id=project.id, kind=kind.value) for kind in FailureKind),
+            *(FAILURE_LOG_DATA_KEY.format(project_id=project.id, kind=kind.value) for kind in FailureKind),
         ]
         for key in owned:
             await redis_client.client.set(key, "x")

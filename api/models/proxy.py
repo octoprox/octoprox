@@ -7,6 +7,7 @@ from collections.abc import Mapping
 from datetime import datetime
 from enum import StrEnum
 from typing import Any
+from urllib.parse import quote
 from uuid import uuid4
 
 from pydantic import BaseModel, Field, field_validator
@@ -34,6 +35,15 @@ class ProxyProtocol(StrEnum):
     HTTPS = "https"
     SOCKS4 = "socks4"
     SOCKS5 = "socks5"
+
+
+def proxy_url(protocol: str, host: str, port: int, username: str | None, password: str | None) -> str:
+    """A proxy URL whose credentials every client that parses it gets back exactly as stored.
+
+    They are escaped: a URL parser decodes ``%xx`` in them and ends them at ``/``, ``?`` or ``#``.
+    """
+    auth = f"{quote(username, safe='')}:{quote(password, safe='')}@" if username and password else ""
+    return f"{protocol}://{auth}{host}:{port}"
 
 
 class ProxyStatus(StrEnum):
@@ -84,11 +94,8 @@ class Proxy(BaseModel):
 
     @property
     def url(self) -> str:
-        """Get the proxy URL."""
-        auth = ""
-        if self.username and self.password:
-            auth = f"{self.username}:{self.password}@"
-        return f"{self.protocol.value}://{auth}{self.host}:{self.port}"
+        """The proxy URL, its credentials escaped (``proxy_url``)."""
+        return proxy_url(self.protocol, self.host, self.port, self.username, self.password)
 
     @property
     def effective_display_host(self) -> str:

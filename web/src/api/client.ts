@@ -1770,9 +1770,9 @@ export const clearMitmRequests = async (projectId: string): Promise<void> => {
 
 // Failure log types
 
-/** One example: a failure, or several identical ones folded together within a few seconds. */
+/** One example: a failure, and every identical one since, whichever gateway saw it. */
 export interface FailureRecord {
-  /** Stream ID and kind; the cursor for the next (older) page. */
+  /** Kind and fingerprint; the same while the failure recurs. */
   id: string
   /** e.g. upstream_timeout, no_proxy_available */
   kind: string
@@ -1794,6 +1794,8 @@ export interface FailureRecord {
   proxy: string | null
   /** The vendor's HTTP status when it refused the request. */
   upstream_status: number | null
+  /** What the vendor said about its refusal besides the status: its error headers and body text. */
+  upstream_message: string | null
   latency_ms: number | null
   count: number
   first_at: string
@@ -1805,8 +1807,8 @@ export interface FailureLogResponse {
   next_cursor: string | null
   /** Examples the log holds, of the kind asked for or of all kinds. */
   total: number
-  /** Examples ever appended; compare with the head to know how many are newer. */
-  appended: number
+  /** Where the log stood when read; the head counts the examples changed since. */
+  newest: number
   enabled: boolean
   /** Examples kept per kind. */
   max_entries: number
@@ -1814,7 +1816,8 @@ export interface FailureLogResponse {
 }
 
 export interface FailureLogHead {
-  appended: number
+  /** Examples new or seen again since the page was read. */
+  changed: number
   total: number
 }
 
@@ -1849,8 +1852,10 @@ export const fetchFailures = async (
   return response.data
 }
 
-export const fetchFailureHead = async (projectId: string, kind?: string | null): Promise<FailureLogHead> => {
-  const response = await api.get(`/projects/${projectId}/failures/head`, { params: kind ? { kind } : {} })
+export const fetchFailureHead = async (projectId: string, since: number, kind?: string | null): Promise<FailureLogHead> => {
+  const params: Record<string, string | number> = { since }
+  if (kind) params.kind = kind
+  const response = await api.get(`/projects/${projectId}/failures/head`, { params })
   return response.data
 }
 

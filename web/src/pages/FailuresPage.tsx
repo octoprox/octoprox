@@ -6,9 +6,10 @@
  *
  * - "What failed" reads the failure counts from the metrics history: every
  *   failure, for the selected time range, refreshed every half minute.
- * - "Examples" reads the failure log, a sample kept per kind. It does not
- *   refresh under the reader: newer examples are announced and loaded on
- *   request, and an opened example stays open whatever arrives.
+ * - "Examples" reads the failure log: one row per distinct failure, kept
+ *   per kind, which every gateway adds to. It does not refresh under the
+ *   reader: new or recurring examples are announced and loaded on request,
+ *   and an opened example stays open whatever arrives.
  */
 
 import { useEffect, useMemo, useState } from 'react'
@@ -89,19 +90,19 @@ export default function FailuresPage() {
     refetchOnWindowFocus: false,
   })
   const records = useMemo(() => examples.data?.pages.flatMap((p) => p.records) ?? [], [examples.data])
+  // An example keeps its id while it recurs: once reloaded, the open one shows its latest count and times.
+  const shown = useMemo(() => (open ? (records.find((r) => r.id === open.id) ?? open) : null), [open, records])
   const meta = examples.data?.pages[0]
   // Keyed by the load it is set against, and only polled once that load is
-  // in: a head fetched before a reload is never compared with the reloaded
-  // page, where it would read as a clear and announce every example as new.
+  // in: a head fetched for an earlier load is never shown against this one.
   const head = useQuery({
-    queryKey: ['failures-head', selectedProjectId, kindFilter, meta?.appended],
-    queryFn: () => fetchFailureHead(selectedProjectId!, kindFilter),
+    queryKey: ['failures-head', selectedProjectId, kindFilter, meta?.newest],
+    queryFn: () => fetchFailureHead(selectedProjectId!, meta!.newest, kindFilter),
     enabled: !!selectedProjectId && !!meta,
     refetchInterval: 10000,
   })
-  // How many examples arrived since the first page was loaded. A head below
-  // what was loaded means the log was cleared or expired since: all of it is new.
-  const newer = meta && head.data ? (head.data.appended >= meta.appended ? head.data.appended - meta.appended : head.data.appended) : 0
+  // How many examples are new, or happened again, since the first page was loaded.
+  const newer = head.data?.changed ?? 0
 
   // Heads kept for earlier loads are emptied too, so a key that comes round again starts without stale data.
   const resetHeads = () => queryClient.resetQueries({ queryKey: ['failures-head', selectedProjectId] })
@@ -188,10 +189,17 @@ export default function FailuresPage() {
       },
     },
     {
-      accessorKey: 'message',
+      id: 'message',
       header: 'Message',
+      // The vendor's own words follow ours, so the filter finds either.
+      accessorFn: (row) => (row.upstream_message ? `${row.message} · ${row.upstream_message}` : row.message),
       meta: { filterVariant: 'text' as const },
-      cell: ({ getValue }) => <span className="text-xs text-fg-muted truncate block" title={getValue<string>()}>{getValue<string>()}</span>,
+      cell: ({ row, getValue }) => (
+        <span className="text-xs text-fg-muted truncate block" title={getValue<string>()}>
+          {row.original.message}
+          {row.original.upstream_message && <span className="text-fg"> · {row.original.upstream_message}</span>}
+        </span>
+      ),
     },
     {
       accessorKey: 'count',
@@ -218,7 +226,7 @@ export default function FailuresPage() {
       actions={nothingAtAll ? (
         <Segmented options={HISTORY_RANGES.map((r) => ({ value: r, label: r }))} value={range} onChange={setRange} size="sm" />
       ) : undefined}
-      panel={open ? <FailurePanel key={open.id} record={open} onClose={() => setOpen(null)} /> : null}
+      panel={shown ? <FailurePanel key={shown.id} record={shown} onClose={() => setOpen(null)} /> : null}
     >
       {meta && !meta.enabled && (
         <Alert variant="warning">
@@ -262,12 +270,12 @@ export default function FailuresPage() {
                     {kindInfo(kindFilter).label} <X className="w-3 h-3" />
                   </button>
                 ) : (
-                  <span className="text-xs text-fg-subtle truncate">newest first, every kind</span>
+                  <span className="text-xs text-fg-subtle truncate">last seen first, every kind</span>
                 )}
               </div>
               {newer > 0 && (
                 <Button variant="outline" size="sm" onClick={showNewest} className="flex-none">
-                  <ArrowUp className="w-3.5 h-3.5" /> {newer > 999 ? '999+' : newer.toLocaleString()} newer {plural(newer, 'example', 'examples')}, show
+                  <ArrowUp className="w-3.5 h-3.5" /> {newer > 999 ? '999+' : newer.toLocaleString()} new or recurring, show
                 </Button>
               )}
             </div>
@@ -292,7 +300,7 @@ export default function FailuresPage() {
               <div className="flex items-center justify-between flex-wrap gap-2 text-xs text-fg-subtle">
                 <span>
                   {records.length.toLocaleString()} of {meta.total.toLocaleString()} {plural(meta.total, 'example', 'examples')} loaded.
-                  {' '}Examples are a sample: the newest {meta.max_entries.toLocaleString()} of each kind are kept for {retentionLabel(meta.retention_hours)}, and identical failures within a few seconds share one. The counts above include every failure.
+                  {' '}Identical failures share one example, which counts them and moves up each time they happen again. The {meta.max_entries.toLocaleString()} seen last of each kind are kept, each until it has not happened for {retentionLabel(meta.retention_hours)}. The counts above include every failure.
                 </span>
                 <span className="flex items-center gap-2">
                   {examples.hasNextPage && (

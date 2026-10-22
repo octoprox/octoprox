@@ -61,7 +61,7 @@ export const KIND_INFO: Record<string, KindInfo> = {
     label: 'Refused by the vendor',
     group: 'upstream',
     color: '#ea580c',
-    hint: 'The upstream proxy answered with an error instead of connecting. Its status says why: 407 means the vendor rejected the connector\'s credentials, 403 that the account may not reach this target or zone, 502 or 503 that the vendor had no exit for the request or could not reach the target.',
+    hint: 'The upstream proxy answered with an error instead of connecting. Its status, and the vendor\'s own message when it sends one, say why: 407 means the vendor rejected the connector\'s credentials, 403 that the account may not reach this target or zone, 502 or 503 that the vendor had no exit for the request or could not reach the target.',
   },
   upstream_error: {
     label: 'Upstream error',
@@ -164,6 +164,15 @@ export function FailurePanel({ record, onClose }: { record: FailureRecord; onClo
           {record.message && <CopyButton text={record.message} className="" />}
         </div>
         {record.error_type && <p className="text-[11px] text-fg-subtle mt-1">{record.error_type}</p>}
+        {record.upstream_message && (
+          <div className="mt-2 pt-2 border-t border-line">
+            <p className="text-[11px] text-fg-subtle mb-1">The vendor said</p>
+            <div className="flex items-start gap-2">
+              <p className="font-mono text-xs wrap-break-word leading-relaxed text-fg flex-1 min-w-0">{record.upstream_message}</p>
+              <CopyButton text={record.upstream_message} className="" />
+            </div>
+          </div>
+        )}
       </div>
 
       {info.hint && <p className="text-[12.5px] text-fg-muted leading-relaxed">{info.hint}</p>}

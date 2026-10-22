@@ -7,12 +7,15 @@ The examples are written to Redis as a gateway's failure log writes them,
 and the counts to Postgres as a worker's metrics flush writes them.
 """
 
-from datetime import timedelta
+import asyncio
+import json
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from starlette.testclient import TestClient
 
 from api.core import utc_now
+from api.core.stats import FailureExample
 from api.db.models import FailureMetricsModel
 from api.db.redis import RedisClient
 from api.db.repository import MetricsRepository
@@ -20,34 +23,41 @@ from api.db.session import SessionFactory
 from tests.conftest import api_runtime, on_app_loop
 
 
-def _entry(i: int = 0, **overrides: str) -> dict[str, str]:
-    fields = {
-        "kind": "upstream_rejected",
-        "status": "502",
+def _entry(i: int = 0, kind: str = "upstream_rejected", **overrides: Any) -> tuple[str, dict[str, Any]]:
+    """An example's kind and description, as a gateway's failure log writes them."""
+    fields: dict[str, Any] = {
+        "status": 502,
         "message": "407 Proxy Authentication Required",
-        "error_type": "ProxyError",
+        "error_type": "TunnelRefusedError",
         "method": "CONNECT",
         "target": f"host{i}.example:443",
         "proxy_id": "proxy-1",
         "connector_id": "connector-1",
         "connector_name": "Bright Data",
         "proxy": "brd.superproxy.io:33335",
-        "upstream_status": "407",
-        "latency_ms": "41.5",
-        "count": "3",
-        "first_at": f"2026-10-15T10:00:{i:02d}",
-        "last_at": f"2026-10-15T10:00:{i:02d}.5",
+        "upstream_status": 407,
+        "upstream_message": "x-brd-error: Auth failed",
     }
     fields.update(overrides)
-    return fields
+    return kind, {k: v for k, v in fields.items() if v is not None}
 
 
-async def _append(redis_client: RedisClient, project_id: str, entries: list[dict[str, str]]) -> None:
-    """Examples as one window of the failure log writes them, oldest first."""
-    parts = redis_client.failures_batch(
-        [(project_id, e["kind"], e) for e in entries], {}, max_entries=1000, retention_seconds=3600
-    )
-    await redis_client.send_batch(parts)
+def _ms(text: str) -> int:
+    return int(datetime.fromisoformat(text).replace(tzinfo=UTC).timestamp() * 1000)
+
+
+async def _append(redis_client: RedisClient, project_id: str, entries: list[tuple[str, dict[str, Any]]]) -> None:
+    """Examples as gateways' windows add them, oldest first, each three times over 41.5 ms on average."""
+    for i, (kind, fields) in enumerate(entries):
+        example = FailureExample(
+            project_id=project_id, kind=kind, fingerprint=fields["target"].encode().hex(), fields=json.dumps(fields),
+            count=3, first_ms=_ms(f"2026-10-15T10:00:{i:02d}"), last_ms=_ms(f"2026-10-15T10:00:{i:02d}.5"),
+            latency_total=124.5, latency_n=3,
+        )
+        await redis_client.send_batch(
+            redis_client.failures_batch([example], {}, max_entries=1000, retention_seconds=3600)
+        )
+        await asyncio.sleep(0.005)  # Redis's clock ranks them
 
 
 def _seed_counts(client: TestClient, project_id: str, connector_id: str) -> None:
@@ -87,7 +97,7 @@ class TestListFailures:
         assert data["records"] == []
         assert data["next_cursor"] is None
         assert data["total"] == 0
-        assert data["appended"] == 0
+        assert data["newest"] == 0
         assert data["enabled"] is True
         assert data["max_entries"] > 0
 
@@ -112,9 +122,9 @@ class TestListFailures:
     ) -> None:
         url = f"/api/v1/projects/{created_project['id']}/failures"
         assert authenticated_client.get(url, params={"cursor": "abc"}).status_code == 422
-        assert authenticated_client.get(url, params={"cursor": "0-0"}).status_code == 422
+        assert authenticated_client.get(url, params={"cursor": "0:upstream_timeout"}).status_code == 422
         assert authenticated_client.get(url, params={"kind": "nonsense"}).status_code == 422
-        response = authenticated_client.get(url, params={"cursor": "0-0:upstream_timeout"})
+        response = authenticated_client.get(url, params={"cursor": "0:upstream_timeout:ab12"})
         assert response.status_code == 200
         assert response.json()["records"] == []
 
@@ -124,7 +134,7 @@ class TestListFailures:
         project_id = created_project["id"]
         await _append(redis_client, project_id, [
             _entry(0),
-            _entry(1, kind="upstream_timeout", status="504", upstream_status="", message="No answer"),
+            _entry(1, kind="upstream_timeout", status=504, upstream_status=None, upstream_message=None, message="No answer"),
             _entry(2),
         ])
 
@@ -132,15 +142,17 @@ class TestListFailures:
 
         assert [r["target"] for r in data["records"]] == [f"host{i}.example:443" for i in (2, 1, 0)]
         record = data["records"][0]
-        assert record["id"].endswith(":upstream_rejected")
+        assert record["id"] == f"upstream_rejected:{b'host2.example:443'.hex()}"
         assert record["status"] == 502
-        assert record["upstream_status"] == 407
+        assert (record["upstream_status"], record["upstream_message"]) == (407, "x-brd-error: Auth failed")
         assert record["count"] == 3
         assert record["latency_ms"] == 41.5
+        assert (record["first_at"], record["last_at"]) == ("2026-10-15T10:00:02.000000", "2026-10-15T10:00:02.500000")
         assert record["connector_name"] == "Bright Data"
         assert record["session_id"] is None
-        assert data["records"][1]["upstream_status"] is None
-        assert (data["total"], data["appended"]) == (3, 3)
+        assert (data["records"][1]["upstream_status"], data["records"][1]["upstream_message"]) == (None, None)
+        assert data["total"] == 3
+        assert data["newest"] > 0
 
     async def test_one_kind(
         self, authenticated_client: TestClient, created_project: dict[str, Any], redis_client: RedisClient
@@ -152,7 +164,7 @@ class TestListFailures:
             f"/api/v1/projects/{project_id}/failures", params={"kind": "upstream_timeout"}
         ).json()
         assert [r["target"] for r in data["records"]] == ["host1.example:443"]
-        assert (data["total"], data["appended"]) == (1, 1)
+        assert data["total"] == 1
 
     async def test_pagination(
         self, authenticated_client: TestClient, created_project: dict[str, Any], redis_client: RedisClient
@@ -165,7 +177,7 @@ class TestListFailures:
 
         first = authenticated_client.get(url, params={"count": 2}).json()
         assert [r["target"] for r in first["records"]] == ["host4.example:443", "host3.example:443"]
-        assert first["next_cursor"] == first["records"][-1]["id"]
+        assert first["next_cursor"].endswith(first["records"][-1]["id"])
 
         rest = authenticated_client.get(url, params={"count": 10, "cursor": first["next_cursor"]}).json()
         assert [r["target"] for r in rest["records"]] == [f"host{i}.example:443" for i in (2, 1, 0)]
@@ -178,21 +190,21 @@ class TestListFailures:
 
 
 class TestHead:
-    async def test_tells_how_many_examples_arrived_since(
+    async def test_tells_how_many_examples_are_new_or_seen_again_since(
         self, authenticated_client: TestClient, created_project: dict[str, Any], redis_client: RedisClient
     ) -> None:
         project_id = created_project["id"]
-        await _append(redis_client, project_id, [_entry(0)])
-        loaded = authenticated_client.get(f"/api/v1/projects/{project_id}/failures").json()["appended"]
+        url = f"/api/v1/projects/{project_id}/failures"
+        await _append(redis_client, project_id, [_entry(0), _entry(1)])
+        newest = authenticated_client.get(url).json()["newest"]
+        assert authenticated_client.get(f"{url}/head", params={"since": newest}).json() == {"changed": 0, "total": 2}
 
-        await _append(redis_client, project_id, [_entry(1), _entry(2, kind="upstream_timeout")])
-        head = authenticated_client.get(f"/api/v1/projects/{project_id}/failures/head").json()
-        assert head["appended"] - loaded == 2
-        assert head["total"] == 3
-        one_kind = authenticated_client.get(
-            f"/api/v1/projects/{project_id}/failures/head", params={"kind": "upstream_timeout"}
-        ).json()
-        assert one_kind == {"appended": 1, "total": 1}
+        # One seen again, one new.
+        await _append(redis_client, project_id, [_entry(0), _entry(2, kind="upstream_timeout")])
+        head = authenticated_client.get(f"{url}/head", params={"since": newest}).json()
+        assert head == {"changed": 2, "total": 3}
+        one_kind = authenticated_client.get(f"{url}/head", params={"since": newest, "kind": "upstream_timeout"}).json()
+        assert one_kind == {"changed": 1, "total": 1}
 
     def test_unknown_project(self, authenticated_client: TestClient) -> None:
         assert authenticated_client.get("/api/v1/projects/nope/failures/head").status_code == 404
@@ -259,7 +271,7 @@ class TestClearFailures:
 
         assert authenticated_client.delete(f"/api/v1/projects/{project_id}/failures").status_code == 200
         data = authenticated_client.get(f"/api/v1/projects/{project_id}/failures").json()
-        assert data["records"] == [] and data["appended"] == 0
+        assert data["records"] == [] and data["total"] == 0
 
     async def test_viewers_can_read_but_not_clear(
         self,
@@ -285,10 +297,9 @@ class TestClearFailures:
     ) -> None:
         """The examples go with the project; its counts not flushed yet are dropped by the metrics flush (``tests/jobs/test_metrics.py``)."""
         project_id = created_project["id"]
+        await _append(redis_client, project_id, [_entry()])
         parts = redis_client.failures_batch(
-            [(project_id, "upstream_rejected", _entry())],
-            {(project_id, None, "no_proxy_available", None): 3},
-            max_entries=1000, retention_seconds=3600,
+            [], {(project_id, None, "no_proxy_available", None): 3}, max_entries=1000, retention_seconds=3600
         )
         await redis_client.send_batch(parts)
 
@@ -297,5 +308,4 @@ class TestClearFailures:
         )
         assert response.status_code == 204
         assert await redis_client.count_failures(project_id, ["upstream_rejected"]) == 0
-        assert await redis_client.failures_appended(project_id) == {}
         assert authenticated_client.get(f"/api/v1/projects/{project_id}/failures").status_code == 404

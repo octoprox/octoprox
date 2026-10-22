@@ -10,7 +10,6 @@ puts back what it owns on its next cycle.
 import asyncio
 import json
 import secrets
-import time
 from abc import ABC, abstractmethod
 from collections import Counter
 from collections.abc import Awaitable, Callable, Collection, Iterable, Iterator, Mapping, Sequence
@@ -35,6 +34,7 @@ from api.core.stats import (
     DemandCountKey,
     FailureCount,
     FailureCountKey,
+    FailureExample,
     FailureKind,
     HostKey,
     MetricDelta,
@@ -75,13 +75,15 @@ STICKY_BINDING_KEY = KEY_PREFIX + "sticky:{project_id}:{session_id}"
 # A project's MITM captures (api.core.mitm.handler): one stream capped at
 # about a thousand entries, kept until they are cleared or the project goes.
 MITM_REQUESTS_KEY = KEY_PREFIX + "mitm:requests:{project_id}"
-# Each project's failure log (api.core.failure_log): one capped stream of
-# examples per kind of failure, newest last, trimmed by length and age as it
-# is written, so a flood of one kind never pushes out the rare ones. The
-# appended hash counts the entries each stream has ever been given, which
-# tells the page how many are newer than the ones it shows.
-FAILURE_LOG_KEY = KEY_PREFIX + "failures:{project_id}:{kind}"
-FAILURE_LOG_APPENDED_KEY = KEY_PREFIX + "failures:{project_id}:appended"
+# Each project's failure log (api.core.failure_log), per kind of failure: a
+# sorted set of the examples' fingerprints, ranked by when Redis last took a
+# gateway's addition to them (its clock, one for every gateway), and a hash
+# with each example's description (JSON, under the fingerprint, written
+# once) and the tallies every gateway adds to (fingerprint:count, :first and
+# :last in epoch ms, :latency and :timed). Trimmed by age and count as it is
+# written, so a flood of one kind never pushes out the rare ones.
+FAILURE_LOG_KEY = KEY_PREFIX + "failure:log:{project_id}:{kind}"
+FAILURE_LOG_DATA_KEY = FAILURE_LOG_KEY + ":data"
 # Failure counts by (project, connector, kind, vendor status), the sixth hash
 # in the metrics pipeline: written by each gateway's failure log next to its
 # examples, taken by the metrics flush into failure_metrics. "-" stands for no
@@ -323,7 +325,6 @@ REDIS_KEY_GROUPS: tuple[tuple[str, str], ...] = (
     (_literal_prefix(METRICS_INDEX_KEY), "Metrics indexes"),
     (_literal_prefix(STICKY_BINDING_KEY), "Sticky bindings"),
     (_literal_prefix(MITM_REQUESTS_KEY), "MITM captures"),
-    # Covers the appended counts too (FAILURE_LOG_APPENDED_KEY).
     (_literal_prefix(FAILURE_LOG_KEY), "Failure log"),
     (_literal_prefix(INSTANCE_REGISTRY_KEY), "Instance heartbeats"),
     (INSTANCE_INDEX_KEY, "Instance heartbeats"),
@@ -517,40 +518,60 @@ end
 return math.max(0, before + (#ARGV - 4) - redis.call('XLEN', KEYS[2]))
 """
 
-# One part of a failure log window (RedisClient.failures_batch). The example
-# streams, appended hashes, count hashes and their index are KEYS from 2 on,
-# each named in ARGV by its position. ARGV[4] the retention, ARGV[5] each
-# stream's exact MAXLEN, ARGV[6] the MINID to trim to, ARGV[7] e, then per
-# example: its stream's position, its appended hash's position, its kind, its
-# ID, n, then n field/value pairs; then c, then per count: its hash's
-# position, its index's position, the count. An ID the stream has passed
-# (another gateway's) falls back to an automatic one. The trim is exact: an
-# approximate MINID drops only whole nodes, so a rarely failing kind would
-# outlive its retention.
+# One part of a failure log window (RedisClient.failures_batch). The kinds'
+# indexes and hashes, the count hashes and their index are KEYS from 2 on,
+# each named in ARGV by its position. ARGV[4] the retention in seconds,
+# ARGV[5] each index's cap, ARGV[6] e, then per example: its index's
+# position, its hash's position, its fingerprint, its description, its count,
+# first and last (epoch ms), latency total and how many failures were timed;
+# then c, then per count: its hash's position, its index's position, the
+# count. An example is ranked by Redis's clock, the same for every gateway,
+# so a page can ask what changed since it was read. Examples untouched for
+# the retention, then the oldest past the cap, leave the index and the hash
+# together.
 _FAILURES_SCRIPT = _BATCH_PROLOGUE + """
-local i = 7
+local clock = redis.call('TIME')
+local now = tonumber(clock[1]) * 1000 + math.floor(tonumber(clock[2]) / 1000)
+local i = 6
 local e = tonumber(ARGV[i]); i = i + 1
-local streams, appended = {}, {}
+local touched = {}
 for _ = 1, e do
-  local key, counts = KEYS[tonumber(ARGV[i])], KEYS[tonumber(ARGV[i + 1])]
-  local kind, id, n = ARGV[i + 2], ARGV[i + 3], tonumber(ARGV[i + 4])
-  i = i + 5
-  local entry = {}
-  for j = 0, 2 * n - 1 do entry[#entry + 1] = ARGV[i + j] end
-  i = i + 2 * n
-  local added = redis.pcall('XADD', key, 'MAXLEN', ARGV[5], id, unpack(entry))
-  if type(added) == 'table' and added.err then
-    redis.call('XADD', key, 'MAXLEN', ARGV[5], '*', unpack(entry))
+  local index, data, fp = KEYS[tonumber(ARGV[i])], KEYS[tonumber(ARGV[i + 1])], ARGV[i + 2]
+  local first, last = ARGV[i + 5], ARGV[i + 6]
+  if redis.call('HSETNX', data, fp, ARGV[i + 3]) == 1 then
+    redis.call('HSET', data, fp .. ':first', first, fp .. ':last', last)
+  else
+    if tonumber(first) < tonumber(redis.call('HGET', data, fp .. ':first') or first) then
+      redis.call('HSET', data, fp .. ':first', first)
+    end
+    if tonumber(last) > tonumber(redis.call('HGET', data, fp .. ':last') or last) then
+      redis.call('HSET', data, fp .. ':last', last)
+    end
   end
-  redis.call('HINCRBY', counts, kind, 1)
-  streams[key], appended[counts] = true, true
+  redis.call('HINCRBY', data, fp .. ':count', ARGV[i + 4])
+  if tonumber(ARGV[i + 8]) > 0 then
+    redis.call('HINCRBYFLOAT', data, fp .. ':latency', ARGV[i + 7])
+    redis.call('HINCRBY', data, fp .. ':timed', ARGV[i + 8])
+  end
+  redis.call('ZADD', index, string.format('%.0f', now), fp)
+  touched[index] = data
+  i = i + 9
 end
-for key in pairs(streams) do
-  redis.call('XTRIM', key, 'MINID', ARGV[6])
-  redis.call('EXPIRE', key, ARGV[4])
-end
-for key in pairs(appended) do
-  redis.call('EXPIRE', key, ARGV[4])
+for index, data in pairs(touched) do
+  local cutoff = string.format('%.0f', now - tonumber(ARGV[4]) * 1000)
+  local gone = redis.call('ZRANGE', index, '-inf', '(' .. cutoff, 'BYSCORE')
+  local over = redis.call('ZCARD', index) - #gone - tonumber(ARGV[5])
+  if over > 0 then
+    for _, fp in ipairs(redis.call('ZRANGE', index, #gone, #gone + over - 1)) do
+      gone[#gone + 1] = fp
+    end
+  end
+  for _, fp in ipairs(gone) do
+    redis.call('HDEL', data, fp, fp .. ':count', fp .. ':first', fp .. ':last', fp .. ':latency', fp .. ':timed')
+    redis.call('ZREM', index, fp)
+  end
+  redis.call('EXPIRE', index, ARGV[4])
+  redis.call('EXPIRE', data, ARGV[4])
 end
 local c = tonumber(ARGV[i]); i = i + 1
 for _ = 1, c do
@@ -674,6 +695,29 @@ class _PartKeys:
         return found
 
 
+class FailureCursor(NamedTuple):
+    """Where a failure log example stands: its rank (when Redis last took an addition to it, epoch ms), kind and fingerprint.
+
+    Pages order by the three, highest first.
+    """
+
+    rank: int
+    kind: str
+    fingerprint: str
+
+
+@dataclass(frozen=True)
+class FailureLogRow:
+    """One failure log example as read back: its description (the window that made it) and what every gateway added up."""
+
+    cursor: FailureCursor
+    fields: dict[str, Any]
+    count: int
+    first_ms: int
+    last_ms: int
+    latency_ms: float | None
+
+
 class StreamId(NamedTuple):
     """A stream entry ID, ``<milliseconds>-<sequence>``, as numbers that order as Redis orders IDs."""
 
@@ -732,10 +776,14 @@ def _decode(value: str | bytes) -> str:
 
 
 def failure_log_keys(project_id: str, kinds: Iterable[str]) -> list[str]:
-    """Every key of a project's failure log for ``kinds``: one example stream per kind, and the appended counts."""
+    """Every key of a project's failure log for ``kinds``: each kind's index and its examples' hash."""
     return [
-        FAILURE_LOG_APPENDED_KEY.format(project_id=project_id),
-        *(FAILURE_LOG_KEY.format(project_id=project_id, kind=kind) for kind in kinds),
+        key
+        for kind in kinds
+        for key in (
+            FAILURE_LOG_KEY.format(project_id=project_id, kind=kind),
+            FAILURE_LOG_DATA_KEY.format(project_id=project_id, kind=kind),
+        )
     ]
 
 
@@ -1203,37 +1251,35 @@ class RedisClient:
 
     def failures_batch(
         self,
-        entries: Sequence[tuple[str, str, dict[str, str]]],
+        examples: Sequence[FailureExample],
         counts: Mapping[FailureCountKey, int],
         *,
         max_entries: int,
         retention_seconds: int,
     ) -> list[BatchPart]:
-        """A failure log window, (project_id, kind, fields) examples and counts, as parts; [] when it holds nothing.
-
-        Examples get their IDs now, oldest first across every kind, so a page
-        merged from several kinds' streams reads in time order.
-        """
-        if not entries and not counts:
+        """A failure log window, its examples and counts, as parts; [] when it holds nothing."""
+        if not examples and not counts:
             return []
-        now_ms = int(time.time() * 1000)
-        min_id = f"{int(time.time() - retention_seconds) * 1000}-0"
-        examples = [
-            (f"{now_ms}-{seq}", project_id, kind, entry) for seq, (project_id, kind, entry) in enumerate(entries)
-        ]
         tallies = list(counts.items())
         parts = []
         for start in range(0, len(examples) + len(tallies), _HASH_BATCH):
             stop = start + _HASH_BATCH
             keys = _PartKeys()
             chunk = examples[start:stop]
-            args = [str(retention_seconds), str(max_entries), min_id, str(len(chunk))]
-            for entry_id, project_id, kind, entry in chunk:
-                stream = keys.position(FAILURE_LOG_KEY.format(project_id=project_id, kind=kind))
-                appended = keys.position(FAILURE_LOG_APPENDED_KEY.format(project_id=project_id))
-                args += [stream, appended, kind, entry_id, str(len(entry))]
-                for name, value in entry.items():
-                    args += [name, value]
+            args = [str(retention_seconds), str(max_entries), str(len(chunk))]
+            for example in chunk:
+                where = {"project_id": example.project_id, "kind": example.kind}
+                args += [
+                    keys.position(FAILURE_LOG_KEY.format(**where)),
+                    keys.position(FAILURE_LOG_DATA_KEY.format(**where)),
+                    example.fingerprint,
+                    example.fields,
+                    str(example.count),
+                    str(example.first_ms),
+                    str(example.last_ms),
+                    str(example.latency_total),
+                    str(example.latency_n),
+                ]
             chunk_counts = tallies[max(0, start - len(examples)):max(0, stop - len(examples))]
             args.append(str(len(chunk_counts)))
             for count_key, count in chunk_counts:
@@ -1424,53 +1470,72 @@ class RedisClient:
         project_id: str,
         kinds: list[str],
         count: int = 200,
-        after: tuple[str, str] | None = None,
-    ) -> list[dict[str, str]]:
-        """The newest examples across the kinds' streams, each with its ``id`` and ``kind``, by (stream ID, kind) newest first.
+        after: FailureCursor | None = None,
+    ) -> list[FailureLogRow]:
+        """The examples across the kinds' indexes, by (rank, kind, fingerprint), the ones a gateway added to last first.
 
-        ``after`` is the (stream ID, kind) of the previous page's last entry:
-        this page holds what follows it.
+        ``after`` is the previous page's last example: this page holds what
+        follows it. An example a gateway adds to meanwhile moves up, out of
+        the older pages, and is counted as changed (``failures_changed``).
         """
-        bounds: list[tuple[str, str]] = []
-        for kind in kinds:
-            if after is None:
-                bounds.append((kind, "+"))
-                continue
-            after_id, after_kind = after
-            if kind < after_kind:
-                # Same ID, smaller kind: still after the cursor in this order.
-                bounds.append((kind, after_id))
-                continue
-            before = StreamId.of(after_id).before()
-            if before is not None:
-                bounds.append((kind, str(before)))
-        if not bounds:
-            return []
+        indexes = [(kind, FAILURE_LOG_KEY.format(project_id=project_id, kind=kind)) for kind in kinds]
+        top: int | str = "+inf"
+        ties = [0] * len(indexes)
+        if after is not None:
+            top = after.rank
+            # Every example ranked with the cursor is read past, however many share its rank.
+            pipe = self.client.pipeline(transaction=False)
+            for _kind, index in indexes:
+                pipe.zcount(index, after.rank, after.rank)
+            ties = [int(n) for n in await pipe.execute()]
         pipe = self.client.pipeline(transaction=False)
-        for kind, end in bounds:
-            pipe.xrevrange(FAILURE_LOG_KEY.format(project_id=project_id, kind=kind), max=end, min="-", count=count)
-        merged = [
-            (entry_id, kind, entry)
-            for (kind, _end), raw in zip(bounds, await pipe.execute(), strict=True)
-            for entry_id, entry in raw
+        for (_kind, index), tied in zip(indexes, ties, strict=True):
+            pipe.zrange(index, top, "-inf", desc=True, withscores=True, byscore=True, offset=0, num=count + tied)
+        ranked = [
+            FailureCursor(int(score), kind, _decode(member))
+            for (kind, _index), raw in zip(indexes, await pipe.execute(), strict=True)
+            for member, score in raw
         ]
-        merged.sort(key=lambda item: (StreamId.of(item[0]), item[1]), reverse=True)
-        return [{**entry, "id": entry_id, "kind": kind} for entry_id, kind, entry in merged[:count]]
+        if after is not None:
+            ranked = [cursor for cursor in ranked if cursor < after]
+        ranked = sorted(ranked, reverse=True)[:count]
+        pipe = self.client.pipeline(transaction=False)
+        for cursor in ranked:
+            fp = cursor.fingerprint
+            pipe.hmget(
+                FAILURE_LOG_DATA_KEY.format(project_id=project_id, kind=cursor.kind),
+                [fp, f"{fp}:count", f"{fp}:first", f"{fp}:last", f"{fp}:latency", f"{fp}:timed"],
+            )
+        rows = []
+        for cursor, (description, n, first, last, latency, timed) in zip(ranked, await pipe.execute(), strict=True):
+            # None: trimmed between the two reads.
+            if description is not None:
+                rows.append(FailureLogRow(
+                    cursor=cursor,
+                    fields=json.loads(description),
+                    count=int(n or 0),
+                    first_ms=int(first or 0),
+                    last_ms=int(last or 0),
+                    latency_ms=round(float(latency) / int(timed), 1) if latency and timed and int(timed) else None,
+                ))
+        return rows
 
     async def count_failures(self, project_id: str, kinds: list[str]) -> int:
-        """How many examples the kinds' streams hold."""
+        """How many examples the kinds hold."""
         pipe = self.client.pipeline(transaction=False)
         for kind in kinds:
-            pipe.xlen(FAILURE_LOG_KEY.format(project_id=project_id, kind=kind))
+            pipe.zcard(FAILURE_LOG_KEY.format(project_id=project_id, kind=kind))
         return sum(int(n) for n in await pipe.execute())
 
-    async def failures_appended(self, project_id: str) -> dict[str, int]:
-        """How many examples each kind's stream has been given so far."""
-        raw = await self.client.hgetall(FAILURE_LOG_APPENDED_KEY.format(project_id=project_id))
-        return {(k if isinstance(k, str) else k.decode()): int(v) for k, v in raw.items()}
+    async def failures_changed(self, project_id: str, kinds: list[str], since: int) -> int:
+        """How many of the kinds' examples a gateway added to, new ones included, after the rank ``since``."""
+        pipe = self.client.pipeline(transaction=False)
+        for kind in kinds:
+            pipe.zcount(FAILURE_LOG_KEY.format(project_id=project_id, kind=kind), f"({since}", "+inf")
+        return sum(int(n) for n in await pipe.execute())
 
     async def clear_failures(self, project_id: str, kinds: Iterable[str]) -> None:
-        """Delete a project's failure log: the kinds' examples and the appended counts, in one DEL. Counts in history stay."""
+        """Delete a project's failure log for the kinds, in one DEL. Counts in history stay."""
         await self.client.delete(*failure_log_keys(project_id, kinds))
 
     # The metrics take: a flush moves every live window into a staging hash

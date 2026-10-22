@@ -20,7 +20,13 @@ import structlog
 
 import api.db.redis as catalogue
 from api.core.roles import JobKind
-from api.core.stats import FailureCount, FailureCountKey, MetricDelta, TunnelPeerMetricDelta
+from api.core.stats import (
+    FailureCount,
+    FailureCountKey,
+    FailureExample,
+    MetricDelta,
+    TunnelPeerMetricDelta,
+)
 from api.db.redis import (
     APPLIED_BATCHES_KEY,
     APPLIED_BATCHES_TTL_SECONDS,
@@ -31,7 +37,7 @@ from api.db.redis import (
     DEFAULT_REQUEST_TIMEOUT_SECONDS,
     DEMAND_KEY,
     EARLIER_RELEASES_KEY_GROUP,
-    FAILURE_LOG_APPENDED_KEY,
+    FAILURE_LOG_DATA_KEY,
     FAILURE_LOG_KEY,
     FAILURE_WINDOWS,
     FEED_HEAD_KEY,
@@ -667,7 +673,7 @@ class TestKeyGroups:
             (RUNTIME_STREAM_KEY, "Event streams"),
             (FEED_STREAM_KEY, "Event streams"),
             (APPLIED_BATCHES_KEY.format(writer="process:ab12cd34"), "Batch marks"),
-            (FAILURE_LOG_APPENDED_KEY.format(project_id="p1"), "Failure log"),
+            (FAILURE_LOG_DATA_KEY.format(project_id="p1", kind="upstream_timeout"), "Failure log"),
             (TUNNEL_PEER_STATUS_INDEX_KEY.format(protocol="openvpn"), "OpenVPN"),
         ],
     )
@@ -1096,85 +1102,140 @@ async def _failure_counts(redis_client: RedisClient) -> dict[FailureCountKey, in
     return {count_key: count.failure_count for count_key, count in taken.failures.items()}
 
 
+def _example(
+    target: str, kind: str = "upstream_timeout", *, count: int = 1, first_ms: int = 1000, last_ms: int = 2000,
+    latency_total: float = 0.0, latency_n: int = 0,
+) -> FailureExample:
+    """An example of project ``proj`` whose fingerprint stands for its target."""
+    return FailureExample(
+        project_id="proj", kind=kind, fingerprint=target.encode().hex(), fields=json.dumps({"target": target}),
+        count=count, first_ms=first_ms, last_ms=last_ms, latency_total=latency_total, latency_n=latency_n,
+    )
+
+
+async def _targets(redis_client: RedisClient, kinds: list[str], **kwargs: Any) -> list[str]:
+    return [row.fields["target"] for row in await redis_client.get_failures("proj", kinds, **kwargs)]
+
+
 class TestFailuresBatch:
     async def test_a_window_lands_its_examples_their_tallies_and_its_counts(self, redis_client: RedisClient) -> None:
-        entries = [
-            ("proj", "upstream_timeout", {"target": "a"}),
-            ("proj", "upstream_rejected", {"target": "b"}),
-            ("proj", "upstream_timeout", {"target": "c"}),
+        examples = [
+            _example("a", count=3, latency_total=30.0, latency_n=2),
+            _example("b", "upstream_rejected"),
         ]
-        counts = {("proj", "conn", "upstream_timeout", None): 2, ("proj", None, "upstream_rejected", 407): 1}
+        counts: dict[FailureCountKey, int] = {
+            ("proj", "conn", "upstream_timeout", None): 3, ("proj", None, "upstream_rejected", 407): 1,
+        }
 
-        parts = redis_client.failures_batch(entries, counts, max_entries=10, retention_seconds=3600)
+        parts = redis_client.failures_batch(examples, counts, max_entries=10, retention_seconds=3600)
 
         assert await _outcomes(redis_client, parts) == [BatchOutcome.APPLIED]
-        kinds = ["upstream_timeout", "upstream_rejected"]
-        assert [entry["target"] for entry in await redis_client.get_failures("proj", kinds)] == ["c", "b", "a"]
-        assert await redis_client.failures_appended("proj") == {"upstream_timeout": 2, "upstream_rejected": 1}
+        rows = {row.fields["target"]: row for row in await redis_client.get_failures("proj", ["upstream_timeout", "upstream_rejected"])}
+        assert (rows["a"].count, rows["a"].first_ms, rows["a"].last_ms, rows["a"].latency_ms) == (3, 1000, 2000, 15.0)
+        assert (rows["b"].count, rows["b"].latency_ms) == (1, None)
         assert await _failure_counts(redis_client) == counts
-        stream = FAILURE_LOG_KEY.format(project_id="proj", kind="upstream_timeout")
-        for key in (stream, FAILURE_LOG_APPENDED_KEY.format(project_id="proj")):
+        for key in (
+            FAILURE_LOG_KEY.format(project_id="proj", kind="upstream_timeout"),
+            FAILURE_LOG_DATA_KEY.format(project_id="proj", kind="upstream_timeout"),
+        ):
             assert 0 < await redis_client.client.ttl(key) <= 3600
 
-    async def test_a_window_sent_again_adds_no_example_and_no_count(self, redis_client: RedisClient) -> None:
-        """What lets the failure log keep a window Redis did not answer for, rather than drop it."""
-        counts = {("proj", "conn", "upstream_timeout", None): 1}
-        parts = redis_client.failures_batch(
-            [("proj", "upstream_timeout", {"target": "a"})], counts, max_entries=10, retention_seconds=3600
+    async def test_windows_add_up_in_one_example_whichever_gateway_sends_them(self, redis_client: RedisClient) -> None:
+        """The same failure seen by two gateways, or in two windows, is one row: counts add, times widen."""
+        first = redis_client.failures_batch(
+            [_example("a", count=2, first_ms=5000, last_ms=6000, latency_total=10.0, latency_n=1)], {},
+            max_entries=10, retention_seconds=3600,
         )
+        late = redis_client.failures_batch(
+            [_example("a", count=3, first_ms=4000, last_ms=5500, latency_total=20.0, latency_n=1)], {},
+            max_entries=10, retention_seconds=3600,
+        )
+        assert await _outcomes(redis_client, first + late) == [BatchOutcome.APPLIED] * 2
+
+        (row,) = await redis_client.get_failures("proj", ["upstream_timeout"])
+        assert (row.count, row.first_ms, row.last_ms, row.latency_ms) == (5, 4000, 6000, 15.0)
+
+    async def test_a_window_sent_again_adds_nothing(self, redis_client: RedisClient) -> None:
+        """What lets the failure log keep a window Redis did not answer for, rather than drop it."""
+        counts: dict[FailureCountKey, int] = {("proj", "conn", "upstream_timeout", None): 1}
+        parts = redis_client.failures_batch([_example("a")], counts, max_entries=10, retention_seconds=3600)
 
         assert await _outcomes(redis_client, parts) == [BatchOutcome.APPLIED]
         assert await _outcomes(redis_client, parts) == [BatchOutcome.REPEATED]
 
-        assert await redis_client.count_failures("proj", ["upstream_timeout"]) == 1
-        assert await redis_client.failures_appended("proj") == {"upstream_timeout": 1}
+        (row,) = await redis_client.get_failures("proj", ["upstream_timeout"])
+        assert row.count == 1
         assert await _failure_counts(redis_client) == counts
 
-    async def test_an_id_another_gateway_has_passed_still_lands(self, redis_client: RedisClient) -> None:
-        key = FAILURE_LOG_KEY.format(project_id="proj", kind="upstream_timeout")
-        await redis_client.client.xadd(key, {"target": "peer"}, id=f"{2**42}-0")  # a clock far ahead
+    async def test_the_example_seen_again_moves_up_and_counts_as_changed(self, redis_client: RedisClient) -> None:
+        for target in ("a", "b"):
+            parts = redis_client.failures_batch([_example(target)], {}, max_entries=10, retention_seconds=3600)
+            assert await _outcomes(redis_client, parts) == [BatchOutcome.APPLIED]
+            await asyncio.sleep(0.005)  # Redis's clock ranks them
+        (newest, _older) = await redis_client.get_failures("proj", ["upstream_timeout"])
+        assert await redis_client.failures_changed("proj", ["upstream_timeout"], newest.cursor.rank) == 0
+        await asyncio.sleep(0.005)
 
-        parts = redis_client.failures_batch(
-            [("proj", "upstream_timeout", {"target": "ours"})], {}, max_entries=10, retention_seconds=3600
-        )
-
+        parts = redis_client.failures_batch([_example("a"), _example("c")], {}, max_entries=10, retention_seconds=3600)
         assert await _outcomes(redis_client, parts) == [BatchOutcome.APPLIED]
-        assert {entry["target"] for entry in await redis_client.get_failures("proj", ["upstream_timeout"])} == {
-            "peer",
-            "ours",
-        }
 
-    async def test_a_large_window_is_cut_into_parts_and_reads_in_order(self, redis_client: RedisClient) -> None:
-        entries = [("proj", "upstream_timeout", {"target": f"t{i}"}) for i in range(600)]
-        counts = {("proj", f"c{i}", "upstream_timeout", None): 1 for i in range(450)}
+        assert await redis_client.failures_changed("proj", ["upstream_timeout"], newest.cursor.rank) == 2
+        assert (await _targets(redis_client, ["upstream_timeout"]))[2] == "b"
 
-        parts = redis_client.failures_batch(entries, counts, max_entries=1000, retention_seconds=3600)
+    async def test_past_the_cap_the_examples_seen_longest_ago_go_whole(self, redis_client: RedisClient) -> None:
+        for target in ("a", "b", "c"):
+            parts = redis_client.failures_batch([_example(target)], {}, max_entries=2, retention_seconds=3600)
+            assert await _outcomes(redis_client, parts) == [BatchOutcome.APPLIED]
+            await asyncio.sleep(0.005)
+
+        assert await _targets(redis_client, ["upstream_timeout"]) == ["c", "b"]
+        data = FAILURE_LOG_DATA_KEY.format(project_id="proj", kind="upstream_timeout")
+        assert not [field for field in await redis_client.client.hkeys(data) if str(field).startswith(b"a".hex())]
+
+    async def test_an_example_untouched_for_the_retention_goes_whole(self, redis_client: RedisClient) -> None:
+        parts = redis_client.failures_batch([_example("old")], {}, max_entries=10, retention_seconds=60)
+        assert await _outcomes(redis_client, parts) == [BatchOutcome.APPLIED]
+        index = FAILURE_LOG_KEY.format(project_id="proj", kind="upstream_timeout")
+        await redis_client.client.zadd(index, {b"old".hex(): 1000})  # last added to long ago
+
+        parts = redis_client.failures_batch([_example("new")], {}, max_entries=10, retention_seconds=60)
+        assert await _outcomes(redis_client, parts) == [BatchOutcome.APPLIED]
+
+        assert await _targets(redis_client, ["upstream_timeout"]) == ["new"]
+        data = FAILURE_LOG_DATA_KEY.format(project_id="proj", kind="upstream_timeout")
+        assert not await redis_client.client.hexists(data, b"old".hex())
+
+    async def test_a_large_window_is_cut_into_parts(self, redis_client: RedisClient) -> None:
+        examples = [_example(f"t{i}") for i in range(600)]
+        counts: dict[FailureCountKey, int] = {("proj", f"c{i}", "upstream_timeout", None): 1 for i in range(450)}
+
+        parts = redis_client.failures_batch(examples, counts, max_entries=1000, retention_seconds=3600)
 
         assert [part.items for part in parts] == [500, 500, 50]
         assert await _outcomes(redis_client, parts) == [BatchOutcome.APPLIED] * 3
-        newest_first = await redis_client.get_failures("proj", ["upstream_timeout"], count=600)
-        assert [entry["target"] for entry in newest_first] == [f"t{i}" for i in reversed(range(600))]
+        assert sorted(await _targets(redis_client, ["upstream_timeout"], count=600)) == sorted(f"t{i}" for i in range(600))
         assert len(await _failure_counts(redis_client)) == 450
 
     def test_an_empty_window_is_no_part(self, redis_client: RedisClient) -> None:
         assert redis_client.failures_batch([], {}, max_entries=10, retention_seconds=60) == []
 
-    async def test_a_page_ending_on_the_larger_kind_still_reads_the_smaller_one_at_that_id(
-        self, redis_client: RedisClient
-    ) -> None:
-        """Two kinds' streams can hand out one ID: the cursor carries the kind, so neither is skipped."""
+    async def test_pages_read_every_example_once_however_many_share_a_rank(self, redis_client: RedisClient) -> None:
+        """Examples of two kinds ranked alike: the cursor carries kind and fingerprint, so none is skipped or repeated."""
         kinds = ["upstream_timeout", "no_proxy_available"]
-        for i in range(3):
-            for kind in kinds:
-                key = FAILURE_LOG_KEY.format(project_id="p", kind=kind)
-                await redis_client.client.xadd(key, {"target": f"{kind[0]}{i}"}, id=f"100-{i}")
+        for kind in kinds:
+            for i in range(3):
+                target = f"{kind[0]}{i}"
+                await redis_client.client.zadd(FAILURE_LOG_KEY.format(project_id="proj", kind=kind), {target.encode().hex(): 100})
+                await redis_client.client.hset(
+                    FAILURE_LOG_DATA_KEY.format(project_id="proj", kind=kind), target.encode().hex(), json.dumps({"target": target})
+                )
         seen: list[str] = []
         after = None
-        while page := await redis_client.get_failures("p", kinds, count=3, after=after):
-            seen += [entry["target"] for entry in page]
-            after = (page[-1]["id"], page[-1]["kind"])
+        while page := await redis_client.get_failures("proj", kinds, count=2, after=after):
+            seen += [row.fields["target"] for row in page]
+            after = page[-1].cursor
 
-        assert seen == ["u2", "n2", "u1", "n1", "u0", "n0"]
+        assert seen == ["u2", "u1", "u0", "n2", "n1", "n0"]
 
 
 def _append(redis_client: RedisClient, *items: str) -> list[BatchPart]:
