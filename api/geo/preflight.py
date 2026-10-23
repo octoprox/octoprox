@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import random
+import time
 from collections.abc import Sequence
 from datetime import datetime
 from typing import TYPE_CHECKING, NamedTuple
@@ -39,6 +40,7 @@ from api.providers.sdk.strategies import (
     META_GEO_CITY,
     META_GEO_STATE,
     META_SESSION_ID,
+    META_SESSION_SECONDS,
     is_dynamic_gateway,
 )
 
@@ -347,6 +349,7 @@ class PreflightChecker:
             return cached
 
         self.checks += 1
+        started = time.monotonic()
         # An upstream failing the echo raises here, uncached: it is the
         # request's own failure, and the next request asks the vendor again.
         ip, endpoint = await self._geo_service.discoverer().discover_with_place(
@@ -447,10 +450,21 @@ class PreflightChecker:
                 unknown=project.location_unknown.value,
             )
         if key:
-            await self._store(
-                key, verdict, ttl=self._geo_service.settings.preflight_session_ttl_seconds
-            )
+            await self._store(key, verdict, ttl=self._verdict_ttl(proxy, elapsed=time.monotonic() - started))
         return verdict
+
+    def _verdict_ttl(self, proxy: Proxy, *, elapsed: float) -> int:
+        """How long a verdict is trusted: the preflight TTL, or what is left of the vendor session when that is shorter.
+
+        Past its length the vendor may hand the same session another exit, and its clock started with the echo that
+        took ``elapsed`` seconds; ``render_request`` puts the length on the request.
+        """
+        ttl = self._geo_service.settings.preflight_session_ttl_seconds
+        try:
+            session = int(proxy.metadata.get(META_SESSION_SECONDS) or 0)
+        except (TypeError, ValueError):
+            session = 0
+        return min(ttl, max(1, session - int(elapsed))) if session > 0 else ttl
 
     def _sighting(
         self,

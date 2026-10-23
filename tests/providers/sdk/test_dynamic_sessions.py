@@ -20,6 +20,7 @@ from api.providers.sdk.strategies import (
     META_GEO_COUNTRY,
     META_GEO_STATE,
     META_SESSION_ID,
+    META_SESSION_SECONDS,
 )
 from api.providers.sdk.validation import ConfigValidationError
 from tests.providers.sdk.conftest import TEST_POLICY, make_connector, make_credential
@@ -109,6 +110,16 @@ class TestGatewayRow:
         assert _oxylabs(builtins, runtime, exit_sample_percent="250").exit_sample_percent == 100  # clamped
         assert _oxylabs(builtins, runtime, exit_sample_percent="junk").exit_sample_percent == 5
 
+    def test_session_length_reads_the_unit_or_the_suffix(self, builtins: dict[str, ProviderDescriptor]) -> None:
+        ptype = builtins["oxylabs"].proxy_types[0]
+        assert ptype.session_length_field == "connector.session_duration_minutes"
+        assert [ptype.session_seconds(raw) for raw in (3, "3", 1.5, "45s", "2h", "10M")] == [180, 180, 90, 45, 7200, 600]
+        assert [ptype.session_seconds(raw) for raw in (None, "", 0, "-5", "junk", "5d")] == [None] * 6
+        assert ptype.model_copy(update={"session_length_unit": "seconds"}).session_seconds(90) == 90
+        # Under a second still caps the verdict; a length no float holds caps nothing rather than raising.
+        assert ptype.session_seconds("0.5s") == 1
+        assert ptype.session_seconds("9" * 400 + "m") is None
+
     async def test_provision_country_is_a_no_op(self, builtins: dict[str, ProviderDescriptor], runtime: SdkRuntime) -> None:
         provider = _oxylabs(builtins, runtime)
         assert await provider.provision_country([], "DE") == []
@@ -190,6 +201,15 @@ class TestRenderRequest:
         rendered = provider.render_request(to_add[0], sessid="abc", location=LocationTarget(country="GB"), scope="p")
         assert rendered.username == "royal"
         assert re.fullmatch(r"\{password\}_country-gb_session-[a-z0-9]{8}_lifetime-30m", rendered.password or "")
+        assert rendered.metadata[META_SESSION_SECONDS] == 1800  # the suffix names the unit
+
+    async def test_client_session_carries_the_session_length(self, builtins: dict[str, ProviderDescriptor], runtime: SdkRuntime, gateway: Proxy) -> None:
+        provider = _oxylabs(builtins, runtime, session_duration_minutes=3)
+        assert provider.render_request(gateway, sessid="order-1", location=None, scope="p").metadata[META_SESSION_SECONDS] == 180
+        # A rotating request has no session to outlive, and a connector leaving the length to the vendor says nothing.
+        assert META_SESSION_SECONDS not in provider.render_request(gateway, sessid=None, location=None, scope="p").metadata
+        unset = _oxylabs(builtins, runtime, session_duration_minutes=None)
+        assert META_SESSION_SECONDS not in unset.render_request(gateway, sessid="order-1", location=None, scope="p").metadata
 
 
 def test_validation_hides_num_proxies_when_dynamic() -> None:

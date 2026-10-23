@@ -292,6 +292,28 @@ class TestPreflight:
         mismatch = await checker.check(VERIFIED, other, session_id="order-2", requested=LocationTarget(country="US"))
         assert not mismatch.ok and checker.checks == 3
 
+    async def test_dynamic_session_verdict_lives_no_longer_than_the_vendor_session(self, geo_service: GeoService) -> None:
+        checker = _checker(geo_service, {"ip": GB_IP, "country": "GB"})
+        ttls: list[int] = []
+
+        async def store(key: str, verdict: PreflightVerdict, ttl: int) -> None:
+            ttls.append(ttl)
+
+        async def cached(key: str) -> PreflightVerdict | None:
+            return None
+
+        checker._store = store  # type: ignore[method-assign]
+        checker._cached = cached  # type: ignore[method-assign]
+        requested = LocationTarget(country="GB")
+        for session_seconds in (180, 7200, None):
+            rendered = _proxy(dynamic_sessions="true", session_id="abc123", geo="GB", session_seconds=session_seconds)
+            await checker.check(VERIFIED, rendered, session_id="order-1", requested=requested)
+        # A 3-minute session, a 2-hour one (the preflight TTL is shorter), and one whose length the connector leaves to the vendor.
+        assert ttls == [180, 600, 600]
+        # The vendor's clock started with the echo, so a slow echo leaves the verdict that much less.
+        rendered = _proxy(dynamic_sessions="true", session_id="abc123", geo="GB", session_seconds=180)
+        assert checker._verdict_ttl(rendered, elapsed=4.2) == 176
+
     async def test_pooled_slot_verdict_is_reused_only_for_the_same_requirement(self, geo_service: GeoService) -> None:
         checker = _checker(geo_service, {"ip": GB_IP, "country": "GB"})
         stored: dict[str, str] = {}

@@ -37,6 +37,7 @@ from api.providers.sdk.strategies import (
     META_GEO_COUNTRY,
     META_GEO_STATE,
     META_SESSION_ID,
+    META_SESSION_SECONDS,
     DynamicSessionStrategy,
     ListModeStrategy,
     PortModeStrategy,
@@ -135,6 +136,8 @@ class DescriptorProvider(ProxyProvider):
             self._ptype.mode == "session"
             and str(self._ctx.lookup(self._ptype.session_mode_field) or "") == SESSION_MODE_DYNAMIC
         )
+        length_field = self._ptype.session_length_field
+        self._session_seconds = self._ptype.session_seconds(self._ctx.lookup(length_field)) if length_field else None
         # Which of state and city the templates can carry into a dynamic request.
         self._targeting = targeting_support(self._ptype)
         self._session_ids = SessionIdGenerator(descriptor.session_id)
@@ -185,6 +188,11 @@ class DescriptorProvider(ProxyProvider):
             return max(0, min(100, int(float(raw))))
         except (TypeError, ValueError):
             return DEFAULT_EXIT_SAMPLE_PERCENT
+
+    @property
+    def session_seconds(self) -> int | None:
+        """How long the vendor keeps a session's exit, when the connector sets it; dynamic only."""
+        return self._session_seconds
 
     def accepts_request_country(self) -> bool:
         """Whether unlisted countries can be provisioned on demand from ``-cc-`` requests.
@@ -254,8 +262,12 @@ class DescriptorProvider(ProxyProvider):
         self._builder.rerender(rendered, ctx)
         self._builder.rerender_endpoint(rendered, ctx)
         rendered.metadata[META_EXIT_SAMPLE_PERCENT] = self.exit_sample_percent
+        rendered.metadata.pop(META_SESSION_SECONDS, None)
         if seed:
             rendered.metadata[META_SESSION_ID] = session_id
+            # Preflight trusts the session's verdict no longer than the vendor keeps its exit.
+            if self._session_seconds:
+                rendered.metadata[META_SESSION_SECONDS] = self._session_seconds
         else:
             # A rotating request: nothing about this session outlives it.
             rendered.metadata.pop(META_SESSION_ID, None)

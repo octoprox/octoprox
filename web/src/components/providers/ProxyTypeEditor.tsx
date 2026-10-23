@@ -77,6 +77,13 @@ export function ProxyTypeEditor({ spec, onChange }: { spec: Spec; onChange: (pat
             </>
           )}
 
+          {(t.mode ?? 'session') === 'session' && (
+            <div className="grid grid-cols-[1fr_140px] gap-3">
+              <TextField label="Session length field" value={t.session_length_field ?? ''} onChange={(v) => update(i, { session_length_field: v || null })} mono placeholder="connector.session_duration_minutes" help="Dynamic sessions: the connector field holding how long the vendor keeps a session's exit. Preflight trusts a session's result no longer than that. Leave empty to use the preflight cache time alone." />
+              <SelectField label="Unit" value={t.session_length_unit ?? 'minutes'} onChange={(v) => update(i, { session_length_unit: v || 'minutes' })} options={['minutes', 'seconds', 'hours'].map((u) => ({ value: u, label: u }))} help="For values without an s, m or h suffix." />
+            </div>
+          )}
+
           {t.mode === 'port' && (
             <div className="rounded-lg bg-surface-raised/50 p-2.5 space-y-3">
               <SelectField

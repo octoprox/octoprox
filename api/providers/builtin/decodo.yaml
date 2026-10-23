@@ -121,6 +121,7 @@ proxy_types:
   - key: residential
     label: Residential
     mode: session
+    session_length_field: connector.session_duration_minutes
     host: gate.decodo.com
     port: 7000
     username:
@@ -146,6 +147,7 @@ proxy_types:
   - key: mobile
     label: Mobile
     mode: session
+    session_length_field: connector.session_duration_minutes
     host: gate.decodo.com
     port: 7000
     username:

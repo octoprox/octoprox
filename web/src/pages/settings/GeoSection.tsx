@@ -623,7 +623,7 @@ function PolicyTab() {
             <div>
               <Label htmlFor="geo-preflight-ttl">Verdict cache (seconds)</Label>
               <Input id="geo-preflight-ttl" type="number" min={10} value={policy.preflight_session_ttl_seconds} onChange={(e) => update({ preflight_session_ttl_seconds: parseInt(e.target.value) || 600 })} />
-              <p className="text-[11px] text-fg-subtle mt-1">One echo request per proxy per this window.</p>
+              <p className="text-[11px] text-fg-subtle mt-1">One echo request per proxy per this window, or per vendor session when a dynamic connector sets a shorter session length.</p>
             </div>
             <div>
               <Label htmlFor="geo-preflight-attempts">Retry attempts</Label>

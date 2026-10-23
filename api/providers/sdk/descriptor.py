@@ -23,6 +23,7 @@ Templates use ``{namespace.key}`` placeholders; see
 
 from __future__ import annotations
 
+import math
 import re
 from typing import Annotated, Any, Literal
 from urllib.parse import urlsplit
@@ -42,6 +43,9 @@ PortStrategy = Literal["sequential", "fixed"]
 SESSION_MODE_POOL = "pool"
 SESSION_MODE_DYNAMIC = "dynamic"
 DEFAULT_EXIT_SAMPLE_PERCENT = 5
+SessionLengthUnit = Literal["seconds", "minutes", "hours"]
+_UNIT_SECONDS = {"seconds": 1, "minutes": 60, "hours": 3600, "s": 1, "m": 60, "h": 3600}
+_SESSION_LENGTH_PATTERN = re.compile(r"^(\d+(?:\.\d+)?)\s*([smh]?)$")
 
 
 def check_port_range(port: int) -> int:
@@ -569,6 +573,17 @@ class ProxyTypeSpec(BaseModel):
             "session that preflight echoes to observe their exit; default 5 when unset"
         ),
     )
+    session_length_field: str | None = Field(
+        default=None,
+        description=(
+            "Dynamic sessions only: variable holding how long the vendor keeps a session's exit, in "
+            "session_length_unit or with its own s/m/h suffix ('10m'); preflight trusts a session's verdict "
+            "no longer than that. Unset: the preflight TTL alone"
+        ),
+    )
+    session_length_unit: SessionLengthUnit = Field(
+        default="minutes", description="Unit of a session_length_field value that has no suffix"
+    )
     healthcheck_url: str | None = None
 
     @field_validator("key")
@@ -594,6 +609,15 @@ class ProxyTypeSpec(BaseModel):
         except ValueError as exc:
             raise ValueError(f"port '{value}' must be a number or a template such as '{{connector.port}}'") from exc
         return check_port_range(number)
+
+    def session_seconds(self, raw: object) -> int | None:
+        """A ``session_length_field`` value in seconds; None when it is unset, zero or unreadable."""
+        match = _SESSION_LENGTH_PATTERN.match(str(raw).strip().lower()) if raw is not None else None
+        if match is None:
+            return None
+        seconds = float(match.group(1)) * _UNIT_SECONDS[match.group(2) or self.session_length_unit]
+        # Zero means unset; a length past what a float holds outlasts any verdict anyway.
+        return max(1, int(seconds)) if 0 < seconds < math.inf else None
 
     @property
     def port_template(self) -> str | None:

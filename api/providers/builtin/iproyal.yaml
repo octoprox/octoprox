@@ -120,6 +120,7 @@ proxy_types:
   - key: residential
     label: Residential
     mode: session
+    session_length_field: connector.session_lifetime
     host: "{connector.entry_node|or:geo.iproyal.com}"
     port: 12321
     username: "{credential.username}"

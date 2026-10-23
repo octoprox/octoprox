@@ -99,6 +99,9 @@ def recorded_place_claim(metadata: dict[str, Any], *, vendor: bool) -> LocationT
 # On a request rendered for a dynamic gateway: the connector's percentage of
 # session-less requests preflight may echo to observe the exit.
 META_EXIT_SAMPLE_PERCENT = "exit_sample_percent"
+# On a request rendered for a client session: how long the vendor keeps the
+# session's exit, in seconds, when the connector sets it.
+META_SESSION_SECONDS = "session_seconds"
 META_LIST_IDENTITY = "list_identity"
 META_PROVIDER = "provider"
 
