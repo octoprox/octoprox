@@ -2550,18 +2550,27 @@ function TrendsSection() {
       ) : (
         <div className="flex flex-col gap-4">
           <DeltaStrip points={points} range={range} />
-          <TrendChart
-            title="Storage"
-            points={points}
-            height={200}
-            series={[
-              { key: 'database_size_bytes', name: 'Database', color: SERIES.db },
-              { key: 'redis_memory_bytes', name: 'Redis memory', color: SERIES.redis },
-            ]}
-            formatValue={formatBytes}
-            formatTick={bytesShort}
-            tickWidth={56}
-          />
+          {/* Separate charts, so Redis memory - far smaller than the database - keeps its own scale. */}
+          <div className="grid grid-cols-1 @3xl:grid-cols-2 gap-4">
+            <TrendChart
+              title="Database"
+              points={points}
+              height={200}
+              series={[{ key: 'database_size_bytes', name: 'Database', color: SERIES.db }]}
+              formatValue={formatBytes}
+              formatTick={bytesShort}
+              tickWidth={56}
+            />
+            <TrendChart
+              title="Redis memory"
+              points={points}
+              height={200}
+              series={[{ key: 'redis_memory_bytes', name: 'Redis memory', color: SERIES.redis }]}
+              formatValue={formatBytes}
+              formatTick={bytesShort}
+              tickWidth={56}
+            />
+          </div>
           <div className="grid grid-cols-1 @3xl:grid-cols-2 gap-4">
             <TrendChart
               title="Proxy pool"
@@ -2804,8 +2813,8 @@ function ChartLegend({ items, small }: { items: [string, string][]; small?: bool
 
 /**
  * Which tables actually grew over the window. A difference between the two
- * window edges, so it needs no bucketing - and it is the question the storage
- * chart above raises as soon as the line slopes up.
+ * window edges, so it needs no bucketing - and it is the question the database
+ * chart above raises as soon as its line slopes up.
  */
 function TableGrowthList({ history, range }: { history: SystemMetricsHistory; range: SystemHistoryRange }) {
   const movers = history.table_growth.filter((t) => t.delta_bytes !== 0)
