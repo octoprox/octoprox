@@ -22,6 +22,12 @@ export const TIME_RANGE_MS: Record<TimeRange, number> = {
   '1h': HOUR, '6h': 6 * HOUR, '24h': 24 * HOUR, '7d': 7 * 24 * HOUR, '30d': 30 * 24 * HOUR, '90d': 90 * 24 * HOUR,
 }
 
+/** A history chart's time axis: the range ending when its data arrived (a query's `dataUpdatedAt`), or now before any has. */
+export function rangeDomain(range: TimeRange, dataUpdatedAt: number): [number, number] {
+  const end = dataUpdatedAt || Date.now()
+  return [end - TIME_RANGE_MS[range], end]
+}
+
 /** Axis tick for a history chart: the time of day inside a day, the date beyond it. */
 export function formatRangeTick(epoch: number, range: TimeRange): string {
   const d = new Date(epoch)

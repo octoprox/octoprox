@@ -25,7 +25,7 @@ import { useProject } from '../contexts/ProjectContext'
 import { useAuth } from '../contexts/AuthContext'
 import { useToast } from '../contexts/ToastContext'
 import { useTheme } from '../contexts/ThemeContext'
-import { TIME_RANGE_MS, formatRangeTick, useTimeRange } from '../contexts/TimeRangeContext'
+import { formatRangeTick, rangeDomain, useTimeRange } from '../contexts/TimeRangeContext'
 import { DataTable, type DataTableFeatures } from '../components/DataTable'
 import { Page, EmptyState } from '../components/layout/Page'
 import { StatusCodeBadge } from '../components/mitm/RequestDetail'
@@ -247,6 +247,7 @@ export default function FailuresPage() {
         <>
           <WhatFailed
             summary={summary}
+            updatedAt={summaryQuery.dataUpdatedAt}
             loading={summaryQuery.isLoading}
             failed={!!summaryQuery.error}
             range={range}
@@ -334,8 +335,10 @@ export default function FailuresPage() {
 }
 
 /** The counted summary: kinds by group with the vendor's statuses, failures over time by kind, and by connector. */
-function WhatFailed({ summary, loading, failed, range, onRange, isDark, kindFilter, onKind }: {
+function WhatFailed({ summary, updatedAt, loading, failed, range, onRange, isDark, kindFilter, onKind }: {
   summary: FailureSummary | undefined
+  /** When the summary arrived; the chart's axis ends there. */
+  updatedAt: number
   loading: boolean
   failed: boolean
   range: (typeof HISTORY_RANGES)[number]
@@ -345,7 +348,8 @@ function WhatFailed({ summary, loading, failed, range, onRange, isDark, kindFilt
   onKind: (kind: string) => void
 }) {
   const data = useMemo(() => chartData(summary), [summary])
-  const timeDomain = useMemo(() => { const now = Date.now(); return [now - TIME_RANGE_MS[range], now] }, [range])
+  // Anchored to when the data arrived, so every refetch moves the axis with the window.
+  const timeDomain = useMemo(() => rangeDomain(range, updatedAt), [range, updatedAt])
   const largest = summary && summary.kinds.length > 0 ? summary.kinds[0].count : 0
   const groups = useMemo(() => {
     const byGroup = new Map<FailureGroup, FailureSummary['kinds']>()

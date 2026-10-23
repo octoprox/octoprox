@@ -16,7 +16,7 @@ import {
 } from '../api/client'
 import { useProject } from '../contexts/ProjectContext'
 import { useDebounced } from '../hooks/useDebounced'
-import { TIME_RANGE_MS, formatRangeTick, useTimeRange } from '../contexts/TimeRangeContext'
+import { formatRangeTick, rangeDomain, useTimeRange } from '../contexts/TimeRangeContext'
 import { useTheme } from '../contexts/ThemeContext'
 import { bytesShort, compact, formatBytes, parseApiDate, plural } from '../utils/format'
 import { DataTable, type DataTableFeatures } from '../components/DataTable'
@@ -86,7 +86,7 @@ export default function HostsPage() {
     refetchInterval: 30000,
     placeholderData: (previous) => previous,
   })
-  const { data: history } = useQuery({
+  const { data: history, dataUpdatedAt: historyUpdatedAt } = useQuery({
     queryKey: ['host-history', selectedProjectId, range, connectorId],
     queryFn: () => fetchProjectHostHistory(selectedProjectId!, { range, connectorId: connectorId || null, top: TOP_SERIES }),
     enabled: !!selectedProjectId,
@@ -111,7 +111,8 @@ export default function HostsPage() {
 
   const chartData = useMemo(() => buildChartData(history, metric), [history, metric])
   const seriesHosts = useMemo(() => history?.series.map((s) => s.host) ?? [], [history])
-  const timeDomain = useMemo(() => { const now = Date.now(); return [now - TIME_RANGE_MS[range], now] }, [range])
+  // Anchored to when the data arrived, so every refetch moves the axis with the window.
+  const timeDomain = useMemo(() => rangeDomain(range, historyUpdatedAt), [range, historyUpdatedAt])
 
   // The busiest hosts as bars, from the same (search-narrowed) list as the table and
   // the totals, so the three agree; the header names the search when one is on.

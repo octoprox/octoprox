@@ -12,7 +12,7 @@ import {
   HISTORY_RANGES, HistoryRange,
 } from '../api/client'
 import { useProject } from '../contexts/ProjectContext'
-import { TIME_RANGE_MS, formatRangeTick, useTimeRange } from '../contexts/TimeRangeContext'
+import { formatRangeTick, rangeDomain, useTimeRange } from '../contexts/TimeRangeContext'
 import { useAuth } from '../contexts/AuthContext'
 import { useTheme } from '../contexts/ThemeContext'
 import { useToast } from '../contexts/ToastContext'
@@ -132,7 +132,7 @@ export default function Overview() {
     enabled: !!selectedProjectId,
     refetchInterval: 10000,
   })
-  const { data: history } = useQuery({
+  const { data: history, dataUpdatedAt: historyUpdatedAt } = useQuery({
     queryKey: ['metrics-history', selectedProjectId, range],
     queryFn: () => fetchProjectMetricsHistory(selectedProjectId!, range),
     enabled: !!selectedProjectId,
@@ -173,7 +173,8 @@ export default function Overview() {
   const snapshots = history?.snapshots ?? []
   const totals = useMemo(() => computeTotals(snapshots), [snapshots])
   const chartData = useMemo(() => buildChartData(snapshots, range), [snapshots, range])
-  const timeDomain = useMemo(() => { const now = Date.now(); return [now - TIME_RANGE_MS[range], now] }, [range])
+  // Anchored to when the data arrived, so every refetch moves the axis with the window.
+  const timeDomain = useMemo(() => rangeDomain(range, historyUpdatedAt), [range, historyUpdatedAt])
   const sparks = useMemo(() => ({
     requests: sample(snapshots.map((s) => s.request_count)),
     successes: sample(snapshots.map((s) => s.success_count)),

@@ -24,6 +24,9 @@ import { navItemBase, navItemCollapsed, navItemExpanded, navItemIdle } from './n
 import { cn } from '../../utils/cn'
 
 const COLLAPSED_KEY = 'octoprox_sidebar_collapsed'
+/** Below Tailwind's lg breakpoint the sidebar is a rail and opens over the page. In rem, as Tailwind writes it, so the two agree at any font size. */
+const NARROW = '(width < 64rem)'
+const isNarrow = () => window.matchMedia(NARROW).matches
 
 const PAGE_TITLES: Record<string, string> = {
   overview: 'Overview',
@@ -64,18 +67,19 @@ export default function AppShell({ onLogout }: { onLogout: () => void }) {
   const { authStatus, isAdmin } = useAuth()
   const { isDark } = useTheme()
   const [collapsed, setCollapsed] = useState<boolean>(() => {
+    if (isNarrow()) return true // a phone never opens on the overlay
     try { return localStorage.getItem(COLLAPSED_KEY) === '1' } catch { return false }
   })
 
   useEffect(() => {
-    if (window.matchMedia('(max-width: 1023px)').matches) return // auto-collapsed, not a preference
+    if (isNarrow()) return // auto-collapsed, not a preference
     try { localStorage.setItem(COLLAPSED_KEY, collapsed ? '1' : '0') } catch { /* ignore */ }
   }, [collapsed])
 
   // Narrow viewports: collapse the sidebar automatically and restore the saved
   // preference when there is room again, so the page content never disappears.
   useEffect(() => {
-    const media = window.matchMedia('(max-width: 1023px)')
+    const media = window.matchMedia(NARROW)
     const apply = () => {
       if (media.matches) setCollapsed(true)
       else { try { setCollapsed(localStorage.getItem(COLLAPSED_KEY) === '1') } catch { setCollapsed(false) } }
@@ -84,6 +88,11 @@ export default function AppShell({ onLogout }: { onLogout: () => void }) {
     media.addEventListener('change', apply)
     return () => media.removeEventListener('change', apply)
   }, [])
+
+  // On narrow viewports the open sidebar covers the page, so picking a page (the current one too) closes it.
+  useEffect(() => {
+    if (isNarrow()) setCollapsed(true)
+  }, [location.key])
 
   // Keep the project context in sync with the URL.
   useEffect(() => {
@@ -108,10 +117,15 @@ export default function AppShell({ onLogout }: { onLogout: () => void }) {
 
   return (
     <div className="h-screen flex bg-bg text-fg overflow-hidden">
+      {/* Narrow viewports: the sidebar is fixed over a rail-wide spacer, so it opens over the page like the Inspector
+          and closing it never reflows the page; the backdrop closes it. */}
+      <div className="w-14 flex-none lg:hidden" aria-hidden />
+      {!collapsed && <div className="fixed inset-0 z-30 bg-overlay/30 lg:hidden" onClick={() => setCollapsed(true)} aria-hidden />}
       <aside
         className={cn(
           'flex-none h-full bg-surface border-r border-line flex flex-col transition-[width] duration-200 overflow-hidden',
-          collapsed ? 'w-14' : 'w-[232px]'
+          'max-lg:fixed max-lg:inset-y-0 max-lg:left-0 max-lg:z-20',
+          collapsed ? 'w-14' : 'w-[232px] max-lg:z-40 max-lg:shadow-2xl'
         )}
       >
         {/* Logo + collapse toggle */}
@@ -226,7 +240,8 @@ export default function AppShell({ onLogout }: { onLogout: () => void }) {
       </aside>
 
       <main className="flex-1 min-w-0 flex flex-col">
-        <header className="h-11 flex-none flex items-center gap-4 px-4 border-b border-line bg-surface">
+        {/* The pool ticker drops to a second line when it does not fit beside the breadcrumb. */}
+        <header className="min-h-11 flex-none flex flex-wrap items-center gap-x-4 gap-y-1 px-4 py-1.5 border-b border-line bg-surface">
           <div className="flex items-center gap-1.5 text-[13px] min-w-0">
             {projectId && selectedProject ? (
               <>
@@ -241,13 +256,12 @@ export default function AppShell({ onLogout }: { onLogout: () => void }) {
             )}
             {inSettings && (
               <>
-                <span className="text-fg-muted">Settings</span>
+                <span className="text-fg-muted truncate">Settings</span>
                 <ChevronRight className="w-3 h-3 text-fg-subtle flex-none" />
               </>
             )}
             <span className="font-semibold truncate">{pageTitle}</span>
           </div>
-          <div className="flex-1" />
           {projectId && <PoolTicker projectId={projectId} />}
         </header>
 
@@ -332,16 +346,17 @@ function PoolTicker({ projectId }: { projectId: string }) {
   if (!pool) return null
   // Each proxy once: the API also counts quarantined proxies inside unhealthy.
   const { healthy, quarantined, unhealthy } = poolBreakdown(pool)
+  // Phones drop the separators and the word "live" so the ticker fits one line; it wraps rather than clips past that.
   return (
-    <div className="flex items-center gap-2.5 text-xs text-fg-muted tabular-nums whitespace-nowrap">
+    <div className="ml-auto flex flex-wrap justify-end items-center gap-x-2 gap-y-1 sm:gap-x-2.5 text-xs text-fg-muted tabular-nums whitespace-nowrap">
       <TickerDot className="bg-success" value={healthy} title="Healthy" />
       <TickerDot className="bg-orange-500" value={quarantined} title="Quarantined" />
       <TickerDot className="bg-danger" value={unhealthy} title="Unhealthy, initializing or unknown" />
-      <span className="text-line-strong">|</span>
+      <span className="text-line-strong max-sm:hidden">|</span>
       <span title="Average latency">{Math.round(pool.avg_latency_ms)} ms</span>
       {scaling && (
         <>
-          <span className="text-line-strong">|</span>
+          <span className="text-line-strong max-sm:hidden">|</span>
           <span title="Requests per minute">{scaling.requests_per_minute.toFixed(0)} req/min</span>
         </>
       )}
@@ -350,7 +365,7 @@ function PoolTicker({ projectId }: { projectId: string }) {
         title="Refreshed every 10 seconds from Postgres and Redis, the same whichever api process answers"
       >
         <span className="w-1.5 h-1.5 rounded-full bg-success animate-pulse-soft" />
-        live
+        <span className="max-sm:hidden">live</span>
       </span>
     </div>
   )
