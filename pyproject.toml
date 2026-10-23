@@ -1,6 +1,6 @@
 [project]
 name = "octoprox"
-version = "6.0.8"
+version = "6.0.9"
 description = "A dynamic and flexible proxy manager"
 readme = "README.md"
 requires-python = ">=3.12"
