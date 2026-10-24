@@ -63,6 +63,11 @@ CREATE_TIMEOUT_SECONDS = 600
 # deletion to ask for it, so an instance with neither a row nor an entry (Redis
 # lost its creator's entry) is terminated within about this.
 LISTING_INTERVAL_SECONDS = 3600
+# How a failed listing's error starts, as recorded on the connector: a successful
+# listing clears the connector's error only when it starts so, and leaves a
+# create's or a termination's to count its backoff up.
+LISTING_FAILED = "Failed to list the connector's instances"
+LISTING_ERROR_PREFIX = f"{LISTING_FAILED}: "
 # Checks in a row that must find a draining instance's counters unchanged
 # before it is terminated: one can miss the counts a metrics flush holds for
 # a few seconds between taking them and committing them.
@@ -340,7 +345,11 @@ class AutoscaleJob(Job):
         await self._save_state(run)
 
     async def _read(self, connector: Connector, cloud: CloudProvider) -> _Run:
-        """Read what a run starts from, in this order: the instances the cloud lists, when the run lists them, the creating hash, then the rows."""
+        """Read what a run starts from, in this order: the instances the cloud lists, when the run lists them, the creating hash, then the rows.
+
+        A failed listing is recorded on the connector as a cloud error, which backs it off; a successful one clears a
+        failed listing's error.
+        """
         now = time.time()
         state = await self._load_state(connector.id, now)
         listed: list[CloudInstance] | None = None
@@ -348,15 +357,20 @@ class AutoscaleJob(Job):
             try:
                 listed = await cloud.tagged_instances()
             except Exception as exc:
-                logger.warning("Failed to list the connector's instances", connector_id=connector.id, error=error_text(exc))
+                logger.warning(LISTING_FAILED, connector_id=connector.id, error=error_text(exc))
+                connector = await self._connectors.record_error(connector.id, LISTING_ERROR_PREFIX + error_text(exc)) or connector
             else:
                 state.listed_at = now
+                if connector.last_error is not None and connector.last_error.startswith(LISTING_ERROR_PREFIX):
+                    connector = await self._connectors.record_error(connector.id, None) or connector
         creating = await self._creations(connector.id)
         proxies = await self._rows(connector.id)
         return _Run(connector, cloud, listed, creating, proxies, state, now)
 
     async def _lists(self, connector: Connector, state: AutoscalerState, now: float) -> bool:
-        """Whether the run lists the connector's instances: while it is pending deletion or its creating hash holds any entry, and once no listing succeeded within ``LISTING_INTERVAL_SECONDS``."""
+        """Whether the run lists the connector's instances: never while it backs off after a cloud error, otherwise while it is pending deletion or its creating hash holds any entry, and once no listing succeeded within ``LISTING_INTERVAL_SECONDS``."""
+        if connector.in_error_backoff:
+            return False
         if connector.pending_deletion or not state.listed_within(now):
             return True
         return bool(await self._redis.client.exists(SCALE_CREATING_KEY.format(connector_id=connector.id)))
@@ -459,7 +473,9 @@ class AutoscaleJob(Job):
                 if proxy.status == ProxyStatus.DRAINING:
                     await self._check_drained(run, proxy, counters)
                 elif proxy.status == ProxyStatus.TERMINATING:
-                    await self._terminate(run, proxy)
+                    # Terminating is a cloud call: not while backing off.
+                    if not run.connector.in_error_backoff:
+                        await self._terminate(run, proxy)
                 else:
                     logger.info("Draining proxy of a disabled connector", connector_id=run.connector.id, proxy_id=proxy.id)
                     await self._drain(run, proxy.id)

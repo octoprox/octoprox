@@ -42,6 +42,7 @@ from sqlalchemy.orm import joinedload, selectinload
 from api.core import utc_now
 from api.core.stats import HOST_OVERFLOW, FailureCountKey, MetricDelta, TunnelPeerMetricDelta
 from api.db.models import (
+    LAST_ERROR_CHARS,
     ConnectorMetricsModel,
     ConnectorModel,
     CredentialModel,
@@ -524,7 +525,8 @@ class ConnectorRepository:
             values = {"last_error": None, "last_error_at": None, "consecutive_errors": 0}
         else:
             values = {
-                "last_error": error,
+                # Cut to the column, since a cloud SDK's error can run longer.
+                "last_error": error[:LAST_ERROR_CHARS],
                 "last_error_at": utc_now(),
                 "consecutive_errors": ConnectorModel.consecutive_errors + 1,
             }
