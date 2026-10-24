@@ -9,6 +9,7 @@ for its instances client that hands back the SDK's own instance messages.
 
 import base64
 import functools
+import inspect
 import io
 import json
 import re
@@ -1301,7 +1302,9 @@ class _Instances:
     def __init__(self) -> None:
         self.instances: dict[str, compute_v1.Instance] = {}
         self.operations: list[_Operation] = []
+        # Each listing's filter, and the project and zone it was asked in.
         self.filters: list[str] = []
+        self.listed_in: list[tuple[str, str]] = []
         self.insert_error: Exception | None = None
         self.delete_error: Exception | None = None
         # The external IP an inserted instance gets.
@@ -1337,8 +1340,9 @@ class _Instances:
             raise NotFound(f"instance {instance}")
         return self.instances[instance]
 
-    def list(self, *, project: str, zone: str, filter: str) -> list[compute_v1.Instance]:
-        self.filters.append(filter)
+    def list(self, request: compute_v1.ListInstancesRequest) -> list[compute_v1.Instance]:
+        self.listed_in.append((request.project, request.zone))
+        self.filters.append(request.filter)
         return list(self.instances.values())
 
     def delete(self, *, project: str, zone: str, instance: str) -> _Operation:
@@ -1409,7 +1413,15 @@ class TestGCPInstances:
         listed = await GCPProvider(gcp_connector, gcp_credential).tagged_instances()
 
         assert zone.filters == [f'labels.{CONNECTOR_TAG} = "{gcp_connector.id}"']
+        assert zone.listed_in == [("my-gcp-project", gcp_connector.config["zone"])]
         assert listed == [CloudInstance("a", "gcp-a"), CloudInstance("b", "gcp-b"), CloudInstance("e", "gcp-e")]
+
+    @pytest.mark.parametrize("method", ["insert", "get", "list", "delete"])
+    def test_the_stand_in_takes_only_what_the_sdk_client_takes(self, method: str) -> None:
+        """A call the stand-in answers must be one the SDK's client accepts too: a listing once passed a filter the SDK refuses, and the stand-in took it."""
+        sdk = inspect.signature(getattr(compute_v1.InstancesClient, method)).parameters
+        stand_in = inspect.signature(getattr(_Instances, method)).parameters
+        assert set(stand_in) - {"self"} <= set(sdk)
 
     async def test_terminate_waits_for_the_delete_and_counts_a_missing_or_stopping_instance_as_terminated(
         self, zone: _Instances, gcp_connector: Connector, gcp_credential: Credential
