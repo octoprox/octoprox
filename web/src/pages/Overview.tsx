@@ -5,10 +5,10 @@ import { useMemo, useState } from 'react'
 import { useNavigate } from 'react-router'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts'
-import { Settings, Check, Loader, Power, AlertTriangle } from 'lucide-react'
+import { Check, Loader, Power, AlertTriangle } from 'lucide-react'
 import {
   fetchProjectMetrics, fetchProjectScalingMetrics, fetchProjectMetricsHistory, fetchProjectConnectors,
-  updateProject, poolBreakdown, MetricsSnapshot, ProjectUpdate,
+  updateProject, poolBreakdown, MetricsSnapshot,
   HISTORY_RANGES, HistoryRange,
 } from '../api/client'
 import { useProject } from '../contexts/ProjectContext'
@@ -21,11 +21,10 @@ import { targetTotal, describeTarget, isDynamic } from '../utils/connectors'
 import { ProviderLogo } from '../components/ProviderLogo'
 import { Page } from '../components/layout/Page'
 import { Sparkline } from '../components/charts/Sparkline'
-import { ProjectPanel } from '../components/ProjectForm'
 import { ProjectLocations, LocationSummary } from '../components/ProjectLocations'
 import { TrafficSplitPanel, totalSpend } from '../components/TrafficSplit'
 import { PERIOD_LABEL, TrafficUsageBar, describeUsage } from '../components/ConnectorTraffic'
-import { Badge, Button, Card, CardHeader, KeyValue, Segmented } from '../components/ui'
+import { Badge, Card, CardHeader, KeyValue, Segmented } from '../components/ui'
 import { cn } from '../utils/cn'
 
 // Gap thresholds per range: 2x the expected interval between points.
@@ -118,7 +117,6 @@ export default function Overview() {
   const [range, setRange] = useTimeRange(HISTORY_RANGES)
   const [routingOpen, setRoutingOpen] = useState(false)
   const [locations, setLocations] = useState<LocationSummary | null>(null)
-  const [projectPanelOpen, setProjectPanelOpen] = useState(false)
 
   const { data: metrics } = useQuery({
     queryKey: ['metrics', selectedProjectId],
@@ -155,17 +153,6 @@ export default function Overview() {
       toast.show(`Routing strategy set to ${formatStrategy(strategy)}`)
     },
     onError: (e: Error) => toast.show(e.message || 'Failed to change strategy', 'error'),
-  })
-
-  const updateMutation = useMutation({
-    mutationFn: (data: ProjectUpdate) => updateProject(selectedProjectId!, data),
-    onSuccess: async () => {
-      queryClient.invalidateQueries({ queryKey: ['metrics', selectedProjectId] })
-      queryClient.invalidateQueries({ queryKey: ['projects'] })
-      await refreshProject()
-      setProjectPanelOpen(false)
-      toast.show('Project settings saved')
-    },
   })
 
   const pool = metrics?.pool
@@ -209,25 +196,7 @@ export default function Overview() {
     <Page
       title="Overview"
       subtitle={selectedProject ? `Pool health and traffic for ${selectedProject.name}` : undefined}
-      actions={
-        <>
-          <Segmented options={HISTORY_RANGES.map((r) => ({ value: r, label: r }))} value={range} onChange={setRange} />
-          {canMutate && selectedProject && (
-            <Button variant="outline" size="sm" onClick={() => { updateMutation.reset(); setProjectPanelOpen(true) }}>
-              <Settings className="w-3.5 h-3.5" /> Edit project
-            </Button>
-          )}
-        </>
-      }
-      panel={projectPanelOpen && selectedProject ? (
-        <ProjectPanel
-          project={selectedProject}
-          onClose={() => setProjectPanelOpen(false)}
-          onSave={(data) => updateMutation.mutate(data)}
-          isLoading={updateMutation.isPending}
-          error={updateMutation.error?.message}
-        />
-      ) : null}
+      actions={<Segmented options={HISTORY_RANGES.map((r) => ({ value: r, label: r }))} value={range} onChange={setRange} />}
     >
       {/* Hero: success rate + pool health */}
       <Card className="grid grid-cols-1 @xl:grid-cols-[240px_minmax(0,1fr)] overflow-hidden">

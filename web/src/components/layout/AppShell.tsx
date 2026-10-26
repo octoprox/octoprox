@@ -1,12 +1,12 @@
 // Copyright 2026 Octoprox Authors
 // SPDX-License-Identifier: Apache-2.0
 
-import { useEffect, useState, type ReactNode } from 'react'
+import { startTransition, useEffect, useState, type ReactNode } from 'react'
 import { NavLink as RouterNavLink, Outlet, useLocation, useNavigate, useParams } from 'react-router'
 import { useQuery } from '@tanstack/react-query'
 import {
   BarChart3, Server, Link2, KeyRound, Eye, Settings as SettingsIcon, LogOut, ChevronLeft, ChevronRight,
-  ChevronsUpDown, FolderOpen, ArrowLeft, User as UserIcon, Palette, Users as UsersIcon, DatabaseBackup, Puzzle,
+  ArrowLeft, User as UserIcon, Palette, Users as UsersIcon, DatabaseBackup, Puzzle,
   Activity, Globe, Router, ShieldCheck, Target, LogIn, Plug, AlertTriangle,
 } from 'lucide-react'
 import octoproxLogo from '../../assets/logos/octoprox_horizontal.svg'
@@ -20,6 +20,9 @@ import { useNavigationGuardContext } from '../../contexts/NavigationGuardContext
 import { fetchProjectMetrics, fetchProjectScalingMetrics, poolBreakdown } from '../../api/client'
 import { popSettingsOrigin, setSettingsOrigin } from '../../utils/settingsOrigin'
 import { HelpMenu } from '../HelpMenu'
+import { ProjectPanel } from '../ProjectForm'
+import { ProjectSwitcher } from './ProjectSwitcher'
+import { ShellPanelContext } from './Page'
 import { navItemBase, navItemCollapsed, navItemExpanded, navItemIdle } from './navStyles'
 import { cn } from '../../utils/cn'
 
@@ -27,6 +30,8 @@ const COLLAPSED_KEY = 'octoprox_sidebar_collapsed'
 /** Below Tailwind's lg breakpoint the sidebar is a rail and opens over the page. In rem, as Tailwind writes it, so the two agree at any font size. */
 const NARROW = '(width < 64rem)'
 const isNarrow = () => window.matchMedia(NARROW).matches
+/** The same path in another project. */
+const inProject = (path: string, id: string) => path.replace(/^\/projects\/[^/]+/, `/projects/${id}`)
 
 const PAGE_TITLES: Record<string, string> = {
   overview: 'Overview',
@@ -63,9 +68,11 @@ export default function AppShell({ onLogout }: { onLogout: () => void }) {
   const guard = useNavigationGuardContext()
   // Every navigation the shell performs goes through the unsaved-changes guard.
   const navigate = (to: string) => guard.request(() => routerNavigate(to))
-  const { selectedProject, setSelectedProjectId, isLoading } = useProject()
-  const { authStatus, isAdmin } = useAuth()
+  const { selectedProjectId, selectedProject, setSelectedProjectId } = useProject()
+  const { authStatus, isAdmin, canMutate } = useAuth()
   const { isDark } = useTheme()
+  // Project settings belong to the page they were opened on: leaving it closes them.
+  const [projectSettingsOn, setProjectSettingsOn] = useState<string | null>(null)
   const [collapsed, setCollapsed] = useState<boolean>(() => {
     if (isNarrow()) return true // a phone never opens on the overlay
     try { return localStorage.getItem(COLLAPSED_KEY) === '1' } catch { return false }
@@ -94,6 +101,9 @@ export default function AppShell({ onLogout }: { onLogout: () => void }) {
     if (isNarrow()) setCollapsed(true)
   }, [location.key])
 
+  // Leaving the page closes project settings for good, so coming back to it does not reopen them.
+  useEffect(() => { setProjectSettingsOn(null) }, [location.pathname])
+
   // Keep the project context in sync with the URL.
   useEffect(() => {
     if (projectId) setSelectedProjectId(projectId)
@@ -108,8 +118,28 @@ export default function AppShell({ onLogout }: { onLogout: () => void }) {
     navigate(settingsBase)
   }
   const leaveSettings = () => {
-    const from = popSettingsOrigin()
+    // The project can be switched inside Settings; Back returns to the same page in the project open now.
+    const origin = popSettingsOrigin()
+    const from = origin && projectId ? inProject(origin, projectId) : origin
     navigate(from || (projectId ? `${base}/overview` : '/'))
+  }
+
+  // The same page in the other project; from global settings, its Overview. Query string and hash belong to the old project.
+  // The router applies a navigation as a transition; the new id joins it, so no page renders it under the old URL.
+  const switchProject = (id: string) => guard.request(() => startTransition(() => {
+    setSelectedProjectId(id)
+    routerNavigate(projectId ? inProject(location.pathname, id) : `/projects/${id}/overview`)
+  }))
+  const showAllProjects = () => guard.request(() => startTransition(() => {
+    setSelectedProjectId(null)
+    routerNavigate('/')
+  }))
+  // Pages read the project from the context, so they wait until it holds the project in the URL (after a switch,
+  // or Back into another project). A failed load clears the selection and lets the page show that.
+  const projectPending = !!projectId && !!selectedProjectId && (selectedProjectId !== projectId || !selectedProject)
+  const openProjectSettings = () => {
+    if (isNarrow()) setCollapsed(true) // the panel covers the screen on a phone
+    setProjectSettingsOn(location.pathname)
   }
 
   const segment = location.pathname.split('/').filter(Boolean).pop() || ''
@@ -148,23 +178,14 @@ export default function AppShell({ onLogout }: { onLogout: () => void }) {
           )}
         </div>
 
-        {/* Project switcher */}
-        <button
-          onClick={() => guard.request(() => { setSelectedProjectId(null); routerNavigate('/') })}
-          title="Switch project"
-          className={cn(
-            'flex items-center gap-2 text-[13px] font-medium text-fg hover:bg-surface-raised transition-colors flex-none',
-            collapsed ? 'mx-2 my-1 h-9 justify-center rounded-md' : 'mx-3 my-1 h-[34px] px-2.5 rounded-lg border border-line'
-          )}
-        >
-          <FolderOpen className="w-4 h-4 text-fg-subtle flex-none" />
-          {!collapsed && (
-            <>
-              <span className="truncate flex-1 text-left">{projectId ? (selectedProject?.name ?? '…') : 'All projects'}</span>
-              <ChevronsUpDown className="w-3.5 h-3.5 text-fg-subtle flex-none" />
-            </>
-          )}
-        </button>
+        <ProjectSwitcher
+          collapsed={collapsed}
+          projectId={projectId}
+          label={projectId ? (selectedProject?.name ?? '…') : 'All projects'}
+          onSwitch={(p) => switchProject(p.id)}
+          onAllProjects={showAllProjects}
+          onProjectSettings={projectId && canMutate && selectedProject ? openProjectSettings : undefined}
+        />
 
         {/* Navigation */}
         <nav className={cn('flex-1 min-h-0 overflow-y-auto flex flex-col gap-0.5', collapsed ? 'px-2 py-1' : 'px-3 py-1')}>
@@ -266,10 +287,15 @@ export default function AppShell({ onLogout }: { onLogout: () => void }) {
         </header>
 
         <div className="flex-1 min-h-0 flex">
-          {projectId && isLoading && !selectedProject ? (
+          {projectPending ? (
             <div className="flex-1 flex items-center justify-center text-fg-muted text-sm">Loading project…</div>
           ) : (
-            <Outlet />
+            // Keyed by project, so a switch starts the page afresh instead of keeping the old project's panels and filters.
+            <ShellPanelContext
+              value={projectSettingsOn === location.pathname && selectedProject ? <ProjectPanel project={selectedProject} onClose={() => setProjectSettingsOn(null)} /> : null}
+            >
+              <Outlet key={projectId} />
+            </ShellPanelContext>
           )}
         </div>
       </main>

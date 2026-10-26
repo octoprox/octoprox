@@ -49,11 +49,15 @@ export function docsForPath(pathname: string): DocLink[] {
 }
 
 const MENU_WIDTH = 272
+/** Space kept between the menu and the edges of the screen. */
+const GUTTER = 8
+
+interface Placement { left: number; bottom: number; width: number; maxHeight: number }
 
 export function HelpMenu({ collapsed }: { collapsed: boolean }) {
   const location = useLocation()
   const [open, setOpen] = useState(false)
-  const [anchor, setAnchor] = useState<{ left: number; bottom: number } | null>(null)
+  const [anchor, setAnchor] = useState<Placement | null>(null)
   const buttonRef = useRef<HTMLButtonElement>(null)
   const menuRef = useRef<HTMLDivElement>(null)
 
@@ -62,17 +66,23 @@ export function HelpMenu({ collapsed }: { collapsed: boolean }) {
   useEffect(() => { setOpen(false) }, [location.pathname, collapsed])
 
   // Place the menu beside the button, bottom aligned, before it paints, and
-  // again whenever the window changes size while it is open.
+  // again whenever the window changes size while it is open. On a phone with the
+  // sidebar open there is no room beside it, so the menu opens above the button.
+  // It narrows to the screen's width and scrolls when the screen is too short.
   useLayoutEffect(() => {
     if (!open) return
     const place = () => {
       const rect = buttonRef.current?.getBoundingClientRect()
-      if (rect) setAnchor({ left: rect.right + 8, bottom: Math.max(8, window.innerHeight - rect.bottom) })
+      if (!rect) return
+      const beside = collapsed || rect.right + GUTTER + MENU_WIDTH <= window.innerWidth - GUTTER
+      const left = beside ? rect.right + GUTTER : rect.left
+      const bottom = beside ? Math.max(GUTTER, window.innerHeight - rect.bottom) : window.innerHeight - rect.top + 4
+      setAnchor({ left, bottom, width: Math.min(MENU_WIDTH, window.innerWidth - left - GUTTER), maxHeight: window.innerHeight - bottom - GUTTER })
     }
     place()
     window.addEventListener('resize', place)
     return () => window.removeEventListener('resize', place)
-  }, [open])
+  }, [open, collapsed])
 
   useEffect(() => {
     if (!open) return
@@ -115,8 +125,8 @@ export function HelpMenu({ collapsed }: { collapsed: boolean }) {
         <div
           ref={menuRef}
           role="menu"
-          style={{ position: 'fixed', left: anchor.left, bottom: anchor.bottom, width: MENU_WIDTH }}
-          className="z-50 bg-surface border border-line-strong rounded-lg shadow-lg py-1.5 text-[13px]"
+          style={{ position: 'fixed', left: anchor.left, bottom: anchor.bottom, width: anchor.width, maxHeight: anchor.maxHeight }}
+          className="z-50 bg-surface border border-line-strong rounded-lg shadow-lg py-1.5 text-[13px] overflow-y-auto overscroll-contain"
         >
           {pageDocs.length > 0 && (
             <>

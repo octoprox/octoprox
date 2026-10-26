@@ -1,7 +1,7 @@
 // Copyright 2026 Octoprox Authors
 // SPDX-License-Identifier: Apache-2.0
 
-import { createContext, useCallback, useContext, useState, useEffect, ReactNode } from 'react'
+import { createContext, useCallback, useContext, useRef, useState, useEffect, ReactNode } from 'react'
 import { ProjectSummary, fetchProject } from '../api/client'
 
 const PROJECT_KEY = 'octoprox_selected_project'
@@ -10,7 +10,6 @@ interface ProjectContextType {
   selectedProjectId: string | null
   selectedProject: ProjectSummary | null
   setSelectedProjectId: (id: string | null) => void
-  isLoading: boolean
   refreshProject: () => Promise<void>
 }
 
@@ -21,36 +20,37 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
     return localStorage.getItem(PROJECT_KEY)
   })
   const [selectedProject, setSelectedProject] = useState<ProjectSummary | null>(null)
-  const [isLoading, setIsLoading] = useState(false)
+  // The selection now: a load that answers after a switch belongs to the project left behind and is dropped.
+  const currentId = useRef(selectedProjectId)
 
   // Stable, so effects that list it (AppShell's URL sync) only re-run when the
   // project changes, not on every render of this provider.
   const setSelectedProjectId = useCallback((id: string | null) => {
+    currentId.current = id
     setSelectedProjectIdState(id)
+    // A switch drops the previous project's details, so no page shows them under the new id while it loads.
+    setSelectedProject((current) => (current && current.id === id ? current : null))
     if (id) {
       localStorage.setItem(PROJECT_KEY, id)
     } else {
       localStorage.removeItem(PROJECT_KEY)
-      setSelectedProject(null)
     }
   }, [])
 
   const refreshProject = async () => {
-    if (!selectedProjectId) {
+    const id = selectedProjectId
+    if (!id) {
       setSelectedProject(null)
       return
     }
 
-    setIsLoading(true)
     try {
-      const project = await fetchProject(selectedProjectId)
-      setSelectedProject(project)
+      const project = await fetchProject(id)
+      if (currentId.current === id) setSelectedProject(project)
     } catch (error) {
       console.error('Failed to fetch project:', error)
       // If project not found, clear selection
-      setSelectedProjectId(null)
-    } finally {
-      setIsLoading(false)
+      if (currentId.current === id) setSelectedProjectId(null)
     }
   }
 
@@ -65,7 +65,6 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
         selectedProjectId,
         selectedProject,
         setSelectedProjectId,
-        isLoading,
         refreshProject,
       }}
     >

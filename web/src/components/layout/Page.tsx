@@ -1,8 +1,11 @@
 // Copyright 2026 Octoprox Authors
 // SPDX-License-Identifier: Apache-2.0
 
-import { type ReactNode } from 'react'
+import { createContext, useContext, type ReactNode } from 'react'
 import { cn } from '../../utils/cn'
+
+/** A panel the shell opens over any page (project settings); it takes the page's panel slot while set, the page's own panel kept hidden. */
+export const ShellPanelContext = createContext<ReactNode>(null)
 
 /**
  * Standard page frame: scrolling content on the left, optional docked
@@ -30,6 +33,7 @@ interface PageProps {
 }
 
 export function Page({ title, subtitle, count, belowTitle, actions, toolbar, panel, children, contentClassName }: PageProps) {
+  const shellPanel = useContext(ShellPanelContext)
   return (
     <div className="flex flex-1 min-h-0 min-w-0">
       <div className="@container flex-1 min-w-0 overflow-y-auto">
@@ -51,7 +55,9 @@ export function Page({ title, subtitle, count, belowTitle, actions, toolbar, pan
           {children}
         </div>
       </div>
-      {panel}
+      {/* Hidden, not unmounted, under the shell's panel, so whatever is being edited in it is still there afterwards. */}
+      {panel ? <div className={shellPanel ? 'hidden' : 'contents'}>{panel}</div> : null}
+      {shellPanel}
     </div>
   )
 }

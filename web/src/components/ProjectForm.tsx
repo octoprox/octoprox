@@ -2,9 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { useState } from 'react'
-import { useQuery } from '@tanstack/react-query'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Eye, EyeOff, Info, AlertTriangle, Shield, MapPin } from 'lucide-react'
-import { ProjectCreate, ProjectUpdate, ProjectSummary, downloadCaCertificate, fetchGeoDatabases, fetchGeoSettings } from '../api/client'
+import { ProjectCreate, ProjectUpdate, ProjectSummary, downloadCaCertificate, fetchGeoDatabases, fetchGeoSettings, updateProject } from '../api/client'
 import type { ConflictRule, ContradictedAction, UnknownAction } from '../api/client'
 import { locationExamples, scenarioSteps, ROW_KIND_FACTS } from './locationExamples'
 import type { RowKind, Ask } from './locationExamples'
@@ -12,6 +12,7 @@ import { RichSelect, RichSelectOption } from './RichSelect'
 import { Button, Input, Select, Textarea, Label, Alert, Inspector, Tabs, Segmented, InfoTip } from './ui'
 import { isInUse } from '../utils/geo'
 import { useToast } from '../contexts/ToastContext'
+import { useProject } from '../contexts/ProjectContext'
 
 const engineOptions: RichSelectOption[] = [
   { value: 'curl_cffi', label: 'curl_cffi', description: 'C/libcurl - mature, Chrome-grade fingerprinting' },
@@ -85,8 +86,8 @@ interface ProjectFormProps {
 }
 
 /**
- * Project settings form body. Rendered inside the docked Inspector on the
- * Overview page and inside a modal on the project selection page (create).
+ * Project settings form body. Rendered inside the docked Inspector opened from
+ * the project switcher and on the project selection page (create and edit).
  */
 export function ProjectForm({ project, onSave, error, formId }: ProjectFormProps) {
   const isEdit = !!project
@@ -400,14 +401,21 @@ export function ProjectForm({ project, onSave, error, formId }: ProjectFormProps
   )
 }
 
-/** Docked-panel wrapper used by the Overview page. */
-export function ProjectPanel({ project, onClose, onSave, isLoading, error }: {
-  project: ProjectSummary
-  onClose: () => void
-  onSave: (data: ProjectUpdate) => void
-  isLoading: boolean
-  error?: string
-}) {
+/** Settings of the open project in a docked panel; the shell shows it beside any project page. */
+export function ProjectPanel({ project, onClose }: { project: ProjectSummary; onClose: () => void }) {
+  const queryClient = useQueryClient()
+  const { refreshProject } = useProject()
+  const toast = useToast()
+  const save = useMutation({
+    mutationFn: (data: ProjectUpdate) => updateProject(project.id, data),
+    onSuccess: async () => {
+      queryClient.invalidateQueries({ queryKey: ['metrics', project.id] })
+      queryClient.invalidateQueries({ queryKey: ['projects'] })
+      await refreshProject()
+      onClose()
+      toast.show('Project settings saved')
+    },
+  })
   return (
     <Inspector
       title="Project settings"
@@ -417,11 +425,11 @@ export function ProjectPanel({ project, onClose, onSave, isLoading, error }: {
         <>
           <span className="flex-1" />
           <Button type="button" variant="outline" size="sm" onClick={onClose}>Cancel</Button>
-          <Button type="submit" form="project-form" size="sm" disabled={isLoading}>{isLoading ? 'Saving…' : 'Save changes'}</Button>
+          <Button type="submit" form="project-form" size="sm" disabled={save.isPending}>{save.isPending ? 'Saving…' : 'Save changes'}</Button>
         </>
       }
     >
-      <ProjectForm key={project.id} project={project} onSave={onSave} error={error} formId="project-form" />
+      <ProjectForm key={project.id} project={project} onSave={(data) => save.mutate(data)} error={save.error?.message} formId="project-form" />
     </Inspector>
   )
 }
