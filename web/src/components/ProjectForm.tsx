@@ -258,7 +258,7 @@ export function ProjectForm({ project, onSave, error, formId }: ProjectFormProps
             <label className="inline-flex items-center gap-2 text-[13px]">
               <input type="checkbox" checked={formData.location_preflight ?? false} onChange={(e) => setFormData({ ...formData, location_preflight: e.target.checked })} className="w-4 h-4" />
               <span>Preflight check</span>
-              <InfoTip label="About preflight">One echo through the selected upstream before a session's first request, when the client names a place; always on a dynamic-sessions gateway. Fixed exits are never preflighted. Needed for the decisions above to reach dynamic connectors, and to catch a pooled session that moved between health checks.</InfoTip>
+              <InfoTip label="About preflight">When on, one echo through the selected upstream before a session's first request: on a pooled slot when the client names a place, on a dynamic-sessions gateway for every session. Fixed exits are never preflighted. When off, dynamic-sessions exits are not observed at all, and the decisions above do not reach dynamic connectors. Also catches a pooled session that moved between health checks.</InfoTip>
             </label>
           </div>
           <div>

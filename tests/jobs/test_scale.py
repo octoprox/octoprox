@@ -37,6 +37,7 @@ from api.db.repository import ConnectorRepository, MetricsRepository, ProxyRepos
 from api.jobs.job import JobBatch
 from api.jobs.scale import (
     CREATE_TIMEOUT_SECONDS,
+    LISTING_ERROR_PREFIX,
     LISTING_INTERVAL_SECONDS,
     SCALING_COOLDOWN_SECONDS,
     AutoscaleJob,
@@ -359,6 +360,17 @@ async def _with_error(
             "last_error": "Cloud provider error",
             "last_error_at": utc_now() - timedelta(minutes=minutes_ago),
             "consecutive_errors": errors,
+        }))
+        await session.commit()
+
+
+async def _backoff_over(sessions: async_sessionmaker[AsyncSession], connector: Connector) -> None:
+    """Move the connector's last cloud error back past the backoff ceiling, as time passing would; its text and count stay."""
+    async with sessions() as session:
+        stored = await ConnectorRepository(session).get_by_id(connector.id)
+        assert stored is not None and stored.last_error_at is not None
+        await ConnectorRepository(session).update(stored.model_copy(update={
+            "last_error_at": utc_now() - timedelta(minutes=MAX_ERROR_BACKOFF_MINUTES + 1),
         }))
         await session.commit()
 
@@ -1128,9 +1140,9 @@ class TestStaleEntries:
         assert await _creating(redis_client, aws) == {}
 
     async def test_entries_stay_while_the_listing_fails_so_a_stale_scale_entry_holds_scaling_until_one_succeeds(
-        self, harness: Harness, aws: Connector, redis_client: RedisClient
+        self, harness: Harness, aws: Connector, redis_client: RedisClient, sessions: async_sessionmaker[AsyncSession]
     ) -> None:
-        """Without a listing a run cannot tell whether the entry's instance runs: the first run that lists settles it."""
+        """Without a listing a run cannot tell whether the entry's instance runs: the first run that lists, once the failed listing's backoff is over, settles it."""
         instance = harness.account.boot(aws, "octo-1-abcdef")
         await _entry(redis_client, aws, "octo-1-abcdef", "scale", age=CREATE_TIMEOUT_SECONDS + 5)
         harness.account.list_error = RuntimeError("API down")
@@ -1139,6 +1151,7 @@ class TestStaleEntries:
         assert list(await _creating(redis_client, aws)) == ["octo-1-abcdef"]
 
         harness.account.list_error = None
+        await _backoff_over(sessions, aws)
         await harness.run(aws)
         assert harness.account.terminated == [instance.proxy_id]
         # The entry gone, the run scales to the connector's minimum.
@@ -1320,14 +1333,22 @@ class TestUnrecordedInstances:
         await harness.run(aws)
         assert harness.account.terminated == [instance.proxy_id]
 
-    async def test_a_listing_that_fails_terminates_nothing_and_the_run_goes_on(
-        self, harness: Harness, rows: Rows, aws: Connector
+    async def test_a_listing_that_fails_terminates_nothing_and_holds_scaling_until_its_backoff_is_over(
+        self, harness: Harness, rows: Rows, aws: Connector, sessions: async_sessionmaker[AsyncSession]
     ) -> None:
-        harness.account.boot(aws, "octo-1-abcdef")
+        """A failed listing is a cloud error like a failed create: recorded on the connector, which backs off."""
+        instance = harness.account.boot(aws, "octo-1-abcdef")
         harness.account.list_error = RuntimeError("API down")
         await harness.run(aws)
-        assert harness.account.terminated == []
+        assert harness.account.terminated == [] and harness.account.created == []
+        assert await rows.of(aws) == []
+
+        harness.account.list_error = None
+        await _backoff_over(sessions, aws)
+        await harness.run(aws)
+        assert harness.account.terminated == [instance.proxy_id]
         assert [p.id for p in await rows.of(aws)] == [f"fake-{harness.account.created[0]}"]
+        assert await _no_error(rows, aws)
 
 
 class TestListing:
@@ -1401,8 +1422,9 @@ class TestListing:
         await harness.run(emptiable)
         assert harness.account.listings == 2 and harness.account.terminated == [instance.proxy_id]
 
-    async def test_a_failed_listing_is_not_recorded_so_the_next_run_lists_again(
-        self, harness: Harness, emptiable: Connector, redis_client: RedisClient
+    async def test_a_failed_listing_records_its_error_and_the_next_waits_for_the_backoff(
+        self, harness: Harness, rows: Rows, emptiable: Connector, redis_client: RedisClient,
+        sessions: async_sessionmaker[AsyncSession],
     ) -> None:
         listed_at = time.time() - LISTING_INTERVAL_SECONDS - 1
         await _seed(redis_client, emptiable, AutoscalerState(since=time.time(), listed_at=listed_at))
@@ -1411,10 +1433,52 @@ class TestListing:
         await harness.run(emptiable)
         assert harness.account.terminated == []
         assert (await _state(redis_client, emptiable)).listed_at == listed_at
+        stored = await rows.connector_as_stored(emptiable.id)
+        assert stored is not None
+        assert (stored.last_error, stored.consecutive_errors) == (f"{LISTING_ERROR_PREFIX}API down", 1)
 
+        # Within the backoff a run lists nothing, failing or not.
         harness.account.list_error = None
         await harness.run(emptiable)
+        assert harness.account.listings == 1
+
+        # Once it is over the run lists, and the success clears the listing's error.
+        await _backoff_over(sessions, emptiable)
+        await harness.run(emptiable)
         assert harness.account.listings == 2 and harness.account.terminated == [instance.proxy_id]
+        assert await _no_error(rows, emptiable)
+
+    async def test_failed_listings_count_the_backoff_up(
+        self, harness: Harness, rows: Rows, emptiable: Connector, sessions: async_sessionmaker[AsyncSession]
+    ) -> None:
+        harness.account.list_error = RuntimeError("API down")
+        for _ in range(3):
+            await harness.run(emptiable)
+            await _backoff_over(sessions, emptiable)
+        stored = await rows.connector_as_stored(emptiable.id)
+        assert stored is not None and stored.consecutive_errors == 3
+        assert harness.account.listings == 3
+
+    async def test_a_successful_listing_leaves_another_cloud_error_to_count_its_backoff(
+        self, harness: Harness, rows: Rows, emptiable: Connector, sessions: async_sessionmaker[AsyncSession]
+    ) -> None:
+        """A create's error clears once a create succeeds: a listing that succeeds meanwhile leaves it, and its count, as they were."""
+        await _with_error(sessions, emptiable, errors=3, minutes_ago=MAX_ERROR_BACKOFF_MINUTES + 1)
+        await harness.run(emptiable)
+        assert harness.account.listings == 1
+        stored = await rows.connector_as_stored(emptiable.id)
+        assert stored is not None
+        assert (stored.last_error, stored.consecutive_errors) == ("Cloud provider error", 3)
+
+    async def test_a_long_listing_error_is_recorded_cut_to_the_column(
+        self, harness: Harness, rows: Rows, emptiable: Connector
+    ) -> None:
+        """A cloud SDK's error can carry trace and correlation IDs past the column's 1024 characters."""
+        harness.account.list_error = RuntimeError("x" * 2000)
+        await harness.run(emptiable)
+        stored = await rows.connector_as_stored(emptiable.id)
+        assert stored is not None and stored.last_error is not None
+        assert len(stored.last_error) == 1024 and stored.last_error.startswith(LISTING_ERROR_PREFIX)
 
 
 class TestDraining:
@@ -1644,6 +1708,19 @@ class TestDisabledConnectors:
         await harness.run(connector)
         assert await rows.connector_as_stored(connector.id) is not None
 
+    async def test_a_disabled_connector_whose_listing_fails_shows_the_error_and_backs_off(
+        self, harness: Harness, rows: Rows, project: Project
+    ) -> None:
+        """An expired cloud credential on a disabled connector: one listing, its error on the connector, then quiet runs every period of the backoff."""
+        connector = await rows.connector(project, "aws", config=AWS_CONFIG, enabled=False)
+        harness.account.list_error = RuntimeError("credential expired")
+        for _ in range(5):
+            await harness.run(connector)
+        assert harness.account.listings == 1
+        stored = await rows.connector_as_stored(connector.id)
+        assert stored is not None
+        assert (stored.last_error, stored.consecutive_errors) == (f"{LISTING_ERROR_PREFIX}credential expired", 1)
+
     async def test_a_connector_pending_deletion_waits_for_its_creating_entries(
         self, harness: Harness, rows: Rows, doomed: Connector, redis_client: RedisClient
     ) -> None:
@@ -1669,13 +1746,18 @@ class TestDisabledConnectors:
         assert await rows.connector_as_stored(doomed.id) is None
 
     async def test_a_listing_that_fails_holds_the_deletion(
-        self, harness: Harness, rows: Rows, doomed: Connector
+        self, harness: Harness, rows: Rows, doomed: Connector, sessions: async_sessionmaker[AsyncSession]
     ) -> None:
         harness.account.list_error = RuntimeError("API down")
         await harness.run(doomed)
         assert await rows.connector_as_stored(doomed.id) is not None
 
+        # Within the backoff the deletion waits even with the cloud answering again.
         harness.account.list_error = None
+        await harness.run(doomed)
+        assert await rows.connector_as_stored(doomed.id) is not None
+
+        await _backoff_over(sessions, doomed)
         await harness.run(doomed)
         assert await rows.connector_as_stored(doomed.id) is None
 
@@ -1735,11 +1817,12 @@ class TestErrorsWithoutText:
         assert stored is not None
         return stored.last_error
 
-    async def test_a_listing(self, harness: Harness, aws: Connector) -> None:
+    async def test_a_listing(self, harness: Harness, rows: Rows, aws: Connector) -> None:
         harness.account.list_error = TimeoutError()
         with structlog.testing.capture_logs() as logs:
             await harness.run(aws)
         assert self._errors(logs, "Failed to list the connector's instances") == ["TimeoutError"]
+        assert await self._recorded(rows, aws) == f"{LISTING_ERROR_PREFIX}TimeoutError"
 
     async def test_a_termination_of_an_instance_with_no_row(self, harness: Harness, aws: Connector) -> None:
         harness.account.boot(aws, "octo-1-abcdef")

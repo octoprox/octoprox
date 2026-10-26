@@ -26,6 +26,9 @@ from api.core import utc_now
 from api.db.base import Base
 from api.models.proxy import ProxyProtocol, ProxyStatus
 
+# The characters a connector's last cloud error keeps.
+LAST_ERROR_CHARS = 1024
+
 
 class UserModel(Base):
     """SQLAlchemy model for user accounts."""
@@ -193,7 +196,7 @@ class ConnectorModel(Base):
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     pending_deletion: Mapped[bool] = mapped_column(Boolean, default=False)
     # Cloud provider error tracking
-    last_error: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+    last_error: Mapped[str | None] = mapped_column(String(LAST_ERROR_CHARS), nullable=True)
     last_error_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     consecutive_errors: Mapped[int] = mapped_column(Integer, default=0)
     routing_config: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)

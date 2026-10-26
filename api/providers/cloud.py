@@ -566,10 +566,16 @@ class GCPProvider(CloudProvider):
     async def tagged_instances(self) -> list[CloudInstance]:
         """Every provisioning, staging or running instance labelled with this connector."""
         client = await asyncio.to_thread(self._get_compute_client)
+        from google.cloud import compute_v1
 
         def listed() -> list[Any]:
-            labelled = f'labels.{CONNECTOR_TAG} = "{self.connector.id}"'
-            return list(client.list(project=self._config.project_id, zone=self._config.zone, filter=labelled))
+            # The client takes a filter only inside the request: as a keyword beside project and zone it is refused.
+            request = compute_v1.ListInstancesRequest(
+                project=self._config.project_id,
+                zone=self._config.zone,
+                filter=f'labels.{CONNECTOR_TAG} = "{self.connector.id}"',
+            )
+            return list(client.list(request=request))
 
         return [
             CloudInstance(instance.name, self._proxy_id(instance.name))
