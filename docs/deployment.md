@@ -170,7 +170,7 @@ redis HGETALL o6:scale:creating:<connector id>   # cloud instances a scale job i
 redis SMEMBERS o6:instance_index                 # processes that heartbeat (and some just gone)
 ```
 
-Replace `health` with any other job kind (`sync`, `scale`, `provision`, `reattribute`, `enrich`, `traffic`, `metrics_flush`, `compaction`, `snapshot`, `geo_update`, `tunnel_last_seen`, `index_hygiene`) for its stream; the queued backlog is the stream's length less the group's pending count. In Postgres, `SELECT version_num FROM alembic_version` is the schema revision the install migrated to, and `SELECT application_name, count(*) FROM pg_stat_activity GROUP BY 1` shows the connections of each role.
+Replace `health` with any other job kind (`sync`, `scale`, `provision`, `reattribute`, `enrich`, `traffic`, `metrics_flush`, `compaction`, `snapshot`, `geo_update`, `tunnel_last_seen`, `index_hygiene`, `update_check`) for its stream; the queued backlog is the stream's length less the group's pending count. In Postgres, `SELECT version_num FROM alembic_version` is the schema revision the install migrated to, and `SELECT application_name, count(*) FROM pg_stat_activity GROUP BY 1` shows the connections of each role.
 
 ### Failover smoke test
 

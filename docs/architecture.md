@@ -82,7 +82,7 @@ The model is plain:
 | `o6:stream:sightings`, group `workers` | `item`: a preflight sighting, JSON | gateways | workers (the sighting ingest; forward-only writes) | about 50,000 |
 | `o6:stream:observations`, group `workers` | `item`: an IP observation or an exit judgement, JSON | api, gateway and worker processes | workers (the observation ingest; forward-only, order-tolerant writes) | about 100,000 |
 
-The fifteen work streams (thirteen job kinds, the sightings and the observations) are listed once, as `WORK_STREAMS` in `api/db/redis.py`, under the names the System page shows them by (`jobs.<kind>`, `sightings`, `observations`); the System page and index hygiene both read that list, and the log lines about a work stream's consumer group name the stream by it: after a wipe, `Stream consumer group was missing; created again` says `jobs.sync`, not the runner's loop.
+The sixteen work streams (fourteen job kinds, the sightings and the observations) are listed once, as `WORK_STREAMS` in `api/db/redis.py`, under the names the System page shows them by (`jobs.<kind>`, `sightings`, `observations`); the System page and index hygiene both read that list, and the log lines about a work stream's consumer group name the stream by it: after a wipe, `Stream consumer group was missing; created again` says `jobs.sync`, not the runner's loop.
 
 There are two kinds of stream:
 
@@ -246,6 +246,7 @@ flowchart TD
 | `geo_update` | `all` | every `geo_updater_interval` | never (**Download now** runs in the api) | 1 x 1 |
 | `tunnel_last_seen` | `all` | every 10 s | never | 1 x 1 |
 | `index_hygiene` | `all` | every 60 s | never | 1 x 1 |
+| `update_check` | `all` | every hour, while `update_check` is on | never | 1 x 1 |
 
 `OCTOPROX_WORKER_JOBS` limits the kinds a worker takes (every kind by default), so a set of workers can be given to health checks alone and never hold up syncs and scaling, or `geo_update` can run on workers sized for its downloads. Every kind needs at least one worker taking it.
 
@@ -283,6 +284,7 @@ Each worker process runs one job runner per kind it takes, a consumer of that ki
 | `geo_update` | Downloads what is due by the rows; two runs at once download twice, harmlessly. |
 | `tunnel_last_seen` | Last sightings only move forward. |
 | `index_hygiene` | Each prune checks and removes in one step; the traffic decisions it asks for are run-now entries like any other. |
+| `update_check` | A run fetches only when the last good check is a day old; two runs at once fetch twice and store the same finding. |
 
 Quarantines are no job: the gateway writes the sorted set (`ZADD GT`, so a longer quarantine is never shortened) and appends a runtime entry in one transaction, and the api lifts them the same way.
 
@@ -360,13 +362,14 @@ Every cloud connector, enabled or not, gets a `scale` run about every 30 seconds
 
 ### Housekeeping
 
-Five install-wide kinds run on workers like any other job, each published once per period with the key `all`. None keeps a record of what it did: each checks what is needed and does it.
+Six install-wide kinds run on workers like any other job, each published once per period with the key `all`. None keeps a record of what it did: each checks what is needed and does it.
 
 - **compaction** (hourly). Per project, the tiers run in order, one transaction a tier over the six history tables: minutes become hours after a day, hours become six hours after a week, six hours become days after 30 days; a compaction that has not run for weeks catches up in one pass. Each table, tier and project is one statement, `WITH moved AS (DELETE ... RETURNING ...), added AS (INSERT ... SELECT ... FROM moved GROUP BY <series>, <bucket>) SELECT count(*) FROM moved`: under READ COMMITTED a second pass's `DELETE` waits for the first's row locks, then finds the rows gone, so each source row is aggregated exactly once however many passes run. A bucket starts at `floor(epoch / width) * width`, the bucketing the chart queries use; latency is averaged by requests. Then the retentions: per-project metrics past `metrics_retention_days`, the totals of entities that are gone, raw observations past `observation_retention_days` and exit IPs last seen before `exit_ip_retention_days` (read from the worker's attribution settings at each run), and `metric_flushes` rows older than a day. Two passes at once can deadlock only when their scans lock rows in different orders; Postgres aborts one, whose job is delivered again, still folding each row once.
 - **snapshot** (every `system_metrics_interval`). The stored readings set the cadence: a run stores a reading only when the newest is at least nine tenths of the interval old, so an entry published twice, redelivered or run after a failover adds no row. The interval is floored at a minute, since each reading runs size queries over every table. Retention runs after each stored reading.
 - **geo_update** (every `geo_updater_interval`, an hour). One tick of the IP database updater: it gives back the disk space replaced files hold, then downloads every database whose schedule is due by its row (`last_update_at` plus `update_interval_hours`). A new file of an enabled database asks for `reattribute all`. Workers therefore reach the vendors' download URLs, and hold a download in memory while they unpack it: up to 512 MiB, held twice at the peak. Size worker memory for it, or give `geo_update` to workers of its own through `OCTOPROX_WORKER_JOBS`.
 - **tunnel_last_seen** (every 10 seconds). Reads every gateway's published tunnel statuses, takes the newest per device, and moves each device's last sighting forward in one statement per protocol. WireGuard statuses are matched by public key inside the statement (the key is unique, and it is all a gateway knows a device by, so workers need no compile); OpenVPN statuses carry the device ID. With nothing published, the run opens no Postgres session.
-- **index_hygiene** (every minute), in four steps: the instance and tunnel carrier indexes lose the members whose keys expired; stopped consumers of the fifteen work streams with nothing pending and idle for an hour are removed (a live worker resets its idle time at least every 20 seconds, and a consumer name is fresh for each process, so only stopped processes qualify, and a stopped worker stays visible on the System page for that hour); ended quarantines are trimmed (`ZREMRANGEBYSCORE o6:proxy:quarantined -inf <now>`; readers skip them anyway); and a `traffic` decision is asked for every connector in `o6:traffic:blocked` or `o6:traffic:pending`, each once, ended entries included. A failed step ends that run, and the next minute's run repeats every step.
+- **index_hygiene** (every minute), in four steps: the instance and tunnel carrier indexes lose the members whose keys expired; stopped consumers of the sixteen work streams with nothing pending and idle for an hour are removed (a live worker resets its idle time at least every 20 seconds, and a consumer name is fresh for each process, so only stopped processes qualify, and a stopped worker stays visible on the System page for that hour); ended quarantines are trimmed (`ZREMRANGEBYSCORE o6:proxy:quarantined -inf <now>`; readers skip them anyway); and a `traffic` decision is asked for every connector in `o6:traffic:blocked` or `o6:traffic:pending`, each once, ended entries included. A failed step ends that run, and the next minute's run repeats every step.
+- **update_check** (every hour, while `update_check` is on). Fetches the release notes octoprox.com lists when the last good check is a day old, and keeps them in Redis, where the api reads them to tell admins a newer release is out. A failed fetch keeps the last finding, and the next hour's run tries again.
 
 ### Health checks
 

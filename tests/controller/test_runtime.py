@@ -59,6 +59,7 @@ LOOPS = {
     "job_producer_geo_update",
     "job_producer_tunnel_last_seen",
     "job_producer_index_hygiene",
+    "job_producer_update_check",
 }
 
 # Builds a controller runtime for an instance ID, with any settings changed: build("controller-a", health_check_interval=1).
@@ -157,6 +158,7 @@ class TestLoops:
             metrics_flush_interval=50,
             system_metrics_interval=120,
             geo_updater_interval=7200.0,
+            update_check=True,
         )
         await runtime.start()
         assert {task.get_name() for task in runtime.tasks.tasks} == LOOPS
@@ -170,12 +172,18 @@ class TestLoops:
             JobKind.GEO_UPDATE: 7200,
             JobKind.TUNNEL_LAST_SEEN: 10,
             JobKind.INDEX_HYGIENE: 60,
+            JobKind.UPDATE_CHECK: 3600,
         }
 
     def test_no_snapshots_are_published_while_they_are_off(self, runtimes: Build) -> None:
-        runtime = runtimes("controller-a", system_metrics_interval=0)
+        runtime = runtimes("controller-a", system_metrics_interval=0, update_check=True)
         assert JobKind.SNAPSHOT not in producers_of(runtime)
         assert {loop.name for loop in runtime.loops()} == LOOPS - {"job_producer_snapshot"}
+
+    def test_no_update_checks_are_published_while_the_check_is_off(self, runtimes: Build) -> None:
+        runtime = runtimes("controller-a", system_metrics_interval=120, update_check=False)
+        assert JobKind.UPDATE_CHECK not in producers_of(runtime)
+        assert {loop.name for loop in runtime.loops()} == LOOPS - {"job_producer_update_check"}
 
     def test_a_period_a_setting_gives_in_fractions_is_rounded_to_whole_seconds(self, runtimes: Build) -> None:
         runtime = runtimes("controller-a", geo_updater_interval=90.6)

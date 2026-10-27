@@ -1,0 +1,409 @@
+# Release notes, newest first. One file feeds the changelog page on
+# octoprox.com, What's New in the app (the image ships this file), the update
+# check (octoprox.com/releases.json) and the GitHub Release of each tag.
+# scripts/release.sh drafts each release's entry and adds it here.
+#
+#   version  the release, or the newest release a summary covers
+#   from     the first release a summary covers (the summaries up to 6.1.4)
+#   date     when `version` was released
+#   title    a few words naming the main themes
+#   changes  what changed, for the people who use Octoprox; `docs` is a page
+#            on octoprox.com that explains it, such as connecting#exit-headers
+
+- version: 6.1.4
+  from: 6.1.0
+  date: 2026-10-27
+  title: Exit IP headers, IP sharing, project switcher
+  changes:
+    - text: "Turn on Exit headers on a project's Location tab and clients learn which exit served each request from `X-Octoprox-Proxy-Id`, `X-Octoprox-Exit-Ip`, `X-Octoprox-Exit-Source` and `X-Octoprox-Exit-Checked-At` on the `CONNECT` answer or the plain HTTP response. It is off by default."
+      docs: connecting#exit-headers
+    - text: "A new IP sharing tab under Exit locations shows whether a project's connectors hand out the same exit IPs, with a chord diagram of the overlap, a size vs. uniqueness chart, a per-connector table and a pairwise heatmap. The API serves the same figures."
+      docs: ip-attribution#shared-exits-between-connectors
+    - text: "A project switcher at the top of the sidebar moves to another project while staying on the same page, and opens the project's settings from any page."
+    - text: "Fixes: GCP connectors can list their instances again, and a failed cloud listing now shows as an error on the connector and backs off."
+
+- version: 6.0.11
+  from: 6.0.0
+  date: 2026-10-23
+  title: Octoprox splits into roles that scale independently
+  changes:
+    - text: "Upgrade note: Octoprox now runs as roles chosen with `OCTOPROX_ROLE` (api, gateway, controller, worker and echo) that share only Postgres and Redis and scale on their own. A single instance still runs everything in one process, and the upgrade from 5.x is a short planned downtime described in the migration guide."
+      docs: migrating-to-6
+    - text: "Upgrade note: Set `OCTOPROX_INTERNAL_SECRET` to the same value on every process, run Redis 7.2 or later, and send JSON request bodies with `Content-Type: application/json`. `OCTOPROX_PROXY_PUBLIC_HOST`, `OCTOPROX_PROXY_PUBLIC_PORT` and the standalone echo service are gone; use `OCTOPROX_PROXY_PUBLIC_URL` and `OCTOPROX_ROLE=echo` instead."
+      docs: migrating-to-6#settings-and-environment-variables
+    - text: "Upgrade note: Some API and routing behaviour changes. The proxies strategy endpoint is gone (set the project's `routing_strategy`), re-attribution is queued and answers `202`, `/health` reports the role, `least_used` counts open transfers, and TLS interception impersonates Chrome 150 and Firefox 147."
+      docs: migrating-to-6#behaviour-changes
+    - text: "New Architecture and Kubernetes guides explain each role and how to run it, with a Deployment per role, probes, secrets and autoscaling for gateways and workers."
+      docs: kubernetes
+    - text: "The System page under Settings shows the whole cluster: every process by role, the leading controller, whether each gateway is in sync and the queued work, plus a live Topology view of how the roles connect."
+      docs: api#system-topology
+    - text: "The Failures page lists each distinct failure once across all gateways with how often it happened, and keeps what the vendor said, such as its error headers and error page text. Clients receive the vendor's message in the error too."
+      docs: metrics#failures-why-requests-failed
+    - text: "Exit verification now behaves like the request itself. A vendor that refuses the check fails the request with the vendor's answer, a failed echo refuses a place the location settings require (`Exit location not checked`) instead of letting it through, and these refusals count as failures on Overview."
+      docs: location-routing#preflight
+    - text: "Fixes: a dynamic session's exit is checked again once the connector's session length (Oxylabs, Decodo, IPRoyal) runs out, connections to a client or upstream that vanished are released after about 5 minutes, latency covers the whole wait for the tunnel, and the sidebar opens over the page on phones."
+
+- version: 5.0.11
+  from: 5.0.0
+  date: 2026-10-16
+  title: City radius, clearer vendor refusals and faster logs
+  changes:
+    - text: "Load a free GeoNames cities file and city claims are judged by distance: an exit placed within the city radius of the claimed city confirms it, so a neighbouring town still counts as the city. The radius is 25 km by default and can be set per project."
+      docs: ip-attribution#city-coordinates-and-the-city-radius
+    - text: "When an upstream proxy refuses a tunnel, the client's 502 now says why in its reason phrase (for example the vendor's 429 or 407) and carries a `Proxy-Status` header, also inside TLS-intercepted connections."
+      docs: connecting#troubleshooting
+    - text: "The observation log and Exit IPs list stay quick on long histories. Totals are capped, Count all gives the exact number on demand, and Until jumps the log back to an earlier moment."
+      docs: ip-attribution#unique-exits-per-connector
+    - text: "Scheduled IP database downloads can be paused and resumed, and the databases table shows when each schedule last checked and when it is next due."
+      docs: ip-attribution#databases
+    - text: "Octoprox holds up better under heavy load: IP observations are drained in batches so bursts do not pile up, TLS interception no longer leaks work and memory, proxy checks use less CPU, and logs are quieter. The System page shows how far the event loop is running behind, and the IP attribution page shows how many observations are still queued."
+
+- version: 4.7.1
+  from: 4.7.0
+  date: 2026-10-15
+  title: A Failures page that explains failed requests
+  changes:
+    - text: "A new Failures page under Overview shows why requests failed or were refused, counted by kind, vendor status and connector and charted over the selected time range."
+      docs: metrics#failures-why-requests-failed
+    - text: "Examples of each kind of failure show the vendor's answer, what the client was told, the target, the session and location asked for, and the connector and proxy. Identical failures are folded into one example with a count."
+      docs: metrics#failures-why-requests-failed
+    - text: "The `failure_log` settings control how many examples are kept and for how long, and the API serves the summary and the examples and can clear them."
+      docs: configuration#failure-log
+
+- version: 4.6.7
+  from: 4.6.0
+  date: 2026-10-15
+  title: Connect page, host credentials and simpler location settings
+  changes:
+    - text: "A new Connect page builds the proxy URL and username for any country, state, city and session, shows which connectors would serve it, and gives ready-to-copy examples for curl, Python, Node.js and Playwright. The same answer is available from the API."
+      docs: connecting
+    - text: "Set `OCTOPROX_PROXY_PUBLIC_URL` to the address clients use, including an `https://` URL behind a load balancer that terminates TLS. It replaces `OCTOPROX_PROXY_PUBLIC_HOST` and `OCTOPROX_PROXY_PUBLIC_PORT`, which are still read while it is unset."
+      docs: connecting#endpoint
+    - text: "AWS, GCP and Azure credentials can use the identity of the host Octoprox runs on instead of stored secrets, and can assume a role, impersonate a service account or federate into another tenant to manage proxies in another account."
+      docs: aws-setup#step-1-choose-how-octoprox-authenticates
+    - text: "Upgrade note: A project's location settings are now two decisions: what to do when the IP databases contradict the vendor (route on the evidence, trust the vendor, or refuse) and what to do when nothing can place the exit (trust the vendor or refuse). Existing projects are converted automatically; in the API `location_policy` and `location_sources` are gone and `location_preflight` is now true or false."
+      docs: location-routing#the-settings-at-a-glance
+    - text: "An exit's location now always comes from the IP databases first, then the echo endpoint, then the vendor, and a proxy found outside its connector's listed countries is no longer routed. A new `any` conflict rule confirms a vendor's claim when any independent source agrees."
+      docs: location-routing#what-a-proxy-is-routed-on
+    - text: "The project's Location tab has a simulator: pick the kind of proxy, what the client asks for and whether it uses a session, and it walks through what the current settings will do."
+      docs: location-routing#scenarios
+    - text: "One time range now applies to the history charts on every page and is remembered in the browser, and a Help menu in the sidebar links to the guide for the page you are on."
+      docs: metrics#five-levels-of-history
+
+- version: 4.5.2
+  from: 4.5.0
+  date: 2026-10-13
+  title: Clearer location policies and a routing guide
+  changes:
+    - text: "Upgrade note: the `off` location policy is removed. Projects that used it move to `warn`, which always behaved the same way, and `warn` is now the default for new projects."
+      docs: location-routing
+    - text: "The `strict` policy now routes only to proxies whose vendor location is confirmed. A contradicted pooled residential or mobile session is removed, so the provider sync replaces it with a fresh one."
+      docs: location-routing
+    - text: "Under `strict`, a proxy whose IP databases disagree, or that no database knows, is skipped until a later check settles it, so load at least one IP database first. A country pinned by hand on a static proxy is still routed to, and existing proxies are judged again on their next health check."
+      docs: location-routing
+    - text: "Each proxy now carries a verdict on its vendor location: confirmed, contradicted or open. The Proxies page marks open claims with a question mark, and the API returns the verdict with the proxy."
+      docs: api#proxy-location-fields
+    - text: "A new Location routing guide walks through how the source order, conflict rule, policy, preflight and routing strategy combine. The project's Location tab shows a worked example for the chosen settings and clearer names for the source orders."
+      docs: location-routing
+
+- version: 4.4.1
+  from: 4.4.0
+  date: 2026-10-12
+  title: Single sign-on and personal access tokens
+  changes:
+    - text: "People you have added can sign in with their Google, Microsoft or GitHub account. An admin sets up each provider under Settings > Sign-in, and only users whose verified email already exists in Octoprox get in."
+      docs: sso#sign-in-with-a-provider
+    - text: "Set `OCTOPROX_PUBLIC_URL` when Octoprox runs behind a load balancer or reverse proxy, so sign-in redirects and invite links use the address users reach. The bundled nginx config now passes the original host and port through, so download it again for cluster installs."
+      docs: sso#setting-it-up
+    - text: "Personal access tokens let scripts call the API without a password. Create them under Settings > Account with an expiry; they act with the user's current role, stop working as soon as they are revoked or the user is disabled, and admins can issue them to service accounts."
+      docs: sso#personal-access-tokens
+    - text: "Users who sign in through a provider can add a password later under Settings > Account and manage their linked accounts there. Setting a password, creating tokens and sending set-password links need a signed-in session, never an API token."
+      docs: sso#adding-a-password-later
+    - text: "Upgrade note: user emails are now stored in lower case and must be unique regardless of case. On upgrade, where accounts differed only in case, the most recently active one keeps the address and the others get a numbered tag such as name+1@example.com."
+
+- version: 4.3.2
+  from: 4.3.0
+  date: 2026-10-10
+  title: Hosts page and Scrapoxy migration guide
+  changes:
+    - text: "A new Hosts page per project shows where the traffic goes: requests, failures, bytes, latency and share for each destination host, split by connector, with the busiest hosts charted over time."
+      docs: metrics#hosts-where-the-traffic-goes
+    - text: "The same per-host figures and history are available from the metrics API."
+      docs: api#hosts
+    - text: "Every host is counted by default. Installs that crawl the open web can turn per-host counting off with `metrics.hosts.enabled` or cap the named hosts per project with `metrics.hosts.max_hosts`, which folds the rest into an (other) row."
+      docs: configuration#host-metrics
+    - text: "A Scrapoxy migration guide maps each Scrapoxy setting to its Octoprox equivalent and shows how to repoint your clients."
+      docs: scrapoxy-migration
+    - text: "Fixes: database space held by replaced or removed IP database files is freed after each update, and the Backup and IP attribution settings pages use the full width."
+
+- version: 4.2.1
+  from: 4.2.0
+  date: 2026-10-06
+  title: OpenVPN devices and small-screen layouts
+  changes:
+    - text: "OpenVPN devices: a second tunnel protocol for routers and older devices that have an OpenVPN client but no WireGuard, and for networks where only TCP gets out. Inside the tunnel, traffic is routed, filtered and metered exactly as for WireGuard devices."
+      docs: openvpn
+    - text: "Each OpenVPN device gets a certificate from a private CA that Octoprox creates, delivered as a single .ovpn profile to import. Disabling, rotating or removing a device ends its session at once."
+      docs: openvpn#adding-a-device
+    - text: "Enable it with `OCTOPROX_OPENVPN_ENABLED=true`, the `NET_ADMIN` capability and the tun device, publish port 1194, then choose UDP or TCP and the public endpoint host under Settings > OpenVPN. The bundled cluster runs it on every replica; download the updated nginx config so port 1194 is forwarded."
+      docs: openvpn#enabling-the-endpoint
+    - text: "WireGuard and OpenVPN devices now share one Devices page per project, and you pick the tunnel when adding a device."
+      docs: wireguard#adding-a-device
+    - text: "Tables, the traffic split and the Overview fit small screens better: tables scroll sideways instead of squeezing columns, and pagers and split rows compact on narrow widths."
+
+- version: 4.1.0
+  date: 2026-10-05
+  title: Per-device WireGuard metrics and history
+  changes:
+    - text: "Every WireGuard device now has its own metrics: connections, bytes each way, success rate and time to connect. They are cluster-wide, survive restarts and are charted over time in the device panel."
+      docs: wireguard#what-a-device-shows
+    - text: "The API returns each device's metrics with the device list and serves its history over the same ranges as connector history."
+      docs: api#wireguard
+    - text: "When and where a device was last seen is now kept on record, so the device list still shows it after the instance carrying the tunnel restarts."
+      docs: wireguard#what-a-device-shows
+    - text: "The routed-by-address and blocked encrypted DNS counters are kept per device with history, and the WireGuard settings page totals them across all devices."
+      docs: wireguard#encrypted-dns-on-devices
+    - text: "Upgrade note: the shared tunnel settings (transparent port, DNS port, fake IP range, sniff timeout and encrypted DNS blocking) moved from the `wireguard:` config section to a new `tunnel:` section. Their environment variables are now `OCTOPROX_TUNNEL_*` instead of `OCTOPROX_WIREGUARD_*`, so rename any you set."
+      docs: configuration#wireguard
+
+- version: 4.0.0
+  date: 2026-10-05
+  title: WireGuard devices and an nginx cluster balancer
+  changes:
+    - text: "WireGuard devices: routers, TVs, consoles and phones with no proxy setting can join a project's pool through a WireGuard tunnel that Octoprox terminates. Their traffic gets the project's routing, domain filters, traffic limits, exit checks and metrics like any proxy client."
+      docs: wireguard
+    - text: "Add a device on the project's WireGuard devices page and load it from a config file or QR code. Each device can carry a fixed sticky session and an exit country, state and city, and can be disabled, re-keyed or removed."
+      docs: wireguard#adding-a-device
+    - text: "The endpoint is off by default. Set `OCTOPROX_WIREGUARD_ENABLED=true`, grant the container `NET_ADMIN`, publish UDP port 51820, then set the public endpoint host under Settings > WireGuard."
+      docs: wireguard#enabling-the-endpoint
+    - text: "Device traffic resolves names at the exit, not on the device, and known encrypted DNS resolvers are blocked by default so devices keep using the tunnel's resolver. Each device shows how many connections had to be routed by address."
+      docs: wireguard#encrypted-dns-on-devices
+    - text: "Upgrade note: the bundled cluster now runs nginx in front of the replicas instead of HAProxy. Download the nginx config alongside the compose file; the HAProxy stats page on port 8404 is gone, and each signed-in user is pinned to one replica by login rather than by cookie."
+      docs: deployment
+    - text: "Fixes: SOCKS4 upstreams now resolve target names at the exit instead of on the Octoprox host, and a client's half-closed connection is passed on to the upstream so protocols that wait for it no longer hang."
+
+- version: 3.3.0
+  date: 2026-09-29
+  title: State and city targeting and verification
+  changes:
+    - text: "Proxy usernames can now target a state and a city below the country with `-st-` and `-city-`, for example `myuser-cc-us-st-ny-city-new_york`. A malformed location, such as `-cc-usa` or a state without a country, now gets 400 Bad Request instead of being routed."
+      docs: routing-strategies#state-and-city-routing
+    - text: "Residential and mobile connectors with dynamic sessions pass the state and city to the vendor in its own format. A connector whose vendor cannot target the requested level is skipped, and a request is never quietly widened to the country."
+      docs: routing-strategies#state-and-city-routing
+    - text: "Fixed exits (static, ISP, datacenter, list and cloud proxies) match on the state and city IP attribution resolves for them, and static proxies can have a state and city pinned by hand. Routing and verifying below the country needs a city-level IP database."
+      docs: ip-attribution#databases
+    - text: "Provider accuracy on the Exit locations pages now shows separate country, state and city rates, and preflight checks the state and city too, naming the level that failed."
+      docs: ip-attribution#provider-accuracy
+    - text: "Preflight now checks only rows whose exit the vendor can move: pooled sessions and dynamic gateways. Fixed exits are no longer echoed per request, since health checks already track where they are."
+      docs: ip-attribution#preflight
+    - text: "Provider descriptors read the targeted place from a new `geo` template namespace and gain a `|nospace` filter. Existing descriptors are rewritten automatically."
+      docs: providers#templates
+
+- version: 3.2.3
+  from: 3.2.0
+  date: 2026-09-28
+  title: Traffic limits, billing and sticky session changes
+  changes:
+    - text: "Connectors now meter their traffic per billing period (day, week or month) and can take a byte limit with an action: alert only, block new requests, or also cut running transfers. When every eligible connector is over its limit, clients get 509 (or 429) with a `Proxy-Status` header."
+      docs: traffic-limits
+    - text: "Enter the price you pay per GB on a connector to see spend in the connector list, the connector editor, the traffic split and a new Spend this period tile on the Overview. Prometheus exports traffic, limit, cost and blocked gauges per connector."
+      docs: traffic-limits#billing
+    - text: "Reset usage starts a connector's count over mid-period, for a vendor top-up or a plan change, and lifts a block. Each connector also keeps its own metrics history, so its charts and the traffic split survive proxy rotation."
+      docs: traffic-limits#resetting-usage
+    - text: "Upgrade note: under the sticky strategy, requests without `-sessid-` are now routed like random instead of being pinned by client IP. Clients that relied on IP affinity should send a session ID."
+      docs: routing-strategies#session-ids
+    - text: "With dynamic sessions, the requested country is now part of the vendor session, so one `-sessid-` holds a separate exit per country and returns to the same exit when it asks for that country again. Sticky bindings also stay consistent across instances while a session is in use."
+      docs: routing-strategies#session-ids
+    - text: "IP database settings offer DB-IP City Lite and ASN Lite presets, with guidance on which files to load together."
+      docs: ip-attribution#databases
+
+- version: 3.1.4
+  from: 3.1.0
+  date: 2026-09-24
+  title: Dynamic sessions, connector weights and request IDs
+  changes:
+    - text: "Residential and mobile connectors for Oxylabs, Bright Data, Decodo, IPRoyal and NetNut can use dynamic sessions: one gateway proxy that opens a fresh vendor session per request. A client session ID always maps to the same vendor session, and the country is picked per request."
+      docs: providers#proxy-type-modes
+    - text: "Upgrade note: each connector now has a weight from 1 to 100 (default 1), and a project's traffic is split between connectors by weight instead of by how many proxies each one holds. Connectors of different sizes now share requests evenly, so set weights if you want the old split back."
+      docs: routing-strategies#connector-weights
+    - text: "A Traffic split panel on the Overview and Connectors pages shows each connector's weight, its expected share and the share it actually received. The same numbers are available from the API."
+      docs: routing-strategies#seeing-the-split
+    - text: "Every API response carries an `X-Request-ID` header, and you can send your own. The ID appears on every server log line for that request, together with the user who made it."
+      docs: api#request-ids
+    - text: "Logs can be written as JSON with `OCTOPROX_LOG_FORMAT`, and every line names the instance that wrote it."
+      docs: configuration#logging
+    - text: "The Users page shows when each user last logged in."
+    - text: "Fixes: UK is accepted as an alias for GB wherever a country is entered, and the Overview map shows the countries a dynamic-sessions connector can serve."
+
+- version: 3.0.5
+  from: 3.0.0
+  date: 2026-09-23
+  title: IP attribution, location checks and a System page
+  changes:
+    - text: "IP attribution works out where each exit IP really is from IP databases you provide (MaxMind, DB-IP, IPinfo or IP2Location), added by upload, scheduled download or file path. Country routing uses the resolved country, and each vendor's claimed location is checked against it."
+      docs: ip-attribution#databases
+    - text: "Each project can set a location policy that flags or excludes proxies whose vendor location is contradicted, and a preflight check that verifies a session's exit before its first request is forwarded. On a mismatch, preflight can report it, retry on another proxy or reject the request with a 502."
+      docs: ip-attribution#per-project-policy
+    - text: "A new Exit locations page shows each provider's location accuracy, every distinct exit IP with how often it was reused, and a log of all observations. Admins see every project under Settings > IP attribution."
+      docs: ip-attribution#provider-accuracy
+    - text: "Admins get a new Settings > System page with install-wide counts, Postgres and Redis usage, the health of background workers on every instance, and trend charts covering up to 90 days."
+      docs: api#system-statistics
+    - text: "Provider descriptors can use templates for the gateway host and port, so a connector field can override the vendor's default."
+      docs: providers#proxy-type-modes
+    - text: "Upgrade note: the default exit lookup endpoint is now httpbin.org, which returns the IP but no country, so load an IP database to keep getting countries for manually added proxies. Every instance now serves its own echo endpoint, which you can point the lookup at in production."
+      docs: ip-attribution#echo-endpoint
+    - text: "Fixes: plain HTTP requests no longer pass the client's `Proxy-Authorization` header on to the vendor, which exposed the project credential and made Oxylabs reject requests. Metric history no longer fails to compact hours with more than about 2 GB of traffic."
+
+- version: 2.2.1
+  from: 2.2.0
+  date: 2026-09-19
+  title: Country routing per request
+  changes:
+    - text: "Clients pick the exit country per request by adding a country code to the proxy username (for example myuser-cc-us), so one project can serve many countries instead of needing a project per country. A request for a country nothing in the project serves gets a 502 and never falls back to another country."
+      docs: routing-strategies#country-routing
+    - text: "Connectors take a list of countries, and the number of proxies applies per country. Residential and mobile connectors with no countries listed create a group of sessions for a country on demand, the first time a client asks for it."
+      docs: routing-strategies#declaring-countries-on-a-connector
+    - text: "Port-based ISP and datacenter connectors keep only IPs located in their listed countries. The IP refresh now checks proxies in parallel and replaces any proxy whose exit moves out of its country."
+      docs: routing-strategies#declaring-countries-on-a-connector
+    - text: "Manually added proxies get their exit IP and country looked up when they are created. You can also set the country by hand or run the lookup again with the Detect button on the Proxies page."
+      docs: configuration#proxy-configuration
+    - text: "The Overview page shows a world map of where the project's proxies exit, with healthy and total counts per country, and the Proxies page shows each proxy's country."
+
+- version: 2.1.1
+  from: 2.1.0
+  date: 2026-09-09
+  title: Live provider tests and unique names
+  changes:
+    - text: "The provider Test tab can send a real request through a proxy built exactly as a connector would build it, and reports the status, latency and exit IP. It works for shipped and custom providers, uses throwaway credentials and saves nothing."
+      docs: providers#adding-a-provider-from-the-ui
+    - text: "Upgrade note: credential and connector names must now be unique within a project, ignoring case, and creating a duplicate returns a 400 error. Existing duplicates are renamed on upgrade with a numbered suffix such as (2)."
+      docs: api#create-connector
+    - text: "Upgrade note: the bundled HAProxy config now keeps each browser on one instance, so items you save show up at once instead of briefly missing from the list. Clustered installs should download the updated config, or set up session affinity on their own load balancer."
+
+- version: 2.0.3
+  from: 2.0.0
+  date: 2026-09-08
+  title: Provider SDK and four new vendors
+  changes:
+    - text: "Proxy vendors are now defined by declarative provider descriptors, and admins can add a new vendor from Settings > Providers without code or a redeploy. Shipped providers can be exported as YAML or duplicated as a starting point."
+      docs: providers#adding-a-provider-from-the-ui
+    - text: "Decodo, Webshare, IPRoyal and NetNut ship as new built-in providers in beta, next to Oxylabs and Bright Data. Existing Oxylabs and Bright Data credentials, connectors and proxies keep working unchanged."
+      docs: providers#shipped-descriptors
+    - text: "Operators can load extra provider descriptors from a directory set with `OCTOPROX_PROVIDERS_DIR`, or install providers as Python packages."
+      docs: providers#operator-installed-providers
+    - text: "Calls to vendor APIs are HTTPS only and cannot reach private addresses, admins confirm every vendor host that receives credentials, and every change to a provider is audited."
+      docs: providers#security-model
+    - text: "Custom providers are included in Backup & Migration exports and are restored before everything that depends on them."
+      docs: providers#backups
+    - text: "Fixes: side panels float over the page on narrower screens, the sidebar collapses on its own in small windows, the provider editor warns before you leave with unsaved changes, and theme previews display correctly in Safari."
+
+- version: 1.1.0
+  date: 2026-09-04
+  title: Redesigned web interface
+  changes:
+    - text: "The web UI is redesigned, with a grouped sidebar and a top bar that shows where you are and a live pool summary: healthy, quarantined and unhealthy proxies, latency and requests per minute."
+    - text: "A new Overview page replaces the separate Dashboard and Metrics pages, bringing pool health, request and traffic charts, connectors, routing and auto-scaling into one view."
+    - text: "Proxies, connectors, credentials, projects and users open in a side panel next to their list, so you can view, edit or add them without leaving the page."
+
+- version: 1.0.2
+  from: 1.0.0
+  date: 2026-09-04
+  title: Clustering, high availability and backups
+  changes:
+    - text: "Octoprox can run as a cluster of identical instances behind a load balancer, sharing one Postgres and one Redis. New Docker Compose files start three instances behind HAProxy."
+      docs: deployment
+    - text: "If an instance goes down, the others keep serving traffic, and background work such as metrics, auto-scaling and provider syncs moves to a surviving instance within seconds. Health checks are spread across the instances."
+      docs: deployment
+    - text: "Sticky sessions, rate limits and quarantines are shared by all instances, so a session keeps its upstream proxy whichever instance handles the next request."
+    - text: "Admins can export the whole setup as a passphrase-encrypted backup file from Settings > Backup & Migration and restore it on the same or another instance. A restore replaces all existing data, and both instances must run the same Octoprox version."
+      docs: api#backup--migration
+    - text: "Upgrade note: Bright Data traffic now goes to port 44445 on Bright Data's super proxy, because port 33335 is retired. Existing proxies move over automatically; allow the new port if you restrict outbound traffic."
+      docs: brightdata-setup
+    - text: "Fixes: the sidebar highlights the current page, lists keep a stable order when served by different instances, dashboard counts no longer jump between instances, and instances starting together no longer write conflicting TLS interception certificates."
+
+- version: 0.11.2
+  from: 0.11.0
+  date: 2026-05-15
+  title: UI themes and a Settings area
+  changes:
+    - text: "The web UI has seven themes: Light, Dark, Solarized Light, Solarized Dark, Dracula, Nord and High Contrast. Pick one in Settings under Appearance; it is saved to your account and follows you to other devices."
+    - text: "A new Settings area brings together Account (email and password), Appearance and, for admins, Users. Its back button returns you to the page you came from."
+
+- version: 0.10.0
+  date: 2026-04-07
+  title: Metrics retention and long-term history
+  changes:
+    - text: "Each project has a metrics retention setting in days, 90 by default, with 0 keeping history forever. Older history is deleted automatically."
+      docs: metrics#five-levels-of-history
+    - text: "Metrics history is summarised as it ages: one-minute points for a day, hourly for a week, six-hourly for a month and daily after that, so storage no longer grows without limit and totals stay correct."
+      docs: metrics#five-levels-of-history
+    - text: "A new Metrics & Request Counting guide explains that requests are counted once per HTTPS tunnel, not per HTTP request inside it, that byte counts are exact, and how to get per-request numbers."
+      docs: metrics#how-counting-works
+
+- version: 0.9.0
+  date: 2026-03-26
+  title: Per-proxy rate limits and quarantine
+  changes:
+    - text: "Connectors can rate limit each proxy from a new Rate Limiting tab. A proxy that reaches the set number of requests within a sliding window rests in quarantine for a random time between a minimum and a maximum."
+      docs: rate-limiting#how-it-works
+    - text: "Quarantined proxies stay healthy but are skipped by routing. When every healthy proxy in a project is quarantined, clients get HTTP 429 instead of 502."
+      docs: rate-limiting#how-it-works
+    - text: "With the sticky quarantine option on, a sticky session whose proxy is quarantined gets 429 instead of moving to another IP, so the client decides when to switch."
+      docs: rate-limiting#sticky-session-quarantine
+    - text: "The proxy list marks quarantined proxies with a countdown and lets you release them early. The dashboard and the Prometheus export count quarantined proxies."
+      docs: rate-limiting#monitoring
+
+- version: 0.8.7
+  from: 0.8.0
+  date: 2026-03-20
+  title: TLS interception, inspector and user management
+  changes:
+    - text: "Projects can intercept HTTPS traffic. Plain mode decrypts and re-encrypts for inspection, Browser Match re-encrypts with a TLS fingerprint that matches the client's User-Agent, and Browser Override also replaces the User-Agent with the chosen browser's."
+      docs: tls-interception#modes
+    - text: "Browser modes use the curl_cffi or rnet engine and can impersonate Chrome, Firefox, Safari or Edge, or a random browser per request."
+      docs: tls-interception#browser-profiles
+    - text: "Octoprox generates its CA certificate on first start, or uses your own. Clients download it from the project settings or the API and add it to their trust store."
+      docs: tls-interception#ca-certificate
+    - text: "A new MITM Inspector page lists intercepted requests with method, host, path, status, latency and size. It shows the headers the client sent, the headers forwarded upstream, the response headers and the client's TLS handshake with JA3 and JA4 fingerprints."
+      docs: api#intercepted-requests
+    - text: "Octoprox now has user management with Admin, Editor and Viewer roles. Admins can set a password for a new user or send an invite link that lets the user choose one."
+      docs: configuration#authentication
+    - text: "Upgrade note: sign-in is always required and `OCTOPROX_AUTH_ENABLED` is gone. On first start Octoprox creates an admin from `OCTOPROX_AUTH_USERNAME` and `OCTOPROX_AUTH_PASSWORD`, so set the password before upgrading."
+      docs: configuration#authentication
+    - text: "Fixes: metrics trend charts show the full selected range without overlapping labels, provider connectors remove unhealthy proxies first when shrinking, and long usernames no longer overflow the layout."
+
+- version: 0.6.7
+  from: 0.6.0
+  date: 2026-02-27
+  title: Session IDs and BrightData IP discovery
+  changes:
+    - text: "Sticky sessions can be keyed by a session ID in the proxy username, such as `myuser-sessid-order-123`, so the client decides which requests share an exit IP. Without one, the client IP is used as before."
+      docs: routing-strategies#session-ids
+    - text: "BrightData datacenter and ISP connectors get their IP list from the BrightData API, and the country picker shows how many IPs the zone has in each country. Static residential zones are treated as ISP proxies."
+      docs: brightdata-setup
+    - text: "Provider proxy IPs are refreshed every hour by default instead of every 24 hours, and the interval is configurable with `proxy.ip_refresh_interval`."
+      docs: configuration#proxy-configuration
+    - text: "The proxies table can be filtered by host, protocol, connector and status, and project metrics charts are laid out in two columns."
+    - text: "Fixes: Oxylabs and BrightData connectors no longer create two proxies with the same exit IP, and the proxies table keeps its page when data refreshes."
+
+- version: 0.5.0
+  date: 2026-02-25
+  title: "First release: self-hosted managed proxy pools"
+  changes:
+    - text: "Each project is its own proxy pool with its own proxy username and password. Clients send HTTP and HTTPS traffic to one proxy port, and Octoprox routes every request through a proxy from that project's pool."
+      docs: connecting#endpoint
+    - text: "Cloud connectors launch Squid proxy servers on AWS, GCP and Azure, scale them between a minimum and maximum with demand, and replace them after a set lifetime. Disabling or deleting a connector drains its proxies before the instances are terminated."
+      docs: aws-setup#how-octoprox-manages-the-instances
+    - text: "Oxylabs and BrightData connectors (beta) add residential, mobile, ISP and datacenter proxies with optional country targeting."
+      docs: oxylabs-setup#supported-proxy-types
+    - text: "Static proxies can be added one at a time or uploaded in bulk from a CSV file, over HTTP, SOCKS4 or SOCKS5."
+      docs: api#upload-proxies-bulk
+    - text: "Five routing strategies are available per project: round robin, least used, random, sticky (the same client keeps the same proxy) and health based."
+      docs: routing-strategies
+    - text: "Health checks take failing proxies out of rotation. The dashboard shows requests, success rate, latency and bytes sent and received per project and per proxy, and each project exports its metrics for Prometheus."
+      docs: api#prometheus-metrics
+    - text: "Per-connector domain whitelists and blacklists choose which target sites a connector serves."
+      docs: domain-filtering
+    - text: "A web UI with optional sign-in and dark mode, and a REST API for projects, credentials, connectors and proxies. Octoprox ships as a Docker image for amd64 and arm64 with a ready Docker Compose file."
+      docs: getting-started#quick-start-with-docker-recommended
+

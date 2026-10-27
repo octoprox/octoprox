@@ -2,20 +2,25 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /**
- * Help entry for the sidebar: a popover with the guide for the page the user
- * is on, the documentation site, the API reference and where to report a
- * problem. Rendered fixed next to the sidebar so it is never clipped by the
- * collapsed rail.
+ * Help entry for the sidebar: a popover with What's New, the guide for the
+ * page the user is on, the documentation site, the API reference and where to
+ * report a problem. Rendered fixed next to the sidebar so it is never clipped
+ * by the collapsed rail. A dot on the button points out release notes the user
+ * has not opened, and for admins a newer release.
  */
 
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react'
 import { useLocation } from 'react-router'
-import { BookOpen, Braces, Bug, ExternalLink, HelpCircle, LifeBuoy } from 'lucide-react'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { ArrowUpCircle, BookOpen, Braces, Bug, ExternalLink, HelpCircle, LifeBuoy, Sparkles } from 'lucide-react'
+import { fetchReleases, markReleasesSeen, type ReleaseInfo } from '../api/client'
+import { useAuth } from '../contexts/AuthContext'
 import { cn } from '../utils/cn'
 import { navItemBase, navItemCollapsed, navItemExpanded, navItemIdle } from './layout/navStyles'
 import { ProviderMark } from './SignInProviderMark'
+import { DOCS_URL } from '../utils/docs'
+import { WhatsNewDialog } from './WhatsNew'
 
-export const DOCS_URL = 'https://www.octoprox.com'
 const REPO_URL = 'https://github.com/octoprox/octoprox'
 
 interface DocLink { title: string; path: string }
@@ -48,6 +53,9 @@ export function docsForPath(pathname: string): DocLink[] {
   return PAGE_DOCS[segment] ?? []
 }
 
+/** The release notes change only with a deploy, and the update check once a day. */
+const RELEASES_STALE_MS = 10 * 60_000
+
 const MENU_WIDTH = 272
 /** Space kept between the menu and the edges of the screen. */
 const GUTTER = 8
@@ -60,6 +68,28 @@ export function HelpMenu({ collapsed }: { collapsed: boolean }) {
   const [anchor, setAnchor] = useState<Placement | null>(null)
   const buttonRef = useRef<HTMLButtonElement>(null)
   const menuRef = useRef<HTMLDivElement>(null)
+  // What's New as it stood when opened, so its New marks outlast marking the notes seen.
+  const [whatsNew, setWhatsNew] = useState<ReleaseInfo | null>(null)
+
+  // Per user: what is unseen, and the admins-only update, are the signed-in user's, and sign-out keeps the cache.
+  const { authStatus } = useAuth()
+  const releasesKey = ['releases', authStatus?.user_id]
+  const queryClient = useQueryClient()
+  const { data: releases } = useQuery({ queryKey: releasesKey, queryFn: fetchReleases, staleTime: RELEASES_STALE_MS })
+  const markSeen = useMutation({
+    mutationFn: markReleasesSeen,
+    onSuccess: (info) => queryClient.setQueryData(releasesKey, info),
+  })
+  const unseen = releases?.unseen ?? 0
+  const update = releases?.update ?? null
+  const attention = unseen > 0 || update !== null
+
+  const openWhatsNew = () => {
+    if (!releases) return
+    setOpen(false)
+    setWhatsNew(releases)
+    if (releases.unseen > 0) markSeen.mutate()
+  }
 
   // Close on navigation and when the sidebar collapses or expands: the button
   // moves during the width transition, so the menu would be left behind.
@@ -112,13 +142,19 @@ export function HelpMenu({ collapsed }: { collapsed: boolean }) {
         ref={buttonRef}
         type="button"
         onClick={() => setOpen((v) => !v)}
-        title={collapsed ? 'Help' : undefined}
+        title={collapsed ? (attention ? 'Help: something new' : 'Help') : undefined}
         aria-haspopup="menu"
         aria-expanded={open}
-        className={cn(navItemBase, collapsed ? navItemCollapsed : cn(navItemExpanded, 'w-full'), open ? 'bg-surface-raised text-fg' : navItemIdle)}
+        aria-label={attention ? 'Help, something new' : undefined}
+        className={cn('relative', navItemBase, collapsed ? navItemCollapsed : cn(navItemExpanded, 'w-full'), open ? 'bg-surface-raised text-fg' : navItemIdle)}
       >
         <HelpCircle />
-        {!collapsed && <span className="truncate">Help</span>}
+        {!collapsed && <span className="truncate flex-1 text-left">Help</span>}
+        {attention && (
+          collapsed
+            ? <span className="absolute top-2 right-2 w-2 h-2 rounded-full bg-primary ring-2 ring-surface" aria-hidden />
+            : <span className="flex-none text-[10.5px] font-semibold leading-none px-1.5 py-1 rounded-full bg-primary-soft text-primary-soft-fg" aria-hidden>New</span>
+        )}
       </button>
 
       {open && anchor && (
@@ -128,6 +164,18 @@ export function HelpMenu({ collapsed }: { collapsed: boolean }) {
           style={{ position: 'fixed', left: anchor.left, bottom: anchor.bottom, width: anchor.width, maxHeight: anchor.maxHeight }}
           className="z-50 bg-surface border border-line-strong rounded-lg shadow-lg py-1.5 text-[13px] overflow-y-auto overscroll-contain"
         >
+          {update && (
+            <MenuButton onClick={openWhatsNew} icon={<ArrowUpCircle className="text-primary!" />}>
+              <span className="truncate flex-1">Octoprox {update.version} is available</span>
+            </MenuButton>
+          )}
+          {releases && (
+            <MenuButton onClick={openWhatsNew} icon={<Sparkles />}>
+              <span className="truncate flex-1">What's New</span>
+              {unseen > 0 && <span className="flex-none text-[11px] font-medium text-primary-soft-fg bg-primary-soft rounded-full px-1.5 py-0.5">{unseen} new</span>}
+            </MenuButton>
+          )}
+          {releases && <MenuDivider />}
           {pageDocs.length > 0 && (
             <>
               <MenuLabel>About this page</MenuLabel>
@@ -146,6 +194,8 @@ export function HelpMenu({ collapsed }: { collapsed: boolean }) {
           <MenuLink href={`${REPO_URL}/issues`} icon={<Bug />}>Report a problem</MenuLink>
         </div>
       )}
+
+      {whatsNew && <WhatsNewDialog info={whatsNew} onClose={() => setWhatsNew(null)} />}
     </>
   )
 }
@@ -158,6 +208,17 @@ function MenuDivider() {
   return <div className="h-px bg-line my-1.5" aria-hidden />
 }
 
+const menuItemClasses = 'flex items-center gap-2.5 px-3 h-8 text-fg-muted hover:bg-surface-raised hover:text-fg transition-colors [&>svg]:w-4 [&>svg]:h-4 [&>svg]:flex-none [&>svg]:text-fg-subtle'
+
+function MenuButton({ onClick, icon, children }: { onClick: () => void; icon: ReactNode; children: ReactNode }) {
+  return (
+    <button type="button" role="menuitem" onClick={onClick} className={cn(menuItemClasses, 'w-full text-left')}>
+      {icon}
+      {children}
+    </button>
+  )
+}
+
 function MenuLink({ href, icon, children }: { href: string; icon: ReactNode; children: ReactNode }) {
   return (
     <a
@@ -165,7 +226,7 @@ function MenuLink({ href, icon, children }: { href: string; icon: ReactNode; chi
       target="_blank"
       rel="noreferrer"
       role="menuitem"
-      className="flex items-center gap-2.5 px-3 h-8 text-fg-muted hover:bg-surface-raised hover:text-fg transition-colors [&>svg]:w-4 [&>svg]:h-4 [&>svg]:flex-none [&>svg]:text-fg-subtle"
+      className={menuItemClasses}
     >
       {icon}
       <span className="truncate flex-1">{children}</span>

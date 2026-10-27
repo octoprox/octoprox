@@ -251,7 +251,7 @@ Scrape port 8000, path `/metrics`, on every pod: each process exports its own ro
 | `o6:jobs:sync:stream`, `o6:jobs:scale:stream`, `o6:jobs:provision:stream` | 4 |
 | `o6:jobs:enrich:stream` | 5 |
 | `o6:jobs:reattribute:stream`, `o6:jobs:traffic:stream` | 100 |
-| `o6:jobs:metrics_flush:stream`, `o6:jobs:compaction:stream`, `o6:jobs:snapshot:stream`, `o6:jobs:geo_update:stream`, `o6:jobs:tunnel_last_seen:stream`, `o6:jobs:index_hygiene:stream` | 1 |
+| `o6:jobs:metrics_flush:stream`, `o6:jobs:compaction:stream`, `o6:jobs:snapshot:stream`, `o6:jobs:geo_update:stream`, `o6:jobs:tunnel_last_seen:stream`, `o6:jobs:index_hygiene:stream`, `o6:jobs:update_check:stream` | 1 |
 | `o6:stream:sightings` | 500 |
 | `o6:stream:observations` | 5000 |
 

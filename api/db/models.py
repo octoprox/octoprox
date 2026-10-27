@@ -51,6 +51,8 @@ class UserModel(Base):
     )
     # Set whenever a token is issued (login or invite acceptance). Null until then.
     last_login_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # The release whose What's New the user last opened (api.core.releases). Null until then.
+    last_seen_release: Mapped[str | None] = mapped_column(String(32), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now, onupdate=utc_now)
 

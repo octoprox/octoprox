@@ -2229,6 +2229,14 @@ class UserRepository:
         )
         return now
 
+    async def mark_release_seen(self, user_id: str, version: str) -> None:
+        """Record that the user opened What's New on ``version``; ``updated_at`` pinned, as for ``touch_last_login``."""
+        await self._session.execute(
+            update(UserModel)
+            .where(UserModel.id == user_id)
+            .values(last_seen_release=version, updated_at=UserModel.updated_at)
+        )
+
     async def delete(self, user_id: str) -> bool:
         """Delete a user."""
         result = await self._session.execute(
@@ -2249,6 +2257,7 @@ class UserRepository:
             invite_token_expires_at=model.invite_token_expires_at,
             theme_preference=model.theme_preference,
             last_login_at=model.last_login_at,
+            last_seen_release=model.last_seen_release,
             created_at=model.created_at,
             updated_at=model.updated_at,
         )

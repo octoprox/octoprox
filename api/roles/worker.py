@@ -20,7 +20,13 @@ from api.geo.attributor import ProxyAttributor
 from api.geo.observations import ObservationIngest
 from api.jobs.attribution import Attribution, EnrichJob, ReattributeJob, SightingIngest
 from api.jobs.health import HealthCheckJob
-from api.jobs.housekeeping import GeoUpdateJob, IndexHygieneJob, SnapshotJob, TunnelLastSeenJob
+from api.jobs.housekeeping import (
+    GeoUpdateJob,
+    IndexHygieneJob,
+    SnapshotJob,
+    TunnelLastSeenJob,
+    UpdateCheckJob,
+)
 from api.jobs.metrics import CompactionJob, MetricsFlushJob
 from api.jobs.provision import ProvisionJob
 from api.jobs.queue import JobQueue
@@ -119,6 +125,7 @@ class WorkerRuntime(RoleRuntime):
             GeoUpdateJob(updater),
             TunnelLastSeenJob(session_factory, redis_client),
             IndexHygieneJob(redis_client, self.jobs),
+            UpdateCheckJob(redis_client),
         ]
         by_kind = {job.kind: job for job in every_job}
         # One runner per kind this worker takes, in the order the settings list them.

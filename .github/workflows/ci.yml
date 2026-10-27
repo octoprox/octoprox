@@ -150,3 +150,36 @@ jobs:
           docker buildx imagetools create $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
             $(printf '${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@sha256:%s ' *)
 
+
+  release:
+    needs: merge
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push'
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      # The tag's entry in docs/_data/releases.yml, the notes What's New and the changelog page show
+      - name: Write the release notes
+        run: |
+          python -m pip install pyyaml==6.0.3
+          python scripts/release_notes.py markdown "$GITHUB_REF_NAME" > release-notes.md
+
+      # Edited in place when the job runs again for the same tag
+      - name: Publish the GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release edit "$GITHUB_REF_NAME" --notes-file release-notes.md
+          else
+            gh release create "$GITHUB_REF_NAME" --title "Octoprox ${GITHUB_REF_NAME#v}" --notes-file release-notes.md --verify-tag
+          fi

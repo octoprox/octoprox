@@ -112,6 +112,7 @@ def _include_api(app: FastAPI) -> None:
         projects,
         providers,
         proxies,
+        releases,
         sso,
         system,
         users,
@@ -171,6 +172,9 @@ def _include_api(app: FastAPI) -> None:
     )
     app.include_router(
         system.router, prefix="/api/v1", tags=["System"], dependencies=auth_dependency
+    )
+    app.include_router(
+        releases.router, prefix="/api/v1", tags=["Releases"], dependencies=auth_dependency
     )
     app.include_router(
         geo.router, prefix="/api/v1", tags=["IP attribution"], dependencies=auth_dependency

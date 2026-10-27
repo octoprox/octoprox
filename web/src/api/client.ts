@@ -1997,6 +1997,49 @@ export const updateSelf = async (data: UserSelfUpdate): Promise<UserAccount> => 
   return response.data
 }
 
+// What's New (docs/_data/releases.yml, see the Changelog on the docs site)
+export interface ReleaseChange {
+  text: string
+  /** A page on the docs site, such as `connecting#exit-headers`. */
+  docs?: string | null
+}
+
+export interface ReleaseNote {
+  version: string
+  /** The first release a summary covers; set on the summaries up to 6.1.4. */
+  from?: string | null
+  date: string
+  title: string
+  changes: ReleaseChange[]
+}
+
+export interface ReleaseUpdate {
+  version: string
+  checked_at: string
+  /** The releases newer than the running one, newest first. */
+  notes: ReleaseNote[]
+}
+
+export interface ReleaseInfo {
+  current_version: string
+  last_seen_version: string | null
+  unseen: number
+  /** The running version's notes and those before it, newest first. */
+  notes: ReleaseNote[]
+  /** Admins only, when the daily update check found a newer release. */
+  update: ReleaseUpdate | null
+}
+
+export const fetchReleases = async (): Promise<ReleaseInfo> => {
+  const response = await api.get('/releases')
+  return response.data
+}
+
+export const markReleasesSeen = async (): Promise<ReleaseInfo> => {
+  const response = await api.post('/releases/seen')
+  return response.data
+}
+
 export const setPasswordWithToken = async (token: string, password: string): Promise<LoginResponse> => {
   const response = await api.post('/auth/set-password', { token, password })
   const data = response.data as LoginResponse
@@ -2010,7 +2053,7 @@ export const setPasswordWithToken = async (token: string, password: string): Pro
 /** The kinds of work workers run, one job stream each: the controller publishes the periodic ones, and any process asks for a run now. */
 export const JOB_KINDS = [
   'health', 'sync', 'scale', 'provision', 'reattribute', 'enrich', 'traffic',
-  'metrics_flush', 'compaction', 'snapshot', 'geo_update', 'tunnel_last_seen', 'index_hygiene',
+  'metrics_flush', 'compaction', 'snapshot', 'geo_update', 'tunnel_last_seen', 'index_hygiene', 'update_check',
 ] as const
 export type JobKind = (typeof JOB_KINDS)[number]
 

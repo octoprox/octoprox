@@ -276,6 +276,7 @@ class TestWorkerRegistry:
                 "job_producer_geo_update",
                 "job_producer_tunnel_last_seen",
                 "job_producer_index_hygiene",
+                "job_producer_update_check",
             },
             Role.WORKER: {
                 "heartbeat",
@@ -296,6 +297,7 @@ class TestWorkerRegistry:
                 "job_runner_geo_update",
                 "job_runner_tunnel_last_seen",
                 "job_runner_index_hygiene",
+                "job_runner_update_check",
                 "sighting_ingest",
                 "observation_ingest",
             },
@@ -322,7 +324,7 @@ class TestWorkerRegistry:
     def test_every_periodic_kind_has_a_producer_on_the_controller_under_its_lease(self) -> None:
         periodic = {
             JobKind.HEALTH, JobKind.SYNC, JobKind.SCALE, JobKind.METRICS_FLUSH, JobKind.COMPACTION, JobKind.SNAPSHOT,
-            JobKind.GEO_UPDATE, JobKind.TUNNEL_LAST_SEEN, JobKind.INDEX_HYGIENE,
+            JobKind.GEO_UPDATE, JobKind.TUNNEL_LAST_SEEN, JobKind.INDEX_HYGIENE, JobKind.UPDATE_CHECK,
         }
         for kind in periodic:
             name = job_producer_name(kind)

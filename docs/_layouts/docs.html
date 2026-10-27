@@ -91,6 +91,7 @@
     .docs-main { flex: 1; margin-left: var(--sidebar-width); padding: 40px 48px 64px; max-width: calc(var(--sidebar-width) + 860px); min-width: 0; }
     .content h1 { font-size: 26px; font-weight: 600; letter-spacing: -0.01em; line-height: 1.25; margin-bottom: 6px; }
     .content .subtitle { font-size: 15px; color: var(--muted); margin-bottom: 28px; }
+    .content .release-meta { font-size: 13px; color: var(--muted); margin-top: -4px; }
     .content h2 { font-size: 18px; font-weight: 600; margin-top: 40px; margin-bottom: 12px; padding-bottom: 8px; border-bottom: 1px solid var(--line); }
     .content h3 { font-size: 15px; font-weight: 600; margin-top: 28px; margin-bottom: 8px; }
     .content h4 { font-size: 13.5px; font-weight: 600; margin-top: 20px; margin-bottom: 6px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; }
@@ -220,6 +221,7 @@
       <div class="sidebar-section">
         <h4>Reference</h4>
         <a href="{{ site.baseurl }}/api" {% if page.nav_id == 'api' %}class="active"{% endif %}>API Reference</a>
+        <a href="{{ site.baseurl }}/changelog" {% if page.nav_id == 'changelog' %}class="active"{% endif %}>Changelog</a>
       </div>
     </aside>
 

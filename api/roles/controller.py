@@ -43,6 +43,8 @@ logger = structlog.get_logger()
 SCALE_PERIOD_SECONDS = 30
 COMPACTION_PERIOD_SECONDS = 3600
 INDEX_HYGIENE_PERIOD_SECONDS = 60
+# Hourly, so a new install checks within the hour; the job fetches only once a day.
+UPDATE_CHECK_PERIOD_SECONDS = 3600
 
 
 class ControllerRuntime(RoleRuntime):
@@ -137,7 +139,7 @@ class ControllerRuntime(RoleRuntime):
 
     @staticmethod
     def _periods(settings: Settings) -> dict[JobKind, float]:
-        """Each periodic kind's period, in seconds; no snapshots while ``system_metrics_interval`` is 0."""
+        """Each periodic kind's period, in seconds; no snapshots while ``system_metrics_interval`` is 0, no update checks while ``update_check`` is off."""
         periods: dict[JobKind, float] = {
             JobKind.HEALTH: settings.health_check_interval,
             JobKind.SYNC: settings.ip_refresh_interval,
@@ -148,7 +150,10 @@ class ControllerRuntime(RoleRuntime):
             JobKind.GEO_UPDATE: settings.geo_updater_interval,
             JobKind.TUNNEL_LAST_SEEN: TUNNEL_STATUS_INTERVAL,
             JobKind.INDEX_HYGIENE: INDEX_HYGIENE_PERIOD_SECONDS,
+            JobKind.UPDATE_CHECK: UPDATE_CHECK_PERIOD_SECONDS,
         }
         if not settings.system_metrics_interval:
             del periods[JobKind.SNAPSHOT]
+        if not settings.update_check:
+            del periods[JobKind.UPDATE_CHECK]
         return periods

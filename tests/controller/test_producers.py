@@ -165,7 +165,10 @@ class TestJobKeys:
         assert keys.of_kind(JobKind.HEALTH) == frozenset({"instance"})
         assert keys.of_kind(JobKind.SYNC) == frozenset()
         assert keys.of_kind(JobKind.SCALE) == frozenset({"cloud"})
-        others = (JobKind.METRICS_FLUSH, JobKind.COMPACTION, JobKind.SNAPSHOT, JobKind.GEO_UPDATE, JobKind.INDEX_HYGIENE)
+        others = (
+            JobKind.METRICS_FLUSH, JobKind.COMPACTION, JobKind.SNAPSHOT, JobKind.GEO_UPDATE, JobKind.INDEX_HYGIENE,
+            JobKind.UPDATE_CHECK,
+        )
         assert all(keys.of_kind(kind) == INSTALL_WIDE_KEYS == ("all",) for kind in (*others, JobKind.TUNNEL_LAST_SEEN))
         # Before the first compile: none of a compile's, the install's all the same.
         assert JobKeys().of_kind(JobKind.HEALTH) == frozenset()

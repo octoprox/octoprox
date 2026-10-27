@@ -397,6 +397,13 @@ class Settings(BaseSettings):
         default=90,
         description="How long to keep system metric snapshots, in days (0 keeps them forever)",
     )
+    update_check: bool = Field(
+        default=True,
+        description=(
+            "Check octoprox.com once a day for a newer release and tell admins in the UI; "
+            "false makes no request to octoprox.com"
+        ),
+    )
 
     # Logging
     log_level: str = Field(

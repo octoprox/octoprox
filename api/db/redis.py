@@ -158,6 +158,10 @@ SSO_STATE_KEY = KEY_PREFIX + "sso:state:{state}"
 SSO_STATE_TTL_SECONDS = 600
 SSO_LOGIN_CODE_KEY = KEY_PREFIX + "sso:login_code:{digest}"
 SSO_LOGIN_CODE_TTL_SECONDS = 60
+# What the last update check found (api.core.releases.LatestRelease JSON):
+# the release notes octoprox.com lists and when the worker's update_check job
+# fetched them. Replaced by each successful check, read by the api.
+LATEST_RELEASE_KEY = KEY_PREFIX + "release:latest"
 # The routing feed (api.feed): the definitions the controller compiled from
 # Postgres, for gateways, which have no database. The head (a string of
 # FeedHead JSON) names the current compile; the manifest hash maps each
@@ -342,6 +346,7 @@ REDIS_KEY_GROUPS: tuple[tuple[str, str], ...] = (
     # The fake-IP names, addresses and counter.
     (KEY_PREFIX + "tunnel:", "Tunnel devices"),
     (KEY_PREFIX + "sso:", "Sign-in flows"),
+    (LATEST_RELEASE_KEY, "Update check"),
     (KEY_PREFIX + "feed:", "Routing feed"),
     (_literal_prefix(JOB_STREAM_KEY), "Job streams"),
     (_literal_prefix(DEMAND_KEY), "Demand"),

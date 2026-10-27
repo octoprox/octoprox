@@ -1294,6 +1294,7 @@ const JOB_INFO: Record<JobKind, { label: string; description: string }> = {
   geo_update: { label: 'IP database updates', description: 'The scheduled IP database downloads that are due' },
   tunnel_last_seen: { label: 'Tunnel last seen', description: 'When each tunnel device was last seen, recorded on its row' },
   index_hygiene: { label: 'Index hygiene', description: 'Stopped processes, workers and ended quarantines pruned, and blocked or pending connectors decided again' },
+  update_check: { label: 'Update check', description: 'The release notes octoprox.com lists, fetched once a day to tell admins about a newer release' },
 }
 
 /** The work streams that are not a job kind's. */

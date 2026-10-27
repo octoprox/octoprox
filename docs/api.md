@@ -1088,7 +1088,7 @@ Editors and viewers receive `403`.
 | `instances` | Every live process, grouped by the role it registered with (`all`, `api`, `gateway`, `controller`, `worker`; a role with no live process is absent), each list sorted by instance id. An entry carries `instance_id`, `role`, the process's last heartbeat `snapshot` (below) and `age_seconds`, how old that snapshot is. `{}` when Redis cannot be read. Echo processes do not heartbeat and are never listed. |
 | `controller` | `leader`: the instance id holding the controller lease (`null` while none does, during a failover); `changes` and `compiled_at`: how far the leader's last compile read the change stream (an entry ID) and when it was made, from its heartbeat; `changes_head`: the change stream's newest entry ID, read now, ahead of `changes` while the leader has changes to compile (`null` while there is no stream); `standby_poll_ms` and `lease_ttl_ms`: how often a standby asks for the lease and how long a failed leader holds it, the numbers the page words the takeover from; `error` when Redis cannot be read. |
 | `feed` | The routing feed in Redis: `digest`, `changes`, `compiled_at` and `sections` of its head (all `null` while there is none), and `gateways`: per gateway the `digest` and `changes` it applied, `in_sync` (it applied the current head) and `age_seconds` since it last applied an update, which grows while nothing changes. `error` when Redis cannot be read or the head was published by another release. |
-| `streams` | `by_name`: every work stream by name, `jobs.<kind>` for each of the thirteen job kinds, then `sightings` and `observations`, each with `length` (entries queued and running, since workers delete each entry once handled), `pending` (delivered to a worker and not acknowledged yet: running, or waiting to be reclaimed), `queued` (`length` less `pending`, never below zero: the backlog), `consumers` (worker processes in the `workers` group, a stopped one until index hygiene removes it, within the hour) and `oldest_seconds` (the age of the oldest entry, queued or running, by Redis's clock; `null` when the stream is empty). A stream nobody created yet reads as zeros. `error` when Redis cannot be read. |
+| `streams` | `by_name`: every work stream by name, `jobs.<kind>` for each of the fourteen job kinds, then `sightings` and `observations`, each with `length` (entries queued and running, since workers delete each entry once handled), `pending` (delivered to a worker and not acknowledged yet: running, or waiting to be reclaimed), `queued` (`length` less `pending`, never below zero: the backlog), `consumers` (worker processes in the `workers` group, a stopped one until index hygiene removes it, within the hour) and `oldest_seconds` (the age of the oldest entry, queued or running, by Redis's clock; `null` when the stream is empty). A stream nobody created yet reads as zeros. `error` when Redis cannot be read. |
 | `inventory` | Exact counts of projects, credentials, connectors, proxies, users and providers, and `proxies_by_status` from the proxies' status column. |
 | `projects` | Per-project credential, connector and proxy counts, busiest first. |
 | `database` | Database size, per-table size (indexes included) and server connections. Each api process's own pool is in its snapshot. |
@@ -1728,6 +1728,39 @@ profile, which carries the device's key, so downloading it needs an editor
   "server_configured": true
 }
 ```
+
+## Release Notes
+
+What's New in the web UI: the release notes of the running version and those before it, and how many the signed-in user has not opened yet. See [Changelog]({{ site.baseurl }}/changelog).
+
+```bash
+GET /api/v1/releases
+POST /api/v1/releases/seen
+```
+
+Any signed-in user. `POST /releases/seen` records that the user has seen the notes up to the running version; both return the same body:
+
+```json
+{
+  "current_version": "6.1.4",
+  "last_seen_version": "6.1.3",
+  "unseen": 1,
+  "notes": [
+    {
+      "version": "6.1.4",
+      "from": "6.1.0",
+      "date": "2026-10-27",
+      "title": "IP sharing and exit headers",
+      "changes": [{"text": "...", "docs": "connecting#exit-headers"}]
+    }
+  ],
+  "update": null
+}
+```
+
+- `notes`: newest first. `from` is set on the summaries that cover several releases (those up to 6.1.4); `docs` is a page on octoprox.com.
+- `last_seen_version`: null until the user first opens What's New, and `unseen` is then 1, for the newest notes.
+- `update`: for admins only, while `OCTOPROX_UPDATE_CHECK` is on and the last daily check found a newer release: its `version`, `checked_at` and the `notes` of every release newer than the running one. Null otherwise.
 
 ## Health Check
 

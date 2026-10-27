@@ -33,6 +33,7 @@ class WorkerName(StrEnum):
     JOB_PRODUCER_GEO_UPDATE = "job_producer_geo_update"
     JOB_PRODUCER_TUNNEL_LAST_SEEN = "job_producer_tunnel_last_seen"
     JOB_PRODUCER_INDEX_HYGIENE = "job_producer_index_hygiene"
+    JOB_PRODUCER_UPDATE_CHECK = "job_producer_update_check"
     # Gateways.
     FEED_FOLLOWER = "feed_follower"
     REQUEST_METERING = "request_metering"
@@ -61,6 +62,7 @@ class WorkerName(StrEnum):
     JOB_RUNNER_GEO_UPDATE = "job_runner_geo_update"
     JOB_RUNNER_TUNNEL_LAST_SEEN = "job_runner_tunnel_last_seen"
     JOB_RUNNER_INDEX_HYGIENE = "job_runner_index_hygiene"
+    JOB_RUNNER_UPDATE_CHECK = "job_runner_update_check"
     SIGHTING_INGEST = "sighting_ingest"
     OBSERVATION_INGEST = "observation_ingest"
 
@@ -180,6 +182,11 @@ WORKERS: dict[WorkerName, WorkerInfo] = {
     ),
     WorkerName.JOB_PRODUCER_INDEX_HYGIENE: WorkerInfo(
         "Publishes an index hygiene pass every minute, for the workers to run",
+        roles=_CONTROLLER,
+        lease=LeaseName.CONTROLLER,
+    ),
+    WorkerName.JOB_PRODUCER_UPDATE_CHECK: WorkerInfo(
+        "Publishes an update check every hour while the update check is on, for the workers to run",
         roles=_CONTROLLER,
         lease=LeaseName.CONTROLLER,
     ),
@@ -333,6 +340,11 @@ WORKERS: dict[WorkerName, WorkerInfo] = {
         "Drops instances and tunnel carriers that stopped publishing from the Redis indexes, "
         "stopped workers from the work streams' consumer groups and ended quarantines from the "
         "quarantine set, and asks for a traffic decision of every connector blocked or waiting for one",
+        roles=_WORKER,
+    ),
+    WorkerName.JOB_RUNNER_UPDATE_CHECK: WorkerInfo(
+        "Fetches the release notes octoprox.com lists once a day, so the api can tell admins when a "
+        "newer release is out",
         roles=_WORKER,
     ),
     WorkerName.SIGHTING_INGEST: WorkerInfo(

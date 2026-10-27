@@ -98,12 +98,42 @@ if [[ ! $REPLY =~ ^[Yy]$ ]]; then
     exit 1
 fi
 
+# Release notes (docs/_data/releases.yml): a draft from the commits since the
+# last tag, or from Claude, edited in $EDITOR, then added to the notes file.
+# What's New in the app, the changelog page and the GitHub Release show it.
+PYTHON=".venv/bin/python"
+[ -x "$PYTHON" ] || PYTHON="python3"
+LAST_TAG=$(git describe --tags --abbrev=0 --match 'v*' 2>/dev/null || git rev-list --max-parents=0 HEAD)
+# A directory, so the draft keeps its .yml name for the editor (GNU mktemp needs X's in a file template)
+NOTES_DIR=$(mktemp -d "${TMPDIR:-/tmp}/octoprox-release-notes.XXXXXX")
+NOTES_DRAFT="$NOTES_DIR/release-notes.yml"
+DRAFT_FLAGS=""
+if command -v claude >/dev/null 2>&1; then
+    read -p "Draft the release notes with Claude? (y/N) " -n 1 -r
+    echo
+    [[ $REPLY =~ ^[Yy]$ ]] && DRAFT_FLAGS="--ai"
+fi
+"$PYTHON" scripts/release_notes.py draft "$NEW_VERSION" "$LAST_TAG" $DRAFT_FLAGS > "$NOTES_DRAFT"
+while true; do
+    ${VISUAL:-${EDITOR:-vi}} "$NOTES_DRAFT"
+    if "$PYTHON" scripts/release_notes.py add "$NOTES_DRAFT" "$NEW_VERSION"; then
+        break
+    fi
+    read -p "Edit the notes again? (Y/n) " -n 1 -r
+    echo
+    if [[ $REPLY =~ ^[Nn]$ ]]; then
+        echo "Aborted."
+        exit 1
+    fi
+done
+rm -rf "$NOTES_DIR"
+
 # Update version in pyproject.toml
 sed -i.bak "s/^version = \".*\"/version = \"$NEW_VERSION\"/" "$VERSION_FILE"
 rm -f "$VERSION_FILE.bak"
 
-# Commit the version bump
-git add "$VERSION_FILE"
+# Commit the version bump with its release notes
+git add "$VERSION_FILE" docs/_data/releases.yml
 git commit -m "Bump version to $NEW_VERSION"
 
 # Create tag

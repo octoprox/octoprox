@@ -146,6 +146,7 @@ def test_settings(
         health_check_interval=3600,  # Disable health checks in tests
         metrics_flush_interval=3600,  # Disable metrics flushing in tests
         system_metrics_interval=0,  # No background system snapshots in tests
+        update_check=False,  # No requests to octoprox.com from tests
         proxy_port=0,  # Use port 0 to let OS assign a free port
         geo_lookup_enabled=False,  # No requests through proxies in tests
         geo_cache_dir=str(test_data_dir / "geo"),

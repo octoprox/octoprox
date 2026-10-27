@@ -62,3 +62,5 @@ class JobKind(StrEnum):
     # quarantines, and ask for a traffic decision of every connector blocked or
     # waiting for one.
     INDEX_HYGIENE = "index_hygiene"
+    # Ask octoprox.com for its release notes once a day, for the api to say when a newer release is out.
+    UPDATE_CHECK = "update_check"

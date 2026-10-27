@@ -35,6 +35,7 @@ class User(BaseModel):
     invite_token_expires_at: datetime | None = None
     theme_preference: str = "light"
     last_login_at: datetime | None = None
+    last_seen_release: str | None = None
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
 

@@ -41,6 +41,8 @@ RUN pip install --no-cache-dir -e .
 # Copy application code
 COPY api/ ./api/
 COPY config/ ./config/
+# The release notes What's New shows (api.core.releases), where the docs site keeps them
+COPY docs/_data/releases.yml ./docs/_data/releases.yml
 
 # Copy built frontend
 COPY --from=frontend-builder /app/web/dist ./web/dist

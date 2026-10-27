@@ -22,7 +22,7 @@ Every process reads its own settings when it starts. In a cluster, each [role]({
 | `OCTOPROX_ROLE` | What this process runs: `all` (everything in one process), `api`, `gateway`, `controller`, `worker` or `echo`. See [Architecture]({{ site.baseurl }}/architecture) | all |
 | `OCTOPROX_INTERNAL_SECRET` | The secret the api, gateways and controllers share (and role `all`): it encrypts and authenticates the routing feed in Redis, and signs the gateways' calls to the api's internal endpoint. The same value on each of them, and different from `OCTOPROX_JWT_SECRET`. Workers and echo never read it. Keep it in the environment (or a secret store), like the JWT secret, not in a config file | change-me-in-production |
 | `OCTOPROX_INTERNAL_API_URL` | Where gateways reach the api, such as `http://octoprox-internal-api:8000`: they fetch IP database files from it. A gateway left at the default logs `Gateway reaches the api at the default internal_api_url` at start; the default suits only role `all` | http://localhost:8000 |
-| `OCTOPROX_WORKER_JOBS` | The job kinds this worker takes, comma-separated: `health`, `sync`, `scale`, `provision`, `reattribute`, `enrich`, `traffic`, `metrics_flush`, `compaction`, `snapshot`, `geo_update`, `tunnel_last_seen`, `index_hygiene`. Lets some workers run health checks only, so a large pool's checks never hold up syncs and scaling, or the IP database downloads (`geo_update`) run on workers sized for them. Every kind needs at least one worker taking it | every kind |
+| `OCTOPROX_WORKER_JOBS` | The job kinds this worker takes, comma-separated: `health`, `sync`, `scale`, `provision`, `reattribute`, `enrich`, `traffic`, `metrics_flush`, `compaction`, `snapshot`, `geo_update`, `tunnel_last_seen`, `index_hygiene`, `update_check`. Lets some workers run health checks only, so a large pool's checks never hold up syncs and scaling, or the IP database downloads (`geo_update`) run on workers sized for them. Every kind needs at least one worker taking it | every kind |
 | `OCTOPROX_INSTANCE_ID` | Names this process in log lines, on the System page, as the holder of the controller lease and in the tunnel statuses it publishes | host name and a random suffix per boot |
 
 The routing feed and the change stream every process follows have two intervals, in `config/*.yaml` under `feed:` or as environment variables:
@@ -60,6 +60,7 @@ A saved change reaches the gateways within moments: the controller compiles it a
 | `OCTOPROX_CONNECTION_TIMEOUT` | Seconds the gateway waits for an upstream proxy (`proxy.connection.timeout_seconds`) | 30 |
 | `OCTOPROX_METRICS_FLUSH_INTERVAL` | Seconds between two flushes of the request counters into the metrics history (`database.metrics_flush_interval`): the controller publishes the flush job, and a worker runs it | 60 |
 | `OCTOPROX_SYSTEM_METRICS_INTERVAL`, `OCTOPROX_SYSTEM_METRICS_RETENTION_DAYS` | The System page's trend snapshots (`system.metrics_interval`, `system.metrics_retention_days`); set the interval alike on the controller, which publishes the snapshot job, the workers, which take the snapshots and apply the retention, and the api, which charts them | 300, 90 |
+| `OCTOPROX_UPDATE_CHECK` | Check octoprox.com once a day for a newer release, which admins then see under **Help** in the UI (see [Changelog]({{ site.baseurl }}/changelog#whats-new-and-the-update-check)). The request carries nothing about the install. Set it alike on the controller, which publishes the check, and the api, which shows what it found; `false` on both makes no request | true |
 | `OCTOPROX_TLS_MITM_CA_CERT_PATH` | Path to the MITM CA certificate | data/ca/octoprox-ca.crt |
 | `OCTOPROX_TLS_MITM_CA_KEY_PATH` | Path to the MITM CA private key | data/ca/octoprox-ca.key |
 | `OCTOPROX_PROVIDERS_DIR` | Directory of operator-supplied provider descriptor YAML files | (unset) |
@@ -353,6 +354,7 @@ In a cluster each role reads only part of the settings. Give each what it reads,
 | `database.metrics_flush_interval` | | | yes | | |
 | `system.metrics_interval` | yes | | yes | yes | |
 | `system.metrics_retention_days` | | | | yes | |
+| `OCTOPROX_UPDATE_CHECK` | yes | | yes | | |
 | `metrics.hosts.*`, `failure_log.*` | yes | yes | | | |
 | `OCTOPROX_WORKER_JOBS` | | | | yes | |
 | Provider descriptors (`providers.*`, plugins) | yes | yes | yes | yes | |

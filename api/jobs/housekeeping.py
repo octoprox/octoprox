@@ -10,9 +10,12 @@ from datetime import timedelta
 from functools import partial
 from typing import TYPE_CHECKING
 
+import httpx
 import structlog
 
 from api.core import utc_now
+from api.core.logging import error_text
+from api.core.releases import LatestRelease
 from api.core.roles import JobKind
 from api.core.system_stats import SystemReader
 from api.db.openvpn_repository import OpenVpnPeerRepository
@@ -53,6 +56,11 @@ _DUE_TOLERANCE = 0.9
 # 20 s, and each resets its idle time, so only a stopped worker gets here;
 # its name, fresh per process, never comes back.
 CONSUMER_PRUNE_SECONDS = 3600
+
+# Where the update check reads the release notes: the docs site renders them from the notes file.
+UPDATE_CHECK_URL = "https://www.octoprox.com/releases.json"
+UPDATE_CHECK_EVERY = timedelta(days=1)
+UPDATE_CHECK_TIMEOUT = 10.0
 
 
 class SnapshotJob(Job):
@@ -230,3 +238,33 @@ class IndexHygieneJob(Job):
         if removed:
             logger.info("Stopped workers removed from the work streams", consumers=removed)
         return removed
+
+
+class UpdateCheckJob(Job):
+    """Fetches the release notes octoprox.com lists once a day and keeps them for the api, which says when a newer release is out.
+
+    Published every hour; a run within a day of the last good check does nothing, and a failed one leaves the last
+    finding in place for the next hour's run to replace.
+    """
+
+    kind = JobKind.UPDATE_CHECK
+
+    def __init__(self, redis_client: RedisClient, *, url: str = UPDATE_CHECK_URL) -> None:
+        self._redis = redis_client
+        self._url = url
+
+    async def run(self, batch: JobBatch) -> None:
+        """Fetch the notes unless the last check is younger than a day."""
+        last = await LatestRelease.load(self._redis)
+        if last is not None and utc_now() - last.checked_at < UPDATE_CHECK_EVERY:
+            return
+        try:
+            async with httpx.AsyncClient(timeout=UPDATE_CHECK_TIMEOUT, follow_redirects=True) as client:
+                response = await client.get(self._url)
+                response.raise_for_status()
+            found = LatestRelease.of(utc_now(), response.json())
+        except (httpx.HTTPError, ValueError) as e:
+            logger.warning("Update check failed", url=self._url, error=error_text(e))
+            return
+        await found.save(self._redis)
+        logger.info("Update check done", latest=found.version)

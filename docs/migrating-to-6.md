@@ -267,7 +267,7 @@ A single instance needs nothing new to run: the compose files keep their service
 | `OCTOPROX_ROLE` | | `all` | every process | What the process runs: `all`, `api`, `gateway`, `controller`, `worker` or `echo` |
 | `OCTOPROX_INTERNAL_SECRET` | | placeholder | api, gateway, controller | Encrypts and authenticates the routing feed, and signs gateway calls to the api. The same value on each |
 | `OCTOPROX_INTERNAL_API_URL` | | `http://localhost:8000` | gateway | Where gateways reach the api, such as `http://octoprox-internal-api:8000` |
-| `OCTOPROX_WORKER_JOBS` | | every kind | worker | Comma-separated job kinds this worker takes: `health`, `sync`, `scale`, `provision`, `reattribute`, `enrich`, `traffic`, `metrics_flush`, `compaction`, `snapshot`, `geo_update`, `tunnel_last_seen`, `index_hygiene` |
+| `OCTOPROX_WORKER_JOBS` | | every kind | worker | Comma-separated job kinds this worker takes: `health`, `sync`, `scale`, `provision`, `reattribute`, `enrich`, `traffic`, `metrics_flush`, `compaction`, `snapshot`, `geo_update`, `tunnel_last_seen`, `index_hygiene`, `update_check` |
 | `OCTOPROX_FEED_COMPILE_INTERVAL` | `feed.compile_interval_seconds` | `1` | controller | The least time between two compiles of the routing feed: a change after a quiet spell is compiled at once, and changes that arrive sooner are compiled together |
 | `OCTOPROX_RECONCILE_INTERVAL` | `feed.reconcile_interval_seconds` | `3600` | api, gateway, controller, worker | How often every process reads in full what it follows, whatever the change stream announced: the net for a write that announced nothing |
 | `OCTOPROX_HEALTH_CHECK_CONCURRENCY` | `proxy.health_check.concurrency` | `50` | worker | Health checks one worker runs at once |

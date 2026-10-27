@@ -22,6 +22,7 @@ from redis.exceptions import ResponseError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from api.core import utc_now
+from api.core.releases import LatestRelease, ReleaseNote
 from api.core.roles import JobKind
 from api.db.geo_repository import GeoDatabaseRepository
 from api.db.models import SystemMetricsModel
@@ -47,7 +48,14 @@ from api.geo.models import GeoDatabaseRecord, GeoDatabaseSource
 from api.geo.store import GeoDatabaseStore
 from api.geo.updater import GeoDatabaseUpdater
 from api.jobs import housekeeping
-from api.jobs.housekeeping import GeoUpdateJob, IndexHygieneJob, SnapshotJob, TunnelLastSeenJob
+from api.jobs.housekeeping import (
+    UPDATE_CHECK_URL,
+    GeoUpdateJob,
+    IndexHygieneJob,
+    SnapshotJob,
+    TunnelLastSeenJob,
+    UpdateCheckJob,
+)
 from api.jobs.job import JobBatch
 from api.jobs.queue import JobQueue
 from api.jobs.traffic import TrafficJob
@@ -545,3 +553,83 @@ class TestIndexHygieneJob:
 
         assert keys == [connector.id]
         assert await redis_client.client.exists(TRAFFIC_PENDING_KEY) == 0
+
+
+def release_notes_answer(monkeypatch: pytest.MonkeyPatch, status: int, content: bytes) -> list[httpx.Request]:
+    """Answer the update check with ``status`` and ``content``; the requests it made."""
+    requests: list[httpx.Request] = []
+    client = httpx.AsyncClient
+
+    def answer(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(status, content=content)
+
+    def mocked(**options: Any) -> httpx.AsyncClient:
+        return client(transport=httpx.MockTransport(answer), **options)
+
+    monkeypatch.setattr(httpx, "AsyncClient", mocked)
+    return requests
+
+
+RELEASES_JSON = (
+    b'[{"version": "6.1.4", "from": "6.1.0", "date": "2026-10-27", "title": "Exit headers", "changes": []},'
+    b' {"version": "6.2.0", "date": "2026-11-01", "title": "What\'s New", "changes": [{"text": "Help has it."}]}]'
+)
+
+
+async def stored_finding(redis_client: RedisClient, age: timedelta) -> LatestRelease:
+    """A finding an earlier check stored ``age`` ago."""
+    found = LatestRelease(
+        checked_at=utc_now() - age,
+        notes=[ReleaseNote(version="6.1.4", date="2026-10-27", title="Exit headers", changes=[])],  # type: ignore[arg-type]
+    )
+    await found.save(redis_client)
+    return found
+
+
+class TestUpdateCheckJob:
+    async def test_the_first_check_stores_the_notes_octoprox_com_lists_newest_first(
+        self, monkeypatch: pytest.MonkeyPatch, redis_client: RedisClient
+    ) -> None:
+        requests = release_notes_answer(monkeypatch, 200, RELEASES_JSON)
+
+        await UpdateCheckJob(redis_client).run(ALL)
+
+        assert [str(r.url) for r in requests] == [UPDATE_CHECK_URL]
+        found = await LatestRelease.load(redis_client)
+        assert found is not None
+        assert [n.version for n in found.notes] == ["6.2.0", "6.1.4"]
+        assert utc_now() - found.checked_at < timedelta(minutes=1)
+
+    async def test_a_check_younger_than_a_day_makes_no_request(
+        self, monkeypatch: pytest.MonkeyPatch, redis_client: RedisClient
+    ) -> None:
+        before = await stored_finding(redis_client, timedelta(hours=23))
+        requests = release_notes_answer(monkeypatch, 200, RELEASES_JSON)
+
+        await UpdateCheckJob(redis_client).run(ALL)
+
+        assert requests == []
+        assert await LatestRelease.load(redis_client) == before
+
+    async def test_a_day_old_check_is_replaced(self, monkeypatch: pytest.MonkeyPatch, redis_client: RedisClient) -> None:
+        await stored_finding(redis_client, timedelta(days=1, minutes=1))
+        release_notes_answer(monkeypatch, 200, RELEASES_JSON)
+
+        await UpdateCheckJob(redis_client).run(ALL)
+
+        found = await LatestRelease.load(redis_client)
+        assert found is not None and found.version == "6.2.0"
+
+    @pytest.mark.parametrize(("status", "content"), [(503, b"down"), (200, b"<html>not json</html>"), (200, b'{"a": 1}')])
+    async def test_a_failed_check_keeps_the_last_finding_for_the_next_hour_to_replace(
+        self, monkeypatch: pytest.MonkeyPatch, redis_client: RedisClient, status: int, content: bytes
+    ) -> None:
+        before = await stored_finding(redis_client, timedelta(days=2))
+        release_notes_answer(monkeypatch, status, content)
+
+        with structlog.testing.capture_logs() as logs:
+            await UpdateCheckJob(redis_client).run(ALL)
+
+        assert await LatestRelease.load(redis_client) == before
+        assert [log["event"] for log in logs if log["log_level"] == "warning"] == ["Update check failed"]
