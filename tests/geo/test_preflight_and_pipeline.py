@@ -4,6 +4,7 @@
 """Tests for the preflight check and its verdict cache."""
 
 import asyncio
+from datetime import datetime
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -136,6 +137,8 @@ class TestPreflight:
         slot = _proxy()
         verdict = await checker.check(VERIFIED, slot, session_id="s", requested=LocationTarget(country="GB"))
         assert verdict.ok and verdict.observed == LocationTarget(country="GB") and verdict.expected == LocationTarget(country="GB") and verdict.reason == "match"
+        # Echoed for this request, and when: what the exit headers tell a client.
+        assert verdict.checked_at is not None and not verdict.cached
         assert calls == ["http://u:p@gw:8000"]
         assert checker.checks == 1 and checker.rejections == 0
         # The slot's sighting goes to a worker's attribution, which judges the slot's own claim and
@@ -431,9 +434,13 @@ class TestPreflight:
         assert not verdict.ok and verdict.country_conflict is True and verdict.observed == LocationTarget(country="GB")
 
     def test_verdict_roundtrip(self) -> None:
-        verdict = PreflightVerdict(ok=False, expected=LocationTarget(country="US", state="NY"), observed=LocationTarget(country="GB", state="ENG"), ip=GB_IP, reason="mismatch", endpoint_country="GB", country_conflict=False, state_conflict=True)
+        verdict = PreflightVerdict(ok=False, expected=LocationTarget(country="US", state="NY"), observed=LocationTarget(country="GB", state="ENG"), ip=GB_IP, reason="mismatch", endpoint_country="GB", country_conflict=False, state_conflict=True, checked_at=datetime(2026, 10, 27, 9, 30, 5))
         parsed = PreflightVerdict.from_json(verdict.to_json())
         assert parsed == verdict
+        # Being read from the cache is not stored with the verdict.
+        assert PreflightVerdict.from_json(verdict._replace(cached=True).to_json()) == verdict
+        # A verdict cached before it carried its check time is still read, without one.
+        assert PreflightVerdict.from_json('{"ok": true, "expected": null, "observed": null, "ip": "1.1.1.1", "reason": "observed"}') == PreflightVerdict(ok=True, expected=None, observed=None, ip="1.1.1.1", reason="observed")
         assert PreflightVerdict.from_json("garbage") is None
         # A verdict cached by the previous version, with bare country codes, is a miss.
         assert PreflightVerdict.from_json('{"ok": true, "expected": "GB", "observed": "GB", "ip": "1.1.1.1", "reason": "match"}') is None
@@ -448,9 +455,9 @@ class TestPreflightCache:
         other = GEO_PREFLIGHT_KEY.format(project_id="p", proxy_id="other")
         await checker._store(key, verdict, ttl=600)
         await checker._store(other, verdict, ttl=600)
-        assert await checker._cached(key) == verdict
+        assert await checker._cached(key) == verdict._replace(cached=True)
         await checker.invalidate("p", "x")
-        assert await checker._cached(key) is None and await checker._cached(other) == verdict
+        assert await checker._cached(key) is None and await checker._cached(other) == verdict._replace(cached=True)
 
     async def test_a_cache_without_redis_is_a_miss(self) -> None:
         checker = PreflightChecker(MagicMock(spec=GeoService), None, sightings=Sightings(), exclusions=Retired())

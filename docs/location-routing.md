@@ -22,6 +22,7 @@ Two of the settings are decisions about an exit whose location is in doubt: what
 | **Databases contradict the vendor** (`location_contradicted`) | Project, Location tab | The independent sources agree against the vendor's claim. `evidence` (default) routes the proxy on where they put the exit; `vendor` routes it on the claim anyway and only shows the contradiction; `refuse` skips the proxy and replaces a pooled session slot. |
 | **No database knows the exit** (`location_unknown`) | Project, Location tab | No database knows the IP, or the databases disagree under `consensus`. `vendor` (default) routes on the vendor's word; `refuse` skips the proxy until a later sighting places it. |
 | **Preflight check** (`location_preflight`) | Project, Location tab | Whether a session's exit is verified with an echo request before its first request is forwarded. What the verdict then does to the request is the two decisions' call. |
+| **Exit headers** (`exit_headers`) | Project, Location tab | Whether clients are told each request's exit IP in `X-Octoprox-*` response headers, from preflight's echo when it ran, else the row's last recorded exit. See [Exit headers]({{ site.baseurl }}/connecting#exit-headers). |
 | **Routing strategy** | Project, Routing tab | Whether a request that preflight refused may move to another proxy. `sticky` promised a session one exit, so it will not move it. |
 | **Exit sampling** (`exit_sample_percent`) | Connector, dynamic sessions only | The share of session-less requests preflight echoes when nothing has to be verified. |
 

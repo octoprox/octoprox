@@ -13,19 +13,23 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
+from datetime import datetime
+from enum import StrEnum
 from typing import TYPE_CHECKING
 
 import structlog
 from python_socks import ProxyConnectionError
 
 from api.core.http_tunnel import TunnelRefusedError
+from api.geo.attributor import ProxyAttributor
 from api.geo.models import LocationRules
 from api.geo.preflight import PreflightChecker, PreflightVerdict
+from api.geo.readers import is_ip
 from api.models.location import LocationTarget
 from api.models.project import Project
 from api.models.proxy import Proxy
 from api.providers.sdk.sources import UPSTREAM_ERRORS
-from api.providers.sdk.strategies import is_dynamic_gateway
+from api.providers.sdk.strategies import META_DISCOVERED_IP, is_dynamic_gateway
 
 if TYPE_CHECKING:
     from api.routing.router import Router
@@ -33,19 +37,62 @@ if TYPE_CHECKING:
 logger = structlog.get_logger()
 
 
+class ExitSource(StrEnum):
+    """Where the exit IP a client is told about came from."""
+
+    # The echo ran for this request.
+    PREFLIGHT = "preflight"
+    # An earlier echo on the same session, within the verdict's TTL.
+    CACHED = "cached"
+    # The row's last recorded exit (discovery, a health check or an earlier preflight): no echo answered for the request.
+    LAST_SEEN = "last-seen"
+
+
+@dataclass(frozen=True)
+class ExitIp:
+    """The exit IP a request goes out through as far as Octoprox knows it, where that came from and when it was seen."""
+
+    # Always a valid address: it goes into a header line, and echo endpoints and vendor lists supply it unchecked.
+    ip: str
+    source: ExitSource
+    # Naive UTC; None when nothing says.
+    checked_at: datetime | None = None
+
+    @classmethod
+    def of_verdict(cls, verdict: PreflightVerdict) -> ExitIp | None:
+        """What the echo behind ``verdict`` saw; None when no echo answered with an IP."""
+        if verdict.ip is None or not is_ip(verdict.ip):
+            return None
+        return cls(verdict.ip.strip(), ExitSource.CACHED if verdict.cached else ExitSource.PREFLIGHT, verdict.checked_at)
+
+    @classmethod
+    def last_seen(cls, proxy: Proxy) -> ExitIp | None:
+        """The exit recorded on ``proxy``'s row; None when there is none, and on a dynamic gateway, whose exit is per request."""
+        ip = proxy.metadata.get(META_DISCOVERED_IP)
+        if is_dynamic_gateway(proxy) or not isinstance(ip, str) or not is_ip(ip):
+            return None
+        return cls(ip.strip(), ExitSource.LAST_SEEN, ProxyAttributor.checked_at(proxy))
+
+
 @dataclass(frozen=True)
 class ExitDecision:
     """The upstream to forward through, why the request is refused, or what the upstream failed its echo with."""
 
     # On a refusal, the proxy whose echo refused it.
-    proxy: Proxy | None
+    proxy: Proxy
     rejection: str | None = None
     # ``proxy`` failed the echo with it: the request fails as if its own connection had.
     upstream_error: BaseException | None = None
+    # What preflight saw of the exit it lets the request through on; None when no echo answered.
+    exit_ip: ExitIp | None = None
 
     @property
     def rejected(self) -> bool:
         return self.rejection is not None
+
+    def known_exit(self) -> ExitIp | None:
+        """The exit the request goes out through as far as Octoprox knows: preflight's answer, else the row's last recorded one."""
+        return self.exit_ip or ExitIp.last_seen(self.proxy)
 
 
 def _worth_retrying(error: BaseException) -> bool:
@@ -145,7 +192,7 @@ class ExitVerifier:
                     await self._preflight_checker.invalidate(project.id, proxy.id)
                     verdict = verdict._replace(ok=False, replaced=True)
                 elif verdict.acceptable(rules, allowed):
-                    return ExitDecision(proxy)
+                    return ExitDecision(proxy, exit_ip=ExitIp.of_verdict(verdict))
                 logger.debug(
                     "Request refused for its exit location",
                     proxy_id=proxy.id,

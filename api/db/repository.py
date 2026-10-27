@@ -157,6 +157,7 @@ class ProjectRepository:
             location_preflight=project.location_preflight,
             location_conflict_rule=project.location_conflict_rule.value if project.location_conflict_rule else None,
             location_city_radius_km=project.location_city_radius_km,
+            exit_headers=project.exit_headers,
             created_at=project.created_at,
             updated_at=project.updated_at,
         )
@@ -191,6 +192,7 @@ class ProjectRepository:
                 project.location_conflict_rule.value if project.location_conflict_rule else None
             )
             model.location_city_radius_km = project.location_city_radius_km
+            model.exit_headers = project.exit_headers
             model.updated_at = utc_now()
             await self._session.flush()
         return self._to_domain(model) if model else None
@@ -257,6 +259,7 @@ class ProjectRepository:
             location_preflight=bool(model.location_preflight),
             location_conflict_rule=ConflictRule(model.location_conflict_rule) if model.location_conflict_rule else None,
             location_city_radius_km=model.location_city_radius_km,
+            exit_headers=bool(model.exit_headers),
             created_at=model.created_at,
             updated_at=model.updated_at,
         )

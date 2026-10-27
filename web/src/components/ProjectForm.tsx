@@ -111,6 +111,7 @@ export function ProjectForm({ project, onSave, error, formId }: ProjectFormProps
     location_preflight: project?.location_preflight ?? false,
     location_conflict_rule: project?.location_conflict_rule ?? undefined,
     location_city_radius_km: project?.location_city_radius_km ?? undefined,
+    exit_headers: project?.exit_headers ?? false,
   })
   const [showPassword, setShowPassword] = useState(false)
   const [activeTab, setActiveTab] = useState<SettingsTab>('general')
@@ -259,6 +260,13 @@ export function ProjectForm({ project, onSave, error, formId }: ProjectFormProps
               <input type="checkbox" checked={formData.location_preflight ?? false} onChange={(e) => setFormData({ ...formData, location_preflight: e.target.checked })} className="w-4 h-4" />
               <span>Preflight check</span>
               <InfoTip label="About preflight">When on, one echo through the selected upstream before a session's first request: on a pooled slot when the client names a place, on a dynamic-sessions gateway for every session. Fixed exits are never preflighted. When off, dynamic-sessions exits are not observed at all, and the decisions above do not reach dynamic connectors. Also catches a pooled session that moved between health checks.</InfoTip>
+            </label>
+          </div>
+          <div>
+            <label className="inline-flex items-center gap-2 text-[13px]">
+              <input type="checkbox" checked={formData.exit_headers ?? false} onChange={(e) => setFormData({ ...formData, exit_headers: e.target.checked })} className="w-4 h-4" />
+              <span>Exit headers</span>
+              <InfoTip label="About exit headers">When on, clients are told which exit IP served each request, in X-Octoprox-Exit-Ip, -Exit-Source (preflight, cached or last-seen), -Exit-Checked-At and -Proxy-Id headers: on the 200 answering a CONNECT, and on a plain HTTP response. A dynamic-sessions exit is known only when preflight echoed the request. See Connecting in the docs.</InfoTip>
             </label>
           </div>
           <div>

@@ -60,10 +60,12 @@ class TestCreate:
     async def test_stores_the_project(
         self, project_service: ProjectService, sessions: async_sessionmaker[AsyncSession]
     ) -> None:
-        project = await project_service.create(create(routing_strategy="sticky", location_preflight=True))
+        project = await project_service.create(
+            create(routing_strategy="sticky", location_preflight=True, exit_headers=True)
+        )
 
         assert await stored(sessions, project.id) == project
-        assert (project.routing_strategy, project.location_preflight) == ("sticky", True)
+        assert (project.routing_strategy, project.location_preflight, project.exit_headers) == ("sticky", True, True)
 
     async def test_an_unknown_routing_strategy_is_refused(
         self, project_service: ProjectService, sessions: async_sessionmaker[AsyncSession]

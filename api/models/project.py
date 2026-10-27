@@ -118,6 +118,10 @@ class Project(BaseModel):
     # 0 compares names only. None inherits the install default (GeoSettings).
     location_city_radius_km: float | None = Field(default=None, ge=0, le=MAX_CITY_RADIUS_KM)
 
+    # Whether clients are told each request's exit IP in X-Octoprox-* response
+    # headers (see docs/connecting.md).
+    exit_headers: bool = False
+
     # Metadata
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
@@ -169,6 +173,7 @@ class ProjectCreate(BaseModel):
     location_preflight: bool = False
     location_conflict_rule: ConflictRule | None = None
     location_city_radius_km: float | None = Field(default=None, ge=0, le=MAX_CITY_RADIUS_KM)
+    exit_headers: bool = False
 
     @model_validator(mode="after")
     def validate_mitm_fields(self) -> "ProjectCreate":
@@ -201,6 +206,7 @@ class ProjectUpdate(BaseModel):
     location_conflict_rule: ConflictRule | Literal[""] | None = None
     # "" clears the override (inherit the install default).
     location_city_radius_km: Annotated[float, Field(ge=0, le=MAX_CITY_RADIUS_KM)] | Literal[""] | None = None
+    exit_headers: bool | None = None
 
     def changes(self) -> dict[str, object]:
         """The fields this edit sets, with the empty strings that clear an override turned into None."""
@@ -232,6 +238,7 @@ class ProjectResponse(BaseModel):
     location_preflight: bool = False
     location_conflict_rule: ConflictRule | None = None
     location_city_radius_km: float | None = None
+    exit_headers: bool = False
     created_at: datetime
     updated_at: datetime
     # Aggregated stats (populated by API)
@@ -257,6 +264,7 @@ class ProjectSummary(BaseModel):
     location_preflight: bool = False
     location_conflict_rule: ConflictRule | None = None
     location_city_radius_km: float | None = None
+    exit_headers: bool = False
     credential_count: int = 0
     connector_count: int = 0
     proxy_count: int = 0

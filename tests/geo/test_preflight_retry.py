@@ -4,6 +4,7 @@
 """Tests for the ExitVerifier: what preflight does with the selection, per assurance level and strategy."""
 
 from collections.abc import Iterator
+from datetime import datetime
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
@@ -15,11 +16,11 @@ from api.core.config import Settings
 from api.core.http_tunnel import TunnelRefusedError
 from api.geo.models import ContradictedAction, LocationRules, UnknownAction
 from api.geo.observations import ObservationRecorder
-from api.geo.preflight import PreflightChecker
+from api.geo.preflight import PreflightChecker, PreflightVerdict
 from api.geo.service import GeoService
 from api.geo.settings import GeoSettingsStore
 from api.geo.store import GeoDatabaseStore
-from api.geo.verifier import ExitVerifier
+from api.geo.verifier import ExitDecision, ExitIp, ExitSource, ExitVerifier
 from api.models.location import LocationTarget
 from api.models.project import Project
 from api.models.proxy import Proxy, ProxyStatus
@@ -211,6 +212,47 @@ class TestVerify:
         assert not decision.rejected and decision.proxy is not None and decision.proxy.id == "gb"
         assert router.select_proxy_for_project.await_args.kwargs["exclude"] == frozenset({"down"})
         assert len(refusals.events) == 1 and refusals.events[0]["proxy_id"] == "down"
+
+
+class TestExitIp:
+    """What the decision tells the exit headers: the echo it forwards on, else the row's last recorded exit."""
+
+    async def test_an_accepted_echo_is_the_exit(self, checker: PreflightChecker) -> None:
+        router = _router(picks=[_proxy("gb")])
+        decision = await ExitVerifier(checker, router).verify(_project(), _proxy("us"), session_id=None, location=LocationTarget(country="GB"), target_host="x")
+        # The replacement's echo, not the refused one's.
+        assert decision.exit_ip is not None and decision.exit_ip.checked_at is not None
+        assert (decision.exit_ip.ip, decision.exit_ip.source) == (GB_IP, ExitSource.PREFLIGHT)
+        assert decision.known_exit() == decision.exit_ip
+
+    def test_a_cached_verdict_says_so(self) -> None:
+        stamp = datetime(2026, 10, 27, 9, 30)
+        verdict = PreflightVerdict(ok=True, expected=None, observed=None, ip=GB_IP, reason="observed", checked_at=stamp, cached=True)
+        assert ExitIp.of_verdict(verdict) == ExitIp(GB_IP, ExitSource.CACHED, stamp)
+        assert ExitIp.of_verdict(verdict._replace(ip=None)) is None
+
+    async def test_without_an_echo_the_rows_last_exit_is_the_answer(self, checker: PreflightChecker) -> None:
+        slot = _proxy("us")
+        slot.metadata.update({"discovered_ip": US_IP, "location_checked_at": "2026-10-27T09:30:00"})
+        decision = await ExitVerifier(checker, _router()).verify(_project(preflight=False), slot, session_id=None, location=None, target_host="x")
+        assert decision.exit_ip is None
+        assert decision.known_exit() == ExitIp(US_IP, ExitSource.LAST_SEEN, datetime(2026, 10, 27, 9, 30))
+        # A row never seen has no exit to name.
+        assert ExitDecision(_proxy("us")).known_exit() is None
+
+    def test_an_answer_that_is_not_an_ip_names_no_exit(self) -> None:
+        # The IP goes into a header line, and the echo endpoint or a vendor's list supplies it unchecked.
+        injected = "203.0.113.9\r\nX-Octoprox-Exit-Source: preflight"
+        verdict = PreflightVerdict(ok=True, expected=None, observed=None, ip=injected, reason="observed")
+        assert ExitIp.of_verdict(verdict) is None
+        slot = _proxy("us")
+        slot.metadata["discovered_ip"] = injected
+        assert ExitDecision(slot).known_exit() is None
+
+    def test_a_dynamic_gateways_exit_is_known_only_from_its_echo(self) -> None:
+        gateway = _proxy("us")
+        gateway.metadata.update({"dynamic_sessions": "true", "discovered_ip": US_IP})
+        assert ExitDecision(gateway).known_exit() is None
 
 
 class TestStrategyHook:

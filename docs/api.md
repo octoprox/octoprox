@@ -121,6 +121,8 @@ A route that needs Postgres or Redis while it cannot be reached answers `503` wi
 
 Projects provide multi-tenancy support. Each project has its own credentials, connectors, and proxy pools. A route under `/projects/{project_id}` answers `404` for an id that belongs to another project, and a duplicate name or an unknown `routing_strategy` is a `400`. Changing a project's location rules (`location_contradicted`, `location_unknown`, `location_conflict_rule`, `location_city_radius_km`) queues a re-attribution of its proxies.
 
+`exit_headers` (boolean, default `false`) tells the project's clients which exit IP served each request, in `X-Octoprox-*` headers on the `CONNECT` answer and on plain HTTP responses; see [Exit headers]({{ site.baseurl }}/connecting#exit-headers).
+
 ### List Projects
 
 ```bash

@@ -258,15 +258,15 @@ class TransparentProxyServer(ProxyServer):
             if proxy is None:
                 await self._reject_no_proxy(client_writer, project.id, target_host, session_id, location)
                 return
-            verified = await self._verify_exit(
+            decision = await self._verify_exit(
                 project, proxy, session_id, location, target_host, client_writer, peer_id=peer.id, started=started
             )
-            if verified is None:
+            if decision is None:
                 return
 
             use_mitm = sniffed.tls and mitm_possible
             await self._relay(
-                client_reader, client_writer, verified, project, target_host, dst_port,
+                client_reader, client_writer, decision.proxy, project, target_host, dst_port,
                 started=started,
                 established=None,
                 use_mitm=use_mitm,

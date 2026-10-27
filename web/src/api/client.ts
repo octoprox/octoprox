@@ -165,6 +165,8 @@ export interface Project {
   location_conflict_rule: ConflictRule | null
   /** Km from a claimed city that still confirms it (0 compares names only); null inherits the install default. */
   location_city_radius_km: number | null
+  /** Tell clients each request's exit IP in X-Octoprox-* response headers. */
+  exit_headers: boolean
   created_at: string
   updated_at: string
 }
@@ -220,6 +222,7 @@ export interface ProjectCreate {
   location_preflight?: boolean
   location_conflict_rule?: ConflictRule | null
   location_city_radius_km?: number | null
+  exit_headers?: boolean
 }
 
 export interface ProjectUpdate {
@@ -243,6 +246,7 @@ export interface ProjectUpdate {
   location_conflict_rule?: ConflictRule | '' | null
   /** An empty string clears the override. */
   location_city_radius_km?: number | '' | null
+  exit_headers?: boolean
 }
 
 export interface Proxy {

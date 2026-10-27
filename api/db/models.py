@@ -149,6 +149,8 @@ class ProjectModel(Base):
     location_conflict_rule: Mapped[str | None] = mapped_column(String(10), nullable=True)
     # Km from a claimed city that still confirms it; null inherits geo_settings.default_city_radius_km.
     location_city_radius_km: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # Whether clients are told each request's exit IP in X-Octoprox-* response headers.
+    exit_headers: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
 
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now, onupdate=utc_now)

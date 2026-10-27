@@ -80,6 +80,10 @@ class PreflightVerdict(NamedTuple):
     required_by: str | None = None
     # Set by the verifier when the slot left the pool while it was being checked.
     replaced: bool = False
+    # When the echo answered, naive UTC; None for a verdict no echo answered.
+    checked_at: datetime | None = None
+    # True when the verdict was read from the cache rather than echoed for this request; never stored.
+    cached: bool = False
 
     def acceptable(self, rules: LocationRules, allowed: Sequence[str] = ()) -> bool:
         """Whether this verdict lets the request through under the project's ``rules``; one with no requirement never refuses.
@@ -168,6 +172,7 @@ class PreflightVerdict(NamedTuple):
                 "state_conflict": self.state_conflict,
                 "city_conflict": self.city_conflict,
                 "required_by": self.required_by,
+                "checked_at": self.checked_at.isoformat() if self.checked_at else None,
             }
         )
 
@@ -180,6 +185,7 @@ class PreflightVerdict(NamedTuple):
             if isinstance(expected, str) or isinstance(observed, str):
                 # A verdict cached by a previous version: unreadable, so a miss and verified again.
                 return None
+            checked_at = data.get("checked_at")
             return cls(
                 ok=bool(data["ok"]),
                 expected=LocationTarget.from_dict(expected),
@@ -191,6 +197,7 @@ class PreflightVerdict(NamedTuple):
                 state_conflict=data.get("state_conflict"),
                 city_conflict=data.get("city_conflict"),
                 required_by=data.get("required_by"),
+                checked_at=datetime.fromisoformat(checked_at) if checked_at else None,
             )
         except (TypeError, ValueError, KeyError):
             return None
@@ -406,6 +413,7 @@ class PreflightChecker:
             state_conflict=resolution.state_conflict,
             city_conflict=resolution.city_conflict,
             required_by=required_by,
+            checked_at=observed_at,
         )
 
         if dynamic:
@@ -511,7 +519,7 @@ class PreflightChecker:
         )
 
     async def _cached(self, key: str) -> PreflightVerdict | None:
-        """The verdict cached under ``key``; None when there is none, or Redis did not answer within the deadline."""
+        """The verdict cached under ``key``, marked ``cached``; None when there is none, or Redis did not answer within the deadline."""
         if self._redis is None:
             return None
         try:
@@ -519,7 +527,8 @@ class PreflightChecker:
                 raw = await self._redis.client.get(key)
         except Exception:
             return None
-        return PreflightVerdict.from_json(raw) if raw else None
+        verdict = PreflightVerdict.from_json(raw) if raw else None
+        return verdict._replace(cached=True) if verdict else None
 
     async def _store(self, key: str, verdict: PreflightVerdict, *, ttl: int) -> None:
         """Cache ``verdict`` under ``key`` for ``ttl`` seconds; a Redis that does not answer in time keeps none."""

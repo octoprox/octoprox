@@ -124,6 +124,35 @@ and pass `verify="octoprox-bundle.pem"` (or set `REQUESTS_CA_BUNDLE` to it). The
 
 Below the credentials the Connect page lists the connectors a request with the username would reach right now and each one's expected share by [weight]({{ site.baseurl }}/routing-strategies#connector-weights). It uses the same eligibility as a real request, so it shows, for example, that a city is served only by a dynamic-sessions connector whose vendor can name it and by fixed exits known to be there, or that an "All countries" pool would create sessions for a new country on the first request. A connector with a [domain filter]({{ site.baseurl }}/domain-filtering) is listed as well, since the page does not know the destination. The same answer is available from the API: [`GET /api/v1/projects/{project_id}/connect`]({{ site.baseurl }}/api#connect).
 
+## Exit headers
+
+With **Exit headers** on (the project's Location tab, `exit_headers` in the [API]({{ site.baseurl }}/api#projects)), Octoprox tells the client which exit IP served each request, for example to build your own IP database from what the sites you visit report, or to watch exits per connector. It is off by default, so a project's clients see no exit IPs unless the project asks for them.
+
+| Header | Value |
+|--------|-------|
+| `X-Octoprox-Proxy-Id` | The proxy row the request went through, the same id the Proxies page, the [observation log]({{ site.baseurl }}/ip-attribution) and the API use. Always sent |
+| `X-Octoprox-Exit-Ip` | The exit IP, when Octoprox knows it |
+| `X-Octoprox-Exit-Source` | Where the IP came from, below |
+| `X-Octoprox-Exit-Checked-At` | When that IP was seen, in UTC (`2026-10-27T09:30:05Z`); left out when nothing recorded it |
+
+An HTTPS request gets them on the `200 Connection Established` that answers its `CONNECT`, which only the client reads: the site never sees them. A plain `http://` request gets them on the response, and any `X-Octoprox-*` header the upstream sent is dropped first, so the ones the client reads are always Octoprox's. A request Octoprox answers with an error, a preflight refusal included, gets none, and neither does traffic from [WireGuard]({{ site.baseurl }}/wireguard) or [OpenVPN]({{ site.baseurl }}/openvpn) devices, which has no proxy answer to carry them.
+
+| `X-Octoprox-Exit-Source` | Meaning |
+|--------------------------|---------|
+| `preflight` | The [preflight check]({{ site.baseurl }}/ip-attribution#preflight) echoed this request's exit just before forwarding it |
+| `cached` | An earlier echo on the same session, reused for up to `preflight_session_ttl_seconds` (600 by default), or the vendor's session length when that is shorter, and dropped early when a health check sees the exit move. The vendor may still have moved the session in between |
+| `last-seen` | No echo answered for the request (preflight off or not needed, or its echo failed), so this is the row's last recorded exit, from discovery, a health check or an earlier preflight. The check time is when Octoprox recorded that exit: a later sighting of the same IP does not move it |
+
+When no IP is known, only the proxy id is sent. A dynamic-sessions connector picks its exit per request, so its exit is known only when preflight echoed that request: preflight has to be on, and a request without `-sessid-` and without a place that could be refused is echoed only for the connector's `exit_sample_percent` of requests. A row no sighting has placed yet has no IP either.
+
+Most HTTP libraries do not pass the headers of a successful `CONNECT` on to the caller. curl shows them with `-i` or `-D` (unless `--suppress-connect-headers` is given), Go through `http.Transport.OnProxyConnectResponse`, and Python's `http.client` through `HTTPConnection.get_proxy_response_headers()` (Python 3.12 and later). Python requests, httpx, aiohttp and browsers, Playwright included, do not, so with them the headers can only be read on plain `http://` requests.
+
+```bash
+curl --proxy 'http://proxy.example.com:8080' \
+  --proxy-user 'myuser-cc-us-sessid-a1:mypassword' \
+  -s -o /dev/null -D - 'https://ipinfo.io/json' | grep -i '^x-octoprox-'
+```
+
 ## Troubleshooting
 
 | Response | Meaning |

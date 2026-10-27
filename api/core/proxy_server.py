@@ -39,6 +39,7 @@ from api.core.logging import error_text
 from api.core.signals import request_completed, request_failed, request_rejected
 from api.core.stats import FailureKind
 from api.core.username_params import AuthResult, parse_username_params
+from api.geo.verifier import ExitDecision
 from api.models.project import MitmMode, Project
 from api.models.proxy import Proxy, ProxyProtocol
 
@@ -93,6 +94,10 @@ USER_TIMEOUT_MS = 300_000
 TRAFFIC_LIMIT_REASONS = {429: "Too Many Requests", 509: "Bandwidth Limit Exceeded"}
 # RFC 9209 Proxy-Status header: the same signal whichever status is configured.
 TRAFFIC_LIMIT_PROXY_STATUS = f"Proxy-Status: {BANDWIDTH_LIMIT_PROXY_STATUS}"
+
+# The headers naming a request's exit, for projects that ask for them
+# (``exit_headers``); the upstream's own are dropped so these can be trusted.
+EXIT_HEADER_PREFIX = "x-octoprox-"
 
 # What a tunnel direction calls per chunk; False means stop the transfer.
 _ByteCounter = Callable[[int], bool] | None
@@ -431,24 +436,24 @@ class ProxyServer:
         peer_id: str | None = None,
         *,
         started: float,
-    ) -> Proxy | None:
-        """Hand the selected upstream to preflight; None when the request was answered here.
+    ) -> ExitDecision | None:
+        """Hand the selected upstream to preflight; the decision to forward on, None when the request was answered here.
 
         A refusal, or the upstream failing the echo, is one failed request however many proxies preflight tried. The
         upstream's failure is answered and counted as its own connection's would be, against that proxy, with the
         latency since ``started``, as a forwarded request's.
         """
         if self._exit_verifier is None:
-            return proxy
+            return ExitDecision(proxy)
         decision = await self._exit_verifier.verify(
             project, proxy, session_id=session_id, location=location, target_host=target_host
         )
         error = decision.upstream_error
         if error is None and not decision.rejected:
-            return decision.proxy
+            return decision
         latency_ms = (time.monotonic() - started) * 1000
         # The proxy whose echo decided it, a replacement preflight moved to among them.
-        proxy = decision.proxy or proxy
+        proxy = decision.proxy
         if error is not None:
             status, phrase, message = _upstream_answer(error)
             failure = self._upstream_failure(error, project.id, proxy, latency_ms, status)
@@ -473,6 +478,23 @@ class ProxyServer:
         )
         await self._publish_failure(failure)
         return None
+
+    @staticmethod
+    def _exit_headers(project: Project, decision: ExitDecision) -> bytes:
+        """The header lines naming the exit ``decision`` forwards through; none unless the project asked for them.
+
+        The proxy row always, and the exit IP where Octoprox knows it (:meth:`ExitDecision.known_exit`).
+        """
+        if not project.exit_headers:
+            return b""
+        lines = [f"X-Octoprox-Proxy-Id: {decision.proxy.id}"]
+        exit_ip = decision.known_exit()
+        if exit_ip is not None:
+            lines.append(f"X-Octoprox-Exit-Ip: {exit_ip.ip}")
+            lines.append(f"X-Octoprox-Exit-Source: {exit_ip.source.value}")
+            if exit_ip.checked_at is not None:
+                lines.append(f"X-Octoprox-Exit-Checked-At: {exit_ip.checked_at:%Y-%m-%dT%H:%M:%SZ}")
+        return "".join(f"{line}\r\n" for line in lines).encode()
 
     async def _connect_via_proxy(
         self,
@@ -732,16 +754,19 @@ class ProxyServer:
             await self._reject_no_proxy(client_writer, project.id, target_host, session_id, location)
             return
 
-        verified = await self._verify_exit(
+        decision = await self._verify_exit(
             project, proxy, session_id, location, target_host, client_writer, started=started
         )
-        if verified is None:
+        if decision is None:
             return
 
         await self._relay(
-            client_reader, client_writer, verified, project, target_host, target_port,
+            client_reader, client_writer, decision.proxy, project, target_host, target_port,
             started=started,
-            established=b"HTTP/1.1 200 Connection Established\r\n\r\n",
+            # Only the client reads these: the target sees what follows the 200.
+            established=(
+                b"HTTP/1.1 200 Connection Established\r\n" + self._exit_headers(project, decision) + b"\r\n"
+            ),
             use_mitm=project.tls_mitm_mode != MitmMode.OFF and self._mitm_handler is not None,
         )
 
@@ -1056,12 +1081,12 @@ class ProxyServer:
             await self._reject_no_proxy(client_writer, project_id, parsed_host, session_id, location)
             return
 
-        verified = await self._verify_exit(
+        decision = await self._verify_exit(
             project, proxy, session_id, location, parsed_host, client_writer, started=start_time
         )
-        if verified is None:
+        if decision is None:
             return
-        proxy = verified
+        proxy = decision.proxy
 
         success = False
         latency_ms = 0.0
@@ -1194,9 +1219,13 @@ class ProxyServer:
             relayed_names = set(
                 self._end_to_end_headers(response_headers, HOP_BY_HOP_RESPONSE_HEADERS)
             )
+            exit_headers = self._exit_headers(project, decision)
             for relayed_name, line in raw_lines:
+                if exit_headers and relayed_name is not None and relayed_name.startswith(EXIT_HEADER_PREFIX):
+                    continue
                 if relayed_name is None or relayed_name in relayed_names:
                     client_writer.write(line)
+            client_writer.write(exit_headers)
             client_writer.write(b"Connection: close\r\n\r\n")
 
             await client_writer.drain()
