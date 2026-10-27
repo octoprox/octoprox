@@ -119,6 +119,11 @@ export const TIPS = {
   uniqueExits: 'Distinct exit IPs this connector handed out: first seen within the selected window / ever.',
   reused: 'Share of the connector\'s distinct exit IPs that were handed out more than once. High for pools that recycle a small set of exits.',
   whereWrong: 'Contradicted exits per level, with the most frequent claimed and observed pair. Open the details for the full list.',
+  sharingExits: 'Distinct exit IPs this connector handed out that were seen within the selected window, including ones first seen before it.',
+  sharingReused: 'Share of these exits the connector handed out more than once, counting every hand-out ever, not only those in the window.',
+  shared: 'Share of this connector\'s exits that another connector of the project also handed out in the window. Two connectors on one provider usually share a pool; two providers sharing many exits are likely selling the same network.',
+  exclusive: 'Exits no other connector of the project handed out in the window: what this connector adds on its own.',
+  overlapsMost: 'The connector this one has the most exits in common with in the window, and how many.',
   sightings: 'How many times the connector handed this IP to a proxy. Re-checks of an exit a proxy already had (re-attribution, preflight, unchanged health checks) do not count.',
   latestState: (
     <>

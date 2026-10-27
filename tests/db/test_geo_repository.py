@@ -384,6 +384,47 @@ class TestObservations:
         assert await repo.exit_ips(connector_ids=["conn-1"]) == ([], 0, True)
         assert await repo.existing_connector_ids({"conn-1", "conn-2", "ghost"}) == {"conn-2"}
 
+    async def test_exit_sharing_counts_overlap_within_the_window(self, db_session: AsyncSession) -> None:
+        """An exit is shared when another of the connectors also handed it out in the window, counted once per pair."""
+        await _connectors(db_session, "share-a", "share-b", "share-c", "share-d")
+        repo = ObservationRepository(db_session)
+        old = datetime(2026, 9, 1)
+        recent = datetime(2026, 9, 20)
+        sightings = [
+            # 10.0.0.1 behind a, b and c; a handed it out twice.
+            (_observation(connector_id="share-a", ip="10.0.0.1", observed_at=recent), True),
+            (_observation(connector_id="share-a", ip="10.0.0.1", observed_at=recent + timedelta(hours=1)), True),
+            (_observation(connector_id="share-b", ip="10.0.0.1", observed_at=recent), True),
+            (_observation(connector_id="share-c", ip="10.0.0.1", observed_at=recent), True),
+            # 10.0.0.2 behind a and b.
+            (_observation(connector_id="share-a", ip="10.0.0.2", observed_at=recent), True),
+            (_observation(connector_id="share-b", ip="10.0.0.2", observed_at=recent), True),
+            # a's own exit.
+            (_observation(connector_id="share-a", ip="10.0.0.3", observed_at=recent), True),
+            # Behind c in the window, but behind a only before it: not shared.
+            (_observation(connector_id="share-c", ip="10.0.0.4", observed_at=recent), True),
+            (_observation(connector_id="share-a", ip="10.0.0.4", observed_at=old), True),
+            # A connector outside the list is not compared.
+            (_observation(connector_id="share-d", ip="10.0.0.3", observed_at=recent), True),
+        ]
+        await repo.add_exit_ips(ExitSighting.fold(sightings))
+        await db_session.commit()
+
+        sharing = await repo.exit_sharing(connector_ids=["share-a", "share-b", "share-c"], since=datetime(2026, 9, 10))
+        assert sharing is not None
+        assert (sharing["exits"], sharing["shared"]) == (4, 2)
+        assert {c["connector_id"]: (c["exits"], c["reused"], c["shared"]) for c in sharing["connectors"]} == {
+            "share-a": (3, 1, 2),
+            "share-b": (2, 0, 2),
+            "share-c": (2, 0, 1),
+        }
+        assert sorted((p["connector_id"], p["other_id"], p["shared"]) for p in sharing["pairs"]) == [
+            ("share-a", "share-b", 2),
+            ("share-a", "share-c", 1),
+            ("share-b", "share-c", 1),
+        ]
+        assert await repo.exit_sharing(connector_ids=[], since=old) == {"exits": 0, "shared": 0, "connectors": [], "pairs": []}
+
     async def test_recent_filters_and_pages_on_the_server(self, db_session: AsyncSession) -> None:
         """Filters narrow the query itself; a page never depends on what a previous page held."""
         repo = ObservationRepository(db_session)

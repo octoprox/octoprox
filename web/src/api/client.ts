@@ -562,6 +562,35 @@ export interface GeoExitsResponse {
   connectors: ConnectorExits[]
 }
 
+/** A connector's distinct exits seen in the window, how many it reused (ever) and how many another connector also had. */
+export interface ConnectorSharing {
+  connector_id: string
+  connector_name: string | null
+  /** The connector's credential type. */
+  provider: string | null
+  coverage: ExitCoverage | null
+  exits: number
+  reused: number
+  shared: number
+}
+
+/** The exits two connectors both handed out in the window; `connector_id` sorts before `other_id`. */
+export interface SharedPair {
+  connector_id: string
+  other_id: string
+  shared: number
+}
+
+export interface GeoExitSharingResponse {
+  since: string
+  /** Distinct exits across the project's connectors. */
+  exits: number
+  /** Of those, handed out by more than one connector. */
+  shared: number
+  connectors: ConnectorSharing[]
+  pairs: SharedPair[]
+}
+
 /** One distinct exit of a connector, with the state of its latest observation. */
 export interface ExitIp {
   connector_id: string
@@ -704,6 +733,8 @@ export const fetchGeoAccuracy = async (params: { project_id?: string; connector_
 export const fetchGeoStatus = async (): Promise<GeoStatus> => (await api.get('/geo/status')).data
 export const fetchGeoExits = async (params: { project_id?: string; connector_id?: string; days?: number } = {}): Promise<GeoExitsResponse> =>
   (await api.get('/geo/exits', { params })).data
+export const fetchGeoExitSharing = async (params: { project_id: string; days?: number }): Promise<GeoExitSharingResponse> =>
+  (await api.get('/geo/exits/sharing', { params })).data
 export const fetchGeoExitIps = async (params: ExitIpFilters & { limit?: number; offset?: number } = {}): Promise<ExitIpsPage> =>
   (await api.get('/geo/exits/ips', { params })).data
 export const countGeoExitIps = async (params: ExitIpFilters = {}): Promise<number> =>

@@ -1076,6 +1076,32 @@ class TestObservationsAndStatus:
         exits = authenticated_client.get("/api/v1/geo/exits", params={"connector_id": connector_id}).json()
         assert [(row["connector_name"], row["unique_total"]) for row in exits["connectors"]] == [(names[0], 1)]
 
+    def test_sharing_compares_a_project_s_connectors(
+        self,
+        authenticated_client: TestClient,
+        created_project: dict[str, Any],
+        created_connector: dict[str, Any],
+        sample_connector_data: dict[str, Any],
+    ) -> None:
+        project_id = created_project["id"]
+        second = authenticated_client.post(
+            f"/api/v1/projects/{project_id}/connectors",
+            json={**sample_connector_data, "name": "Second", "credential_id": created_connector["credential_id"]},
+        )
+        assert second.status_code == 201, second.text
+        ids = sorted([created_connector["id"], second.json()["id"]])
+        for connector_id in ids:
+            _contradicted_exit(authenticated_client, connector_id, project_id)
+
+        sharing = authenticated_client.get("/api/v1/geo/exits/sharing", params={"project_id": project_id}).json()
+        assert (sharing["exits"], sharing["shared"]) == (1, 1)
+        assert sorted(
+            (row["connector_name"], row["provider"], row["exits"], row["shared"]) for row in sharing["connectors"]
+        ) == sorted((name, created_connector["credential_type"], 1, 1) for name in (created_connector["name"], "Second"))
+        assert sharing["pairs"] == [{"connector_id": ids[0], "other_id": ids[1], "shared": 1}]
+        assert authenticated_client.get("/api/v1/geo/exits/sharing", params={"project_id": "missing"}).status_code == 404
+        assert authenticated_client.get("/api/v1/geo/exits/sharing").status_code == 422
+
     def test_a_dynamic_sessions_connector_s_rows_say_what_preflight_lets_them_see(
         self, authenticated_client: TestClient, created_project: dict[str, Any]
     ) -> None:

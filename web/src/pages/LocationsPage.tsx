@@ -10,11 +10,12 @@ import { Tabs } from '../components/ui'
 import { AccuracyRow, ProviderAccuracyPanel, accuracyDays, useAccuracyRange } from '../components/geo/ProviderAccuracyPanel'
 import { AccuracyDetailsInspector } from '../components/geo/AccuracyDetails'
 import { ExitIpsPanel } from '../components/geo/ExitIpsPanel'
+import { ExitSharingPanel } from '../components/geo/ExitSharingPanel'
 import { ObservationsPanel } from '../components/geo/ObservationsPanel'
 
-type Tab = 'accuracy' | 'exits' | 'observations'
+type Tab = 'accuracy' | 'sharing' | 'exits' | 'observations'
 
-/** Where this project's proxies really exit: provider accuracy and the observation log, project-scoped. */
+/** Where this project's proxies really exit: provider accuracy, exit sharing, exit IPs and the observation log, project-scoped. */
 export default function LocationsPage() {
   const { selectedProjectId } = useProject()
   const [tab, setTab] = useState<Tab>('accuracy')
@@ -30,7 +31,7 @@ export default function LocationsPage() {
   return (
     <Page
       title="Exit locations"
-      subtitle="Whether this project's providers put its proxies where they claim, and every exit IP seen behind them."
+      subtitle="Whether this project's providers put its proxies where they claim, how much their exit IPs overlap, and every exit IP seen behind them."
       panel={inspecting && tab === 'accuracy' ? (
         <AccuracyDetailsInspector
           row={inspecting}
@@ -41,7 +42,7 @@ export default function LocationsPage() {
       ) : undefined}
     >
       <Tabs<Tab>
-        tabs={[{ id: 'accuracy', label: 'Provider accuracy' }, { id: 'exits', label: 'Exit IPs' }, { id: 'observations', label: 'Observation log' }]}
+        tabs={[{ id: 'accuracy', label: 'Provider accuracy' }, { id: 'sharing', label: 'IP sharing' }, { id: 'exits', label: 'Exit IPs' }, { id: 'observations', label: 'Observation log' }]}
         active={tab}
         onChange={setTab}
       />
@@ -52,6 +53,7 @@ export default function LocationsPage() {
           inspecting={inspecting?.connector_id ?? null}
         />
       )}
+      {tab === 'sharing' && <ExitSharingPanel projectId={selectedProjectId} />}
       {tab === 'exits' && <ExitIpsPanel projectId={selectedProjectId} />}
       {tab === 'observations' && <ObservationsPanel projectId={selectedProjectId} />}
     </Page>

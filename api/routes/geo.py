@@ -263,6 +263,34 @@ class ExitsResponse(BaseModel):
     connectors: list[ConnectorExits]
 
 
+class ConnectorSharing(BaseModel):
+    """A connector's distinct exits seen in the window, how many it reused and how many another connector also had."""
+
+    connector_id: str
+    connector_name: str | None = None
+    provider: str | None = None  # the connector's credential type
+    coverage: ExitCoverage | None = None
+    exits: int
+    reused: int  # handed out more than once, ever
+    shared: int  # also handed out by another connector of the project in the window
+
+
+class SharedPair(BaseModel):
+    """The exits two connectors both handed out in the window; ``connector_id`` sorts before ``other_id``."""
+
+    connector_id: str
+    other_id: str
+    shared: int
+
+
+class SharingResponse(BaseModel):
+    since: datetime
+    exits: int  # distinct exits across the project's connectors
+    shared: int  # of those, handed out by more than one connector
+    connectors: list[ConnectorSharing]
+    pairs: list[SharedPair]
+
+
 class ExitIp(BaseModel):
     """One distinct exit of a connector, with the state of its latest observation."""
 
@@ -1024,6 +1052,43 @@ async def exits(
         )
     result.sort(key=lambda c: (-c.unique_total, c.connector_name or ""))
     return ExitsResponse(since=since, connectors=result)
+
+
+@router.get("/exits/sharing", response_model=SharingResponse)
+async def exit_sharing(
+    request: Request, session: DbDep, _user: CurrentUserDep, project_id: str, days: int = 30
+) -> SharingResponse:
+    """How a project's connectors' exits seen in the window overlap: per connector, per pair and across the project."""
+    await require_project(request, project_id)
+    since = utc_now() - timedelta(days=max(1, min(days, 3650)))
+    connectors = {c.id: c for c in await ConnectorRepository(session).get_by_project(project_id)}
+    sharing = await ObservationRepository(session).exit_sharing(connector_ids=list(connectors), since=since)
+    if sharing is None:
+        raise HTTPException(
+            status_code=504,
+            detail=f"Comparing the exits took longer than {READ_TIMEOUT_MS // 1000} s. Pick a shorter window.",
+        )
+    rows = sharing["connectors"]
+    coverage = await _coverage(request, (row["connector_id"] for row in rows))
+    result = []
+    for row in rows:
+        connector = connectors.get(row["connector_id"])
+        result.append(
+            ConnectorSharing(
+                connector_name=connector.name if connector else None,
+                provider=connector.credential_type if connector else None,
+                coverage=coverage.get(row["connector_id"]),
+                **row,
+            )
+        )
+    result.sort(key=lambda c: (-c.exits, c.connector_name or ""))
+    return SharingResponse(
+        since=since,
+        exits=sharing["exits"],
+        shared=sharing["shared"],
+        connectors=result,
+        pairs=[SharedPair(**pair) for pair in sharing["pairs"]],
+    )
 
 
 async def _exit_ip_filters(

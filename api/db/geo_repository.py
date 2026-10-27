@@ -23,10 +23,12 @@ from sqlalchemy import (
     delete,
     func,
     literal_column,
+    null,
     or_,
     select,
     text,
     tuple_,
+    union_all,
     update,
     values,
 )
@@ -880,6 +882,84 @@ class ObservationRepository:
             }
             for row in result.all()
         ]
+
+    async def exit_sharing(self, *, connector_ids: list[str], since: datetime) -> dict[str, Any] | None:
+        """How the exits ``connector_ids`` handed out since ``since`` overlap; None past ``READ_TIMEOUT_MS``.
+
+        Per connector its distinct exits, how many were handed out more than once (ever) and how many another of the
+        connectors also handed out in the window; per pair the exits both did; and the distinct exits across all.
+        """
+        if not connector_ids:
+            return {"exits": 0, "shared": 0, "connectors": [], "pairs": []}
+        m = ConnectorExitIpModel
+
+        def counted(condition: Any) -> Any:
+            return func.sum(case((condition, 1), else_=0))
+
+        seen = (
+            select(m.connector_id, m.ip, m.sightings)
+            .where(m.connector_id.in_(connector_ids), m.last_seen >= since)
+            .cte("seen")
+        )
+        holders = select(seen.c.ip, func.count().label("holders")).group_by(seen.c.ip).cte("holders")
+        # One statement, so the window's rows are read once and the time limit covers the whole comparison.
+        totals = select(
+            literal_column("'total'").label("kind"),
+            null().label("connector_id"),
+            null().label("other_id"),
+            func.count().label("exits"),
+            literal_column("0").label("reused"),
+            counted(holders.c.holders > 1).label("shared"),
+        ).select_from(holders)
+        per_connector = (
+            select(
+                literal_column("'connector'"),
+                seen.c.connector_id,
+                null(),
+                func.count(),
+                counted(seen.c.sightings > 1),
+                counted(holders.c.holders > 1),
+            )
+            .select_from(seen)
+            .join(holders, holders.c.ip == seen.c.ip)
+            .group_by(seen.c.connector_id)
+        )
+        other = seen.alias("other")
+        pairs = (
+            select(
+                literal_column("'pair'"),
+                seen.c.connector_id,
+                other.c.connector_id,
+                literal_column("0"),
+                literal_column("0"),
+                func.count(),
+            )
+            .select_from(seen)
+            .join(other, and_(other.c.ip == seen.c.ip, other.c.connector_id > seen.c.connector_id))
+            .group_by(seen.c.connector_id, other.c.connector_id)
+        )
+
+        async def read() -> dict[str, Any]:
+            sharing: dict[str, Any] = {"exits": 0, "shared": 0, "connectors": [], "pairs": []}
+            for row in (await self._session.execute(union_all(totals, per_connector, pairs))).all():
+                if row.kind == "total":
+                    sharing["exits"], sharing["shared"] = int(row.exits or 0), int(row.shared or 0)
+                elif row.kind == "connector":
+                    sharing["connectors"].append(
+                        {
+                            "connector_id": row.connector_id,
+                            "exits": int(row.exits),
+                            "reused": int(row.reused or 0),
+                            "shared": int(row.shared or 0),
+                        }
+                    )
+                else:
+                    sharing["pairs"].append(
+                        {"connector_id": row.connector_id, "other_id": row.other_id, "shared": int(row.shared)}
+                    )
+            return sharing
+
+        return await self._time_limited(read)
 
     @staticmethod
     def _exit_ips_filtered(
