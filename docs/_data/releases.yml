@@ -10,6 +10,18 @@
 #   changes  what changed, for the people who use Octoprox; `docs` is a page
 #            on octoprox.com that explains it, such as connecting#exit-headers
 
+- version: 6.1.5
+  date: 2026-10-27
+  title: What's New, changelog and update check
+  changes:
+    - text: "Help > What's New shows the release notes for the version you run and the versions before it, and marks the ones you have not opened yet. The same notes are on a new Changelog page on octoprox.com, with links to the guides that explain each change."
+      docs: changelog
+    - text: "Admins see under Help when a newer release is out, along with its notes. Once a day a worker fetches the release list from octoprox.com, and the request carries nothing about your install. Set `OCTOPROX_UPDATE_CHECK=false` on the controller and the api to turn the check off."
+      docs: changelog#whats-new-and-the-update-check
+    - text: "The API serves the release notes and any newer release found, and records which notes each user has seen."
+      docs: api#release-notes
+    - text: "Each GitHub Release now carries its notes and the command to pull its image."
+
 - version: 6.1.4
   from: 6.1.0
   date: 2026-10-27
