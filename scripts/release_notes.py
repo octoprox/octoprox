@@ -26,6 +26,9 @@ import yaml
 ROOT = Path(__file__).resolve().parents[1]
 NOTES_FILE = ROOT / "docs" / "_data" / "releases.yml"
 DOCS_URL = "https://www.octoprox.com"
+# Where CI pushes each tag's image (ci.yml), for the install line of its GitHub Release.
+IMAGE = "ghcr.io/octoprox/octoprox"
+PACKAGE_URL = "https://github.com/octoprox/octoprox/pkgs/container/octoprox"
 VERSION = re.compile(r"\d+\.\d+\.\d+")
 # The most of the docs diff Claude is shown, in characters.
 AI_DOCS_DIFF_LIMIT = 60_000
@@ -161,21 +164,35 @@ def add(path: Path, version: str) -> None:
     print(f"Added the {version} entry to the release notes.")
 
 
+def install(version: str) -> list[str]:
+    """How to get ``version``: its image, which CI has pushed by the time the release is published."""
+    return [
+        "## Install",
+        "",
+        "```bash",
+        f"docker pull {IMAGE}:{version}",
+        "```",
+        "",
+        f"For amd64 and arm64. [Package]({PACKAGE_URL}) · [Upgrading]({DOCS_URL}/deployment#restarts-and-upgrades)",
+    ]
+
+
 def markdown(version: str) -> str:
-    """The entry of ``version`` as Markdown, or a pointer to the changelog when it has none."""
+    """The entry of ``version`` as Markdown, or a pointer to the changelog when it has none, then how to install it."""
     version = version.removeprefix("v")
     entry = next((e for e in entries() if str(e["version"]) == version), None)
     changelog = f"{DOCS_URL}/changelog"
     if entry is None:
-        return f"No user-facing changes in this release. See the [changelog]({changelog}).\n"
-    lines = [f"## {entry['title']}", ""]
-    if entry.get("from"):
-        lines += [f"Covers {entry['from']} to {entry['version']}.", ""]
-    for change in entry["changes"]:
-        docs = f" ([docs]({DOCS_URL}/{change['docs']}))" if change.get("docs") else ""
-        lines.append(f"- {change['text']}{docs}")
-    lines += ["", f"All releases: [changelog]({changelog})"]
-    return "\n".join(lines) + "\n"
+        lines = [f"No user-facing changes in this release. See the [changelog]({changelog})."]
+    else:
+        lines = [f"## {entry['title']}", ""]
+        if entry.get("from"):
+            lines += [f"Covers {entry['from']} to {entry['version']}.", ""]
+        for change in entry["changes"]:
+            docs = f" ([docs]({DOCS_URL}/{change['docs']}))" if change.get("docs") else ""
+            lines.append(f"- {change['text']}{docs}")
+        lines += ["", f"All releases: [changelog]({changelog})"]
+    return "\n".join([*lines, "", *install(version)]) + "\n"
 
 
 def main() -> int:
