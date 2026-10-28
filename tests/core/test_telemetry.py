@@ -19,7 +19,9 @@ from api import __version__
 from api.core.roles import JobKind, Role
 from api.core.stats import FailureKind
 from api.core.telemetry import Telemetry
+from api.core.timing import Step
 from api.db.streams import FullRead
+from api.gateway.latency import RequestLatencies
 from api.models.system import (
     ApiSnapshot,
     ControllerSnapshot,
@@ -40,9 +42,9 @@ Samples = dict[tuple[str, frozenset[tuple[str, str]]], float]
 COMPILED_THROUGH = "1792281600000-0"
 
 
-def scrape(snapshot: InstanceSnapshot) -> tuple[Samples, dict[str, str]]:
-    """Render ``snapshot`` and parse it back; every sample must carry the process's role."""
-    text = Telemetry(lambda: snapshot).render().decode()
+def scrape(snapshot: InstanceSnapshot, latencies: RequestLatencies | None = None) -> tuple[Samples, dict[str, str]]:
+    """Render ``snapshot`` and the gateway's ``latencies`` and parse them back; every sample must carry the process's role."""
+    text = Telemetry(lambda: snapshot, latencies.snapshot if latencies else tuple).render().decode()
     samples: Samples = {}
     types: dict[str, str] = {}
     for family in text_string_to_metric_families(text):
@@ -298,6 +300,53 @@ class TestGateway:
         samples, _ = scrape(snapshot_of(Role.GATEWAY, gateway=gateway_section()))
 
         assert not {name for name in names(samples) if name.startswith("octoprox_gateway_tunnel")}
+
+    def test_latency_and_its_steps_as_histograms_by_connector_and_outcome(self) -> None:
+        latencies = RequestLatencies()
+        latencies.record("c1", "geonode", True, 120.0, {Step.ROUTE: 0.5, Step.CONNECT: 19.5, Step.HANDSHAKE: 100.0})
+        latencies.record("c1", "geonode", True, 1600.0, {Step.ROUTE: 0.5, Step.PREFLIGHT: 900.0, Step.HANDSHAKE: 699.5})
+        latencies.record("c1", "geonode", False, 30000.0, {Step.ROUTE: 0.5, Step.HANDSHAKE: 29999.5})
+
+        samples, types = scrape(snapshot_of(Role.GATEWAY, gateway=gateway_section()), latencies)
+
+        def at(metric: str, labels: dict[str, str], **more: str) -> float:
+            """One sample; its labels passed as a dict, since one of them is called ``name``."""
+            return samples[(metric, frozenset({**labels, **more}.items()))]
+
+        whole = "octoprox_gateway_request_duration_seconds"
+        steps = "octoprox_gateway_request_step_duration_seconds"
+        success = {"connector": "c1", "name": "geonode", "outcome": "success"}
+        assert types[whole] == types[steps] == "histogram"
+        assert at(f"{whole}_count", success) == 2
+        assert at(f"{whole}_sum", success) == pytest.approx(1.72)
+        # Cumulative, each bucket counting what fell at or under its bound.
+        assert at(f"{whole}_bucket", success, le="0.1") == 0
+        assert at(f"{whole}_bucket", success, le="0.25") == 1
+        assert at(f"{whole}_bucket", success, le="2.5") == 2
+        assert at(f"{whole}_bucket", success, le="+Inf") == 2
+        assert at(f"{steps}_count", success, step="route") == 2
+        assert at(f"{steps}_count", success, step="preflight") == 1
+        assert at(f"{steps}_bucket", success, le="0.001", step="route") == 2
+        assert at(f"{steps}_sum", success, step="handshake") == pytest.approx(0.7995)
+        assert (f"{steps}_count", frozenset({**success, "step": "response"}.items())) not in samples
+        failure = {**success, "outcome": "failure"}
+        assert at(f"{whole}_bucket", failure, le="30.0") == 1
+        assert at(f"{steps}_count", failure, step="handshake") == 1
+
+    def test_no_latency_families_before_a_request_finished(self) -> None:
+        samples, _ = scrape(snapshot_of(Role.GATEWAY, gateway=gateway_section()))
+
+        assert not {name for name in names(samples) if "duration_seconds" in name}
+
+    def test_the_latency_is_read_on_each_scrape(self) -> None:
+        """From the gateway's metering, never the snapshot: a request finished since the last scrape is in the next."""
+        latencies = RequestLatencies()
+        telemetry = Telemetry(lambda: snapshot_of(Role.GATEWAY, gateway=gateway_section()), latencies.snapshot)
+        assert b"request_duration_seconds" not in telemetry.render()
+
+        latencies.record("c1", "geonode", True, 120.0, {Step.ROUTE: 0.5})
+
+        assert b'octoprox_gateway_request_duration_seconds_count{connector="c1"' in telemetry.render()
 
 
 class TestController:

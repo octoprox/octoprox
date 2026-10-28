@@ -725,7 +725,7 @@ function DeviceTrafficSection({ device, adapter, projectId }: { device: Device; 
       <KeyValue label="Relayed" value={<>{formatBytes(m.bytes_sent + m.bytes_received)} <span className="text-fg-subtle font-normal">· {formatBytes(m.bytes_sent)} up, {formatBytes(m.bytes_received)} down</span></>} />
       <KeyValue
         label="Connections"
-        value={<>{m.request_count}{successRate != null && <span className="text-fg-subtle font-normal"> · {successRate}% reached the exit, {Math.round(m.avg_latency_ms)} ms to connect</span>}</>}
+        value={<>{m.request_count}{successRate != null && <span className="text-fg-subtle font-normal"> · {successRate}% reached the exit{m.success_count > 0 && <>, {Math.round(m.avg_latency_ms)} ms to connect</>}</span>}</>}
       />
       <div className="pt-1">
         <div className="mb-1 space-y-1.5">

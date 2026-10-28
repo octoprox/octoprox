@@ -12,7 +12,6 @@ import asyncio
 import base64
 import errno
 import hmac
-import time
 from collections.abc import Callable
 from typing import TYPE_CHECKING, cast
 
@@ -38,6 +37,7 @@ from api.core.keepalive import set_keepalive
 from api.core.logging import error_text
 from api.core.signals import request_completed, request_failed, request_rejected
 from api.core.stats import FailureKind
+from api.core.timing import RequestTimer, Step
 from api.core.username_params import AuthResult, parse_username_params
 from api.geo.verifier import ExitDecision
 from api.models.project import MitmMode, Project
@@ -376,9 +376,9 @@ class ProxyServer:
         await request_failed.send_async(self, failure=failure)
 
     def _upstream_failure(
-        self, exc: BaseException, project_id: str, proxy: Proxy, latency_ms: float, status: int
+        self, exc: BaseException, project_id: str, proxy: Proxy, timer: RequestTimer, status: int
     ) -> RequestFailure:
-        """Describe a request whose upstream leg failed with ``exc`` and was answered ``status``."""
+        """Describe a request whose upstream leg failed with ``exc`` and was answered ``status``, in the timer's step."""
         if isinstance(exc, _ClientClosedError | _ClientStalledError):
             kind, upstream_status = FailureKind.CLIENT_CLOSED, None
         else:
@@ -392,7 +392,7 @@ class ProxyServer:
                 message = type(exc).__name__
         return build_failure(
             project_id, kind, status, message,
-            proxy=proxy, exc=exc, latency_ms=latency_ms,
+            proxy=proxy, exc=exc, timer=timer,
             upstream_status=upstream_status, upstream_message=upstream_message,
         )
 
@@ -418,11 +418,11 @@ class ProxyServer:
             extra_headers=[f"Proxy-Status: {status}"] if status else None,
         )
 
-    def _interrupted_failure(self, project_id: str, proxy: Proxy, start_time: float) -> RequestFailure:
+    def _interrupted_failure(self, project_id: str, proxy: Proxy, timer: RequestTimer) -> RequestFailure:
         """A request cancelled before it got going: the server was shutting down."""
         return build_failure(
             project_id, FailureKind.INTERRUPTED, 502, "Octoprox stopped while the request was being set up",
-            proxy=proxy, latency_ms=(time.monotonic() - start_time) * 1000,
+            proxy=proxy, timer=timer,
         )
 
     async def _verify_exit(
@@ -435,35 +435,34 @@ class ProxyServer:
         client_writer: asyncio.StreamWriter,
         peer_id: str | None = None,
         *,
-        started: float,
+        timer: RequestTimer,
     ) -> ExitDecision | None:
         """Hand the selected upstream to preflight; the decision to forward on, None when the request was answered here.
 
         A refusal, or the upstream failing the echo, is one failed request however many proxies preflight tried. The
         upstream's failure is answered and counted as its own connection's would be, against that proxy, with the
-        latency since ``started``, as a forwarded request's.
+        latency ``timer`` measured, as a forwarded request's. The timer is in ``Step.PREFLIGHT`` only while one runs.
         """
-        if self._exit_verifier is None:
+        if self._exit_verifier is None or not self._exit_verifier.applies(project, location, proxy):
             return ExitDecision(proxy)
+        timer.enter(Step.PREFLIGHT)
         decision = await self._exit_verifier.verify(
             project, proxy, session_id=session_id, location=location, target_host=target_host
         )
         error = decision.upstream_error
         if error is None and not decision.rejected:
             return decision
-        latency_ms = (time.monotonic() - started) * 1000
+        latency_ms = timer.stop()
         # The proxy whose echo decided it, a replacement preflight moved to among them.
         proxy = decision.proxy
         if error is not None:
             status, phrase, message = _upstream_answer(error)
-            failure = self._upstream_failure(error, project.id, proxy, latency_ms, status)
+            failure = self._upstream_failure(error, project.id, proxy, timer, status)
             await self._send_upstream_error(client_writer, failure, phrase, message)
         else:
             # Counted as demand by its completion below, so not also as a rejection.
             message = decision.rejection or "Exit location mismatch"
-            failure = build_failure(
-                project.id, FailureKind.PREFLIGHT_MISMATCH, 502, message, proxy=proxy, latency_ms=latency_ms
-            )
+            failure = build_failure(project.id, FailureKind.PREFLIGHT_MISMATCH, 502, message, proxy=proxy, timer=timer)
             await self._send_error(client_writer, 502, "Bad Gateway", message)
         await request_completed.send_async(
             self,
@@ -471,6 +470,7 @@ class ProxyServer:
             project_id=project.id,
             success=False,
             latency_ms=latency_ms,
+            steps=timer.steps,
             bytes_sent=0,
             bytes_received=0,
             peer_id=peer_id,
@@ -501,6 +501,7 @@ class ProxyServer:
         proxy: Proxy,
         target_host: str,
         target_port: int,
+        timer: RequestTimer,
     ) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
         """Connect to target through upstream proxy.
 
@@ -511,6 +512,8 @@ class ProxyServer:
             proxy: The upstream proxy to connect through
             target_host: Destination hostname or IP
             target_port: Destination port
+            timer: the request's, moved to ``Step.CONNECT`` and then ``Step.HANDSHAKE``; straight to the handshake on
+                SOCKS, whose connection and handshake are one call
 
         Returns:
             Tuple of (reader, writer) with tunnel established
@@ -524,10 +527,15 @@ class ProxyServer:
         # use its 4a form instead of resolving here, so no path looks a
         # target up on this host.
         if proxy.protocol is ProxyProtocol.HTTP:
+            timer.enter(Step.CONNECT)
             return await asyncio.wait_for(
-                open_http_tunnel(proxy.host, proxy.port, proxy.username, proxy.password, target_host, target_port),
+                open_http_tunnel(
+                    proxy.host, proxy.port, proxy.username, proxy.password, target_host, target_port,
+                    on_connected=lambda: timer.enter(Step.HANDSHAKE),
+                ),
                 timeout=self._timeout,
             )
+        timer.enter(Step.HANDSHAKE)
         socks_proxy = SocksProxy.from_url(proxy.url, rdns=True)
 
         # Connect through the proxy - returns a socket with tunnel established
@@ -745,7 +753,7 @@ class ProxyServer:
             target_port = 443  # Default HTTPS port
 
         # The request's latency runs from here: selecting and verifying its exit are part of the client's wait.
-        started = time.monotonic()
+        timer = RequestTimer()
         # Select upstream proxy scoped to the authenticated project
         proxy = await self._get_upstream_proxy(
             project_id=project.id, session_id=session_id, target_host=target_host, location=location,
@@ -755,14 +763,14 @@ class ProxyServer:
             return
 
         decision = await self._verify_exit(
-            project, proxy, session_id, location, target_host, client_writer, started=started
+            project, proxy, session_id, location, target_host, client_writer, timer=timer
         )
         if decision is None:
             return
 
         await self._relay(
             client_reader, client_writer, decision.proxy, project, target_host, target_port,
-            started=started,
+            timer=timer,
             # Only the client reads these: the target sees what follows the 200.
             established=(
                 b"HTTP/1.1 200 Connection Established\r\n" + self._exit_headers(project, decision) + b"\r\n"
@@ -779,7 +787,7 @@ class ProxyServer:
         target_host: str,
         target_port: int,
         *,
-        started: float,
+        timer: RequestTimer,
         established: bytes | None,
         use_mitm: bool,
         client_head: bytes = b"",
@@ -790,17 +798,15 @@ class ProxyServer:
         The tail of a CONNECT and the whole of a transparent tunnel connection, once the proxy is selected and verified.
 
         Args:
-            started: when Octoprox began on the request (``time.monotonic()``), which its latency runs from.
+            timer: the request's, running since Octoprox took it up; stopped once the upstream leg is up or failed.
             established: written to the client once the upstream leg is up (the CONNECT 200 line); None writes nothing.
             use_mitm: the MITM handler relays both legs once the upstream leg is up.
             client_head: the start of the client's TLS stream the caller already read off the socket, for the handshake.
             peer_id: the tunnel device the connection came from, whose counts take the transfer too.
         """
         target = f"{target_host}:{target_port}"
-        start_time = started
         success = False
         client_disconnected = False
-        latency_ms = 0.0
         # Counts the tunnel's bytes as they flow; the completion event below
         # carries only what the meter has not reported yet.
         meter = self._meters.meter(proxy, project.id, peer_id=peer_id, target_host=target_host)
@@ -810,12 +816,12 @@ class ProxyServer:
         try:
             # Connect through upstream proxy (handles all protocols)
             upstream_reader, upstream_writer = await self._connect_via_proxy(
-                proxy, target_host, target_port
+                proxy, target_host, target_port, timer
             )
             keep_alive(upstream_writer)
 
             # Latency: from taking the request up to connection establishment (before tunneling)
-            latency_ms = (time.monotonic() - start_time) * 1000
+            timer.stop()
 
             if use_mitm:
                 # The handshake must find the client's ClientHello still in the
@@ -853,15 +859,13 @@ class ProxyServer:
         # tunnel, and the latency already measured is the one to report.
         except TimeoutError as e:
             if not success:
-                latency_ms = (time.monotonic() - start_time) * 1000
-                failure = self._upstream_failure(e, project.id, proxy, latency_ms, 504)
+                failure = self._upstream_failure(e, project.id, proxy, timer, 504)
                 await self._send_upstream_error(
                     client_writer, failure, "Gateway Timeout", "Connection to upstream proxy timed out"
                 )
         except ConnectionRefusedError as e:
             if not success:
-                latency_ms = (time.monotonic() - start_time) * 1000
-                failure = self._upstream_failure(e, project.id, proxy, latency_ms, 502)
+                failure = self._upstream_failure(e, project.id, proxy, timer, 502)
                 await self._send_upstream_error(
                     client_writer, failure, "Bad Gateway", "Upstream proxy refused connection"
                 )
@@ -873,8 +877,7 @@ class ProxyServer:
                 # A reset on the network: answered below and counted on the Failures page.
                 logger.debug("CONNECT error", error=str(e), target=target)
                 if not success:
-                    latency_ms = (time.monotonic() - start_time) * 1000
-                    failure = self._upstream_failure(e, project.id, proxy, latency_ms, 502)
+                    failure = self._upstream_failure(e, project.id, proxy, timer, 502)
                     await self._send_upstream_error(client_writer, failure, "Bad Gateway")
         except Exception as e:
             if client_writer.transport.is_closing():
@@ -889,8 +892,7 @@ class ProxyServer:
                 else:
                     logger.error("CONNECT error", error=str(e), target=target, exc_info=True)
                 if not success:
-                    latency_ms = (time.monotonic() - start_time) * 1000
-                    failure = self._upstream_failure(e, project.id, proxy, latency_ms, 502)
+                    failure = self._upstream_failure(e, project.id, proxy, timer, 502)
                     await self._send_upstream_error(client_writer, failure, "Bad Gateway")
         finally:
             if client_disconnected:
@@ -908,7 +910,9 @@ class ProxyServer:
                     proxy_id=proxy.id,
                     project_id=project.id,
                     success=success,
-                    latency_ms=latency_ms,
+                    # Stopped already, unless the request was interrupted: then it stops here, with its step.
+                    latency_ms=timer.stop(),
+                    steps=timer.steps,
                     bytes_sent=bytes_sent,
                     bytes_received=bytes_received,
                     peer_id=peer_id,
@@ -916,7 +920,7 @@ class ProxyServer:
                 )
                 # Exactly the requests counted as failures above are logged.
                 if not success:
-                    await self._publish_failure(failure or self._interrupted_failure(project.id, proxy, start_time))
+                    await self._publish_failure(failure or self._interrupted_failure(project.id, proxy, timer))
 
     async def _tunnel(
         self,
@@ -1072,7 +1076,7 @@ class ProxyServer:
         parsed_host, _, _ = self._parse_http_url(target)
 
         # The request's latency runs from here, as on the CONNECT path.
-        start_time = time.monotonic()
+        timer = RequestTimer()
         # Select upstream proxy scoped to the authenticated project
         proxy = await self._get_upstream_proxy(
             project_id=project_id, session_id=session_id, target_host=parsed_host, location=location,
@@ -1082,14 +1086,13 @@ class ProxyServer:
             return
 
         decision = await self._verify_exit(
-            project, proxy, session_id, location, parsed_host, client_writer, started=start_time
+            project, proxy, session_id, location, parsed_host, client_writer, timer=timer
         )
         if decision is None:
             return
         proxy = decision.proxy
 
         success = False
-        latency_ms = 0.0
         meter = self._meters.meter(proxy, project_id, target_host=parsed_host)
         upstream_writer: asyncio.StreamWriter | None = None
         failure: RequestFailure | None = None
@@ -1102,18 +1105,20 @@ class ProxyServer:
                 # For SOCKS: tunnel to target, then send normal HTTP request
                 target_host, target_port, path = self._parse_http_url(target)
                 upstream_reader, upstream_writer = await self._connect_via_proxy(
-                    proxy, target_host, target_port
+                    proxy, target_host, target_port, timer
                 )
                 # Send request with relative path (direct to target)
                 request_line = f"{method} {path} {version}\r\n"
             else:
                 # For HTTP proxy: connect directly to proxy, send full URL
+                timer.enter(Step.CONNECT)
                 upstream_reader, upstream_writer = await asyncio.wait_for(
                     asyncio.open_connection(proxy.host, proxy.port),
                     timeout=self._timeout,
                 )
                 # Send request with full URL (proxy style)
                 request_line = f"{method} {target} {version}\r\n"
+            timer.enter(Step.RESPONSE)
 
             # At this point upstream_writer is always assigned
             assert upstream_writer is not None
@@ -1176,8 +1181,7 @@ class ProxyServer:
                         extra_headers=[TRAFFIC_LIMIT_PROXY_STATUS],
                     )
                     failure = build_failure(
-                        project_id, FailureKind.TRAFFIC_LIMIT_EXCEEDED, status, message,
-                        proxy=proxy, latency_ms=(time.monotonic() - start_time) * 1000,
+                        project_id, FailureKind.TRAFFIC_LIMIT_EXCEEDED, status, message, proxy=proxy, timer=timer
                     )
                     return
 
@@ -1191,7 +1195,7 @@ class ProxyServer:
             meter.add_received(len(response_line))
 
             # Latency: from taking the request up to the first response line (connection establishment)
-            latency_ms = (time.monotonic() - start_time) * 1000
+            timer.stop()
             success = True
 
             client_writer.write(response_line)
@@ -1255,23 +1259,20 @@ class ProxyServer:
         # is the one to report: the client sees the response cut short.
         except TimeoutError as e:
             if not success:
-                latency_ms = (time.monotonic() - start_time) * 1000
-                failure = self._upstream_failure(e, project_id, proxy, latency_ms, 504)
+                failure = self._upstream_failure(e, project_id, proxy, timer, 504)
                 await self._send_upstream_error(
                     client_writer, failure, "Gateway Timeout", "Connection to upstream proxy timed out"
                 )
         except ConnectionRefusedError as e:
             if not success:
-                latency_ms = (time.monotonic() - start_time) * 1000
-                failure = self._upstream_failure(e, project_id, proxy, latency_ms, 502)
+                failure = self._upstream_failure(e, project_id, proxy, timer, 502)
                 await self._send_upstream_error(
                     client_writer, failure, "Bad Gateway", "Upstream proxy refused connection"
                 )
         except Exception as e:
             logger.error("HTTP forward error", error=str(e), target=target)
             if not success:
-                latency_ms = (time.monotonic() - start_time) * 1000
-                failure = self._upstream_failure(e, project_id, proxy, latency_ms, 502)
+                failure = self._upstream_failure(e, project_id, proxy, timer, 502)
                 await self._send_upstream_error(client_writer, failure, "Bad Gateway")
         finally:
             # Finished first, as on the CONNECT path: it ends the in-flight count.
@@ -1283,13 +1284,15 @@ class ProxyServer:
                 proxy_id=proxy.id,
                 project_id=project_id,
                 success=success,
-                latency_ms=latency_ms,
+                # Stopped already (a traffic limit's failure stopped it too), unless the request was interrupted.
+                latency_ms=timer.stop(),
+                steps=timer.steps,
                 bytes_sent=bytes_sent,
                 bytes_received=bytes_received,
                 target_host=parsed_host,
             )
             if not success:
-                await self._publish_failure(failure or self._interrupted_failure(project_id, proxy, start_time))
+                await self._publish_failure(failure or self._interrupted_failure(project_id, proxy, timer))
 
     async def _forward_chunked(
         self,

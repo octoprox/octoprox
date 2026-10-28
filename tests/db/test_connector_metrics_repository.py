@@ -5,10 +5,12 @@
 
 from datetime import datetime, timedelta
 
+import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.core import utc_now
-from api.core.stats import MetricDelta
+from api.core.stats import MetricDelta, StepMetricDelta
+from api.core.timing import Step
 from api.db.models import ConnectorMetricsModel
 from api.db.repository import (
     ConnectorRepository,
@@ -98,7 +100,8 @@ class TestConnectorMetrics:
         await db_session.commit()
         history = await metrics_repo.get_connector_metrics_history(connector.id)
         assert len(history) == 1
-        assert (history[0]["request_count"], history[0]["avg_latency_ms"]) == (4, 42.0)
+        # Over the three successes.
+        assert (history[0]["request_count"], history[0]["avg_latency_ms"]) == (4, 56.0)
         assert history[0]["bytes_received"] == 900
 
     async def test_totals_since_use_each_connectors_window(
@@ -209,6 +212,95 @@ class TestConnectorMetrics:
         assert await connector_repo.delete(connector.id)
         await db_session.commit()
         assert await metrics_repo.get_connector_metrics_history(connector.id) == []
+
+
+class TestLatencySteps:
+    """A connector's latency by step: stored per row, averaged over the successful requests wherever rows are summed."""
+
+    @staticmethod
+    def window(successes: int, failures: int, **steps: float) -> StepMetricDelta:
+        """A flush window whose every success went through ``steps`` (ms by step name)."""
+        delta = StepMetricDelta()
+        for _ in range(successes):
+            delta.add_request(True, sum(steps.values()), steps={Step(name): ms for name, ms in steps.items()})
+        for _ in range(failures):
+            delta.add_request(False, 30000.0, steps={Step.ROUTE: 1.0, Step.HANDSHAKE: 29999.0})
+        return delta
+
+    async def test_a_window_s_steps_are_stored_and_read_back(
+        self,
+        metrics_repo: MetricsRepository,
+        project_repo: ProjectRepository,
+        credential_repo: CredentialRepository,
+        connector_repo: ConnectorRepository,
+        db_session: AsyncSession,
+    ) -> None:
+        _project, connector = await _connector(project_repo, credential_repo, connector_repo, db_session)
+        window = self.window(3, 1, route=1.0, preflight=600.0, handshake=400.0)
+        await metrics_repo.save_connector_metrics_snapshots({connector.id: window})
+        await db_session.commit()
+
+        [point] = await metrics_repo.get_connector_metrics_history(connector.id)
+
+        assert point["avg_latency_ms"] == 1001.0
+        assert point["step_latency_ms"] == {"route": 1.0, "preflight": 600.0, "connect": 0.0, "handshake": 400.0, "response": 0.0}
+
+    async def test_buckets_weigh_steps_by_successes_and_leave_out_rows_without_steps(
+        self,
+        metrics_repo: MetricsRepository,
+        project_repo: ProjectRepository,
+        credential_repo: CredentialRepository,
+        connector_repo: ConnectorRepository,
+        db_session: AsyncSession,
+    ) -> None:
+        """A row from before steps were kept still counts in the latency, but not in the steps it does not have."""
+        project, connector = await _connector(project_repo, credential_repo, connector_repo, db_session)
+        hour = utc_now().replace(minute=0, second=0, microsecond=0) - timedelta(days=2)
+        rows = [
+            (5, self.window(1, 0, route=2.0, handshake=98.0).history_averages() | {"success_count": 1}),
+            (15, self.window(3, 0, route=2.0, handshake=398.0).history_averages() | {"success_count": 3}),
+            # Written before steps were kept: its average took the failure in.
+            (25, {"avg_latency_ms": 900.0, "success_count": 2}),
+            # Nothing succeeded: weighs nothing.
+            (35, self.window(0, 4).history_averages() | {"success_count": 0}),
+        ]
+        for minute, fields in rows:
+            db_session.add(ConnectorMetricsModel(
+                connector_id=connector.id, timestamp=hour + timedelta(minutes=minute), request_count=4,
+                failure_count=4 - fields["success_count"], bytes_sent=0, bytes_received=0, granularity=60, **fields,
+            ))
+        await db_session.commit()
+
+        [bucket] = await metrics_repo.get_connector_metrics_history_aggregated(
+            connector.id, since=hour - timedelta(hours=1), bucket_seconds=3600
+        )
+        # (100*1 + 400*3 + 900*2) / 6 successes; the steps over the four successes that have them.
+        assert bucket["avg_latency_ms"] == pytest.approx(3100 / 6)
+        assert bucket["step_latency_ms"] == {"route": 2.0, "preflight": 0.0, "connect": 0.0, "handshake": 323.0, "response": 0.0}
+
+        await metrics_repo.compact_connector_metrics(
+            project.id, older_than=utc_now() - timedelta(hours=24), source_granularity=60, target_granularity=3600
+        )
+        await db_session.commit()
+        [hourly] = await metrics_repo.get_connector_metrics_history(connector.id, granularity=3600)
+        assert hourly["avg_latency_ms"] == pytest.approx(3100 / 6)
+        assert hourly["step_latency_ms"] == bucket["step_latency_ms"]
+
+    async def test_a_point_without_successes_has_no_latency(
+        self,
+        metrics_repo: MetricsRepository,
+        project_repo: ProjectRepository,
+        credential_repo: CredentialRepository,
+        connector_repo: ConnectorRepository,
+        db_session: AsyncSession,
+    ) -> None:
+        _project, connector = await _connector(project_repo, credential_repo, connector_repo, db_session)
+        await metrics_repo.save_connector_metrics_snapshots({connector.id: self.window(0, 2)})
+        await db_session.commit()
+
+        [point] = await metrics_repo.get_connector_metrics_history(connector.id)
+
+        assert (point["failure_count"], point["avg_latency_ms"], point["step_latency_ms"]) == (2, None, None)
 
 
 class TestSnapshotsForGoneEntities:

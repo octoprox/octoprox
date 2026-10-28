@@ -1426,12 +1426,18 @@ export const fetchProjectScalingMetrics = async (projectId: string): Promise<Sca
   return response.data
 }
 
+/** A part of a request's latency, in the order a request goes through them. */
+export type LatencyStep = 'route' | 'preflight' | 'connect' | 'handshake' | 'response'
+
 export interface MetricsSnapshot {
   timestamp: string
   request_count: number
   success_count: number
   failure_count: number
-  avg_latency_ms: number
+  /** Over the successful requests; null when none succeeded. */
+  avg_latency_ms: number | null
+  /** Each step's average over the successful requests, adding up to avg_latency_ms; null when none succeeded or before steps were kept. */
+  step_latency_ms: Partial<Record<LatencyStep, number>> | null
   bytes_sent: number
   bytes_received: number
 }
@@ -1448,6 +1454,10 @@ export const fetchProjectMetricsHistory = async (projectId: string, range: strin
 /** The windows project, connector, device and host history serve; the shared time range narrows to these. */
 export const HISTORY_RANGES = ['1h', '6h', '24h', '7d', '30d'] as const
 export type HistoryRange = (typeof HISTORY_RANGES)[number]
+/** Twice the interval between a range's history points: a longer stretch without one is a gap a chart breaks its lines at. */
+export const HISTORY_GAP_MS: Record<HistoryRange, number> = {
+  '1h': 120_000, '6h': 120_000, '24h': 120_000, '7d': 2 * 3600_000, '30d': 2 * 6 * 3600_000,
+}
 export type TrafficSplitRange = HistoryRange
 
 export interface ConnectorTrafficShare {
@@ -1832,6 +1842,10 @@ export interface FailureRecord {
   /** What the vendor said about its refusal besides the status: its error headers and body text. */
   upstream_message: string | null
   latency_ms: number | null
+  /** The step of the request's latency it failed in. */
+  step: LatencyStep | null
+  /** Milliseconds each step took, for the first failure of the example. */
+  steps: Partial<Record<LatencyStep, number>> | null
   count: number
   first_at: string
   last_at: string

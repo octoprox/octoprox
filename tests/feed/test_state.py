@@ -187,7 +187,7 @@ class TestWindows:
     async def test_each_kind_reads_its_own_hashes(
         self, reader: RuntimeStateReader, redis_client: RedisClient, kind: EntityWindows, key: str
     ) -> None:
-        delta = MetricDelta(
+        delta = kind.counts(
             request_count=4, success_count=3, failure_count=1, latency_sum_ms=410.5, bytes_sent=50, bytes_received=600
         )
         await write_window(redis_client, key, delta)

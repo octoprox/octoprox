@@ -268,7 +268,7 @@ class TestPeers:
             ),
         )
         counted = {
-            "request_count": 7, "success_count": 6, "failure_count": 1, "avg_latency_ms": round(600 / 7, 2),
+            "request_count": 7, "success_count": 6, "failure_count": 1, "avg_latency_ms": round(600 / 6, 2),
             "bytes_sent": 110, "bytes_received": 1020, "connections_by_address": 3, "encrypted_dns_blocked": 1,
         }
 

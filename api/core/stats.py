@@ -3,10 +3,12 @@
 
 """Metric batches for proxies, projects, connectors, hosts and tunnel devices."""
 
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, fields
 from enum import StrEnum
 from typing import Any
+
+from api.core.timing import Step
 
 # The row a flush window's hosts past the cap are folded into (see
 # ``Settings.host_metrics_max_hosts``). Not a valid hostname, so it cannot
@@ -153,6 +155,7 @@ class WindowCounts:
 class MetricDelta(WindowCounts):
     """A batch of requests' contribution to one entity's metrics, in additive form, its latency carried as a sum.
 
+    The latency is the successful requests' only: a failure's is how long it took to fail, a timeout's the whole wait.
     A slotted dataclass rather than a pydantic model, since every completed request mutates three of these in place.
     """
 
@@ -169,14 +172,15 @@ class MetricDelta(WindowCounts):
         latency_ms: float,
         bytes_sent: int = 0,
         bytes_received: int = 0,
+        steps: Mapping[Step, float] | None = None,
     ) -> None:
-        """Fold a single completed request into the delta."""
+        """Fold a single completed request into the delta; ``steps`` (its latency by step) only where a subclass keeps them."""
         self.request_count += 1
         if success:
             self.success_count += 1
+            self.latency_sum_ms += latency_ms
         else:
             self.failure_count += 1
-        self.latency_sum_ms += latency_ms
         self.add_bytes(bytes_sent, bytes_received)
 
     def add_bytes(self, bytes_sent: int, bytes_received: int) -> None:
@@ -190,8 +194,12 @@ class MetricDelta(WindowCounts):
 
     @property
     def avg_latency_ms(self) -> float:
-        """Mean latency of the requests in the batch, 0 when there are none."""
-        return self.latency_sum_ms / self.request_count if self.request_count else 0.0
+        """Mean latency of the successful requests in the batch, 0 when there are none."""
+        return self.latency_sum_ms / self.success_count if self.success_count else 0.0
+
+    def history_averages(self) -> dict[str, float]:
+        """The averages a history row stores beside the counters, by column."""
+        return {"avg_latency_ms": self.avg_latency_ms}
 
     @classmethod
     def summed[D: "MetricDelta"](cls: type[D], *batches: "MetricDelta | None") -> D:
@@ -210,6 +218,59 @@ class MetricDelta(WindowCounts):
         self.latency_sum_ms += other.latency_sum_ms
         self.bytes_sent += other.bytes_sent
         self.bytes_received += other.bytes_received
+
+
+# The column a project's or connector's history row keeps each step's average in.
+STEP_COLUMNS: dict[Step, str] = {step: f"avg_{step.value}_ms" for step in Step}
+# The field of a StepMetricDelta each step's sum is kept in.
+_STEP_FIELDS: dict[Step, str] = {step: f"{step.value}_sum_ms" for step in Step}
+
+
+@dataclass(slots=True)
+class StepMetricDelta(MetricDelta):
+    """A project's or connector's batch: the request shape plus the successful requests' latency by step, as sums.
+
+    The steps a request skipped add nothing, so the step averages add up to the latency average.
+    """
+
+    route_sum_ms: float = 0.0
+    preflight_sum_ms: float = 0.0
+    connect_sum_ms: float = 0.0
+    handshake_sum_ms: float = 0.0
+    response_sum_ms: float = 0.0
+
+    def add_request(
+        self,
+        success: bool,
+        latency_ms: float,
+        bytes_sent: int = 0,
+        bytes_received: int = 0,
+        steps: Mapping[Step, float] | None = None,
+    ) -> None:
+        MetricDelta.add_request(self, success, latency_ms, bytes_sent, bytes_received)
+        if success and steps:
+            for step, ms in steps.items():
+                field = _STEP_FIELDS[step]
+                setattr(self, field, getattr(self, field) + ms)
+
+    def merge(self, other: MetricDelta) -> None:
+        MetricDelta.merge(self, other)
+        if isinstance(other, StepMetricDelta):
+            for field in _STEP_FIELDS.values():
+                setattr(self, field, getattr(self, field) + getattr(other, field))
+
+    def step_averages(self) -> dict[Step, float]:
+        """Each step's mean over the successful requests in the batch, 0 when there are none."""
+        successes = self.success_count
+        return {
+            step: getattr(self, field) / successes if successes else 0.0 for step, field in _STEP_FIELDS.items()
+        }
+
+    def history_averages(self) -> dict[str, float]:
+        return {
+            **MetricDelta.history_averages(self),
+            **{STEP_COLUMNS[step]: average for step, average in self.step_averages().items()},
+        }
 
 
 @dataclass(slots=True)

@@ -38,6 +38,7 @@ from api.core.stats import (
     FailureKind,
     HostKey,
     MetricDelta,
+    StepMetricDelta,
     TunnelPeerMetricDelta,
     WindowCounts,
 )
@@ -951,8 +952,8 @@ class FailureWindows(MetricWindowKind[FailureCountKey, FailureCount]):
 
 # The kinds of metrics window, in the order a flush takes them.
 PROXY_WINDOWS = TotalledWindows("proxy", PROXY_METRICS_KEY, MetricDelta)
-PROJECT_WINDOWS = TotalledWindows("project", PROJECT_METRICS_KEY, MetricDelta)
-CONNECTOR_WINDOWS = EntityWindows("connector", CONNECTOR_METRICS_KEY, MetricDelta)
+PROJECT_WINDOWS = TotalledWindows("project", PROJECT_METRICS_KEY, StepMetricDelta)
+CONNECTOR_WINDOWS = EntityWindows("connector", CONNECTOR_METRICS_KEY, StepMetricDelta)
 TUNNEL_PEER_WINDOWS = TotalledWindows("tunnel_peer", TUNNEL_PEER_METRICS_KEY, TunnelPeerMetricDelta)
 HOST_WINDOWS = HostWindows("host", HOST_METRICS_KEY, MetricDelta)
 FAILURE_WINDOWS = FailureWindows("failure", FAILURE_METRICS_KEY, FailureCount)
@@ -976,8 +977,8 @@ class MetricWindows:
     """Metrics windows by kind and entity: what a gateway's metering and failure log add to Redis, and what a flush takes."""
 
     proxies: dict[str, MetricDelta] = field(default_factory=dict)
-    projects: dict[str, MetricDelta] = field(default_factory=dict)
-    connectors: dict[str, MetricDelta] = field(default_factory=dict)
+    projects: dict[str, StepMetricDelta] = field(default_factory=dict)
+    connectors: dict[str, StepMetricDelta] = field(default_factory=dict)
     tunnel_peers: dict[str, TunnelPeerMetricDelta] = field(default_factory=dict)
     # Keyed by (project_id, connector_id, host).
     hosts: dict[HostKey, MetricDelta] = field(default_factory=dict)

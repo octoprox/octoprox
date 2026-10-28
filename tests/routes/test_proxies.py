@@ -530,7 +530,8 @@ class TestRuntimeState:
         assert data["quarantined"] is True
         assert 590 < data["quarantine_remaining_seconds"] <= 600
         assert (data["request_count"], data["success_count"], data["failure_count"]) == (10, 8, 2)
-        assert (data["success_rate"], data["avg_latency_ms"]) == (80.0, 90.0)
+        # The latency over the eight successes.
+        assert (data["success_rate"], data["avg_latency_ms"]) == (80.0, 112.5)
         assert (data["bytes_sent"], data["bytes_received"]) == (10, 5)
         # A quarantined proxy takes no requests, so it is not counted as healthy.
         listing = authenticated_client.get(f"/api/v1/projects/{created_project['id']}/proxies").json()

@@ -32,6 +32,7 @@ from api.models.proxy import ProxyProtocol
 
 if TYPE_CHECKING:
     from api.core.config import Settings
+    from api.core.timing import RequestTimer
     from api.db.redis import BatchPart, RedisClient
     from api.models.proxy import Proxy
 
@@ -99,13 +100,16 @@ class RequestFailure:
     upstream_status: int | None = None
     upstream_message: str | None = None
     latency_ms: float | None = None
+    # The step of the request's latency it failed in (a Step), and the milliseconds each step it went through took.
+    step: str | None = None
+    steps: dict[str, float] | None = None
     at: datetime = field(default_factory=utc_now)
 
     def coalesce_key(self) -> tuple[Any, ...]:
-        """Failures equal in everything but time and session are folded into one entry."""
+        """Failures equal in everything but time, session and step timings are folded into one entry."""
         return (
             self.project_id, self.kind, self.status, self.upstream_status, self.upstream_message, self.error_type,
-            self.message, self.method, self.target, self.location, self.peer_id, self.proxy_id,
+            self.message, self.method, self.target, self.location, self.peer_id, self.proxy_id, self.step,
         )
 
     def fingerprint(self) -> str:
@@ -126,6 +130,7 @@ def build_failure(
     proxy: Proxy | None = None,
     exc: BaseException | None = None,
     latency_ms: float | None = None,
+    timer: RequestTimer | None = None,
     upstream_status: int | None = None,
     upstream_message: str | None = None,
     method: str | None = None,
@@ -134,9 +139,12 @@ def build_failure(
     """A failure filled in from the current connection's :class:`RequestInfo`, its message scrubbed of credentials and queries.
 
     Args:
+        timer: the request's, stopped here: its latency, the step it failed in and each step's time.
         method, target: the request's own, overriding the connection's, inside an intercepted connection.
     """
     info = _request_info.get()
+    if timer is not None:
+        latency_ms = timer.stop()
     if proxy is not None:
         message = _scrub(message, proxy)
         upstream_message = _scrub(upstream_message, proxy) if upstream_message else upstream_message
@@ -162,6 +170,8 @@ def build_failure(
         upstream_status=upstream_status,
         upstream_message=upstream_message or None,
         latency_ms=round(latency_ms, 1) if latency_ms is not None else None,
+        step=timer.step.value if timer is not None else None,
+        steps={step.value: round(ms, 1) for step, ms in timer.steps.items()} if timer is not None else None,
     )
 
 
@@ -240,6 +250,9 @@ class _Entry:
             "proxy": f.proxy,
             "upstream_status": f.upstream_status,
             "upstream_message": f.upstream_message,
+            "step": f.step,
+            # The first failure's own step timings: the row's latency is an average, these are one request's.
+            "steps": f.steps,
         }
         return FailureExample(
             project_id=f.project_id,

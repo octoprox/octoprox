@@ -18,6 +18,7 @@ import {
 } from '../api/client'
 import { TrafficSplitPanel, formatShare } from '../components/TrafficSplit'
 import { ACTION_LABEL, ConnectorTrafficSection, TrafficStatusBadge, TrafficUsageBar } from '../components/ConnectorTraffic'
+import { ConnectorLatencySection } from '../components/ConnectorLatency'
 import { useProject } from '../contexts/ProjectContext'
 import { useTimeRange } from '../contexts/TimeRangeContext'
 import { useAuth } from '../contexts/AuthContext'
@@ -1004,6 +1005,8 @@ function ConnectorEditor({ connector, siblings, canMutate, onClose, onDelete, on
       </form>
 
       {isEdit && connector && selectedProjectId && <ConnectorTrafficSection connector={connector} projectId={selectedProjectId} canMutate={canMutate} />}
+
+      {isEdit && connector && selectedProjectId && <ConnectorLatencySection connector={connector} projectId={selectedProjectId} />}
 
       {isEdit && connector && <ConnectorAccuracySection connectorId={connector.id} />}
 

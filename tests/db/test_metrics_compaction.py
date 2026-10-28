@@ -609,18 +609,24 @@ class TestCompactionScope:
 
 
 class TestBuckets:
-    async def test_rows_fold_into_their_buckets_with_latency_weighted_by_requests(
+    async def test_rows_fold_into_their_buckets_with_latency_weighted_by_successes(
         self,
         metrics_repo: MetricsRepository,
         project_repo: ProjectRepository,
         db_session: AsyncSession,
     ) -> None:
-        """A bucket of no requests has no latency to weigh: it reads 0, not NULL."""
+        """A bucket where nothing succeeded has no latency to weigh: it stores 0, and reads back as none."""
         project = Project(name="Buckets", username="buckets_user", password="pass")
         await project_repo.create(project)
         hour = utc_now().replace(minute=0, second=0, microsecond=0) - timedelta(days=2)
-        await _insert_project_metrics(db_session, project.id, hour + timedelta(minutes=5), request_count=1, avg_latency_ms=100.0)
-        await _insert_project_metrics(db_session, project.id, hour + timedelta(minutes=55), request_count=3, avg_latency_ms=200.0)
+        await _insert_project_metrics(
+            db_session, project.id, hour + timedelta(minutes=5), request_count=2, success_count=1, failure_count=1,
+            avg_latency_ms=100.0,
+        )
+        await _insert_project_metrics(
+            db_session, project.id, hour + timedelta(minutes=55), request_count=3, success_count=3, failure_count=0,
+            avg_latency_ms=200.0,
+        )
         await _insert_project_metrics(
             db_session, project.id, hour + timedelta(minutes=65), request_count=0, success_count=0, failure_count=0,
             avg_latency_ms=0.0,
@@ -632,8 +638,8 @@ class TestBuckets:
 
         hourly = await metrics_repo.get_project_metrics_history(project.id, granularity=3600)
         assert [(row["timestamp"], row["request_count"], row["avg_latency_ms"]) for row in hourly] == [
-            (hour + timedelta(hours=1), 0, 0.0),
-            (hour, 4, 175.0),
+            (hour + timedelta(hours=1), 0, None),
+            (hour, 5, 175.0),
         ]
 
     async def test_rows_of_another_granularity_are_left_alone(

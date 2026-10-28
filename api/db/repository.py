@@ -40,7 +40,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import joinedload, selectinload
 
 from api.core import utc_now
-from api.core.stats import HOST_OVERFLOW, FailureCountKey, MetricDelta, TunnelPeerMetricDelta
+from api.core.stats import (
+    HOST_OVERFLOW,
+    STEP_COLUMNS,
+    FailureCountKey,
+    MetricDelta,
+    TunnelPeerMetricDelta,
+)
 from api.db.models import (
     LAST_ERROR_CHARS,
     ConnectorMetricsModel,
@@ -57,6 +63,7 @@ from api.db.models import (
     ProviderDescriptorModel,
     ProxyMetricsModel,
     ProxyModel,
+    StepLatencyColumns,
     SystemMetricsModel,
     TunnelPeerMetricsModel,
     UserModel,
@@ -983,25 +990,35 @@ def _bucket_expressions(
     return bucket_epoch, bucket_ts
 
 
+def _success_weighted(column: Any, success_count: Any) -> Any:
+    """The average of a per-row average ``column`` over the rows' successful requests; NULL where none succeeded.
+
+    A row's NULL (a step average from before steps were kept) leaves the row out, its successes too.
+    """
+    weight = func.sum(success_count).filter(column.is_not(None))
+    return func.sum(column * success_count) / func.nullif(weight, 0)
+
+
 def _metrics_aggregate_columns(model: _MetricsModel) -> list[Any]:
     """Return the standard aggregate SELECT columns for a metrics model.
 
     Columns: request_count, success_count, failure_count, avg_latency_ms
-    (weighted), bytes_sent, bytes_received.
+    (weighted by successes), bytes_sent, bytes_received, and each step's
+    average where the model keeps them (``StepLatencyColumns``).
     """
-    weighted_latency = (
-        func.sum(model.avg_latency_ms * model.request_count)
-        / func.nullif(func.sum(model.request_count), 0)
-    ).label("avg_latency_ms")
-
-    return [
+    columns = [
         func.sum(model.request_count).label("request_count"),
         func.sum(model.success_count).label("success_count"),
         func.sum(model.failure_count).label("failure_count"),
-        weighted_latency,
+        _success_weighted(model.avg_latency_ms, model.success_count).label("avg_latency_ms"),
         func.sum(model.bytes_sent).label("bytes_sent"),
         func.sum(model.bytes_received).label("bytes_received"),
     ]
+    if issubclass(model, StepLatencyColumns):
+        columns += [
+            _success_weighted(getattr(model, name), model.success_count).label(name) for name in STEP_COLUMNS.values()
+        ]
+    return columns
 
 
 def _tunnel_peer_aggregate_columns() -> list[Any]:
@@ -1029,6 +1046,22 @@ def _history_row(timestamp: datetime | None, row: Any) -> dict[str, Any]:
     return point
 
 
+def _latency_history_row(timestamp: datetime, row: Any) -> dict[str, Any]:
+    """A project's or connector's history point: the standard counters, the latency None where nothing succeeded, and
+    each step's average under ``step_latency_ms``, None for a point from before steps were kept.
+    """
+    point = _history_row(timestamp, row)
+    succeeded = point["success_count"] > 0
+    steps = {step.value: getattr(row, name) for step, name in STEP_COLUMNS.items()}
+    point["avg_latency_ms"] = point["avg_latency_ms"] if succeeded else None
+    point["step_latency_ms"] = (
+        {name: float(value) for name, value in steps.items()}
+        if succeeded and all(value is not None for value in steps.values())
+        else None
+    )
+    return point
+
+
 def _tunnel_peer_row(timestamp: datetime, row: Any) -> dict[str, Any]:
     """One history point of a device, from a raw row or an aggregate row."""
     return {
@@ -1047,8 +1080,8 @@ _TOTALS_BATCH = 2000
 _TOTALS_COUNTERS = tuple(TunnelPeerMetricDelta().to_dict())
 
 # Every total recomputed from the history: each entity's rows summed, latency
-# back as a weighted sum so later windows add to it, stamped with its newest
-# row's time. The history columns are nullable and the totals' are not, so a
+# back as a sum over the successful requests so later windows add to it,
+# stamped with its newest row's time. The history columns are nullable and the totals' are not, so a
 # sum over nothing but NULLs counts as 0. Migration 048 filled the table with
 # a frozen copy of this.
 _REBUILD_TOTALS = text(
@@ -1058,19 +1091,19 @@ _REBUILD_TOTALS = text(
         bytes_sent, bytes_received, by_address, encrypted_dns_blocked, updated_at
     )
     SELECT 'proxy', proxy_id, coalesce(sum(request_count), 0), coalesce(sum(success_count), 0),
-           coalesce(sum(failure_count), 0), coalesce(sum(avg_latency_ms * request_count), 0),
+           coalesce(sum(failure_count), 0), coalesce(sum(avg_latency_ms * success_count), 0),
            coalesce(sum(bytes_sent), 0), coalesce(sum(bytes_received), 0), 0, 0,
            coalesce(max(timestamp), timezone('UTC', now()))
     FROM proxy_metrics GROUP BY proxy_id
     UNION ALL
     SELECT 'project', project_id, coalesce(sum(request_count), 0), coalesce(sum(success_count), 0),
-           coalesce(sum(failure_count), 0), coalesce(sum(avg_latency_ms * request_count), 0),
+           coalesce(sum(failure_count), 0), coalesce(sum(avg_latency_ms * success_count), 0),
            coalesce(sum(bytes_sent), 0), coalesce(sum(bytes_received), 0), 0, 0,
            coalesce(max(timestamp), timezone('UTC', now()))
     FROM project_metrics GROUP BY project_id
     UNION ALL
     SELECT 'tunnel_peer', peer_id, coalesce(sum(request_count), 0), coalesce(sum(success_count), 0),
-           coalesce(sum(failure_count), 0), coalesce(sum(avg_latency_ms * request_count), 0),
+           coalesce(sum(failure_count), 0), coalesce(sum(avg_latency_ms * success_count), 0),
            coalesce(sum(bytes_sent), 0), coalesce(sum(bytes_received), 0),
            coalesce(sum(by_address), 0), coalesce(sum(encrypted_dns_blocked), 0),
            coalesce(max(timestamp), timezone('UTC', now()))
@@ -1098,7 +1131,7 @@ _DEVICE_COUNTERS = (
 _DEVICE_BATCH = 2000
 
 # The counters a request history table adds up when it compacts, besides the
-# request-weighted average latency every one of them carries.
+# average latency over the successful requests every one of them carries.
 _REQUEST_COUNTERS = ("request_count", "success_count", "failure_count", "bytes_sent", "bytes_received")
 
 
@@ -1119,11 +1152,11 @@ class MetricsRepository:
         extra = {proxy_id: {"status": statuses.get(proxy_id, "unknown")} for proxy_id in batch}
         return await self._insert_snapshots(ProxyMetricsModel, ProxyModel, "proxy_id", batch, extra)
 
-    async def save_project_metrics_snapshots(self, batch: dict[str, MetricDelta]) -> list[str]:
+    async def save_project_metrics_snapshots(self, batch: Mapping[str, MetricDelta]) -> list[str]:
         """Insert one row per project of a flush window; returns the ids dropped as gone."""
         return await self._insert_snapshots(ProjectMetricsModel, ProjectModel, "project_id", batch)
 
-    async def save_connector_metrics_snapshots(self, batch: dict[str, MetricDelta]) -> list[str]:
+    async def save_connector_metrics_snapshots(self, batch: Mapping[str, MetricDelta]) -> list[str]:
         """Insert one row per connector of a flush window; returns the ids dropped as gone."""
         return await self._insert_snapshots(ConnectorMetricsModel, ConnectorModel, "connector_id", batch)
 
@@ -1132,7 +1165,7 @@ class MetricsRepository:
         model: _MetricsModel,
         parent: type[ProxyModel] | type[ProjectModel] | type[ConnectorModel],
         key: str,
-        batch: dict[str, MetricDelta],
+        batch: Mapping[str, MetricDelta],
         extra: dict[str, dict[str, Any]] | None = None,
     ) -> list[str]:
         """Insert a row per entity of ``batch`` whose parent row still exists; returns the ids dropped.
@@ -1158,7 +1191,7 @@ class MetricsRepository:
                 "request_count": delta.request_count,
                 "success_count": delta.success_count,
                 "failure_count": delta.failure_count,
-                "avg_latency_ms": delta.avg_latency_ms,
+                **delta.history_averages(),
                 "bytes_sent": delta.bytes_sent,
                 "bytes_received": delta.bytes_received,
                 "granularity": 60,
@@ -1191,11 +1224,17 @@ class MetricsRepository:
         Args:
             keys: the columns a series is kept under, besides its bucket of the target granularity.
             sums: the counters added up.
-            latency: whether the rows carry ``avg_latency_ms``, averaged by their requests.
+            latency: whether the rows carry ``avg_latency_ms``, averaged by their successful requests, and the step
+                averages where the model keeps them, alike.
             latest: a column each bucket takes from its newest row.
         """
         table = model.__table__
-        returned = [*keys, "timestamp", *sums, *(["avg_latency_ms"] if latency else []), *([latest] if latest else [])]
+        averages = (
+            ["avg_latency_ms", *(STEP_COLUMNS.values() if issubclass(model, StepLatencyColumns) else ())]
+            if latency
+            else []
+        )
+        returned = [*keys, "timestamp", *sums, *averages, *([latest] if latest else [])]
         moved = (
             delete(model)
             .where(scope, model.granularity == source_granularity, model.timestamp < older_than)
@@ -1208,9 +1247,10 @@ class MetricsRepository:
         # The bucket's start, as the naive UTC the column holds.
         columns["timestamp"] = func.timezone("UTC", func.to_timestamp(bucket))
         columns.update((name, func.sum(moved.c[name])) for name in sums)
-        if latency:
-            weighted = func.sum(moved.c.avg_latency_ms * moved.c.request_count)
-            columns["avg_latency_ms"] = func.coalesce(weighted / func.nullif(func.sum(moved.c.request_count), 0), 0)
+        for name in averages:
+            average = _success_weighted(moved.c[name], moved.c.success_count)
+            # The latency column is not nullable; a step's NULL stays one, as in the rows folded.
+            columns[name] = func.coalesce(average, 0) if name == "avg_latency_ms" else average
         if latest:
             columns[latest] = func.array_agg(aggregate_order_by(moved.c[latest], moved.c.timestamp.desc()))[1]
         columns["granularity"] = literal(target_granularity, Integer())
@@ -1269,18 +1309,7 @@ class MetricsRepository:
             query = query.where(ConnectorMetricsModel.timestamp >= since)
         query = query.order_by(ConnectorMetricsModel.timestamp.desc()).limit(limit)
         result = await self._session.execute(query)
-        return [
-            {
-                "timestamp": m.timestamp,
-                "request_count": m.request_count,
-                "success_count": m.success_count,
-                "failure_count": m.failure_count,
-                "avg_latency_ms": m.avg_latency_ms,
-                "bytes_sent": m.bytes_sent,
-                "bytes_received": m.bytes_received,
-            }
-            for m in result.scalars().all()
-        ]
+        return [_latency_history_row(m.timestamp, m) for m in result.scalars().all()]
 
     async def get_connector_metrics_history_aggregated(
         self,
@@ -1300,18 +1329,7 @@ class MetricsRepository:
             .order_by(bucket_epoch.desc())
         )
         result = await self._session.execute(query)
-        return [
-            {
-                "timestamp": row.bucket_ts,
-                "request_count": row.request_count,
-                "success_count": row.success_count,
-                "failure_count": row.failure_count,
-                "avg_latency_ms": float(row.avg_latency_ms or 0),
-                "bytes_sent": row.bytes_sent,
-                "bytes_received": row.bytes_received,
-            }
-            for row in result.all()
-        ]
+        return [_latency_history_row(row.bucket_ts, row) for row in result.all()]
 
     async def compact_connector_metrics(
         self,
@@ -1367,19 +1385,7 @@ class MetricsRepository:
         query = query.order_by(ProjectMetricsModel.timestamp.desc()).limit(limit)
 
         result = await self._session.execute(query)
-        models = result.scalars().all()
-        return [
-            {
-                "timestamp": m.timestamp,
-                "request_count": m.request_count,
-                "success_count": m.success_count,
-                "failure_count": m.failure_count,
-                "avg_latency_ms": m.avg_latency_ms,
-                "bytes_sent": m.bytes_sent,
-                "bytes_received": m.bytes_received,
-            }
-            for m in models
-        ]
+        return [_latency_history_row(m.timestamp, m) for m in result.scalars().all()]
 
     async def get_project_metrics_history_aggregated(
         self,
@@ -1389,8 +1395,8 @@ class MetricsRepository:
     ) -> list[dict[str, Any]]:
         """A project's metrics summed into buckets of ``bucket_seconds`` by epoch floor division, newest first.
 
-        Latency is weighted by requests, and rows of any granularity up to ``bucket_seconds`` count, so compacted rows
-        and recent raw ones add up together.
+        Latency and its steps are weighted by successful requests, and rows of any granularity up to ``bucket_seconds``
+        count, so compacted rows and recent raw ones add up together.
         """
         bucket_epoch, bucket_ts = _bucket_expressions(ProjectMetricsModel, bucket_seconds)
         agg_cols = _metrics_aggregate_columns(ProjectMetricsModel)
@@ -1405,19 +1411,7 @@ class MetricsRepository:
         )
 
         result = await self._session.execute(query)
-        rows = result.all()
-        return [
-            {
-                "timestamp": row.bucket_ts,
-                "request_count": row.request_count,
-                "success_count": row.success_count,
-                "failure_count": row.failure_count,
-                "avg_latency_ms": float(row.avg_latency_ms or 0),
-                "bytes_sent": row.bytes_sent,
-                "bytes_received": row.bytes_received,
-            }
-            for row in rows
-        ]
+        return [_latency_history_row(row.bucket_ts, row) for row in result.all()]
 
     async def compact_project_metrics(
         self,

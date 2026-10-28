@@ -11,7 +11,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts'
 import { RotateCcw } from 'lucide-react'
 import {
-  Connector, MetricsSnapshot, TrafficPeriod, TrafficUsage,
+  Connector, HistoryRange, MetricsSnapshot, TrafficPeriod, TrafficUsage,
   fetchConnectorMetricsHistory, resetConnectorTraffic,
   HISTORY_RANGES,
 } from '../api/client'
@@ -92,6 +92,15 @@ export function TrafficStatusBadge({ usage }: { usage: TrafficUsage }) {
   return null
 }
 
+/** The connector's history over the range: one request however many inspector sections read it. */
+export function useConnectorHistory(projectId: string, connectorId: string, range: HistoryRange) {
+  return useQuery({
+    queryKey: ['connector-history', projectId, connectorId, range],
+    queryFn: () => fetchConnectorMetricsHistory(projectId, connectorId, range),
+    refetchInterval: 60_000,
+  })
+}
+
 function toPoints(snapshots: MetricsSnapshot[]) {
   return snapshots.map((s) => ({
     time: parseApiDate(s.timestamp)?.getTime() ?? 0,
@@ -109,11 +118,7 @@ export function ConnectorTrafficSection({ connector, projectId, canMutate }: { c
   const [confirmReset, setConfirmReset] = useState(false)
   const usage = connector.traffic_usage
 
-  const { data: history } = useQuery({
-    queryKey: ['connector-history', projectId, connector.id, range],
-    queryFn: () => fetchConnectorMetricsHistory(projectId, connector.id, range),
-    refetchInterval: 60_000,
-  })
+  const { data: history } = useConnectorHistory(projectId, connector.id, range)
   const points = useMemo(() => toPoints(history?.snapshots ?? []), [history])
   const rangeBytes = useMemo(() => points.reduce((a, p) => a + p.bytes, 0), [points])
 

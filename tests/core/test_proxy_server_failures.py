@@ -13,7 +13,6 @@ import contextlib
 import errno
 import socket
 import struct
-import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from dataclasses import dataclass, field
 from typing import Any
@@ -29,6 +28,7 @@ from api.core.mitm.handler import MitmHandler
 from api.core.proxy_server import ProxyServer
 from api.core.signals import request_completed, request_failed, request_rejected
 from api.core.stats import FailureKind
+from api.core.timing import RequestTimer, Step
 from api.core.traffic_limiter import TrafficMeter
 from api.gateway.metering import RequestMetering
 from api.geo.verifier import ExitDecision
@@ -234,14 +234,18 @@ class TestRefused:
         assert _failures(publish) == []
 
 
-def _verifier(decision: ExitDecision, *, takes: float = 0.0) -> MagicMock:
-    """An exit verifier that decides every request the same way, after ``takes`` seconds of checking."""
+def _verifier(decision: ExitDecision, *, takes: float = 0.0, applies: bool = True) -> MagicMock:
+    """An exit verifier that decides every request the same way, after ``takes`` seconds of checking.
+
+    With ``applies`` False no request gets a preflight, as for a project without it.
+    """
 
     async def verify(*_args: Any, **_kwargs: Any) -> ExitDecision:
         await asyncio.sleep(takes)
         return decision
 
     verifier = MagicMock()
+    verifier.applies.return_value = applies
     verifier.verify = AsyncMock(side_effect=verify)
     return verifier
 
@@ -370,6 +374,82 @@ class TestLatency:
 
         (completed,) = _completions(publish)
         assert completed["success"] is True and completed["latency_ms"] >= 200
+
+
+class TestLatencySteps:
+    """The latency splits into the steps the request went through, and they add up to it."""
+
+    async def test_a_tunnel_is_routed_checked_connected_and_handed_over(self, listen: Any, publish: _Published) -> None:
+        async with _vendor(b"HTTP/1.1 200 Connection established\r\n\r\n") as port:
+            upstream = _upstream(port)
+            server = await listen(upstream, exit_verifier=_verifier(ExitDecision(upstream), takes=0.2))
+            await _exchange(server, f"CONNECT example.com:443 HTTP/1.1\r\n{_auth()}\r\n", then=b"hello")
+
+        (completed,) = _completions(publish)
+        steps = completed["steps"]
+        assert list(steps) == [Step.ROUTE, Step.PREFLIGHT, Step.CONNECT, Step.HANDSHAKE]
+        assert steps[Step.PREFLIGHT] >= 200
+        assert sum(steps.values()) == pytest.approx(completed["latency_ms"])
+
+    async def test_a_request_preflight_does_not_apply_to_has_no_preflight_step(
+        self, listen: Any, publish: _Published
+    ) -> None:
+        async with _vendor(b"HTTP/1.1 200 Connection established\r\n\r\n") as port:
+            upstream = _upstream(port)
+            verifier = _verifier(ExitDecision(upstream), applies=False)
+            server = await listen(upstream, exit_verifier=verifier)
+            await _exchange(server, f"CONNECT example.com:443 HTTP/1.1\r\n{_auth()}\r\n", then=b"hello")
+
+        (completed,) = _completions(publish)
+        assert list(completed["steps"]) == [Step.ROUTE, Step.CONNECT, Step.HANDSHAKE]
+        verifier.verify.assert_not_called()
+
+    async def test_a_plain_http_request_waits_for_its_response(self, listen: Any, publish: _Published) -> None:
+        async with _vendor(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n") as port:
+            server = await listen(_upstream(port))
+            await _exchange(server, f"GET http://example.com/ HTTP/1.1\r\nHost: example.com\r\n{_auth()}\r\n")
+
+        (completed,) = _completions(publish)
+        assert list(completed["steps"]) == [Step.ROUTE, Step.CONNECT, Step.RESPONSE]
+        assert sum(completed["steps"].values()) == pytest.approx(completed["latency_ms"])
+
+    async def test_a_failure_names_the_step_it_failed_in(self, listen: Any, publish: _Published) -> None:
+        async with _vendor(None) as port:
+            server = await listen(_upstream(port), timeout=0.3)
+            await _exchange(server, f"CONNECT example.com:443 HTTP/1.1\r\n{_auth()}\r\n")
+        unreachable = await listen(_upstream(_closed_port()))
+        await _exchange(unreachable, f"CONNECT example.com:443 HTTP/1.1\r\n{_auth()}\r\n")
+
+        silent, refused = _failures(publish)
+        # The vendor took the connection and never answered the CONNECT: the whole timeout in the handshake.
+        assert (silent.kind, silent.step) == (FailureKind.UPSTREAM_TIMEOUT, "handshake")
+        assert silent.steps is not None and silent.steps["handshake"] >= 290
+        assert (refused.kind, refused.step) == (FailureKind.UPSTREAM_UNREACHABLE, "connect")
+        assert refused.steps is not None and set(refused.steps) == {"route", "connect"}
+
+    async def test_an_interrupted_request_reports_the_time_it_ran(self, publish: _Published, inflight: InFlight) -> None:
+        """Stopped mid-handshake (the server shutting down): its completion carries the time and steps its failure does."""
+        server = ProxyServer(_router(None), QuietMetering(inflight), host="127.0.0.1", port=0, timeout=30.0)
+        client_writer = MagicMock(spec=asyncio.StreamWriter)
+        client_writer.transport.is_closing.return_value = False
+
+        async def stopped(_proxy: Proxy, _host: str, _port: int, timer: RequestTimer) -> None:
+            timer.enter(Step.HANDSHAKE)
+            await asyncio.sleep(0.05)
+            raise asyncio.CancelledError
+
+        with patch.object(server, "_connect_via_proxy", stopped), pytest.raises(asyncio.CancelledError):
+            await server._relay(
+                MagicMock(spec=asyncio.StreamReader), client_writer, _upstream(8080), PROJECT, "example.com", 443,
+                timer=RequestTimer(), established=None, use_mitm=False,
+            )
+
+        (completed,) = _completions(publish)
+        (failure,) = _failures(publish)
+        assert (failure.kind, failure.step) == (FailureKind.INTERRUPTED, "handshake")
+        assert completed["latency_ms"] >= 50 and completed["latency_ms"] == pytest.approx(failure.latency_ms, abs=0.1)
+        assert list(completed["steps"]) == [Step.ROUTE, Step.HANDSHAKE]
+        assert sum(completed["steps"].values()) == pytest.approx(completed["latency_ms"])
 
 
 class TestUpstreamFailures:
@@ -621,7 +701,7 @@ class TestUpstreamFailures:
         ):
             await server._relay(
                 MagicMock(spec=asyncio.StreamReader), client_writer, _upstream(8080), PROJECT, "example.com", 443,
-                started=time.monotonic(), established=None, use_mitm=False,
+                timer=RequestTimer(), established=None, use_mitm=False,
             )
 
         assert _completions(publish) == [] and _failures(publish) == []
@@ -651,7 +731,7 @@ class TestUpstreamFailures:
             await asyncio.wait_for(
                 server._relay(
                     device, client_writer, _upstream(8080), PROJECT, "example.com", 443,
-                    started=time.monotonic(), established=None, use_mitm=False,
+                    timer=RequestTimer(), established=None, use_mitm=False,
                 ),
                 5,
             )

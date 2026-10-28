@@ -11,7 +11,6 @@ from __future__ import annotations
 import asyncio
 import socket
 import sys
-import time
 from collections.abc import Callable
 from typing import TYPE_CHECKING
 
@@ -20,6 +19,7 @@ import structlog
 from api.core.failure_log import RequestInfo, set_request_info
 from api.core.proxy_server import ProxyServer, close_quietly
 from api.core.signals import tunnel_encrypted_dns_blocked, tunnel_name_unresolved
+from api.core.timing import RequestTimer
 from api.models.project import MitmMode
 from api.tunnel.dns import FakeIpDirectory
 from api.tunnel.peers import PeerLookup
@@ -251,7 +251,7 @@ class TransparentProxyServer(ProxyServer):
             )
 
             # The connection's latency runs from here, as a proxy client's request does.
-            started = time.monotonic()
+            timer = RequestTimer()
             proxy = await self._get_upstream_proxy(
                 project_id=project.id, session_id=session_id, target_host=target_host, location=location
             )
@@ -259,7 +259,7 @@ class TransparentProxyServer(ProxyServer):
                 await self._reject_no_proxy(client_writer, project.id, target_host, session_id, location)
                 return
             decision = await self._verify_exit(
-                project, proxy, session_id, location, target_host, client_writer, peer_id=peer.id, started=started
+                project, proxy, session_id, location, target_host, client_writer, peer_id=peer.id, timer=timer
             )
             if decision is None:
                 return
@@ -267,7 +267,7 @@ class TransparentProxyServer(ProxyServer):
             use_mitm = sniffed.tls and mitm_possible
             await self._relay(
                 client_reader, client_writer, decision.proxy, project, target_host, dst_port,
-                started=started,
+                timer=timer,
                 established=None,
                 use_mitm=use_mitm,
                 # The peeked ClientHello is in the reader, not the socket; the

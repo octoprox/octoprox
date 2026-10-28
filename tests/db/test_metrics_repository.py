@@ -98,7 +98,8 @@ class TestMetricsRepository:
         [proxy_row] = (
             await db_session.execute(select(ProxyMetricsModel).where(ProxyMetricsModel.proxy_id == proxy.id))
         ).scalars().all()
-        assert (proxy_row.request_count, proxy_row.avg_latency_ms, proxy_row.status) == (4, 150.0, "healthy")
+        # Over the three successes.
+        assert (proxy_row.request_count, proxy_row.avg_latency_ms, proxy_row.status) == (4, 200.0, "healthy")
         assert (proxy_row.bytes_sent, proxy_row.bytes_received) == (50, 70)
         [project_row] = await metrics_repo.get_project_metrics_history(project.id)
         assert (project_row["request_count"], project_row["failure_count"]) == (4, 1)
@@ -136,7 +137,7 @@ class TestMetricsRepository:
         project_repo: ProjectRepository,
         db_session: AsyncSession,
     ) -> None:
-        """A flushed window becomes one history row, its latency the window's average."""
+        """A flushed window becomes one history row, its latency the average over the window's successes."""
         project = Project(name="Project Metrics Test", username="projmetricsuser", password="pass")
         await project_repo.create(project)
         await db_session.commit()
@@ -145,7 +146,7 @@ class TestMetricsRepository:
             request_count=100,
             success_count=90,
             failure_count=10,
-            latency_sum_ms=15050.0,
+            latency_sum_ms=13545.0,
             bytes_sent=50000,
             bytes_received=250000,
         )

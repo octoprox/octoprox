@@ -129,6 +129,11 @@ class ExitVerifier:
         self._preflight_checker = preflight_checker
         self._router = router
 
+    @staticmethod
+    def applies(project: Project, location: LocationTarget | None, proxy: Proxy) -> bool:
+        """Whether the request through ``proxy`` gets a preflight at all; :meth:`verify` passes any other straight on."""
+        return PreflightChecker.applies(project, location, proxy)
+
     async def verify(
         self,
         project: Project,
@@ -154,7 +159,7 @@ class ExitVerifier:
         refuses the request wherever the rules could have refused on an
         answer, and lets it through elsewhere.
         """
-        if not PreflightChecker.applies(project, location, proxy):
+        if not self.applies(project, location, proxy):
             return ExitDecision(proxy)
         rules = project.location_rules
         # A session-less request on a dynamic gateway retries by re-rendering:

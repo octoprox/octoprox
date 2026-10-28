@@ -492,7 +492,7 @@ The connector's own metrics history, which survives its proxies being rotated or
 GET /api/v1/projects/{project_id}/connectors/{connector_id}/metrics/history?range=24h
 ```
 
-Same `range` values and response shape as [project metrics history](#metrics).
+Same `range` values and response shape as [project metrics history](#metrics-history).
 
 #### Unquarantine Proxy
 
@@ -651,7 +651,37 @@ GET /api/v1/projects/{project_id}/metrics
 }
 ```
 
-The pool is the proxies of the project's enabled connectors that no traffic limit holds back; `healthy_proxies` are healthy and not quarantined, and `unhealthy_proxies` is everything else that is not draining or terminating, quarantined proxies included. The counters are the project's all-time totals plus what the gateways counted since the last metrics flush, so they are within seconds of live traffic and read the same on every api process. `overall_success_rate` is a percentage. The strategy is the project's `routing_strategy`; change it with [Update Project](#update-project).
+The pool is the proxies of the project's enabled connectors that no traffic limit holds back; `healthy_proxies` are healthy and not quarantined, and `unhealthy_proxies` is everything else that is not draining or terminating, quarantined proxies included. The counters are the project's all-time totals plus what the gateways counted since the last metrics flush, so they are within seconds of live traffic and read the same on every api process. `overall_success_rate` is a percentage, and `avg_latency_ms` is averaged over the successful requests. The strategy is the project's `routing_strategy`; change it with [Update Project](#update-project).
+
+### Metrics History
+
+The project's counters over time, as the workers' metrics flushes wrote them:
+
+```bash
+GET /api/v1/projects/{project_id}/metrics/history?range=24h
+```
+
+`range` is one of `1h`, `6h`, `24h` (default), `7d`, `30d`. Up to a day the points are the one-minute rows; longer ranges are summed into hourly (`7d`) or 6-hourly (`30d`) buckets.
+
+**Response:**
+```json
+{
+  "snapshots": [
+    {
+      "timestamp": "2026-10-28T11:42:00",
+      "request_count": 1200,
+      "success_count": 1130,
+      "failure_count": 70,
+      "avg_latency_ms": 1412.6,
+      "step_latency_ms": { "route": 0.4, "preflight": 612.0, "connect": 38.1, "handshake": 750.3, "response": 11.8 },
+      "bytes_sent": 2400000,
+      "bytes_received": 96000000
+    }
+  ]
+}
+```
+
+Oldest first. `avg_latency_ms` is averaged over the point's successful requests, `null` when none succeeded. `step_latency_ms` splits it into the [steps]({{ site.baseurl }}/metrics#latency-where-the-time-goes) the requests went through, each averaged over the same requests (a step a request skipped counts as 0), so they add up to `avg_latency_ms`; it is `null` when none succeeded and for history recorded before steps were kept.
 
 ### Traffic Split
 
@@ -864,6 +894,8 @@ The examples seen last first. `kind` keeps one kind (leave it out for all of the
       "upstream_status": 407,
       "upstream_message": "x-brd-error: Auth failed",
       "latency_ms": 212.4,
+      "step": "handshake",
+      "steps": { "route": 0.3, "connect": 41.2, "handshake": 170.9 },
       "count": 37,
       "first_at": "2026-10-15T10:59:58.120000",
       "last_at": "2026-10-15T11:00:02.870000"
@@ -878,7 +910,7 @@ The examples seen last first. `kind` keeps one kind (leave it out for all of the
 }
 ```
 
-`kind` is one of `upstream_timeout`, `upstream_unreachable`, `upstream_rejected`, `upstream_error`, `client_closed`, `interrupted`, `preflight_mismatch` (the failures the request metrics count), `no_proxy_available`, `all_proxies_quarantined`, `traffic_limit_exceeded`, `invalid_location` (refused before a proxy was used), or `intercepted_request_failed` (one request inside a TLS-intercepted connection). `status` is what the client was answered; `upstream_status` is the vendor's HTTP status when an HTTP upstream refused the request, and `upstream_message` what it said about it besides: its error headers (such as `x-brd-error`) and the text of its error page, `null` when it said nothing more. `count` is how many identical failures the example stands for, between `first_at` and `last_at`, from every gateway; `session_id` is the first one's. `id` stays the same while the failure recurs. `total` is how many examples are kept and `max_entries` how many are kept per kind.
+`kind` is one of `upstream_timeout`, `upstream_unreachable`, `upstream_rejected`, `upstream_error`, `client_closed`, `interrupted`, `preflight_mismatch` (the failures the request metrics count), `no_proxy_available`, `all_proxies_quarantined`, `traffic_limit_exceeded`, `invalid_location` (refused before a proxy was used), or `intercepted_request_failed` (one request inside a TLS-intercepted connection). `status` is what the client was answered; `upstream_status` is the vendor's HTTP status when an HTTP upstream refused the request, and `upstream_message` what it said about it besides: its error headers (such as `x-brd-error`) and the text of its error page, `null` when it said nothing more. `latency_ms` is the average time until the failure. `step` is the [step]({{ site.baseurl }}/metrics#latency-where-the-time-goes) of the request it failed in (`route`, `preflight`, `connect`, `handshake` or `response`), and `steps` how long each step it went through took; both are `null` for a request refused before a proxy was chosen and inside an intercepted connection. `count` is how many identical failures the example stands for, between `first_at` and `last_at`, from every gateway; `session_id` and `steps` are the first one's. `id` stays the same while the failure recurs. `total` is how many examples are kept and `max_entries` how many are kept per kind.
 
 `newest` marks where the log stood when the first page was read. To tell how many examples are new or have happened again since, poll the head with it:
 

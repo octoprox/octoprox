@@ -159,7 +159,7 @@ export default function ProxiesPage() {
       header: 'Latency',
       size: 90,
       meta: { align: 'right' as const },
-      cell: ({ getValue, row }) => (row.original.request_count > 0 ? `${Math.round(getValue<number>()).toLocaleString()} ms` : '-'),
+      cell: ({ getValue, row }) => (row.original.success_count > 0 ? `${Math.round(getValue<number>()).toLocaleString()} ms` : '-'),
     },
     {
       id: 'traffic',
@@ -384,7 +384,7 @@ function ProxyPanel({ proxy, connectorType, canMutate, onClose, onRelease, onDel
         <StatGrid items={[
           { label: 'Requests', value: proxy.request_count.toLocaleString() },
           { label: 'Success', value: proxy.request_count > 0 ? `${proxy.success_rate.toFixed(1)}%` : '-', className: proxy.request_count > 0 && proxy.success_rate < 90 ? 'text-danger' : undefined },
-          { label: 'Latency', value: proxy.request_count > 0 ? `${Math.round(proxy.avg_latency_ms)} ms` : '-' },
+          { label: 'Latency', value: proxy.success_count > 0 ? `${Math.round(proxy.avg_latency_ms)} ms` : '-' },
           { label: 'Sent ↑', value: formatBytes(proxy.bytes_sent) },
           { label: 'Received ↓', value: formatBytes(proxy.bytes_received) },
           { label: 'Failures', value: proxy.failure_count.toLocaleString(), className: proxy.failure_count > 0 ? 'text-danger' : undefined },

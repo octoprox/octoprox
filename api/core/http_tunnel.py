@@ -18,7 +18,7 @@ import contextlib
 import html
 import re
 import ssl
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from typing import Any
 
 import httpcore
@@ -63,8 +63,11 @@ async def open_http_tunnel(
     password: str | None,
     target_host: str,
     target_port: int,
+    on_connected: Callable[[], None] | None = None,
 ) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
     """A tunnel to ``target_host:target_port`` through the HTTP proxy at ``proxy_host:proxy_port``; no deadline of its own.
+
+    ``on_connected`` is called once the connection to the proxy is open, before the CONNECT is sent.
 
     Raises:
         ProxyConnectionError: the proxy could not be reached, as python-socks raises it.
@@ -75,6 +78,8 @@ async def open_http_tunnel(
         reader, writer = await asyncio.open_connection(proxy_host, proxy_port)
     except OSError as e:
         raise ProxyConnectionError(e.errno, f"Could not connect to proxy {proxy_host}:{proxy_port} [{e.strerror}]") from e
+    if on_connected is not None:
+        on_connected()
     try:
         writer.write(_connect_request(target_host, target_port, username, password))
         await writer.drain()

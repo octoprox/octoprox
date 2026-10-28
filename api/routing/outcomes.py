@@ -6,8 +6,16 @@
 from __future__ import annotations
 
 from collections.abc import Set as AbstractSet
+from dataclasses import dataclass
 
-from api.core.stats import MetricDelta
+
+@dataclass(slots=True)
+class _ProxyOutcomes:
+    """One proxy's finished requests, its latency summed over all of them: a slow failure counts against it."""
+
+    requests: int = 0
+    successes: int = 0
+    latency_sum_ms: float = 0.0
 
 
 class LocalOutcomes:
@@ -15,18 +23,21 @@ class LocalOutcomes:
 
     def __init__(self) -> None:
         # Only proxies with an outcome recorded, until a routing snapshot without them is applied.
-        self._proxies: dict[str, MetricDelta] = {}
+        self._proxies: dict[str, _ProxyOutcomes] = {}
 
     def record(self, proxy_id: str, success: bool, latency_ms: float) -> None:
         """Count one finished request through the proxy, with its latency in milliseconds: until its tunnel was up or it was answered."""
-        self._proxies.setdefault(proxy_id, MetricDelta()).add_request(success, latency_ms)
+        seen = self._proxies.setdefault(proxy_id, _ProxyOutcomes())
+        seen.requests += 1
+        seen.successes += success
+        seen.latency_sum_ms += latency_ms
 
     def of_proxy(self, proxy_id: str) -> tuple[int, int, float]:
         """The proxy's ``(requests, successes, latency sum in ms)`` on this gateway; zeros for a proxy never seen."""
         seen = self._proxies.get(proxy_id)
         if seen is None:
             return 0, 0, 0.0
-        return seen.request_count, seen.success_count, seen.latency_sum_ms
+        return seen.requests, seen.successes, seen.latency_sum_ms
 
     def retain(self, proxy_ids: AbstractSet[str]) -> None:
         """Forget every proxy not in ``proxy_ids``; the gateway calls it with each routing snapshot it applies."""

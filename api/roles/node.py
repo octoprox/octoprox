@@ -52,6 +52,7 @@ if TYPE_CHECKING:
 
     from api.core.config import Settings
     from api.core.loops import Loop
+    from api.gateway.latency import LatencyHistogram
     from api.models.system import StreamState
     from api.providers.registry import ProviderRegistry
     from api.roles.runtime import RoleRuntime
@@ -217,7 +218,7 @@ class Node:
         self.tasks = TaskSet()
         # One per process: what its heartbeat and metrics report as loop lag.
         self.loop_lag = LoopLagMonitor()
-        self.telemetry = Telemetry(self.snapshot)
+        self.telemetry = Telemetry(self.snapshot, self.latencies)
         self._phase = _Phase.BUILT
         # The runtimes asked to start, in start order: stopped in reverse, one whose start raised included.
         self._starting: list[RoleRuntime] = []
@@ -504,6 +505,10 @@ class Node:
             controller=self.controller.snapshot() if self.controller is not None else None,
             worker=self.worker.snapshot() if self.worker is not None else None,
         )
+
+    def latencies(self) -> list[LatencyHistogram]:
+        """The gateway's request latency histograms as they stand, for the metrics alone; none without a gateway."""
+        return self.gateway.metering.latencies.snapshot() if self.gateway is not None else []
 
     @property
     def background_tasks(self) -> list[asyncio.Task[None]]:

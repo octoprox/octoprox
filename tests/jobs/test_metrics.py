@@ -19,7 +19,13 @@ from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from api.core import utc_now
-from api.core.stats import FailureCount, FailureCountKey, MetricDelta, TunnelPeerMetricDelta
+from api.core.stats import (
+    FailureCount,
+    FailureCountKey,
+    MetricDelta,
+    StepMetricDelta,
+    TunnelPeerMetricDelta,
+)
 from api.db.models import (
     ConnectorExitIpModel,
     ConnectorMetricsModel,
@@ -80,6 +86,11 @@ def requests(count: int, latency_ms: float = 100.0) -> MetricDelta:
     for _ in range(count):
         delta.add_request(True, latency_ms, 10, 20)
     return delta
+
+
+def project_requests(count: int, latency_ms: float = 100.0) -> StepMetricDelta:
+    """``requests`` as a project's window reads back: with its (here empty) latency steps."""
+    return StepMetricDelta.summed(requests(count, latency_ms))
 
 
 async def meter(redis_client: RedisClient, windows: MetricWindows) -> None:
@@ -389,7 +400,7 @@ class TestRedelivery:
         assert await totals(sessions, PROJECT_WINDOWS, project.id, other.id) == {project.id: 3, other.id: 4}
         assert await recorded(sessions) == {FIRST}
         assert not await staged(redis_client, FIRST)
-        assert (await live(redis_client)).projects == {project.id: requests(2)}
+        assert (await live(redis_client)).projects == {project.id: project_requests(2)}
 
         await flush.run(delivery(SECOND))
 
@@ -413,7 +424,7 @@ class TestRedelivery:
             with pytest.raises(ConnectionError):
                 await flush.run(delivery(FIRST))
         assert await recorded(sessions) == {FIRST} and await staged(redis_client, FIRST)
-        metered_since = {project.id: requests(2), other.id: requests(4)}
+        metered_since = {project.id: project_requests(2), other.id: project_requests(4)}
         await meter(redis_client, MetricWindows(projects=metered_since))
 
         await flush.run(delivery(FIRST))
@@ -539,7 +550,7 @@ class TestGiveUp:
         await flush.give_up(delivery(FIRST))
 
         assert not await staged(redis_client, FIRST)
-        assert (await live(redis_client)).projects == {project.id: requests(2)}
+        assert (await live(redis_client)).projects == {project.id: project_requests(2)}
         await flush.run(delivery(SECOND))
         assert await totals(sessions, PROJECT_WINDOWS, project.id) == {project.id: 5}
 
@@ -564,7 +575,7 @@ class TestGiveUp:
 
         assert not await staged(redis_client, FIRST)
         back = await live(redis_client)
-        assert back.projects == {project.id: requests(5, latency_ms=12.5)}
+        assert back.projects == {project.id: project_requests(5, latency_ms=12.5)}
         assert back.failures == {refused: FailureCount(4)}
         await flush.run(delivery(SECOND))
         assert await totals(sessions, PROJECT_WINDOWS, project.id) == {project.id: 5}

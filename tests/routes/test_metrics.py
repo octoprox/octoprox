@@ -21,7 +21,8 @@ from starlette.testclient import TestClient
 from api.core import utc_now
 from api.core.demand_tracker import DEMAND_REQUESTS_FIELD, demand_minute
 from api.core.roles import Role
-from api.core.stats import MetricDelta
+from api.core.stats import MetricDelta, StepMetricDelta
+from api.core.timing import Step
 from api.db.models import HostMetricsModel
 from api.db.redis import (
     DEMAND_KEY,
@@ -168,7 +169,8 @@ class TestMetricsEndpoints:
         pool = authenticated_client.get(f"/api/v1/projects/{project_id}/metrics").json()["pool"]
 
         assert (pool["total_requests"], pool["total_successes"], pool["total_failures"]) == (12, 10, 2)
-        assert (pool["overall_success_rate"], pool["avg_latency_ms"]) == (83.33, 91.67)
+        # The latency over the ten successes.
+        assert (pool["overall_success_rate"], pool["avg_latency_ms"]) == (83.33, 110.0)
         assert (pool["total_bytes_sent"], pool["total_bytes_received"]) == (101, 909)
 
     def test_the_strategy_in_force_is_the_projects(
@@ -289,7 +291,10 @@ class TestHistory:
         self, authenticated_client: TestClient, created_project: dict[str, Any],
     ) -> None:
         project_id = created_project["id"]
-        window = MetricDelta(request_count=4, success_count=3, failure_count=1, latency_sum_ms=200, bytes_sent=5)
+        window = StepMetricDelta(bytes_sent=5)
+        for steps in ({Step.ROUTE: 1.0, Step.HANDSHAKE: 39.0}, {Step.ROUTE: 1.0, Step.PREFLIGHT: 60.0, Step.HANDSHAKE: 49.0}):
+            window.add_request(True, sum(steps.values()), steps=steps)
+        window.add_request(False, 30000.0, steps={Step.ROUTE: 1.0, Step.HANDSHAKE: 29999.0})
         on_app_loop(authenticated_client, _save_project_history, api_runtime(authenticated_client).session_factory,
                     project_id, window)
 
@@ -297,9 +302,28 @@ class TestHistory:
             f"/api/v1/projects/{project_id}/metrics/history", params={"range": "1h"}
         ).json()["snapshots"]
 
+        # The latency and its steps over the two successes.
         assert [(s["request_count"], s["failure_count"], s["avg_latency_ms"], s["bytes_sent"]) for s in snapshots] == [
-            (4, 1, 50.0, 5),
+            (3, 1, 75.0, 5),
         ]
+        assert snapshots[0]["step_latency_ms"] == {
+            "route": 1.0, "preflight": 30.0, "connect": 0.0, "handshake": 44.0, "response": 0.0,
+        }
+
+    def test_a_window_where_nothing_succeeded_has_no_latency(
+        self, authenticated_client: TestClient, created_project: dict[str, Any],
+    ) -> None:
+        project_id = created_project["id"]
+        window = StepMetricDelta()
+        window.add_request(False, 30000.0, steps={Step.ROUTE: 1.0, Step.HANDSHAKE: 29999.0})
+        on_app_loop(authenticated_client, _save_project_history, api_runtime(authenticated_client).session_factory,
+                    project_id, window)
+
+        [snapshot] = authenticated_client.get(
+            f"/api/v1/projects/{project_id}/metrics/history", params={"range": "1h"}
+        ).json()["snapshots"]
+
+        assert (snapshot["failure_count"], snapshot["avg_latency_ms"], snapshot["step_latency_ms"]) == (1, None, None)
         assert authenticated_client.get(
             f"/api/v1/projects/{project_id}/metrics/history", params={"range": "7d"}
         ).status_code == 200
@@ -493,7 +517,7 @@ class TestHostMetricsEndpoints:
         }]
         assert data["totals"] == {
             "host_count": 2, "request_count": 8, "success_count": 7, "failure_count": 1,
-            "avg_latency_ms": 87.5, "bytes_sent": 150, "bytes_received": 950,
+            "avg_latency_ms": 85.71, "bytes_sent": 150, "bytes_received": 950,
         }
         assert [c["connector_id"] for c in data["connectors"]] == [connector_id]
 
@@ -677,7 +701,7 @@ async def _save_host_history(session_factory: SessionFactory, project_id: str, c
         repo = MetricsRepository(session)
         dropped = await repo.save_host_metrics_snapshots({
             (project_id, connector_id, "shop.example.com"): MetricDelta(
-                request_count=6, success_count=5, failure_count=1, latency_sum_ms=600, bytes_sent=100, bytes_received=900,
+                request_count=6, success_count=5, failure_count=1, latency_sum_ms=500, bytes_sent=100, bytes_received=900,
             ),
             (project_id, connector_id, "news.example.org"): MetricDelta(
                 request_count=2, success_count=2, latency_sum_ms=100, bytes_sent=50, bytes_received=50,

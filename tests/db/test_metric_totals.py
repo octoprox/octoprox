@@ -9,7 +9,7 @@ from uuid import uuid4
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from api.core.stats import MetricDelta, TunnelPeerMetricDelta
+from api.core.stats import MetricDelta, StepMetricDelta, TunnelPeerMetricDelta
 from api.db.models import ProjectMetricsModel, ProxyMetricsModel, TunnelPeerMetricsModel
 from api.db.redis import (
     METRIC_WINDOW_KINDS,
@@ -138,14 +138,15 @@ class TestRebuild:
 
         assert await metrics_repo.rebuild_totals() == 3
         await db_session.commit()
+        # Each row's average back as a sum over its successful requests.
         assert await metrics_repo.get_totals(PROXY_WINDOWS, [proxy.id, "no-history"]) == {
-            proxy.id: MetricDelta(request_count=4, success_count=3, failure_count=1, latency_sum_ms=600.0, bytes_sent=15, bytes_received=150),
+            proxy.id: MetricDelta(request_count=4, success_count=3, failure_count=1, latency_sum_ms=500.0, bytes_sent=15, bytes_received=150),
         }
         assert await metrics_repo.get_totals(PROJECT_WINDOWS, [project.id]) == {
-            project.id: MetricDelta(request_count=4, success_count=3, failure_count=1, latency_sum_ms=600.0, bytes_sent=15, bytes_received=150),
+            project.id: StepMetricDelta(request_count=4, success_count=3, failure_count=1, latency_sum_ms=450.0, bytes_sent=15, bytes_received=150),
         }
         assert await metrics_repo.get_totals(TUNNEL_PEER_WINDOWS, [device.id]) == {
-            device.id: TunnelPeerMetricDelta(request_count=2, success_count=1, failure_count=1, latency_sum_ms=40.0,
+            device.id: TunnelPeerMetricDelta(request_count=2, success_count=1, failure_count=1, latency_sum_ms=20.0,
                                              bytes_sent=7, bytes_received=70, by_address=3, encrypted_dns_blocked=1),
         }
 

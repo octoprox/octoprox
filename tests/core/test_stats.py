@@ -8,23 +8,25 @@ import pytest
 from api.core.stats import (
     HOST_OVERFLOW,
     MetricDelta,
+    StepMetricDelta,
     TunnelPeerMetricDelta,
     fold_host_tail,
     normalize_host,
 )
+from api.core.timing import Step
 
 
 class TestSummed:
     """An entity's counters: its stored totals plus the Redis window not flushed yet."""
 
-    def test_summed_weights_latency_by_count(self) -> None:
+    def test_summed_weights_latency_by_successes(self) -> None:
         pg = MetricDelta(request_count=100, success_count=90, failure_count=10, latency_sum_ms=20000.0, bytes_sent=50000, bytes_received=200000)
         rd = MetricDelta(request_count=50, success_count=45, failure_count=5, latency_sum_ms=5000.0, bytes_sent=25000, bytes_received=100000)
         total = MetricDelta.summed(pg, rd)
         assert (total.request_count, total.success_count, total.failure_count) == (150, 135, 15)
         assert (total.bytes_sent, total.bytes_received) == (75000, 300000)
-        # (200*100 + 100*50) / 150 = 166.67
-        assert abs(total.avg_latency_ms - 166.67) < 0.01
+        # (20000 + 5000) / 135 successes
+        assert abs(total.avg_latency_ms - 185.19) < 0.01
 
     def test_summed_skips_missing_sources(self) -> None:
         only = MetricDelta(request_count=10, latency_sum_ms=1000.0)
@@ -48,9 +50,24 @@ class TestMetricDelta:
         )
 
     def test_single_failure(self) -> None:
+        """A failure counts, but its time to fail is no latency: a timeout would move the average by its whole wait."""
         d = MetricDelta()
-        d.add_request(success=False, latency_ms=50.0)
-        assert (d.request_count, d.success_count, d.failure_count, d.latency_sum_ms) == (1, 0, 1, 50.0)
+        d.add_request(success=False, latency_ms=30000.0)
+        assert (d.request_count, d.success_count, d.failure_count, d.latency_sum_ms) == (1, 0, 1, 0.0)
+        assert d.avg_latency_ms == 0.0
+
+    def test_latency_averages_the_successes_only(self) -> None:
+        d = MetricDelta()
+        d.add_request(success=True, latency_ms=100.0)
+        d.add_request(success=True, latency_ms=300.0)
+        d.add_request(success=False, latency_ms=30000.0)
+        assert d.avg_latency_ms == 200.0
+        assert d.history_averages() == {"avg_latency_ms": 200.0}
+
+    def test_steps_are_kept_only_where_a_subclass_keeps_them(self) -> None:
+        d = MetricDelta()
+        d.add_request(success=True, latency_ms=100.0, steps={Step.ROUTE: 1.0, Step.HANDSHAKE: 99.0})
+        assert d == MetricDelta(request_count=1, success_count=1, latency_sum_ms=100.0)
 
     def test_running_sum_across_many(self) -> None:
         d = MetricDelta()
@@ -136,7 +153,7 @@ class TestTunnelPeerMetricDelta:
 
     def test_merge_and_sum_include_the_extras(self) -> None:
         a = TunnelPeerMetricDelta(request_count=1, success_count=1, latency_sum_ms=10.0, by_address=1)
-        b = TunnelPeerMetricDelta(request_count=1, failure_count=1, latency_sum_ms=30.0, encrypted_dns_blocked=4)
+        b = TunnelPeerMetricDelta(request_count=1, success_count=1, latency_sum_ms=30.0, encrypted_dns_blocked=4)
         total = TunnelPeerMetricDelta.summed(a, None, b)
         assert isinstance(total, TunnelPeerMetricDelta)
         assert (total.request_count, total.by_address, total.encrypted_dns_blocked) == (2, 1, 4)
@@ -236,3 +253,41 @@ class TestFoldHostTail:
         assert folded[("P", "c1", HOST_OVERFLOW)].request_count == 2
         assert folded[("P", "c1", "kept.example.com")] is not kept
         assert window[("P", "c1", HOST_OVERFLOW)].request_count == 1
+
+
+class TestStepMetricDelta:
+    """A project's or connector's batch: its successful requests' latency by step, as sums."""
+
+    def test_the_successes_steps_add_up_to_their_latency(self) -> None:
+        d = StepMetricDelta()
+        d.add_request(success=True, latency_ms=100.0, steps={Step.ROUTE: 2.0, Step.CONNECT: 18.0, Step.HANDSHAKE: 80.0})
+        d.add_request(success=True, latency_ms=700.0, steps={Step.ROUTE: 2.0, Step.PREFLIGHT: 600.0, Step.HANDSHAKE: 98.0})
+        # A failure's steps are its time to fail, kept out like its latency.
+        d.add_request(success=False, latency_ms=30000.0, steps={Step.ROUTE: 1.0, Step.HANDSHAKE: 29999.0})
+
+        averages = d.step_averages()
+        assert averages == {
+            Step.ROUTE: 2.0, Step.PREFLIGHT: 300.0, Step.CONNECT: 9.0, Step.HANDSHAKE: 89.0, Step.RESPONSE: 0.0,
+        }
+        assert sum(averages.values()) == d.avg_latency_ms == 400.0
+        assert d.history_averages() == {
+            "avg_latency_ms": 400.0, "avg_route_ms": 2.0, "avg_preflight_ms": 300.0, "avg_connect_ms": 9.0,
+            "avg_handshake_ms": 89.0, "avg_response_ms": 0.0,
+        }
+
+    def test_merge_wire_round_trip_and_totals(self) -> None:
+        """Windows merge step by step and travel as fields; the all-time totals take the request shape only."""
+        dst = StepMetricDelta()
+        dst.add_request(success=True, latency_ms=50.0, steps={Step.ROUTE: 1.0, Step.HANDSHAKE: 49.0})
+        src = StepMetricDelta()
+        src.add_request(success=True, latency_ms=150.0, steps={Step.ROUTE: 3.0, Step.HANDSHAKE: 147.0})
+        dst.merge(src)
+
+        assert (dst.request_count, dst.route_sum_ms, dst.handshake_sum_ms) == (2, 4.0, 196.0)
+        assert StepMetricDelta.from_dict(dst.to_dict()) == dst
+        assert TunnelPeerMetricDelta.summed(dst) == TunnelPeerMetricDelta(request_count=2, success_count=2, latency_sum_ms=200.0)
+
+    def test_no_successes_average_nothing(self) -> None:
+        d = StepMetricDelta()
+        d.add_request(success=False, latency_ms=10.0, steps={Step.ROUTE: 10.0})
+        assert set(d.step_averages().values()) == {0.0}

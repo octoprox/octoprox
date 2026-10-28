@@ -99,7 +99,8 @@ class TestSaveHostMetricsSnapshots:
         assert by_connector[a.id].bytes_received == 60
         assert by_connector[a.id].granularity == 60
         assert by_connector[b.id].failure_count == 1
-        assert by_connector[b.id].avg_latency_ms == 900.0
+        # Nothing succeeded: no latency, and a row that weighs nothing in an average.
+        assert by_connector[b.id].avg_latency_ms == 0.0
 
     async def test_empty_batch_is_a_no_op(self, metrics_repo: MetricsRepository) -> None:
         assert await metrics_repo.save_host_metrics_snapshots({}) == []
@@ -141,8 +142,8 @@ class TestHostWindowQueries:
         assert shop["request_count"] == 6 and shop["failure_count"] == 1
         assert shop["bytes_sent"] == 150 and shop["bytes_received"] == 450
         assert shop["connector_count"] == 2
-        # Weighted by requests: (4*100 + 2*400) / 6
-        assert shop["avg_latency_ms"] == (400 + 800) / 6
+        # Weighted by successful requests: (3*100 + 2*400) / 5
+        assert shop["avg_latency_ms"] == (300 + 800) / 5
 
         summary = await metrics_repo.get_host_summary(project.id, since)
         assert summary["host_count"] == 2

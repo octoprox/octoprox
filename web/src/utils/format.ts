@@ -35,6 +35,12 @@ export function bytesShort(bytes: number): string {
   return `${parseFloat((bytes / Math.pow(k, i)).toFixed(1))} ${sizes[i]}`
 }
 
+/** A latency: "<1 ms", "412 ms", and seconds from 10 s ("12.3 s"). */
+export function formatMs(value: number): string {
+  if (value < 1) return '<1 ms'
+  return value >= 10000 ? `${(value / 1000).toFixed(1)} s` : `${Math.round(value)} ms`
+}
+
 /** A count for a tile or an axis tick: 1,234 / 12.3K / 1.23M / 12M. */
 export function compact(n: number): string {
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(n >= 10_000_000 ? 0 : 2)}M`

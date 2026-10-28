@@ -9,7 +9,7 @@ import { Check, Loader, Power, AlertTriangle } from 'lucide-react'
 import {
   fetchProjectMetrics, fetchProjectScalingMetrics, fetchProjectMetricsHistory, fetchProjectConnectors,
   updateProject, poolBreakdown, MetricsSnapshot,
-  HISTORY_RANGES, HistoryRange,
+  HISTORY_RANGES, HISTORY_GAP_MS, HistoryRange,
 } from '../api/client'
 import { useProject } from '../contexts/ProjectContext'
 import { formatRangeTick, rangeDomain, useTimeRange } from '../contexts/TimeRangeContext'
@@ -20,6 +20,7 @@ import { bytesShort, compact, formatBytes, formatMoney, parseApiDate, plural } f
 import { targetTotal, describeTarget, isDynamic } from '../utils/connectors'
 import { ProviderLogo } from '../components/ProviderLogo'
 import { Page } from '../components/layout/Page'
+import { LatencyChart } from '../components/charts/LatencyChart'
 import { Sparkline } from '../components/charts/Sparkline'
 import { ProjectLocations, LocationSummary } from '../components/ProjectLocations'
 import { TrafficSplitPanel, totalSpend } from '../components/TrafficSplit'
@@ -27,17 +28,11 @@ import { PERIOD_LABEL, TrafficUsageBar, describeUsage } from '../components/Conn
 import { Badge, Card, CardHeader, KeyValue, Segmented } from '../components/ui'
 import { cn } from '../utils/cn'
 
-// Gap thresholds per range: 2x the expected interval between points.
-const GAP_THRESHOLD_MS: Record<HistoryRange, number> = {
-  '1h': 120_000, '6h': 120_000, '24h': 120_000, '7d': 2 * 3600_000, '30d': 2 * 6 * 3600_000,
-}
-
 type ChartPoint = {
   time: number
   request_count: number | null
   success_count: number | null
   failure_count: number | null
-  avg_latency_ms: number | null
   bytes_sent: number | null
   bytes_received: number | null
 }
@@ -45,7 +40,7 @@ type ChartPoint = {
 /** Snapshots → chart points, inserting null markers so lines break across gaps. */
 function buildChartData(snapshots: MetricsSnapshot[], range: HistoryRange): ChartPoint[] {
   if (snapshots.length === 0) return []
-  const threshold = GAP_THRESHOLD_MS[range]
+  const threshold = HISTORY_GAP_MS[range]
   const points: ChartPoint[] = []
   for (let i = 0; i < snapshots.length; i++) {
     const s = snapshots[i]
@@ -55,7 +50,7 @@ function buildChartData(snapshots: MetricsSnapshot[], range: HistoryRange): Char
     if (i > 0) {
       const prevEpoch = parseApiDate(snapshots[i - 1].timestamp)?.getTime() ?? 0
       if (epoch - prevEpoch > threshold) {
-        points.push({ time: prevEpoch + 1, request_count: null, success_count: null, failure_count: null, avg_latency_ms: null, bytes_sent: null, bytes_received: null })
+        points.push({ time: prevEpoch + 1, request_count: null, success_count: null, failure_count: null, bytes_sent: null, bytes_received: null })
       }
     }
     points.push({
@@ -63,7 +58,6 @@ function buildChartData(snapshots: MetricsSnapshot[], range: HistoryRange): Char
       request_count: s.request_count,
       success_count: s.success_count,
       failure_count: s.failure_count,
-      avg_latency_ms: s.avg_latency_ms,
       bytes_sent: s.bytes_sent,
       bytes_received: s.bytes_received,
     })
@@ -102,7 +96,7 @@ function formatStrategy(strategy: string): string {
 }
 
 // Series colours are literal so charts read the same on every theme.
-const C = { requests: '#2563eb', successes: '#16a34a', failures: '#dc2626', latency: '#2563eb', sent: '#ea580c', received: '#0d9488' }
+const C = { requests: '#2563eb', successes: '#16a34a', failures: '#dc2626', sent: '#ea580c', received: '#0d9488' }
 // Tooltip rows follow the legend order; Recharts sorts them by name otherwise.
 const REQUEST_SERIES = ['request_count', 'success_count', 'failure_count']
 const TRAFFIC_SERIES = ['bytes_sent', 'bytes_received']
@@ -156,6 +150,8 @@ export default function Overview() {
   })
 
   const pool = metrics?.pool
+  // Over the successful requests: none yet has no average, not one of 0 ms.
+  const avgLatency = pool && pool.total_successes > 0 ? `${Math.round(pool.avg_latency_ms)} ms` : '-'
   const strategy = metrics?.strategy
   const snapshots = history?.snapshots ?? []
   const totals = useMemo(() => computeTotals(snapshots), [snapshots])
@@ -168,7 +164,6 @@ export default function Overview() {
     failures: sample(snapshots.map((s) => s.failure_count)),
     sent: sample(snapshots.map((s) => s.bytes_sent)),
     received: sample(snapshots.map((s) => s.bytes_received)),
-    latency: sample(snapshots.map((s) => s.avg_latency_ms)),
   }), [snapshots])
 
   const gridColor = isDark ? '#374151' : '#e5e7eb'
@@ -213,7 +208,7 @@ export default function Overview() {
           <div className="flex items-center justify-between gap-3 flex-wrap">
             <div className="text-sm font-semibold">Pool health</div>
             <div className="text-xs text-fg-muted tabular-nums min-w-0">
-              <b className="text-fg font-semibold">{total}</b> proxies · avg latency <b className="text-fg font-semibold">{Math.round(pool?.avg_latency_ms ?? 0)} ms</b>
+              <b className="text-fg font-semibold">{total}</b> proxies · avg latency <b className="text-fg font-semibold">{avgLatency}</b>
               {scaling && <> · <b className="text-fg font-semibold">{scaling.requests_per_minute.toFixed(0)}</b> req/min</>}
             </div>
           </div>
@@ -283,20 +278,8 @@ export default function Overview() {
 
           <div className="grid grid-cols-1 @lg:grid-cols-2 gap-4">
             <Card className="p-3.5">
-              <CardHeader title={<span className="text-[13px]">Latency</span>} action={<span className="text-xs text-fg-muted">avg {Math.round(pool?.avg_latency_ms ?? 0)} ms</span>} className="mb-1" />
-              {chartData.length === 0 ? (
-                <p className="text-fg-subtle text-xs text-center h-[110px] flex items-center justify-center">No data</p>
-              ) : (
-                <ResponsiveContainer width="100%" height={110}>
-                  <AreaChart data={chartData} margin={{ top: 6, right: 4, left: -20, bottom: 0 }} aria-label="Latency over time">
-                    <CartesianGrid strokeDasharray="2 4" stroke={gridColor} vertical={false} />
-                    <XAxis dataKey="time" type="number" scale="time" domain={timeDomain} tickFormatter={(v: number) => formatRangeTick(v, range)} tick={{ fontSize: 10, fill: tickColor }} axisLine={false} tickLine={false} minTickGap={48} />
-                    <YAxis tick={{ fontSize: 10, fill: tickColor }} axisLine={false} tickLine={false} tickFormatter={(v: number) => `${Math.round(v)}`} />
-                    <Tooltip labelFormatter={(v) => new Date(Number(v)).toLocaleString()} formatter={(v) => [`${Math.round(Number(v))} ms`, 'Latency']} contentStyle={tooltipStyle} />
-                    <Area connectNulls={false} type="monotone" dataKey="avg_latency_ms" name="Latency" stroke={C.latency} strokeWidth={2} fill={C.latency} fillOpacity={0.08} />
-                  </AreaChart>
-                </ResponsiveContainer>
-              )}
+              <CardHeader title={<span className="text-[13px]">Latency</span>} action={<span className="text-xs text-fg-muted" title="Over the successful requests, since the project started">avg {avgLatency}</span>} className="mb-1" />
+              <LatencyChart snapshots={snapshots} range={range} height={110} domain={timeDomain} compact />
             </Card>
             <Card className="p-3.5">
               <CardHeader title={<span className="text-[13px]">Traffic</span>} action={<ChartLegend items={[['Sent', C.sent], ['Received', C.received]]} small />} className="mb-1" />

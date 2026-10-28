@@ -69,7 +69,7 @@ class TestSnapshots:
         await db_session.commit()
         history = await metrics_repo.get_tunnel_peer_metrics_history(project.id, peer.id)
         assert len(history) == 1
-        assert history[0]["request_count"] == 4 and history[0]["avg_latency_ms"] == 42.0
+        assert history[0]["request_count"] == 4 and history[0]["avg_latency_ms"] == 56.0
         assert history[0]["connections_by_address"] == 2 and history[0]["encrypted_dns_blocked"] == 1
         row = (await db_session.execute(
             TunnelPeerMetricsModel.__table__.select().where(TunnelPeerMetricsModel.peer_id == peer.id)

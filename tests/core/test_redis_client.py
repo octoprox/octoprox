@@ -25,6 +25,7 @@ from api.core.stats import (
     FailureCountKey,
     FailureExample,
     MetricDelta,
+    StepMetricDelta,
     TunnelPeerMetricDelta,
 )
 from api.db.redis import (
@@ -142,8 +143,8 @@ DEVICE = TunnelPeerMetricDelta(
 # A window of every kind, as gateways leave them between two flushes.
 EVERY_KIND = MetricWindows(
     proxies={"p1": _requests(3), "p2": _requests(1, latency_ms=0.25)},
-    projects={"proj": _requests(4)},
-    connectors={"conn": _requests(4)},
+    projects={"proj": StepMetricDelta.summed(_requests(4))},
+    connectors={"conn": StepMetricDelta.summed(_requests(4))},
     tunnel_peers={"dev:1": DEVICE},
     hosts={HOST: _requests(2)},
     failures={COUNT: FailureCount(2), REFUSED: FailureCount(1)},
@@ -822,8 +823,8 @@ class TestMeteringBatch:
         assert 590 < await redis_client.client.ttl(demand) <= 600
         assert await redis_client.take_metric_windows("check") == MetricWindows(
             proxies={"p1": _requests(2, sent=1000)},
-            projects={"proj": _requests(2)},
-            connectors={"conn": _requests(1)},
+            projects={"proj": StepMetricDelta.summed(_requests(2))},
+            connectors={"conn": StepMetricDelta.summed(_requests(1))},
             tunnel_peers={"dev": device},
             hosts={host: _requests(1)},
         )
@@ -831,15 +832,17 @@ class TestMeteringBatch:
     async def test_windows_add_up_in_the_live_ones(self, redis_client: RedisClient) -> None:
         """Each window adds to its entity's: the counts, the latency sum (a fraction too) and the bytes."""
         failed = MetricDelta()
-        failed.add_request(False, 50.5, 500, 0)
-        for window in (_requests(2, sent=1000), failed):
+        failed.add_request(False, 50.0, 500, 0)
+        fraction = MetricDelta()
+        fraction.add_request(True, 50.5)
+        for window in (_requests(2, sent=1000), failed, fraction):
             parts = redis_client.metering_batch(MetricWindows(proxies={"p1": window}, projects={"proj": window}))
             assert await _outcomes(redis_client, parts) == [BatchOutcome.APPLIED]
 
         taken = await redis_client.take_metric_windows("check")
 
         for window in (taken.proxies["p1"], taken.projects["proj"]):
-            assert (window.request_count, window.success_count, window.failure_count) == (3, 2, 1)
+            assert (window.request_count, window.success_count, window.failure_count) == (4, 3, 1)
             assert window.latency_sum_ms == 250.5
             assert window.avg_latency_ms == 83.5
             assert (window.bytes_sent, window.bytes_received) == (2500, 4000)

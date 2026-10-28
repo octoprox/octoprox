@@ -3,7 +3,8 @@
 
 """Prometheus exposition of one process: each scrape turns the process's heartbeat snapshot into metric families.
 
-Every sample is labelled with the process's ``role``, and a scrape reads memory only, never Redis or Postgres.
+A gateway's latency histograms are read from its metering instead, so the heartbeat never carries them. Every sample is
+labelled with the process's ``role``, and a scrape reads memory only, never Redis or Postgres.
 """
 
 from __future__ import annotations
@@ -11,17 +12,24 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from enum import StrEnum
-from typing import TYPE_CHECKING, ClassVar
+from typing import TYPE_CHECKING
 
 from prometheus_client import CONTENT_TYPE_PLAIN_0_0_4, generate_latest
-from prometheus_client.core import CounterMetricFamily, GaugeMetricFamily, Metric
+from prometheus_client.core import (
+    CounterMetricFamily,
+    GaugeMetricFamily,
+    HistogramMetricFamily,
+    Metric,
+)
 from prometheus_client.registry import Collector, CollectorRegistry
 
 from api.core.stats import FailureKind
 from api.db.streams import FullRead
+from api.gateway.latency import LATENCY_BUCKETS
 from api.models.system import ApiSnapshot, ControllerSnapshot, GatewaySnapshot, WorkerSnapshot
 
 if TYPE_CHECKING:
+    from api.gateway.latency import LatencyHistogram
     from api.models.system import InstanceSnapshot
     from api.models.tunnel import TunnelEndpointState
 
@@ -36,6 +44,8 @@ CONTENT_TYPE = CONTENT_TYPE_PLAIN_0_0_4
 # Milliseconds in a second: the snapshot measures durations in ms, Prometheus
 # names durations in seconds.
 _MS_PER_SECOND = 1000.0
+# The ``le`` label of each latency bucket, the last one above every bound.
+_LATENCY_BOUNDS = (*(repr(bound) for bound in LATENCY_BUCKETS), "+Inf")
 
 
 class SectionFamilies(ABC):
@@ -326,6 +336,43 @@ class GatewayFamilies(RoleFamilies[GatewaySnapshot]):
         )
 
 
+class LatencyFamilies(SectionFamilies):
+    """A gateway's request latency and each of its steps, as histograms by connector and outcome.
+
+    Read from the gateway's metering on each scrape, since they grow with every connector and the heartbeat, which
+    publishes the snapshot, has no use for them.
+    """
+
+    def __init__(self, latencies: Callable[[], Sequence[LatencyHistogram]]) -> None:
+        self._latencies = latencies
+
+    def families(self, snapshot: InstanceSnapshot) -> Iterator[Metric]:
+        histograms = self._latencies()
+        if not histograms:
+            return
+        role = snapshot.runtime.role.value
+        labels = ["role", "connector", "name", "outcome"]
+        whole = HistogramMetricFamily(
+            f"{METRIC_PREFIX}_gateway_request_duration_seconds",
+            "Time from taking a request up to its tunnel being up or its response starting, or to its failure, "
+            "by connector and outcome",
+            labels=labels,
+        )
+        steps = HistogramMetricFamily(
+            f"{METRIC_PREFIX}_gateway_request_step_duration_seconds",
+            "The request duration by step: route (choosing the proxy), preflight (checking its exit), connect (to the "
+            "vendor), handshake (the vendor reaching the target) and response (a plain HTTP request's status line)",
+            labels=[*labels, "step"],
+        )
+        for series in histograms:
+            values = [role, series.connector_id, series.connector_name, "success" if series.success else "failure"]
+            family = whole if series.step is None else steps
+            if series.step is not None:
+                values.append(series.step)
+            family.add_metric(values, _cumulative(series.buckets), series.sum_seconds)
+        yield from (whole, steps)
+
+
 class ControllerFamilies(RoleFamilies[ControllerSnapshot]):
     """A controller's lease, compiles and publishes; failing steps and install readings while it leads."""
 
@@ -457,27 +504,29 @@ class WorkerFamilies(RoleFamilies[WorkerSnapshot]):
 
 
 class SnapshotCollector(Collector):
-    """Turns the process's snapshot into metric families each time Prometheus scrapes."""
+    """Turns the process's snapshot, and a gateway's latency histograms, into metric families each time Prometheus scrapes."""
 
-    # Every part of the snapshot, in the order a scrape renders its families.
-    SECTIONS: ClassVar[tuple[SectionFamilies, ...]] = (
-        RuntimeFamilies(),
-        LoopLagFamilies(),
-        LoopFamilies(),
-        StreamFamilies(),
-        ApiFamilies(),
-        GatewayFamilies(),
-        ControllerFamilies(),
-        WorkerFamilies(),
-    )
-
-    def __init__(self, snapshot: Callable[[], InstanceSnapshot]) -> None:
+    def __init__(
+        self, snapshot: Callable[[], InstanceSnapshot], latencies: Callable[[], Sequence[LatencyHistogram]]
+    ) -> None:
         self._snapshot = snapshot
+        # Every part of the process, in the order a scrape renders its families.
+        self._sections: tuple[SectionFamilies, ...] = (
+            RuntimeFamilies(),
+            LoopLagFamilies(),
+            LoopFamilies(),
+            StreamFamilies(),
+            ApiFamilies(),
+            GatewayFamilies(),
+            LatencyFamilies(latencies),
+            ControllerFamilies(),
+            WorkerFamilies(),
+        )
 
     def collect(self) -> Iterator[Metric]:
         """Every family of one snapshot, built once per scrape."""
         snapshot = self._snapshot()
-        for section in self.SECTIONS:
+        for section in self._sections:
             yield from section.families(snapshot)
 
 
@@ -487,11 +536,18 @@ class Telemetry:
     A registry of its own rather than ``prometheus_client``'s global one, so
     a process renders exactly what its node reports, and two nodes built in
     one test process never share a metric.
+
+    Args:
+        latencies: the gateway's latency histograms as they stand; none for a process without a gateway.
     """
 
-    def __init__(self, snapshot: Callable[[], InstanceSnapshot]) -> None:
+    def __init__(
+        self,
+        snapshot: Callable[[], InstanceSnapshot],
+        latencies: Callable[[], Sequence[LatencyHistogram]] = tuple,
+    ) -> None:
         self.registry = CollectorRegistry(auto_describe=False)
-        self.registry.register(SnapshotCollector(snapshot))
+        self.registry.register(SnapshotCollector(snapshot, latencies))
 
     def render(self) -> bytes:
         """The text exposition of every family, from a snapshot built now."""
@@ -515,6 +571,16 @@ def _sample[F: GaugeMetricFamily | CounterMetricFamily](family: F, role: str, va
     """``family`` with its one sample, labelled with the process's role."""
     family.add_metric([role], value)
     return family
+
+
+def _cumulative(counts: Sequence[int]) -> list[tuple[str, float]]:
+    """Per-bucket counts (``LATENCY_BUCKETS``, then above the last) as a histogram's cumulative buckets, ``+Inf`` last."""
+    buckets: list[tuple[str, float]] = []
+    total = 0
+    for bound, count in zip(_LATENCY_BOUNDS, counts, strict=True):
+        total += count
+        buckets.append((bound, total))
+    return buckets
 
 
 def _counted_from_zero(values: type[StrEnum], counts: Mapping[str, int]) -> dict[str, int]:

@@ -271,7 +271,20 @@ class ProxyMetricsModel(Base):
     granularity: Mapped[int] = mapped_column(Integer, default=60, nullable=False)
 
 
-class ProjectMetricsModel(Base):
+class StepLatencyColumns:
+    """Each step's average latency over a history row's successful requests (``StepMetricDelta``), in milliseconds.
+
+    NULL in the rows written before steps were kept; the steps a request skipped count as 0 in the average.
+    """
+
+    avg_route_ms: Mapped[float | None] = mapped_column(Float, nullable=True)
+    avg_preflight_ms: Mapped[float | None] = mapped_column(Float, nullable=True)
+    avg_connect_ms: Mapped[float | None] = mapped_column(Float, nullable=True)
+    avg_handshake_ms: Mapped[float | None] = mapped_column(Float, nullable=True)
+    avg_response_ms: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+
+class ProjectMetricsModel(StepLatencyColumns, Base):
     """SQLAlchemy model for historical project-level metrics (flushed from Redis).
 
     These metrics persist across proxy rotation, providing aggregate metrics
@@ -296,7 +309,7 @@ class ProjectMetricsModel(Base):
     granularity: Mapped[int] = mapped_column(Integer, default=60, nullable=False)
 
 
-class ConnectorMetricsModel(Base):
+class ConnectorMetricsModel(StepLatencyColumns, Base):
     """Historical metrics per connector, the unit vendors bill and traffic limits apply to (flushed from Redis).
 
     The rows outlive the connector's proxies, and have the shape and compaction tiers of the other metrics tables.
@@ -427,7 +440,7 @@ class MetricTotalsModel(Base):
     request_count: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
     success_count: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
     failure_count: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
-    # A sum, as in MetricDelta, so windows add; the average is derived.
+    # A sum over the successful requests, as in MetricDelta, so windows add; the average is derived.
     latency_sum_ms: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
     bytes_sent: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
     bytes_received: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)

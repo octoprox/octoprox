@@ -50,6 +50,12 @@ class FailureRecord(BaseModel):
         None, description="What the vendor said about its refusal besides the status: its error headers and body text"
     )
     latency_ms: float | None = Field(None, description="Average time until the failure")
+    step: str | None = Field(
+        None, description="The step of the request's latency it failed in: route, preflight, connect, handshake or response"
+    )
+    steps: dict[str, float] | None = Field(
+        None, description="Milliseconds each step took for the first failure of the example, by step"
+    )
     count: int = Field(description="How many failures this example stands for")
     first_at: str
     last_at: str

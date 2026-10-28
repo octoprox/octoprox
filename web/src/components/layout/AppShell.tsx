@@ -379,7 +379,7 @@ function PoolTicker({ projectId }: { projectId: string }) {
       <TickerDot className="bg-orange-500" value={quarantined} title="Quarantined" />
       <TickerDot className="bg-danger" value={unhealthy} title="Unhealthy, initializing or unknown" />
       <span className="text-line-strong max-sm:hidden">|</span>
-      <span title="Average latency">{Math.round(pool.avg_latency_ms)} ms</span>
+      <span title="Average latency of the successful requests">{pool.total_successes > 0 ? `${Math.round(pool.avg_latency_ms)} ms` : '- ms'}</span>
       {scaling && (
         <>
           <span className="text-line-strong max-sm:hidden">|</span>

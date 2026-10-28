@@ -33,7 +33,8 @@ from api.core.signals import (
     tunnel_encrypted_dns_blocked,
     tunnel_name_unresolved,
 )
-from api.core.stats import HOST_OVERFLOW, MetricDelta, TunnelPeerMetricDelta
+from api.core.stats import HOST_OVERFLOW, MetricDelta, StepMetricDelta, TunnelPeerMetricDelta
+from api.core.timing import Step
 from api.core.traffic_limiter import PROGRESS_REPORT_BYTES
 from api.core.workers import WorkerName
 from api.db.redis import (
@@ -268,12 +269,13 @@ class TestCounting:
         assert harness.metering.pending == 6
 
         assert await harness.metering.flush() == 6
-        both = MetricDelta(request_count=2, success_count=1, failure_count=1, latency_sum_ms=80.0, bytes_sent=11,
+        # The latency is the success's alone: the failure's time to fail is no latency.
+        both = MetricDelta(request_count=2, success_count=1, failure_count=1, latency_sum_ms=50.0, bytes_sent=11,
                            bytes_received=21)
         first = MetricDelta(request_count=1, success_count=1, latency_sum_ms=50.0, bytes_sent=10, bytes_received=20)
         assert await window(redis_client, PROXY_WINDOWS, proxy.id) == both
-        assert await window(redis_client, CONNECTOR_WINDOWS, proxy.connector_id) == both
-        assert await window(redis_client, PROJECT_WINDOWS, PROJECT) == both
+        assert await window(redis_client, CONNECTOR_WINDOWS, proxy.connector_id) == StepMetricDelta.summed(both)
+        assert await window(redis_client, PROJECT_WINDOWS, PROJECT) == StepMetricDelta.summed(both)
         assert (await live_windows(redis_client)).hosts == {(PROJECT, proxy.connector_id, "shop.example.com"): first}
         assert await window(redis_client, TUNNEL_PEER_WINDOWS, "device-1") == TunnelPeerMetricDelta(
             request_count=1, success_count=1, latency_sum_ms=50.0, bytes_sent=10, bytes_received=20,
@@ -282,6 +284,38 @@ class TestCounting:
         assert (await live_windows(redis_client)).proxies == {proxy.id: both}
         assert harness.metering.pending == 0
         assert await harness.metering.flush() == 0
+
+    async def test_the_project_and_connector_keep_the_successes_steps_and_the_histograms_every_request(
+        self, harness: Harness, redis_client: RedisClient
+    ) -> None:
+        proxy = harness.add(make_connector(name="geonode"))
+        harness.complete(proxy, latency_ms=100.0, steps={Step.ROUTE: 1.0, Step.CONNECT: 19.0, Step.HANDSHAKE: 80.0})
+        harness.complete(proxy, latency_ms=700.0, steps={Step.ROUTE: 1.0, Step.PREFLIGHT: 600.0, Step.HANDSHAKE: 99.0})
+        harness.complete(proxy, success=False, latency_ms=30000.0, steps={Step.ROUTE: 1.0, Step.HANDSHAKE: 29999.0})
+        await harness.metering.flush()
+
+        steps = StepMetricDelta(
+            request_count=3, success_count=2, failure_count=1, latency_sum_ms=800.0, bytes_sent=3, bytes_received=6,
+            route_sum_ms=2.0, preflight_sum_ms=600.0, connect_sum_ms=19.0, handshake_sum_ms=179.0,
+        )
+        assert await window(redis_client, PROJECT_WINDOWS, PROJECT) == steps
+        assert await window(redis_client, CONNECTOR_WINDOWS, proxy.connector_id) == steps
+        # The proxy's and host's windows keep no steps: they would only grow the busiest windows.
+        proxy_window = await read_hash(redis_client, PROXY_METRICS_KEY.format(proxy_id=proxy.id))
+        assert not {name for name in proxy_window if name.endswith("_sum_ms") and name != "latency_sum_ms"}
+
+        histograms = {(h.success, h.step): h for h in harness.metering.latencies.snapshot()}
+        assert {h.connector_name for h in histograms.values()} == {"geonode"}
+        assert (sum(histograms[(True, None)].buckets), histograms[(True, None)].sum_seconds) == (2, 0.8)
+        assert sum(histograms[(True, "preflight")].buckets) == 1
+        assert sum(histograms[(False, "handshake")].buckets) == 1
+        assert (True, "response") not in histograms
+
+    async def test_a_proxy_gone_from_the_snapshot_has_no_histogram(self, harness: Harness) -> None:
+        """Its connector is unknown, so there is nothing to label the latency with."""
+        harness.complete(Proxy(id="gone", host="10.0.0.9", port=8080, connector_id="connector-x"),
+                         steps={Step.ROUTE: 1.0})
+        assert harness.metering.latencies.snapshot() == []
 
     async def test_progress_counts_bytes_and_the_request_counts_when_it_ends(
         self, harness: Harness, redis_client: RedisClient

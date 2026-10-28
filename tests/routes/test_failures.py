@@ -37,6 +37,8 @@ def _entry(i: int = 0, kind: str = "upstream_rejected", **overrides: Any) -> tup
         "proxy": "brd.superproxy.io:33335",
         "upstream_status": 407,
         "upstream_message": "x-brd-error: Auth failed",
+        "step": "handshake",
+        "steps": {"route": 0.5, "connect": 30.0, "handshake": 11.0},
     }
     fields.update(overrides)
     return kind, {k: v for k, v in fields.items() if v is not None}
@@ -134,7 +136,10 @@ class TestListFailures:
         project_id = created_project["id"]
         await _append(redis_client, project_id, [
             _entry(0),
-            _entry(1, kind="upstream_timeout", status=504, upstream_status=None, upstream_message=None, message="No answer"),
+            _entry(
+                1, kind="upstream_timeout", status=504, upstream_status=None, upstream_message=None, message="No answer",
+                step=None, steps=None,
+            ),
             _entry(2),
         ])
 
@@ -151,6 +156,9 @@ class TestListFailures:
         assert record["connector_name"] == "Bright Data"
         assert record["session_id"] is None
         assert (data["records"][1]["upstream_status"], data["records"][1]["upstream_message"]) == (None, None)
+        # The step it failed in and the first one's step timings; none from a log written before steps were kept.
+        assert (record["step"], record["steps"]) == ("handshake", {"route": 0.5, "connect": 30.0, "handshake": 11.0})
+        assert (data["records"][1]["step"], data["records"][1]["steps"]) == (None, None)
         assert data["total"] == 3
         assert data["newest"] > 0
 

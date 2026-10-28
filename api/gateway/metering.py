@@ -31,16 +31,24 @@ from api.core.signals import (
     tunnel_encrypted_dns_blocked,
     tunnel_name_unresolved,
 )
-from api.core.stats import MetricDelta, TunnelPeerMetricDelta, fold_host_tail, normalize_host
+from api.core.stats import (
+    MetricDelta,
+    StepMetricDelta,
+    TunnelPeerMetricDelta,
+    fold_host_tail,
+    normalize_host,
+)
 from api.core.tasks import HeldTasks
 from api.core.traffic_limiter import TrafficMeter
 from api.core.workers import WorkerName
 from api.db.redis import MetricWindows
+from api.gateway.latency import RequestLatencies
 from api.models.connector import DEFAULT_TRAFFIC_LIMIT_STATUS, TrafficLimitAction
 
 if TYPE_CHECKING:
     from api.core.rate_limiter import RateLimiter
     from api.core.stats import DemandCountKey
+    from api.core.timing import Step
     from api.db.redis import BatchPart, BatchReply, RedisClient
     from api.models.proxy import Proxy
     from api.routing.inflight import InFlight
@@ -66,7 +74,8 @@ class RequestMetering(BatchPublisher):
     """A gateway's request counters, and the publisher that adds them to Redis a window at a time; each gateway runs one.
 
     Every :class:`~api.core.traffic_limiter.TrafficMeter` reports to it, and each finished request's outcome goes to the
-    gateway's :class:`~api.routing.outcomes.LocalOutcomes`, which its routing strategies read.
+    gateway's :class:`~api.routing.outcomes.LocalOutcomes`, which its routing strategies read, and its latency to the
+    histograms ``/metrics`` exports.
 
     Args:
         redis_client: takes each window on its ``metering`` batch channel, one writer per process.
@@ -106,6 +115,8 @@ class RequestMetering(BatchPublisher):
         self._held = HeldTasks()
         # Every request and byte this gateway carried since it started, for its snapshot.
         self.totals = MetricDelta()
+        # Every request's latency and steps since it started, by connector, for its snapshot.
+        self.latencies = RequestLatencies()
         # Sends that did not land whole since start: Redis did not answer or
         # refused a part (sent again), or a part's script failed (dropped).
         self.failed_flushes = 0
@@ -145,12 +156,13 @@ class RequestMetering(BatchPublisher):
         bytes_received: int,
         peer_id: str | None = None,
         target_host: str | None = None,
+        steps: Mapping[Step, float] | None = None,
         **_: object,
     ) -> None:
         """``request_completed`` from a listener."""
         try:
             self.record_completed(
-                proxy_id, project_id, success, latency_ms, bytes_sent, bytes_received, peer_id, target_host
+                proxy_id, project_id, success, latency_ms, bytes_sent, bytes_received, peer_id, target_host, steps
             )
         except Exception:
             logger.error("Counting a request failed", proxy_id=proxy_id, project_id=project_id, exc_info=True)
@@ -188,19 +200,22 @@ class RequestMetering(BatchPublisher):
         bytes_received: int,
         peer_id: str | None = None,
         target_host: str | None = None,
+        steps: Mapping[Step, float] | None = None,
     ) -> None:
         """Count one finished request, its bytes being what its meter had not reported yet; never blocks.
 
-        A request through a connector with a rate limit is also counted in the proxy's shared window, in a held task.
+        ``steps`` is its latency by step (``RequestTimer.steps``). A request through a connector with a rate limit is
+        also counted in the proxy's shared window, in a held task.
         """
         view = self._router.snapshot.view_of(proxy_id)
         for delta in self._deltas(proxy_id, project_id, view, peer_id, target_host):
-            delta.add_request(success, latency_ms, bytes_sent, bytes_received)
+            delta.add_request(success, latency_ms, bytes_sent, bytes_received, steps)
         self.totals.add_request(success, latency_ms, bytes_sent, bytes_received)
         self._demand[(project_id, demand_minute(self._clock()), DEMAND_REQUESTS_FIELD)] += 1
         if view is None:
             return
         self._outcomes.record(proxy_id, success, latency_ms)
+        self.latencies.record(view.connector.id, view.connector.name, success, latency_ms, steps or {})
         rate = view.rate_limit
         if rate is not None:
             self._held.spawn(
@@ -243,14 +258,14 @@ class RequestMetering(BatchPublisher):
         """The pending deltas one request or transfer counts on: its project, and its tunnel device when it came through one.
 
         Its proxy, connector and destination host only while the proxy is in the routing snapshot, since a proxy
-        deleted meanwhile has nothing to count on.
+        deleted meanwhile has nothing to count on. The project's and connector's keep the latency by step.
         """
         window = self._windows
-        deltas = [window.projects.setdefault(project_id, MetricDelta())]
+        deltas: list[MetricDelta] = [window.projects.setdefault(project_id, StepMetricDelta())]
         if view is not None:
             connector_id = view.connector.id
             deltas.append(window.proxies.setdefault(proxy_id, MetricDelta()))
-            deltas.append(window.connectors.setdefault(connector_id, MetricDelta()))
+            deltas.append(window.connectors.setdefault(connector_id, StepMetricDelta()))
             host = normalize_host(target_host) if self._host_metrics else None
             if host is not None:
                 deltas.append(window.hosts.setdefault((project_id, connector_id, host), MetricDelta()))

@@ -202,7 +202,7 @@ export default function HostsPage() {
       header: 'Latency',
       size: 90,
       meta: { align: 'right' as const },
-      cell: ({ getValue, row }) => (row.original.request_count > 0 ? `${Math.round(getValue<number>()).toLocaleString()} ms` : '-'),
+      cell: ({ getValue, row }) => (row.original.success_count > 0 ? `${Math.round(getValue<number>()).toLocaleString()} ms` : '-'),
     },
     {
       id: 'share',
@@ -268,7 +268,7 @@ export default function HostsPage() {
         <Kpi label="Requests" value={totals ? compact(totals.request_count) : '-'} sub={totals && totals.request_count > 0 ? `${compact(totals.success_count)} ok` : undefined} />
         <Kpi label="Failure rate" value={failureRate == null ? '-' : `${failureRate.toFixed(1)}%`} sub={totals && totals.failure_count > 0 ? `${compact(totals.failure_count)} failed` : undefined} tone={failureRate != null && failureRate >= 10 ? 'danger' : undefined} />
         <Kpi label="Data transferred" value={totals ? bytesShort(transferred) : '-'} sub={totals ? `${bytesShort(totals.bytes_sent)} sent · ${bytesShort(totals.bytes_received)} received` : undefined} />
-        <Kpi label="Avg latency" value={totals && totals.request_count > 0 ? `${Math.round(totals.avg_latency_ms)} ms` : '-'} sub="to the upstream proxy" />
+        <Kpi label="Avg latency" value={totals && totals.success_count > 0 ? `${Math.round(totals.avg_latency_ms)} ms` : '-'} sub="to the upstream proxy" />
       </Card>
 
       {nothingYet ? (
@@ -434,12 +434,12 @@ function ConnectorBreakdown({ host, nameOf, onOpenConnector }: {
               <span><span className="text-fg-subtle @xl:hidden">Success </span>{rate == null ? '-' : <span className={rate < 90 ? 'text-danger' : ''}>{rate.toFixed(1)}%</span>}</span>
               <span className="@xl:hidden"><span className="text-fg-subtle">Sent </span>{formatBytes(part.bytes_sent)}</span>
               <span className="@xl:hidden"><span className="text-fg-subtle">Received </span>{formatBytes(part.bytes_received)}</span>
-              <span className="@xl:hidden"><span className="text-fg-subtle">Latency </span>{part.request_count > 0 ? `${Math.round(part.avg_latency_ms)} ms` : '-'}</span>
+              <span className="@xl:hidden"><span className="text-fg-subtle">Latency </span>{part.success_count > 0 ? `${Math.round(part.avg_latency_ms)} ms` : '-'}</span>
               <span className="@xl:hidden"><span className="text-fg-subtle">Of this host </span>{formatShare(share)}</span>
             </span>
             <span className="hidden @xl:block tabular-nums text-right text-fg-muted">{formatBytes(part.bytes_sent)}</span>
             <span className="hidden @xl:block tabular-nums text-right text-fg-muted">{formatBytes(part.bytes_received)}</span>
-            <span className="hidden @xl:block tabular-nums text-right text-fg-muted">{part.request_count > 0 ? `${Math.round(part.avg_latency_ms)} ms` : '-'}</span>
+            <span className="hidden @xl:block tabular-nums text-right text-fg-muted">{part.success_count > 0 ? `${Math.round(part.avg_latency_ms)} ms` : '-'}</span>
             <span className="hidden @xl:inline-flex items-center justify-end gap-2 tabular-nums text-fg-muted">
               <span className="w-10 h-1 rounded-full bg-primary-soft overflow-hidden inline-block flex-none">
                 <span className="block h-full rounded-full bg-primary" style={{ width: `${Math.min(100, share)}%` }} />

@@ -50,6 +50,29 @@ Requests are counted by the [gateway]({{ site.baseurl }}/architecture) that carr
 
 Proxy history goes with its proxy; the running totals of a removed proxy, project or device are dropped by the next hourly compaction job.
 
+## Latency: Where the Time Goes
+
+A request's latency runs from Octoprox taking it up until its tunnel through the upstream proxy is up (for plain HTTP, until the response's status line arrives). It is split into the steps the request went through, so time spent in Octoprox can be told from time spent at the vendor:
+
+| Step | What it measures | Whose time |
+|------|------------------|------------|
+| Routing (`route`) | Choosing the proxy: in memory, apart from a sticky session's binding in Redis and a `-cc-` request waiting for an on-demand country group | Octoprox |
+| Preflight (`preflight`) | [Exit verification]({{ site.baseurl }}/location-routing#preflight), only for the requests it applies to: a cached verdict is one Redis read, anything else an echo through the proxy, and through other proxies when it is retried | The vendor's, spent on Octoprox's check |
+| Connect (`connect`) | Opening the connection to the vendor's gateway | The network to the vendor |
+| Handshake (`handshake`) | From the tunnel request until the vendor answers it: the vendor picks an exit and reaches the target | The vendor |
+| Response (`response`) | Plain HTTP only: from sending the request upstream until its status line | The vendor and the target site |
+
+The steps add up to the latency. A SOCKS upstream opens its connection and does its handshake in one call, so all of its time is under Handshake. A [dynamic-sessions]({{ site.baseurl }}/providers#descriptor-reference) gateway used without `-sessid-` gets a new vendor session for every request, so there is no verdict to reuse: such a request is echoed whenever the project's rules could refuse it for its location, and otherwise only a sample of them is.
+
+Latency is averaged over the **successful** requests only. A failed request's time is how long it took to fail, a timeout's the whole timeout, so averaging failures in let a few timeouts move the line; the Failures page shows the time to fail instead.
+
+- The **Overview**'s Latency chart stacks the steps over time, and its legend gives each step's average over the range. Each connector's panel on the **Connectors** page has the same chart for that connector, to compare vendors.
+- Project and connector history (`GET /projects/{id}/metrics/history`, `GET /projects/{id}/connectors/{id}/metrics/history`) carry each step's average per point in `step_latency_ms`.
+- Each gateway's `/metrics` has histograms of the latency and of each step, by connector and outcome, for percentiles (see [Prometheus](#prometheus)).
+- A failure example on the **Failures** page names the step it failed in and how long each step took.
+
+History recorded before steps were kept has no split: the charts show it as one **Not split** band, and its averages were taken over every request, failures included. The all-time averages (a project's or a proxy's) keep the value they had at the upgrade and move toward the successes-only average as new requests come in.
+
 ## Hosts: Where the Traffic Goes
 
 Every request is also counted against the **destination host** it was for, under the connector that carried it: the `CONNECT` target for an HTTPS tunnel, the URL host for a plain HTTP request, and the recovered name (or the address, when no name could be recovered) for a connection from a tunnel device. Host names are folded to lower case without a trailing dot. The project's **Hosts** page in the web UI lists the hosts busiest first for a time range, with requests, success and failure counts, bytes each way, average latency and share, splits each host by connector, and charts the busiest hosts over time against the remainder. The API serves the same through [`GET /projects/{id}/metrics/hosts`]({{ site.baseurl }}/api#hosts) and `/metrics/hosts/history`.
@@ -63,7 +86,7 @@ The same counting rules apply here as above: a keep-alive tunnel is one request 
 The **Failures** page (under Overview in the web UI) says what the failure counts are made of. It has two parts, kept apart on purpose:
 
 - **What failed** counts every failure in the selected time range (1h to 30d, the same range as the other pages), by kind, by the vendor's status when it refused, and by connector, with a chart of the failures over time by kind. The counts come from the metrics history, so they trail live traffic by up to one flush interval (a minute by default) and are complete however many failures there are.
-- **Examples** list each distinct failure once, the ones seen last first: what went wrong, what the client was answered, the vendor's own answer, the target, the session and location asked for, the tunnel device it came from, and the connector and proxy that carried it, with how many times it happened between the first and the last time. Click a kind in the summary to see only its examples, and a row to open the example in full with a note on what that kind usually means. The table does not refresh while you read it: when examples are new or have happened again, a button says how many and loads them when clicked, and an opened example stays open.
+- **Examples** list each distinct failure once, the ones seen last first: what went wrong, what the client was answered, the vendor's own answer, the target, the session and location asked for, the tunnel device it came from, the connector and proxy that carried it, and the [step](#latency-where-the-time-goes) it failed in with how long each step took, with how many times it happened between the first and the last time. Click a kind in the summary to see only its examples, and a row to open the example in full with a note on what that kind usually means. The table does not refresh while you read it: when examples are new or have happened again, a button says how many and loads them when clicked, and an opened example stays open.
 
 | Kind | What happened | Client answered |
 |------|---------------|-----------------|
@@ -89,7 +112,7 @@ Vendor credentials never reach the log: they are scrubbed from error texts, and 
 Both are built to survive a broken upstream failing everything sent to it. Each gateway collects failures for 5 seconds and writes them to Redis in one round trip, so nothing on the request path waits for it:
 
 - The **counts** go to hashes that the metrics flush job turns into rows of a sixth history table (`failure_metrics`), with the same compaction tiers and retention as the other five. One row per project, connector, kind and vendor status per flush, whatever the volume.
-- The **examples** are kept per project and kind, so a flood of one kind never pushes out the examples of a rare one. Failures that differ only in time and session are one example with a count, whichever gateway saw them, so ten thousand identical timeouts are one row reading ×10K, and the row moves to the top each time the failure happens again. Each kind of a project gets at most `failure_log.max_per_window` distinct examples per window on each gateway; beyond that, failures are only counted. Each kind keeps the `failure_log.max_entries` examples seen last, each until it has not happened for `failure_log.retention_hours` (7 days).
+- The **examples** are kept per project and kind, so a flood of one kind never pushes out the examples of a rare one. Failures that differ only in time, session and step timings are one example with a count, whichever gateway saw them (the step timings shown are the first one's, a failure in another step is another example), so ten thousand identical timeouts are one row reading ×10K, and the row moves to the top each time the failure happens again. Each kind of a project gets at most `failure_log.max_per_window` distinct examples per window on each gateway; beyond that, failures are only counted. Each kind keeps the `failure_log.max_entries` examples seen last, each until it has not happened for `failure_log.retention_hours` (7 days).
 
 See [Configuration]({{ site.baseurl }}/configuration#failure-log) for the settings and [`GET /projects/{id}/failures`]({{ site.baseurl }}/api#failure-log) for the API. Clearing the examples on the page does not touch the counts.
 
@@ -106,11 +129,20 @@ Two kinds of Prometheus export exist.
 | every | `octoprox_build_info` (labels `version`, `instance_id`), `octoprox_uptime_seconds`, `octoprox_ready` (1 while `/ready` answers 200), `octoprox_event_loop_lag_max_seconds`, `octoprox_event_loop_lag_mean_seconds`; per background loop (`loop` label) `octoprox_loop_running`, `octoprox_loop_runs_total`, `octoprox_loop_failures_total`, `octoprox_loop_consecutive_failures`, the job producers and job runners included |
 | every process that follows a stream | per stream (`stream`: `changes`, `runtime`, `feed`): `octoprox_stream_lag_seconds`, how far behind the stream's newest entry the process's last read found it (0 when that read found nothing new or read in full; absent before the first read), `octoprox_stream_entries_total` and `octoprox_stream_full_reads_total` (`reason`: `start`, `gap`, `reconnect`, `reconcile`, each from the first scrape) |
 | api | `octoprox_api_db_pool_size`, `octoprox_api_db_pool_checked_out`, `octoprox_api_db_pool_overflow` |
-| gateway | `octoprox_gateway_requests_total` (`outcome`), `octoprox_gateway_bytes_total` (`direction`), `octoprox_gateway_failures_total` (`kind`, every failure kind from the first scrape), `octoprox_gateway_in_flight`, `octoprox_gateway_connections`, `octoprox_gateway_feed_age_seconds`, `octoprox_gateway_preflight_checks_total`, `octoprox_gateway_preflight_rejections_total`, `octoprox_gateway_exclusions` (`kind`: `retired`, `quarantined`), `octoprox_gateway_pending` and `octoprox_gateway_dropped_total` (`buffer`), `octoprox_gateway_metric_flush_failures_total`, `octoprox_gateway_rate_limit_errors_total`, `octoprox_gateway_ip_databases` (`state`: `loaded`, `missing`); with tunnels, `octoprox_gateway_tunnel_up`, `octoprox_gateway_tunnel_restarts_total`, `octoprox_gateway_tunnel_denied_total` (`protocol`) and `octoprox_gateway_tunnel_connections` |
+| gateway | `octoprox_gateway_requests_total` (`outcome`), `octoprox_gateway_bytes_total` (`direction`), the histograms `octoprox_gateway_request_duration_seconds` and `octoprox_gateway_request_step_duration_seconds` (`step`: `route`, `preflight`, `connect`, `handshake`, `response`), both by `connector` (its id), `name` (its name) and `outcome`, `octoprox_gateway_failures_total` (`kind`, every failure kind from the first scrape), `octoprox_gateway_in_flight`, `octoprox_gateway_connections`, `octoprox_gateway_feed_age_seconds`, `octoprox_gateway_preflight_checks_total`, `octoprox_gateway_preflight_rejections_total`, `octoprox_gateway_exclusions` (`kind`: `retired`, `quarantined`), `octoprox_gateway_pending` and `octoprox_gateway_dropped_total` (`buffer`), `octoprox_gateway_metric_flush_failures_total`, `octoprox_gateway_rate_limit_errors_total`, `octoprox_gateway_ip_databases` (`state`: `loaded`, `missing`); with tunnels, `octoprox_gateway_tunnel_up`, `octoprox_gateway_tunnel_restarts_total`, `octoprox_gateway_tunnel_denied_total` (`protocol`) and `octoprox_gateway_tunnel_connections` |
 | controller | `octoprox_controller_leader`, `octoprox_controller_lease_terms_total`, `octoprox_controller_compiles_total`, `octoprox_controller_publishes_total`, `octoprox_controller_sections_written_total`, `octoprox_controller_sections_removed_total`, `octoprox_controller_compile_duration_seconds`, `octoprox_controller_publish_duration_seconds`; from the leader only, `octoprox_controller_failing` (`step`: `compile`, `publish`), `octoprox_controller_feed_sections`, `octoprox_controller_quarantined_proxies` and `octoprox_controller_blocked_connectors` |
 | worker | per job kind (`kind`): `octoprox_worker_job_runs_total`, `octoprox_worker_job_failures_total` (batches whose run raised: delivered again, and given up after repeated deliveries), `octoprox_worker_job_duration_seconds_total` and `octoprox_worker_jobs_in_flight`; `octoprox_worker_sightings_consumed_total`, `octoprox_worker_sightings_dropped_total`, `octoprox_worker_observations_consumed_total` and `octoprox_worker_observations_dropped_total` (dropped: given up after repeated deliveries) |
 
 Counters run from the process's start. The controller's install-wide gauges come only from the leader, so summing them over every controller counts each once. A metrics flush's time is the `metrics_flush` kind's `octoprox_worker_job_duration_seconds_total` over its runs.
+
+The latency histograms count each finished request once, on the gateway that carried it: its whole [latency](#latency-where-the-time-goes), failures included under `outcome="failure"`, and each step it went through. Their buckets run from 1 ms to 60 s. For example, the 95th percentile of each step per connector, and the share of the latency each step takes:
+
+```promql
+histogram_quantile(0.95, sum by (le, name, step) (rate(octoprox_gateway_request_step_duration_seconds_bucket{outcome="success"}[5m])))
+
+sum by (step) (rate(octoprox_gateway_request_step_duration_seconds_sum{outcome="success"}[5m]))
+  / scalar(sum(rate(octoprox_gateway_request_duration_seconds_sum{outcome="success"}[5m])))
+```
 
 No process exports the depth of the work streams, since a scrape reads only the process's memory. The workers' autoscaler reads the streams from Redis itself (see [Running on Kubernetes]({{ site.baseurl }}/kubernetes#scaling)), and KEDA exports what it read as its own scaler metric, `keda_scaler_metrics_value`, one series per trigger: that is the gauge to chart and alert on for a backlog. The System page shows the same per stream: length, pending, queued, consumers and the oldest entry's age.
 
@@ -142,7 +174,7 @@ When [TLS interception](tls-interception) is enabled, Octoprox terminates the cl
 This counting behavior also affects:
 
 - **Rate limiting** - Rate limits are evaluated per CONNECT tunnel, not per HTTP request within a tunnel. A client sending 100 requests over a single keep-alive connection only triggers one rate limit check. [Traffic limits]({{ site.baseurl }}/traffic-limits) are unaffected: they count bytes, which are metered inside the tunnel.
-- **Latency tracking** - `avg_latency_ms` is the time from Octoprox taking a request until its tunnel through the upstream proxy is up (the first response line for plain HTTP), or until it is refused or fails. Choosing the proxy and the exit verification echo are part of it, as they are part of the client's wait. It is not the latency of individual HTTP requests within the tunnel, nor how long the tunnel stays open.
+- **Latency tracking** - `avg_latency_ms` is the average, over the successful requests, of the time from Octoprox taking a request until its tunnel through the upstream proxy is up (the first response line for plain HTTP). Choosing the proxy and the exit verification echo are part of it, as they are part of the client's wait, and [its steps](#latency-where-the-time-goes) say how much. It is not the latency of individual HTTP requests within the tunnel, nor how long the tunnel stays open.
 
 ## Workarounds
 

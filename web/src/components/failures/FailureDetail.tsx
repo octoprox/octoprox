@@ -3,9 +3,10 @@
 
 import { type ReactNode } from 'react'
 import { FailureRecord } from '../../api/client'
-import { formatDateTime, formatTime, parseApiDate } from '../../utils/format'
+import { formatDateTime, formatMs, formatTime, parseApiDate } from '../../utils/format'
 import { Badge, Inspector, InspectorSection, KeyValue } from '../ui'
 import { CopyButton, StatusCodeBadge } from '../mitm/RequestDetail'
+import { LATENCY_STEPS } from '../charts/LatencyChart'
 
 /** Where a kind of failure comes from, which decides whether Overview counts it. */
 export type FailureGroup = 'upstream' | 'refused' | 'intercepted' | 'other'
@@ -136,11 +137,6 @@ export function formatWhen(value: string): string {
   return d.toDateString() === today.toDateString() ? formatTime(value) : formatDateTime(value)
 }
 
-function ms(value: number): string {
-  if (value < 1) return '<1 ms'
-  return value >= 10000 ? `${(value / 1000).toFixed(1)} s` : `${Math.round(value)} ms`
-}
-
 export function FailurePanel({ record, onClose }: { record: FailureRecord; onClose: () => void }) {
   const info = kindInfo(record.kind)
   const tunnel = !!record.peer_id
@@ -193,9 +189,23 @@ export function FailurePanel({ record, onClose }: { record: FailureRecord; onClo
           <KeyValue label="Connector" value={record.connector_name || (record.connector_id ? 'deleted connector' : 'none chosen')} />
           {record.proxy && <KeyValue label="Proxy" value={record.proxy} mono />}
           {record.upstream_status != null && <KeyValue label="Vendor status" value={record.upstream_status} />}
-          {record.latency_ms != null && <KeyValue label={record.count > 1 ? 'Time to fail (average)' : 'Time to fail'} value={ms(record.latency_ms)} />}
+          {record.latency_ms != null && <KeyValue label={record.count > 1 ? 'Time to fail (average)' : 'Time to fail'} value={formatMs(record.latency_ms)} />}
         </div>
       </InspectorSection>
+
+      {record.steps && (
+        <InspectorSection title={record.count > 1 ? 'Steps (first failure)' : 'Steps'}>
+          <div>
+            {LATENCY_STEPS.filter((step) => record.steps?.[step.key] != null).map((step) => (
+              <KeyValue
+                key={step.key}
+                label={<span title={step.hint}>{step.label}{step.key === record.step && <Badge color="red" className="ml-2">failed here</Badge>}</span>}
+                value={formatMs(record.steps?.[step.key] ?? 0)}
+              />
+            ))}
+          </div>
+        </InspectorSection>
+      )}
 
       <InspectorSection title="When">
         <div>

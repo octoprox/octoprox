@@ -33,6 +33,7 @@ from api.core.failure_log import (
 )
 from api.core.job_stats import job_stats
 from api.core.stats import FailureKind
+from api.core.timing import RequestTimer, Step
 from api.core.workers import WorkerName
 from api.db.redis import (
     FAILURE_LOG_KEY,
@@ -186,6 +187,23 @@ class TestBuildFailure:
         assert len(failure.message) == MAX_MESSAGE_CHARS
 
 
+    def test_a_timer_gives_the_latency_the_step_it_failed_in_and_each_step_s_time(self) -> None:
+        timer = RequestTimer()
+        timer.enter(Step.CONNECT)
+        timer.enter(Step.HANDSHAKE)
+
+        failure = build_failure("p1", FailureKind.UPSTREAM_TIMEOUT, 504, "timed out", proxy=_proxy(), timer=timer)
+
+        assert failure.step == "handshake"
+        assert failure.steps is not None and set(failure.steps) == {"route", "connect", "handshake"}
+        assert failure.latency_ms == round(timer.stop(), 1)
+
+    def test_without_a_timer_there_are_no_steps(self) -> None:
+        """A refusal before any proxy, or a request inside an intercepted connection."""
+        failure = build_failure("p1", FailureKind.NO_PROXY_AVAILABLE, 502, "none")
+        assert (failure.step, failure.steps) == (None, None)
+
+
 class TestClassifyUpstreamError:
     def test_http_vendor_refusal_carries_its_status(self) -> None:
         exc = ProxyError("407 Proxy Authentication Required", error_code=407)
@@ -252,6 +270,19 @@ class TestWindow:
         await log.flush()
         entries = redis.failures_batch.call_args.args[0]
         assert sorted(e.count for e in entries) == [1, 2]
+
+    async def test_the_step_splits_a_burst_and_the_first_one_s_timings_are_written_in(self) -> None:
+        """A timeout in preflight and one in the handshake are two failures; one's own timings are not."""
+        redis = _recording_redis()
+        log = FailureLog(redis, _settings())
+        log.record(_failure(step="handshake", steps={"route": 1.0, "handshake": 29999.0}))
+        log.record(_failure(step="handshake", steps={"route": 3.0, "handshake": 29997.0}))
+        log.record(_failure(step="preflight", steps={"route": 1.0, "preflight": 29999.0}))
+
+        await log.flush()
+        entries = sorted(redis.failures_batch.call_args.args[0], key=lambda e: e.count)
+        assert [(e.count, _fields(e)["step"]) for e in entries] == [(1, "preflight"), (2, "handshake")]
+        assert _fields(entries[1])["steps"] == {"route": 1.0, "handshake": 29999.0}
 
     async def test_past_the_cap_failures_are_counted_but_not_kept(self) -> None:
         redis = _recording_redis()

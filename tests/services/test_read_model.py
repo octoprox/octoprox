@@ -22,7 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from api.core import utc_now
 from api.core.demand_tracker import DemandLevel, DemandTracker
-from api.core.stats import MetricDelta, TunnelPeerMetricDelta
+from api.core.stats import MetricDelta, StepMetricDelta, TunnelPeerMetricDelta
 from api.core.traffic_limiter import ConnectorTraffic
 from api.db.redis import (
     CONNECTOR_METRICS_KEY,
@@ -231,11 +231,11 @@ class TestCounters:
 
         counters = await view.counters(PROJECT_WINDOWS, [project.id, "never-counted"])
 
-        assert counters[project.id] == MetricDelta(
+        assert counters[project.id] == StepMetricDelta(
             request_count=12, success_count=11, failure_count=1, latency_sum_ms=1200.0, bytes_sent=5
         )
-        assert counters[project.id].avg_latency_ms == pytest.approx(100.0)
-        assert counters["never-counted"] == MetricDelta()
+        assert counters[project.id].avg_latency_ms == pytest.approx(1200 / 11)
+        assert counters["never-counted"] == StepMetricDelta()
 
     async def test_a_tunnel_devices_counters_carry_its_name_resolution_signals(
         self, view: RuntimeView, sessions: async_sessionmaker[AsyncSession], redis_client: RedisClient

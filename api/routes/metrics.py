@@ -138,7 +138,11 @@ class MetricsSnapshot(BaseModel):
     request_count: int
     success_count: int
     failure_count: int
-    avg_latency_ms: float
+    # Over the successful requests; None when none succeeded.
+    avg_latency_ms: float | None
+    # Each step's average over the successful requests (route, preflight, connect, handshake, response), adding up to
+    # avg_latency_ms; None when none succeeded or for history from before steps were kept.
+    step_latency_ms: dict[str, float] | None = None
     bytes_sent: int
     bytes_received: int
 
