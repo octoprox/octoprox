@@ -10,6 +10,23 @@
 #   changes  what changed, for the people who use Octoprox; `docs` is a page
 #            on octoprox.com that explains it, such as connecting#exit-headers
 
+- version: 6.2.0
+  date: 2026-10-28
+  title: Latency split by request step
+  changes:
+    - text: "Latency is split into the steps a request goes through: routing, preflight, connect, handshake and response. You can tell time spent in Octoprox from time spent at the vendor."
+      docs: metrics#latency-where-the-time-goes
+    - text: "The Overview's Latency chart stacks the steps over time, and its legend gives each step's average for the range. Each connector's panel on the Connectors page has the same chart, so you can compare vendors."
+      docs: metrics#latency-where-the-time-goes
+    - text: "Average latency counts successful requests only, so a few timeouts no longer move the line. History from before the upgrade shows as one 'Not split' band and still includes failures, and all-time averages move toward the new value as traffic comes in."
+      docs: metrics#latency-where-the-time-goes
+    - text: "Each failure example on the Failures page names the step it failed in and how long each step took. The failure log API returns the same."
+      docs: api#failure-log
+    - text: "Project and connector metrics history in the API give each step's average latency per point."
+      docs: api#metrics-history
+    - text: "Each gateway's Prometheus metrics include latency histograms for the whole request and for each step, by connector and outcome, so you can chart percentiles."
+      docs: metrics#prometheus
+
 - version: 6.1.6
   date: 2026-10-28
   title: Clearer worker job failure status
