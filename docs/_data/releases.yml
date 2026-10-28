@@ -10,6 +10,15 @@
 #   changes  what changed, for the people who use Octoprox; `docs` is a page
 #            on octoprox.com that explains it, such as connecting#exit-headers
 
+- version: 6.1.6
+  date: 2026-10-28
+  title: Clearer worker job failure status
+  changes:
+    - text: "On the System page, a worker job's failure count is red only while the job is still failing. A job that failed in a past outage and has since recovered keeps its count without the red, and hovering the count shows whether it recovered or how many failures came in a row."
+      docs: api#system-statistics
+    - text: "A job counts as recovered as soon as it works again, even when it has no work to do. The system statistics API now reports each worker job's current failure streak, which drops back to 0 on recovery."
+      docs: api#system-statistics
+
 - version: 6.1.5
   date: 2026-10-27
   title: What's New, changelog and update check
