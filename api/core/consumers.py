@@ -266,7 +266,12 @@ class GroupConsumer(StreamConsumer):
         return True
 
     def _count_cycle(self, duration_ms: float, worked: bool) -> None:
-        """Nothing: a group consumer's runs are its batches, each timed as it runs."""
+        """No run: a group consumer's runs are its batches, each timed as it runs; a cycle after failed turns ends their streak.
+
+        Unless batches are failing too: only a batch that runs ends their streak.
+        """
+        if self._failures and not self._batch_failures:
+            job_stats.recovered(self.name)
 
     def _next_duty(self) -> float | None:
         """Seconds until the next refresh of what it holds, reclaim check, or end of a read back-off; None while none is timed."""

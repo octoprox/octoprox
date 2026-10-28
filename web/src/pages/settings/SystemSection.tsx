@@ -773,7 +773,15 @@ function WorkerSection({ worker }: { worker: SystemWorkerSnapshot }) {
                 <tr key={kind} className="border-t border-line text-right tabular-nums">
                   <td className="text-left py-1.5 pr-3">{JOB_INFO[kind]?.label ?? kind}</td>
                   <td className="py-1.5 pl-3" title={`${stats.runs.toLocaleString()} batches`}>{formatCount(stats.runs)}</td>
-                  <td className={cn('py-1.5 pl-3', stats.failures > 0 && 'text-danger')}>{formatCount(stats.failures)}</td>
+                  {/* Coloured on the streak, as the loop rows are: a kind that failed during a past outage is not failing now. */}
+                  <td
+                    className={cn('py-1.5 pl-3', stats.consecutive_failures > 0 && 'text-danger')}
+                    title={stats.failures === 0 ? undefined : stats.consecutive_failures > 0
+                      ? `${stats.failures.toLocaleString()} failed, the last ${stats.consecutive_failures.toLocaleString()} in a row`
+                      : `${stats.failures.toLocaleString()} failed, recovered since`}
+                  >
+                    {formatCount(stats.failures)}
+                  </td>
                   <td className="py-1.5 pl-3">{stats.runs > 0 ? formatMs((stats.duration_seconds / stats.runs) * 1000) : '-'}</td>
                   <td className="py-1.5 pl-3">{formatCount(stats.in_flight)}</td>
                 </tr>

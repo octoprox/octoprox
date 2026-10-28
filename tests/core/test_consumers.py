@@ -851,6 +851,55 @@ class TestGroupConsumer:
         assert stats is not None and (stats.runs, stats.failures) == (2, 1)
         assert stats.last_error == "RuntimeError: Postgres is down"
 
+    async def test_a_quiet_worker_whose_reads_failed_stops_failing_once_redis_answers(
+        self, redis_client: RedisClient, connect: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """No batch comes to end its streak, so the first turn that reads again does; the failures stay on record."""
+        worker = Worker(await connect())
+        read = worker._group.read
+        down = [True]
+
+        async def flaky_read(*args: Any, **kwargs: Any) -> Any:
+            if down[0]:
+                raise RedisConnectionError("Connection refused")
+            return await read(*args, **kwargs)
+
+        monkeypatch.setattr(worker._group, "read", flaky_read)
+        async with running(worker):
+            await until(lambda: (stats := job_stats.get(NAME)) is not None and stats.consecutive_failures >= 2)
+            down[0] = False
+            await until(lambda: job_stats.get(NAME).consecutive_failures == 0, timeout=2)  # type: ignore[union-attr]
+
+        stats = job_stats.get(NAME)
+        assert stats is not None and stats.failures >= 2 and worker.consumed == 0
+        assert stats.last_error == "ConnectionError: Connection refused"
+
+    async def test_a_read_that_works_again_leaves_a_failing_batch_s_streak_standing(
+        self, redis_client: RedisClient, connect: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Postgres down through a Redis blip: reading again says nothing of the batches, so only one that runs ends their streak."""
+        worker = Worker(await connect(), count=1, claim=60)
+        worker.failing = True
+        read = worker._group.read
+        down = [False]
+
+        async def flaky_read(*args: Any, **kwargs: Any) -> Any:
+            if down[0]:
+                raise RedisConnectionError("Connection refused")
+            return await read(*args, **kwargs)
+
+        monkeypatch.setattr(worker._group, "read", flaky_read)
+        async with running(worker):
+            await _add(redis_client, "a")
+            await until(lambda: (stats := job_stats.get(NAME)) is not None and stats.failures == 1)
+            down[0] = True
+            await until(lambda: job_stats.get(NAME).consecutive_failures >= 2)  # type: ignore[union-attr]
+            down[0] = False
+            await until(lambda: worker._failures == 0)
+
+        stats = job_stats.get(NAME)
+        assert stats is not None and stats.consecutive_failures == stats.failures >= 2
+
 
 # --- The small utilities ---------------------------------------------------------------------------
 

@@ -165,6 +165,7 @@ class WorkerRuntime(RoleRuntime):
             jobs[kind] = JobKindStats(
                 runs=stats.runs if stats else 0,
                 failures=stats.failures if stats else 0,
+                consecutive_failures=stats.consecutive_failures if stats else 0,
                 duration_seconds=stats.total_duration_ms / 1000 if stats else 0.0,
                 in_flight=runner.in_flight,
             )

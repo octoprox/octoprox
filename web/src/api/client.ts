@@ -2284,6 +2284,8 @@ export interface SystemJobKindStats {
   /** Batches run, and batches whose run raised: delivered again, and given up after five deliveries. */
   runs: number
   failures: number
+  /** Failures in a row; 0 once a batch runs, or a read works again while no batch is failing, so a past outage is not "failing now". */
+  consecutive_failures: number
   /** Seconds spent in the job, summed over the batches that ran. */
   duration_seconds: number
   /** Entries it holds now, in the batches it is running or giving up. */

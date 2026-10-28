@@ -246,6 +246,9 @@ class JobKindStats(BaseModel):
     runs: int = 0
     # Batches whose run raised: delivered again, and given up after five deliveries.
     failures: int = 0
+    # Failures in a row up to now; 0 once a batch runs, or a read works again while no batch is failing, so a past
+    # outage is not "failing now".
+    consecutive_failures: int = 0
     # Seconds spent in the job, summed over the batches that ran.
     duration_seconds: float = 0.0
     # Entries this worker holds now, in the batches it is running or giving up.

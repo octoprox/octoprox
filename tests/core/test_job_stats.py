@@ -127,6 +127,19 @@ class TestTrack:
         assert (stats.failures, stats.consecutive_failures, stats.last_error) == (1, 0, "Skipped")
         assert job_stats.get("never-ran") is None
 
+    async def test_a_recovery_ends_the_failure_streak_but_keeps_the_record(self) -> None:
+        """A good turn with no run to file, as a quiet stream consumer's read is, still ends the streak."""
+        with job_stats.track("worker") as run:
+            run.fail("Timeout connecting to server")
+        job_stats.recovered("worker")
+        job_stats.recovered("never-ran")  # nothing to clear, nothing created
+
+        stats = job_stats.get("worker")
+        assert stats is not None
+        assert (stats.runs, stats.failures, stats.consecutive_failures) == (1, 1, 0)
+        assert stats.last_error == "Timeout connecting to server"
+        assert job_stats.get("never-ran") is None
+
     async def test_a_cycle_that_raised_is_never_idle(self) -> None:
         """However early it gave up, it failed rather than found nothing."""
         with pytest.raises(RuntimeError), job_stats.track("worker") as run:

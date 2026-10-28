@@ -363,6 +363,7 @@ class TestCluster:
         assert wrk["snapshot"]["worker"]["jobs"]["health"] == {
             "runs": 12,
             "failures": 1,
+            "consecutive_failures": 0,
             "duration_seconds": 3.5,
             "in_flight": 4,
         }

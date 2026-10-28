@@ -196,6 +196,23 @@ class TestWork:
         # The snapshot travels as JSON in the heartbeat.
         assert WorkerSnapshot.model_validate_json(snapshot.model_dump_json()) == snapshot
 
+    async def test_a_kind_s_failure_streak_reaches_the_snapshot_and_ends_when_its_loop_recovers(
+        self, build: Build
+    ) -> None:
+        """The System page colours a kind on its streak, so a quiet kind that failed in an outage is not failing for good."""
+        job_stats.reset()
+        runtime = await build(worker_jobs=[JobKind.PROVISION])
+        name = runtime.runners[JobKind.PROVISION].name
+        job_stats.record(name, 1.0, "ConnectionError: Connection refused")
+        job_stats.record(name, 1.0, "TimeoutError: Timeout connecting to server")
+
+        failing = runtime.snapshot().jobs[JobKind.PROVISION]
+        job_stats.recovered(name)
+        recovered = runtime.snapshot().jobs[JobKind.PROVISION]
+
+        assert (failing.failures, failing.consecutive_failures) == (2, 2)
+        assert (recovered.failures, recovered.consecutive_failures) == (2, 0)
+
     async def test_appended_sightings_are_attributed_and_counted(
         self, build: Build, rows: Rows, redis_client: RedisClient
     ) -> None:

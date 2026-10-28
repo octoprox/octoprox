@@ -194,6 +194,15 @@ class JobStatsRegistry:
         if stats is not None:
             stats.consecutive_failures = 0
 
+    def recovered(self, name: str) -> None:
+        """``name`` had a good turn after failing ones: its streak is over, even when the turn did no work to file as a run.
+
+        The lifetime ``failures`` and ``last_error`` stay.
+        """
+        stats = self._stats.get(name)
+        if stats is not None:
+            stats.consecutive_failures = 0
+
     def get(self, name: str) -> JobStats | None:
         """Counters for one worker, or None if no cycle has completed yet."""
         return self._stats.get(name)
