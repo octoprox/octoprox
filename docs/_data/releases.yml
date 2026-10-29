@@ -10,6 +10,13 @@
 #   changes  what changed, for the people who use Octoprox; `docs` is a page
 #            on octoprox.com that explains it, such as connecting#exit-headers
 
+- version: 6.2.1
+  date: 2026-10-29
+  title: Table view for the projects list
+  changes:
+    - text: "The projects list can now show as tiles or as a table. The table lets you sort and filter projects by name, description and routing strategy, and shows proxy, health, connector and credential counts. Your browser remembers which view you picked."
+    - text: "Pressing Enter on the settings or delete button of a project tile no longer opens the project."
+
 - version: 6.2.0
   date: 2026-10-28
   title: Latency split by request step
