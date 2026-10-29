@@ -10,6 +10,17 @@
 #   changes  what changed, for the people who use Octoprox; `docs` is a page
 #            on octoprox.com that explains it, such as connecting#exit-headers
 
+- version: 6.2.2
+  date: 2026-10-29
+  title: Web UI notices new releases
+  changes:
+    - text: "An open web UI notices when Octoprox is upgraded. A bar at the top of the page names the new release and offers to refresh, and the next page you open loads it anyway, so an open form is never cleared."
+      docs: deployment#restarts-and-upgrades
+    - text: "A new browser tab always opens the release the api runs. A page that needs part of the old UI after an upgrade, such as the world map, loads the new release instead of failing."
+      docs: deployment#restarts-and-upgrades
+    - text: "Every api response carries the running release in the `X-Octoprox-Version` header."
+      docs: api
+
 - version: 6.2.1
   date: 2026-10-29
   title: Table view for the projects list
