@@ -1,9 +1,10 @@
 // Copyright 2026 Octoprox Authors
 // SPDX-License-Identifier: Apache-2.0
 
-import { useState } from 'react'
+import { useCallback, useMemo, useState } from 'react'
 import { useLocation, useNavigate } from 'react-router'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
+import { ColumnDef } from '@tanstack/react-table'
 import { Plus, Server, Trash2, FolderOpen, Settings, Pencil, LogOut, Link2, KeyRound } from 'lucide-react'
 import {
   fetchProjects, createProject, deleteProject, updateProject, logout,
@@ -15,15 +16,38 @@ import { useAuth } from '../contexts/AuthContext'
 import { useToast } from '../contexts/ToastContext'
 import { setSettingsOrigin } from '../utils/settingsOrigin'
 import { ProjectForm } from './ProjectForm'
+import { DataTable, type DataTableFeatures } from './DataTable'
 import { Page } from './layout/Page'
 import octoproxLogo from '../assets/logos/octoprox_horizontal.svg'
 import octoproxLogoDark from '../assets/logos/octoprox_horizontal_dark.svg'
-import { Button, Input, Card, Badge, Inspector, ConfirmDialog } from './ui'
+import { Button, Input, Card, Badge, Inspector, ConfirmDialog, Segmented } from './ui'
 
 type PanelState = { kind: 'new' } | { kind: 'edit'; id: string } | null
 
+type ProjectsView = 'tiles' | 'table'
+
+const VIEW_KEY = 'octoprox_projects_view'
+
+/** Whether the projects show as tiles or as a table, remembered in this browser. */
+function useProjectsView(): [ProjectsView, (view: ProjectsView) => void] {
+  const [view, setView] = useState<ProjectsView>(() => {
+    try { return localStorage.getItem(VIEW_KEY) === 'table' ? 'table' : 'tiles' } catch { return 'tiles' }
+  })
+  const choose = (next: ProjectsView) => {
+    setView(next)
+    try { localStorage.setItem(VIEW_KEY, next) } catch { /* ignore */ }
+  }
+  return [view, choose]
+}
+
 function formatStrategy(strategy: string | undefined): string {
   return (strategy || 'round_robin').split('_').map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(' ')
+}
+
+function healthDotClass(project: ProjectSummary): string {
+  const healthy = project.healthy_proxy_count
+  const total = project.proxy_count
+  return total === 0 ? 'bg-fg-subtle' : healthy === total ? 'bg-success' : healthy === 0 ? 'bg-danger' : 'bg-warning'
 }
 
 /**
@@ -41,6 +65,7 @@ export default function ProjectSelection() {
   const [panel, setPanel] = useState<PanelState>(null)
   const [pendingDelete, setPendingDelete] = useState<ProjectSummary | null>(null)
   const [deleteConfirmation, setDeleteConfirmation] = useState('')
+  const [view, setView] = useProjectsView()
 
   const { data, isLoading, error } = useQuery({ queryKey: ['projects'], queryFn: fetchProjects, refetchInterval: 30000 })
 
@@ -79,6 +104,16 @@ export default function ProjectSelection() {
     setSettingsOrigin(location.pathname)
     navigate('/settings')
   }
+  const newProject = () => {
+    createMutation.reset()
+    setPanel({ kind: 'new' })
+  }
+  // Stable, so the table's columns are not rebuilt on every refetch.
+  const resetUpdate = updateMutation.reset
+  const editProject = useCallback((project: ProjectSummary) => {
+    resetUpdate()
+    setPanel({ kind: 'edit', id: project.id })
+  }, [resetUpdate])
 
   const projects = data?.projects ?? []
   const editing = panel?.kind === 'edit' ? projects.find((p) => p.id === panel.id) : undefined
@@ -145,7 +180,10 @@ export default function ProjectSelection() {
           title="Projects"
           count={data?.total}
           subtitle="Pick a project to manage, or create a new one"
-          actions={canMutate ? <Button size="sm" onClick={() => { createMutation.reset(); setPanel({ kind: 'new' }) }}><Plus className="w-3.5 h-3.5" /> New project</Button> : undefined}
+          belowTitle={projects.length > 0 ? (
+            <Segmented size="sm" options={[{ value: 'tiles', label: 'Tiles' }, { value: 'table', label: 'Table' }]} value={view} onChange={setView} />
+          ) : undefined}
+          actions={canMutate ? <Button size="sm" onClick={newProject}><Plus className="w-3.5 h-3.5" /> New project</Button> : undefined}
           panel={panelNode}
         >
           {isLoading ? (
@@ -157,10 +195,20 @@ export default function ProjectSelection() {
               <FolderOpen className="w-10 h-10 mx-auto mb-3 text-fg-subtle" />
               <h3 className="text-base font-medium">No projects yet</h3>
               <p className="text-sm text-fg-muted mt-1">Create your first project to get a proxy endpoint.</p>
-              {canMutate && <Button size="sm" className="mt-4" onClick={() => setPanel({ kind: 'new' })}><Plus className="w-3.5 h-3.5" /> New project</Button>}
+              {canMutate && <Button size="sm" className="mt-4" onClick={newProject}><Plus className="w-3.5 h-3.5" /> New project</Button>}
             </Card>
+          ) : view === 'table' ? (
+            <ProjectTable
+              projects={projects}
+              activeId={panel?.kind === 'edit' ? panel.id : null}
+              panelOpen={panelNode != null}
+              canMutate={canMutate}
+              onOpen={openProject}
+              onEdit={editProject}
+              onDelete={setPendingDelete}
+            />
           ) : (
-            <div className="grid grid-cols-[repeat(auto-fill,320px)] auto-rows-fr gap-4">
+            <div className="grid grid-cols-[repeat(auto-fill,minmax(0,320px))] auto-rows-fr gap-4">
               {projects.map((project) => (
                 <ProjectCard
                   key={project.id}
@@ -168,7 +216,7 @@ export default function ProjectSelection() {
                   active={panel?.kind === 'edit' && panel.id === project.id}
                   canMutate={canMutate}
                   onOpen={() => openProject(project)}
-                  onEdit={() => { updateMutation.reset(); setPanel({ kind: 'edit', id: project.id }) }}
+                  onEdit={() => editProject(project)}
                   onDelete={() => setPendingDelete(project)}
                 />
               ))}
@@ -194,6 +242,98 @@ export default function ProjectSelection() {
   )
 }
 
+/** The projects as one sortable, filterable row each, for installs with too many to scan as tiles. */
+function ProjectTable({ projects, activeId, panelOpen, canMutate, onOpen, onEdit, onDelete }: {
+  projects: ProjectSummary[]
+  activeId: string | null
+  panelOpen: boolean
+  canMutate: boolean
+  onOpen: (project: ProjectSummary) => void
+  onEdit: (project: ProjectSummary) => void
+  onDelete: (project: ProjectSummary) => void
+}) {
+  const columns: ColumnDef<DataTableFeatures, ProjectSummary>[] = useMemo(() => [
+    {
+      accessorKey: 'name',
+      header: 'Project',
+      meta: { filterVariant: 'text' as const },
+      cell: ({ row }) => <span className="font-medium truncate block" title={row.original.name}>{row.original.name}</span>,
+    },
+    {
+      accessorKey: 'description',
+      header: 'Description',
+      meta: { filterVariant: 'text' as const },
+      cell: ({ row }) => row.original.description
+        ? <span className="text-fg-muted truncate block" title={row.original.description}>{row.original.description}</span>
+        : <span className="text-fg-subtle">-</span>,
+    },
+    {
+      id: 'strategy',
+      accessorFn: (row: ProjectSummary) => formatStrategy(row.routing_strategy),
+      header: 'Strategy',
+      size: 160,
+      meta: { filterVariant: 'select' as const },
+      cell: ({ getValue }) => <Badge color="gray">{getValue<string>()}</Badge>,
+    },
+    {
+      accessorKey: 'proxy_count',
+      header: 'Proxies',
+      size: 90,
+      meta: { align: 'right' as const },
+    },
+    {
+      accessorKey: 'healthy_proxy_count',
+      header: 'Healthy',
+      size: 100,
+      meta: { align: 'right' as const },
+      cell: ({ row }) => (
+        <span className="inline-flex items-center gap-1.5">
+          <span className={`w-2 h-2 rounded-full ${healthDotClass(row.original)}`} />
+          {row.original.healthy_proxy_count}
+        </span>
+      ),
+    },
+    {
+      accessorKey: 'connector_count',
+      header: 'Connectors',
+      size: 130,
+      meta: { align: 'right' as const },
+    },
+    {
+      accessorKey: 'credential_count',
+      header: 'Credentials',
+      size: 130,
+      meta: { align: 'right' as const },
+    },
+    ...(canMutate ? [{
+      id: 'actions',
+      header: '',
+      size: 72,
+      enableSorting: false,
+      cell: ({ row }: { row: { original: ProjectSummary } }) => (
+        <div className="flex justify-end gap-0.5">
+          <button onClick={() => onEdit(row.original)} className="p-1 rounded-sm text-fg-subtle hover:text-fg hover:bg-surface-raised" title="Project settings"><Pencil className="w-3.5 h-3.5" /></button>
+          <button onClick={() => onDelete(row.original)} className="p-1 rounded-sm text-fg-subtle hover:text-danger hover:bg-danger-soft" title="Delete project"><Trash2 className="w-3.5 h-3.5" /></button>
+        </div>
+      ),
+    }] as ColumnDef<DataTableFeatures, ProjectSummary>[] : []),
+  ], [canMutate, onEdit, onDelete])
+
+  return (
+    <DataTable
+      columns={columns}
+      data={projects}
+      getRowId={(row) => row.id}
+      onRowClick={onOpen}
+      activeRowId={activeId}
+      columnVisibility={panelOpen ? { description: false, connector_count: false, credential_count: false } : {}}
+      enableColumnFilters
+      defaultPageSize={50}
+      emptyMessage="No projects match these filters."
+    />
+  )
+}
+
 function ProjectCard({ project, active, canMutate, onOpen, onEdit, onDelete }: {
   project: ProjectSummary
   active: boolean
@@ -210,7 +350,7 @@ function ProjectCard({ project, active, canMutate, onOpen, onEdit, onDelete }: {
       onClick={onOpen}
       role="button"
       tabIndex={0}
-      onKeyDown={(e) => { if (e.key === 'Enter') onOpen() }}
+      onKeyDown={(e) => { if (e.key === 'Enter' && e.target === e.currentTarget) onOpen() }}
     >
       <div className="flex items-start justify-between gap-2">
         <div className="min-w-0">
@@ -229,7 +369,7 @@ function ProjectCard({ project, active, canMutate, onOpen, onEdit, onDelete }: {
       <div className="flex items-center gap-2 text-xs text-fg-muted tabular-nums">
         <span className="inline-flex items-center gap-1"><Server className="w-3.5 h-3.5" /> {total} prox{total === 1 ? 'y' : 'ies'}</span>
         <span className="text-line-strong">·</span>
-        <span className="inline-flex items-center gap-1.5"><span className={`w-2 h-2 rounded-full ${total === 0 ? 'bg-fg-subtle' : healthy === total ? 'bg-success' : healthy === 0 ? 'bg-danger' : 'bg-warning'}`} />{healthy} healthy</span>
+        <span className="inline-flex items-center gap-1.5"><span className={`w-2 h-2 rounded-full ${healthDotClass(project)}`} />{healthy} healthy</span>
         <span className="text-line-strong">·</span>
         <span className="inline-flex items-center gap-1" title="Connectors"><Link2 className="w-3.5 h-3.5" /> {project.connector_count}</span>
         <span className="inline-flex items-center gap-1" title="Credentials"><KeyRound className="w-3.5 h-3.5" /> {project.credential_count}</span>
