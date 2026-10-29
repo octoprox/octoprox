@@ -108,6 +108,8 @@ Adding replicas does not divide the controller's work (one leader compiles the f
 
 Restarting one container or pod at a time keeps the cluster serving: a gateway leaves the balancer while others carry the traffic, the controller hands its lease over, and a worker's unfinished entries are reclaimed by another. When a new release starts, the first Postgres role to reach the database runs its migrations while the others wait for the migration lock. A process of the older release that restarts after that finds a schema revision it does not know and does not start, so finish an upgrade rather than restarting old containers in the middle of it.
 
+Browsers with the web UI open notice an upgrade on their next call to an api. A bar at the top of the page names the new release and offers to refresh, and the next page the user opens loads the new release anyway, so nobody stays on the old UI and an open form is never cleared. A new tab always opens the release the api runs.
+
 **The upgrade from 5.x to 6.0 is a short downtime: stop 5.x, start 6.0.** The 6.0 migration only adds to the schema, and 6.0 keeps its own Redis keys, so the way back is a redeploy of 5.0.11 on the same database once one SQL statement has set the schema version back to 047. See [Migrating to 6.0]({{ site.baseurl }}/migrating-to-6).
 
 ## When Redis or Postgres is lost

@@ -21,6 +21,7 @@ import { fetchProjectMetrics, fetchProjectScalingMetrics, poolBreakdown } from '
 import { popSettingsOrigin, setSettingsOrigin } from '../../utils/settingsOrigin'
 import { HelpMenu } from '../HelpMenu'
 import { ProjectPanel } from '../ProjectForm'
+import { NewVersionBanner } from '../NewVersion'
 import { ProjectSwitcher } from './ProjectSwitcher'
 import { ShellPanelContext } from './Page'
 import { navItemBase, navItemCollapsed, navItemExpanded, navItemIdle } from './navStyles'
@@ -261,6 +262,7 @@ export default function AppShell({ onLogout }: { onLogout: () => void }) {
       </aside>
 
       <main className="flex-1 min-w-0 flex flex-col">
+        <NewVersionBanner />
         {/* The pool ticker drops to a second line when it does not fit beside the breadcrumb. */}
         <header className="min-h-11 flex-none flex flex-wrap items-center gap-x-4 gap-y-1 px-4 py-1.5 border-b border-line bg-surface">
           <div className="flex items-center gap-1.5 text-[13px] min-w-0">

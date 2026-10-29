@@ -204,6 +204,29 @@ class TestWebUi:
         assert client.get("/projects/abc/overview").text == "<html>app</html>"
         assert client.get("/").text == "<html>app</html>"
 
+    def test_the_page_is_checked_on_every_load_and_assets_are_kept(self, test_settings: Settings, dist: Path) -> None:
+        """A release changes the page and the asset names it lists, never an asset under its old name."""
+        client = TestClient(create_app(test_settings.model_copy(update={"role": Role.API}), web_dist=dist))
+
+        for path in ("/", "/index.html", "/projects/abc/overview"):
+            assert client.get(path).headers["cache-control"] == "no-cache"
+        assert client.get("/assets/app.js").headers["cache-control"] == "public, max-age=31536000, immutable"
+        assert "cache-control" not in client.get("/robots.txt").headers
+
+    def test_every_response_names_the_release(self, test_settings: Settings, dist: Path) -> None:
+        app = create_app(test_settings.model_copy(update={"role": Role.API}), web_dist=dist)
+
+        @app.post("/boom")
+        async def boom() -> None:
+            raise RuntimeError("boom")
+
+        client = TestClient(app, raise_server_exceptions=False)
+
+        for path in ("/", "/assets/app.js", "/api/v1/projects"):
+            assert client.get(path).headers["x-octoprox-version"] == __version__
+        # The 500 for an unhandled error as well.
+        assert client.post("/boom").headers["x-octoprox-version"] == __version__
+
     @pytest.mark.parametrize(
         "path",
         ["/%2e%2e/secret.txt", "/..%2fsecret.txt", "/%2e%2e%2fsecret.txt", "/%2e%2e/%2e%2e/ca.key", "/linked.txt"],

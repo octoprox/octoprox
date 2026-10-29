@@ -8,6 +8,7 @@ import SsoComplete from './components/SsoComplete'
 import Login from './components/Login'
 import ProjectSelection from './components/ProjectSelection'
 import RequireAdmin from './components/RequireAdmin'
+import { ReloadOnNewVersion } from './components/NewVersion'
 import AppShell from './components/layout/AppShell'
 import Overview from './pages/Overview'
 import HostsPage from './pages/HostsPage'
@@ -40,6 +41,7 @@ import { checkAuthStatus, login, logout, AuthStatus } from './api/client'
 function App() {
   return (
     <BrowserRouter>
+      <ReloadOnNewVersion />
       <Routes>
         {/* Unauthenticated route - accessible without login */}
         <Route path="/set-password/:token" element={<SetPassword />} />

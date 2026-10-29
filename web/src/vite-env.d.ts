@@ -3,6 +3,9 @@
 
 /// <reference types="vite/client" />
 
+/** The release this UI was built from (vite.config.ts). */
+declare const __OCTOPROX_VERSION__: string
+
 declare module '*.svg' {
   const content: string
   export default content

@@ -18,6 +18,7 @@ import { setSettingsOrigin } from '../utils/settingsOrigin'
 import { ProjectForm } from './ProjectForm'
 import { DataTable, type DataTableFeatures } from './DataTable'
 import { Page } from './layout/Page'
+import { NewVersionBanner } from './NewVersion'
 import octoproxLogo from '../assets/logos/octoprox_horizontal.svg'
 import octoproxLogoDark from '../assets/logos/octoprox_horizontal_dark.svg'
 import { Button, Input, Card, Badge, Inspector, ConfirmDialog, Segmented } from './ui'
@@ -158,6 +159,7 @@ export default function ProjectSelection() {
 
   return (
     <div className="h-screen flex flex-col bg-bg text-fg overflow-hidden">
+      <NewVersionBanner />
       <header className="h-14 flex-none flex items-center justify-between px-5 border-b border-line bg-surface">
         <img src={isDark ? octoproxLogoDark : octoproxLogo} alt="Octoprox" className="h-[26px] w-auto" />
         <div className="flex items-center gap-2">

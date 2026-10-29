@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import axios from 'axios'
+import { noteServerVersion, VERSION_HEADER } from '../utils/appVersion'
 
 const api = axios.create({
   baseURL: '/api/v1',
@@ -66,6 +67,18 @@ export function requestIdOf(error: unknown): string | null {
   const fromRequest = error.config?.headers?.[REQUEST_ID_HEADER]
   return typeof fromRequest === 'string' && fromRequest ? fromRequest : null
 }
+
+// Every response names the server's release, so an open UI notices a new one.
+api.interceptors.response.use(
+  (response) => {
+    noteServerVersion(response.headers[VERSION_HEADER.toLowerCase()])
+    return response
+  },
+  (error) => {
+    noteServerVersion(error.response?.headers?.[VERSION_HEADER.toLowerCase()])
+    return Promise.reject(error)
+  },
+)
 
 // Handle API errors
 api.interceptors.response.use(

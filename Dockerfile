@@ -5,6 +5,8 @@ WORKDIR /app/web
 COPY web/package*.json web/.npmrc ./
 RUN npm ci
 COPY web/ ./
+# The release the UI is built for (web/vite.config.ts)
+COPY pyproject.toml /app/pyproject.toml
 RUN npm run build
 
 # Python application stage

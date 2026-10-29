@@ -12,12 +12,15 @@ app object only: its lifespan starts the role's runtimes.
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Any
 
 import uvicorn
 from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.responses import Response
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from api import __version__
 from api.core.config import Settings, get_settings
@@ -32,6 +35,38 @@ from api.routes import health
 WEB_DIST = Path(__file__).resolve().parent.parent / "web" / "dist"
 # The roles whose app serves the admin API, the web UI and the internal endpoints.
 API_ROLES = frozenset({Role.API, Role.ALL})
+# Names the running release on every api response, so an open web UI notices
+# a new one and offers to load it (web/src/utils/appVersion.ts).
+VERSION_HEADER = "X-Octoprox-Version"
+
+
+class _VersionHeader:
+    """Adds the running release to every HTTP response."""
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+        self.header = (VERSION_HEADER.lower().encode("latin-1"), __version__.encode("latin-1"))
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        async def send_with_version(message: Message) -> None:
+            if message["type"] == "http.response.start":
+                message["headers"] = [*message.get("headers", []), self.header]
+            await send(message)
+
+        await self.app(scope, receive, send_with_version)
+
+
+class _HashedAssets(StaticFiles):
+    """The build's assets: a file's name changes with its content, so a browser may keep it for good."""
+
+    def file_response(self, *args: Any, **kwargs: Any) -> Response:
+        response = super().file_response(*args, **kwargs)
+        response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+        return response
 
 
 def create_app(settings: Settings, *, web_dist: Path = WEB_DIST) -> FastAPI:
@@ -61,11 +96,15 @@ def create_app(settings: Settings, *, web_dist: Path = WEB_DIST) -> FastAPI:
             allow_credentials=True,
             allow_methods=["*"],
             allow_headers=["*"],
-            expose_headers=[REQUEST_ID_HEADER],
+            expose_headers=[REQUEST_ID_HEADER, VERSION_HEADER],
         )
     # Added after CORS so it wraps it: every response, preflight included,
     # carries a request ID and every log line during the request has it bound.
     app.add_middleware(RequestContextMiddleware)
+    if settings.role in API_ROLES:
+        # Outermost, so the 500 RequestContextMiddleware answers for an
+        # unhandled error names the release too.
+        app.add_middleware(_VersionHeader)
     # The ops endpoints come first, so the web UI's catch-all never shadows them.
     app.include_router(health.router, tags=["Health"])
     if settings.role in API_ROLES:
@@ -203,19 +242,22 @@ def _serve_web_ui(app: FastAPI, web_dist: Path) -> None:
     if not web_dist.is_dir():
         return
     root = web_dist.resolve()
+    index = root / "index.html"
     assets_dir = root / "assets"
     if assets_dir.is_dir():
-        app.mount("/assets", StaticFiles(directory=assets_dir), name="assets")
+        app.mount("/assets", _HashedAssets(directory=assets_dir), name="assets")
 
     @app.get("/{full_path:path}", include_in_schema=False)
     async def serve_spa(full_path: str) -> FileResponse:
         file_path = (root / full_path).resolve()
         if not file_path.is_relative_to(root):
             raise HTTPException(status_code=404, detail="Not Found")
-        if file_path.is_file():
+        if file_path.is_file() and file_path != index:
             return FileResponse(file_path)
-        # Anything else is a route of the single-page app.
-        return FileResponse(root / "index.html")
+        # Anything else is a route of the single-page app. The page names the
+        # build's assets, so a browser checks it with the server on every load
+        # and a new tab opens a new release at once.
+        return FileResponse(index, headers={"Cache-Control": "no-cache"})
 
 
 # The uvicorn target. Logging first, once, with the role on every line: before
