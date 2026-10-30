@@ -10,6 +10,16 @@
 #   changes  what changed, for the people who use Octoprox; `docs` is a page
 #            on octoprox.com that explains it, such as connecting#exit-headers
 
+- version: 6.4.0
+  date: 2026-10-30
+  title: Separate Administration, Account and project settings
+  changes:
+    - text: "Settings is now split by who a change affects. Install-wide pages (Users, Sign-in, Providers, IP attribution, Backup & Migration, System, WireGuard and OpenVPN) are under Administration, which admins open from the foot of the sidebar or the projects page header."
+    - text: "Your own Account and Appearance pages and Sign out now open from your avatar menu at the foot of the sidebar or in the projects page header. API tokens, linked sign-in accounts and your password are under Account."
+      docs: sso
+    - text: "Users who can edit a project now have a Project settings item in its sidebar, as well as the one in the project switcher."
+    - text: "Old Settings links and bookmarks take you to the matching Account or Administration page."
+
 - version: 6.3.4
   date: 2026-10-30
   title: Dark mode provider logos and clearer preflight help
