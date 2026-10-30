@@ -10,6 +10,17 @@
 #   changes  what changed, for the people who use Octoprox; `docs` is a page
 #            on octoprox.com that explains it, such as connecting#exit-headers
 
+- version: 6.3.3
+  date: 2026-10-30
+  title: Project load on the Projects page
+  changes:
+    - text: "The Projects page shows each project's load on its tile and in the table. You see requests per minute now, plus requests, success rate, traffic and a trend line over the chosen time range."
+      docs: metrics
+    - text: "The table view sorts by any of these numbers, so you can rank projects by load. The Projects page uses the same time range as the other pages."
+      docs: metrics
+    - text: "A new API endpoint, GET /api/v1/projects/load, returns these figures for every project. Any signed-in user can read it."
+      docs: api#project-load
+
 - version: 6.3.2
   date: 2026-10-30
   title: Per-project observation log and retention
