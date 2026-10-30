@@ -12,6 +12,7 @@ import { EmptyState } from '../layout/Page'
 import { Badge, Card, Select } from '../ui'
 import { formatDateTime, relativeTime } from '../../utils/format'
 import { HeaderWithTip, TIPS, VerdictCell, countryVerdict, placeLabel } from './columns'
+import { AdminLink } from '../AdminLink'
 
 const VERDICT_OPTIONS: { value: ObservationVerdict; label: string }[] = [
   { value: 'contradicted', label: 'contradicted' },
@@ -140,7 +141,7 @@ export function ExitIpsPanel({ projectId }: { projectId?: string }) {
   return (
     <div className="space-y-3">
       <div className="flex items-center justify-between gap-3 flex-wrap">
-        <p className="text-xs text-fg-muted">Every distinct exit IP a connector has handed out, most recently seen first, with what the latest observation found. One row per IP however often it was seen; the observation log has every sighting. Kept for the exit IP retention window set in Settings → IP attribution. Country and IP filters match exactly.</p>
+        <p className="text-xs text-fg-muted">Every distinct exit IP a connector has handed out, most recently seen first, with what the latest observation found. One row per IP however often it was seen; the observation log has every sighting. Kept for the exit IP retention window set in <AdminLink page="geo">IP attribution</AdminLink>. Country and IP filters match exactly.</p>
         {!projectId && (
           <Select value={projectFilter} onChange={(e) => setProjectFilter(e.target.value)} className="w-44" aria-label="Project">
             <option value="">All projects</option>

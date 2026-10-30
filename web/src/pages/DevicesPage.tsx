@@ -2,7 +2,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { useEffect, useMemo, useState } from 'react'
-import { Link } from 'react-router'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { ColumnDef } from '@tanstack/react-table'
 import { Check, Copy, Download, KeyRound, Plus, Router, ShieldCheck, Trash2 } from 'lucide-react'
@@ -21,6 +20,7 @@ import { useAuth } from '../contexts/AuthContext'
 import { useTheme } from '../contexts/ThemeContext'
 import { formatRangeTick, useTimeRange } from '../contexts/TimeRangeContext'
 import { useToast } from '../contexts/ToastContext'
+import { AdminLink } from '../components/AdminLink'
 import { DataTable, type DataTableFeatures } from '../components/DataTable'
 import { Page, EmptyState } from '../components/layout/Page'
 import { formatBytes, formatDateTime, parseApiDate, plural } from '../utils/format'
@@ -76,7 +76,7 @@ interface CreateInput {
 interface Adapter {
   label: string
   icon: React.ReactNode
-  settingsSegment: string
+  adminPage: string
   /** The config file's extension, as the download button names it. */
   fileLabel: string
   /** Whether the config is small enough for a QR code and the apps scan one. */
@@ -118,7 +118,7 @@ const ADAPTERS: Record<Protocol, Adapter> = {
   wireguard: {
     label: 'WireGuard',
     icon: <Router className="w-4 h-4" />,
-    settingsSegment: 'wireguard',
+    adminPage: 'wireguard',
     fileLabel: '.conf',
     qr: true,
     list: async (projectId) => {
@@ -138,7 +138,7 @@ const ADAPTERS: Record<Protocol, Adapter> = {
   openvpn: {
     label: 'OpenVPN',
     icon: <ShieldCheck className="w-4 h-4" />,
-    settingsSegment: 'openvpn',
+    adminPage: 'openvpn',
     fileLabel: '.ovpn',
     qr: false,
     list: async (projectId) => {
@@ -316,9 +316,7 @@ export default function DevicesPage() {
       {unconfigured.filter((p) => devices.some((d) => d.protocol === p)).map((protocol) => (
         <Alert key={protocol} variant="warning" className="text-sm">
           The {ADAPTERS[protocol].label} public endpoint is not set, so its device configs cannot be completed yet.{' '}
-          {isAdmin
-            ? <Link to={`/projects/${selectedProjectId}/settings/${ADAPTERS[protocol].settingsSegment}`} className="underline">Set it in Settings, {ADAPTERS[protocol].label}.</Link>
-            : `Ask an administrator to set it under Settings, ${ADAPTERS[protocol].label}.`}
+          {isAdmin ? 'Set it in' : 'Ask an administrator to set it in'} <AdminLink page={ADAPTERS[protocol].adminPage}>{ADAPTERS[protocol].label}</AdminLink>.
         </Alert>
       ))}
       {isLoading ? (

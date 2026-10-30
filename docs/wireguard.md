@@ -102,7 +102,7 @@ The cluster compose files (`docker-compose.cluster.yml`, `docker-compose.cluster
       - OCTOPROX_WIREGUARD_ENABLED=true
 ```
 
-Then, as an admin, open **Settings → WireGuard** and set the **public endpoint host**: the hostname or IP devices will reach the tunnel at (the balancer in a cluster, the host itself otherwise). Device configs cannot be completed before this is set. The page also lists every gateway terminating the tunnel, from their heartbeats, with its backend (kernel or userspace) and the error if it failed to come up. A failure here never takes the proxy ports down; the page says what is missing.
+Then, as an admin, open **Administration → WireGuard** and set the **public endpoint host**: the hostname or IP devices will reach the tunnel at (the balancer in a cluster, the host itself otherwise). Device configs cannot be completed before this is set. The page also lists every gateway terminating the tunnel, from their heartbeats, with its backend (kernel or userspace) and the error if it failed to come up. A failure here never takes the proxy ports down; the page says what is missing.
 
 ### Process settings
 
@@ -128,7 +128,7 @@ What happens to traffic once it is inside a tunnel does not depend on the tunnel
 
 ### Install-wide settings
 
-Edited under **Settings → WireGuard**, stored in Postgres and carried to every gateway by the routing feed, so they all agree on them:
+Edited under **Administration → WireGuard**, stored in Postgres and carried to every gateway by the routing feed, so they all agree on them:
 
 | Setting | Default | Meaning |
 |---------|---------|---------|
@@ -175,7 +175,7 @@ The scheme above depends on the device asking the tunnel resolver. A device that
 
 - **Firefox's canary.** Firefox asks the network resolver for `use-application-dns.net` before enabling DoH and keeps plain DNS when the answer is NXDOMAIN. The tunnel resolver answers it that way.
 - **Encrypted resolvers are closed** (`tunnel.block_encrypted_dns`, on by default): connections to port 853 and to the well-known public DoH resolvers (Google, Cloudflare, Quad9, NextDNS, AdGuard, OpenDNS and others) are closed instead of relayed, so a client in automatic mode falls back to the tunnel resolver. Chrome only upgrades to DoH when the system resolver is a known public one, which the tunnel gateway is not. Android's automatic Private DNS probes the gateway for DoT, finds none and uses plain DNS. A device with an **explicit** Private DNS hostname is the case this cannot fix: with port 853 closed it has no DNS at all. Set Private DNS to automatic or off on tunnel devices, or turn the block off.
-- **The degradation is counted.** Each device shows how many of its connections were routed by address and how many encrypted-DNS connections were closed. Both ride the device's metrics: they are install-wide, survive restarts and have history (the device's chart can show them per interval), and the WireGuard settings page shows the totals over every device. A device with a growing "routed by address" number is resolving somewhere else, or speaking a protocol without a name.
+- **The degradation is counted.** Each device shows how many of its connections were routed by address and how many encrypted-DNS connections were closed. Both ride the device's metrics: they are install-wide, survive restarts and have history (the device's chart can show them per interval), and Administration → WireGuard shows the totals over every device. A device with a growing "routed by address" number is resolving somewhere else, or speaking a protocol without a name.
 
 ## In a cluster
 

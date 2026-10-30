@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { useState, useEffect, useMemo } from 'react'
-import { BrowserRouter, Routes, Route, Navigate } from 'react-router'
+import { BrowserRouter, Routes, Route, Navigate, useParams } from 'react-router'
 import SetPassword from './components/SetPassword'
 import SsoComplete from './components/SsoComplete'
 import Login from './components/Login'
@@ -130,22 +130,6 @@ function AuthenticatedApp() {
     return <Login onLogin={handleLogin} error={loginError} />
   }
 
-  const settingsRoutes = (
-    <>
-      <Route index element={<Navigate to="account" replace />} />
-      <Route path="account" element={<AccountSection />} />
-      <Route path="appearance" element={<AppearanceSection />} />
-      <Route path="users" element={<RequireAdmin><UsersSection /></RequireAdmin>} />
-      <Route path="sign-in" element={<RequireAdmin><SignInSection /></RequireAdmin>} />
-      <Route path="backup" element={<RequireAdmin><BackupSection /></RequireAdmin>} />
-      <Route path="providers" element={<RequireAdmin><ProvidersSection /></RequireAdmin>} />
-      <Route path="geo" element={<RequireAdmin><GeoSection /></RequireAdmin>} />
-      <Route path="wireguard" element={<RequireAdmin><WireGuardSection /></RequireAdmin>} />
-      <Route path="openvpn" element={<RequireAdmin><OpenVpnSection /></RequireAdmin>} />
-      <Route path="system" element={<RequireAdmin><SystemSection /></RequireAdmin>} />
-    </>
-  )
-
   return (
     <AuthProvider value={authContextValue}>
       <ProjectProvider>
@@ -156,10 +140,26 @@ function AuthenticatedApp() {
             {/* Project selection page */}
             <Route path="/" element={<ProjectSelection />} />
 
-            {/* Global settings (no project in scope) */}
-            <Route path="/settings" element={<AppShell onLogout={handleLogout} />}>
-              {settingsRoutes}
+            {/* Your own account: no project in scope */}
+            <Route path="/account" element={<AppShell area="account" onLogout={handleLogout} />}>
+              <Route index element={<AccountSection />} />
+              <Route path="appearance" element={<AppearanceSection />} />
             </Route>
+
+            {/* Administration: install-wide, every project */}
+            <Route path="/admin" element={<RequireAdmin><AppShell area="admin" onLogout={handleLogout} /></RequireAdmin>}>
+              <Route index element={<Navigate to="users" replace />} />
+              <Route path="users" element={<UsersSection />} />
+              <Route path="sign-in" element={<SignInSection />} />
+              <Route path="backup" element={<BackupSection />} />
+              <Route path="providers" element={<ProvidersSection />} />
+              <Route path="geo" element={<GeoSection />} />
+              <Route path="wireguard" element={<WireGuardSection />} />
+              <Route path="openvpn" element={<OpenVpnSection />} />
+              <Route path="system" element={<SystemSection />} />
+            </Route>
+            <Route path="/settings/*" element={<LegacySettingsRedirect />} />
+            <Route path="/projects/:projectId/settings/*" element={<LegacySettingsRedirect />} />
 
             {/* Project-scoped pages */}
             <Route path="/projects/:projectId" element={<AppShell onLogout={handleLogout} />}>
@@ -177,7 +177,6 @@ function AuthenticatedApp() {
               <Route path="mitm-inspector" element={<InspectorPage />} />
               <Route path="locations" element={<LocationsPage />} />
               <Route path="devices" element={<DevicesPage />} />
-              <Route path="settings">{settingsRoutes}</Route>
               <Route path="*" element={<Navigate to="../overview" replace />} />
             </Route>
 
@@ -189,6 +188,14 @@ function AuthenticatedApp() {
       </ProjectProvider>
     </AuthProvider>
   )
+}
+
+/** Settings links from before Account and Administration had their own addresses, inside a project or not. */
+function LegacySettingsRedirect() {
+  const page = useParams()['*'] ?? ''
+  if (page === '' || page === 'account') return <Navigate to="/account" replace />
+  if (page === 'appearance') return <Navigate to="/account/appearance" replace />
+  return <Navigate to={`/admin/${page}`} replace />
 }
 
 export default App

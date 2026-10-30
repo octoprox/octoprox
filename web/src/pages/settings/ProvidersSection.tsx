@@ -147,7 +147,7 @@ export default function ProvidersSection() {
     <Page
       title="Providers"
       count={providers.length}
-      subtitle="Proxy vendors Octoprox can provision from. Shipped providers are read-only; add your own as declarative descriptors - no code, no redeploy."
+      subtitle="Proxy vendors Octoprox can provision from. Shipped providers are read-only; add your own as declarative descriptors - no code, no redeploy. Projects use them through their own Credentials and Connectors."
       actions={<Button size="sm" onClick={() => setPanel({ kind: 'new' })}><Plus className="w-3.5 h-3.5" /> New provider</Button>}
       panel={panelNode}
     >

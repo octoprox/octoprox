@@ -4,12 +4,11 @@
 /**
  * Help entry for the sidebar: a popover with What's New, the guide for the
  * page the user is on, the documentation site, the API reference and where to
- * report a problem. Rendered fixed next to the sidebar so it is never clipped
- * by the collapsed rail. A dot on the button points out release notes the user
- * has not opened, and for admins a newer release.
+ * report a problem. A dot on the button points out release notes the user has
+ * not opened, and for admins a newer release.
  */
 
-import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react'
+import { useState, type ReactNode } from 'react'
 import { useLocation } from 'react-router'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { ArrowUpCircle, BookOpen, Braces, Bug, ExternalLink, HelpCircle, LifeBuoy, Sparkles } from 'lucide-react'
@@ -20,6 +19,7 @@ import { navItemBase, navItemCollapsed, navItemExpanded, navItemIdle } from './l
 import { ProviderMark } from './SignInProviderMark'
 import { DOCS_URL } from '../utils/docs'
 import { WhatsNewDialog } from './WhatsNew'
+import { PopoverMenu, besideSidebarFoot, usePopoverMenu } from './ui/PopoverMenu'
 
 const REPO_URL = 'https://github.com/octoprox/octoprox'
 
@@ -57,17 +57,10 @@ export function docsForPath(pathname: string): DocLink[] {
 const RELEASES_STALE_MS = 10 * 60_000
 
 const MENU_WIDTH = 272
-/** Space kept between the menu and the edges of the screen. */
-const GUTTER = 8
-
-interface Placement { left: number; bottom: number; width: number; maxHeight: number }
 
 export function HelpMenu({ collapsed }: { collapsed: boolean }) {
   const location = useLocation()
-  const [open, setOpen] = useState(false)
-  const [anchor, setAnchor] = useState<Placement | null>(null)
-  const buttonRef = useRef<HTMLButtonElement>(null)
-  const menuRef = useRef<HTMLDivElement>(null)
+  const menu = usePopoverMenu({ moves: collapsed, place: (button) => besideSidebarFoot(button, MENU_WIDTH, collapsed) })
   // What's New as it stood when opened, so its New marks outlast marking the notes seen.
   const [whatsNew, setWhatsNew] = useState<ReleaseInfo | null>(null)
 
@@ -86,67 +79,21 @@ export function HelpMenu({ collapsed }: { collapsed: boolean }) {
 
   const openWhatsNew = () => {
     if (!releases) return
-    setOpen(false)
+    menu.close()
     setWhatsNew(releases)
     if (releases.unseen > 0) markSeen.mutate()
   }
-
-  // Close on navigation and when the sidebar collapses or expands: the button
-  // moves during the width transition, so the menu would be left behind.
-  useEffect(() => { setOpen(false) }, [location.pathname, collapsed])
-
-  // Place the menu beside the button, bottom aligned, before it paints, and
-  // again whenever the window changes size while it is open. On a phone with the
-  // sidebar open there is no room beside it, so the menu opens above the button.
-  // It narrows to the screen's width and scrolls when the screen is too short.
-  useLayoutEffect(() => {
-    if (!open) return
-    const place = () => {
-      const rect = buttonRef.current?.getBoundingClientRect()
-      if (!rect) return
-      const beside = collapsed || rect.right + GUTTER + MENU_WIDTH <= window.innerWidth - GUTTER
-      const left = beside ? rect.right + GUTTER : rect.left
-      const bottom = beside ? Math.max(GUTTER, window.innerHeight - rect.bottom) : window.innerHeight - rect.top + 4
-      setAnchor({ left, bottom, width: Math.min(MENU_WIDTH, window.innerWidth - left - GUTTER), maxHeight: window.innerHeight - bottom - GUTTER })
-    }
-    place()
-    window.addEventListener('resize', place)
-    return () => window.removeEventListener('resize', place)
-  }, [open, collapsed])
-
-  useEffect(() => {
-    if (!open) return
-    const onPointer = (e: MouseEvent) => {
-      const t = e.target as Node
-      if (menuRef.current?.contains(t) || buttonRef.current?.contains(t)) return
-      setOpen(false)
-    }
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key !== 'Escape') return
-      setOpen(false)
-      buttonRef.current?.focus()
-    }
-    document.addEventListener('mousedown', onPointer)
-    document.addEventListener('keydown', onKey)
-    return () => {
-      document.removeEventListener('mousedown', onPointer)
-      document.removeEventListener('keydown', onKey)
-    }
-  }, [open])
 
   const pageDocs = docsForPath(location.pathname)
 
   return (
     <>
       <button
-        ref={buttonRef}
+        {...menu.buttonProps}
         type="button"
-        onClick={() => setOpen((v) => !v)}
         title={collapsed ? (attention ? 'Help: something new' : 'Help') : undefined}
-        aria-haspopup="menu"
-        aria-expanded={open}
         aria-label={attention ? 'Help, something new' : undefined}
-        className={cn('relative', navItemBase, collapsed ? navItemCollapsed : cn(navItemExpanded, 'w-full'), open ? 'bg-surface-raised text-fg' : navItemIdle)}
+        className={cn('relative', navItemBase, collapsed ? navItemCollapsed : cn(navItemExpanded, 'w-full'), menu.open ? 'bg-surface-raised text-fg' : navItemIdle)}
       >
         <HelpCircle />
         {!collapsed && <span className="truncate flex-1 text-left">Help</span>}
@@ -157,43 +104,36 @@ export function HelpMenu({ collapsed }: { collapsed: boolean }) {
         )}
       </button>
 
-      {open && anchor && (
-        <div
-          ref={menuRef}
-          role="menu"
-          style={{ position: 'fixed', left: anchor.left, bottom: anchor.bottom, width: anchor.width, maxHeight: anchor.maxHeight }}
-          className="z-50 bg-surface border border-line-strong rounded-lg shadow-lg py-1.5 text-[13px] overflow-y-auto overscroll-contain"
-        >
-          {update && (
-            <MenuButton onClick={openWhatsNew} icon={<ArrowUpCircle className="text-primary!" />}>
-              <span className="truncate flex-1">Octoprox {update.version} is available</span>
-            </MenuButton>
-          )}
-          {releases && (
-            <MenuButton onClick={openWhatsNew} icon={<Sparkles />}>
-              <span className="truncate flex-1">What's New</span>
-              {unseen > 0 && <span className="flex-none text-[11px] font-medium text-primary-soft-fg bg-primary-soft rounded-full px-1.5 py-0.5">{unseen} new</span>}
-            </MenuButton>
-          )}
-          {releases && <MenuDivider />}
-          {pageDocs.length > 0 && (
-            <>
-              <MenuLabel>About this page</MenuLabel>
-              {pageDocs.map((d) => (
-                <MenuLink key={d.path} href={`${DOCS_URL}/${d.path}`} icon={<BookOpen />}>{d.title}</MenuLink>
-              ))}
-              <MenuDivider />
-            </>
-          )}
-          <MenuLabel>Documentation</MenuLabel>
-          <MenuLink href={`${DOCS_URL}/getting-started`} icon={<LifeBuoy />}>Getting started</MenuLink>
-          <MenuLink href={`${DOCS_URL}/configuration`} icon={<BookOpen />}>Configuration reference</MenuLink>
-          <MenuLink href={`${DOCS_URL}/api`} icon={<Braces />}>API reference</MenuLink>
-          <MenuDivider />
-          <MenuLink href={REPO_URL} icon={<ProviderMark kind="github" />}>Source on GitHub</MenuLink>
-          <MenuLink href={`${REPO_URL}/issues`} icon={<Bug />}>Report a problem</MenuLink>
-        </div>
-      )}
+      <PopoverMenu state={menu} label="Help" className="py-1.5 overflow-y-auto overscroll-contain">
+        {update && (
+          <MenuButton onClick={openWhatsNew} icon={<ArrowUpCircle className="text-primary!" />}>
+            <span className="truncate flex-1">Octoprox {update.version} is available</span>
+          </MenuButton>
+        )}
+        {releases && (
+          <MenuButton onClick={openWhatsNew} icon={<Sparkles />}>
+            <span className="truncate flex-1">What's New</span>
+            {unseen > 0 && <span className="flex-none text-[11px] font-medium text-primary-soft-fg bg-primary-soft rounded-full px-1.5 py-0.5">{unseen} new</span>}
+          </MenuButton>
+        )}
+        {releases && <MenuDivider />}
+        {pageDocs.length > 0 && (
+          <>
+            <MenuLabel>About this page</MenuLabel>
+            {pageDocs.map((d) => (
+              <MenuLink key={d.path} href={`${DOCS_URL}/${d.path}`} icon={<BookOpen />}>{d.title}</MenuLink>
+            ))}
+            <MenuDivider />
+          </>
+        )}
+        <MenuLabel>Documentation</MenuLabel>
+        <MenuLink href={`${DOCS_URL}/getting-started`} icon={<LifeBuoy />}>Getting started</MenuLink>
+        <MenuLink href={`${DOCS_URL}/configuration`} icon={<BookOpen />}>Configuration reference</MenuLink>
+        <MenuLink href={`${DOCS_URL}/api`} icon={<Braces />}>API reference</MenuLink>
+        <MenuDivider />
+        <MenuLink href={REPO_URL} icon={<ProviderMark kind="github" />}>Source on GitHub</MenuLink>
+        <MenuLink href={`${REPO_URL}/issues`} icon={<Bug />}>Report a problem</MenuLink>
+      </PopoverMenu>
 
       {whatsNew && <WhatsNewDialog info={whatsNew} onClose={() => setWhatsNew(null)} />}
     </>
@@ -208,7 +148,7 @@ function MenuDivider() {
   return <div className="h-px bg-line my-1.5" aria-hidden />
 }
 
-const menuItemClasses = 'flex items-center gap-2.5 px-3 h-8 text-fg-muted hover:bg-surface-raised hover:text-fg transition-colors [&>svg]:w-4 [&>svg]:h-4 [&>svg]:flex-none [&>svg]:text-fg-subtle'
+const menuItemClasses = 'flex items-center gap-2.5 px-3 h-8 text-fg-muted outline-none hover:bg-surface-raised hover:text-fg focus-visible:bg-surface-raised focus-visible:text-fg transition-colors [&>svg]:w-4 [&>svg]:h-4 [&>svg]:flex-none [&>svg]:text-fg-subtle'
 
 function MenuButton({ onClick, icon, children }: { onClick: () => void; icon: ReactNode; children: ReactNode }) {
   return (

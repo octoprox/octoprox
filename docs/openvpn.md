@@ -29,7 +29,7 @@ Each device gets a certificate issued by that CA with the device's id as common 
 
 ### Admission: the directory decides, per connection
 
-The daemon is started with `management-client-auth`, which holds every connecting device until the gateway answers over the daemon's management socket. The gateway looks the device up by common name in the device list the routing feed gave it, with no database round trip, and checks three things: the device exists, it is enabled, and the serial of the certificate it presented is the one on record. A device that passes is admitted and pushed its fixed tunnel address (`ifconfig-push`); one that fails is refused with the reason in the log and counted on the settings page.
+The daemon is started with `management-client-auth`, which holds every connecting device until the gateway answers over the daemon's management socket. The gateway looks the device up by common name in the device list the routing feed gave it, with no database round trip, and checks three things: the device exists, it is enabled, and the serial of the certificate it presented is the one on record. A device that passes is admitted and pushed its fixed tunnel address (`ifconfig-push`); one that fails is refused with the reason in the log and counted under Administration → OpenVPN.
 
 That makes the tunnel address the credential, exactly as for WireGuard: the daemon drops packets a device sends from any address but the one it was pushed, so the address a connection arrives from names the device, and through it the project and the routing it was given.
 
@@ -55,7 +55,7 @@ sequenceDiagram
 
 ### The daemon
 
-Where WireGuard is an interface the kernel keeps, OpenVPN is a process. On every gateway where `openvpn.enabled` is set, Octoprox writes the daemon's configuration (identity included) into a private temporary directory, starts `openvpn` with the same ambient capabilities the other tunnel tools get, connects to its management socket, waits for the tun interface to come up, and attaches that interface to the shared data plane. If the daemon exits on its own it is started again with backoff (five seconds, doubling to a minute), and the settings page shows the exit status with the daemon's last lines of output. A failure to start never takes the proxy ports down.
+Where WireGuard is an interface the kernel keeps, OpenVPN is a process. On every gateway where `openvpn.enabled` is set, Octoprox writes the daemon's configuration (identity included) into a private temporary directory, starts `openvpn` with the same ambient capabilities the other tunnel tools get, connects to its management socket, waits for the tun interface to come up, and attaches that interface to the shared data plane. If the daemon exits on its own it is started again with backoff (five seconds, doubling to a minute), and Administration → OpenVPN shows the exit status with the daemon's last lines of output. A failure to start never takes the proxy ports down.
 
 The daemon's configuration, in short: `server <subnet>` in `topology subnet`, one transport (`proto udp` or `proto tcp-server`) on the install's port, `push "redirect-gateway def1"` and `push "dhcp-option DNS <gateway>"`, `remote-cert-tls client`, `dh none` (elliptic-curve key exchange), modern AEAD data ciphers, `tls-crypt` with the install's key, and the management socket. Devices get `remote-cert-tls server` in their profile, which pins the endpoint to a server certificate of the install's CA.
 
@@ -83,7 +83,7 @@ The cluster compose files do all of this on every gateway and publish 1194 over 
       - OCTOPROX_OPENVPN_ENABLED=true
 ```
 
-Then, as an admin, open **Settings → OpenVPN** and set the **public endpoint host**. The page also lists every gateway running the daemon, from their heartbeats, with its version, how often it was restarted, and the error if it failed to come up.
+Then, as an admin, open **Administration → OpenVPN** and set the **public endpoint host**. The page also lists every gateway running the daemon, from their heartbeats, with its version, how often it was restarted, and the error if it failed to come up.
 
 ### Process settings
 
@@ -101,7 +101,7 @@ The data plane's own settings (`tunnel:`) are shared with WireGuard and describe
 
 ### Install-wide settings
 
-Edited under **Settings → OpenVPN**, stored in Postgres and carried to every gateway by the routing feed, so they all agree on them:
+Edited under **Administration → OpenVPN**, stored in Postgres and carried to every gateway by the routing feed, so they all agree on them:
 
 | Setting | Default | Meaning |
 |---------|---------|---------|

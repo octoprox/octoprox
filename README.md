@@ -448,7 +448,7 @@ proxy:
 
 Admins can export the whole setup (users, projects, credentials, connectors,
 proxies and optionally metrics) as a single passphrase-encrypted `.opbak` file
-from **Settings → Backup & Migration**, and restore it on the same or another
+from **Administration → Backup & Migration**, and restore it on the same or another
 install.
 
 - **Export** asks for a passphrase (8+ characters). The file is encrypted with
@@ -479,7 +479,7 @@ For detailed setup instructions, see:
 
 ## Proxy Providers
 
-Residential, ISP and datacenter vendors are integrated through the provider SDK: each vendor is a YAML descriptor that declares its credential and connector fields, how they turn into proxy endpoints (gateway sessions, port-mapped IPs or an API-served list) and which vendor API calls discover zones or validate credentials. Oxylabs, Bright Data, Decodo, Webshare, IPRoyal and NetNut are shipped; admins can add or duplicate providers under **Settings → Providers**, operators can mount YAML files or install Python plugins.
+Residential, ISP and datacenter vendors are integrated through the provider SDK: each vendor is a YAML descriptor that declares its credential and connector fields, how they turn into proxy endpoints (gateway sessions, port-mapped IPs or an API-served list) and which vendor API calls discover zones or validate credentials. Oxylabs, Bright Data, Decodo, Webshare, IPRoyal and NetNut are shipped; admins can add or duplicate providers under **Administration → Providers**, operators can mount YAML files or install Python plugins.
 
 - [Providers & SDK](docs/providers.md) - Descriptor format, security model, UI builder
 

@@ -158,7 +158,7 @@ export function scenarioSteps(i: ScenarioInput): ScenarioStep[] {
       : { title: `Preflight on this request`, text: `Off for this project: no echo. The slot is trusted as the last health check judged it, so a session that moved since then keeps serving until the next check.` })
   } else if (i.kind === 'pooled') {
     steps.push(i.ask === 'country'
-      ? { title: `Preflight on this request`, text: `One echo per session, compared with the requested country. The verdict is cached for the preflight TTL (10 minutes by default, set under Settings, IP attribution; not tied to the sticky session) and dropped early when a health check sees the exit move.` }
+      ? { title: `Preflight on this request`, text: `One echo per session, compared with the requested country. The verdict is cached for the preflight TTL (10 minutes by default, set under Administration → IP attribution; not tied to the sticky session) and dropped early when a health check sees the exit move.` }
       : { title: `Preflight on this request`, text: `Not echoed: the client named no place, so there is nothing to compare the exit with. The slot's own claim is still judged on the row, by the health check and by echoes from requests that do name a country.` })
   } else if (i.session) {
     steps.push({ title: `Preflight on this request`, text: `One echo per vendor session, cached for the preflight TTL (10 minutes by default, not extended by use). The vendor session comes from the -sessid- and the place together, so the same -sessid- asking for another place gets a new session and a new echo.${promised ? ` With nothing asked, the country picked from the connector's list is the vendor's promise.` : ``}` })

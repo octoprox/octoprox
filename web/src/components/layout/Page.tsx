@@ -7,6 +7,9 @@ import { cn } from '../../utils/cn'
 /** A panel the shell opens over any page (project settings); it takes the page's panel slot while set, the page's own panel kept hidden. */
 export const ShellPanelContext = createContext<ReactNode>(null)
 
+/** Who a page's settings reach, shown beside its title where that is not the open project (Administration: all projects). */
+export const PageScopeContext = createContext<string | null>(null)
+
 /**
  * Standard page frame: scrolling content on the left, optional docked
  * Inspector on the right. The AppShell gives it a flex row to fill.
@@ -34,6 +37,7 @@ interface PageProps {
 
 export function Page({ title, subtitle, count, belowTitle, actions, toolbar, panel, children, contentClassName }: PageProps) {
   const shellPanel = useContext(ShellPanelContext)
+  const scope = useContext(PageScopeContext)
   return (
     <div className="flex flex-1 min-h-0 min-w-0">
       <div className="@container flex-1 min-w-0 overflow-y-auto">
@@ -44,6 +48,7 @@ export function Page({ title, subtitle, count, belowTitle, actions, toolbar, pan
                 <h1 className="text-xl font-semibold text-fg flex items-center gap-2">
                   {title}
                   {count !== undefined && <span className="text-sm font-medium text-fg-subtle tabular-nums">{count}</span>}
+                  {scope && <span className="px-2 py-0.5 rounded-full border border-line bg-surface-raised text-[11px] font-medium text-fg-muted whitespace-nowrap">{scope}</span>}
                 </h1>
                 {subtitle && <p className="text-[12.5px] text-fg-muted mt-0.5">{subtitle}</p>}
                 {belowTitle && <div className="mt-2.5">{belowTitle}</div>}

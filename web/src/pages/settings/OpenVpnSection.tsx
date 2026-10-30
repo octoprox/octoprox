@@ -40,7 +40,7 @@ export default function OpenVpnSection() {
   return (
     <Page
       title="OpenVPN"
-      subtitle="Devices without proxy support join a project's pool through an OpenVPN tunnel terminated by Octoprox."
+      subtitle="Devices without proxy support join a project's pool through an OpenVPN tunnel terminated by Octoprox. This server is shared by every project; each project adds its devices on its Devices page."
       toolbar={data && <TunnelStateBadge status={data.status} />}
     >
       {isLoading || !data ? (

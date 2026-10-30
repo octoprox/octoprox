@@ -9,6 +9,7 @@ import type { ConflictRule, ContradictedAction, UnknownAction } from '../api/cli
 import { locationExamples, scenarioSteps, ROW_KIND_FACTS } from './locationExamples'
 import type { RowKind, Ask } from './locationExamples'
 import { RichSelect, RichSelectOption } from './RichSelect'
+import { AdminLink } from './AdminLink'
 import { Button, Input, Select, Textarea, Label, Alert, Inspector, Tabs, Segmented, InfoTip } from './ui'
 import { isInUse } from '../utils/geo'
 import { useToast } from '../contexts/ToastContext'
@@ -71,7 +72,7 @@ const unknownOptions: RichSelectOption[] = [
 ]
 
 const conflictOptions: RichSelectOption[] = [
-  { value: 'inherit', label: 'Install default', description: 'Follow Settings → IP attribution' },
+  { value: 'inherit', label: 'Install default', description: 'Follow Administration → IP attribution' },
   { value: 'consensus', label: 'Consensus', description: 'Every independent source agrees with each other and disagrees with the vendor. While they disagree among themselves the claim is open: no flag, and the row is routed on the vendor\'s word when unknown exits are trusted, on the top-ranked database when they are refused' },
   { value: 'first', label: 'First', description: 'The top-ranked independent source disagrees with the vendor; the others are not consulted for the flag' },
   { value: 'any', label: 'Any', description: 'One independent source agreeing with the vendor confirms the claim, and routing uses that source\'s answer; none agreeing is a contradiction. Never leaves a claim open while a database answers' },
@@ -203,7 +204,7 @@ export function ProjectForm({ project, onSave, error, formId }: ProjectFormProps
                   setFormData({ ...formData, observation_retention_days: value as ProjectCreate['observation_retention_days'] })
                 }}
               />
-              <p className="text-xs text-fg-subtle mt-1">Empty follows the install default; 0 = keep forever</p>
+              <p className="text-xs text-fg-subtle mt-1">Empty follows the install default in <AdminLink page="geo" newTab>IP attribution</AdminLink>; 0 = keep forever</p>
             </div>
           </div>
 
@@ -309,7 +310,7 @@ export function ProjectForm({ project, onSave, error, formId }: ProjectFormProps
             <Label className="text-xs">
               <span className="inline-flex items-center gap-1.5">
                 <span>City radius (km)</span>
-                <InfoTip label="About the city radius">How far from the claimed city an independent answer may place the exit and still confirm a city claim, so a database naming a neighbouring municipality (Diadema for São Paulo) is not a contradiction. 0 compares city names only. Needs a GeoNames file loaded under Settings, IP attribution; without one cities are compared by name.</InfoTip>
+                <InfoTip label="About the city radius">How far from the claimed city an independent answer may place the exit and still confirm a city claim, so a database naming a neighbouring municipality (Diadema for São Paulo) is not a contradiction. 0 compares city names only. Needs a GeoNames file loaded under Administration → IP attribution; without one cities are compared by name.</InfoTip>
               </span>
             </Label>
             <Input
@@ -322,7 +323,7 @@ export function ProjectForm({ project, onSave, error, formId }: ProjectFormProps
                 setFormData({ ...formData, location_city_radius_km: value as ProjectCreate['location_city_radius_km'] })
               }}
             />
-            <p className="text-xs text-fg-subtle mt-1">Empty follows the install default; a smaller radius is stricter.</p>
+            <p className="text-xs text-fg-subtle mt-1">Empty follows the install default in <AdminLink page="geo" newTab>IP attribution</AdminLink>; a smaller radius is stricter.</p>
           </div>
           {(() => {
             const defaults = geo?.settings
@@ -416,10 +417,10 @@ export function ProjectForm({ project, onSave, error, formId }: ProjectFormProps
                   <p className="text-warning">Preflight is off, so refusing the proxy acts on pooled residential and mobile slots only through the health check verdict on the row, and does nothing for dynamic-sessions connectors, whose requests carry no row verdict. Turn preflight on to verify a session's exit before its first request.</p>
                 )}
                 {unknown === 'refuse' && noCityDatabase && (
-                  <p className="text-warning">No loaded database knows states or cities, so every -st- or -city- request is refused as not confirmed under this setting. Load a city-level database under Settings → IP attribution, or trust the vendor for unknown exits.</p>
+                  <p className="text-warning">No loaded database knows states or cities, so every -st- or -city- request is refused as not confirmed under this setting. Load a city-level database under <AdminLink page="geo" newTab>IP attribution</AdminLink>, or trust the vendor for unknown exits.</p>
                 )}
                 {unknown === 'refuse' && noDatabases && (
-                  <p className="text-warning">No IP database is loaded, so nothing independent places any exit: every judged row is skipped under this setting, whether the vendor claimed a place for it or not. Load a database under Settings → IP attribution first.</p>
+                  <p className="text-warning">No IP database is loaded, so nothing independent places any exit: every judged row is skipped under this setting, whether the vendor claimed a place for it or not. Load a database under <AdminLink page="geo" newTab>IP attribution</AdminLink> first.</p>
                 )}
               </div>
             )
@@ -454,7 +455,7 @@ export function ProjectPanel({ project, onClose }: { project: ProjectSummary; on
   return (
     <Inspector
       title="Project settings"
-      subtitle={project.name}
+      subtitle={`${project.name} · only this project`}
       onClose={onClose}
       footer={
         <>

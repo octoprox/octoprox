@@ -13,9 +13,9 @@ Octoprox has three ways into the management API and the dashboard. Every one of 
 
 | Way in | Who it is for | Where it is set up |
 |---|---|---|
-| Username and password | Anyone the admin added with a password or an invite link | Settings, Users |
-| Sign in with Google, Microsoft or GitHub | Anyone the admin added with the email they use at that provider | Settings, Sign-in |
-| Personal access token | Scripts, CI jobs and API clients, acting as a user or a service account | Settings, Account (or the user's inspector, for an admin) |
+| Username and password | Anyone the admin added with a password or an invite link | Administration, Users |
+| Sign in with Google, Microsoft or GitHub | Anyone the admin added with the email they use at that provider | Administration, Sign-in |
+| Personal access token | Scripts, CI jobs and API clients, acting as a user or a service account | Account, from your name in the sidebar (or the user's inspector, for an admin) |
 
 Proxy traffic on port 8080 is unrelated: proxy clients authenticate with a project's credentials, which have nothing to do with who may open the dashboard.
 
@@ -59,18 +59,18 @@ Every api process in a cluster shares the per-login state through Redis, so a lo
    - **Google:** Google Cloud Console, APIs & Services, Credentials, create an OAuth client ID of type Web application. Add the redirect URI under Authorised redirect URIs. If the consent screen is in testing, add your users as test users or publish it.
    - **Microsoft:** Microsoft Entra admin center, App registrations, New registration. Under Supported account types pick accounts in this organisational directory only. Add a Web platform with the redirect URI. Create a client secret under Certificates & secrets. Note the Application (client) ID and the Directory (tenant) ID from the overview.
    - **GitHub:** Settings, Developer settings, OAuth Apps, New OAuth App (or under your organisation's settings). Put the redirect URI in Authorization callback URL. Generate a client secret.
-3. **Paste the client ID and secret** into Settings, Sign-in, under the provider. Microsoft also needs the tenant ID. The secret is stored and never shown again; typing a new one replaces it. Tick the box to show the button on the login page and save.
-4. **Add the people** under Settings, Users, with the email they use at the provider. Case does not matter: addresses are stored lowercase, and an address can belong to only one user. An invite link or a password is optional: a user whose email matches can click "Continue with Google" straight away. The Users table shows what each person signs in with.
+3. **Paste the client ID and secret** into Administration, Sign-in, under the provider. Microsoft also needs the tenant ID. The secret is stored and never shown again; typing a new one replaces it. Tick the box to show the button on the login page and save.
+4. **Add the people** under Administration, Users, with the email they use at the provider. Case does not matter: addresses are stored lowercase, and an address can belong to only one user. An invite link or a password is optional: a user whose email matches can click "Continue with Google" straight away. The Users table shows what each person signs in with.
 
 Enabling a provider changes nothing for anyone who already has a password. Both ways in stay available side by side, and a person can use either.
 
 ### Adding a password later
 
-A person who signs in through a provider has no password until they want one. They set it under Settings, Account: with no password on the account there is no current password to ask for, the provider session is what proves who they are. From then on the password and the provider are two ways into the same account, and changing the password asks for the current one as usual. An admin can also set a password on the user's row or send a set-password link from the Users table. Neither is possible from a session authenticated by an API token.
+A person who signs in through a provider has no password until they want one. They set it under Account: with no password on the account there is no current password to ask for, the provider session is what proves who they are. From then on the password and the provider are two ways into the same account, and changing the password asks for the current one as usual. An admin can also set a password on the user's row or send a set-password link from the Users table. Neither is possible from a session authenticated by an API token.
 
 ### Linking and unlinking
 
-Settings, Account lists the provider accounts linked to you and lets you unlink one. An admin sees and manages the same under the user's inspector in Settings, Users. Unlinking does not end sessions that are already open, and signing in with that provider again relinks it as long as the verified email still matches.
+Account lists the provider accounts linked to you and lets you unlink one. An admin sees and manages the same under the user's inspector in Administration, Users. Unlinking does not end sessions that are already open, and signing in with that provider again relinks it as long as the verified email still matches.
 
 Disabling a user ends every way in at once: password, provider sign-in and tokens. Deleting a user removes their linked accounts and tokens with them. Both travel with the user in a [backup]({{ site.baseurl }}/api#backup--migration), as do the provider settings themselves.
 
@@ -95,7 +95,7 @@ The server log has the specific reason behind each one, with the provider's subj
 
 A token lets a script call the API as a user without a password and without the browser round trip, which also makes it the way in for anyone who signs in through a provider.
 
-- **Create one** under Settings, Account, API tokens. Give it a name (what will use it) and an expiry: 30 days, 90 days, a year, or never. The secret is shown once; copy it then. Octoprox keeps only a hash.
+- **Create one** under Account, API tokens. Give it a name (what will use it) and an expiry: 30 days, 90 days, a year, or never. The secret is shown once; copy it then. Octoprox keeps only a hash.
 - **Send it** as a bearer token, exactly like the token the login endpoint returns:
 
   ```bash
@@ -104,7 +104,7 @@ A token lets a script call the API as a user without a password and without the 
 
 - **It acts as the user is right now.** The role and the active flag are read from the user on every call, so a role change takes effect immediately and disabling the user ends the token at once. This is unlike a session token from a password login, which carries its role until it expires.
 - **Revoke it** from the same list. The next call made with it gets 401. A token cannot create other tokens: something that leaked one should not be able to breed replacements that outlive its revocation.
-- **Service accounts.** For automation that should not run under a person's identity, an admin adds a user with no password and no email (an invite that is never used, or any account), and issues it a token from the user's inspector under Settings, Users. The admin's name is recorded on the token. Give the account the lowest role that does the job; a viewer token can read everything and change nothing.
+- **Service accounts.** For automation that should not run under a person's identity, an admin adds a user with no password and no email (an invite that is never used, or any account), and issues it a token from the user's inspector under Administration, Users. The admin's name is recorded on the token. Give the account the lowest role that does the job; a viewer token can read everything and change nothing.
 
 The Users inspector shows every token a person holds, when each was last used and when it expires, so an admin can confirm nothing outlives a departure.
 
@@ -112,11 +112,11 @@ A token starts with `octo_`, which is how the API tells it from a session token 
 
 ## Octoprox Enterprise
 
-The sign-in above is for teams whose admin adds each person by hand. Octoprox Enterprise hands that control to your directory. It is a licensed add-on, enabled by a license key entered under Settings, System, and it builds on the same sign-in engine; nothing in a project changes.
+The sign-in above is for teams whose admin adds each person by hand. Octoprox Enterprise hands that control to your directory. It is a licensed add-on, enabled by a license key entered under Administration, System, and it builds on the same sign-in engine; nothing in a project changes.
 
 ### Domain rules
 
-Instead of adding every person, an admin writes rules under Settings, Sign-in, Enterprise: everyone whose verified email is at `@example.com` may sign in and gets a user on first login, with a default role per rule. Individual emails can still be listed, with their own role, and an email rule wins over a domain rule. Google domain rules check the hosted-domain claim, so an `@example.com` address that is not a Workspace account of that domain does not match.
+Instead of adding every person, an admin writes rules under Administration, Sign-in, Enterprise: everyone whose verified email is at `@example.com` may sign in and gets a user on first login, with a default role per rule. Individual emails can still be listed, with their own role, and an email rule wins over a domain rule. Google domain rules check the hosted-domain claim, so an `@example.com` address that is not a Workspace account of that domain does not match.
 
 ### Your own identity provider
 
@@ -136,7 +136,7 @@ A SCIM 2.0 endpoint lets Okta, Entra and other directories create, update and de
 
 ### Audit log
 
-Every sign-in (which way, from where, which provider), every token issued, used for the first time or revoked, and every change to a provider or a rule is recorded with the actor and the request id, kept for a configurable period, visible under Settings, System, Audit, and exportable as JSON lines for a SIEM.
+Every sign-in (which way, from where, which provider), every token issued, used for the first time or revoked, and every change to a provider or a rule is recorded with the actor and the request id, kept for a configurable period, visible under Administration, System, Audit, and exportable as JSON lines for a SIEM.
 
 ### Getting a license
 

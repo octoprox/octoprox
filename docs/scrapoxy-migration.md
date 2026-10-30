@@ -152,7 +152,7 @@ Scrapoxy had connectors for Evomi, Geonode, HypeProxy, Live Proxies, Massive, Ni
 
 Any proxy vendor can be added without code or a redeploy. A provider is a YAML descriptor: which fields a credential and a connector need, how they turn into a gateway host, port, username and password, and which vendor API calls validate the credential or list options. Most residential and datacenter vendors fit this shape, because they all hand out a gateway with targeting parameters encoded in the username.
 
-- **An admin on your instance** adds it under **Settings → Providers**, tests it with throwaway credentials before saving, and it is live for every project immediately. The Bright Data descriptor exercises nearly every feature and can be exported as a starting point. The format is documented in [Providers & the Provider SDK](providers).
+- **An admin on your instance** adds it under **Administration → Providers**, tests it with throwaway credentials before saving, and it is live for every project immediately. The Bright Data descriptor exercises nearly every feature and can be exported as a starting point. The format is documented in [Providers & the Provider SDK](providers).
 - **An operator** can also mount descriptors as files (`OCTOPROX_PROVIDERS_DIR`) so they ship with the deployment.
 - **Ask for one.** Open an issue on [GitHub](https://github.com/octoprox/octoprox/issues) naming the vendor and linking its proxy documentation. Descriptors are small, and ones that are generally useful are added to the shipped set.
 - Vendors that deliver a fixed list of IPs rather than a gateway work today through a static proxy connector.

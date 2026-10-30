@@ -8,7 +8,7 @@ import { useAuth } from '../contexts/AuthContext'
 export default function RequireAdmin({ children }: { children: ReactNode }) {
   const { isAdmin } = useAuth()
   if (!isAdmin) {
-    return <Navigate to="/settings/account" replace />
+    return <Navigate to="/" replace />
   }
   return <>{children}</>
 }

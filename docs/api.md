@@ -1115,7 +1115,7 @@ provider credentials, protected only by the passphrase.
 
 ## System Statistics
 
-Admin-only. One endpoint describing the install as a cluster: every process and what it is doing, the controller, the routing feed and each gateway's copy of it, the work streams, and what the install holds and costs in Postgres and Redis. This is what the **Settings → System** page renders.
+Admin-only. One endpoint describing the install as a cluster: every process and what it is doing, the controller, the routing feed and each gateway's copy of it, the work streams, and what the install holds and costs in Postgres and Redis. This is what the **Administration → System** page renders.
 
 ```bash
 GET /api/v1/system/stats

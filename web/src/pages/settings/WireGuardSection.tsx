@@ -39,7 +39,7 @@ export default function WireGuardSection() {
   return (
     <Page
       title="WireGuard"
-      subtitle="Devices without proxy support join a project's pool through a WireGuard tunnel terminated by Octoprox."
+      subtitle="Devices without proxy support join a project's pool through a WireGuard tunnel terminated by Octoprox. This server is shared by every project; each project adds its devices on its Devices page."
       toolbar={data && <TunnelStateBadge status={data.status} />}
     >
       {isLoading || !data ? (

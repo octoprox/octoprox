@@ -9,7 +9,7 @@ description: "Use Oxylabs residential, mobile, ISP and datacenter proxies throug
 
 The Oxylabs Connector allows Octoprox to use Oxylabs proxy services including residential, mobile, ISP, and datacenter proxies. This guide covers how to configure the connector with your Oxylabs credentials.
 
-> **Built-in descriptor:** Oxylabs is implemented as a shipped provider descriptor. Admins can inspect or export it under **Settings → Providers** and use it as a template for other vendors. See the [Providers guide]({{ site.baseurl }}/providers).
+> **Built-in descriptor:** Oxylabs is implemented as a shipped provider descriptor. Admins can inspect or export it under **Administration → Providers** and use it as a template for other vendors. See the [Providers guide]({{ site.baseurl }}/providers).
 
 ## Prerequisites
 

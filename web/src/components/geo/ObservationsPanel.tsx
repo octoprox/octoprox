@@ -13,6 +13,7 @@ import { Alert, Badge, Card, Select } from '../ui'
 import { formatDateTime, relativeTime } from '../../utils/format'
 import { HeaderWithTip, TIPS, VerdictCell, countryVerdict, placeLabel } from './columns'
 import { UntilPicker } from './UntilPicker'
+import { AdminLink } from '../AdminLink'
 
 const SOURCE_OPTIONS = ['discovery', 'health_check', 'geo_lookup', 'manual', 'preflight'].map((s) => ({ value: s, label: s.replace('_', ' ') }))
 const VERDICT_OPTIONS: { value: ObservationVerdict; label: string }[] = [
@@ -158,7 +159,7 @@ export function ObservationsPanel({ projectId }: { projectId?: string }) {
   return (
     <div className="space-y-3">
       <div className="flex items-center justify-between gap-3 flex-wrap">
-        <p className="text-xs text-fg-muted">Every time an exit IP was seen behind a proxy, newest first. Raw rows follow the retention window set in Settings → IP attribution. Country and IP filters match exactly; Until shows the log up to an earlier moment.</p>
+        <p className="text-xs text-fg-muted">Every time an exit IP was seen behind a proxy, newest first. Raw rows follow the retention window set in <AdminLink page="geo">IP attribution</AdminLink>, unless a project sets its own. Country and IP filters match exactly; Until shows the log up to an earlier moment.</p>
         <div className="flex items-center gap-2 flex-wrap">
           <UntilPicker onChange={setUntil} />
           {!projectId && (

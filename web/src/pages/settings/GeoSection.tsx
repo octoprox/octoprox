@@ -554,7 +554,7 @@ function PolicyTab() {
       <div className="grid grid-cols-1 @3xl:grid-cols-2 gap-4">
         <Card className="p-5">
           <h3 className="text-sm font-semibold text-fg mb-1">Judging the vendor</h3>
-          <p className="text-xs text-fg-muted mb-3">The routing value is always the local IP databases in their priority, then the echo endpoint, then the vendor filling only what nothing independent answered. The rule below decides when a vendor claim counts as contradicted; projects can override it on their Location tab.</p>
+          <p className="text-xs text-fg-muted mb-3">The routing value is always the local IP databases in their priority, then the echo endpoint, then the vendor filling only what nothing independent answered. The rule below decides when a vendor claim counts as contradicted; projects can override it in their project settings, on the Location tab.</p>
           <div>
             <Label htmlFor="geo-conflict">When is a vendor claim contradicted? (default)</Label>
             <Select id="geo-conflict" value={policy.default_conflict_rule} onChange={(e) => update({ default_conflict_rule: e.target.value as GeoSettingsDoc['default_conflict_rule'] })}>
@@ -568,12 +568,12 @@ function PolicyTab() {
             <Label htmlFor="geo-city-radius">City radius (km, default)</Label>
             <Input id="geo-city-radius" type="number" min={0} max={500} step={1} className="w-32" value={policy.default_city_radius_km} onChange={(e) => update({ default_city_radius_km: Math.min(500, Math.max(0, parseFloat(e.target.value) || 0)) })} />
             <p className="text-[11px] text-fg-subtle mt-1">
-              How far from the claimed city an independent answer may place the exit and still confirm a city claim: a database that puts a São Paulo exit in Diadema, 15 km from the centre, confirms it at 25 km. 0 compares city names only. Projects can set their own on their Location tab.
+              How far from the claimed city an independent answer may place the exit and still confirm a city claim: a database that puts a São Paulo exit in Diadema, 15 km from the centre, confirms it at 25 km. 0 compares city names only. Projects can set their own in their project settings, on the Location tab.
               {databases && !databases.some((d) => d.kind === 'places' && isInUse(d)) && <span className="text-warning"> No GeoNames file is loaded, so cities are compared by name until one is added on the Databases tab.</span>}
             </p>
           </div>
           <p className="text-xs text-fg-muted mt-4 border-t border-line pt-3">
-            What a verdict does to routing is decided per project, on the project's Location tab, because different projects tolerate different risk: what to do when the databases contradict the vendor (route on the evidence, route on the vendor's claim, or refuse the proxy), what to do when no database knows the exit (trust the vendor, or refuse the proxy), and whether a session's exit is verified before its first request (the preflight switch).
+            What a verdict does to routing is decided per project, in project settings on the Location tab, because different projects tolerate different risk: what to do when the databases contradict the vendor (route on the evidence, route on the vendor's claim, or refuse the proxy), what to do when no database knows the exit (trust the vendor, or refuse the proxy), and whether a session's exit is verified before its first request (the preflight switch).
           </p>
         </Card>
 
@@ -637,7 +637,7 @@ function PolicyTab() {
             <div>
               <Label htmlFor="geo-retention">Raw observations (days)</Label>
               <Input id="geo-retention" type="number" min={0} value={policy.observation_retention_days} onChange={(e) => update({ observation_retention_days: parseInt(e.target.value) || 0 })} />
-              <p className="text-[11px] text-fg-subtle mt-1">0 keeps raw observations forever. Accuracy totals are kept forever.</p>
+              <p className="text-[11px] text-fg-subtle mt-1">0 keeps raw observations forever. Accuracy totals are kept forever. Projects can set their own in their project settings.</p>
             </div>
             <div>
               <Label htmlFor="geo-exit-retention">Exit IPs not seen for (days)</Label>

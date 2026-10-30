@@ -14,6 +14,7 @@ import { useAuth } from '../contexts/AuthContext'
 import { useToast } from '../contexts/ToastContext'
 import { DataTable, type DataTableFeatures } from '../components/DataTable'
 import { Page } from '../components/layout/Page'
+import { AdminLink } from '../components/AdminLink'
 import { CredentialForm, NewCredentialPanel, TypeCard } from '../components/CredentialForm'
 import { useProviders } from '../hooks/useProviders'
 import { ProviderLogo } from '../components/ProviderLogo'
@@ -25,7 +26,7 @@ type PanelState = { kind: 'edit'; id: string } | { kind: 'new' } | null
 export default function CredentialsPage() {
   const queryClient = useQueryClient()
   const { selectedProjectId } = useProject()
-  const { canMutate } = useAuth()
+  const { canMutate, isAdmin } = useAuth()
   const { labelFor } = useProviders()
   const toast = useToast()
   const [panel, setPanel] = useState<PanelState>(null)
@@ -136,7 +137,7 @@ export default function CredentialsPage() {
     <Page
       title="Credentials"
       count={data?.total}
-      subtitle="Provider and cloud accounts this project can provision proxies from"
+      subtitle={<>Provider and cloud accounts this project can provision proxies from{isAdmin && <>. The providers themselves are in <AdminLink page="providers">Providers</AdminLink>, for every project.</>}</>}
       actions={canMutate ? <Button size="sm" onClick={() => setPanel({ kind: 'new' })}><Plus className="w-3.5 h-3.5" /> Add credential</Button> : undefined}
       panel={panelNode}
     >

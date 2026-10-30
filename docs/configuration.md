@@ -168,7 +168,7 @@ A health check marks a proxy degraded at its first failure and unhealthy at the 
 
 ### IP Attribution
 
-The install-wide settings (default conflict rule and city radius, echo endpoint, preflight, retention) are edited in Settings → IP attribution and stored in the database; projects may override the conflict rule and the city radius. The config file describes this process and seeds a fresh install:
+The install-wide settings (default conflict rule and city radius, echo endpoint, preflight, retention) are edited in Administration → IP attribution and stored in the database; projects may override the conflict rule and the city radius. The config file describes this process and seeds a fresh install:
 
 | Option | Description | Default |
 |--------|-------------|---------|
@@ -208,7 +208,7 @@ wireguard:
 
 Environment variables: `OCTOPROX_TUNNEL_TRANSPARENT_PORT`, `OCTOPROX_TUNNEL_DNS_PORT`, `OCTOPROX_TUNNEL_FAKE_IP_RANGE`, `OCTOPROX_TUNNEL_SNIFF_TIMEOUT_SECONDS`, `OCTOPROX_TUNNEL_BLOCK_ENCRYPTED_DNS`, `OCTOPROX_WIREGUARD_ENABLED`, `OCTOPROX_WIREGUARD_INTERFACE`, `OCTOPROX_WIREGUARD_LISTEN_PORT`, `OCTOPROX_WIREGUARD_MTU`.
 
-The key pair, public endpoint and tunnel subnet are install-wide, stored in Postgres and edited under **Settings → WireGuard**. The `tunnel:` and `wireguard:` blocks are read by the gateways that terminate the tunnel; `defaults` by the api, which seeds the install-wide row. See [WireGuard Devices](wireguard) for what each setting does and what a terminating gateway needs.
+The key pair, public endpoint and tunnel subnet are install-wide, stored in Postgres and edited under **Administration → WireGuard**. The `tunnel:` and `wireguard:` blocks are read by the gateways that terminate the tunnel; `defaults` by the api, which seeds the install-wide row. See [WireGuard Devices](wireguard) for what each setting does and what a terminating gateway needs.
 
 ## OpenVPN
 
@@ -227,7 +227,7 @@ openvpn:
 
 Environment variables: `OCTOPROX_OPENVPN_ENABLED`, `OCTOPROX_OPENVPN_INTERFACE`, `OCTOPROX_OPENVPN_LISTEN_PORT`, `OCTOPROX_OPENVPN_MTU`.
 
-The CA, server certificate, public endpoint, transport and subnet are install-wide, stored in Postgres and edited under **Settings → OpenVPN**. The `tunnel:` block above is shared with WireGuard. See [OpenVPN Devices](openvpn).
+The CA, server certificate, public endpoint, transport and subnet are install-wide, stored in Postgres and edited under **Administration → OpenVPN**. The `tunnel:` block above is shared with WireGuard. See [OpenVPN Devices](openvpn).
 
 ## Logging
 

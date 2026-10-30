@@ -5,7 +5,7 @@ import { useCallback, useMemo, useState } from 'react'
 import { useLocation, useNavigate } from 'react-router'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { ColumnDef } from '@tanstack/react-table'
-import { Plus, Server, Trash2, FolderOpen, Settings, Pencil, LogOut, Link2, KeyRound } from 'lucide-react'
+import { Plus, Server, Trash2, FolderOpen, Settings, Shield, Link2, KeyRound } from 'lucide-react'
 import {
   fetchProjects, fetchProjectsLoad, createProject, deleteProject, updateProject, logout,
   ProjectCreate, ProjectUpdate, ProjectSummary, ProjectLoad, HISTORY_RANGES, HistoryRange,
@@ -21,6 +21,7 @@ import { ProjectForm } from './ProjectForm'
 import { DataTable, type DataTableFeatures } from './DataTable'
 import { Page } from './layout/Page'
 import { NewVersionBanner } from './NewVersion'
+import { UserMenu } from './UserMenu'
 import { Sparkline } from './charts/Sparkline'
 import octoproxLogo from '../assets/logos/octoprox_horizontal.svg'
 import octoproxLogoDark from '../assets/logos/octoprox_horizontal_dark.svg'
@@ -86,7 +87,7 @@ export default function ProjectSelection() {
   const queryClient = useQueryClient()
   const { setSelectedProjectId } = useProject()
   const { isDark } = useTheme()
-  const { canMutate, authStatus } = useAuth()
+  const { canMutate, isAdmin } = useAuth()
   const toast = useToast()
   const [panel, setPanel] = useState<PanelState>(null)
   const [pendingDelete, setPendingDelete] = useState<ProjectSummary | null>(null)
@@ -134,9 +135,9 @@ export default function ProjectSelection() {
     setSelectedProjectId(project.id)
     navigate(`/projects/${project.id}/overview`)
   }
-  const openSettings = () => {
+  const openAdmin = () => {
     setSettingsOrigin(location.pathname)
-    navigate('/settings')
+    navigate('/admin')
   }
   const newProject = () => {
     createMutation.reset()
@@ -178,7 +179,7 @@ export default function ProjectSelection() {
     panelNode = (
       <Inspector
         title="Project settings"
-        subtitle={editing.name}
+        subtitle={`${editing.name} · only this project`}
         onClose={() => setPanel(null)}
         footer={
           <>
@@ -200,16 +201,9 @@ export default function ProjectSelection() {
       <header className="h-14 flex-none flex items-center justify-between px-5 border-b border-line bg-surface">
         <img src={isDark ? octoproxLogoDark : octoproxLogo} alt="Octoprox" className="h-[26px] w-auto" />
         <div className="flex items-center gap-2">
-          <Button variant="ghost" size="sm" onClick={openSettings}><Settings className="w-3.5 h-3.5" /> Settings</Button>
-          <div className="flex items-center gap-2 pl-2 border-l border-line">
-            <div className="w-7 h-7 rounded-full bg-primary-soft text-primary-soft-fg flex items-center justify-center text-[11px] font-semibold uppercase">{(authStatus?.username ?? '?').slice(0, 2)}</div>
-            <div className="leading-tight hidden sm:block">
-              <div className="text-[13px] font-medium">{authStatus?.username}</div>
-              <div className="text-[11px] text-fg-subtle">{authStatus?.role}</div>
-            </div>
-            <button onClick={() => logout()} className="p-1.5 rounded-md text-fg-muted hover:text-fg hover:bg-surface-raised transition-colors" title="Sign out">
-              <LogOut className="w-4 h-4" />
-            </button>
+          {isAdmin && <Button variant="ghost" size="sm" onClick={openAdmin}><Shield className="w-3.5 h-3.5" /> Administration</Button>}
+          <div className={isAdmin ? 'pl-2 border-l border-line' : undefined}>
+            <UserMenu placement="header" onSignOut={() => logout()} />
           </div>
         </div>
       </header>
@@ -418,7 +412,7 @@ function ProjectTable({ projects, activeId, panelOpen, canMutate, onOpen, onEdit
       enableSorting: false,
       cell: ({ row }: { row: { original: ProjectRow } }) => (
         <div className="flex justify-end gap-0.5">
-          <button onClick={() => onEdit(row.original)} className="p-1 rounded-sm text-fg-subtle hover:text-fg hover:bg-surface-raised" title="Project settings"><Pencil className="w-3.5 h-3.5" /></button>
+          <button onClick={() => onEdit(row.original)} className="p-1 rounded-sm text-fg-subtle hover:text-fg hover:bg-surface-raised" title="Project settings"><Settings className="w-3.5 h-3.5" /></button>
           <button onClick={() => onDelete(row.original)} className="p-1 rounded-sm text-fg-subtle hover:text-danger hover:bg-danger-soft" title="Delete project"><Trash2 className="w-3.5 h-3.5" /></button>
         </div>
       ),
@@ -468,7 +462,7 @@ function ProjectCard({ project, range, active, canMutate, onOpen, onEdit, onDele
         </div>
         {canMutate && (
           <div className="flex items-center gap-0.5 flex-none -mr-1 -mt-1">
-            <button onClick={(e) => { e.stopPropagation(); onEdit() }} className="p-1.5 rounded-md text-fg-subtle hover:text-fg hover:bg-surface-raised" title="Project settings"><Pencil className="w-3.5 h-3.5" /></button>
+            <button onClick={(e) => { e.stopPropagation(); onEdit() }} className="p-1.5 rounded-md text-fg-subtle hover:text-fg hover:bg-surface-raised" title="Project settings"><Settings className="w-3.5 h-3.5" /></button>
             <button onClick={(e) => { e.stopPropagation(); onDelete() }} className="p-1.5 rounded-md text-fg-subtle hover:text-danger hover:bg-danger-soft" title="Delete project"><Trash2 className="w-3.5 h-3.5" /></button>
           </div>
         )}

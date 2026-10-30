@@ -16,7 +16,7 @@ description: "Upgrade a 5.x install to Octoprox 6.0 with a short downtime: befor
 
 ## Before you start
 
-1. **Take a backup**, from **Settings → Backup & Migration** (tick *Include history* to keep the metrics, unless the install keeps a long observation log: 5.x builds the export whole in memory, every IP observation included), or a snapshot of the database, and keep it outside the install. The way back is one SQL statement and a redeploy (see [The way back](#the-way-back)), so the backup is the last resort.
+1. **Take a backup**, from **Administration → Backup & Migration** (tick *Include history* to keep the metrics, unless the install keeps a long observation log: 5.x builds the export whole in memory, every IP observation included), or a snapshot of the database, and keep it outside the install. The way back is one SQL statement and a redeploy (see [The way back](#the-way-back)), so the backup is the last resort.
 2. **Choose an internal secret**: a long random string, different from `OCTOPROX_JWT_SECRET`. It goes on every 6.0 api, gateway and controller, the same value on each (on a single instance, its one service).
 3. **Check Redis**, unless it is the `redis:7-alpine` the shipped compose files run: 6.0 needs Redis 7.2 or later (`redis-cli INFO server` shows it as `redis_version`), and opens every connection with `HELLO 3`, so a proxy between Octoprox and Redis must pass `HELLO` through.
 4. **Fetch the 6.0 image ahead**, so its download is not part of the downtime: with Docker Compose, pull it while 5.x serves (below); on Kubernetes, pull it on the nodes the 6.0 pods will run on.
@@ -122,7 +122,7 @@ Migration `048` runs at the first start of a 6.0 api, controller or worker:
 Once 6.0 serves:
 
 1. Every 6.0 process answers `/ready` with `200`. A gateway turns ready once the controller has published the routing feed, a few seconds after the controller starts.
-2. **Settings → System** shows a controller leading, every gateway's feed in sync, and the work streams draining: no stream whose queued entries stay above zero, and none with entries queued and no live worker taking its kind.
+2. **Administration → System** shows a controller leading, every gateway's feed in sync, and the work streams draining: no stream whose queued entries stay above zero, and none with entries queued and no live worker taking its kind.
 3. Within a minute or two every proxy's status reflects its first 6.0 health check. Until then a proxy has the status 048 gave it: `healthy`, or `draining` for a drain 5.x had started.
 4. A request through the proxy is answered.
 5. A cloud proxy you deleted through 5.x just before the switch may be back: 5.x marked it terminating in Redis only, so if 5.x stopped before it terminated the instance, 6.0 sees a healthy proxy. Delete it again.
@@ -185,7 +185,7 @@ ALTER TABLE proxies DROP COLUMN IF EXISTS status, DROP COLUMN IF EXISTS status_c
 
 Run it again if a statement gives up waiting for its lock. On Docker Compose, `docker compose -f <your file> exec postgres psql -U octoprox octoprox` opens a session, with your database's user and name.
 
-**The backup is the last resort**, when the data itself went wrong. Find the release in the backup file (its envelope is plain JSON around the encrypted part, so `head -n 6 octoprox-backup-<date>.opbak` shows its `app_version` and `schema_version` without the passphrase), start that release on an empty database with the image pinned to it, sign in with the admin it seeds and import the backup from **Settings → Backup & Migration**, with *Keep my current account* unticked to get every user back as it was. The import refuses a backup whose `schema_version` differs from the install's, so it takes that release or another at the same schema, not 6.0. A database snapshot goes back the way your Postgres restores one, with 5.0.11 started on it.
+**The backup is the last resort**, when the data itself went wrong. Find the release in the backup file (its envelope is plain JSON around the encrypted part, so `head -n 6 octoprox-backup-<date>.opbak` shows its `app_version` and `schema_version` without the passphrase), start that release on an empty database with the image pinned to it, sign in with the admin it seeds and import the backup from **Administration → Backup & Migration**, with *Keep my current account* unticked to get every user back as it was. The import refuses a backup whose `schema_version` differs from the install's, so it takes that release or another at the same schema, not 6.0. A database snapshot goes back the way your Postgres restores one, with 5.0.11 started on it.
 
 ## What changes
 

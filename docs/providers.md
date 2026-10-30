@@ -32,7 +32,7 @@ Beta descriptors follow the vendor's public documentation but have not yet been 
 
 ## Adding a provider from the UI
 
-Admins open **Settings → Providers**. Shipped providers are read-only; any of them can be exported as YAML or duplicated as a starting point. Every descriptor provider, shipped or custom, has a **Test** tab where it can be tried with throwaway credentials before any credential or connector exists.
+Admins open **Administration → Providers**. Shipped providers are read-only; any of them can be exported as YAML or duplicated as a starting point. Every descriptor provider, shipped or custom, has a **Test** tab where it can be tried with throwaway credentials before any credential or connector exists.
 
 1. **General** - id (becomes the credential type), name, description, documentation link, logo, and an optional dark mode logo (without one, dark mode shows the logo).
 2. **Credential fields** - what a user enters once per account. Mark API keys and passwords as *secret* so they are never written into proxy rows.

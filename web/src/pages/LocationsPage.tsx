@@ -5,7 +5,9 @@ import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { fetchGeoExits } from '../api/client'
 import { useProject } from '../contexts/ProjectContext'
+import { useAuth } from '../contexts/AuthContext'
 import { Page } from '../components/layout/Page'
+import { AdminLink } from '../components/AdminLink'
 import { Tabs } from '../components/ui'
 import { AccuracyRow, ProviderAccuracyPanel, accuracyDays, useAccuracyRange } from '../components/geo/ProviderAccuracyPanel'
 import { AccuracyDetailsInspector } from '../components/geo/AccuracyDetails'
@@ -18,6 +20,7 @@ type Tab = 'accuracy' | 'sharing' | 'exits' | 'observations'
 /** Where this project's proxies really exit: provider accuracy, exit sharing, exit IPs and the observation log, project-scoped. */
 export default function LocationsPage() {
   const { selectedProjectId } = useProject()
+  const { isAdmin } = useAuth()
   const [tab, setTab] = useState<Tab>('accuracy')
   const [range] = useAccuracyRange()
   const [inspecting, setInspecting] = useState<AccuracyRow | null>(null)
@@ -31,7 +34,7 @@ export default function LocationsPage() {
   return (
     <Page
       title="Exit locations"
-      subtitle="Whether this project's providers put its proxies where they claim, how much their exit IPs overlap, and every exit IP seen behind them."
+      subtitle={<>Whether this project's providers put its proxies where they claim, how much their exit IPs overlap, and every exit IP seen behind them.{isAdmin && <> Every project at once is in <AdminLink page="geo">IP attribution</AdminLink>.</>}</>}
       panel={inspecting && tab === 'accuracy' ? (
         <AccuracyDetailsInspector
           row={inspecting}
