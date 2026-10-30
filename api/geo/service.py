@@ -136,11 +136,6 @@ class GeoService:
     def observation_recorder(self) -> ObservationRecorder:
         return self._observation_recorder
 
-    @property
-    def instance_id(self) -> str:
-        """This process, as observations and judgements it records name it unless told otherwise."""
-        return self._settings.instance_id
-
     # --- echo endpoint -------------------------------------------------------------
 
     def echo_spec(self) -> IpDiscoverySpec:
@@ -272,19 +267,17 @@ class GeoService:
         session_id: str | None = None,
         candidates: Sequence[LocationCandidate] | None = None,
         observed_at: datetime | None = None,
-        instance_id: str | None = None,
     ) -> tuple[Resolution, bool]:
         """Judge ``ip`` for ``proxy`` (see :meth:`judge`) and record the sighting; the resolution, and whether a persisted field changed.
 
         A gateway's sighting is applied by a worker seconds later, and both the row's stamp and the observation keep the
-        gateway's time and name.
+        gateway's time.
 
         Args:
             policy: the owning project's source policy; None for the install's.
             endpoint: what the endpoint requested through the proxy reported about the exit, if anything.
             session_id: the client session the sighting served, when one did.
             observed_at: when the exit was seen, naive UTC; None for now.
-            instance_id: the process that saw it; None for this one.
         """
         observed_at = observed_at or utc_now()
         resolution, changed = self.judge(
@@ -293,7 +286,7 @@ class GeoService:
         self.record(
             self._observation(
                 proxy, ip, resolution, source=source, project_id=project_id, endpoint=endpoint, session_id=session_id,
-                observed_at=observed_at, instance_id=instance_id,
+                observed_at=observed_at,
             )
         )
         self._log_conflict(proxy, ip, resolution, source.value)
@@ -310,7 +303,6 @@ class GeoService:
         endpoint: LocationTarget | None,
         session_id: str | None,
         observed_at: datetime,
-        instance_id: str | None,
     ) -> IpObservation:
         """The sighting record for ``ip`` behind ``proxy`` as ``resolution`` judged it."""
         return IpObservation(
@@ -332,8 +324,6 @@ class GeoService:
             resolved_city=resolution.resolved_city,
             state_conflict=resolution.state_conflict,
             city_conflict=resolution.city_conflict,
-            candidates=resolution.compact_candidates(),
-            instance_id=instance_id or self.instance_id,
         )
 
     def record_sighting(
@@ -348,7 +338,6 @@ class GeoService:
         session_id: str | None = None,
         candidates: Sequence[LocationCandidate] | None = None,
         observed_at: datetime | None = None,
-        instance_id: str | None = None,
     ) -> Resolution:
         """Resolve ``ip`` seen behind ``proxy`` and record the sighting without touching the row.
 
@@ -360,7 +349,7 @@ class GeoService:
         self.record(
             self._observation(
                 proxy, ip, resolution, source=source, project_id=project_id, endpoint=endpoint, session_id=session_id,
-                observed_at=observed_at or utc_now(), instance_id=instance_id,
+                observed_at=observed_at or utc_now(),
             )
         )
         self._log_conflict(proxy, ip, resolution, source.value)
@@ -394,7 +383,6 @@ class GeoService:
                 resolved_city=resolution.resolved_city,
                 state_conflict=resolution.state_conflict,
                 city_conflict=resolution.city_conflict,
-                instance_id=self.instance_id,
             )
         )
         self._log_conflict(proxy, ip, resolution, JUDGEMENT_SOURCE)

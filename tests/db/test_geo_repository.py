@@ -5,6 +5,7 @@
 
 import asyncio
 import os
+from collections import Counter
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -540,8 +541,8 @@ class TestObservations:
         """Counting a filter no index serves reads the table, as can a page under a value with no recent rows; past the limit each gives up and the session stays usable."""
         await db_session.execute(
             text(
-                "INSERT INTO ip_observations (observed_at, source, ip, candidates, instance_id) "
-                "SELECT timestamp '2026-01-01' + g * interval '1 second', 'health_check', '10.0.0.1', '[]', '' "
+                "INSERT INTO ip_observations (observed_at, source, ip) "
+                "SELECT timestamp '2026-01-01' + g * interval '1 second', 'health_check', '10.0.0.1' "
                 "FROM generate_series(1, 200000) g"
             )
         )
@@ -589,23 +590,41 @@ class TestObservations:
             assert ips((await fetch(verdict="no_claim"))[0]) == {"10.1.0.5"}
             assert (await fetch())[1] == 5
 
-    async def test_a_session_or_instance_id_longer_than_its_column_is_cut(self, db_session: AsyncSession) -> None:
+    async def test_a_session_id_longer_than_its_column_is_cut(self, db_session: AsyncSession) -> None:
         """A client's ``-sessid-`` can be any length: one too long would fail its whole batch at every delivery."""
         repo = ObservationRepository(db_session)
-        assert await repo.insert_many([_observation(session_id="s" * 300, instance_id="i" * 100), _observation()]) == 2
+        assert await repo.insert_many([_observation(session_id="s" * 300), _observation()]) == 2
         await db_session.commit()
 
         rows, _, _ = await repo.recent()
-        assert {(row["session_id"], row["instance_id"]) for row in rows} == {("s" * 255, "i" * 64), (None, "")}
+        assert {row["session_id"] for row in rows} == {"s" * 255, None}
 
-    async def test_retention(self, db_session: AsyncSession) -> None:
+    async def test_retention_is_a_project_s_own_days_and_the_install_s_for_every_other_row(self, db_session: AsyncSession) -> None:
+        """Rows of no project, or of one deleted since, follow the install's days; 0 days keeps forever on either side."""
         repo = ObservationRepository(db_session)
-        old = _observation(observed_at=datetime(2020, 1, 1))
-        await repo.insert_many([old, _observation()])
+        now = utc_now()
+        ages = (0.5, 2.5, 10.5)
+        projects = ("short", "forever", "inherits", "same", None, "deleted")
+        await repo.insert_many([
+            _observation(project_id=project, ip=f"10.0.{p}.{a}", observed_at=now - timedelta(days=age))
+            for p, project in enumerate(projects)
+            for a, age in enumerate(ages)
+        ])
         await db_session.commit()
-        assert await repo.delete_older_than(utc_now() - timedelta(days=7)) == 1
+
+        async def kept() -> Counter[str | None]:
+            page = await repo.recent(limit=100)
+            assert page is not None
+            return Counter(row["project_id"] for row in page[0])
+
+        assert await repo.delete_expired(now, 7, {"short": 1, "forever": 0, "same": 7}) == 6
         await db_session.commit()
-        assert await repo.count_matching() == 1
+        assert await kept() == {"short": 1, "forever": 3, "inherits": 2, "same": 2, None: 2, "deleted": 2}
+
+        # An install that keeps forever still applies a project's own days.
+        assert await repo.delete_expired(now, 0, {"short": 0, "inherits": 1}) == 1
+        await db_session.commit()
+        assert await kept() == {"short": 1, "forever": 3, "inherits": 1, "same": 2, None: 2, "deleted": 2}
 
     async def test_the_log_is_planned_for_its_own_filter_values(self, db_session: AsyncSession) -> None:
         """A cached generic plan would sort a busy proxy's every row, or walk the whole history for a rare one."""

@@ -345,8 +345,8 @@ class TestIngest:
         await first._handle(_entries(_observation(ip="10.5.0.1", observed_at=_at(0))))
 
         await asyncio.gather(
-            first._handle(_entries(_observation(ip="10.5.0.2", observed_at=_at(60), instance_id="gateway-1"))),
-            second._handle(_entries(_observation(ip="10.5.0.2", observed_at=_at(61), instance_id="gateway-2"))),
+            first._handle(_entries(_observation(ip="10.5.0.2", observed_at=_at(60)))),
+            second._handle(_entries(_observation(ip="10.5.0.2", observed_at=_at(61)))),
         )
 
         assert await _hand_outs(db_session_factory, "10.5.0.1") == 1
@@ -438,13 +438,33 @@ class TestIngest:
     async def test_a_session_id_longer_than_its_column_is_ingested_cut(
         self, redis_client: RedisClient, db_session_factory: async_sessionmaker[AsyncSession]
     ) -> None:
-        await ObservationIngest(redis_client, db_session_factory)._handle(
-            _entries(_observation(session_id="s" * 300, instance_id="i" * 100))
-        )
+        await ObservationIngest(redis_client, db_session_factory)._handle(_entries(_observation(session_id="s" * 300)))
 
         async with db_session_factory() as session:
             (row,), _, _ = await ObservationRepository(session).recent()
-        assert (row["session_id"], row["instance_id"]) == ("s" * 255, "i" * 64)
+        assert row["session_id"] == "s" * 255
+
+    async def test_a_project_with_its_log_off_gets_no_rows_and_still_feeds_the_exit_table(
+        self, redis_client: RedisClient, db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+    ) -> None:
+        connector = await ConnectorRepository(db_session).get_by_id("conn-1")
+        assert connector is not None
+        projects = ProjectRepository(db_session)
+        quiet = await projects.get_by_id(connector.project_id)
+        assert quiet is not None
+        await projects.update(quiet.model_copy(update={"observation_log": False}))
+        await db_session.commit()
+
+        await ObservationIngest(redis_client, db_session_factory)._handle(_entries(
+            _observation(ip="10.8.0.1", project_id=quiet.id, observed_at=_at(0)),
+            _observation(ip="10.8.0.2", project_id=quiet.id, observed_at=_at(60)),
+            _observation(ip="10.8.0.3", project_id="logged", connector_id="conn-2", proxy_id="proxy-2"),
+        ))
+
+        assert [await _hand_outs(db_session_factory, ip) for ip in ("10.8.0.1", "10.8.0.2")] == [1, 1]
+        async with db_session_factory() as session:
+            page = await ObservationRepository(session).recent()
+        assert page is not None and [row["ip"] for row in page[0]] == ["10.8.0.3"]
 
     async def test_malformed_entries_are_completed_with_their_batch(
         self, redis_client: RedisClient, db_session_factory: async_sessionmaker[AsyncSession], quick: None

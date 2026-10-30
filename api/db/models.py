@@ -153,6 +153,10 @@ class ProjectModel(Base):
     location_city_radius_km: Mapped[float | None] = mapped_column(Float, nullable=True)
     # Whether clients are told each request's exit IP in X-Octoprox-* response headers.
     exit_headers: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    # Whether the project's sightings get a row in ip_observations, and for how
+    # many days (0 forever); null days inherit geo_settings.observation_retention_days.
+    observation_log: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")
+    observation_retention_days: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now, onupdate=utc_now)
@@ -768,8 +772,6 @@ class IpObservationModel(Base):
     resolved_city: Mapped[str | None] = mapped_column(String(120), nullable=True)
     state_conflict: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     city_conflict: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
-    candidates: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
-    instance_id: Mapped[str] = mapped_column(String(64), nullable=False, default="")
 
 
 class ConnectorExitIpModel(Base):

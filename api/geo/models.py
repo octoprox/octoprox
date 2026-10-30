@@ -155,6 +155,9 @@ DEFAULT_ECHO_IP_PATH = "origin"
 # about 15 km from São Paulo's centre) without reaching the next real one.
 DEFAULT_CITY_RADIUS_KM = 25.0
 MAX_CITY_RADIUS_KM = 500.0
+# The most days a project keeps its observations for: ten years, far inside
+# what the retention can count back from now; 0 keeps them forever.
+MAX_OBSERVATION_RETENTION_DAYS = 3650
 
 
 def normalize_country(value: Any) -> str | None:
@@ -410,8 +413,6 @@ class IpObservation(BaseModel):
     resolved_city: str | None = None
     state_conflict: bool | None = None
     city_conflict: bool | None = None
-    candidates: list[dict[str, Any]] = Field(default_factory=list)
-    instance_id: str = ""
 
 
 # What an exit row's ``source`` says when its verdict last came from a re-judgement.
@@ -441,7 +442,6 @@ class ExitJudgement(BaseModel):
     resolved_city: str | None = None
     state_conflict: bool | None = None
     city_conflict: bool | None = None
-    instance_id: str = ""
 
 
 class ExitCoverage(BaseModel):

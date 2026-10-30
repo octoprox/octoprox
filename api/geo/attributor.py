@@ -179,7 +179,6 @@ class ProxyAttributor:
         session_id: str | None = None,
         candidates: Sequence[LocationCandidate] | None = None,
         observed_at: datetime | None = None,
-        instance_id: str | None = None,
     ) -> Proxy | None:
         """Attribute one sighting of ``ip`` behind a proxy of ``store``'s batch, and save the row if it changed.
 
@@ -190,7 +189,6 @@ class ProxyAttributor:
             session_id: the client session the sighting came from, stamped on the observation.
             candidates: the databases' answers for ``ip`` at the sighting (a gateway's preflight); not looked up again.
             observed_at: when the exit was seen, by default now; it stamps the row and bounds its write.
-            instance_id: the process that saw the exit, by default this one.
         """
         if not is_ip(ip):
             return None
@@ -213,7 +211,6 @@ class ProxyAttributor:
                 session_id=proxy.metadata.get(META_SESSION_ID),
                 candidates=candidates,
                 observed_at=observed_at,
-                instance_id=instance_id,
             )
             return proxy
         if self.is_repeat(proxy, ip, source):
@@ -228,12 +225,11 @@ class ProxyAttributor:
                     session_id=session_id,
                     candidates=candidates,
                     observed_at=observed_at,
-                    instance_id=instance_id,
                 )
             return proxy
         self._apply(
             store, proxy, project, ip, source=source, endpoint=endpoint, session_id=session_id,
-            candidates=candidates, observed_at=observed_at, instance_id=instance_id, always_save=False,
+            candidates=candidates, observed_at=observed_at, always_save=False,
         )
         return proxy
 
@@ -249,7 +245,6 @@ class ProxyAttributor:
         session_id: str | None,
         candidates: Sequence[LocationCandidate] | None,
         observed_at: datetime,
-        instance_id: str | None,
         always_save: bool,
     ) -> None:
         """Judge and record one sighting, then save the row when it changed, must rotate, or ``always_save``.
@@ -267,7 +262,6 @@ class ProxyAttributor:
             session_id=session_id,
             candidates=candidates,
             observed_at=observed_at,
-            instance_id=instance_id,
         )
         rotate = self.is_refused_slot(proxy, project)
         if not (changed or rotate or always_save):
@@ -317,7 +311,7 @@ class ProxyAttributor:
             return None
         self._apply(
             store, proxy, self.project_of(store, proxy.connector_id), ip, source=source, endpoint=endpoint,
-            session_id=None, candidates=None, observed_at=utc_now(), instance_id=None, always_save=True,
+            session_id=None, candidates=None, observed_at=utc_now(), always_save=True,
         )
         logger.info("Recorded exit location", proxy_id=proxy_id, ip=ip, country=proxy.country)
         return proxy

@@ -437,8 +437,6 @@ class PreflightChecker:
                     resolved_city=resolution.resolved_city,
                     state_conflict=resolution.state_conflict,
                     city_conflict=resolution.city_conflict,
-                    candidates=resolution.compact_candidates(),
-                    instance_id=self._geo_service.instance_id,
                 )
             )
         else:
@@ -514,7 +512,6 @@ class PreflightChecker:
                 session_id=session_id,
                 candidates=list(candidates),
                 observed_at=observed_at,
-                instance_id=self._geo_service.instance_id,
             )
         )
 

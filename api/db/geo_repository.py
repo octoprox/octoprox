@@ -7,9 +7,9 @@ from __future__ import annotations
 
 import itertools
 from collections import Counter
-from collections.abc import Awaitable, Callable, Iterable
+from collections.abc import Awaitable, Callable, Iterable, Mapping
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, cast
 
 import structlog
@@ -52,6 +52,7 @@ from api.db.models import (
     GeoDatabaseModel,
     GeoSettingsModel,
     IpObservationModel,
+    ProjectModel,
 )
 from api.geo.models import (
     JUDGEMENT_SOURCE,
@@ -419,14 +420,12 @@ class ObservationRepository:
         self._session = session
 
     async def insert_many(self, observations: list[IpObservation]) -> int:
-        """Bulk insert one batch, each session and instance ID cut to its column's width; the caller commits."""
+        """Bulk insert one batch, each session ID cut to its column's width; the caller commits."""
         if not observations:
             return 0
-        # The columns' widths: a client's -sessid- can be any length, and one
+        # The column's width: a client's -sessid- can be any length, and one
         # value too long would fail its whole batch at every delivery.
-        columns = IpObservationModel.__table__.c
-        session_width = cast(String, columns.session_id.type).length
-        instance_width = cast(String, columns.instance_id.type).length
+        session_width = cast(String, IpObservationModel.__table__.c.session_id.type).length
         rows = [
             {
                 "observed_at": o.observed_at,
@@ -447,8 +446,6 @@ class ObservationRepository:
                 "resolved_city": o.resolved_city,
                 "state_conflict": o.state_conflict,
                 "city_conflict": o.city_conflict,
-                "candidates": o.candidates,
-                "instance_id": o.instance_id[:instance_width],
             }
             for o in observations
         ]
@@ -587,8 +584,6 @@ class ObservationRepository:
                 "resolved_city": o.resolved_city,
                 "state_conflict": o.state_conflict,
                 "city_conflict": o.city_conflict,
-                "candidates": list(o.candidates or []),
-                "instance_id": o.instance_id,
             }
             for o in found
         ]
@@ -679,11 +674,36 @@ class ObservationRepository:
             entry["breakdown"].sort(key=lambda b: -b["exits"])
         return list(rows.values())
 
-    async def delete_older_than(self, cutoff: datetime) -> int:
-        result = await self._session.execute(
-            delete(IpObservationModel).where(IpObservationModel.observed_at < cutoff)
-        )
-        return int(result.rowcount or 0)  # type: ignore[attr-defined]
+    async def delete_expired(self, now: datetime, default_days: int, project_days: Mapping[str, int]) -> int:
+        """Delete the observations past their retention, a project's own days where it set them; 0 days keeps forever.
+
+        Rows of a project not in ``project_days``, of no project or of a deleted one follow ``default_days``.
+        """
+        m = IpObservationModel
+        own: dict[int, list[str]] = {}
+        for project_id, days in sorted(project_days.items()):
+            if days != default_days:
+                own.setdefault(days, []).append(project_id)
+        statements = [
+            delete(m).where(m.observed_at < now - timedelta(days=days), m.project_id.in_(project_ids))
+            for days, project_ids in own.items()
+            if days > 0
+        ]
+        if default_days > 0:
+            rest = delete(m).where(m.observed_at < now - timedelta(days=default_days))
+            if own:
+                others = [project_id for project_ids in own.values() for project_id in project_ids]
+                rest = rest.where(or_(m.project_id.is_(None), m.project_id.not_in(others)))
+            statements.append(rest)
+        deleted = 0
+        for statement in statements:
+            deleted += int((await self._session.execute(statement)).rowcount or 0)  # type: ignore[attr-defined]
+        return deleted
+
+    async def unlogged_project_ids(self) -> set[str]:
+        """The projects whose sightings get no observation log row (``observation_log`` off)."""
+        result = await self._session.execute(select(ProjectModel.id).where(ProjectModel.observation_log.is_(False)))
+        return set(result.scalars().all())
 
     async def existing_connector_ids(self, connector_ids: set[str]) -> set[str]:
         """Which of ``connector_ids`` still exist. Aggregates cascade with connectors, so

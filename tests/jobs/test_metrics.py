@@ -792,6 +792,38 @@ class TestCompaction:
         await compaction.run(COMPACTION)
         assert await kept() == (["198.51.100.2"], ["198.51.100.2"])
 
+    async def test_a_project_s_own_observation_retention_applies_to_its_rows(
+        self, compaction: CompactionJob, sessions: async_sessionmaker[AsyncSession], rows: Rows, geo: GeoStack
+    ) -> None:
+        """A project's own days, 0 keeping forever; a project without them and rows of no project follow the settings."""
+        short, forever, inherits = (
+            await rows.project(observation_retention_days=1),
+            await rows.project(observation_retention_days=0),
+            await rows.project(),
+        )
+        now = utc_now()
+        owners = (short.id, forever.id, inherits.id, None)
+        await stored(
+            sessions,
+            *(
+                IpObservationModel(
+                    observed_at=now - timedelta(days=age), project_id=owner, source="echo", ip=f"198.51.{age}.{i}"
+                )
+                for i, owner in enumerate(owners)
+                for age in (2, 4)
+            ),
+        )
+        store = geo.settings_store
+        store.adopt(store.settings.model_copy(update={"observation_retention_days": 3}), stored=True)
+
+        await compaction.run(COMPACTION)
+
+        async with sessions() as session:
+            left = (await session.execute(select(IpObservationModel.project_id, IpObservationModel.observed_at))).all()
+        assert sorted(((owner or ""), (now - at).days) for owner, at in left) == sorted(
+            [(forever.id, 2), (forever.id, 4), (inherits.id, 2), ("", 2)]
+        )
+
     async def test_flush_records_older_than_a_day_are_forgotten(
         self, compaction: CompactionJob, sessions: async_sessionmaker[AsyncSession]
     ) -> None:

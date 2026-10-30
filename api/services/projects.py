@@ -74,8 +74,8 @@ class ProjectService:
     async def update(self, project_id: str, data: ProjectUpdate) -> Project:
         """Apply the fields ``data`` sets to a project; the saved project.
 
-        An empty string clears ``location_conflict_rule`` and ``location_city_radius_km``, so the project inherits the
-        install default again, and the fields the TLS interception mode does not use are cleared.
+        An empty string clears ``location_conflict_rule``, ``location_city_radius_km`` and ``observation_retention_days``,
+        so the project inherits the install default again, and the fields the TLS interception mode does not use are cleared.
         """
         async with self._session_factory() as session:
             projects = ProjectRepository(session)

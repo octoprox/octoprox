@@ -51,4 +51,4 @@ def test_verdicts_are_converted_conservatively(test_settings: Settings) -> None:
     finally:
         command.upgrade(cfg, "head")
         with engine.begin() as conn:
-            conn.execute(text("DELETE FROM ip_observations WHERE instance_id = 't'"))
+            conn.execute(text("DELETE FROM ip_observations WHERE observed_at = :ts"), {"ts": ts})

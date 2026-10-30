@@ -185,10 +185,10 @@ class CompactionJob(Job):
         async with self._session_factory() as session:
             metrics, observations = MetricsRepository(session), ObservationRepository(session)
             totals = await metrics.delete_orphan_totals()
-            observed = (
-                await observations.delete_older_than(now - timedelta(days=settings.observation_retention_days))
-                if settings.observation_retention_days > 0
-                else 0
+            observed = await observations.delete_expired(
+                now,
+                settings.observation_retention_days,
+                {p.id: p.observation_retention_days for p in projects if p.observation_retention_days is not None},
             )
             exits = (
                 await observations.delete_exit_ips_last_seen_before(now - timedelta(days=settings.exit_ip_retention_days))

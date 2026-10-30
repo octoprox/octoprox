@@ -112,6 +112,8 @@ export function ProjectForm({ project, onSave, error, formId }: ProjectFormProps
     location_conflict_rule: project?.location_conflict_rule ?? undefined,
     location_city_radius_km: project?.location_city_radius_km ?? undefined,
     exit_headers: project?.exit_headers ?? false,
+    observation_log: project?.observation_log ?? true,
+    observation_retention_days: project?.observation_retention_days ?? undefined,
   })
   const [showPassword, setShowPassword] = useState(false)
   const [activeTab, setActiveTab] = useState<SettingsTab>('general')
@@ -177,6 +179,31 @@ export function ProjectForm({ project, onSave, error, formId }: ProjectFormProps
               <Label>Metrics retention (days)</Label>
               <Input type="number" min={0} value={formData.metrics_retention_days ?? 90} onChange={(e) => setFormData({ ...formData, metrics_retention_days: parseInt(e.target.value) || 0 })} />
               <p className="text-xs text-fg-subtle mt-1">0 = keep forever</p>
+            </div>
+          </div>
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <Label>Observation log</Label>
+              <label className="inline-flex items-center gap-2 text-[13px] h-11">
+                <input type="checkbox" checked={formData.observation_log ?? true} onChange={(e) => setFormData({ ...formData, observation_log: e.target.checked })} className="w-4 h-4" />
+                <span>Keep the log</span>
+                <InfoTip label="About the observation log">Every sighting of an exit IP as a row under Exit locations, Observation log. Off, the project's sightings still count in its exit IPs and provider accuracy; only the rows are not kept.</InfoTip>
+              </label>
+            </div>
+            <div>
+              <Label>Observation log (days)</Label>
+              <Input
+                type="number" min={0} max={3650} step={1} className="disabled:bg-surface-raised disabled:cursor-not-allowed"
+                disabled={!(formData.observation_log ?? true)}
+                value={formData.observation_retention_days ?? ''}
+                placeholder={geo ? `Install default (${geo.settings.observation_retention_days || 'forever'})` : 'Install default'}
+                onChange={(e) => {
+                  // Empty inherits: an edit sends '' to clear the override, a new project sends null.
+                  const value = e.target.value === '' ? (project ? '' : null) : Math.min(3650, Math.max(0, parseInt(e.target.value) || 0))
+                  setFormData({ ...formData, observation_retention_days: value as ProjectCreate['observation_retention_days'] })
+                }}
+              />
+              <p className="text-xs text-fg-subtle mt-1">Empty follows the install default; 0 = keep forever</p>
             </div>
           </div>
 

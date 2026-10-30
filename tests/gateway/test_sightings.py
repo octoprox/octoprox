@@ -29,8 +29,7 @@ from tests.waits import running, until
 
 def _sighting(proxy_id: str, ip: str = "81.2.69.160") -> SightingMessage:
     return SightingMessage(
-        proxy_id=proxy_id, ip=ip, source=ObservationSource.PREFLIGHT, candidates=[], observed_at=utc_now(),
-        instance_id="gateway-1",
+        proxy_id=proxy_id, ip=ip, source=ObservationSource.PREFLIGHT, candidates=[], observed_at=utc_now()
     )
 
 

@@ -312,9 +312,8 @@ class Sighting(NamedTuple):
     session_id: str | None = None
     # What the databases said about ``ip`` where it was seen; None looks it up here.
     candidates: Sequence[LocationCandidate] | None = None
-    # When and where it was seen; None for now and this process.
+    # When it was seen; None for now.
     observed_at: datetime | None = None
-    instance_id: str | None = None
 
     @classmethod
     def of(cls, message: SightingMessage) -> Sighting:
@@ -327,7 +326,6 @@ class Sighting(NamedTuple):
             session_id=message.session_id,
             candidates=message.candidates,
             observed_at=message.observed_at,
-            instance_id=message.instance_id,
         )
 
     @classmethod
@@ -390,7 +388,6 @@ class Attribution:
                 session_id=sighting.session_id,
                 candidates=sighting.candidates,
                 observed_at=sighting.observed_at,
-                instance_id=sighting.instance_id,
             )
         await store.flush()
 

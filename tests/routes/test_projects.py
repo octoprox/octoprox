@@ -160,6 +160,48 @@ class TestProjectEndpoints:
 
         assert response.status_code == 404
 
+    def test_the_observation_log_settings_round_trip_and_an_empty_string_inherits_again(
+        self,
+        authenticated_client: TestClient,
+        created_project: dict[str, Any],
+    ) -> None:
+        url = f"/api/v1/projects/{created_project['id']}"
+        assert (created_project["observation_log"], created_project["observation_retention_days"]) == (True, None)
+
+        edited = authenticated_client.patch(url, json={"observation_log": False, "observation_retention_days": 0})
+        assert edited.status_code == 200
+        assert (edited.json()["observation_log"], edited.json()["observation_retention_days"]) == (False, 0)
+        # The list carries them too: the project page edits from it.
+        listed = {p["id"]: p for p in authenticated_client.get("/api/v1/projects").json()["projects"]}
+        assert listed[created_project["id"]]["observation_retention_days"] == 0
+
+        cleared = authenticated_client.patch(url, json={"observation_retention_days": ""})
+        assert cleared.status_code == 200 and cleared.json()["observation_retention_days"] is None
+        assert cleared.json()["observation_log"] is False
+        assert authenticated_client.patch(url, json={"observation_retention_days": -1}).status_code == 422
+        # The hourly retention counts back from now, so a day count past ten years is refused.
+        assert authenticated_client.patch(url, json={"observation_retention_days": 3651}).status_code == 422
+        assert authenticated_client.patch(url, json={"observation_retention_days": 3650}).status_code == 200
+
+    def test_a_save_from_the_project_list_keeps_the_metrics_retention(
+        self,
+        authenticated_client: TestClient,
+        created_project: dict[str, Any],
+    ) -> None:
+        """The project page edits from the list and sends back every field its form holds."""
+        url = f"/api/v1/projects/{created_project['id']}"
+        assert authenticated_client.patch(url, json={"metrics_retention_days": 30}).status_code == 200
+
+        listed = {p["id"]: p for p in authenticated_client.get("/api/v1/projects").json()["projects"]}
+        form = {
+            field: listed[created_project["id"]][field]
+            for field in ("name", "description", "username", "password", "routing_strategy", "metrics_retention_days")
+        }
+        saved = authenticated_client.patch(url, json={**form, "description": "edited"})
+
+        assert saved.status_code == 200
+        assert saved.json()["metrics_retention_days"] == 30
+
     def test_delete_project(
         self,
         authenticated_client: TestClient,

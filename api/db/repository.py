@@ -165,6 +165,8 @@ class ProjectRepository:
             location_conflict_rule=project.location_conflict_rule.value if project.location_conflict_rule else None,
             location_city_radius_km=project.location_city_radius_km,
             exit_headers=project.exit_headers,
+            observation_log=project.observation_log,
+            observation_retention_days=project.observation_retention_days,
             created_at=project.created_at,
             updated_at=project.updated_at,
         )
@@ -200,6 +202,8 @@ class ProjectRepository:
             )
             model.location_city_radius_km = project.location_city_radius_km
             model.exit_headers = project.exit_headers
+            model.observation_log = project.observation_log
+            model.observation_retention_days = project.observation_retention_days
             model.updated_at = utc_now()
             await self._session.flush()
         return self._to_domain(model) if model else None
@@ -267,6 +271,8 @@ class ProjectRepository:
             location_conflict_rule=ConflictRule(model.location_conflict_rule) if model.location_conflict_rule else None,
             location_city_radius_km=model.location_city_radius_km,
             exit_headers=bool(model.exit_headers),
+            observation_log=bool(model.observation_log),
+            observation_retention_days=model.observation_retention_days,
             created_at=model.created_at,
             updated_at=model.updated_at,
         )

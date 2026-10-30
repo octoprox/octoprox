@@ -146,10 +146,10 @@ class TestPreflight:
         assert geo_service.observation_recorder.pending == 0
         (sighting,) = sightings.messages
         # The databases' answer travels with the sighting, so the worker does not look the IP up again,
-        # and so do when and where the exit was seen.
+        # and so does when the exit was seen.
         assert [c.country for c in sighting.candidates] == ["GB"]
-        assert sighting.instance_id == "t" and sighting.observed_at is not None
-        assert sighting.model_dump(exclude={"candidates", "observed_at", "instance_id"}) == {
+        assert sighting.observed_at is not None
+        assert sighting.model_dump(exclude={"candidates", "observed_at"}) == {
             "proxy_id": slot.id, "ip": GB_IP, "source": "preflight",
             "endpoint_country": "GB", "endpoint_state": None, "endpoint_city": None, "session_id": "s",
         }

@@ -180,6 +180,10 @@ export interface Project {
   location_city_radius_km: number | null
   /** Tell clients each request's exit IP in X-Octoprox-* response headers. */
   exit_headers: boolean
+  /** Keep an observation log row per sighting; off, exit IPs and accuracy still learn of every sighting. */
+  observation_log: boolean
+  /** Days the project's observation log is kept (0 forever); null inherits the install's. */
+  observation_retention_days: number | null
   created_at: string
   updated_at: string
 }
@@ -236,6 +240,8 @@ export interface ProjectCreate {
   location_conflict_rule?: ConflictRule | null
   location_city_radius_km?: number | null
   exit_headers?: boolean
+  observation_log?: boolean
+  observation_retention_days?: number | null
 }
 
 export interface ProjectUpdate {
@@ -260,6 +266,9 @@ export interface ProjectUpdate {
   /** An empty string clears the override. */
   location_city_radius_km?: number | '' | null
   exit_headers?: boolean
+  observation_log?: boolean
+  /** An empty string clears the override. */
+  observation_retention_days?: number | '' | null
 }
 
 export interface Proxy {
@@ -505,8 +514,6 @@ export interface IpObservation {
   resolved_city: string | null
   state_conflict: boolean | null
   city_conflict: boolean | null
-  candidates: { source: string; origin: string; country: string | null }[]
-  instance_id: string
 }
 
 export type PlaceLevel = 'country' | 'state' | 'city'

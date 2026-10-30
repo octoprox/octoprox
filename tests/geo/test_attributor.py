@@ -246,21 +246,19 @@ class TestObservations:
     def test_when_and_where_the_exit_was_seen_stamp_the_row_and_the_observation(
         self, attributor: ProxyAttributor, geo_service: GeoService
     ) -> None:
-        """A gateway's sighting is applied by a worker later: the gateway's time and name are what stay."""
+        """A gateway's sighting is applied by a worker later: the gateway's time is what stays."""
         store = _store()
         proxy = store.add(_proxy(connector_id="oxy"))
-        attributor.observe(
-            store, proxy.id, GB_IP, source=ObservationSource.PREFLIGHT, observed_at=T0, instance_id="gateway-2", session_id="s"
-        )
+        attributor.observe(store, proxy.id, GB_IP, source=ObservationSource.PREFLIGHT, observed_at=T0, session_id="s")
         assert proxy.metadata[META_LOCATION_CHECKED_AT] == T0.isoformat()
         assert store.saves == [(proxy.id, T0, False, False)]
         observation = _recorded(geo_service)[-1]
         assert isinstance(observation, IpObservation)
-        assert observation.observed_at == T0 and observation.instance_id == "gateway-2" and observation.session_id == "s"
-        # Without them: now, and this process.
+        assert observation.observed_at == T0 and observation.session_id == "s"
+        # Without a time: now.
         other = store.add(_proxy(connector_id="oxy"))
         attributor.observe(store, other.id, GB_IP, source=ObservationSource.HEALTH_CHECK)
-        assert _recorded(geo_service)[-1].instance_id == "worker-1"
+        assert _recorded(geo_service)[-1].observed_at > T0
         assert ProxyAttributor.checked_at(other) is not None and ProxyAttributor.checked_at(other) > T0  # type: ignore[operator]
 
     async def test_an_exit_move_drops_the_cached_verdict_unless_preflight_saw_it(self, attributor: ProxyAttributor) -> None:
@@ -399,7 +397,6 @@ class TestPreflightSighting:
                 session_id=message.session_id,
                 candidates=message.candidates,
                 observed_at=message.observed_at,
-                instance_id=message.instance_id,
             )
 
     async def test_two_sessions_on_one_exit_give_two_observations_and_one_row_write(
@@ -416,7 +413,7 @@ class TestPreflightSighting:
         # The gateway records nothing and never changes its snapshot row: the worker owns the row.
         assert _recorded(geo_service) == [] and slot == before and retired.ids == []
         assert [m.session_id for m in sink.messages] == ["s1", "s2"]
-        assert all(m.instance_id == "worker-1" and [c.country for c in m.candidates] == ["GB"] for m in sink.messages)
+        assert all([c.country for c in m.candidates] == ["GB"] for m in sink.messages)
 
         self._ingest(attributor, store, sink.messages)
         await store.flush()

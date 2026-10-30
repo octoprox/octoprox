@@ -222,7 +222,7 @@ class TestWork:
         await start(runtime)
         message = SightingMessage(
             proxy_id=proxy.id, ip=LONDON_IP, source=ObservationSource.PREFLIGHT, candidates=[],
-            observed_at=datetime(2026, 10, 18, 12, 0), instance_id="gateway-1",
+            observed_at=datetime(2026, 10, 18, 12, 0),
         )
 
         await redis_client.client.xadd(SIGHTING_STREAM_KEY, {"item": message.model_dump_json()})

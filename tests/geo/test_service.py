@@ -175,7 +175,6 @@ class TestApplyObservation:
         assert observation.project_id == "proj" and observation.session_id is None
         assert observation.claimed_country == "US" and observation.resolved_country == "GB"
         assert observation.endpoint_country == "GB" and observation.country_conflict
-        assert observation.instance_id == "test-instance"
 
 
 class TestJudge:
@@ -198,22 +197,19 @@ class TestJudge:
     async def test_apply_observation_is_judge_plus_one_observation_stamped_by_the_sighting(self, geo_service: GeoService) -> None:
         seen = datetime(2026, 10, 17, 12, 0, 0)
         proxy = _proxy()
-        geo_service.apply_observation(
-            proxy, GB_IP, source=ObservationSource.PREFLIGHT, observed_at=seen, instance_id="gateway-3", session_id="s"
-        )
+        geo_service.apply_observation(proxy, GB_IP, source=ObservationSource.PREFLIGHT, observed_at=seen, session_id="s")
         (observation,) = geo_service.observation_recorder._buffer
         assert isinstance(observation, IpObservation)
-        assert observation.observed_at == seen and observation.instance_id == "gateway-3" and observation.session_id == "s"
+        assert observation.observed_at == seen and observation.session_id == "s"
         assert proxy.metadata[META_LOCATION_CHECKED_AT] == seen.isoformat()
-        geo_service.record_sighting(proxy, GB_IP, source=ObservationSource.PREFLIGHT, observed_at=seen, instance_id="gateway-4")
-        assert geo_service.observation_recorder._buffer[-1].instance_id == "gateway-4"
-        assert geo_service.instance_id == "test-instance"
+        geo_service.record_sighting(proxy, GB_IP, source=ObservationSource.PREFLIGHT, observed_at=seen + timedelta(seconds=1))
+        assert geo_service.observation_recorder._buffer[-1].observed_at == seen + timedelta(seconds=1)
 
     async def test_rejudge_keeps_the_stamp(self, geo_service: GeoService) -> None:
         proxy = _proxy(**{META_GEO_COUNTRY: "US", META_LOCATION_CHECKED_AT: "2026-10-17T12:00:00"})
         geo_service.rejudge(proxy, GB_IP)
         assert proxy.metadata[META_LOCATION_CHECKED_AT] == "2026-10-17T12:00:00"
-        assert geo_service.observation_recorder._buffer[-1].instance_id == "test-instance"
+        assert isinstance(geo_service.observation_recorder._buffer[-1], ExitJudgement)
 
 
 class TestEchoSpec:

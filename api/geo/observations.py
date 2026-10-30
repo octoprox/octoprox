@@ -156,7 +156,9 @@ class ObservationIngest(GroupConsumer):
         verdicts = await self._verdicts(observations)
         async with self._session_factory() as session:
             repo = ObservationRepository(session)
-            written = await repo.insert_many(observations)
+            # A project with its log off still feeds the exit table, only without log rows.
+            unlogged = await repo.unlogged_project_ids()
+            written = await repo.insert_many([o for o in observations if o.project_id not in unlogged])
             # The exit table cascades with its connector: one deleted since the sighting must not fail the batch,
             # and a judgement of its exits finds no row to rewrite.
             live = await repo.existing_connector_ids({o.connector_id for o in observations if o.connector_id})

@@ -123,6 +123,8 @@ Projects provide multi-tenancy support. Each project has its own credentials, co
 
 `exit_headers` (boolean, default `false`) tells the project's clients which exit IP served each request, in `X-Octoprox-*` headers on the `CONNECT` answer and on plain HTTP responses; see [Exit headers]({{ site.baseurl }}/connecting#exit-headers).
 
+`observation_log` (boolean, default `true`) keeps a row in the [observation log]({{ site.baseurl }}/ip-attribution#unique-exits-per-connector) for each sighting of the project's exits; off, the sightings still count in its exit IPs and provider accuracy. `observation_retention_days` (optional, up to 3650; `0` keeps forever) is how many days the project's rows are kept; left out it follows the install's `observation_retention_days`, and on update an empty string clears it.
+
 ### List Projects
 
 ```bash

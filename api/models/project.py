@@ -13,6 +13,7 @@ from pydantic import BaseModel, Field, model_validator
 from api.core import utc_now
 from api.geo.models import (
     MAX_CITY_RADIUS_KM,
+    MAX_OBSERVATION_RETENTION_DAYS,
     ConflictRule,
     ContradictedAction,
     LocationRules,
@@ -122,6 +123,12 @@ class Project(BaseModel):
     # headers (see docs/connecting.md).
     exit_headers: bool = False
 
+    # Whether the project's sightings get an observation log row, and for how
+    # many days (0 forever); None inherits the install's observation retention.
+    # Off, the exit IPs and provider accuracy still learn of every sighting.
+    observation_log: bool = True
+    observation_retention_days: int | None = Field(default=None, ge=0, le=MAX_OBSERVATION_RETENTION_DAYS)
+
     # Metadata
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
@@ -174,6 +181,8 @@ class ProjectCreate(BaseModel):
     location_conflict_rule: ConflictRule | None = None
     location_city_radius_km: float | None = Field(default=None, ge=0, le=MAX_CITY_RADIUS_KM)
     exit_headers: bool = False
+    observation_log: bool = True
+    observation_retention_days: int | None = Field(default=None, ge=0, le=MAX_OBSERVATION_RETENTION_DAYS)
 
     @model_validator(mode="after")
     def validate_mitm_fields(self) -> "ProjectCreate":
@@ -207,11 +216,14 @@ class ProjectUpdate(BaseModel):
     # "" clears the override (inherit the install default).
     location_city_radius_km: Annotated[float, Field(ge=0, le=MAX_CITY_RADIUS_KM)] | Literal[""] | None = None
     exit_headers: bool | None = None
+    observation_log: bool | None = None
+    # "" clears the override (inherit the install's observation retention).
+    observation_retention_days: Annotated[int, Field(ge=0, le=MAX_OBSERVATION_RETENTION_DAYS)] | Literal[""] | None = None
 
     def changes(self) -> dict[str, object]:
         """The fields this edit sets, with the empty strings that clear an override turned into None."""
         changes: dict[str, object] = self.model_dump(exclude_none=True)
-        for field in ("location_conflict_rule", "location_city_radius_km"):
+        for field in ("location_conflict_rule", "location_city_radius_km", "observation_retention_days"):
             if changes.get(field) == "":
                 changes[field] = None
         return changes
@@ -239,6 +251,8 @@ class ProjectResponse(BaseModel):
     location_conflict_rule: ConflictRule | None = None
     location_city_radius_km: float | None = None
     exit_headers: bool = False
+    observation_log: bool = True
+    observation_retention_days: int | None = None
     created_at: datetime
     updated_at: datetime
     # Aggregated stats (populated by API)
@@ -249,13 +263,14 @@ class ProjectResponse(BaseModel):
 
 
 class ProjectSummary(BaseModel):
-    """Summary of a project for listing."""
+    """Summary of a project for listing; the project page edits from it, so it carries every field the form sends."""
     id: str
     name: str
     description: str
     username: str
     password: str
     routing_strategy: str
+    metrics_retention_days: int
     tls_mitm_mode: MitmMode = MitmMode.OFF
     tls_mitm_engine: MitmEngine | None = None
     tls_mitm_browser: MitmBrowser | None = None
@@ -265,6 +280,8 @@ class ProjectSummary(BaseModel):
     location_conflict_rule: ConflictRule | None = None
     location_city_radius_km: float | None = None
     exit_headers: bool = False
+    observation_log: bool = True
+    observation_retention_days: int | None = None
     credential_count: int = 0
     connector_count: int = 0
     proxy_count: int = 0

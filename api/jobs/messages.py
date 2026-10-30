@@ -34,5 +34,3 @@ class SightingMessage(BaseModel):
     # When the gateway saw the exit (naive UTC). Stamped on the observation and
     # on the row, which is never written back to an older sighting.
     observed_at: datetime
-    # The gateway that saw it, stamped on the observation.
-    instance_id: str

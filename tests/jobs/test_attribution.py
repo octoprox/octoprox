@@ -103,7 +103,6 @@ def _sighting(proxy: Proxy, ip: str, observed_at: datetime, **fields: object) ->
         "source": ObservationSource.PREFLIGHT,
         "candidates": [],
         "observed_at": observed_at,
-        "instance_id": "gateway-1",
     }
     values.update(fields)
     return SightingMessage.model_validate(values).model_dump_json()
@@ -596,7 +595,6 @@ class TestSightingMessage:
                 )
             ],
             observed_at=utc_now(),
-            instance_id="gateway-1",
         )
         publisher = SightingPublisher(redis_client, interval=60, max_pending=10)
         publisher.push(message)
@@ -611,13 +609,13 @@ class TestSightingMessage:
         assert received.candidates[0].city == "berlin"
 
     def test_the_gateway_must_say_what_the_worker_cannot_learn(self) -> None:
-        """No databases' answer, no time and no gateway would make the worker guess."""
+        """No databases' answer and no time would make the worker guess."""
         with pytest.raises(ValidationError) as caught:
             SightingMessage(  # type: ignore[call-arg]
                 proxy_id="proxy-1", ip="203.0.113.7", source=ObservationSource.PREFLIGHT
             )
         missing = {error["loc"][0] for error in caught.value.errors()}
-        assert missing == {"candidates", "observed_at", "instance_id"}
+        assert missing == {"candidates", "observed_at"}
 
 
 class Refusing(Attribution):
@@ -672,9 +670,9 @@ class TestSightingIngest:
         stored = await rows.get(proxy.id)
         assert stored is not None and stored.metadata[META_DISCOVERED_IP] == LONDON_IP
         observations = await recorded(geo, redis_client)
-        assert [(o.ip, o.observed_at, o.instance_id) for o in observations if isinstance(o, IpObservation)] == [
-            (UNKNOWN_IP, T0, "gateway-1"),
-            (LONDON_IP, T0 + timedelta(seconds=5), "gateway-1"),
+        assert [(o.ip, o.observed_at) for o in observations if isinstance(o, IpObservation)] == [
+            (UNKNOWN_IP, T0),
+            (LONDON_IP, T0 + timedelta(seconds=5)),
         ]
         # Completed: the stream holds only work in hand.
         assert await redis_client.client.xlen(SIGHTING_STREAM_KEY) == 0
