@@ -10,6 +10,19 @@
 #   changes  what changed, for the people who use Octoprox; `docs` is a page
 #            on octoprox.com that explains it, such as connecting#exit-headers
 
+- version: 6.3.0
+  date: 2026-10-30
+  title: Proxy pinning and steadier sticky sessions
+  changes:
+    - text: "A client can send a request through one chosen proxy by adding `-prxy-<proxy id>` to the username. The request never moves to another proxy and fails when that proxy cannot serve it."
+      docs: routing-strategies#pinning-a-proxy
+    - text: "The Proxies page shows each proxy's id under Details, with a button that copies it."
+      docs: routing-strategies#pinning-a-proxy
+    - text: "Sticky sessions keep their proxy more reliably when proxy health goes up and down. A returning session lands on the same proxy whenever the same proxies are eligible, and a proxy that drops out or joins moves only its own share of sessions."
+      docs: routing-strategies#session-ids
+    - text: "Upgrade note: `-prxy-` is now a reserved delimiter. A project username or session ID that contains it must be changed."
+      docs: connecting
+
 - version: 6.2.2
   date: 2026-10-29
   title: Web UI notices new releases
