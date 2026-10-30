@@ -156,7 +156,7 @@ export function ExitIpsPanel({ projectId }: { projectId?: string }) {
             columns={columns}
             data={rows}
             getRowId={(e) => `${e.connector_id}:${e.ip}`}
-            emptyMessage="No exit IPs match the filters."
+            emptyMessage={isLoading ? 'Loading…' : 'No exit IPs match the filters.'}
             manualFiltering={{ columnFilters, onColumnFiltersChange: setColumnFilters }}
             manualPagination={{
               pageIndex,

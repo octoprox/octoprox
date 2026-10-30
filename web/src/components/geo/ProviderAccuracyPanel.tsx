@@ -57,20 +57,22 @@ export function ProviderAccuracyPanel({ projectId, onInspect, inspecting }: {
   const days = accuracyDays(range)
   const [projectFilter, setProjectFilter] = useState('')
   const scope = projectId ?? (projectFilter || undefined)
-  const { data, isLoading } = useQuery({
+  // No timed refetch: each answer reads the connectors' whole exit history, and the numbers move by the day.
+  const { data, isLoading: accuracyLoading } = useQuery({
     queryKey: ['geo-accuracy', scope ?? 'all', days],
     queryFn: () => fetchGeoAccuracy({ days, project_id: scope }),
-    refetchInterval: 60_000,
   })
-  const { data: exits } = useQuery({
+  const { data: exits, isLoading: exitsLoading } = useQuery({
     queryKey: ['geo-exits', scope ?? 'all', days],
     queryFn: () => fetchGeoExits({ days, project_id: scope }),
-    refetchInterval: 60_000,
   })
+  // A row merges both answers, so the table waits for both: exits alone would read as "no claims".
+  const isLoading = accuracyLoading || exitsLoading
   const { data: projects } = useQuery({ queryKey: ['projects'], queryFn: fetchProjects, enabled: !projectId })
   const projectNames = useMemo(() => new Map((projects?.projects ?? []).map((p) => [p.id, p.name])), [projects])
 
   const rows: AccuracyRow[] = useMemo(() => {
+    if (isLoading) return []
     const byConnector = new Map((exits?.connectors ?? []).map((e) => [e.connector_id, e]))
     const seen = new Set<string>()
     const merged: AccuracyRow[] = (data?.connectors ?? []).map((c) => {
@@ -89,7 +91,7 @@ export function ProviderAccuracyPanel({ projectId, onInspect, inspecting }: {
       }
     }
     return merged
-  }, [data, exits, projectNames])
+  }, [isLoading, data, exits, projectNames])
 
   const columns: ColumnDef<DataTableFeatures, AccuracyRow>[] = useMemo(() => [
     {
@@ -208,7 +210,7 @@ export function ProviderAccuracyPanel({ projectId, onInspect, inspecting }: {
         {!isLoading && rows.length === 0 ? (
           <EmptyState icon={<CheckCircle2 className="w-5 h-5" />} title="Nothing to compare yet" description="Accuracy appears once proxies with a vendor-declared country have been attributed; unique exits once any exit IP has been seen." />
         ) : (
-          <DataTable columns={columns} data={rows} getRowId={(c) => c.connector_id} enableColumnFilters defaultPageSize={25} onRowClick={onInspect ? (row) => onInspect(row) : undefined} />
+          <DataTable columns={columns} data={rows} getRowId={(c) => c.connector_id} enableColumnFilters defaultPageSize={25} emptyMessage={isLoading ? 'Loading…' : undefined} onRowClick={onInspect ? (row) => onInspect(row) : undefined} />
         )}
       </Card>
     </div>

@@ -63,13 +63,15 @@ function pairCounts(pairs: SharedPair[]): Map<string, number> {
 export function ExitSharingPanel({ projectId }: { projectId: string }) {
   const [range, setRange] = useAccuracyRange()
   const days = accuracyDays(range)
-  // A comparison the server called off for its time limit is not asked for again until the window changes: each try
-  // reads for the whole limit.
+  // No timed refetch: each comparison reads the project's whole exit history, and the numbers move by the day. A
+  // comparison the server called off for its time limit is not retried either, on focus or remount, since each try
+  // reads for the whole limit; picking the window again asks again.
   const { data, isLoading, isError, error } = useQuery({
     queryKey: ['geo-exit-sharing', projectId, days],
     queryFn: () => fetchGeoExitSharing({ project_id: projectId, days }),
-    refetchInterval: (query) => (query.state.status === 'error' ? false : 60_000),
     retry: false,
+    retryOnMount: false,
+    refetchOnWindowFocus: (query) => query.state.status !== 'error',
   })
 
   const shared = useMemo(() => pairCounts(data?.pairs ?? []), [data])

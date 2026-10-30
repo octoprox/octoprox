@@ -180,7 +180,7 @@ export function ObservationsPanel({ projectId }: { projectId?: string }) {
             columns={columns}
             data={rows}
             getRowId={(o) => String(o.id)}
-            emptyMessage="No observations match the filters."
+            emptyMessage={isLoading ? 'Loading…' : 'No observations match the filters.'}
             manualFiltering={{ columnFilters, onColumnFiltersChange: setColumnFilters }}
             manualPagination={{
               pageIndex,

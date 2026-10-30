@@ -232,7 +232,7 @@ export function DataTable<TData extends RowData>({
 
   return (
     <div className={cn('bg-surface rounded-lg border border-line overflow-hidden min-w-0 flex flex-col', className)}>
-      <div className="overflow-x-auto">
+      <div className="overflow-x-auto @container">
         <table className="w-full text-[13px] table-fixed" style={{ minWidth: minTableWidth }}>
           <thead>
             <tr className="bg-surface-raised border-b border-line">
@@ -324,8 +324,9 @@ export function DataTable<TData extends RowData>({
               })
             ) : (
               <tr>
-                <td colSpan={visibleColumnCount} className="px-3 py-10 text-center text-fg-muted">
-                  {emptyMessage}
+                {/* Centred in the visible width, not the table's, so a phone scrolled to the left still sees it. */}
+                <td colSpan={visibleColumnCount} className="p-0">
+                  <div className="sticky left-0 w-[100cqw] px-3 py-10 text-center text-fg-muted">{emptyMessage}</div>
                 </td>
               </tr>
             )}

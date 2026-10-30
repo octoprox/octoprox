@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+import itertools
+from collections import Counter
 from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass
 from datetime import datetime
@@ -12,8 +14,10 @@ from typing import Any, cast
 
 import structlog
 from sqlalchemy import (
+    BigInteger,
     Boolean,
     DateTime,
+    Integer,
     Select,
     String,
     Table,
@@ -22,19 +26,20 @@ from sqlalchemy import (
     column,
     delete,
     func,
+    literal,
     literal_column,
-    null,
     or_,
     select,
     text,
+    true,
     tuple_,
-    union_all,
     update,
     values,
 )
 from sqlalchemy import (
     cast as cast_sql,
 )
+from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession
@@ -71,6 +76,10 @@ COUNT_CAP = 10_000
 # this either is called off rather than left to load the database.
 READ_TIMEOUT_MS = 30_000
 _QUERY_CANCELED = "57014"
+# Exit sharing folds each IP into bigint masks of connectors, this many to a word so the sign bit stays clear.
+_MASK_BITS = 63
+# Exit sharing's grouping by IP: at the default 4MB a busy project's window mostly spills to disk.
+_SHARING_WORK_MEM = "64MB"
 
 
 def _verdict_clauses(m: type[IpObservationModel] | type[ConnectorExitIpModel], verdict: str | None) -> list[Any]:
@@ -595,84 +604,76 @@ class ObservationRepository:
     ) -> list[dict[str, Any]]:
         """Per connector: distinct exits seen in the window and how their vendor claims were judged, per level.
 
-        Each exit counts once, with the verdict of its latest observation.
+        Each exit counts once, with the verdict of its latest observation. The window is read once, since on a busy
+        project each read is mostly disk: every exit counts towards its connector's totals row, and a contradicted
+        exit also towards one row per level it was contradicted at, by what was claimed and what was observed.
         """
+        if connector_ids is not None and not connector_ids:
+            return []
         m = ConnectorExitIpModel
-
-        def counted(condition: Any) -> Any:
-            return func.sum(case((condition, 1), else_=0))
-
-        totals = select(
-            m.connector_id,
-            func.count().label("exits"),
-            counted(m.claimed_country.is_not(None)).label("claimed"),
-            counted(m.country_conflict.is_(False)).label("confirmed"),
-            counted(m.country_conflict.is_(True)).label("contradicted"),
-            counted(and_(m.claimed_country.is_not(None), m.country_conflict.is_(None))).label("open"),
-            counted(m.claimed_state.is_not(None)).label("state_claimed"),
-            counted(m.state_conflict.is_(False)).label("state_confirmed"),
-            counted(m.state_conflict.is_(True)).label("state_contradicted"),
-            counted(and_(m.claimed_state.is_not(None), m.state_conflict.is_(None))).label("state_open"),
-            counted(m.claimed_city.is_not(None)).label("city_claimed"),
-            counted(m.city_conflict.is_(False)).label("city_confirmed"),
-            counted(m.city_conflict.is_(True)).label("city_contradicted"),
-            counted(and_(m.claimed_city.is_not(None), m.city_conflict.is_(None))).label("city_open"),
-        ).group_by(m.connector_id)
-        wrong_by_level = {
-            "country": (
-                select(m.connector_id, m.claimed_country.label("claimed"), m.country.label("observed"), func.count().label("exits"))
-                .where(m.country_conflict.is_(True))
-                .group_by(m.connector_id, m.claimed_country, m.country)
-            ),
-            "state": (
-                select(m.connector_id, m.claimed_state.label("claimed"), m.resolved_state.label("observed"), func.count().label("exits"))
-                .where(m.state_conflict.is_(True))
-                .group_by(m.connector_id, m.claimed_state, m.resolved_state)
-            ),
-            "city": (
-                select(m.connector_id, m.claimed_city.label("claimed"), m.resolved_city.label("observed"), func.count().label("exits"))
-                .where(m.city_conflict.is_(True))
-                .group_by(m.connector_id, m.claimed_city, m.resolved_city)
-            ),
+        levels = {
+            "country": (m.claimed_country, m.country, m.country_conflict),
+            "state": (m.claimed_state, m.resolved_state, m.state_conflict),
+            "city": (m.claimed_city, m.resolved_city, m.city_conflict),
         }
+        # The rows an exit counts towards: the totals (no level), and each level whose verdict is a contradiction.
+        counted_in = (
+            values(
+                column("level", String),
+                column("claimed", String),
+                column("observed", String),
+                column("counted", Boolean),
+                name="counted_in",
+            )
+            .data([(None, None, None, True), *((level, *judged) for level, judged in levels.items())])
+            .lateral()
+        )
+        verdicts = {
+            f"{level}_{verdict}": func.count().filter(condition)
+            for level, (claimed, _observed, conflict) in levels.items()
+            for verdict, condition in (
+                ("claimed", claimed.is_not(None)),
+                ("confirmed", conflict.is_(False)),
+                ("contradicted", conflict.is_(True)),
+                ("open", and_(claimed.is_not(None), conflict.is_(None))),
+            )
+        }
+        query = (
+            select(
+                m.connector_id,
+                counted_in.c.level,
+                counted_in.c.claimed,
+                counted_in.c.observed,
+                func.count().label("exits"),
+                *(count.label(name) for name, count in verdicts.items()),
+            )
+            .select_from(m)
+            .join(counted_in, true())
+            .where(counted_in.c.counted)
+            .group_by(m.connector_id, counted_in.c.level, counted_in.c.claimed, counted_in.c.observed)
+        )
         if connector_ids is not None:
-            if not connector_ids:
-                return []
-            totals = totals.where(m.connector_id.in_(connector_ids))
-            wrong_by_level = {level: q.where(m.connector_id.in_(connector_ids)) for level, q in wrong_by_level.items()}
+            query = query.where(m.connector_id.in_(connector_ids))
         if since is not None:
-            totals = totals.where(m.last_seen >= since)
-            wrong_by_level = {level: q.where(m.last_seen >= since) for level, q in wrong_by_level.items()}
+            query = query.where(m.last_seen >= since)
+        found = (await self._session.execute(query)).all()
         rows = {
             row.connector_id: {
                 "connector_id": row.connector_id,
-                "exits": int(row.exits or 0),
-                "country": {
-                    "claimed": int(row.claimed or 0),
-                    "confirmed": int(row.confirmed or 0),
-                    "contradicted": int(row.contradicted or 0),
-                    "open": int(row.open or 0),
-                },
-                "state": {
-                    "claimed": int(row.state_claimed or 0),
-                    "confirmed": int(row.state_confirmed or 0),
-                    "contradicted": int(row.state_contradicted or 0),
-                    "open": int(row.state_open or 0),
-                },
-                "city": {
-                    "claimed": int(row.city_claimed or 0),
-                    "confirmed": int(row.city_confirmed or 0),
-                    "contradicted": int(row.city_contradicted or 0),
-                    "open": int(row.city_open or 0),
+                "exits": int(row.exits),
+                **{
+                    level: {verdict: int(getattr(row, f"{level}_{verdict}")) for verdict in ("claimed", "confirmed", "contradicted", "open")}
+                    for level in levels
                 },
                 "breakdown": [],
             }
-            for row in (await self._session.execute(totals)).all()
+            for row in found
+            if row.level is None
         }
-        for level, query in wrong_by_level.items():
-            for row in (await self._session.execute(query)).all():
+        for row in found:
+            if row.level is not None:
                 rows[row.connector_id]["breakdown"].append(
-                    {"level": level, "claimed": row.claimed, "observed": row.observed, "exits": int(row.exits)}
+                    {"level": row.level, "claimed": row.claimed, "observed": row.observed, "exits": int(row.exits)}
                 )
         for entry in rows.values():
             entry["breakdown"].sort(key=lambda b: -b["exits"])
@@ -888,76 +889,60 @@ class ObservationRepository:
 
         Per connector its distinct exits, how many were handed out more than once (ever) and how many another of the
         connectors also handed out in the window; per pair the exits both did; and the distinct exits across all.
+
+        One read of the window: each IP folds into a bitmask of the connectors holding it (and of those that reused
+        it), then the IPs are counted per pair of masks, a few rows that everything else is worked out from.
         """
         if not connector_ids:
             return {"exits": 0, "shared": 0, "connectors": [], "pairs": []}
         m = ConnectorExitIpModel
+        # A connector's bit is its place in the list, bound once as one array parameter however often it is used.
+        position = func.array_position(literal(connector_ids, ARRAY(String)), m.connector_id, type_=Integer) - 1
+        words = range((len(connector_ids) + _MASK_BITS - 1) // _MASK_BITS)
 
-        def counted(condition: Any) -> Any:
-            return func.sum(case((condition, 1), else_=0))
+        def bit(word: int) -> Any:
+            return case((position // _MASK_BITS == word, cast_sql(1, BigInteger).op("<<")(position % _MASK_BITS)), else_=0)
 
-        seen = (
-            select(m.connector_id, m.ip, m.sightings)
+        per_ip = (
+            select(
+                *(func.bit_or(bit(word)).label(f"held_{word}") for word in words),
+                *(func.bit_or(case((m.sightings > 1, bit(word)), else_=0)).label(f"reused_{word}") for word in words),
+            )
             .where(m.connector_id.in_(connector_ids), m.last_seen >= since)
-            .cte("seen")
+            .group_by(m.ip)
+            .subquery()
         )
-        holders = select(seen.c.ip, func.count().label("holders")).group_by(seen.c.ip).cte("holders")
-        # One statement, so the window's rows are read once and the time limit covers the whole comparison.
-        totals = select(
-            literal_column("'total'").label("kind"),
-            null().label("connector_id"),
-            null().label("other_id"),
-            func.count().label("exits"),
-            literal_column("0").label("reused"),
-            counted(holders.c.holders > 1).label("shared"),
-        ).select_from(holders)
-        per_connector = (
-            select(
-                literal_column("'connector'"),
-                seen.c.connector_id,
-                null(),
-                func.count(),
-                counted(seen.c.sightings > 1),
-                counted(holders.c.holders > 1),
-            )
-            .select_from(seen)
-            .join(holders, holders.c.ip == seen.c.ip)
-            .group_by(seen.c.connector_id)
-        )
-        other = seen.alias("other")
-        pairs = (
-            select(
-                literal_column("'pair'"),
-                seen.c.connector_id,
-                other.c.connector_id,
-                literal_column("0"),
-                literal_column("0"),
-                func.count(),
-            )
-            .select_from(seen)
-            .join(other, and_(other.c.ip == seen.c.ip, other.c.connector_id > seen.c.connector_id))
-            .group_by(seen.c.connector_id, other.c.connector_id)
-        )
+        masks = [per_ip.c[f"{kind}_{word}"] for kind in ("held", "reused") for word in words]
+        combinations = select(*masks, func.count().label("exits")).group_by(*masks)
+
+        def members(row: Any, kind: str) -> list[str]:
+            mask = sum(int(getattr(row, f"{kind}_{word}")) << (word * _MASK_BITS) for word in words)
+            return [connector_id for place, connector_id in enumerate(connector_ids) if mask >> place & 1]
 
         async def read() -> dict[str, Any]:
-            sharing: dict[str, Any] = {"exits": 0, "shared": 0, "connectors": [], "pairs": []}
-            for row in (await self._session.execute(union_all(totals, per_connector, pairs))).all():
-                if row.kind == "total":
-                    sharing["exits"], sharing["shared"] = int(row.exits or 0), int(row.shared or 0)
-                elif row.kind == "connector":
-                    sharing["connectors"].append(
-                        {
-                            "connector_id": row.connector_id,
-                            "exits": int(row.exits),
-                            "reused": int(row.reused or 0),
-                            "shared": int(row.shared or 0),
-                        }
-                    )
-                else:
-                    sharing["pairs"].append(
-                        {"connector_id": row.connector_id, "other_id": row.other_id, "shared": int(row.shared)}
-                    )
-            return sharing
+            await self._session.execute(select(func.set_config("work_mem", _SHARING_WORK_MEM, True)))
+            exits: Counter[str] = Counter()
+            reused: Counter[str] = Counter()
+            shared: Counter[str] = Counter()
+            pairs: Counter[tuple[str, str]] = Counter()
+            total = shared_total = 0
+            for row in (await self._session.execute(combinations)).all():
+                count, holders = int(row.exits), members(row, "held")
+                total += count
+                exits.update(dict.fromkeys(holders, count))
+                reused.update(dict.fromkeys(members(row, "reused"), count))
+                if len(holders) > 1:
+                    shared_total += count
+                    shared.update(dict.fromkeys(holders, count))
+                    pairs.update(dict.fromkeys(itertools.combinations(sorted(holders), 2), count))
+            return {
+                "exits": total,
+                "shared": shared_total,
+                "connectors": [
+                    {"connector_id": c, "exits": n, "reused": reused[c], "shared": shared[c]} for c, n in exits.items()
+                ],
+                "pairs": [{"connector_id": a, "other_id": b, "shared": n} for (a, b), n in pairs.items()],
+            }
 
         return await self._time_limited(read)
 

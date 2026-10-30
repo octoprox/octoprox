@@ -425,6 +425,38 @@ class TestObservations:
         ]
         assert await repo.exit_sharing(connector_ids=[], since=old) == {"exits": 0, "shared": 0, "connectors": [], "pairs": []}
 
+    async def test_exit_sharing_spans_more_connectors_than_one_mask_word(self, db_session: AsyncSession) -> None:
+        """Connectors past the 63rd land in a further mask word and are compared like the first ones."""
+        ids = [f"wide-{n:02d}" for n in range(70)]
+        await _connectors(db_session, *ids)
+        repo = ObservationRepository(db_session)
+        seen = datetime(2026, 9, 20)
+        sightings = [
+            # 10.0.1.1 behind the first and the last connector, one in each word.
+            (_observation(connector_id=ids[0], ip="10.0.1.1", observed_at=seen), True),
+            (_observation(connector_id=ids[69], ip="10.0.1.1", observed_at=seen), True),
+            (_observation(connector_id=ids[69], ip="10.0.1.1", observed_at=seen + timedelta(hours=1)), True),
+            # 10.0.1.2 behind the 63rd and the 64th, either side of the word boundary.
+            (_observation(connector_id=ids[62], ip="10.0.1.2", observed_at=seen), True),
+            (_observation(connector_id=ids[63], ip="10.0.1.2", observed_at=seen), True),
+        ]
+        await repo.add_exit_ips(ExitSighting.fold(sightings))
+        await db_session.commit()
+
+        sharing = await repo.exit_sharing(connector_ids=ids, since=datetime(2026, 9, 10))
+        assert sharing is not None
+        assert (sharing["exits"], sharing["shared"]) == (2, 2)
+        assert {c["connector_id"]: (c["exits"], c["reused"], c["shared"]) for c in sharing["connectors"]} == {
+            ids[0]: (1, 0, 1),
+            ids[62]: (1, 0, 1),
+            ids[63]: (1, 0, 1),
+            ids[69]: (1, 1, 1),
+        }
+        assert sorted((p["connector_id"], p["other_id"], p["shared"]) for p in sharing["pairs"]) == [
+            (ids[0], ids[69], 1),
+            (ids[62], ids[63], 1),
+        ]
+
     async def test_recent_filters_and_pages_on_the_server(self, db_session: AsyncSession) -> None:
         """Filters narrow the query itself; a page never depends on what a previous page held."""
         repo = ObservationRepository(db_session)
