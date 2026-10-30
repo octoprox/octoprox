@@ -10,6 +10,19 @@
 #   changes  what changed, for the people who use Octoprox; `docs` is a page
 #            on octoprox.com that explains it, such as connecting#exit-headers
 
+- version: 6.3.2
+  date: 2026-10-30
+  title: Per-project observation log and retention
+  changes:
+    - text: "Each project can turn off its observation log or keep it for its own number of days, under project settings (General, Observation log). Without a log, the project's sightings still count in its exit IPs and provider accuracy."
+      docs: ip-attribution#unique-exits-per-connector
+    - text: "Projects in the API take `observation_log` and `observation_retention_days`. Without a value, the retention follows the install's `observation_retention_days`, `0` keeps rows forever, and an empty string on update clears the project's value."
+      docs: api
+    - text: "Observation log rows take less storage. They no longer include the location candidates or the instance ID."
+      docs: ip-attribution
+    - text: "Upgrade note: while 6.3 or earlier runs alongside 6.3.2, some IP observations are retried or lost, and the observation log page fails on an old api. To lose none, stop the old release before you start the new one, and do not go back to 6.3 on the upgraded database because it records no IP observations there."
+      docs: deployment#restarts-and-upgrades
+
 - version: 6.3.1
   date: 2026-10-30
   title: Faster exit IP sharing and accuracy views
