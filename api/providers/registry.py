@@ -65,6 +65,7 @@ class ProviderType:
     factory: ProviderFactory | None = None
     origin: str = ""
     logo: str | None = None
+    logo_dark: str | None = None
     docs_url: str | None = None
     beta: bool = False
     extra: dict[str, Any] = field(default_factory=dict)
@@ -194,6 +195,7 @@ class ProviderRegistry:
                 factory=factory,
                 origin=origin,
                 logo=descriptor.logo,
+                logo_dark=descriptor.logo_dark,
                 docs_url=descriptor.docs_url,
                 beta=descriptor.beta,
             )

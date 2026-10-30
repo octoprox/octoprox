@@ -873,6 +873,7 @@ export interface ProviderSummary {
   cloud: boolean
   beta: boolean
   logo: string | null
+  logo_dark: string | null
   docs_url: string | null
   credential_fields: ProviderField[]
   connector_fields: ProviderField[]

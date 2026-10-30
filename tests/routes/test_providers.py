@@ -300,6 +300,18 @@ class TestAuthoring:
         assert authenticated_client.delete("/api/v1/providers/acme").status_code == 204
         assert authenticated_client.get("/api/v1/providers/acme").status_code == 404
 
+    def test_a_dark_mode_logo_reaches_the_catalog(self, authenticated_client: TestClient) -> None:
+        provider_id = f"acme_{uuid.uuid4().hex[:8]}"
+        light, dark = "data:image/svg+xml;base64,PHN2Zy8+", "data:image/png;base64,iVBORw0KGgo="
+        _create_acme(authenticated_client, dict(ACME_SPEC, id=provider_id, logo=light, logo_dark=dark))
+        by_id = {p["id"]: p for p in authenticated_client.get("/api/v1/providers").json()["providers"]}
+        assert (by_id[provider_id]["logo"], by_id[provider_id]["logo_dark"]) == (light, dark)
+        assert by_id["oxylabs"]["logo_dark"] is None
+
+        bad = dict(ACME_SPEC, id=f"acme_{uuid.uuid4().hex[:8]}", logo_dark="https://acme.test/logo.svg")
+        response = authenticated_client.post("/api/v1/providers", json={"spec": bad, "confirmed_hosts": ["api.acme.test"]})
+        assert response.status_code == 422 and "logo_dark must be a data:image" in response.text
+
     def test_builtins_are_read_only(self, authenticated_client: TestClient) -> None:
         assert authenticated_client.put("/api/v1/providers/oxylabs", json={"enabled": False}).status_code == 409
         assert authenticated_client.delete("/api/v1/providers/oxylabs").status_code == 409

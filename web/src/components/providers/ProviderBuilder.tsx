@@ -16,6 +16,7 @@ import { ProxyTypeEditor } from './ProxyTypeEditor'
 import { DiscoveryEditor } from './DiscoveryEditor'
 import { TestPanel } from './TestPanel'
 import { Checkbox, Field, Spec, TextField, inputSm, slugify } from './editors'
+import { cn } from '../../utils/cn'
 
 type Tab = 'general' | 'credential' | 'connector' | 'proxy_types' | 'discovery' | 'test' | 'yaml'
 
@@ -220,23 +221,8 @@ export function ProviderBuilder({ existing, initialSpec, onClose, onSaved, onDel
               <TextField label="Id" value={spec.id} onChange={(v) => !isEdit && patch({ id: slugify(v) })} mono help={isEdit ? 'Ids cannot be changed after creation.' : 'Becomes the credential type. Lowercase letters, digits, - and _.'} required />
               <TextField label="Description" value={spec.description} onChange={(v) => patch({ description: v })} className="col-span-2" placeholder="Residential and ISP proxies" />
               <TextField label="Documentation URL" value={spec.docs_url} onChange={(v) => patch({ docs_url: v || null })} mono placeholder="https://docs.vendor.com" />
-              <Field label="Logo (SVG or PNG, under 200 KB)">
-                <div className="flex items-center gap-3">
-                  {spec.logo && <img src={spec.logo} alt="" className="w-9 h-9 object-contain rounded-md border border-line" />}
-                  <label className="inline-flex items-center gap-1.5 text-xs text-primary cursor-pointer hover:brightness-110">
-                    <Upload className="w-3.5 h-3.5" /> {spec.logo ? 'Replace' : 'Upload'}
-                    <input type="file" accept="image/svg+xml,image/png" className="hidden" onChange={(e) => {
-                      const file = e.target.files?.[0]
-                      if (!file) return
-                      if (file.size > 200_000) { setError('Logo must be under 200 KB'); return }
-                      const reader = new FileReader()
-                      reader.onload = () => patch({ logo: String(reader.result) })
-                      reader.readAsDataURL(file)
-                    }} />
-                  </label>
-                  {spec.logo && <button type="button" className="text-xs text-fg-muted hover:text-danger" onClick={() => patch({ logo: null })}>Remove</button>}
-                </div>
-              </Field>
+              <LogoField label="Logo (SVG or PNG, under 200 KB)" name="Logo" value={spec.logo} onChange={(logo) => patch({ logo })} onError={setError} />
+              <LogoField label="Dark mode logo (optional)" name="Dark mode logo" value={spec.logo_dark} dark onChange={(logo_dark) => patch({ logo_dark })} onError={setError} help="Shown in dark mode; without one the logo is used." />
             </div>
             <Checkbox label="Mark as beta" checked={!!spec.beta} onChange={(v) => patch({ beta: v || undefined })} help="Shows a beta tag in the provider picker." />
             <div className="rounded-lg bg-surface-raised/60 p-3 text-xs text-fg-muted space-y-1">
@@ -293,6 +279,37 @@ export function ProviderBuilder({ existing, initialSpec, onClose, onSaved, onDel
         </ConfirmDialog>
       )}
     </>
+  )
+}
+
+/** One logo slot: a preview on the background it is drawn for, with upload, replace and remove. */
+function LogoField({ label, name, value, dark, help, onChange, onError }: {
+  label: string
+  name: string
+  value: string | null | undefined
+  dark?: boolean
+  help?: string
+  onChange: (value: string | null) => void
+  onError: (message: string) => void
+}) {
+  return (
+    <Field label={label} help={help}>
+      <div className="flex items-center gap-3">
+        {value && <img src={value} alt="" className={cn('w-9 h-9 object-contain rounded-md border border-line', dark ? 'bg-[#111318]' : 'bg-white')} />}
+        <label className="inline-flex items-center gap-1.5 text-xs text-primary cursor-pointer hover:brightness-110">
+          <Upload className="w-3.5 h-3.5" /> {value ? 'Replace' : 'Upload'}
+          <input type="file" accept="image/svg+xml,image/png" className="hidden" onChange={(e) => {
+            const file = e.target.files?.[0]
+            if (!file) return
+            if (file.size > 200_000) { onError(`${name} must be under 200 KB`); return }
+            const reader = new FileReader()
+            reader.onload = () => onChange(String(reader.result))
+            reader.readAsDataURL(file)
+          }} />
+        </label>
+        {value && <button type="button" className="text-xs text-fg-muted hover:text-danger" onClick={() => onChange(null)}>Remove</button>}
+      </div>
+    </Field>
   )
 }
 

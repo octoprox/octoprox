@@ -28,7 +28,7 @@ import re
 from typing import Annotated, Any, Literal
 from urllib.parse import urlsplit
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator, model_validator
 
 from api.models.proxy import ProxyProtocol
 
@@ -657,6 +657,7 @@ class ProviderDescriptor(BaseModel):
     description: str = ""
     version: int = Field(default=1, ge=1)
     logo: str | None = Field(default=None, description="data: URI of an SVG/PNG logo")
+    logo_dark: str | None = Field(default=None, description="data: URI of the logo for dark mode; unset: logo")
     docs_url: str | None = None
     beta: bool = False
     credential_fields: list[FieldSpec] = Field(default_factory=list)
@@ -680,13 +681,13 @@ class ProviderDescriptor(BaseModel):
             )
         return value
 
-    @field_validator("logo")
+    @field_validator("logo", "logo_dark")
     @classmethod
-    def _validate_logo(cls, value: str | None) -> str | None:
+    def _validate_logo(cls, value: str | None, info: ValidationInfo) -> str | None:
         if value is not None and not value.startswith("data:image/"):
-            raise ValueError("logo must be a data:image/... URI")
+            raise ValueError(f"{info.field_name} must be a data:image/... URI")
         if value is not None and len(value) > 200_000:
-            raise ValueError("logo must be under 200KB")
+            raise ValueError(f"{info.field_name} must be under 200KB")
         return value
 
     @model_validator(mode="after")

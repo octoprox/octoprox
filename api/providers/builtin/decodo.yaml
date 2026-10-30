@@ -66,16 +66,19 @@ connector_fields:
     default: 5
     min: 0
     max: 100
-    help: Share of requests without a client session whose exit is checked before forwarding.
+    help: Share of requests without a -sessid- whose exit preflight checks. Requests with a -sessid- are always checked.
     details: >-
-      Only preflight can see where a dynamic request went, by an echo request through the same vendor
-      session before the real one. Requests with a -sessid- are checked once per session; this is the
-      share of requests without one that are checked. Below 100 the unique-exit figures for that traffic
-      are undercounts; 100 counts every exit at one echo per request. Applies to requests that name no
-      country: on a connector with a country list a sampled exit outside the list is refused and an
-      unsampled one goes unseen, unless the project refuses contradictions or unknown exits, which verify
-      every one; 100 makes the list a full guarantee.
-      A request that names a country is checked every time unless the decisions can refuse nothing.
+      Only with Preflight check on in the project. With it off, no request is checked, whatever this number,
+      and none of the cases below applies.
+      With a -sessid-: always checked, whatever this number, once per session and place. Later requests
+      in that session reuse the result for the Preflight verdict cache in Settings (600 seconds by
+      default), or for the vendor's session length when that is shorter.
+      Without a -sessid-: this share of requests is checked. A check is one extra echo request through
+      the vendor before the real one, so 100 means one echo per request. Below 100, unique-exit figures
+      for that traffic are undercounts.
+      Exception: when the request names a place (-cc-, -st-, -city-) or the connector lists countries,
+      and the project's location decisions could refuse the exit, every request is checked whatever
+      this number, since a sampled check guarantees nothing.
     show_when: { field: connector.session_mode, equals: dynamic }
   - key: num_proxies
     label: Number of proxies

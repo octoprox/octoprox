@@ -60,6 +60,7 @@ class ProviderSummary(BaseModel):
     cloud: bool
     beta: bool = False
     logo: str | None = None
+    logo_dark: str | None = None
     docs_url: str | None = None
     credential_fields: list[FieldSpec]
     connector_fields: list[FieldSpec]

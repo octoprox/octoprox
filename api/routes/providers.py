@@ -137,6 +137,7 @@ def _summary(ptype: ProviderType, usage: _Usage, record: ProviderRecord | None =
         cloud=ptype.cloud,
         beta=ptype.beta,
         logo=ptype.logo,
+        logo_dark=ptype.logo_dark,
         docs_url=ptype.docs_url,
         credential_fields=_with_dependencies(ptype, ptype.credential_fields),
         connector_fields=_with_dependencies(ptype, ptype.connector_fields),

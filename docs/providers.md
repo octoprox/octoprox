@@ -34,7 +34,7 @@ Beta descriptors follow the vendor's public documentation but have not yet been 
 
 Admins open **Settings → Providers**. Shipped providers are read-only; any of them can be exported as YAML or duplicated as a starting point. Every descriptor provider, shipped or custom, has a **Test** tab where it can be tried with throwaway credentials before any credential or connector exists.
 
-1. **General** - id (becomes the credential type), name, description, documentation link, logo.
+1. **General** - id (becomes the credential type), name, description, documentation link, logo, and an optional dark mode logo (without one, dark mode shows the logo).
 2. **Credential fields** - what a user enters once per account. Mark API keys and passwords as *secret* so they are never written into proxy rows.
 3. **Connector fields** - per-connector settings such as proxy counts, countries or zones. Fields can be shown conditionally (`show_when`) and selects can load their options from the vendor API.
 4. **Proxy types** - one entry per product line, each with a *mode* (see below), gateway host and port, and username/password templates.
@@ -82,6 +82,8 @@ id: acme                      # lowercase letters, digits, - and _; becomes the 
 name: Acme Proxies
 description: Residential proxies
 docs_url: https://docs.acme.example
+logo: data:image/svg+xml;base64,...        # SVG or PNG data URI, under 200 KB
+logo_dark: data:image/svg+xml;base64,...   # optional, for dark mode; unset: logo
 beta: false
 
 credential_fields:
