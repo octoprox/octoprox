@@ -10,6 +10,16 @@
 #   changes  what changed, for the people who use Octoprox; `docs` is a page
 #            on octoprox.com that explains it, such as connecting#exit-headers
 
+- version: 6.3.1
+  date: 2026-10-30
+  title: Faster exit IP sharing and accuracy views
+  changes:
+    - text: "The Shared exits and Provider accuracy views on Exit locations load faster for projects with a long exit history. The shared exits comparison also hits its time limit less often."
+      docs: ip-attribution#shared-exits-between-connectors
+    - text: "These views no longer reload every minute. They refresh when you come back to the page or pick another time window."
+      docs: ip-attribution#provider-accuracy
+    - text: "Exit locations tables now say Loading while data arrives, where they used to say nothing matches the filters. On a phone, the empty table message stays in view when you scroll the table sideways."
+
 - version: 6.3.0
   date: 2026-10-30
   title: Proxy pinning and steadier sticky sessions
