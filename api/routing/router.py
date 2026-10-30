@@ -195,6 +195,7 @@ class Router:
         location: LocationTarget | None = None,
         exclude: frozenset[str] | None = None,
         exclude_connectors: frozenset[str] | None = None,
+        pinned_proxy_id: str | None = None,
     ) -> Proxy | None:
         """The proxy for one request of the project, credentials filled in; None when nothing serves it.
 
@@ -205,14 +206,19 @@ class Router:
             session_id: the client's ``-sessid-``, which sticky projects route by and a dynamic gateway's session derives from.
             exclude: proxies dropped before the strategy runs (preflight's retry); a session bound to one is re-bound.
             exclude_connectors: connectors whose proxies are all dropped the same way (preflight's retry after a vendor's 4xx).
+            pinned_proxy_id: the client's ``-prxy-``: that proxy when it is eligible, else None, whatever the strategy
+                and the session's binding say.
         """
-        if await self._is_sticky_quarantine_blocked(project_id, session_id):
+        if pinned_proxy_id is None and await self._is_sticky_quarantine_blocked(project_id, session_id):
             return None
         target = location or None
         snapshot = self._snapshot
-        routable = self._eligible_proxies(snapshot, project_id, target_host, target, include_quarantined=False)
+        routable = self._eligible_proxies(
+            snapshot, project_id, target_host, target, include_quarantined=False, pinned_proxy_id=pinned_proxy_id
+        )
         if (
             not routable
+            and pinned_proxy_id is None
             and target is not None
             and target.country
             and not target.below_country
@@ -224,11 +230,15 @@ class Router:
             routable = [proxy for proxy in routable if proxy.id not in exclude]
         if exclude_connectors:
             routable = [proxy for proxy in routable if proxy.connector_id not in exclude_connectors]
-        # The connector by routing weight, then the proxy inside it. Sticky
-        # reads and writes its Redis binding inside; the others need no I/O.
-        selected = await self.strategy_for_project(project_id).select_weighted(
-            self._groups(snapshot, routable), session_id, redis_client=self._redis, project_id=project_id
-        )
+        if pinned_proxy_id is not None:
+            # The strategy is not asked, so a sticky session's binding is neither read nor moved.
+            selected = routable[0] if routable else None
+        else:
+            # The connector by routing weight, then the proxy inside it. Sticky
+            # reads and writes its Redis binding inside; the others need no I/O.
+            selected = await self.strategy_for_project(project_id).select_weighted(
+                self._groups(snapshot, routable), session_id, redis_client=self._redis, project_id=project_id
+            )
         if selected is None or not is_dynamic_gateway(selected):
             return selected
         return self._render(snapshot, selected, project_id, session_id, target)
@@ -239,17 +249,20 @@ class Router:
         target_host: str | None = None,
         session_id: str | None = None,
         location: LocationTarget | None = None,
+        pinned_proxy_id: str | None = None,
     ) -> bool:
         """Whether a request found nothing because of rate-limit quarantines (429), not because nothing serves it (502).
 
         True when the session is held to its quarantined sticky proxy, or every row that would serve it is quarantined;
-        a retired slot is gone, not resting.
+        a retired slot is gone, not resting. A pinned request asks about its one proxy only.
         """
-        if await self._is_sticky_quarantine_blocked(project_id, session_id):
+        if pinned_proxy_id is None and await self._is_sticky_quarantine_blocked(project_id, session_id):
             return True
         snapshot = self._snapshot
         target = location or None
-        candidates = self._eligible_proxies(snapshot, project_id, target_host, target, include_quarantined=True)
+        candidates = self._eligible_proxies(
+            snapshot, project_id, target_host, target, include_quarantined=True, pinned_proxy_id=pinned_proxy_id
+        )
         return bool(candidates) and all(self._is_quarantined(snapshot, proxy.id) for proxy in candidates)
 
     def traffic_limit_status(
@@ -257,6 +270,7 @@ class Router:
         project_id: str,
         target_host: str | None = None,
         location: LocationTarget | None = None,
+        pinned_proxy_id: str | None = None,
     ) -> int | None:
         """The status to answer with when only connectors over their traffic limit could serve the request.
 
@@ -265,10 +279,13 @@ class Router:
         """
         snapshot = self._snapshot
         target = location or None
-        if self._eligible_proxies(snapshot, project_id, target_host, target, include_quarantined=True):
+        if self._eligible_proxies(
+            snapshot, project_id, target_host, target, include_quarantined=True, pinned_proxy_id=pinned_proxy_id
+        ):
             return None
         held_back = self._eligible_proxies(
-            snapshot, project_id, target_host, target, include_quarantined=True, include_traffic_blocked=True
+            snapshot, project_id, target_host, target,
+            include_quarantined=True, include_traffic_blocked=True, pinned_proxy_id=pinned_proxy_id,
         )
         statuses: set[int] = set()
         for connector_id in {proxy.connector_id for proxy in held_back}:
@@ -406,10 +423,19 @@ class Router:
         return [
             view
             for view in snapshot.connector_views(project_id)
-            if view.takes_requests
+            if self._takes(snapshot, view, target_host, include_traffic_blocked=include_traffic_blocked)
+        ]
+
+    @staticmethod
+    def _takes(
+        snapshot: RoutingSnapshot, view: ConnectorView, target_host: str | None, *, include_traffic_blocked: bool
+    ) -> bool:
+        """Whether the connector takes requests and lets ``target_host`` through, as ``_enabled_connectors`` keeps it."""
+        return (
+            view.takes_requests
             and (not target_host or view.allows_host(target_host))
             and (include_traffic_blocked or not snapshot.is_traffic_blocked(view.connector.id))
-        ]
+        )
 
     def _eligible_proxies(
         self,
@@ -420,14 +446,21 @@ class Router:
         *,
         include_quarantined: bool,
         include_traffic_blocked: bool = False,
+        pinned_proxy_id: str | None = None,
     ) -> list[Proxy]:
         """Healthy proxies a request for ``target`` may use, after domain and location filtering and the project's rules.
 
-        A state or city keeps the dynamic gateways that render it and the fixed exits known to be there.
+        A state or city keeps the dynamic gateways that render it and the fixed exits known to be there. A pinned
+        request keeps its one proxy, if that one passes.
         """
         wanted = target.country if target is not None else None
         project = snapshot.project(project_id)
         rules = project.location_rules if project is not None else LocationRules()
+        if pinned_proxy_id is not None:
+            return self._pinned(
+                snapshot, project_id, target_host, target, rules, pinned_proxy_id,
+                include_quarantined=include_quarantined, include_traffic_blocked=include_traffic_blocked,
+            )
         excluded = self._excluded(snapshot, include_quarantined=include_quarantined)
         eligible: list[Proxy] = []
         for view in self._enabled_connectors(
@@ -440,6 +473,36 @@ class Router:
                     continue
                 eligible.append(proxy)
         return eligible
+
+    def _pinned(
+        self,
+        snapshot: RoutingSnapshot,
+        project_id: str,
+        target_host: str | None,
+        target: LocationTarget | None,
+        rules: LocationRules,
+        proxy_id: str,
+        *,
+        include_quarantined: bool,
+        include_traffic_blocked: bool,
+    ) -> list[Proxy]:
+        """The pinned proxy alone, looked up by id, when it passes every check ``_eligible_proxies`` makes; else nothing.
+
+        Without a country it may be a slot of an "All countries" pool's on-demand group, which untargeted traffic keeps off.
+        """
+        proxy = snapshot.proxy(proxy_id)
+        view = snapshot.connector_view(proxy.connector_id) if proxy is not None else None
+        if proxy is None or view is None or view.connector.project_id != project_id:
+            return []
+        if not self._takes(snapshot, view, target_host, include_traffic_blocked=include_traffic_blocked):
+            return []
+        if self._exclusions.is_retired(proxy.id) or (not include_quarantined and self._is_quarantined(snapshot, proxy.id)):
+            return []
+        if not view.can_serve(proxy, target.country if target is not None else None, rules, pinned=True):
+            return []
+        if target is not None and target.below_country and not self._serves_place(view, proxy, rules, target):
+            return []
+        return [proxy]
 
     def _excluded(self, snapshot: RoutingSnapshot, *, include_quarantined: bool) -> set[str]:
         """The proxies no request may use now: retired on this gateway, and quarantined unless included."""
@@ -476,7 +539,9 @@ class Router:
             if group is None:
                 view = snapshot.connector_view(proxy.connector_id)
                 weight = view.weight if view is not None else DEFAULT_ROUTING_WEIGHT
-                group = groups[proxy.connector_id] = ProxyGroup(key=proxy.connector_id, weight=weight)
+                group = groups[proxy.connector_id] = ProxyGroup(
+                    key=proxy.connector_id, weight=weight, members=view.proxies if view is not None else ()
+                )
             group.proxies.append(proxy)
         return list(groups.values())
 

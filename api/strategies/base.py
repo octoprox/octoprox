@@ -5,6 +5,7 @@
 
 import random
 from abc import ABC, abstractmethod
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -21,11 +22,14 @@ class ProxyGroup:
     ``key`` identifies the group (the connector id) so stateful strategies
     can keep per-group state across calls. ``weight`` is the connector's
     relative share; only its ratio to the other groups' weights matters.
+    ``members`` is every row of the connector whatever its state, which
+    sticky places sessions over; empty means ``proxies`` are all of them.
     """
 
     key: str
     weight: int
     proxies: list[Proxy] = field(default_factory=list)
+    members: Sequence[Proxy] = ()
 
 
 class RoutingStrategy(ABC):

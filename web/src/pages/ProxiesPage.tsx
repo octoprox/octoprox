@@ -19,7 +19,7 @@ import { ProviderLogo } from '../components/ProviderLogo'
 import { useProviders } from '../hooks/useProviders'
 import { RichSelect, RichSelectOption } from '../components/RichSelect'
 import { formatBytes, formatDate, formatDateTime } from '../utils/format'
-import { Button, Input, Select, Label, Alert, Inspector, InspectorSection, StatGrid, KeyValue, ConfirmDialog } from '../components/ui'
+import { Button, Input, Select, Label, Alert, Inspector, InspectorSection, StatGrid, KeyValue, ConfirmDialog, CopyButton } from '../components/ui'
 
 type PanelState =
   | { kind: 'proxy'; id: string }
@@ -490,6 +490,16 @@ function ProxyPanel({ proxy, connectorType, canMutate, onClose, onRelease, onDel
       </InspectorSection>
 
       <InspectorSection title="Details">
+        <KeyValue
+          label="ID"
+          value={
+            <span className="flex items-center justify-end gap-1 min-w-0">
+              <span className="truncate" title={proxy.id}>{proxy.id}</span>
+              <CopyButton text={proxy.id} label="Copy proxy ID, for -prxy- in the proxy username" />
+            </span>
+          }
+          mono
+        />
         <KeyValue label="Upstream host" value={proxy.host} mono />
         <KeyValue label="Successes" value={proxy.success_count.toLocaleString()} />
         <KeyValue label="Added" value={formatDateTime(proxy.created_at)} />

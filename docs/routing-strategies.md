@@ -42,7 +42,7 @@ How the strategy performs step 2:
 | `random` | Weighted random draw | Random proxy |
 | `round_robin` | Smooth weighted round robin: weights 3 and 1 give the fixed order A A B A, three A for every B, spread out rather than clumped | Proxies cycled in order; each connector keeps its own position |
 | `least_used` | Fewest open transfers on this gateway divided by weight, so weight reads as relative capacity; ties broken at random, by weight | Proxy with the fewest open transfers on this gateway; ties broken at random |
-| `sticky` | The session id is hashed onto a connector, weighted, so a session always lands on the same connector | The usual sticky binding |
+| `sticky` | The session id is hashed onto a connector, weighted, so a session always lands on the same connector | The session's proxy; a new session is hashed onto one, see [Session IDs](#session-ids) |
 | `health_based` | Weighted random draw; weight is not adjusted for health | A random pick among the best-scoring third of the proxies this gateway has at least 10 results for, and every proxy it has fewer for |
 
 Under `sticky`, a session already bound to a proxy keeps it while that proxy is eligible, whatever the weights say. Weight changes steer new sessions only, and raising one weight moves a proportional slice of new sessions rather than reshuffling them all.
@@ -88,12 +88,39 @@ Proxy-Authorization: Basic base64(my-project-sessid-abc456:password)
 
 - The `-sessid-` delimiter separates the real username from the session ID. The password remains unchanged.
 - The session ID is the only key the sticky strategy uses. The client's address is never one: behind a NAT or a load balancer it is shared by every client, and a session should exist only when a client asked for one.
-- If the upstream proxy assigned to a session becomes unhealthy (e.g., IP rotation), a new proxy is automatically assigned on the next request.
+- A session keeps its proxy while it is in use: at least 2.5 minutes, usually 5, after its last request, and every request starts that time again. After a longer gap the next request places the session afresh, as a new session: each of the connector's proxies holds points on a hash ring, whether it is healthy or not, and the session goes to the first proxy after its own hash that can serve the request. The same session ID therefore lands on the same proxy whenever the same proxies are eligible, and a proxy that is out at that moment moves only the sessions that would have landed on it. A proxy added to the connector takes its share of the sessions placed afresh and leaves the others where they were, except when the connector grows past 16 or 64 proxies, where each proxy's share of the ring is resized and some sessions move between the others too. Placing a session takes the same time however many proxies the connector has.
+- If the proxy a session is bound to stops being eligible (unhealthy, removed, or rate limited without [sticky session quarantine]({{ site.baseurl }}/rate-limiting#sticky-session-quarantine)), the next request moves the session to another proxy, where it stays while it is in use.
+- To reach one particular proxy rather than whichever one a session lands on, name it with `-prxy-`; see [Pinning a proxy](#pinning-a-proxy).
 - Without a session ID, the sticky strategy picks a connector by weight and a proxy inside it at random for each request, exactly like `random`.
 - This feature only takes effect when the project's routing strategy is set to `sticky`. Other strategies ignore the session ID.
 - Connectors running a residential or mobile product with **dynamic sessions** also forward the session to the vendor: the `-sessid-` value is hashed into the vendor's session id, so the same value keeps the same exit IP across requests and gateways, and a request without `-sessid-` gets a fresh vendor session every time. The whole requested place is part of that hash: `-sessid-order-1-cc-de` and `-sessid-order-1-cc-us` are two vendor sessions with two exits, and so are `-cc-us-city-austin` and `-cc-us-city-dallas` under one `-sessid-`, each kept for as long as the client reuses it, since a vendor does not move a session it has already placed somewhere else. This applies under every routing strategy, not only `sticky`. See [Dynamic sessions]({{ site.baseurl }}/providers#descriptor-reference).
 
-> **Note:** The strings `-sessid-`, `-cc-`, `-st-` and `-city-` are reserved delimiters and should not appear in your project username or in session IDs.
+> **Note:** The strings `-sessid-`, `-cc-`, `-st-`, `-city-` and `-prxy-` are reserved delimiters and should not appear in your project username or in session IDs.
+
+## Pinning a proxy
+
+A client can name the proxy a request goes through. This suits static lists and long-running cloud instances, where a client wants to reach each of a known set of IPs on purpose, rather than trying session IDs until every IP has turned up.
+
+**Format:** `<username>-prxy-<proxy_id>`
+
+```
+# Always through proxy 3f2a9c1e-5b7d-4e8f-9a0b-1c2d3e4f5a6b
+Proxy-Authorization: Basic base64(myuser-prxy-3f2a9c1e-5b7d-4e8f-9a0b-1c2d3e4f5a6b:password)
+```
+
+Open a proxy on the Proxies page to see its id under Details, with a button that copies it. The same id is the `id` of its row in [`GET /api/v1/projects/{project_id}/proxies`]({{ site.baseurl }}/api#list-proxies). With [exit headers]({{ site.baseurl }}/connecting#exit-headers) on, every response also names the proxy it went through in `X-Octoprox-Proxy-Id`.
+
+**Behavior:**
+
+- Every routing strategy honours it, and the request never moves to another proxy. When the pinned proxy cannot serve the request, the request fails:
+  - `502 Bad Gateway` (`Proxy <id> is not available for this domain`) when the id is not one of the project's proxies, or the proxy is not healthy, its connector is disabled, or it does not serve the requested place or destination. `-cc-`, `-st-`, `-city-` and the connector's [domain filter]({{ site.baseurl }}/domain-filtering) apply as on any request.
+  - `429 Too Many Requests` while the proxy is [rate limited]({{ site.baseurl }}/rate-limiting).
+  - The connector's traffic-limit status, `509` by default, while its connector is over its [traffic limit]({{ site.baseurl }}/traffic-limits).
+  - With the [preflight check]({{ site.baseurl }}/location-routing) on, an exit that fails the check fails the request instead of another proxy being tried. A dynamic-sessions gateway pinned without `-sessid-` is first tried again with a fresh vendor session, as on any request.
+- With `-sessid-` as well, the sticky strategy does not read or change the session's binding: the session's next request without `-prxy-` goes where the session was. On a [dynamic-sessions]({{ site.baseurl }}/providers#descriptor-reference) connector the session still chooses the vendor session, so pinning its gateway row with a `-sessid-` keeps one exit.
+- A slot of an "All countries" pool's country group, which requests without `-cc-` never reach, can be pinned without `-cc-`: it exits in its group's country.
+- An id belongs to one proxy row. A static proxy keeps its id until it is deleted. A cloud proxy's row goes with its instance, so a replaced instance comes back under a new id.
+- An id that contains one of the other delimiters, such as a cloud instance whose name holds `-st-`, cannot be pinned: the username would be read as two parameters.
 
 ## Country Routing
 
@@ -181,4 +208,4 @@ Requests **without** a `-cc-` suffix are unaffected: they may use any proxy in t
 - Country groups created on demand are not removed automatically. Delete unused ones from the Proxies page, or list the countries you need on the connector so the sync manages them.
 - The Proxies page shows each proxy's country, and its state and city when known, and the Overview page shows a world map of where the project's proxies exit from, with healthy and total counts per country. A dynamic-sessions connector has no exit of its own to plot, since the vendor picks one per request, so the map tints the countries its allow-list names, or the whole world when it names none.
 
-> **Note:** The strings `-cc-`, `-st-` and `-city-` are reserved delimiters and should not appear in your project username or in session IDs.
+> **Note:** The strings `-sessid-`, `-cc-`, `-st-`, `-city-` and `-prxy-` are reserved delimiters and should not appear in your project username or in session IDs.

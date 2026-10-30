@@ -168,7 +168,7 @@ async def test_fake_ip_destination_is_connected_by_name(upstream: _ConnectProxy)
         await server.stop()
     assert upstream.targets == ["media.example.net:8443"]
     router.select_proxy_for_project.assert_awaited_once_with(
-        "proj", "sofa", "media.example.net", LocationTarget(country="DE")
+        "proj", "sofa", "media.example.net", LocationTarget(country="DE"), pinned_proxy_id=None
     )
     # The completion event names the device, so the request is metered on it
     # as well as on the proxy, connector and project; so is the meter. Both

@@ -197,6 +197,14 @@ class TestDynamicSessions:
         selected = await router.select_proxy_for_project("project-1", "order-1")
         assert selected is not None and selected.password == "s3cret"
 
+    async def test_a_pinned_gateway_renders_the_session_and_place_as_ever(self, feed: FeedBuilder) -> None:
+        router = feed.router()
+        de = LocationTarget(country="DE")
+        unpinned = await router.select_proxy_for_project("project-1", "order-1", location=de)
+        pinned = await router.select_proxy_for_project("project-1", "order-1", location=de, pinned_proxy_id="gw")
+        assert unpinned is not None and pinned is not None
+        assert pinned.id == "gw" and pinned.username == unpinned.username and pinned.password == "s3cret"
+
     async def test_no_session_id_does_not_pin_a_vendor_session(self, feed: FeedBuilder) -> None:
         router = feed.router()
         # A request without -sessid- has no routing key at all, so the vendor rotates.
@@ -526,3 +534,23 @@ class TestOnDemandCountryGroups:
         router = self._router(feed, on_demand)
         assert await router.select_proxy_for_project("project-1", location=LocationTarget(country="DE")) is None
         assert on_demand.requested == []
+
+    async def test_a_pinned_request_is_not_asked_for(self, feed: FeedBuilder) -> None:
+        """A new group could never hold the pinned proxy: the request fails at once."""
+        on_demand = ProvisioningOnDemand(feed)
+        router = self._router(feed, on_demand)
+        de = LocationTarget(country="DE")
+        assert await router.select_proxy_for_project("project-1", location=de, pinned_proxy_id="px-aaa") is None
+        assert on_demand.requested == [] and on_demand.waits == []
+
+    async def test_a_slot_of_a_country_group_can_be_pinned_without_its_country(self, feed: FeedBuilder) -> None:
+        """Untargeted traffic keeps off the group; a request naming one of its slots gets it, in the group's country."""
+        router = self._router(feed, ProvisioningOnDemand(feed))
+        await router.select_proxy_for_project("project-1", location=LocationTarget(country="DE"))
+        slot = next(p.id for p in feed.proxies.values() if p.metadata.get("geo") == "DE")
+        assert slot not in _ids(router)
+        selected = await router.select_proxy_for_project("project-1", pinned_proxy_id=slot)
+        assert selected is not None and selected.id == slot and selected.metadata["geo"] == "DE"
+        de = await router.select_proxy_for_project("project-1", location=LocationTarget(country="DE"), pinned_proxy_id=slot)
+        assert de is not None and de.id == slot
+        assert await router.select_proxy_for_project("project-1", location=LocationTarget(country="FR"), pinned_proxy_id=slot) is None

@@ -20,6 +20,7 @@ from api.core.auth import RequireEditorDep
 from api.core.username_params import (
     CITY_SEPARATOR,
     COUNTRY_SEPARATOR,
+    RESERVED_SEPARATORS,
     SESSID_SEPARATOR,
     STATE_SEPARATOR,
     format_username_params,
@@ -46,7 +47,7 @@ router = APIRouter(prefix="/projects")
 
 _SEPARATORS = (COUNTRY_SEPARATOR, STATE_SEPARATOR, CITY_SEPARATOR, SESSID_SEPARATOR)
 # Every reserved delimiter in a string, overlapping ones included: "-sessid-st-ny" holds two.
-_DELIMITERS = re.compile("(?=" + "|".join(re.escape(separator) for separator in _SEPARATORS) + ")")
+_DELIMITERS = re.compile("(?=" + "|".join(re.escape(separator) for separator in RESERVED_SEPARATORS) + ")")
 # What a delete must be confirmed with, typed by the user.
 _DELETE_CONFIRMATION = "permanently delete"
 
@@ -213,12 +214,12 @@ async def get_connect_info(
     params = parse_username_params(composed)
     error = params.location_error
     if params.username != project.username:
-        error = "The project username contains a reserved delimiter (-cc-, -st-, -city- or -sessid-), so the proxy cannot read it"
+        error = "The project username contains a reserved delimiter (-cc-, -st-, -city-, -sessid- or -prxy-), so the proxy cannot read it"
     elif len(_DELIMITERS.findall(composed, len(project.username))) != len(values):
         # Only the delimiters put there may follow the username: a value holding one, or
         # forming one with the dash before or after it ("st-ny" after -sessid- reads as
         # -st-ny), would be read as another parameter.
-        error = "A value cannot contain -cc-, -st-, -city- or -sessid-, including one formed with the dash before or after it"
+        error = "A value cannot contain -cc-, -st-, -city-, -sessid- or -prxy-, including one formed with the dash before or after it"
     elif params.sessid and ":" in params.sessid:
         # Basic auth splits user and password at the first colon.
         error = "A session ID cannot contain a colon"

@@ -188,7 +188,17 @@ class ConnectorView:
             self._candidates[key] = rows
         return rows
 
-    def _can_serve(self, proxy: Proxy, country: str | None, rules: LocationRules) -> bool:
+    def can_serve(self, proxy: Proxy, country: str | None, rules: LocationRules, *, pinned: bool = False) -> bool:
+        """Whether ``proxy`` is one of the ``candidates`` for ``country``, checked alone rather than by building them.
+
+        ``pinned``, a request naming the row, may use an on-demand country group's slot without naming its country.
+        """
+        declared = self.declared_countries
+        if country and declared and country not in declared:
+            return False
+        return self._can_serve(proxy, country, rules, pinned=pinned)
+
+    def _can_serve(self, proxy: Proxy, country: str | None, rules: LocationRules, *, pinned: bool = False) -> bool:
         """Whether a row of a connector that serves ``country`` at all is one of its ``candidates``."""
         if (
             proxy.status != ProxyStatus.HEALTHY
@@ -200,8 +210,8 @@ class ConnectorView:
             # The connector's allow-list was applied above; the row itself has no country.
             return True
         if not country:
-            # Untargeted traffic keeps off the on-demand groups of an "All countries" pool.
-            return not (self.accepts_request_country and proxy.metadata.get(META_GEO_COUNTRY))
+            # Untargeted traffic keeps off the on-demand groups of an "All countries" pool, unless it named the slot.
+            return pinned or not (self.accepts_request_country and proxy.metadata.get(META_GEO_COUNTRY))
         known = proxy.country
         return known == country if known is not None else country in self.declared_countries
 

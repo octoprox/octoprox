@@ -16,3 +16,4 @@ export { Inspector, InspectorSection, KeyValue, StatGrid, INSPECTOR_WIDTH, INSPE
 export { Tabs, Segmented } from './Tabs'
 export { FlowDiagram, FlowNode, type FlowAnchor, type FlowEdge, type FlowTone } from './FlowDiagram'
 export { ConfirmDialog } from './ConfirmDialog'
+export { CopyButton } from './CopyButton'

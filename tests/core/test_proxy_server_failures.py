@@ -216,6 +216,37 @@ class TestRefused:
         (failure,) = _failures(publish)
         assert (failure.kind, failure.status) == (FailureKind.ALL_PROXIES_QUARANTINED, 429)
 
+    async def test_a_pinned_proxy_that_cannot_serve_is_named(self, listen: Any, publish: _Published) -> None:
+        server = await listen(None)
+        response = await _exchange(server, f"CONNECT example.com:443 HTTP/1.1\r\n{_auth('proj-sessid-s1-prxy-px-7')}\r\n")
+
+        status_line, _ = _head(response)
+        assert status_line == "HTTP/1.1 502 Bad Gateway (Proxy px-7 is not available for this domain)"
+        router = server._router
+        assert router.select_proxy_for_project.await_args.kwargs["pinned_proxy_id"] == "px-7"  # type: ignore[attr-defined]
+        assert router.are_all_proxies_quarantined.await_args.kwargs["pinned_proxy_id"] == "px-7"  # type: ignore[attr-defined]
+        assert router.traffic_limit_status.call_args.kwargs["pinned_proxy_id"] == "px-7"  # type: ignore[attr-defined]
+        (failure,) = _failures(publish)
+        assert (failure.kind, failure.status, failure.session_id) == (FailureKind.NO_PROXY_AVAILABLE, 502, "s1")
+
+    async def test_a_quarantined_pinned_proxy_is_named(self, listen: Any, publish: _Published) -> None:
+        server = await listen(None, quarantined=True)
+        response = await _exchange(server, f"GET http://example.com/ HTTP/1.1\r\n{_auth('proj-prxy-px-7')}\r\n")
+
+        assert response.startswith(b"HTTP/1.1 429 Too Many Requests (Proxy px-7 is temporarily rate-limited. Retry later.)")
+        (failure,) = _failures(publish)
+        assert (failure.kind, failure.status) == (FailureKind.ALL_PROXIES_QUARANTINED, 429)
+
+    async def test_a_traffic_limited_pinned_proxy_is_named(self, listen: Any, publish: _Published) -> None:
+        server = await listen(None)
+        server._router.traffic_limit_status.return_value = 509  # type: ignore[attr-defined]
+        response = await _exchange(server, f"GET http://example.com/ HTTP/1.1\r\n{_auth('proj-prxy-px-7')}\r\n")
+
+        status_line, _ = _head(response)
+        assert status_line == "HTTP/1.1 509 Bandwidth Limit Exceeded (The connector of proxy px-7 has reached its traffic limit.)"
+        (failure,) = _failures(publish)
+        assert (failure.kind, failure.status) == (FailureKind.TRAFFIC_LIMIT_EXCEEDED, 509)
+
     async def test_a_state_without_a_country(self, listen: Any, publish: _Published) -> None:
         server = await listen(None)
         response = await _exchange(server, f"GET http://example.com/a?b=c HTTP/1.1\r\n{_auth('proj-st-ny')}\r\n")

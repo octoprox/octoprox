@@ -2,10 +2,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { useState } from 'react'
-import { Copy, Check, Info } from 'lucide-react'
+import { Info } from 'lucide-react'
 import { MitmRequestRecord } from '../../api/client'
 import { formatBytes, formatTime } from '../../utils/format'
-import { Badge, Inspector, KeyValue, StatGrid, Tabs } from '../ui'
+import { Badge, CopyButton, Inspector, KeyValue, StatGrid, Tabs } from '../ui'
 
 export function StatusCodeBadge({ code }: { code: number }) {
   let color: 'green' | 'blue' | 'yellow' | 'red' | 'gray' = 'gray'
@@ -34,20 +34,6 @@ function HeadersTable({ headers }: { headers: [string, string][] }) {
         </div>
       ))}
     </div>
-  )
-}
-
-export function CopyButton({ text, className = 'ml-1.5 align-middle' }: { text: string; className?: string }) {
-  const [copied, setCopied] = useState(false)
-  return (
-    <button
-      type="button"
-      onClick={() => { navigator.clipboard.writeText(text); setCopied(true); setTimeout(() => setCopied(false), 1500) }}
-      className={`p-0.5 text-fg-subtle hover:text-fg-muted inline-flex ${className}`}
-      title="Copy to clipboard"
-    >
-      {copied ? <Check className="w-3 h-3 text-success" /> : <Copy className="w-3 h-3" />}
-    </button>
   )
 }
 
@@ -90,14 +76,14 @@ function TlsInfoTable({ record }: { record: MitmRequestRecord }) {
       {ch && (
         <>
           <TlsSectionHeader title="Fingerprints" />
-          <TlsRow label="JA3"><span className="break-all">{ch.ja3}</span><CopyButton text={ch.ja3} /></TlsRow>
-          <TlsRow label="JA4"><span className="break-all">{ch.ja4}</span><CopyButton text={ch.ja4} /></TlsRow>
-          <TlsRow label="JA4_r"><span className="break-all">{ch.ja4_r}</span><CopyButton text={ch.ja4_r} /></TlsRow>
+          <TlsRow label="JA3"><span className="break-all">{ch.ja3}</span><CopyButton text={ch.ja3} className="ml-1.5 align-middle" /></TlsRow>
+          <TlsRow label="JA4"><span className="break-all">{ch.ja4}</span><CopyButton text={ch.ja4} className="ml-1.5 align-middle" /></TlsRow>
+          <TlsRow label="JA4_r"><span className="break-all">{ch.ja4_r}</span><CopyButton text={ch.ja4_r} className="ml-1.5 align-middle" /></TlsRow>
           <TlsRow label="JA3 full">
             {ja3Expanded ? (
               <div>
                 <span className="break-all">{ch.ja3_full}</span>
-                <CopyButton text={ch.ja3_full} />
+                <CopyButton text={ch.ja3_full} className="ml-1.5 align-middle" />
                 <button onClick={() => setJa3Expanded(false)} className="ml-2 text-primary text-[10px]">collapse</button>
               </div>
             ) : (
@@ -169,7 +155,7 @@ export function RequestPanel({ record, onClose }: { record: MitmRequestRecord; o
       </div>
       <div className="font-mono text-xs break-all leading-relaxed">
         <span className="text-fg-muted">{record.target_host}</span>{path}
-        <CopyButton text={record.url} />
+        <CopyButton text={record.url} className="ml-1.5 align-middle" />
       </div>
       <StatGrid items={[
         { label: 'Request body', value: formatBytes(record.request_body_size) },

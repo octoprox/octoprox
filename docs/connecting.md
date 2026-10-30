@@ -39,12 +39,13 @@ Routing parameters are appended to the project username as `-<key>-<value>` segm
 | `-st-<state>` | `-st-ny` | Exit in a state, province or other first-level subdivision (ISO 3166-2 code). Needs `-cc-` |
 | `-city-<city>` | `-city-new_york` | Exit in a city, as a slug: lower case, underscores for spaces. Needs `-cc-` |
 | `-sessid-<id>` | `-sessid-order-42` | Keep the same exit across requests. See [Session IDs]({{ site.baseurl }}/routing-strategies#session-ids) |
+| `-prxy-<proxy id>` | `-prxy-3f2a9c1e-5b7d-4e8f-9a0b-1c2d3e4f5a6b` | Go through this proxy of the project and no other; the request fails when it cannot serve it. See [Pinning a proxy]({{ site.baseurl }}/routing-strategies#pinning-a-proxy) |
 
 ```
 myuser-cc-us-st-ny-city-new_york-sessid-order-42
 ```
 
-The Connect page normalises what you type the way the proxy does (`New York`, `new-york` and `nyc` all become `new_york`) and shows the username in that form. A session ID must not contain one of the reserved delimiters (`-cc-`, `-st-`, `-city-`, `-sessid-`), nor start with one without its first dash (`-sessid-st-ny` reads as `-st-ny`), and must not contain a colon, since Basic auth splits the username from the password at the first colon. Without `-sessid-` each request is routed on its own; with it, the [sticky strategy]({{ site.baseurl }}/routing-strategies#session-ids) keeps the session on one proxy, and a [dynamic-sessions]({{ site.baseurl }}/providers#descriptor-reference) connector keeps one vendor session for it under every strategy.
+The Connect page normalises what you type the way the proxy does (`New York`, `new-york` and `nyc` all become `new_york`) and shows the username in that form. A session ID must not contain one of the reserved delimiters (`-cc-`, `-st-`, `-city-`, `-sessid-`, `-prxy-`), nor start with one without its first dash (`-sessid-st-ny` reads as `-st-ny`), and must not contain a colon, since Basic auth splits the username from the password at the first colon. Without `-sessid-` each request is routed on its own; with it, the [sticky strategy]({{ site.baseurl }}/routing-strategies#session-ids) keeps the session on one proxy, and a [dynamic-sessions]({{ site.baseurl }}/providers#descriptor-reference) connector keeps one vendor session for it under every strategy.
 
 ## Examples
 
@@ -54,7 +55,7 @@ The examples fetch [ipinfo.io](https://ipinfo.io/json), which answers with the e
 
 ```bash
 curl --proxy 'http://proxy.example.com:8080' \
-  --proxy-user 'myuser-cc-us-st-ny:mypassword' \
+  --prxy-user 'myuser-cc-us-st-ny:mypassword' \
   'https://ipinfo.io/json'
 ```
 
@@ -106,7 +107,7 @@ export http_proxy="$https_proxy"
 curl 'https://ipinfo.io/json'
 ```
 
-In the URL form the username and password are percent-encoded: a password containing `@`, `:` or `/` would otherwise end the credentials early. The Connect page does this for you; curl's `--proxy-user` and Playwright's separate fields need no encoding. Many scraping tools also import the `host:port:username:password` line the page offers.
+In the URL form the username and password are percent-encoded: a password containing `@`, `:` or `/` would otherwise end the credentials early. The Connect page does this for you; curl's `--prxy-user` and Playwright's separate fields need no encoding. Many scraping tools also import the `host:port:username:password` line the page offers.
 
 ### With TLS interception
 
@@ -149,7 +150,7 @@ Most HTTP libraries do not pass the headers of a successful `CONNECT` on to the 
 
 ```bash
 curl --proxy 'http://proxy.example.com:8080' \
-  --proxy-user 'myuser-cc-us-sessid-a1:mypassword' \
+  --prxy-user 'myuser-cc-us-sessid-a1:mypassword' \
   -s -o /dev/null -D - 'https://ipinfo.io/json' | grep -i '^x-octoprox-'
 ```
 
@@ -159,10 +160,10 @@ curl --proxy 'http://proxy.example.com:8080' \
 |----------|---------|
 | `407 Proxy Authentication Required` | No credentials, or the username (without its parameters) and password match no project |
 | `400 Bad Request` | A parameter cannot be read: a country that is not a two-letter code, a state or city without `-cc-`. The body says which |
-| `502 Bad Gateway` | Nothing in the project serves the place asked for, or the exit failed the [preflight check]({{ site.baseurl }}/location-routing). A request is never widened to the country. Also the upstream proxy could not be reached or refused the tunnel: a vendor's own status, 429 or 407 included, is answered as a 502, since it describes one connector rather than the project and a retry may go through another. A plain `http://` request through an HTTP upstream is not tunnelled, so it gets the vendor's answer as the vendor sent it |
+| `502 Bad Gateway` | Nothing in the project serves the place asked for, or the exit failed the [preflight check]({{ site.baseurl }}/location-routing). A request is never widened to the country. With `-prxy-`, the pinned proxy cannot serve it (`Proxy <id> is not available for ...`): the id is unknown, or the proxy is unhealthy or does not serve the place or destination. Also the upstream proxy could not be reached or refused the tunnel: a vendor's own status, 429 or 407 included, is answered as a 502, since it describes one connector rather than the project and a retry may go through another. A plain `http://` request through an HTTP upstream is not tunnelled, so it gets the vendor's answer as the vendor sent it |
 | `504 Gateway Timeout` | The upstream proxy did not answer in time, or the client stopped sending its request body |
 | `509 Bandwidth Limit Exceeded` | Every connector that could serve the request is over its [traffic limit]({{ site.baseurl }}/traffic-limits); the status is the connector's `limit_status`, 509 by default |
-| `429 Too Many Requests` | Every proxy that could serve the request is [rate limited]({{ site.baseurl }}/rate-limiting) |
+| `429 Too Many Requests` | Every proxy that could serve the request is [rate limited]({{ site.baseurl }}/rate-limiting), or the one `-prxy-` names is |
 
 Most clients drop the body of a failed `CONNECT` and show only the status line, so the explanation is in the reason phrase as well: requests reports `Tunnel connection failed: 502 Bad Gateway (Upstream proxy refused the tunnel: 429 Too Many Requests)`, httpx and aiohttp the same status line. curl prints only the status code; `curl -v` shows the whole line. A failure on the upstream leg also carries an [RFC 9209](https://www.rfc-editor.org/rfc/rfc9209) `Proxy-Status` header for clients that read the headers of a failed `CONNECT` (aiohttp's `ClientHttpProxyError.headers`):
 

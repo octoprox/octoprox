@@ -142,12 +142,14 @@ class ExitVerifier:
         session_id: str | None,
         location: LocationTarget | None,
         target_host: str | None,
+        pinned_proxy_id: str | None = None,
     ) -> ExitDecision:
         """Return the proxy to forward through, a rejection, or the upstream's failure of the echo.
 
         ``session_id`` is the client's explicit ``-sessid-`` value, handed
         back to the selector on a retry so a dynamic-sessions row keeps the
-        same vendor session.
+        same vendor session. ``pinned_proxy_id`` is handed back the same way,
+        so a retry never leaves the proxy the client pinned.
 
         An upstream that fails the echo is tried past on another proxy where
         the strategy allows and another try could help (:func:`_worth_retrying`),
@@ -218,6 +220,7 @@ class ExitVerifier:
                 replacement = await self._router.select_proxy_for_project(
                     project.id, session_id, target_host, location,
                     exclude=frozenset(excluded), exclude_connectors=frozenset(excluded_connectors),
+                    pinned_proxy_id=pinned_proxy_id,
                 )
                 if replacement is not None:
                     logger.info(

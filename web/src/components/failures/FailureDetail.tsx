@@ -4,8 +4,8 @@
 import { type ReactNode } from 'react'
 import { FailureRecord } from '../../api/client'
 import { formatDateTime, formatMs, formatTime, parseApiDate } from '../../utils/format'
-import { Badge, Inspector, InspectorSection, KeyValue } from '../ui'
-import { CopyButton, StatusCodeBadge } from '../mitm/RequestDetail'
+import { Badge, CopyButton, Inspector, InspectorSection, KeyValue } from '../ui'
+import { StatusCodeBadge } from '../mitm/RequestDetail'
 import { LATENCY_STEPS } from '../charts/LatencyChart'
 
 /** Where a kind of failure comes from, which decides whether Overview counts it. */
@@ -86,19 +86,19 @@ export const KIND_INFO: Record<string, KindInfo> = {
     label: 'No proxy available',
     group: 'refused',
     color: '#ca8a04',
-    hint: 'No healthy proxy matched the request: the pool is empty or unhealthy, the connectors\' domain filters do not allow this host, or nothing serves the requested location. Check the Proxies page and the connectors\' domain and location settings.',
+    hint: 'No healthy proxy matched the request: the pool is empty or unhealthy, the connectors\' domain filters do not allow this host, or nothing serves the requested location. A request that named its proxy with -prxy- says so in the message: that proxy is not one of the project\'s, is not healthy, or does not serve this host or location. Check the Proxies page and the connectors\' domain and location settings.',
   },
   all_proxies_quarantined: {
     label: 'All proxies quarantined',
     group: 'refused',
     color: '#0d9488',
-    hint: 'Every proxy that could serve the request is resting after hitting its rate limit. The client was told to retry later (429). If this is frequent, the pool is too small for the request rate or the limits are too tight.',
+    hint: 'Every proxy that could serve the request is resting after hitting its rate limit, or the one a request named with -prxy- is. The client was told to retry later (429). If this is frequent, the pool is too small for the request rate or the limits are too tight.',
   },
   traffic_limit_exceeded: {
     label: 'Traffic limit reached',
     group: 'refused',
     color: '#2563eb',
-    hint: 'The connectors that could serve the request have used their traffic allowance for the period. When this cuts a request that already had a proxy, Overview counts it as a failure. See the traffic limit on the connector.',
+    hint: 'The connectors that could serve the request, or the connector of the proxy a request named with -prxy-, have used their traffic allowance for the period. When this cuts a request that already had a proxy, Overview counts it as a failure. See the traffic limit on the connector.',
   },
   preflight_mismatch: {
     label: 'Wrong exit location',
@@ -157,7 +157,7 @@ export function FailurePanel({ record, onClose }: { record: FailureRecord; onClo
       <div className="rounded-lg border border-line bg-surface-raised/50 px-3 py-2.5">
         <div className="flex items-start gap-2">
           <p className="font-mono text-xs wrap-break-word leading-relaxed text-fg flex-1 min-w-0">{record.message || '-'}</p>
-          {record.message && <CopyButton text={record.message} className="" />}
+          {record.message && <CopyButton text={record.message} label="Copy message" />}
         </div>
         {record.error_type && <p className="text-[11px] text-fg-subtle mt-1">{record.error_type}</p>}
         {record.upstream_message && (
@@ -165,7 +165,7 @@ export function FailurePanel({ record, onClose }: { record: FailureRecord; onClo
             <p className="text-[11px] text-fg-subtle mb-1">The vendor said</p>
             <div className="flex items-start gap-2">
               <p className="font-mono text-xs wrap-break-word leading-relaxed text-fg flex-1 min-w-0">{record.upstream_message}</p>
-              <CopyButton text={record.upstream_message} className="" />
+              <CopyButton text={record.upstream_message} label="Copy what the vendor said" />
             </div>
           </div>
         )}

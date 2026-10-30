@@ -155,6 +155,23 @@ class TestParseUsernameParams:
     def test_empty_state_and_city_values_are_absent(self) -> None:
         assert parse_username_params("myuser-cc-us-st--city-") == UsernameParams("myuser", None, LocationTarget(country="US"))
 
+    def test_pinned_proxy_keeps_its_hyphens(self) -> None:
+        proxy_id = "3f2a9c1e-5b7d-4e8f-9a0b-1c2d3e4f5a6b"
+        assert parse_username_params(f"myuser-prxy-{proxy_id}") == UsernameParams("myuser", None, None, proxy_id=proxy_id)
+
+    def test_pinned_proxy_with_the_other_parameters_in_any_order(self) -> None:
+        params = parse_username_params("my-project-prxy-abc-1-cc-us-sessid-s1")
+        assert params == UsernameParams("my-project", "s1", LocationTarget(country="US"), proxy_id="abc-1")
+        params = parse_username_params("myuser-cc-us-st-ny-prxy-abc-1")
+        assert params.location == LocationTarget(country="US", state="NY") and params.proxy_id == "abc-1"
+
+    def test_pinned_proxy_survives_a_location_error(self) -> None:
+        params = parse_username_params("myuser-st-ny-prxy-abc")
+        assert params.location_error == LOCATION_NEEDS_COUNTRY and params.proxy_id == "abc"
+
+    def test_empty_pinned_proxy_is_absent(self) -> None:
+        assert parse_username_params("myuser-prxy--sessid-s1") == UsernameParams("myuser", "s1", None)
+
 
 class TestFormatUsernameParams:
     """format_username_params is the inverse of the parser, in the spelling the docs use."""

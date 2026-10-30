@@ -10,6 +10,7 @@ requests it finished (:class:`LocalOutcomes`, recorded through it here).
 
 import random
 from collections import Counter
+from collections.abc import Sequence
 from typing import cast
 from unittest.mock import AsyncMock, call, patch
 
@@ -21,6 +22,7 @@ from api.routing.inflight import InFlight
 from api.routing.outcomes import LocalOutcomes
 from api.strategies import STRATEGY_NAMES, get_strategy
 from api.strategies.base import ProxyGroup
+from api.strategies.hash_ring import HashRing
 from api.strategies.health_based import HEALTH_MIN_SAMPLES, HealthBasedStrategy
 from api.strategies.least_used import LeastUsedStrategy
 from api.strategies.random import RandomStrategy
@@ -256,9 +258,9 @@ class TestStickySessionStrategy:
         first_result = await strategy.select(sample_proxies, session_id=session_id)
         strategy.reset()
 
-        # After reset, session map is cleared but consistent hashing should give same result
+        # After reset, session map is cleared but the ring gives the same result
         second_result = await strategy.select(sample_proxies, session_id=session_id)
-        assert second_result.id == first_result.id  # Consistent hashing
+        assert second_result.id == first_result.id  # Rendezvous hashing
 
     async def test_sessid_produces_consistent_selection(self, sample_proxies: list[Proxy]):
         """Test that a session ID (as extracted from username) produces consistent results."""
@@ -318,12 +320,84 @@ class TestStickySessionStrategy:
         assert result.id != first_result.id
         assert result.id in [p.id for p in remaining]
 
+    async def test_a_new_session_is_placed_the_same_whatever_the_list_order(self) -> None:
+        proxies = _rows(*(f"p-{i}" for i in range(10)))
+        sessions = [f"s-{i}" for i in range(500)]
+        assert await _placements(proxies, sessions) == await _placements(list(reversed(proxies)), sessions)
+
+    async def test_new_sessions_spread_over_the_proxies(self) -> None:
+        counts = Counter((await _placements(_rows("p-0", "p-1", "p-2", "p-3"), [f"s-{i}" for i in range(4000)])).values())
+        assert set(counts) == {f"p-{i}" for i in range(4)}
+        assert all(800 < count < 1200 for count in counts.values())
+
+    async def test_a_proxy_leaving_moves_only_its_own_sessions(self) -> None:
+        """One proxy out at the moment sessions are placed again: the others' sessions stay where they were."""
+        proxies = _rows(*(f"p-{i}" for i in range(10)))
+        sessions = [f"s-{i}" for i in range(2000)]
+        before = await _placements(proxies, sessions)
+        after = await _placements([proxy for proxy in proxies if proxy.id != "p-3"], sessions)
+        moved = {session for session in sessions if before[session] != after[session]}
+        assert moved == {session for session in sessions if before[session] == "p-3"}
+
+    async def test_a_proxy_joining_takes_only_its_share(self) -> None:
+        proxies = _rows(*(f"p-{i}" for i in range(9)))
+        sessions = [f"s-{i}" for i in range(2000)]
+        before = await _placements(proxies, sessions)
+        after = await _placements([*proxies, *_rows("p-new")], sessions)
+        moved = [session for session in sessions if before[session] != after[session]]
+        assert all(after[session] == "p-new" for session in moved)
+        assert 0.05 < len(moved) / 2000 < 0.15
+
+    async def test_a_connectors_ring_is_built_once_for_every_new_session(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A placement is a lookup on the ring, not a pass over the proxies."""
+        built: list[int] = []
+        original = HashRing.__init__
+
+        def counting(ring: HashRing, members: Sequence[Proxy]) -> None:
+            built.append(len(members))
+            original(ring, members)
+
+        monkeypatch.setattr(HashRing, "__init__", counting)
+        rows = _rows(*(f"p-{i}" for i in range(50)))
+        strategy = StickySessionStrategy()
+        for i in range(200):
+            await strategy.select_weighted([ProxyGroup(key="c", weight=1, proxies=rows[:40], members=tuple(rows))], session_id=f"s-{i}")
+        assert built == [50]
+
+    async def test_health_changes_keep_the_ring_and_move_only_their_own_sessions(self) -> None:
+        """The ring is over every row; a row out of the eligible set is walked past, not taken off the ring."""
+        rows = _rows(*(f"p-{i}" for i in range(10)))
+        sessions = [f"s-{i}" for i in range(1000)]
+        strategy = StickySessionStrategy()
+
+        async def place(eligible: list[Proxy], members: Sequence[Proxy]) -> dict[str, str]:
+            strategy._session_map.clear()
+            placed = {}
+            for session in sessions:
+                selected = await strategy.select_weighted([ProxyGroup(key="c", weight=1, proxies=eligible, members=members)], session_id=session)
+                assert selected is not None
+                placed[session] = selected.id
+            return placed
+
+        before = await place(rows, tuple(rows))
+        ring = strategy._rings["c"]
+        # A new snapshot: the same rows in a new tuple, one of them unhealthy.
+        after = await place([proxy for proxy in rows if proxy.id != "p-4"], tuple(rows))
+        assert strategy._rings["c"] is ring
+        assert {s for s in sessions if before[s] != after[s]} == {s for s in sessions if before[s] == "p-4"}
+        # A row added to the connector is a new ring.
+        await place(rows, (*rows, *_rows("p-new")))
+        assert strategy._rings["c"] is not ring
+        strategy.forget_group("c")
+        assert "c" not in strategy._rings
+
     async def test_an_unreadable_binding_places_the_session_by_hashing(self, sample_proxies: list[Proxy]) -> None:
         redis = AsyncMock(spec=RedisClient)
         redis.get_sticky_binding.side_effect = ConnectionError("Redis is down")
         strategy = StickySessionStrategy()
         selected = await strategy.select(sample_proxies, session_id="s", redis_client=redis, project_id="p")
-        assert selected is not None and selected.id == StickySessionStrategy._consistent_hash_pick(sample_proxies, "s").id
+        placed = await StickySessionStrategy().select(sample_proxies, session_id="s")
+        assert selected is not None and placed is not None and selected.id == placed.id
 
     async def test_an_unwritable_binding_stays_local(self, sample_proxies: list[Proxy]) -> None:
         now = [0.0]
@@ -416,6 +490,16 @@ def _measured(**outcomes: tuple[int, int, float]) -> LocalOutcomes:
 
 def _rows(*ids: str) -> list[Proxy]:
     return [Proxy(id=i, host=f"{i}.example.com", port=8080, connector_id="conn-1", status=ProxyStatus.HEALTHY) for i in ids]
+
+
+async def _placements(proxies: list[Proxy], sessions: list[str]) -> dict[str, str]:
+    """The proxy each session is placed on as a new session, none of them bound yet."""
+    placed: dict[str, str] = {}
+    for session in sessions:
+        selected = await StickySessionStrategy().select(proxies, session_id=session)
+        assert selected is not None
+        placed[session] = selected.id
+    return placed
 
 
 class TestHealthBasedStrategy:

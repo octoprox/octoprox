@@ -97,9 +97,9 @@ The **Failures** page (under Overview in the web UI) says what the failure count
 | Client went away | The client closed the connection, or stopped sending, before sending the whole request body | 502 (504 when it stopped) |
 | Interrupted | Octoprox stopped while the request was being set up | - |
 | Wrong exit location | Exit verification found the proxy exiting somewhere other than the requested location, or got no answer that placed it (`Exit location not checked`), and the request was refused | 502 |
-| No proxy available | No healthy proxy matched the host's domain filters and the requested location | 502 |
-| All proxies quarantined | Every proxy that could serve the request is resting after its rate limit | 429 |
-| Traffic limit reached | The connectors that could serve the request are over their period's traffic | 509 (or as configured) |
+| No proxy available | No healthy proxy matched the host's domain filters and the requested location, or the proxy a request named with [`-prxy-`]({{ site.baseurl }}/routing-strategies#pinning-a-proxy) cannot serve it | 502 |
+| All proxies quarantined | Every proxy that could serve the request is resting after its rate limit, or the one named with `-prxy-` is | 429 |
+| Traffic limit reached | The connectors that could serve the request are over their period's traffic, or the connector of the proxy named with `-prxy-` is | 509 (or as configured) |
 | Invalid location | The username named a state or city without a country | 400 |
 | Intercepted request failed | With [TLS interception]({{ site.baseurl }}/tls-interception), one request inside the connection could not be relayed upstream. When the upstream proxy refused the engine's tunnel, the vendor's status is kept as for a refusal | 502 |
 

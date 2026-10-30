@@ -245,6 +245,7 @@ class ProxyServer:
         session_id: str | None = None,
         target_host: str | None = None,
         location: LocationTarget | None = None,
+        pinned_proxy_id: str | None = None,
     ) -> Proxy | None:
         """Select an upstream proxy from the authenticated project's pool.
 
@@ -264,11 +265,15 @@ class ProxyServer:
                 whose domain routing config allows this host.
             location: If provided, only consider proxies that serve this
                 place (from the -cc-, -st- and -city- username suffixes).
+            pinned_proxy_id: If provided (the -prxy- suffix), only this
+                proxy, and nothing else when it cannot serve the request.
 
         Returns:
             Selected proxy or None if no healthy proxies available.
         """
-        return await self._router.select_proxy_for_project(project_id, session_id, target_host, location)
+        return await self._router.select_proxy_for_project(
+            project_id, session_id, target_host, location, pinned_proxy_id=pinned_proxy_id
+        )
 
     def _authenticate_project(self, headers: dict[str, str]) -> AuthResult | None:
         """Authenticate a client request using Proxy-Authorization header.
@@ -276,14 +281,14 @@ class ProxyServer:
         Expects HTTP Basic Auth in the Proxy-Authorization header with
         project username and password. The username may carry routing
         parameters as suffixes, in any order:
-        <username>[-sessid-<session_id>][-cc-<country>][-st-<state>][-city-<city>]
+        <username>[-sessid-<session_id>][-cc-<country>][-st-<state>][-city-<city>][-prxy-<proxy_id>]
 
         Args:
             headers: Request headers (lowercase keys)
 
         Returns:
-            AuthResult with authenticated Project and optional sessid and
-            location, or None if authentication fails.
+            AuthResult with authenticated Project and optional sessid,
+            location and pinned proxy, or None if authentication fails.
         """
         auth_header = headers.get("proxy-authorization", "")
         if not auth_header:
@@ -302,7 +307,7 @@ class ProxyServer:
         except (ValueError, UnicodeDecodeError):
             return None
 
-        # Parse routing parameters (sessid, location) from username
+        # Parse routing parameters (sessid, location, pinned proxy) from username
         params = parse_username_params(username)
         real_username = params.username
 
@@ -318,15 +323,20 @@ class ProxyServer:
             return None
 
         return AuthResult(
-            project=project, sessid=params.sessid, location=params.location, location_error=params.location_error
+            project=project,
+            sessid=params.sessid,
+            location=params.location,
+            location_error=params.location_error,
+            proxy_id=params.proxy_id,
         )
 
     @staticmethod
-    def _no_proxy_message(location: LocationTarget | None) -> str:
+    def _no_proxy_message(location: LocationTarget | None, pinned_proxy_id: str | None = None) -> str:
         """Human-readable 502 body when no upstream proxy matched the request."""
-        if location:
-            return f"No upstream proxy available for {location.describe()} and this domain"
-        return "No upstream proxy available for this domain"
+        wanted = f"{location.describe()} and this domain" if location else "this domain"
+        if pinned_proxy_id is not None:
+            return f"Proxy {pinned_proxy_id} is not available for {wanted}"
+        return f"No upstream proxy available for {wanted}"
 
     async def _reject_no_proxy(
         self,
@@ -335,6 +345,7 @@ class ProxyServer:
         target_host: str | None,
         session_id: str | None,
         location: LocationTarget | None,
+        pinned_proxy_id: str | None = None,
     ) -> None:
         """Answer a request no proxy could serve, saying why.
 
@@ -345,17 +356,27 @@ class ProxyServer:
         status was chosen. Anything else is a 502: nothing is configured
         for this request.
         """
-        if await self._router.are_all_proxies_quarantined(project_id, target_host, session_id, location):
-            message = "All proxies are temporarily rate-limited. Retry later."
+        if await self._router.are_all_proxies_quarantined(
+            project_id, target_host, session_id, location, pinned_proxy_id=pinned_proxy_id
+        ):
+            if pinned_proxy_id is not None:
+                message = f"Proxy {pinned_proxy_id} is temporarily rate-limited. Retry later."
+            else:
+                message = "All proxies are temporarily rate-limited. Retry later."
             await self._send_error(client_writer, 429, "Too Many Requests", message)
             await request_rejected.send_async(self, project_id=project_id, reason="all_proxies_quarantined")
             await self._publish_failure(
                 build_failure(project_id, FailureKind.ALL_PROXIES_QUARANTINED, 429, message)
             )
             return
-        limit_status = self._router.traffic_limit_status(project_id, target_host, location)
+        limit_status = self._router.traffic_limit_status(
+            project_id, target_host, location, pinned_proxy_id=pinned_proxy_id
+        )
         if limit_status is not None:
-            message = "Every connector that could serve this request has reached its traffic limit."
+            if pinned_proxy_id is not None:
+                message = f"The connector of proxy {pinned_proxy_id} has reached its traffic limit."
+            else:
+                message = "Every connector that could serve this request has reached its traffic limit."
             await self._send_error(
                 client_writer, limit_status, TRAFFIC_LIMIT_REASONS.get(limit_status, "Bandwidth Limit Exceeded"),
                 message,
@@ -366,7 +387,7 @@ class ProxyServer:
                 build_failure(project_id, FailureKind.TRAFFIC_LIMIT_EXCEEDED, limit_status, message)
             )
             return
-        message = self._no_proxy_message(location)
+        message = self._no_proxy_message(location, pinned_proxy_id)
         await self._send_error(client_writer, 502, "Bad Gateway", message)
         await request_rejected.send_async(self, project_id=project_id, reason="no_proxy_available")
         await self._publish_failure(build_failure(project_id, FailureKind.NO_PROXY_AVAILABLE, 502, message))
@@ -436,6 +457,7 @@ class ProxyServer:
         peer_id: str | None = None,
         *,
         timer: RequestTimer,
+        pinned_proxy_id: str | None = None,
     ) -> ExitDecision | None:
         """Hand the selected upstream to preflight; the decision to forward on, None when the request was answered here.
 
@@ -447,7 +469,8 @@ class ProxyServer:
             return ExitDecision(proxy)
         timer.enter(Step.PREFLIGHT)
         decision = await self._exit_verifier.verify(
-            project, proxy, session_id=session_id, location=location, target_host=target_host
+            project, proxy,
+            session_id=session_id, location=location, target_host=target_host, pinned_proxy_id=pinned_proxy_id,
         )
         error = decision.upstream_error
         if error is None and not decision.rejected:
@@ -598,6 +621,7 @@ class ProxyServer:
             project = auth_result.project
             session_id = auth_result.sessid
             location = auth_result.location
+            pinned_proxy_id = auth_result.proxy_id
             project_id = project.id
             logger.debug(
                 "Authenticated project",
@@ -606,6 +630,7 @@ class ProxyServer:
                 client_addr=client_addr,
                 session_id=session_id,
                 location=location.key if location else None,
+                pinned_proxy_id=pinned_proxy_id,
             )
 
             set_request_info(RequestInfo(
@@ -627,12 +652,12 @@ class ProxyServer:
 
             if method.upper() == "CONNECT":
                 await self._handle_connect(
-                    client_reader, client_writer, target, headers, project, session_id, location,
+                    client_reader, client_writer, target, headers, project, session_id, location, pinned_proxy_id,
                 )
             else:
                 await self._handle_http(
                     client_reader, client_writer, method, target, version, headers, project,
-                    session_id, location,
+                    session_id, location, pinned_proxy_id,
                 )
 
         except asyncio.CancelledError:
@@ -742,6 +767,7 @@ class ProxyServer:
         project: Project,
         session_id: str | None = None,
         location: LocationTarget | None = None,
+        pinned_proxy_id: str | None = None,
     ) -> None:
         """Handle HTTPS CONNECT tunneling."""
         # Parse target host:port before proxy selection (needed for domain filtering)
@@ -757,13 +783,15 @@ class ProxyServer:
         # Select upstream proxy scoped to the authenticated project
         proxy = await self._get_upstream_proxy(
             project_id=project.id, session_id=session_id, target_host=target_host, location=location,
+            pinned_proxy_id=pinned_proxy_id,
         )
         if not proxy:
-            await self._reject_no_proxy(client_writer, project.id, target_host, session_id, location)
+            await self._reject_no_proxy(client_writer, project.id, target_host, session_id, location, pinned_proxy_id)
             return
 
         decision = await self._verify_exit(
-            project, proxy, session_id, location, target_host, client_writer, timer=timer
+            project, proxy, session_id, location, target_host, client_writer,
+            timer=timer, pinned_proxy_id=pinned_proxy_id,
         )
         if decision is None:
             return
@@ -1069,6 +1097,7 @@ class ProxyServer:
         project: Project,
         session_id: str | None = None,
         location: LocationTarget | None = None,
+        pinned_proxy_id: str | None = None,
     ) -> None:
         """Handle regular HTTP request forwarding."""
         project_id = project.id
@@ -1080,13 +1109,15 @@ class ProxyServer:
         # Select upstream proxy scoped to the authenticated project
         proxy = await self._get_upstream_proxy(
             project_id=project_id, session_id=session_id, target_host=parsed_host, location=location,
+            pinned_proxy_id=pinned_proxy_id,
         )
         if not proxy:
-            await self._reject_no_proxy(client_writer, project_id, parsed_host, session_id, location)
+            await self._reject_no_proxy(client_writer, project_id, parsed_host, session_id, location, pinned_proxy_id)
             return
 
         decision = await self._verify_exit(
-            project, proxy, session_id, location, parsed_host, client_writer, timer=timer
+            project, proxy, session_id, location, parsed_host, client_writer,
+            timer=timer, pinned_proxy_id=pinned_proxy_id,
         )
         if decision is None:
             return

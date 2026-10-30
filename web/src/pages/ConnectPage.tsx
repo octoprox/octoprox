@@ -4,13 +4,13 @@
 import { useMemo, useState, type ReactNode } from 'react'
 import { useNavigate } from 'react-router'
 import { useQuery } from '@tanstack/react-query'
-import { AlertTriangle, Check, Copy, Download, Eye, EyeOff, RefreshCw } from 'lucide-react'
+import { AlertTriangle, Download, Eye, EyeOff, RefreshCw } from 'lucide-react'
 import { downloadCaCertificate, fetchConnectInfo, type ConnectInfo, type ConnectParams } from '../api/client'
 import { useProject } from '../contexts/ProjectContext'
 import { useToast } from '../contexts/ToastContext'
 import { useDebounced } from '../hooks/useDebounced'
 import { Page } from '../components/layout/Page'
-import { Alert, Button, Card, CardHeader, InfoTip, Input, Label, Segmented, Select, Tabs } from '../components/ui'
+import { Alert, Button, Card, CardHeader, CopyButton, InfoTip, Input, Label, Segmented, Select, Tabs } from '../components/ui'
 import {
   COUNTRY_CODES, SNIPPETS, US_STATES, countryLabel, effectivePort, formatEndpoint, needsEncoding, omitsPort, parseEndpoint,
   proxyLine, proxyUrl, randomSessionId, snippet, type ProxyAccess, type ProxyEndpoint, type SnippetKind,
@@ -23,22 +23,6 @@ const CONTROL = 'px-3 text-[13px]'
 
 const STRATEGY_LABELS: Record<string, string> = {
   round_robin: 'Round Robin', least_used: 'Least Used', random: 'Random', sticky: 'Sticky', health_based: 'Health Based',
-}
-
-function CopyButton({ text, label = 'Copy' }: { text: string; label?: string }) {
-  const [copied, setCopied] = useState(false)
-  const copy = async () => {
-    try {
-      await navigator.clipboard.writeText(text)
-      setCopied(true)
-      setTimeout(() => setCopied(false), 1500)
-    } catch { /* clipboard unavailable in insecure contexts; the value is selectable */ }
-  }
-  return (
-    <button type="button" onClick={copy} title={label} aria-label={label} className="flex-none p-1 rounded-sm text-fg-subtle hover:text-fg hover:bg-surface-raised">
-      {copied ? <Check className="w-3.5 h-3.5 text-success" /> : <Copy className="w-3.5 h-3.5" />}
-    </button>
-  )
 }
 
 /**

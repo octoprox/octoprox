@@ -429,6 +429,7 @@ class TestConnectInfo:
         # A delimiter formed with the dash around a value: "-sessid-st-ny" would read as state NY with no session.
         assert "cannot contain -cc-" in self._get(authenticated_client, created_project, country="us", sessid="st-ny")["error"]
         assert "cannot contain -cc-" in self._get(authenticated_client, created_project, country="us", city="paris-st", sessid="1")["error"]
+        assert "or -prxy-" in self._get(authenticated_client, created_project, sessid="a-prxy-b")["error"]
         # At the end of the username nothing follows, so a trailing "-cc" is only part of the session ID.
         data = self._get(authenticated_client, created_project, sessid="job-cc")
         assert data["error"] is None and data["username"] == f"{username}-sessid-job-cc"

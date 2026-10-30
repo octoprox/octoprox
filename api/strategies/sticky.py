@@ -10,7 +10,7 @@ import hashlib
 import math
 import random
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -20,6 +20,7 @@ from api.core.logging import error_text
 from api.core.tasks import HeldTasks
 from api.models.proxy import Proxy
 from api.strategies.base import ProxyGroup, RoutingStrategy, weighted_random_group
+from api.strategies.hash_ring import HashRing, ring_position
 
 if TYPE_CHECKING:
     from api.db.redis import RedisClient
@@ -50,9 +51,11 @@ class StickySessionStrategy(RoutingStrategy):
     hashing: every connector scores the session id, scaled by its weight,
     and the best score wins. The same session id always lands on the same
     connector, and changing one weight moves only the proportional slice
-    of sessions instead of reshuffling them all. A session already bound
-    to a proxy keeps it while that proxy stays eligible, whatever the
-    weights say.
+    of sessions instead of reshuffling them all. Inside the connector the
+    proxy is placed on the connector's :class:`HashRing`, kept here until
+    its rows change, so a proxy leaving or joining the eligible set moves
+    only the sessions it held or wins. A session already bound to a proxy
+    keeps it while that proxy stays eligible, whatever the weights say.
     """
 
     def __init__(
@@ -66,6 +69,8 @@ class StickySessionStrategy(RoutingStrategy):
         self._bindings_since_sweep = 0
         # Binding writes on their way to Redis, held so none is collected before it runs.
         self._writes = HeldTasks()
+        # Connector id -> the ring over its rows, rebuilt when they change.
+        self._rings: dict[str, HashRing] = {}
 
     @property
     def name(self) -> str:
@@ -83,21 +88,10 @@ class StickySessionStrategy(RoutingStrategy):
         redis_client: "RedisClient | None" = None,
         project_id: str | None = None,
     ) -> Proxy | None:
-        if not proxies:
-            return None
-
-        if session_id is None:
-            return random.choice(proxies)
-
-        cached = await self._lookup_binding(
-            redis_client, project_id, session_id, proxies
+        # One connector whose rows are these proxies.
+        return await self.select_weighted(
+            [ProxyGroup(key="", weight=1, proxies=proxies)], session_id, redis_client=redis_client, project_id=project_id
         )
-        if cached is not None:
-            return cached
-
-        selected = self._consistent_hash_pick(proxies, session_id)
-        self._remember_binding(redis_client, project_id, session_id, selected)
-        return selected
 
     async def select_weighted(
         self,
@@ -110,21 +104,23 @@ class StickySessionStrategy(RoutingStrategy):
         groups = [g for g in groups if g.proxies]
         if not groups:
             return None
-        if len(groups) == 1:
-            return await self.select(
-                groups[0].proxies, session_id, redis_client=redis_client, project_id=project_id
-            )
         if session_id is None:
             return random.choice(weighted_random_group(groups).proxies)
 
-        everything = [p for g in groups for p in g.proxies]
-        cached = await self._lookup_binding(redis_client, project_id, session_id, everything)
+        eligible = {proxy.id: proxy for group in groups for proxy in group.proxies}
+        cached = await self._lookup_binding(redis_client, project_id, session_id, eligible)
         if cached is not None:
             return cached
 
-        group = self.pick_group(groups, session_id)
-        selected = self._consistent_hash_pick(group.proxies, session_id)
-        self._remember_binding(redis_client, project_id, session_id, selected)
+        group = groups[0] if len(groups) == 1 else self.pick_group(groups, session_id)
+        members = group.members or group.proxies
+        ring = self._rings.get(group.key)
+        if ring is None or not ring.matches(members):
+            ring = self._rings[group.key] = HashRing(members)
+        # The group's eligible proxies are among its members, so the ring finds one.
+        selected = ring.place(ring_position(session_id), eligible)
+        if selected is not None:
+            self._remember_binding(redis_client, project_id, session_id, selected)
         return selected
 
     def pick_group(self, groups: list[ProxyGroup], session_id: str | None) -> ProxyGroup:
@@ -227,26 +223,21 @@ class StickySessionStrategy(RoutingStrategy):
         redis_client: "RedisClient | None",
         project_id: str | None,
         session_id: str,
-        proxies: list[Proxy],
+        eligible: Mapping[str, Proxy],
     ) -> Proxy | None:
         """Local cache first, then Redis (if available)."""
         cached_proxy_id = await self.held_proxy(session_id, redis_client=redis_client, project_id=project_id)
         if not cached_proxy_id:
             return None
-        for proxy in proxies:
-            if proxy.id == cached_proxy_id:
-                binding = self.remember(session_id, cached_proxy_id)
-                self._refresh_redis(redis_client, project_id, session_id, binding)
-                return proxy
+        proxy = eligible.get(cached_proxy_id)
+        if proxy is not None:
+            binding = self.remember(session_id, cached_proxy_id)
+            self._refresh_redis(redis_client, project_id, session_id, binding)
+            return proxy
         # Bound proxy is no longer in the eligible set - drop the stale cache
-        # entry so the next call re-binds via consistent hashing.
+        # entry so the next call places the session on the ring again.
         self._session_map.pop(session_id, None)
         return None
-
-    @staticmethod
-    def _consistent_hash_pick(proxies: list[Proxy], session_id: str) -> Proxy:
-        hash_value = int(hashlib.md5(session_id.encode()).hexdigest(), 16)
-        return proxies[hash_value % len(proxies)]
 
     def _remember_binding(
         self,
@@ -262,9 +253,19 @@ class StickySessionStrategy(RoutingStrategy):
         """A session under sticky routing was promised one exit; a misplaced exit fails it rather than moving it."""
         return session_id is None
 
+    def forget_group(self, key: str) -> None:
+        self._rings.pop(key, None)
+
     def reset(self) -> None:
         self._session_map.clear()
         self._bindings_since_sweep = 0
+        self._rings.clear()
+
+
+def _session_hash(key: str, session_id: str) -> int:
+    """A 64-bit hash of a session id paired with a connector's or a proxy's id."""
+    digest = hashlib.blake2s(f"{key}|{session_id}".encode(), digest_size=8).digest()
+    return int.from_bytes(digest, "big")
 
 
 def _rendezvous_score(group: ProxyGroup, session_id: str) -> float:
@@ -274,6 +275,5 @@ def _rendezvous_score(group: ProxyGroup, session_id: str) -> float:
     and the session id. The connector with the highest score wins with
     probability proportional to its weight.
     """
-    digest = hashlib.blake2s(f"{group.key}|{session_id}".encode(), digest_size=8).digest()
-    u = (int.from_bytes(digest, "big") + 1) / (2**64 + 1)
+    u = (_session_hash(group.key, session_id) + 1) / (2**64 + 1)
     return -max(group.weight, 1) / math.log(u)

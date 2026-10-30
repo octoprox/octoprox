@@ -19,12 +19,14 @@ from api.core import utc_now
 from api.db.redis import RedisClient
 from api.models.connector import Connector
 from api.models.credential import Credential, CredentialType
+from api.models.location import LocationTarget
 from api.models.project import Project
 from api.models.proxy import Proxy, ProxyStatus
 from api.routing.exclusions import LocalExclusions
 from api.routing.inflight import InFlight
 from api.routing.outcomes import LocalOutcomes
 from api.routing.router import Router
+from api.routing.snapshot import ConnectorView
 from api.strategies.round_robin import RoundRobinStrategy
 from api.strategies.sticky import StickySessionStrategy
 from tests.routing.builder import FeedBuilder, healthy
@@ -225,6 +227,121 @@ class TestDomainFilter:
         router = _feed(routing_config={"domain_whitelist": ["allowed.com"]}).router()
         assert await router.select_proxy_for_project("p", target_host="allowed.com") is not None
         assert await router.select_proxy_for_project("p", target_host="blocked.com") is None
+
+
+class TestPinnedProxy:
+    """``-prxy-``: that proxy when it is eligible, otherwise nothing, never another proxy."""
+
+    @pytest.mark.parametrize("strategy", ["round_robin", "random", "least_used", "health_based", "sticky"])
+    async def test_every_request_goes_through_the_pinned_proxy(self, strategy: str) -> None:
+        router = _feed(strategy).router()
+        for session_id in (None, "s1", "s2"):
+            for _ in range(5):
+                selected = await router.select_proxy_for_project("p", session_id, pinned_proxy_id="p2")
+                assert selected is not None and selected.id == "p2"
+
+    async def test_an_unknown_proxy_or_another_projects_serves_nothing(self) -> None:
+        feed = _feed()
+        feed.add(
+            Project(id="q", name="Q", username="other", password="pw"),
+            Connector(
+                id="qconn", name="Q", credential_id="k", credential_type=CredentialType.STATIC_PROXY_PROVIDER,
+                project_id="q",
+            ),
+            healthy(Proxy(id="q1", host="hq", port=1, connector_id="qconn")),
+        )
+        router = feed.router()
+        for pinned in ("nope", "q1"):
+            assert await router.select_proxy_for_project("p", pinned_proxy_id=pinned) is None
+            # A 502: nothing quarantined, no traffic limit.
+            assert await router.are_all_proxies_quarantined("p", pinned_proxy_id=pinned) is False
+            assert router.traffic_limit_status("p", pinned_proxy_id=pinned) is None
+
+    @pytest.mark.parametrize("status", [s for s in ProxyStatus if s != ProxyStatus.HEALTHY])
+    async def test_an_unhealthy_pinned_proxy_fails_rather_than_moving(self, status: ProxyStatus) -> None:
+        feed = _feed()
+        feed.proxies["p1"].status = status
+        router = feed.router()
+        assert await router.select_proxy_for_project("p", pinned_proxy_id="p1") is None
+        assert await router.are_all_proxies_quarantined("p", pinned_proxy_id="p1") is False
+
+    async def test_the_domain_filter_still_applies(self) -> None:
+        router = _feed(routing_config={"domain_whitelist": ["allowed.com"]}).router()
+        selected = await router.select_proxy_for_project("p", target_host="allowed.com", pinned_proxy_id="p1")
+        assert selected is not None and selected.id == "p1"
+        assert await router.select_proxy_for_project("p", target_host="blocked.com", pinned_proxy_id="p1") is None
+
+    async def test_the_place_still_applies(self) -> None:
+        router = _feed(config={"countries": ["DE"]}).router()
+        selected = await router.select_proxy_for_project("p", location=LocationTarget(country="DE"), pinned_proxy_id="p1")
+        assert selected is not None and selected.id == "p1"
+        assert await router.select_proxy_for_project("p", location=LocationTarget(country="US"), pinned_proxy_id="p1") is None
+
+    async def test_a_quarantined_pinned_proxy_is_a_429_while_others_serve(self) -> None:
+        exclusions = LocalExclusions()
+        router = _feed().router(exclusions=exclusions)
+        exclusions.quarantine("p1", utc_now() + timedelta(minutes=5))
+        assert await router.select_proxy_for_project("p", pinned_proxy_id="p1") is None
+        assert await router.are_all_proxies_quarantined("p", pinned_proxy_id="p1") is True
+        assert await router.are_all_proxies_quarantined("p") is False
+
+    async def test_a_traffic_blocked_pinned_proxy_answers_its_limit_status(self) -> None:
+        feed = _feed()
+        _add_connector(feed, "over", traffic_config={"limit_bytes": 1000, "action": "block"})
+        feed.blocked_until["over"] = utc_now() + timedelta(days=1)
+        router = feed.router()
+        assert await router.select_proxy_for_project("p", pinned_proxy_id="over-0") is None
+        assert router.traffic_limit_status("p", pinned_proxy_id="over-0") == 509
+        assert router.traffic_limit_status("p") is None
+
+    async def test_exclude_leaves_nothing_rather_than_another_proxy(self) -> None:
+        """Preflight's retry excludes the proxy it tried; a pinned request has nowhere else to go."""
+        router = _feed("random").router()
+        assert await router.select_proxy_for_project("p", exclude=frozenset({"p1"}), pinned_proxy_id="p1") is None
+
+    async def test_a_sessions_binding_is_neither_read_nor_moved(self) -> None:
+        router = _feed("sticky").router()
+        bound = await router.select_proxy_for_project("p", "s1")
+        assert bound is not None
+        other = "p2" if bound.id == "p1" else "p1"
+        pinned = await router.select_proxy_for_project("p", "s1", pinned_proxy_id=other)
+        assert pinned is not None and pinned.id == other
+        again = await router.select_proxy_for_project("p", "s1")
+        assert again is not None and again.id == bound.id
+        strategy = router.strategy_for_project("p")
+        assert isinstance(strategy, StickySessionStrategy) and strategy.bound_proxy_id("s1") == bound.id
+
+    async def test_a_pinned_request_is_not_held_by_its_sessions_quarantine(self) -> None:
+        exclusions = LocalExclusions()
+        router = _feed("sticky", rate_limit_config=STICKY_RATE_LIMIT).router(exclusions=exclusions)
+        bound = await router.select_proxy_for_project("p", "s1")
+        assert bound is not None
+        other = "p2" if bound.id == "p1" else "p1"
+        exclusions.quarantine(bound.id, utc_now() + timedelta(minutes=5))
+        assert await router.select_proxy_for_project("p", "s1") is None
+        pinned = await router.select_proxy_for_project("p", "s1", pinned_proxy_id=other)
+        assert pinned is not None and pinned.id == other
+        assert await router.are_all_proxies_quarantined("p", session_id="s1", pinned_proxy_id=other) is False
+
+    async def test_the_pinned_proxy_is_looked_up_not_scanned_for(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """No list of every eligible row is built for a pinned request, nor for the answers to one that found nothing."""
+        exclusions = LocalExclusions()
+        feed = _feed()
+        _add_connector(feed, "over", traffic_config={"limit_bytes": 1000, "action": "block"})
+        feed.blocked_until["over"] = utc_now() + timedelta(days=1)
+        router = feed.router(exclusions=exclusions)
+
+        def scan(*_: object) -> None:
+            raise AssertionError("a pinned request scanned the connector's rows")
+
+        monkeypatch.setattr(ConnectorView, "candidates", scan)
+        selected = await router.select_proxy_for_project("p", pinned_proxy_id="p1")
+        assert selected is not None and selected.id == "p1"
+        exclusions.quarantine("p1", utc_now() + timedelta(minutes=5))
+        assert await router.select_proxy_for_project("p", pinned_proxy_id="p1") is None
+        assert await router.are_all_proxies_quarantined("p", pinned_proxy_id="p1") is True
+        assert router.traffic_limit_status("p", pinned_proxy_id="over-0") == 509
+        assert router.traffic_limit_status("p", pinned_proxy_id="p2") is None
 
 
 class TestStrategies:

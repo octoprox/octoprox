@@ -127,6 +127,17 @@ class TestVerify:
         decision = await ExitVerifier(checker, _router(picks=[None])).verify(_project(), _proxy("us"), session_id=None, location=LocationTarget(country="GB"), target_host="x")
         assert decision.rejected and len(refusals.events) == 1
 
+    async def test_a_pinned_request_retries_only_on_its_pinned_proxy(self, checker: PreflightChecker, refusals: Refusals) -> None:
+        """The retry asks for the pinned proxy with that proxy excluded, which the router answers with nothing."""
+        router = _router(picks=[None])
+        decision = await ExitVerifier(checker, router).verify(
+            _project(), _proxy("us"), session_id=None, location=LocationTarget(country="GB"), target_host="x",
+            pinned_proxy_id="us",
+        )
+        assert decision.rejected and len(refusals.events) == 1
+        kwargs = router.select_proxy_for_project.await_args.kwargs
+        assert kwargs["pinned_proxy_id"] == "us" and kwargs["exclude"] == frozenset({"us"})
+
     async def test_a_refusal_names_the_proxy_whose_echo_refused_it(self, checker: PreflightChecker) -> None:
         """The message is the last verdict's, so the refusal is counted against the proxy that verdict was on."""
         router = _router(picks=[_proxy("us2"), None])
