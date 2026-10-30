@@ -10,6 +10,16 @@
 #   changes  what changed, for the people who use Octoprox; `docs` is a page
 #            on octoprox.com that explains it, such as connecting#exit-headers
 
+- version: 6.3.4
+  date: 2026-10-30
+  title: Dark mode provider logos and clearer preflight help
+  changes:
+    - text: "Custom providers can now have a separate logo for dark mode. Upload one on the General tab of the provider builder, or set `logo_dark` in the YAML. Without one, dark mode shows the regular logo."
+      docs: providers#adding-a-provider-from-the-ui
+    - text: "The Bright Data, Decodo, IPRoyal, NetNut and Oxylabs logos now show correctly in light and dark mode. The same fix covers Webshare."
+    - text: "On dynamic connectors for Bright Data, Decodo, IPRoyal, NetNut and Oxylabs, the help for the preflight share is clearer. It says which requests get checked and how long a session's result is reused. It also says when every request is checked whatever the share."
+      docs: providers#shipped-descriptors
+
 - version: 6.3.3
   date: 2026-10-30
   title: Project load on the Projects page
