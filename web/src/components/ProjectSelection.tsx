@@ -7,23 +7,29 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { ColumnDef } from '@tanstack/react-table'
 import { Plus, Server, Trash2, FolderOpen, Settings, Pencil, LogOut, Link2, KeyRound } from 'lucide-react'
 import {
-  fetchProjects, createProject, deleteProject, updateProject, logout,
-  ProjectCreate, ProjectUpdate, ProjectSummary,
+  fetchProjects, fetchProjectsLoad, createProject, deleteProject, updateProject, logout,
+  ProjectCreate, ProjectUpdate, ProjectSummary, ProjectLoad, HISTORY_RANGES, HistoryRange,
 } from '../api/client'
 import { useProject } from '../contexts/ProjectContext'
+import { useTimeRange } from '../contexts/TimeRangeContext'
 import { useTheme } from '../contexts/ThemeContext'
 import { useAuth } from '../contexts/AuthContext'
 import { useToast } from '../contexts/ToastContext'
 import { setSettingsOrigin } from '../utils/settingsOrigin'
+import { bytesShort, compact } from '../utils/format'
 import { ProjectForm } from './ProjectForm'
 import { DataTable, type DataTableFeatures } from './DataTable'
 import { Page } from './layout/Page'
 import { NewVersionBanner } from './NewVersion'
+import { Sparkline } from './charts/Sparkline'
 import octoproxLogo from '../assets/logos/octoprox_horizontal.svg'
 import octoproxLogoDark from '../assets/logos/octoprox_horizontal_dark.svg'
 import { Button, Input, Card, Badge, Inspector, ConfirmDialog, Segmented } from './ui'
 
 type PanelState = { kind: 'new' } | { kind: 'edit'; id: string } | null
+
+/** A project with its load over the chosen range, once that has loaded. */
+type ProjectRow = ProjectSummary & { load?: ProjectLoad }
 
 type ProjectsView = 'tiles' | 'table'
 
@@ -51,6 +57,25 @@ function healthDotClass(project: ProjectSummary): string {
   return total === 0 ? 'bg-fg-subtle' : healthy === total ? 'bg-success' : healthy === 0 ? 'bg-danger' : 'bg-warning'
 }
 
+// The Overview's requests colour, literal so the trend reads the same on every theme.
+const REQUESTS_COLOR = '#2563eb'
+
+/** Requests per minute: one decimal under ten, whole and compact above; a trickle reads <0.1, not 0. */
+function formatRpm(rpm: number): string {
+  if (rpm <= 0) return '0'
+  if (rpm < 0.1) return '<0.1'
+  return rpm < 10 ? rpm.toFixed(1).replace(/\.0$/, '') : compact(Math.round(rpm))
+}
+
+/** The share of the range's requests that succeeded, 0-100; null when there were none. */
+function successRate(load: ProjectLoad): number | null {
+  return load.request_count > 0 ? (load.success_count / load.request_count) * 100 : null
+}
+
+function trafficBytes(load: ProjectLoad): number {
+  return load.bytes_sent + load.bytes_received
+}
+
 /**
  * Project picker. Uses the same top bar, page frame and docked panel as the
  * rest of the app so creating or editing a project feels like everything else.
@@ -67,8 +92,16 @@ export default function ProjectSelection() {
   const [pendingDelete, setPendingDelete] = useState<ProjectSummary | null>(null)
   const [deleteConfirmation, setDeleteConfirmation] = useState('')
   const [view, setView] = useProjectsView()
+  const [range, setRange] = useTimeRange(HISTORY_RANGES)
 
   const { data, isLoading, error } = useQuery({ queryKey: ['projects'], queryFn: fetchProjects, refetchInterval: 30000 })
+  const { data: loadData } = useQuery({
+    queryKey: ['projects-load', range],
+    queryFn: () => fetchProjectsLoad(range),
+    refetchInterval: 30000,
+    // The last range's numbers stay up while a new range loads, labelled with the range they are for.
+    placeholderData: (previous) => previous,
+  })
 
   const createMutation = useMutation({
     mutationFn: createProject,
@@ -116,8 +149,12 @@ export default function ProjectSelection() {
     setPanel({ kind: 'edit', id: project.id })
   }, [resetUpdate])
 
-  const projects = data?.projects ?? []
-  const editing = panel?.kind === 'edit' ? projects.find((p) => p.id === panel.id) : undefined
+  const projects = data?.projects
+  const rows: ProjectRow[] = useMemo(() => {
+    const loads = new Map(loadData?.projects.map((load) => [load.project_id, load]))
+    return (projects ?? []).map((project) => ({ ...project, load: loads.get(project.id) }))
+  }, [projects, loadData])
+  const editing = panel?.kind === 'edit' ? rows.find((p) => p.id === panel.id) : undefined
 
   let panelNode: React.ReactNode = null
   if (panel?.kind === 'new') {
@@ -182,8 +219,11 @@ export default function ProjectSelection() {
           title="Projects"
           count={data?.total}
           subtitle="Pick a project to manage, or create a new one"
-          belowTitle={projects.length > 0 ? (
-            <Segmented size="sm" options={[{ value: 'tiles', label: 'Tiles' }, { value: 'table', label: 'Table' }]} value={view} onChange={setView} />
+          belowTitle={rows.length > 0 ? (
+            <div className="flex items-center gap-2 flex-wrap">
+              <Segmented size="sm" options={[{ value: 'tiles', label: 'Tiles' }, { value: 'table', label: 'Table' }]} value={view} onChange={setView} />
+              <Segmented size="sm" options={HISTORY_RANGES.map((r) => ({ value: r, label: r }))} value={range} onChange={setRange} />
+            </div>
           ) : undefined}
           actions={canMutate ? <Button size="sm" onClick={newProject}><Plus className="w-3.5 h-3.5" /> New project</Button> : undefined}
           panel={panelNode}
@@ -192,7 +232,7 @@ export default function ProjectSelection() {
             <div className="text-sm text-fg-muted py-10 text-center">Loading projects…</div>
           ) : error ? (
             <div className="text-sm text-danger py-10 text-center">Failed to load projects</div>
-          ) : projects.length === 0 ? (
+          ) : rows.length === 0 ? (
             <Card className="p-10 text-center">
               <FolderOpen className="w-10 h-10 mx-auto mb-3 text-fg-subtle" />
               <h3 className="text-base font-medium">No projects yet</h3>
@@ -201,7 +241,7 @@ export default function ProjectSelection() {
             </Card>
           ) : view === 'table' ? (
             <ProjectTable
-              projects={projects}
+              projects={rows}
               activeId={panel?.kind === 'edit' ? panel.id : null}
               panelOpen={panelNode != null}
               canMutate={canMutate}
@@ -211,10 +251,11 @@ export default function ProjectSelection() {
             />
           ) : (
             <div className="grid grid-cols-[repeat(auto-fill,minmax(0,320px))] auto-rows-fr gap-4">
-              {projects.map((project) => (
+              {rows.map((project) => (
                 <ProjectCard
                   key={project.id}
                   project={project}
+                  range={loadData?.range ?? range}
                   active={panel?.kind === 'edit' && panel.id === project.id}
                   canMutate={canMutate}
                   onOpen={() => openProject(project)}
@@ -246,7 +287,7 @@ export default function ProjectSelection() {
 
 /** The projects as one sortable, filterable row each, for installs with too many to scan as tiles. */
 function ProjectTable({ projects, activeId, panelOpen, canMutate, onOpen, onEdit, onDelete }: {
-  projects: ProjectSummary[]
+  projects: ProjectRow[]
   activeId: string | null
   panelOpen: boolean
   canMutate: boolean
@@ -254,7 +295,7 @@ function ProjectTable({ projects, activeId, panelOpen, canMutate, onOpen, onEdit
   onEdit: (project: ProjectSummary) => void
   onDelete: (project: ProjectSummary) => void
 }) {
-  const columns: ColumnDef<DataTableFeatures, ProjectSummary>[] = useMemo(() => [
+  const columns: ColumnDef<DataTableFeatures, ProjectRow>[] = useMemo(() => [
     {
       accessorKey: 'name',
       header: 'Project',
@@ -268,6 +309,63 @@ function ProjectTable({ projects, activeId, panelOpen, canMutate, onOpen, onEdit
       cell: ({ row }) => row.original.description
         ? <span className="text-fg-muted truncate block" title={row.original.description}>{row.original.description}</span>
         : <span className="text-fg-subtle">-</span>,
+    },
+    {
+      id: 'rpm',
+      accessorFn: (row: ProjectRow) => row.load?.requests_per_minute,
+      header: 'Req/min',
+      size: 100,
+      sortUndefined: 'last' as const,
+      meta: { align: 'right' as const },
+      cell: ({ getValue }) => {
+        const rpm = getValue<number | undefined>()
+        return <span title="Requests per minute over the last 5 minutes">{rpm == null ? '-' : formatRpm(rpm)}</span>
+      },
+    },
+    {
+      id: 'trend',
+      header: 'Trend',
+      size: 100,
+      enableSorting: false,
+      cell: ({ row }) => row.original.load
+        ? <Sparkline values={row.original.load.trend} color={REQUESTS_COLOR} width={72} height={20} fromZero className="inline-block align-middle" />
+        : null,
+    },
+    {
+      id: 'requests',
+      accessorFn: (row: ProjectRow) => row.load?.request_count,
+      header: 'Requests',
+      size: 105,
+      sortUndefined: 'last' as const,
+      meta: { align: 'right' as const },
+      cell: ({ getValue }) => {
+        const requests = getValue<number | undefined>()
+        return requests == null ? '-' : compact(requests)
+      },
+    },
+    {
+      id: 'success',
+      accessorFn: (row: ProjectRow) => (row.load ? successRate(row.load) ?? undefined : undefined),
+      header: 'Success',
+      size: 100,
+      sortUndefined: 'last' as const,
+      meta: { align: 'right' as const },
+      cell: ({ getValue }) => {
+        const rate = getValue<number | undefined>()
+        return rate == null ? '-' : `${rate.toFixed(1)}%`
+      },
+    },
+    {
+      id: 'traffic',
+      accessorFn: (row: ProjectRow) => (row.load ? trafficBytes(row.load) : undefined),
+      header: 'Traffic',
+      size: 95,
+      sortUndefined: 'last' as const,
+      meta: { align: 'right' as const },
+      cell: ({ getValue }) => {
+        const bytes = getValue<number | undefined>()
+        return <span title="Bytes sent and received">{bytes == null ? '-' : bytesShort(bytes)}</span>
+      },
     },
     {
       id: 'strategy',
@@ -296,29 +394,35 @@ function ProjectTable({ projects, activeId, panelOpen, canMutate, onOpen, onEdit
       ),
     },
     {
-      accessorKey: 'connector_count',
-      header: 'Connectors',
-      size: 130,
+      // One column for both, as the tiles show them, so the load columns fit beside them.
+      id: 'held',
+      header: () => (
+        <span className="inline-flex items-center gap-2" title="Connectors and credentials">
+          <Link2 className="w-3.5 h-3.5" /><KeyRound className="w-3.5 h-3.5" />
+        </span>
+      ),
+      size: 100,
+      enableSorting: false,
       meta: { align: 'right' as const },
-    },
-    {
-      accessorKey: 'credential_count',
-      header: 'Credentials',
-      size: 130,
-      meta: { align: 'right' as const },
+      cell: ({ row }) => (
+        <span className="inline-flex items-center gap-2.5 text-fg-muted">
+          <span className="inline-flex items-center gap-1" title="Connectors"><Link2 className="w-3.5 h-3.5" /> {row.original.connector_count}</span>
+          <span className="inline-flex items-center gap-1" title="Credentials"><KeyRound className="w-3.5 h-3.5" /> {row.original.credential_count}</span>
+        </span>
+      ),
     },
     ...(canMutate ? [{
       id: 'actions',
       header: '',
       size: 72,
       enableSorting: false,
-      cell: ({ row }: { row: { original: ProjectSummary } }) => (
+      cell: ({ row }: { row: { original: ProjectRow } }) => (
         <div className="flex justify-end gap-0.5">
           <button onClick={() => onEdit(row.original)} className="p-1 rounded-sm text-fg-subtle hover:text-fg hover:bg-surface-raised" title="Project settings"><Pencil className="w-3.5 h-3.5" /></button>
           <button onClick={() => onDelete(row.original)} className="p-1 rounded-sm text-fg-subtle hover:text-danger hover:bg-danger-soft" title="Delete project"><Trash2 className="w-3.5 h-3.5" /></button>
         </div>
       ),
-    }] as ColumnDef<DataTableFeatures, ProjectSummary>[] : []),
+    }] as ColumnDef<DataTableFeatures, ProjectRow>[] : []),
   ], [canMutate, onEdit, onDelete])
 
   return (
@@ -328,7 +432,7 @@ function ProjectTable({ projects, activeId, panelOpen, canMutate, onOpen, onEdit
       getRowId={(row) => row.id}
       onRowClick={onOpen}
       activeRowId={activeId}
-      columnVisibility={panelOpen ? { description: false, connector_count: false, credential_count: false } : {}}
+      columnVisibility={panelOpen ? { description: false, trend: false, held: false } : {}}
       enableColumnFilters
       defaultPageSize={50}
       emptyMessage="No projects match these filters."
@@ -336,8 +440,9 @@ function ProjectTable({ projects, activeId, panelOpen, canMutate, onOpen, onEdit
   )
 }
 
-function ProjectCard({ project, active, canMutate, onOpen, onEdit, onDelete }: {
-  project: ProjectSummary
+function ProjectCard({ project, range, active, canMutate, onOpen, onEdit, onDelete }: {
+  project: ProjectRow
+  range: HistoryRange
   active: boolean
   canMutate: boolean
   onOpen: () => void
@@ -376,10 +481,31 @@ function ProjectCard({ project, active, canMutate, onOpen, onEdit, onDelete }: {
         <span className="inline-flex items-center gap-1" title="Connectors"><Link2 className="w-3.5 h-3.5" /> {project.connector_count}</span>
         <span className="inline-flex items-center gap-1" title="Credentials"><KeyRound className="w-3.5 h-3.5" /> {project.credential_count}</span>
       </div>
+      <LoadSummary load={project.load} range={range} />
       <div className="flex items-center justify-between mt-auto pt-1">
         <Badge color="gray">{formatStrategy(project.routing_strategy)}</Badge>
         <span className="text-xs font-medium text-primary">Open →</span>
       </div>
     </Card>
+  )
+}
+
+/** A tile's load: the request rate now beside the range's trend, and the range's requests, success rate and bytes. */
+function LoadSummary({ load, range }: { load: ProjectLoad | undefined; range: HistoryRange }) {
+  const rate = load ? successRate(load) : null
+  return (
+    <div className="pt-3 border-t border-line flex flex-col gap-1.5">
+      <div className="flex items-center justify-between gap-3">
+        <span className="text-lg font-semibold leading-none tabular-nums" title="Requests per minute over the last 5 minutes">
+          {load ? formatRpm(load.requests_per_minute) : '-'} <span className="text-xs font-normal text-fg-muted">req/min</span>
+        </span>
+        {load && <Sparkline values={load.trend} color={REQUESTS_COLOR} width={96} height={24} fromZero />}
+      </div>
+      <div className="text-xs text-fg-muted tabular-nums truncate">
+        {!load ? '\u00a0' : load.request_count === 0 ? `No requests in ${range}` : (
+          <>{compact(load.request_count)} req · {rate == null ? '-' : `${rate.toFixed(1)}%`} success · {bytesShort(trafficBytes(load))} · {range}</>
+        )}
+      </div>
+    </div>
   )
 }

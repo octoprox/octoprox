@@ -38,7 +38,9 @@ Metrics are kept per **proxy**, per **project**, per **connector**, per **tunnel
 
 A connection from a [WireGuard device]({{ site.baseurl }}/wireguard) is counted against the device as well, in the same pipeline, so a device has totals and a history of its own (`GET /projects/{id}/wireguard/peers/{id}/metrics/history`) that are install-wide and survive restarts. Device rows carry two extra counters the transparent listener reports per device: connections relayed by address because no destination name could be recovered, and encrypted-DNS connections closed. The table is shared by every tunnel protocol; a device's rows go when the device is removed, and the project's retention applies.
 
-In the web UI one time range (1h to 90d) covers every view of this history: the Overview charts, the traffic split, the Hosts page, the connector and device charts, provider accuracy and the system trends. Pick it on any page and the others follow; the choice is remembered in the browser. A view that cannot show the exact window (claim statistics are daily, project history stops at 30 days) shows the nearest one it has.
+The **Projects** page shows every project's load side by side, for anyone signed in: its requests per minute now (over the last five minutes, as on its Overview), and over the chosen range its requests, success rate, bytes and a trend line. The table view sorts by any of the numbers, to rank projects by load. The API serves the same through [`GET /projects/load`]({{ site.baseurl }}/api#project-load).
+
+In the web UI one time range (1h to 90d) covers every view of this history: the project list, the Overview charts, the traffic split, the Hosts page, the connector and device charts, provider accuracy and the system trends. Pick it on any page and the others follow; the choice is remembered in the browser. A view that cannot show the exact window (claim statistics are daily, project history stops at 30 days) shows the nearest one it has.
 
 ## Where the Numbers Come From
 

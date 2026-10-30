@@ -5,7 +5,7 @@
 
 from collections.abc import Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 
 from sqlalchemy import (
@@ -1418,6 +1418,47 @@ class MetricsRepository:
 
         result = await self._session.execute(query)
         return [_latency_history_row(row.bucket_ts, row) for row in result.all()]
+
+    async def get_projects_metrics_buckets(
+        self, until: datetime, buckets: int, bucket_seconds: int
+    ) -> list[tuple[str, int, MetricDelta]]:
+        """Every project's counters summed into ``buckets`` buckets of ``bucket_seconds`` counted back from ``until``.
+
+        Each row is (project id, bucket, counters, the latency left out). Bucket 0 is the newest and bucket ``n`` holds
+        the rows stamped in ``(until - (n + 1) * width, until - n * width]``, so each bucket holds whole flushes; rows
+        of every granularity count. Only buckets with rows come back.
+        """
+        model = ProjectMetricsModel
+        counters = ("request_count", "success_count", "failure_count", "bytes_sent", "bytes_received")
+        # Each row's bucket in a subquery, so ``until`` stays a parameter and the statement is the same every call.
+        age = func.extract("epoch", literal(until, DateTime()) - model.timestamp)
+        aged = (
+            select(
+                model.project_id,
+                func.floor(age / bucket_seconds).label("bucket"),
+                *(model.__table__.c[c] for c in counters),
+            )
+            .where(model.timestamp > until - timedelta(seconds=buckets * bucket_seconds), model.timestamp <= until)
+            .subquery()
+        )
+        query = select(
+            aged.c.project_id, aged.c.bucket, *(func.sum(aged.c[c]).label(c) for c in counters)
+        ).group_by(aged.c.project_id, aged.c.bucket)
+        result = await self._session.execute(query)
+        return [
+            (
+                row.project_id,
+                int(row.bucket),
+                MetricDelta(
+                    request_count=int(row.request_count or 0),
+                    success_count=int(row.success_count or 0),
+                    failure_count=int(row.failure_count or 0),
+                    bytes_sent=int(row.bytes_sent or 0),
+                    bytes_received=int(row.bytes_received or 0),
+                ),
+            )
+            for row in result.all()
+        ]
 
     async def compact_project_metrics(
         self,

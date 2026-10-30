@@ -10,9 +10,11 @@ previews routing with the gateway's own router over a compile of the project
 """
 
 import re
+from datetime import timedelta
 from pathlib import Path
+from typing import Literal
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
@@ -175,6 +177,66 @@ async def list_projects(request: Request) -> ProjectListResponse:
     """List all projects, oldest first."""
     summaries = [_view_to_summary(view) for view in await runtime_view_of(request).projects()]
     return ProjectListResponse(total=len(summaries), projects=summaries)
+
+
+class ProjectLoadEntry(BaseModel):
+    """One project's load: its request rate now, and its requests over the range."""
+    project_id: str
+    # Over the last five minutes, rejected requests included: the Overview's requests per minute.
+    requests_per_minute: float
+    request_count: int
+    success_count: int
+    failure_count: int
+    bytes_sent: int
+    bytes_received: int
+    # Requests per bucket of ``bucket_seconds``, oldest first, the last ending at the last metrics flush.
+    trend: list[int]
+
+
+class ProjectLoadResponse(BaseModel):
+    """Every project's load over one range, for the project list."""
+    range: str
+    bucket_seconds: int
+    projects: list[ProjectLoadEntry]
+
+
+# What each range reads: how far back, and the trend's bucket in seconds. Two to three dozen points, none finer than
+# the rows kept at that age (minute rows for a day, hourly ones for a week, six-hourly ones after), so no bucket is
+# left empty between two full ones.
+LOAD_RANGES: dict[str, tuple[timedelta, int]] = {
+    "1h": (timedelta(hours=1), 120),
+    "6h": (timedelta(hours=6), 900),
+    "24h": (timedelta(hours=24), 3600),
+    "7d": (timedelta(days=7), 21600),
+    "30d": (timedelta(days=30), 86400),
+}
+
+
+@router.get("/load", response_model=ProjectLoadResponse)
+async def get_projects_load(
+    request: Request,
+    range: Literal["1h", "6h", "24h", "7d", "30d"] = Query("24h", alias="range"),
+) -> ProjectLoadResponse:
+    """Every project's request rate now and its requests, outcomes and bytes over ``range``, oldest first."""
+    span, bucket_seconds = LOAD_RANGES[range]
+    loads = await runtime_view_of(request).load(int(span.total_seconds()) // bucket_seconds, bucket_seconds)
+    return ProjectLoadResponse(
+        range=range,
+        bucket_seconds=bucket_seconds,
+        projects=[
+            ProjectLoadEntry(
+                project_id=load.project_id,
+                requests_per_minute=round(load.requests_per_minute, 2),
+                request_count=load.counters.request_count,
+                success_count=load.counters.success_count,
+                failure_count=load.counters.failure_count,
+                bytes_sent=load.counters.bytes_sent,
+                bytes_received=load.counters.bytes_received,
+                trend=list(load.trend),
+            )
+            for load in loads
+        ],
+    )
 
 
 @router.post("", response_model=ProjectResponse, status_code=201)

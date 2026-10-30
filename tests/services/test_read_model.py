@@ -523,6 +523,8 @@ class TestWithoutRedis:
             with structlog.testing.capture_logs() as usage_logs:
                 capped = await view.connector(world.project.id, world.capped.id)
             scaling = await view.scaling(world.project.id)
+            with structlog.testing.capture_logs() as load_logs:
+                loads = await view.load(24, 3600)
             with structlog.testing.capture_logs() as logs:
                 quarantined = await view.quarantined()
                 blocked = await view.blocked()
@@ -539,6 +541,10 @@ class TestWithoutRedis:
         usage = capped.traffic_usage
         assert (usage.total_bytes, usage.status, usage.blocked, usage.pending) == (CAPPED_BYTES, "exceeded", False, False)
         assert scaling is not None and scaling.demand_level == "LOW"
+        # Every project's load from the flushed history alone, at no rate.
+        [load] = [load for load in loads if load.project_id == world.project.id]
+        assert (load.requests_per_minute, len(load.trend)) == (0.0, 24)
+        assert [log["state"] for log in load_logs] == ["demand"]
         assert (quarantined, blocked) == ({}, {})
         assert [(log["event"], log["log_level"], log["state"]) for log in logs] == [
             ("Runtime state unavailable, shown without it", "warning", "quarantines"),

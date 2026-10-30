@@ -93,6 +93,16 @@ class TestRates:
         assert await tracker.get_requests_per_minute(PROJECT) == 0.0
         assert await tracker.get_requests_per_minute("project-2") == 10.0
 
+    async def test_many_projects_in_one_read(self, tracker: DemandTracker, redis_client: RedisClient) -> None:
+        await seed(redis_client, requests=10)
+        for minutes_ago in range(6):
+            await seed(redis_client, requests=10, minutes_ago=minutes_ago, project_id="project-2")
+
+        assert await tracker.get_requests_per_minute_of([PROJECT, "project-2", "project-3"]) == {
+            PROJECT: 2.0, "project-2": 11.0, "project-3": 0.0,
+        }
+        assert await tracker.get_requests_per_minute_of([]) == {}
+
     async def test_the_recent_rate_reads_the_last_minute(
         self, tracker: DemandTracker, redis_client: RedisClient
     ) -> None:

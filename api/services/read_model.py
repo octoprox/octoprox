@@ -93,6 +93,19 @@ class ProjectView:
 
 
 @dataclass(frozen=True)
+class ProjectLoad:
+    """A project's load: its request rate now, and its requests over a range, in total and as a trend."""
+
+    project_id: str
+    # Over the demand window, rejected requests included: the rate the Overview and scaling read.
+    requests_per_minute: float
+    # The range's counters, from the flushed history.
+    counters: MetricDelta
+    # Requests per bucket, oldest first, the newest ending at the last flush.
+    trend: tuple[int, ...]
+
+
+@dataclass(frozen=True)
 class ScalingView:
     """A project's demand and its cloud instances, as the scaling metrics show them."""
 
@@ -261,6 +274,36 @@ class RuntimeView:
             held = await self._pool_rows(session, connectors, project_id)
         pools = await self._pools(held)
         return ProjectView.of(project, counts.get(project_id), pools.pool({c.id for c in connectors}))
+
+    async def load(self, buckets: int, bucket_seconds: int) -> list[ProjectLoad]:
+        """Every project's load over the last ``buckets`` buckets of ``bucket_seconds``, oldest project first.
+
+        The counters and the trend are the flushed history alone: a flush holds the minute before it, so every bucket
+        holds its own span's traffic and the newest ends at the last flush, at most a minute ago; the rate covers now.
+        """
+        now = utc_now()
+        async with self._session_factory() as session:
+            projects = await ProjectRepository(session).get_all()
+            rows = await MetricsRepository(session).get_projects_metrics_buckets(now, buckets, bucket_seconds)
+        ids = [project.id for project in sorted(projects, key=lambda p: (p.created_at, p.id))]
+        rates = await _soft(self._demand.get_requests_per_minute_of(ids), {}, "demand")
+        counters = {project_id: MetricDelta() for project_id in ids}
+        trends = {project_id: [0] * buckets for project_id in ids}
+        for project_id, bucket, delta in rows:
+            # A project created after the project list was read, its first rows flushed before the history read.
+            if project_id not in counters:
+                continue
+            counters[project_id].merge(delta)
+            trends[project_id][buckets - 1 - min(max(bucket, 0), buckets - 1)] += delta.request_count
+        return [
+            ProjectLoad(
+                project_id=project_id,
+                requests_per_minute=rates.get(project_id, 0.0),
+                counters=counters[project_id],
+                trend=tuple(trends[project_id]),
+            )
+            for project_id in ids
+        ]
 
     async def scaling(self, project_id: str) -> ScalingView | None:
         """A project's demand and cloud instances; None when there is no such project.

@@ -3,17 +3,19 @@
 
 /**
  * Tiny inline trend line for stat tiles. Pure SVG, scales with its box.
- * The last point is marked so the current value reads as "now".
+ * The last point is marked so the current value reads as "now". It spans its
+ * values' range, or from zero with `fromZero`, so a steady series stays flat.
  */
-export function Sparkline({ values, color, width = 64, height = 26, className }: {
+export function Sparkline({ values, color, width = 64, height = 26, fromZero = false, className }: {
   values: number[]
   color: string
   width?: number
   height?: number
+  fromZero?: boolean
   className?: string
 }) {
   if (values.length < 2) return <svg width={width} height={height} className={className} />
-  const min = Math.min(...values)
+  const min = fromZero ? 0 : Math.min(...values)
   const max = Math.max(...values)
   const span = max - min || 1
   const pad = 2

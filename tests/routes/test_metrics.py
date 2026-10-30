@@ -23,7 +23,7 @@ from api.core.demand_tracker import DEMAND_REQUESTS_FIELD, demand_minute
 from api.core.roles import Role
 from api.core.stats import MetricDelta, StepMetricDelta
 from api.core.timing import Step
-from api.db.models import HostMetricsModel
+from api.db.models import HostMetricsModel, ProjectMetricsModel
 from api.db.redis import (
     DEMAND_KEY,
     PROJECT_METRICS_KEY,
@@ -333,6 +333,78 @@ class TestHistory:
         assert authenticated_client.get(
             f"/api/v1/projects/{created_project['id']}/metrics/history", params={"range": "2h"}
         ).status_code == 422
+
+
+class TestProjectsLoad:
+    """GET /projects/load: every project's rate now, and its requests over a range in total and as a trend."""
+
+    @staticmethod
+    def _load(client: TestClient, project_id: str, **params: str) -> dict[str, Any]:
+        data = client.get("/api/v1/projects/load", params=params).json()
+        [load] = [p for p in data["projects"] if p["project_id"] == project_id]
+        return load
+
+    def test_a_project_without_traffic(self, authenticated_client: TestClient, created_project: dict[str, Any]) -> None:
+        data = authenticated_client.get("/api/v1/projects/load").json()
+
+        assert (data["range"], data["bucket_seconds"]) == ("24h", 3600)
+        assert self._load(authenticated_client, created_project["id"]) == {
+            "project_id": created_project["id"], "requests_per_minute": 0.0, "request_count": 0, "success_count": 0,
+            "failure_count": 0, "bytes_sent": 0, "bytes_received": 0, "trend": [0] * 24,
+        }
+
+    def test_history_lands_in_the_bucket_of_its_age(
+        self, authenticated_client: TestClient, created_project: dict[str, Any],
+    ) -> None:
+        project_id = created_project["id"]
+        on_app_loop(authenticated_client, _save_aged_project_history, api_runtime(authenticated_client).session_factory,
+                    project_id)
+
+        load = self._load(authenticated_client, project_id)
+
+        # The day before the 25-hour-old row: an hourly row from 23.5 hours ago, minute rows from 90 and 10 minutes ago.
+        assert load["trend"] == [4] + [0] * 21 + [2, 10]
+        assert (load["request_count"], load["success_count"], load["failure_count"]) == (16, 13, 3)
+        assert (load["bytes_sent"], load["bytes_received"]) == (16, 160)
+
+    def test_the_window_not_flushed_yet_is_left_out(
+        self, authenticated_client: TestClient, created_project: dict[str, Any],
+    ) -> None:
+        """A flush holds the minute before it, so the newest bucket already holds a full bucket; the window would overfill it."""
+        project_id = created_project["id"]
+        runtime = api_runtime(authenticated_client)
+        on_app_loop(authenticated_client, _save_aged_project_history, runtime.session_factory, project_id)
+        window = MetricDelta(request_count=3, success_count=2, failure_count=1, bytes_sent=7, bytes_received=70)
+        on_app_loop(authenticated_client, _write_project_window, runtime.redis_client, project_id, window)
+
+        load = self._load(authenticated_client, project_id, range="1h")
+
+        # Two-minute buckets: the minute row from 10 minutes ago is the sixth from the end, and the window is nowhere.
+        assert load["trend"] == [0] * 24 + [10, 0, 0, 0, 0, 0]
+        assert (load["request_count"], load["success_count"], load["failure_count"]) == (10, 8, 2)
+        assert (load["bytes_sent"], load["bytes_received"]) == (10, 100)
+
+    def test_the_rate_is_the_demand_over_the_last_five_minutes(
+        self, authenticated_client: TestClient, created_project: dict[str, Any],
+    ) -> None:
+        project_id = created_project["id"]
+        redis = api_runtime(authenticated_client).redis_client
+        key = DEMAND_KEY.format(project_id=project_id, minute=demand_minute(time.time()))
+        on_app_loop(authenticated_client, redis.client.hset, key, DEMAND_REQUESTS_FIELD, 300)
+
+        assert self._load(authenticated_client, project_id)["requests_per_minute"] == 60.0
+
+    def test_each_range_has_its_buckets(self, authenticated_client: TestClient, created_project: dict[str, Any]) -> None:
+        for range_, (points, bucket_seconds) in {
+            "1h": (30, 120), "6h": (24, 900), "24h": (24, 3600), "7d": (28, 21600), "30d": (30, 86400),
+        }.items():
+            data = authenticated_client.get("/api/v1/projects/load", params={"range": range_}).json()
+            assert data["bucket_seconds"] == bucket_seconds
+            assert len(self._load(authenticated_client, created_project["id"], range=range_)["trend"]) == points
+        assert authenticated_client.get("/api/v1/projects/load", params={"range": "2h"}).status_code == 422
+
+    def test_viewers_see_it(self, viewer_client: TestClient) -> None:
+        assert viewer_client.get("/api/v1/projects/load").status_code == 200
 
 
 class TestTrafficSplit:
@@ -692,6 +764,24 @@ async def _save_project_history(session_factory: SessionFactory, project_id: str
     """One flushed window of the project's history, stamped now."""
     async with session_factory() as session:
         await MetricsRepository(session).save_project_metrics_snapshots({project_id: delta})
+        await session.commit()
+
+
+async def _save_aged_project_history(session_factory: SessionFactory, project_id: str) -> None:
+    """Project history rows 10 and 90 minutes old, an hourly one 23.5 hours old and one 25 hours old."""
+    now = utc_now()
+    async with session_factory() as session:
+        for age, granularity, requests, failures in (
+            (timedelta(minutes=10), 60, 10, 2),
+            (timedelta(minutes=90), 60, 2, 0),
+            (timedelta(hours=23, minutes=30), 3600, 4, 1),
+            (timedelta(hours=25), 3600, 100, 0),
+        ):
+            session.add(ProjectMetricsModel(
+                project_id=project_id, timestamp=now - age, request_count=requests,
+                success_count=requests - failures, failure_count=failures, avg_latency_ms=10.0,
+                bytes_sent=requests, bytes_received=requests * 10, granularity=granularity,
+            ))
         await session.commit()
 
 

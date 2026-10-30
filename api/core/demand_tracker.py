@@ -11,7 +11,7 @@ so callers treat a project with no demand at all as unknown rather than idle.
 from __future__ import annotations
 
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any
 
@@ -186,25 +186,39 @@ class DemandTracker:
             "proxy_count": current_proxy_count,
         }
 
+    async def get_requests_per_minute_of(self, project_ids: Iterable[str]) -> dict[str, float]:
+        """Each project's requests per minute over the demand window, as ``get_requests_per_minute``, in one round trip."""
+        return await self._rates(project_ids, DEMAND_WINDOW_SECONDS)
+
     async def _rate(self, project_id: str, span_seconds: int) -> float:
+        """Requests per minute over the last ``span_seconds`` for one project."""
+        return (await self._rates([project_id], span_seconds))[project_id]
+
+    async def _rates(self, project_ids: Iterable[str], span_seconds: int) -> dict[str, float]:
         """Requests per minute over the last ``span_seconds``, from the minute hashes the span touches, in one round trip.
 
         The current minute counts with what it holds so far and the oldest only
         for the share of it still inside the span: the usual sliding-window
         estimate, exact while the traffic is steady.
         """
+        ids = list(dict.fromkeys(project_ids))
         now = self._clock()
         minutes = span_seconds // 60
         current = demand_minute(now)
         # The share of the oldest minute that is still inside the span.
         inside = 1.0 - (now - current * 60) / 60
+        span = range(current - minutes, current + 1)
         pipe = self._redis_client.client.pipeline(transaction=False)
-        for minute in range(current - minutes, current + 1):
-            key = DEMAND_KEY.format(project_id=project_id, minute=minute)
-            pipe.hmget(key, [DEMAND_REQUESTS_FIELD, DEMAND_REJECTIONS_FIELD])
-        rows: list[list[str | None]] = await pipe.execute()
-        total = 0.0
-        for offset, values in enumerate(rows):
-            weight = inside if offset == 0 else 1.0
-            total += weight * sum(int(value) for value in values if value is not None)
-        return total / minutes
+        for project_id in ids:
+            for minute in span:
+                key = DEMAND_KEY.format(project_id=project_id, minute=minute)
+                pipe.hmget(key, [DEMAND_REQUESTS_FIELD, DEMAND_REJECTIONS_FIELD])
+        rows: list[list[str | None]] = await pipe.execute() if ids else []
+        rates: dict[str, float] = {}
+        for index, project_id in enumerate(ids):
+            total = 0.0
+            for offset, values in enumerate(rows[index * len(span):(index + 1) * len(span)]):
+                weight = inside if offset == 0 else 1.0
+                total += weight * sum(int(value) for value in values if value is not None)
+            rates[project_id] = total / minutes
+        return rates

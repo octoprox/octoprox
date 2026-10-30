@@ -1325,6 +1325,31 @@ export const fetchProjects = async (): Promise<ProjectListResponse> => {
   return response.data
 }
 
+/** A project's load: its request rate now, and its requests over the range from the saved history. */
+export interface ProjectLoad {
+  project_id: string
+  /** Over the last five minutes, rejected requests included: the Overview's requests per minute. */
+  requests_per_minute: number
+  request_count: number
+  success_count: number
+  failure_count: number
+  bytes_sent: number
+  bytes_received: number
+  /** Requests per bucket, oldest first, the last ending at the last save to history (at most a minute ago). */
+  trend: number[]
+}
+
+export interface ProjectLoadResponse {
+  range: HistoryRange
+  bucket_seconds: number
+  projects: ProjectLoad[]
+}
+
+export const fetchProjectsLoad = async (range: HistoryRange): Promise<ProjectLoadResponse> => {
+  const response = await api.get('/projects/load', { params: { range } })
+  return response.data
+}
+
 export const fetchProject = async (id: string): Promise<ProjectSummary> => {
   const response = await api.get(`/projects/${id}`)
   return response.data

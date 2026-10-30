@@ -131,6 +131,14 @@ Projects provide multi-tenancy support. Each project has its own credentials, co
 GET /api/v1/projects
 ```
 
+### Project Load
+
+```bash
+GET /api/v1/projects/load?range=24h
+```
+
+Every project's load, oldest project first, for the project list: `requests_per_minute` (over the last five minutes, rejected requests included, the same figure as the project's Overview), then the requests, successes, failures and bytes each way over `range` (`1h`, `6h`, `24h` default, `7d` or `30d`), and `trend`, the requests per bucket of `bucket_seconds`, oldest first. The totals and the trend come from the history, so like the Overview's charts they trail live traffic by up to one flush interval. Any signed-in user can read it.
+
 ### Create Project
 
 ```bash
