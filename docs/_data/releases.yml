@@ -10,6 +10,13 @@
 #   changes  what changed, for the people who use Octoprox; `docs` is a page
 #            on octoprox.com that explains it, such as connecting#exit-headers
 
+- version: 6.4.1
+  date: 2026-10-31
+  title: Phone layout fixes for provider and failure views
+  changes:
+    - text: "The provider picker shows one provider per row on phones, so names and descriptions are easier to read."
+    - text: "On narrow screens the What failed card on the Failures page moves the time range picker under the title. Long failure labels no longer push the bars out of the card."
+
 - version: 6.4.0
   date: 2026-10-30
   title: Separate Administration, Account and project settings
