@@ -21,7 +21,7 @@ export function TypePicker({ onPick, hint }: { onPick: (type: CredentialType) =>
     <div className="space-y-3">
       {hint && <p className="text-xs text-fg-muted">{hint}</p>}
       {isLoading && <p className="text-xs text-fg-muted">Loading providers…</p>}
-      <div className="grid grid-cols-2 gap-2.5">
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
         {providers.map((p) => (
           <button
             key={p.id}
@@ -36,7 +36,7 @@ export function TypePicker({ onPick, hint }: { onPick: (type: CredentialType) =>
                 <span className="truncate">{p.name}</span>
                 {p.beta && <span className="flex-none text-[10px] font-medium uppercase text-warning">beta</span>}
               </span>
-              <span className="block text-[11.5px] text-fg-muted leading-snug mt-0.5 line-clamp-2">{p.description}</span>
+              <span className="text-[11.5px] text-fg-muted leading-snug mt-0.5 line-clamp-2">{p.description}</span>
             </span>
           </button>
         ))}

@@ -365,13 +365,14 @@ function WhatFailed({ summary, updatedAt, loading, failed, range, onRange, isDar
     ? { backgroundColor: '#1f2937', border: '1px solid #374151', color: '#f3f4f6', borderRadius: 8, fontSize: 12 }
     : { borderRadius: 8, fontSize: 12, border: '1px solid #e5e7eb' }
 
-  // Nothing in this card wraps or grows with its content: a docked example
-  // narrows the page, and a card that grew taller then would push the
+  // From @md up nothing in this card wraps or grows with its content: a docked
+  // example narrows the page, and a card that grew taller then would push the
   // examples down under the reader's pointer. The body has a fixed height
-  // and the kind list scrolls if it ever outgrows it.
+  // and the kind list scrolls if it ever outgrows it. Below @md the card is
+  // one column anyway, so the range picker may wrap under the title there.
   return (
     <Card className="p-4">
-      <div className="flex items-center justify-between gap-3 mb-3">
+      <div className="flex flex-wrap @md:flex-nowrap items-center justify-between gap-x-3 gap-y-2 mb-3">
         <div className="flex items-center gap-1.5 min-w-0">
           <h2 className="text-sm font-semibold text-fg flex-none">What failed</h2>
           <InfoTip>
@@ -418,7 +419,7 @@ function WhatFailed({ summary, updatedAt, loading, failed, range, onRange, isDar
                     >
                       <span className="flex items-center gap-2.5 min-w-0 w-full">
                         <span className="inline-block w-2 h-2 rounded-full flex-none" style={{ background: info.color }} />
-                        <span className="text-[13px] text-fg w-32 @2xl:w-44 flex-none truncate">{info.label}</span>
+                        <span className="text-[13px] text-fg w-32 @2xl:w-44 min-w-0 truncate">{info.label}</span>
                         <span className="flex-1 h-1.5 rounded-full bg-surface-raised overflow-hidden min-w-[24px]">
                           <span className="block h-full rounded-full" style={{ width: `${Math.max(2, (k.count / largest) * 100)}%`, background: info.color }} />
                         </span>
