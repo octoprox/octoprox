@@ -10,6 +10,13 @@
 #   changes  what changed, for the people who use Octoprox; `docs` is a page
 #            on octoprox.com that explains it, such as connecting#exit-headers
 
+- version: 6.4.2
+  date: 2026-11-01
+  title: Animated loading indicator and steadier first loads
+  changes:
+    - text: "The web UI now shows an animated Octoprox logo while the app, a project or a page is loading, in place of the plain Loading text."
+    - text: "The Hosts and Failures pages now wait for their first data before drawing anything. They no longer flash empty charts or tables while loading."
+
 - version: 6.4.1
   date: 2026-10-31
   title: Phone layout fixes for provider and failure views
