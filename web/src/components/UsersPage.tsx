@@ -5,7 +5,7 @@ import { useState, useMemo } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { ColumnDef } from '@tanstack/react-table'
 import { Plus, Trash2, Send, Copy, Check, KeyRound } from 'lucide-react'
-import { Button, Input, Label, Badge, Alert, Inspector, InspectorSection, KeyValue, ConfirmDialog, LogoLoader } from './ui'
+import { Button, Input, Label, Badge, Alert, Inspector, InspectorSection, KeyValue, ConfirmDialog, QueryContent } from './ui'
 import { DataTable, type DataTableFeatures } from './DataTable'
 import { Page } from './layout/Page'
 import { RichSelect, RichSelectOption } from './RichSelect'
@@ -40,7 +40,8 @@ export default function UsersPage() {
   const [pendingDelete, setPendingDelete] = useState<UserAccount | null>(null)
   const [inviteUrl, setInviteUrl] = useState<string | null>(null)
 
-  const { data, isLoading } = useQuery({ queryKey: ['users'], queryFn: fetchUsers })
+  const usersQuery = useQuery({ queryKey: ['users'], queryFn: fetchUsers })
+  const { data } = usersQuery
   const users = data?.users ?? []
 
   const reinviteMutation = useMutation({
@@ -195,9 +196,7 @@ export default function UsersPage() {
       actions={<Button size="sm" onClick={() => setPanel({ kind: 'new' })}><Plus className="w-3.5 h-3.5" /> Add user</Button>}
       panel={panelNode}
     >
-      {isLoading ? (
-        <LogoLoader className="py-10" />
-      ) : (
+      <QueryContent query={usersQuery} what="the users">
         <DataTable
           columns={columns}
           data={users}
@@ -209,7 +208,7 @@ export default function UsersPage() {
           activeRowId={panel?.kind === 'edit' ? panel.id : null}
           columnVisibility={panel ? { last_login_at: false, created_at: false, actions: false } : {}}
         />
-      )}
+      </QueryContent>
       {pendingDelete && (
         <ConfirmDialog
           title="Delete user?"

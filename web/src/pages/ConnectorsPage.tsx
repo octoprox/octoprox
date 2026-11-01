@@ -34,7 +34,7 @@ import { targetTotal, describeTarget, isDynamic } from '../utils/connectors'
 import { coverageLabel } from '../components/geo/coverage'
 import { MismatchSummary, rateClass, ratePercent } from '../components/geo/AccuracyDetails'
 import { RichSelect, RichSelectOption } from '../components/RichSelect'
-import { Button, Input, Label, Badge, Alert, ChipInput, Inspector, Tabs, Segmented, Select, ConfirmDialog, KeyValue, InspectorSection, InfoTip, LogoLoader } from '../components/ui'
+import { Button, Input, Label, Badge, Alert, ChipInput, Inspector, Tabs, Segmented, Select, ConfirmDialog, KeyValue, InspectorSection, InfoTip, QueryContent } from '../components/ui'
 
 type DomainFilterMode = 'none' | 'whitelist' | 'blacklist'
 type ConfigTab = string
@@ -96,12 +96,13 @@ export default function ConnectorsPage() {
   const [panel, setPanel] = useState<PanelState>(null)
   const [pendingDelete, setPendingDelete] = useState<Connector | null>(null)
 
-  const { data: connectorsData, isLoading } = useQuery({
+  const connectorsQuery = useQuery({
     queryKey: ['connectors', selectedProjectId],
     queryFn: () => fetchProjectConnectors(selectedProjectId!),
     enabled: !!selectedProjectId,
     refetchInterval: 15000, // proxy counts and provisioning errors
   })
+  const { data: connectorsData } = connectorsQuery
 
   // Deep link from the Overview connector list: ?open=<id>
   useEffect(() => {
@@ -296,40 +297,40 @@ export default function ConnectorsPage() {
       actions={canMutate ? <Button size="sm" onClick={() => setPanel({ kind: 'new' })}><Plus className="w-3.5 h-3.5" /> Add connector</Button> : undefined}
       panel={panelNode}
     >
-      {isLoading ? (
-        <LogoLoader className="py-10" />
-      ) : connectors.length === 0 ? (
-        <EmptyState
-          icon={<Link2 />}
-          title="No connectors yet"
-          description="A connector turns a credential into proxies: cloud instances, provider sessions or a static list you manage yourself."
-          action={canMutate ? <Button size="sm" onClick={() => setPanel({ kind: 'new' })}><Plus className="w-3.5 h-3.5" /> Add connector</Button> : undefined}
-        />
-      ) : (
-        <>
-          {connectors.length > 1 && selectedProjectId && (
-            <TrafficSplitPanel projectId={selectedProjectId} onOpenConnector={(id) => setPanel({ kind: 'edit', id })} className="mb-4" />
-          )}
-          <DataTable
-            columns={columns}
-            data={connectors}
-            getRowId={(row) => row.id}
-            onRowClick={(row) => setPanel({ kind: 'edit', id: row.id })}
-            activeRowId={panel?.kind === 'edit' ? panel.id : null}
-            columnVisibility={panel ? { updated_at: false, actions: false, traffic: false } : {}}
+      <QueryContent query={connectorsQuery} what="the connectors">
+        {connectors.length === 0 ? (
+          <EmptyState
+            icon={<Link2 />}
+            title="No connectors yet"
+            description="A connector turns a credential into proxies: cloud instances, provider sessions or a static list you manage yourself."
+            action={canMutate ? <Button size="sm" onClick={() => setPanel({ kind: 'new' })}><Plus className="w-3.5 h-3.5" /> Add connector</Button> : undefined}
           />
-          {errored.map((c) => (
-            <Alert key={c.id} className="flex items-start gap-2.5 text-[12.5px]">
-              <AlertTriangle className="w-4 h-4 flex-none mt-0.5" />
-              <span>
-                <b className="font-semibold">{c.name}</b> failed {c.consecutive_errors} consecutive provisioning attempt{c.consecutive_errors === 1 ? '' : 's'}:{' '}
-                <span className="font-mono text-xs">{c.last_error}</span>{' '}
-                <button onClick={() => setPanel({ kind: 'edit', id: c.id })} className="underline font-medium">Open connector</button>
-              </span>
-            </Alert>
-          ))}
-        </>
-      )}
+        ) : (
+          <>
+            {connectors.length > 1 && selectedProjectId && (
+              <TrafficSplitPanel projectId={selectedProjectId} onOpenConnector={(id) => setPanel({ kind: 'edit', id })} className="mb-4" />
+            )}
+            <DataTable
+              columns={columns}
+              data={connectors}
+              getRowId={(row) => row.id}
+              onRowClick={(row) => setPanel({ kind: 'edit', id: row.id })}
+              activeRowId={panel?.kind === 'edit' ? panel.id : null}
+              columnVisibility={panel ? { updated_at: false, actions: false, traffic: false } : {}}
+            />
+            {errored.map((c) => (
+              <Alert key={c.id} className="flex items-start gap-2.5 text-[12.5px]">
+                <AlertTriangle className="w-4 h-4 flex-none mt-0.5" />
+                <span>
+                  <b className="font-semibold">{c.name}</b> failed {c.consecutive_errors} consecutive provisioning attempt{c.consecutive_errors === 1 ? '' : 's'}:{' '}
+                  <span className="font-mono text-xs">{c.last_error}</span>{' '}
+                  <button onClick={() => setPanel({ kind: 'edit', id: c.id })} className="underline font-medium">Open connector</button>
+                </span>
+              </Alert>
+            ))}
+          </>
+        )}
+      </QueryContent>
       {pendingDelete && (
         <ConfirmDialog
           title="Delete connector?"

@@ -19,7 +19,7 @@ import { ObservationsPanel } from '../../components/geo/ObservationsPanel'
 import { ExitIpsPanel } from '../../components/geo/ExitIpsPanel'
 import { formatBytes, formatDateTime, parseApiDate, plural, relativeTime, timeUntil } from '../../utils/format'
 import { isInUse } from '../../utils/geo'
-import { Alert, Badge, Button, Card, ConfirmDialog, Input, Label, LogoLoader, Select, Tabs } from '../../components/ui'
+import { Alert, Badge, Button, Card, ConfirmDialog, Input, Label, QueryStatus, Select, Tabs } from '../../components/ui'
 import { cn } from '../../utils/cn'
 
 type Tab = 'databases' | 'policy' | 'accuracy' | 'exits' | 'observations'
@@ -533,7 +533,8 @@ function FromUrlCard({ onDone }: { onDone: () => void }) {
 function PolicyTab() {
   const queryClient = useQueryClient()
   const toast = useToast()
-  const { data, isLoading } = useQuery({ queryKey: ['geo-settings'], queryFn: fetchGeoSettings })
+  const settingsQuery = useQuery({ queryKey: ['geo-settings'], queryFn: fetchGeoSettings })
+  const { data } = settingsQuery
   // Whether a GeoNames file is open where cities are judged; the Databases tab shares the list.
   const { data: databases } = useQuery({ queryKey: ['geo-databases'], queryFn: fetchGeoDatabases, staleTime: 60_000 })
   const [draft, setDraft] = useState<GeoSettingsDoc | null>(null)
@@ -545,7 +546,7 @@ function PolicyTab() {
     onSuccess: (saved) => { queryClient.setQueryData(['geo-settings'], saved); setDraft(null); toast.show('Settings saved; every process applies them within a few seconds') },
     onError: (e: Error) => toast.show(e.message || 'Failed to save settings', 'error'),
   })
-  if (isLoading || !policy) return <LogoLoader className="py-10" />
+  if (!policy) return <QueryStatus query={settingsQuery} what="the attribution settings" />
 
   const update = (patch: Partial<GeoSettingsDoc>) => setDraft({ ...policy, ...patch })
 

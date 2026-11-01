@@ -13,7 +13,7 @@ import { DataTable, type DataTableFeatures } from '../components/DataTable'
 import { Page, EmptyState } from '../components/layout/Page'
 import { MethodBadge, StatusCodeBadge, RequestPanel } from '../components/mitm/RequestDetail'
 import { formatBytes, formatTime } from '../utils/format'
-import { Button, ConfirmDialog, LogoLoader } from '../components/ui'
+import { Button, ConfirmDialog, QueryContent } from '../components/ui'
 
 export default function InspectorPage() {
   const queryClient = useQueryClient()
@@ -23,12 +23,13 @@ export default function InspectorPage() {
   const [openId, setOpenId] = useState<string | null>(null)
   const [confirmClear, setConfirmClear] = useState(false)
 
-  const { data, isLoading } = useQuery({
+  const requestsQuery = useQuery({
     queryKey: ['mitm-requests', selectedProjectId],
     queryFn: () => fetchMitmRequests(selectedProjectId!, 200),
     enabled: !!selectedProjectId,
     refetchInterval: 5000,
   })
+  const { data } = requestsQuery
 
   const clearMutation = useMutation({
     mutationFn: () => clearMitmRequests(selectedProjectId!),
@@ -123,27 +124,27 @@ export default function InspectorPage() {
       ) : undefined}
       panel={open ? <RequestPanel key={open.id} record={open} onClose={() => setOpenId(null)} /> : null}
     >
-      {isLoading ? (
-        <LogoLoader className="py-10" />
-      ) : records.length === 0 ? (
-        <EmptyState
-          icon={<Eye />}
-          title="No intercepted requests"
-          description="Requests appear here when TLS interception is enabled in the project settings and traffic flows through the proxy."
-        />
-      ) : (
-        <DataTable
-          columns={columns}
-          data={records}
-          defaultPageSize={50}
-          enableColumnFilters
-          getRowId={(row) => row.id}
-          onRowClick={(row) => setOpenId(row.id)}
-          activeRowId={openId}
-          columnVisibility={open ? { response_content_type: false, size: false } : {}}
-          emptyMessage="No requests match the current filters."
-        />
-      )}
+      <QueryContent query={requestsQuery} what="the captured requests">
+        {records.length === 0 ? (
+          <EmptyState
+            icon={<Eye />}
+            title="No intercepted requests"
+            description="Requests appear here when TLS interception is enabled in the project settings and traffic flows through the proxy."
+          />
+        ) : (
+          <DataTable
+            columns={columns}
+            data={records}
+            defaultPageSize={50}
+            enableColumnFilters
+            getRowId={(row) => row.id}
+            onRowClick={(row) => setOpenId(row.id)}
+            activeRowId={openId}
+            columnVisibility={open ? { response_content_type: false, size: false } : {}}
+            emptyMessage="No requests match the current filters."
+          />
+        )}
+      </QueryContent>
       {confirmClear && (
         <ConfirmDialog
           title="Clear captured requests?"

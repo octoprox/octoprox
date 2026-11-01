@@ -13,19 +13,21 @@ interface ReloadingProps {
   active: boolean
   /** Where the loader sits: the middle of a chart or card, or the top of a block taller than the screen. */
   align?: 'center' | 'top'
+  /** The loader's size: small over a single line, such as a message. */
+  size?: 'sm' | 'md'
   /** The content's own layout, e.g. the spacing between the cards it holds. */
   className?: string
   children: ReactNode
 }
 
 /** Keeps content in place while its next version loads, dimmed under the loader, so nothing on the page moves. */
-export function Reloading({ active, align = 'center', className, children }: ReloadingProps) {
+export function Reloading({ active, align = 'center', size = 'md', className, children }: ReloadingProps) {
   return (
     <div className="relative" aria-busy={active || undefined}>
       <div className={cn(className, active && RELOADING)}>{children}</div>
       {active && (
         <div className={cn('pointer-events-none absolute inset-0 flex justify-center', align === 'top' ? 'items-start' : 'items-center')}>
-          <LogoLoader className={align === 'top' ? 'py-10' : undefined} />
+          <LogoLoader size={size} className={align === 'top' ? 'py-10' : undefined} />
         </div>
       )}
     </div>

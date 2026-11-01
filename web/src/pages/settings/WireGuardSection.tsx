@@ -12,7 +12,7 @@ import { useToast } from '../../contexts/ToastContext'
 import { Page } from '../../components/layout/Page'
 import { TunnelGatewaysCard, TunnelStateBadge, relayedLabel } from '../../components/TunnelGateways'
 import { formatDateTime } from '../../utils/format'
-import { Alert, Button, Card, CardHeader, ConfirmDialog, InfoTip, Input, Label, LogoLoader } from '../../components/ui'
+import { Alert, Button, Card, CardHeader, ConfirmDialog, InfoTip, Input, Label, QueryContent } from '../../components/ui'
 
 /**
  * Admin page for the WireGuard endpoint: the install's identity and what every
@@ -22,7 +22,8 @@ import { Alert, Button, Card, CardHeader, ConfirmDialog, InfoTip, Input, Label, 
 export default function WireGuardSection() {
   const queryClient = useQueryClient()
   const toast = useToast()
-  const { data, isLoading } = useQuery({ queryKey: ['wireguard-settings'], queryFn: fetchWireGuardSettings, refetchInterval: 15_000 })
+  const settingsQuery = useQuery({ queryKey: ['wireguard-settings'], queryFn: fetchWireGuardSettings, refetchInterval: 15_000 })
+  const { data } = settingsQuery
   const [confirmRotate, setConfirmRotate] = useState(false)
 
   const rotate = useMutation({
@@ -42,25 +43,25 @@ export default function WireGuardSection() {
       subtitle="Devices without proxy support join a project's pool through a WireGuard tunnel terminated by Octoprox. This server is shared by every project; each project adds its devices on its Devices page."
       toolbar={data && <TunnelStateBadge status={data.status} />}
     >
-      {isLoading || !data ? (
-        <LogoLoader className="py-10" />
-      ) : (
-        <div className="grid gap-4 @4xl:grid-cols-[minmax(0,1fr)_380px]">
-          <div className="space-y-4">
-            <EndpointForm settings={data} />
-            <Card className="p-5">
-              <CardHeader
-                title="Server identity"
-                action={<Button size="sm" variant="outline" onClick={() => setConfirmRotate(true)}><KeyRound className="w-3.5 h-3.5" /> Rotate key</Button>}
-              />
-              <p className="text-sm text-fg-muted mt-1">One key pair for the whole install, shared by every gateway. Devices pin this public key in their config.</p>
-              <div className="mt-3 font-mono text-xs bg-surface-raised rounded-lg p-3 break-all select-all">{data.public_key}</div>
-              <div className="text-xs text-fg-subtle mt-2">Last changed {formatDateTime(data.updated_at)}</div>
-            </Card>
+      <QueryContent query={settingsQuery} what="the WireGuard settings">
+        {(data) => (
+          <div className="grid gap-4 @4xl:grid-cols-[minmax(0,1fr)_380px]">
+            <div className="space-y-4">
+              <EndpointForm settings={data} />
+              <Card className="p-5">
+                <CardHeader
+                  title="Server identity"
+                  action={<Button size="sm" variant="outline" onClick={() => setConfirmRotate(true)}><KeyRound className="w-3.5 h-3.5" /> Rotate key</Button>}
+                />
+                <p className="text-sm text-fg-muted mt-1">One key pair for the whole install, shared by every gateway. Devices pin this public key in their config.</p>
+                <div className="mt-3 font-mono text-xs bg-surface-raised rounded-lg p-3 break-all select-all">{data.public_key}</div>
+                <div className="text-xs text-fg-subtle mt-2">Last changed {formatDateTime(data.updated_at)}</div>
+              </Card>
+            </div>
+            <StatusCard status={data.status} />
           </div>
-          <StatusCard status={data.status} />
-        </div>
-      )}
+        )}
+      </QueryContent>
       {confirmRotate && (
         <ConfirmDialog
           title="Rotate the server key?"

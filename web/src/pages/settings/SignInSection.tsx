@@ -9,7 +9,7 @@ import { useToast } from '../../contexts/ToastContext'
 import { Page } from '../../components/layout/Page'
 import { ProviderMark } from '../../components/SignInProviderMark'
 import { formatDateTime } from '../../utils/format'
-import { Alert, Badge, Button, Card, CardHeader, InfoTip, Input, Label, LogoLoader } from '../../components/ui'
+import { Alert, Badge, Button, Card, CardHeader, InfoTip, Input, Label, QueryContent } from '../../components/ui'
 
 const DOCS_URL = 'https://octoprox.github.io/octoprox/sso'
 
@@ -25,26 +25,26 @@ const PROVIDER_HELP: Record<AuthProviderSettings['kind'], { where: string; href:
  * provider's verified email against the users the admin has added.
  */
 export default function SignInSection() {
-  const { data: providers, isLoading } = useQuery({ queryKey: ['auth-providers'], queryFn: fetchAuthProviders })
+  const providersQuery = useQuery({ queryKey: ['auth-providers'], queryFn: fetchAuthProviders })
 
   return (
     <Page
       title="Sign-in"
       subtitle="Let the people you have added sign in with a Google, Microsoft or GitHub account instead of a password."
     >
-      {isLoading || !providers ? (
-        <LogoLoader className="py-10" />
-      ) : (
-        <div className="grid gap-4 @4xl:grid-cols-[minmax(0,1fr)_380px]">
-          <div className="space-y-4">
-            <Alert variant="info" className="text-sm">
-              Nobody self-registers. A sign-in succeeds only when the provider vouches for an email address that belongs to an existing, active user. Add people under Users first, with the email they use at the provider.
-            </Alert>
-            {providers.map((p) => <ProviderCard key={p.kind} settings={p} />)}
+      <QueryContent query={providersQuery} what="the sign-in providers">
+        {(providers) => (
+          <div className="grid gap-4 @4xl:grid-cols-[minmax(0,1fr)_380px]">
+            <div className="space-y-4">
+              <Alert variant="info" className="text-sm">
+                Nobody self-registers. A sign-in succeeds only when the provider vouches for an email address that belongs to an existing, active user. Add people under Users first, with the email they use at the provider.
+              </Alert>
+              {providers.map((p) => <ProviderCard key={p.kind} settings={p} />)}
+            </div>
+            <EnterpriseCard />
           </div>
-          <EnterpriseCard />
-        </div>
-      )}
+        )}
+      </QueryContent>
     </Page>
   )
 }

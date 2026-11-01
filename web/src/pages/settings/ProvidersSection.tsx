@@ -6,21 +6,22 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { ColumnDef } from '@tanstack/react-table'
 import { Plus, Puzzle, Trash2 } from 'lucide-react'
 import { deleteProvider, fetchProvider, ProviderDetail, ProviderSpec, ProviderSummary } from '../../api/client'
-import { useProviders } from '../../hooks/useProviders'
+import { useProviders, useProvidersQuery } from '../../hooks/useProviders'
 import { useToast } from '../../contexts/ToastContext'
 import { DataTable, type DataTableFeatures } from '../../components/DataTable'
 import { Page, EmptyState } from '../../components/layout/Page'
 import { ProviderLogo } from '../../components/ProviderLogo'
 import { ProviderBuilder, duplicateSpec } from '../../components/providers/ProviderBuilder'
 import { ProviderDetailPanel } from '../../components/providers/ProviderDetailPanel'
-import { Badge, Button, ConfirmDialog, INSPECTOR_WIDTH_WIDE, LogoLoader } from '../../components/ui'
+import { Badge, Button, ConfirmDialog, INSPECTOR_WIDTH_WIDE, QueryContent, QueryStatus } from '../../components/ui'
 
 type PanelState = { kind: 'view'; id: string } | { kind: 'edit'; id: string } | { kind: 'new'; spec?: ProviderSpec } | null
 
 /** Admin catalog of provider types: shipped ones read-only, custom descriptors editable in the builder. */
 export default function ProvidersSection() {
   const queryClient = useQueryClient()
-  const { providers, isLoading, byId } = useProviders()
+  const { providers, byId } = useProviders()
+  const providersQuery = useProvidersQuery()
   const toast = useToast()
   const [panel, setPanelState] = useState<PanelState>(null)
   const [pendingDelete, setPendingDelete] = useState<ProviderSummary | null>(null)
@@ -151,25 +152,25 @@ export default function ProvidersSection() {
       actions={<Button size="sm" onClick={() => setPanel({ kind: 'new' })}><Plus className="w-3.5 h-3.5" /> New provider</Button>}
       panel={panelNode}
     >
-      {isLoading ? (
-        <LogoLoader className="py-10" />
-      ) : providers.length === 0 ? (
-        <EmptyState icon={<Puzzle />} title="No providers" description="The catalog is empty, which should not happen." />
-      ) : (
-        <>
-          <DataTable
-            columns={columns}
-            data={providers}
-            getRowId={(row) => row.id}
-            onRowClick={(row) => setPanel({ kind: 'view', id: row.id })}
-            activeRowId={panel && 'id' in panel ? panel.id : null}
-            columnVisibility={panel ? { hosts: false, usage: false, actions: false } : {}}
-          />
-          {custom === 0 && (
-            <p className="text-xs text-fg-muted">Tip: open a shipped provider and choose “Duplicate as custom” to start from a working descriptor.</p>
-          )}
-        </>
-      )}
+      <QueryContent query={providersQuery} what="the providers">
+        {providers.length === 0 ? (
+          <EmptyState icon={<Puzzle />} title="No providers" description="The catalog is empty, which should not happen." />
+        ) : (
+          <>
+            <DataTable
+              columns={columns}
+              data={providers}
+              getRowId={(row) => row.id}
+              onRowClick={(row) => setPanel({ kind: 'view', id: row.id })}
+              activeRowId={panel && 'id' in panel ? panel.id : null}
+              columnVisibility={panel ? { hosts: false, usage: false, actions: false } : {}}
+            />
+            {custom === 0 && (
+              <p className="text-xs text-fg-muted">Tip: open a shipped provider and choose “Duplicate as custom” to start from a working descriptor.</p>
+            )}
+          </>
+        )}
+      </QueryContent>
       {blockedPanel !== undefined && (
         <ConfirmDialog
           title="Leave the provider builder?"
@@ -194,7 +195,8 @@ export default function ProvidersSection() {
 }
 
 function EditBuilder({ providerId, onClose, onSaved, onDelete, onDirtyChange }: { providerId: string; onClose: () => void; onSaved: (p: ProviderDetail) => void; onDelete: () => void; onDirtyChange: (dirty: boolean) => void }) {
-  const { data } = useQuery({ queryKey: ['provider', providerId], queryFn: () => fetchProvider(providerId) })
-  if (!data) return <div style={{ width: INSPECTOR_WIDTH_WIDE }} className="flex-none border-l border-line bg-surface p-6"><LogoLoader className="py-10" /></div>
+  const providerQuery = useQuery({ queryKey: ['provider', providerId], queryFn: () => fetchProvider(providerId) })
+  const { data } = providerQuery
+  if (!data) return <div style={{ width: INSPECTOR_WIDTH_WIDE }} className="flex-none border-l border-line bg-surface p-6"><QueryStatus query={providerQuery} what="the provider" /></div>
   return <ProviderBuilder existing={data} onClose={onClose} onSaved={onSaved} onDelete={onDelete} onDirtyChange={onDirtyChange} />
 }

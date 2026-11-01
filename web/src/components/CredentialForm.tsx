@@ -9,38 +9,40 @@ import {
   CredentialType, CredentialCreate, CredentialDetail, ProviderSummary,
 } from '../api/client'
 import { useProject } from '../contexts/ProjectContext'
-import { useProviders } from '../hooks/useProviders'
-import { Button, Alert, Inspector, Badge, LogoLoader } from './ui'
+import { useProviders, useProvidersQuery } from '../hooks/useProviders'
+import { Button, Alert, Inspector, Badge, QueryContent, LogoLoader } from './ui'
 import { ProviderLogo } from './ProviderLogo'
 import { SchemaForm, defaultValues, serializeValues, FormValues } from './SchemaForm'
 
 /** Grid of provider cards for choosing a credential / connector type. */
 export function TypePicker({ onPick, hint }: { onPick: (type: CredentialType) => void; hint?: string }) {
-  const { providers, isLoading } = useProviders()
+  const { providers } = useProviders()
+  const providersQuery = useProvidersQuery()
   return (
     <div className="space-y-3">
       {hint && <p className="text-xs text-fg-muted">{hint}</p>}
-      {isLoading && <LogoLoader className="py-6" label="Loading providers…" />}
-      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
-        {providers.map((p) => (
-          <button
-            key={p.id}
-            type="button"
-            onClick={() => onPick(p.id)}
-            title={p.description}
-            className="flex items-center gap-3 h-[76px] px-3 border border-line rounded-[10px] text-left hover:border-primary hover:bg-primary-soft transition-colors"
-          >
-            <ProviderLogo type={p.id} name={p.name} className="w-9 h-9 text-[36px]" />
-            <span className="min-w-0 flex-1">
-              <span className="flex items-center gap-1.5 text-[13px] font-semibold leading-tight">
-                <span className="truncate">{p.name}</span>
-                {p.beta && <span className="flex-none text-[10px] font-medium uppercase text-warning">beta</span>}
+      <QueryContent query={providersQuery} what="the providers" loader={<LogoLoader className="py-6" label="Loading providers…" />}>
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+          {providers.map((p) => (
+            <button
+              key={p.id}
+              type="button"
+              onClick={() => onPick(p.id)}
+              title={p.description}
+              className="flex items-center gap-3 h-[76px] px-3 border border-line rounded-[10px] text-left hover:border-primary hover:bg-primary-soft transition-colors"
+            >
+              <ProviderLogo type={p.id} name={p.name} className="w-9 h-9 text-[36px]" />
+              <span className="min-w-0 flex-1">
+                <span className="flex items-center gap-1.5 text-[13px] font-semibold leading-tight">
+                  <span className="truncate">{p.name}</span>
+                  {p.beta && <span className="flex-none text-[10px] font-medium uppercase text-warning">beta</span>}
+                </span>
+                <span className="text-[11.5px] text-fg-muted leading-snug mt-0.5 line-clamp-2">{p.description}</span>
               </span>
-              <span className="text-[11.5px] text-fg-muted leading-snug mt-0.5 line-clamp-2">{p.description}</span>
-            </span>
-          </button>
-        ))}
-      </div>
+            </button>
+          ))}
+        </div>
+      </QueryContent>
     </div>
   )
 }

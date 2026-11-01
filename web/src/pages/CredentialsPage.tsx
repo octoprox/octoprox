@@ -19,7 +19,7 @@ import { CredentialForm, NewCredentialPanel, TypeCard } from '../components/Cred
 import { useProviders } from '../hooks/useProviders'
 import { ProviderLogo } from '../components/ProviderLogo'
 import { formatDate, formatDateTime } from '../utils/format'
-import { Button, Inspector, ConfirmDialog, KeyValue, InspectorSection, LogoLoader } from '../components/ui'
+import { Button, Inspector, ConfirmDialog, KeyValue, InspectorSection, LogoLoader, QueryContent } from '../components/ui'
 
 type PanelState = { kind: 'edit'; id: string } | { kind: 'new' } | null
 
@@ -32,11 +32,12 @@ export default function CredentialsPage() {
   const [panel, setPanel] = useState<PanelState>(null)
   const [pendingDelete, setPendingDelete] = useState<Credential | null>(null)
 
-  const { data, isLoading } = useQuery({
+  const credentialsQuery = useQuery({
     queryKey: ['credentials', selectedProjectId],
     queryFn: () => fetchProjectCredentials(selectedProjectId!),
     enabled: !!selectedProjectId,
   })
+  const { data } = credentialsQuery
   const { data: connectorsData } = useQuery({
     queryKey: ['connectors', selectedProjectId],
     queryFn: () => fetchProjectConnectors(selectedProjectId!),
@@ -141,20 +142,20 @@ export default function CredentialsPage() {
       actions={canMutate ? <Button size="sm" onClick={() => setPanel({ kind: 'new' })}><Plus className="w-3.5 h-3.5" /> Add credential</Button> : undefined}
       panel={panelNode}
     >
-      {isLoading ? (
-        <LogoLoader className="py-10" />
-      ) : credentials.length === 0 ? (
-        <EmptyCredentials canMutate={canMutate} onAdd={() => setPanel({ kind: 'new' })} />
-      ) : (
-        <DataTable
-          columns={columns}
-          data={credentials}
-          getRowId={(row) => row.id}
-          onRowClick={(row) => setPanel({ kind: 'edit', id: row.id })}
-          activeRowId={panel?.kind === 'edit' ? panel.id : null}
-          columnVisibility={panel ? { created_at: false, actions: false } : {}}
-        />
-      )}
+      <QueryContent query={credentialsQuery} what="the credentials">
+        {credentials.length === 0 ? (
+          <EmptyCredentials canMutate={canMutate} onAdd={() => setPanel({ kind: 'new' })} />
+        ) : (
+          <DataTable
+            columns={columns}
+            data={credentials}
+            getRowId={(row) => row.id}
+            onRowClick={(row) => setPanel({ kind: 'edit', id: row.id })}
+            activeRowId={panel?.kind === 'edit' ? panel.id : null}
+            columnVisibility={panel ? { created_at: false, actions: false } : {}}
+          />
+        )}
+      </QueryContent>
       {pendingDelete && (
         <ConfirmDialog
           title="Delete credential?"
@@ -192,12 +193,13 @@ function EditCredentialPanel({ credentialId, usedBy, canMutate, onClose, onDelet
   onSaved: (c: CredentialDetail) => void
 }) {
   const { selectedProjectId } = useProject()
-  const { data: detail, isLoading } = useQuery({
+  const credentialQuery = useQuery({
     queryKey: ['credential', selectedProjectId, credentialId],
     queryFn: () => fetchProjectCredential(selectedProjectId!, credentialId),
     enabled: !!selectedProjectId,
     refetchInterval: false,
   })
+  const { data: detail } = credentialQuery
   const { labelFor } = useProviders()
   const typeLabel = detail ? labelFor(detail.type) : ''
 
@@ -215,19 +217,19 @@ function EditCredentialPanel({ credentialId, usedBy, canMutate, onClose, onDelet
         </>
       ) : undefined}
     >
-      {isLoading || !detail ? (
-        <LogoLoader className="py-6" />
-      ) : (
-        <>
-          <TypeCard type={detail.type} />
-          <CredentialForm key={detail.id} type={detail.type} credential={detail} onSaved={onSaved} formId="credential-form" />
-          <InspectorSection title="Usage">
-            <KeyValue label="Used by" value={usedBy.length ? usedBy.join(', ') : 'no connectors yet'} />
-            <KeyValue label="Created" value={formatDateTime(detail.created_at)} />
-            <KeyValue label="Updated" value={formatDateTime(detail.updated_at)} />
-          </InspectorSection>
-        </>
-      )}
+      <QueryContent query={credentialQuery} what="the credential" loader={<LogoLoader className="py-6" />}>
+        {(detail) => (
+          <>
+            <TypeCard type={detail.type} />
+            <CredentialForm key={detail.id} type={detail.type} credential={detail} onSaved={onSaved} formId="credential-form" />
+            <InspectorSection title="Usage">
+              <KeyValue label="Used by" value={usedBy.length ? usedBy.join(', ') : 'no connectors yet'} />
+              <KeyValue label="Created" value={formatDateTime(detail.created_at)} />
+              <KeyValue label="Updated" value={formatDateTime(detail.updated_at)} />
+            </InspectorSection>
+          </>
+        )}
+      </QueryContent>
     </Inspector>
   )
 }

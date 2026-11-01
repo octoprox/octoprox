@@ -19,7 +19,7 @@ import { ProviderLogo } from '../components/ProviderLogo'
 import { useProviders } from '../hooks/useProviders'
 import { RichSelect, RichSelectOption } from '../components/RichSelect'
 import { formatBytes, formatDate, formatDateTime } from '../utils/format'
-import { Button, Input, Select, Label, Alert, Inspector, InspectorSection, StatGrid, KeyValue, ConfirmDialog, CopyButton, LogoLoader } from '../components/ui'
+import { Button, Input, Select, Label, Alert, Inspector, InspectorSection, StatGrid, KeyValue, ConfirmDialog, CopyButton, QueryContent } from '../components/ui'
 
 type PanelState =
   | { kind: 'proxy'; id: string }
@@ -37,12 +37,13 @@ export default function ProxiesPage() {
   const [panel, setPanel] = useState<PanelState>(null)
   const [pendingDelete, setPendingDelete] = useState<Proxy[] | null>(null)
 
-  const { data, isLoading } = useQuery({
+  const proxiesQuery = useQuery({
     queryKey: ['proxies', selectedProjectId],
     queryFn: () => fetchProjectProxies(selectedProjectId!),
     enabled: !!selectedProjectId,
     refetchInterval: 10000, // statuses and counters move
   })
+  const { data } = proxiesQuery
   const { data: connectorsData } = useQuery({
     queryKey: ['connectors', selectedProjectId],
     queryFn: () => fetchProjectConnectors(selectedProjectId!),
@@ -276,9 +277,7 @@ export default function ProxiesPage() {
       ) : undefined}
       panel={panelNode}
     >
-      {isLoading ? (
-        <LogoLoader className="py-10" />
-      ) : (
+      <QueryContent query={proxiesQuery} what="the proxies">
         <DataTable
           columns={columns}
           data={proxies}
@@ -292,7 +291,7 @@ export default function ProxiesPage() {
           columnVisibility={columnVisibility}
           bulkActions={canMutate ? bulkActions : undefined}
         />
-      )}
+      </QueryContent>
 
       {pendingDelete && (
         <ConfirmDialog

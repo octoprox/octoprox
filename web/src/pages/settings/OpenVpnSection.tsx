@@ -12,7 +12,7 @@ import { useToast } from '../../contexts/ToastContext'
 import { Page } from '../../components/layout/Page'
 import { TunnelGatewaysCard, TunnelStateBadge, relayedLabel } from '../../components/TunnelGateways'
 import { formatDateTime, plural } from '../../utils/format'
-import { Alert, Button, Card, CardHeader, ConfirmDialog, InfoTip, Input, Label, LogoLoader, Select } from '../../components/ui'
+import { Alert, Button, Card, CardHeader, ConfirmDialog, InfoTip, Input, Label, QueryContent, Select } from '../../components/ui'
 
 /**
  * Admin page for the OpenVPN endpoint: the install's CA and what every device
@@ -22,7 +22,8 @@ import { Alert, Button, Card, CardHeader, ConfirmDialog, InfoTip, Input, Label, 
 export default function OpenVpnSection() {
   const queryClient = useQueryClient()
   const toast = useToast()
-  const { data, isLoading } = useQuery({ queryKey: ['openvpn-settings'], queryFn: fetchOpenVpnSettings, refetchInterval: 15_000 })
+  const settingsQuery = useQuery({ queryKey: ['openvpn-settings'], queryFn: fetchOpenVpnSettings, refetchInterval: 15_000 })
+  const { data } = settingsQuery
   const [confirmRotate, setConfirmRotate] = useState(false)
 
   const rotate = useMutation({
@@ -43,30 +44,30 @@ export default function OpenVpnSection() {
       subtitle="Devices without proxy support join a project's pool through an OpenVPN tunnel terminated by Octoprox. This server is shared by every project; each project adds its devices on its Devices page."
       toolbar={data && <TunnelStateBadge status={data.status} />}
     >
-      {isLoading || !data ? (
-        <LogoLoader className="py-10" />
-      ) : (
-        <div className="grid gap-4 @4xl:grid-cols-[minmax(0,1fr)_380px]">
-          <div className="space-y-4">
-            <EndpointForm settings={data} />
-            <Card className="p-5">
-              <CardHeader
-                title="Server identity"
-                action={<Button size="sm" variant="outline" onClick={() => setConfirmRotate(true)}><KeyRound className="w-3.5 h-3.5" /> Rotate identity</Button>}
-              />
-              <p className="text-sm text-fg-muted mt-1">A private certificate authority for the whole install, shared by every gateway. It signs the server certificate devices check and the certificate each device presents. Rotating it reissues every device.</p>
-              <dl className="mt-3 grid grid-cols-[auto_minmax(0,1fr)] gap-x-4 gap-y-1.5 text-sm">
-                <dt className="text-fg-muted">CA fingerprint</dt>
-                <dd className="font-mono text-xs break-all select-all">{data.ca_fingerprint}</dd>
-                <dt className="text-fg-muted">CA expires</dt>
-                <dd>{formatDateTime(data.ca_expires_at)}</dd>
-              </dl>
-              <div className="text-xs text-fg-subtle mt-2">Last changed {formatDateTime(data.updated_at)}</div>
-            </Card>
+      <QueryContent query={settingsQuery} what="the OpenVPN settings">
+        {(data) => (
+          <div className="grid gap-4 @4xl:grid-cols-[minmax(0,1fr)_380px]">
+            <div className="space-y-4">
+              <EndpointForm settings={data} />
+              <Card className="p-5">
+                <CardHeader
+                  title="Server identity"
+                  action={<Button size="sm" variant="outline" onClick={() => setConfirmRotate(true)}><KeyRound className="w-3.5 h-3.5" /> Rotate identity</Button>}
+                />
+                <p className="text-sm text-fg-muted mt-1">A private certificate authority for the whole install, shared by every gateway. It signs the server certificate devices check and the certificate each device presents. Rotating it reissues every device.</p>
+                <dl className="mt-3 grid grid-cols-[auto_minmax(0,1fr)] gap-x-4 gap-y-1.5 text-sm">
+                  <dt className="text-fg-muted">CA fingerprint</dt>
+                  <dd className="font-mono text-xs break-all select-all">{data.ca_fingerprint}</dd>
+                  <dt className="text-fg-muted">CA expires</dt>
+                  <dd>{formatDateTime(data.ca_expires_at)}</dd>
+                </dl>
+                <div className="text-xs text-fg-subtle mt-2">Last changed {formatDateTime(data.updated_at)}</div>
+              </Card>
+            </div>
+            <StatusCard status={data.status} transport={data.protocol} />
           </div>
-          <StatusCard status={data.status} transport={data.protocol} />
-        </div>
-      )}
+        )}
+      </QueryContent>
       {confirmRotate && (
         <ConfirmDialog
           title="Rotate the OpenVPN identity?"

@@ -6,15 +6,16 @@ import { useMutation, useQuery } from '@tanstack/react-query'
 import { fetchCurrentUser, updateSelf, UserSelfUpdate } from '../../api/client'
 import { Page } from '../../components/layout/Page'
 import { ApiTokensPanel, LinkedSignInsPanel } from '../../components/AccessPanels'
-import { Alert, Button, Card, Input, Label, Badge, LogoLoader } from '../../components/ui'
+import { Alert, Button, Card, Input, Label, Badge, QueryContent } from '../../components/ui'
 
 export default function AccountSection() {
-  const { data: currentUser, isLoading, refetch } = useQuery({
+  const currentUserQuery = useQuery({
     queryKey: ['currentUser'],
     queryFn: fetchCurrentUser,
     refetchInterval: false,
     staleTime: Infinity,
   })
+  const { data: currentUser, refetch } = currentUserQuery
 
   const [email, setEmail] = useState('')
   const [currentPassword, setCurrentPassword] = useState('')
@@ -59,63 +60,63 @@ export default function AccountSection() {
 
   return (
     <Page title="Account" subtitle="Your sign-in details. Settings here apply to your user, not to a project.">
-      {isLoading || !currentUser ? (
-        <LogoLoader className="py-10" />
-      ) : (
-        <div className="space-y-4 max-w-xl">
-        <Card className="p-5">
-          <form onSubmit={handleSubmit} className="space-y-4">
-            {error && <Alert variant="error">{error}</Alert>}
-            {success && <Alert variant="success">Account updated</Alert>}
+      <QueryContent query={currentUserQuery} what="your account">
+        {(currentUser) => (
+          <div className="space-y-4 max-w-xl">
+          <Card className="p-5">
+            <form onSubmit={handleSubmit} className="space-y-4">
+              {error && <Alert variant="error">{error}</Alert>}
+              {success && <Alert variant="success">Account updated</Alert>}
 
-            <div className="grid grid-cols-2 gap-3">
-              <div>
-                <Label htmlFor="profile-username">Username</Label>
-                <Input id="profile-username" value={currentUser.username} disabled />
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <Label htmlFor="profile-username">Username</Label>
+                  <Input id="profile-username" value={currentUser.username} disabled />
+                </div>
+                <div>
+                  <Label>Role</Label>
+                  <div className="h-9 flex items-center"><Badge color={currentUser.role === 'admin' ? 'blue' : 'gray'}>{currentUser.role}</Badge></div>
+                </div>
               </div>
               <div>
-                <Label>Role</Label>
-                <div className="h-9 flex items-center"><Badge color={currentUser.role === 'admin' ? 'blue' : 'gray'}>{currentUser.role}</Badge></div>
+                <Label htmlFor="profile-email">Email</Label>
+                <Input id="profile-email" type="email" value={email} onChange={(e) => setEmail(e.target.value)} autoComplete="email" />
               </div>
-            </div>
-            <div>
-              <Label htmlFor="profile-email">Email</Label>
-              <Input id="profile-email" type="email" value={email} onChange={(e) => setEmail(e.target.value)} autoComplete="email" />
-            </div>
 
-            <h3 className="text-[11px] font-semibold uppercase tracking-wider text-fg-subtle pt-2">{currentUser.has_password ? 'Change password' : 'Set a password'}</h3>
-            {currentUser.has_password ? (
-              <div>
-                <Label htmlFor="current-password">Current password</Label>
-                <Input id="current-password" type="password" value={currentPassword} onChange={(e) => setCurrentPassword(e.target.value)} placeholder="Required to change password" autoComplete="current-password" />
+              <h3 className="text-[11px] font-semibold uppercase tracking-wider text-fg-subtle pt-2">{currentUser.has_password ? 'Change password' : 'Set a password'}</h3>
+              {currentUser.has_password ? (
+                <div>
+                  <Label htmlFor="current-password">Current password</Label>
+                  <Input id="current-password" type="password" value={currentPassword} onChange={(e) => setCurrentPassword(e.target.value)} placeholder="Required to change password" autoComplete="current-password" />
+                </div>
+              ) : (
+                <p className="text-xs text-fg-muted">
+                  {currentUser.sign_in_providers.length > 0
+                    ? 'You sign in through a provider and have no password. Setting one adds a second way in; it does not replace the provider.'
+                    : 'This account has no password yet. Setting one lets you sign in with your username.'}
+                </p>
+              )}
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <Label htmlFor="new-password">New password</Label>
+                  <Input id="new-password" type="password" value={newPassword} onChange={(e) => setNewPassword(e.target.value)} placeholder="Leave blank to keep" autoComplete="new-password" />
+                </div>
+                <div>
+                  <Label htmlFor="confirm-password">Confirm</Label>
+                  <Input id="confirm-password" type="password" value={confirmPassword} onChange={(e) => setConfirmPassword(e.target.value)} placeholder="Repeat new password" autoComplete="new-password" />
+                </div>
               </div>
-            ) : (
-              <p className="text-xs text-fg-muted">
-                {currentUser.sign_in_providers.length > 0
-                  ? 'You sign in through a provider and have no password. Setting one adds a second way in; it does not replace the provider.'
-                  : 'This account has no password yet. Setting one lets you sign in with your username.'}
-              </p>
-            )}
-            <div className="grid grid-cols-2 gap-3">
-              <div>
-                <Label htmlFor="new-password">New password</Label>
-                <Input id="new-password" type="password" value={newPassword} onChange={(e) => setNewPassword(e.target.value)} placeholder="Leave blank to keep" autoComplete="new-password" />
-              </div>
-              <div>
-                <Label htmlFor="confirm-password">Confirm</Label>
-                <Input id="confirm-password" type="password" value={confirmPassword} onChange={(e) => setConfirmPassword(e.target.value)} placeholder="Repeat new password" autoComplete="new-password" />
-              </div>
-            </div>
 
-            <div className="flex justify-end">
-              <Button type="submit" size="sm" disabled={mutation.isPending}>{mutation.isPending ? 'Saving…' : 'Save changes'}</Button>
-            </div>
-          </form>
-        </Card>
-        <Card className="p-5"><LinkedSignInsPanel /></Card>
-        <Card className="p-5"><ApiTokensPanel /></Card>
-        </div>
-      )}
+              <div className="flex justify-end">
+                <Button type="submit" size="sm" disabled={mutation.isPending}>{mutation.isPending ? 'Saving…' : 'Save changes'}</Button>
+              </div>
+            </form>
+          </Card>
+          <Card className="p-5"><LinkedSignInsPanel /></Card>
+          <Card className="p-5"><ApiTokensPanel /></Card>
+          </div>
+        )}
+      </QueryContent>
     </Page>
   )
 }

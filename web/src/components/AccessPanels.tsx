@@ -10,7 +10,7 @@ import {
 } from '../api/client'
 import { useToast } from '../contexts/ToastContext'
 import { formatDate, formatDateTime, relativeTime } from '../utils/format'
-import { Alert, Badge, Button, ConfirmDialog, Input, Label, LogoLoader, Modal, ModalHeader, Select } from './ui'
+import { Alert, Badge, Button, ConfirmDialog, Input, Label, LogoLoader, QueryContent, Modal, ModalHeader, Select } from './ui'
 import { ProviderMark } from './SignInProviderMark'
 
 /**
@@ -30,7 +30,8 @@ export function ApiTokensPanel({ userId, canCreate = true, compact = false }: { 
   const queryClient = useQueryClient()
   const toast = useToast()
   const queryKey = ['api-tokens', userId ?? 'me']
-  const { data: tokens = [], isLoading } = useQuery({ queryKey, queryFn: () => fetchApiTokens(userId) })
+  const tokensQuery = useQuery({ queryKey, queryFn: () => fetchApiTokens(userId) })
+  const { data: tokens = [] } = tokensQuery
   const [creating, setCreating] = useState(false)
   const [created, setCreated] = useState<ApiTokenCreated | null>(null)
   const [pendingRevoke, setPendingRevoke] = useState<ApiTokenSummary | null>(null)
@@ -56,34 +57,34 @@ export function ApiTokensPanel({ userId, canCreate = true, compact = false }: { 
           A token authenticates scripts and API clients as this user, with the user's current role, until it is revoked. Send it as <span className="font-mono">Authorization: Bearer octo_…</span>.
         </p>
       )}
-      {isLoading ? (
-        <LogoLoader size="sm" className="py-4" />
-      ) : tokens.length === 0 ? (
-        <div className="text-xs text-fg-muted">No tokens.</div>
-      ) : (
-        <ul className="divide-y divide-line rounded-lg border border-line">
-          {tokens.map((t) => (
-            <li key={t.id} className="flex items-center gap-3 px-3 py-2">
-              <KeyRound className="w-4 h-4 text-fg-subtle flex-none" />
-              <div className="flex-1 min-w-0">
-                <div className="flex items-center gap-2 text-sm">
-                  <span className="font-medium truncate">{t.name}</span>
-                  <span className="font-mono text-[11px] text-fg-subtle">{t.token_prefix}…</span>
-                  {t.expired && <Badge color="red">expired</Badge>}
+      <QueryContent query={tokensQuery} what="the tokens" loader={<LogoLoader size="sm" className="py-4" />}>
+        {tokens.length === 0 ? (
+          <div className="text-xs text-fg-muted">No tokens.</div>
+        ) : (
+          <ul className="divide-y divide-line rounded-lg border border-line">
+            {tokens.map((t) => (
+              <li key={t.id} className="flex items-center gap-3 px-3 py-2">
+                <KeyRound className="w-4 h-4 text-fg-subtle flex-none" />
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-2 text-sm">
+                    <span className="font-medium truncate">{t.name}</span>
+                    <span className="font-mono text-[11px] text-fg-subtle">{t.token_prefix}…</span>
+                    {t.expired && <Badge color="red">expired</Badge>}
+                  </div>
+                  <div className="text-[11px] text-fg-muted">
+                    {t.last_used_at ? `Last used ${relativeTime(t.last_used_at)}` : 'Never used'}
+                    {' · '}{t.expires_at ? `expires ${formatDate(t.expires_at)}` : 'no expiry'}
+                    {t.created_by && userId ? ` · issued by ${t.created_by}` : ''}
+                  </div>
                 </div>
-                <div className="text-[11px] text-fg-muted">
-                  {t.last_used_at ? `Last used ${relativeTime(t.last_used_at)}` : 'Never used'}
-                  {' · '}{t.expires_at ? `expires ${formatDate(t.expires_at)}` : 'no expiry'}
-                  {t.created_by && userId ? ` · issued by ${t.created_by}` : ''}
-                </div>
-              </div>
-              <Button type="button" size="sm" variant="danger-ghost" onClick={() => setPendingRevoke(t)} title="Revoke">
-                <Trash2 className="w-3.5 h-3.5" />
-              </Button>
-            </li>
-          ))}
-        </ul>
-      )}
+                <Button type="button" size="sm" variant="danger-ghost" onClick={() => setPendingRevoke(t)} title="Revoke">
+                  <Trash2 className="w-3.5 h-3.5" />
+                </Button>
+              </li>
+            ))}
+          </ul>
+        )}
+      </QueryContent>
 
       {creating && (
         <CreateTokenDialog
@@ -172,7 +173,8 @@ export function LinkedSignInsPanel({ userId, compact = false }: { userId?: strin
   const queryClient = useQueryClient()
   const toast = useToast()
   const queryKey = ['auth-identities', userId ?? 'me']
-  const { data: identities = [], isLoading } = useQuery({ queryKey, queryFn: () => fetchAuthIdentities(userId) })
+  const identitiesQuery = useQuery({ queryKey, queryFn: () => fetchAuthIdentities(userId) })
+  const { data: identities = [] } = identitiesQuery
   const [pendingUnlink, setPendingUnlink] = useState<AuthIdentity | null>(null)
 
   const unlink = useMutation({
@@ -189,28 +191,28 @@ export function LinkedSignInsPanel({ userId, compact = false }: { userId?: strin
           Provider accounts this user has signed in with. A provider links itself the first time its verified email matches the user's email; nothing to set up here.
         </p>
       )}
-      {isLoading ? (
-        <LogoLoader size="sm" className="py-4" />
-      ) : identities.length === 0 ? (
-        <div className="text-xs text-fg-muted">None yet.</div>
-      ) : (
-        <ul className="divide-y divide-line rounded-lg border border-line">
-          {identities.map((i) => (
-            <li key={i.id} className="flex items-center gap-3 px-3 py-2">
-              <ProviderMark kind={i.provider} className="w-4 h-4 text-fg-subtle flex-none" />
-              <div className="flex-1 min-w-0">
-                <div className="text-sm"><span className="font-medium">{i.label}</span> <span className="text-fg-muted">{i.email}</span></div>
-                <div className="text-[11px] text-fg-muted">
-                  Linked {formatDateTime(i.created_at)}{i.last_login_at ? ` · last sign-in ${relativeTime(i.last_login_at)}` : ''}
+      <QueryContent query={identitiesQuery} what="the linked sign-ins" loader={<LogoLoader size="sm" className="py-4" />}>
+        {identities.length === 0 ? (
+          <div className="text-xs text-fg-muted">None yet.</div>
+        ) : (
+          <ul className="divide-y divide-line rounded-lg border border-line">
+            {identities.map((i) => (
+              <li key={i.id} className="flex items-center gap-3 px-3 py-2">
+                <ProviderMark kind={i.provider} className="w-4 h-4 text-fg-subtle flex-none" />
+                <div className="flex-1 min-w-0">
+                  <div className="text-sm"><span className="font-medium">{i.label}</span> <span className="text-fg-muted">{i.email}</span></div>
+                  <div className="text-[11px] text-fg-muted">
+                    Linked {formatDateTime(i.created_at)}{i.last_login_at ? ` · last sign-in ${relativeTime(i.last_login_at)}` : ''}
+                  </div>
                 </div>
-              </div>
-              <Button type="button" size="sm" variant="danger-ghost" onClick={() => setPendingUnlink(i)} title="Unlink">
-                <Unlink className="w-3.5 h-3.5" />
-              </Button>
-            </li>
-          ))}
-        </ul>
-      )}
+                <Button type="button" size="sm" variant="danger-ghost" onClick={() => setPendingUnlink(i)} title="Unlink">
+                  <Unlink className="w-3.5 h-3.5" />
+                </Button>
+              </li>
+            ))}
+          </ul>
+        )}
+      </QueryContent>
       {pendingUnlink && (
         <ConfirmDialog
           title={`Unlink ${pendingUnlink.label}?`}

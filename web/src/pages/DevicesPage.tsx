@@ -25,7 +25,7 @@ import { DataTable, type DataTableFeatures } from '../components/DataTable'
 import { Page, EmptyState } from '../components/layout/Page'
 import { formatBytes, formatDateTime, parseApiDate, plural } from '../utils/format'
 import {
-  Alert, Badge, Button, ConfirmDialog, InfoTip, Input, Inspector, InspectorSection, KeyValue, Label, LogoLoader, Segmented,
+  Alert, Badge, Button, ConfirmDialog, InfoTip, Input, Inspector, InspectorSection, KeyValue, Label, QueryContent, Segmented,
 } from '../components/ui'
 
 // --- one shape for every tunnel protocol's devices -------------------------------------------
@@ -187,7 +187,6 @@ export default function DevicesPage() {
     refetchInterval: 10_000,
   })
   const lists = [{ protocol: 'wireguard' as Protocol, query: wireguard }, { protocol: 'openvpn' as Protocol, query: openvpn }]
-  const isLoading = wireguard.isLoading || openvpn.isLoading
   const devices = useMemo(
     () => [...(wireguard.data?.devices ?? []), ...(openvpn.data?.devices ?? [])]
       .sort((a, b) => a.created_at.localeCompare(b.created_at) || a.id.localeCompare(b.id)),
@@ -319,25 +318,28 @@ export default function DevicesPage() {
           {isAdmin ? 'Set it in' : 'Ask an administrator to set it in'} <AdminLink page={ADAPTERS[protocol].adminPage}>{ADAPTERS[protocol].label}</AdminLink>.
         </Alert>
       ))}
-      {isLoading ? (
-        <LogoLoader className="py-10" />
-      ) : devices.length === 0 ? (
-        <EmptyState
-          icon={<Router />}
-          title="No devices yet"
-          description="Add a device to get a WireGuard config and QR code, or an OpenVPN profile. Import it on the device and its traffic exits through this project's proxies, no proxy settings needed."
-          action={canMutate ? <Button size="sm" onClick={() => setPanel({ kind: 'new' })}><Plus className="w-3.5 h-3.5" /> Add device</Button> : undefined}
-        />
-      ) : (
-        <DataTable
-          columns={columns}
-          data={devices}
-          getRowId={(row) => `${row.protocol}:${row.id}`}
-          onRowClick={(row) => setPanel({ kind: 'edit', protocol: row.protocol, id: row.id })}
-          activeRowId={panel?.kind === 'edit' ? `${panel.protocol}:${panel.id}` : null}
-          columnVisibility={panel ? { traffic: false, routing: false, actions: false } : {}}
-        />
-      )}
+      {/* Both lists in turn: one protocol's devices alone would read as all there are. */}
+      <QueryContent query={wireguard} what="the WireGuard devices">
+        <QueryContent query={openvpn} what="the OpenVPN devices">
+          {devices.length === 0 ? (
+            <EmptyState
+              icon={<Router />}
+              title="No devices yet"
+              description="Add a device to get a WireGuard config and QR code, or an OpenVPN profile. Import it on the device and its traffic exits through this project's proxies, no proxy settings needed."
+              action={canMutate ? <Button size="sm" onClick={() => setPanel({ kind: 'new' })}><Plus className="w-3.5 h-3.5" /> Add device</Button> : undefined}
+            />
+          ) : (
+            <DataTable
+              columns={columns}
+              data={devices}
+              getRowId={(row) => `${row.protocol}:${row.id}`}
+              onRowClick={(row) => setPanel({ kind: 'edit', protocol: row.protocol, id: row.id })}
+              activeRowId={panel?.kind === 'edit' ? `${panel.protocol}:${panel.id}` : null}
+              columnVisibility={panel ? { traffic: false, routing: false, actions: false } : {}}
+            />
+          )}
+        </QueryContent>
+      </QueryContent>
       {pendingDelete && (
         <ConfirmDialog
           title="Remove device?"

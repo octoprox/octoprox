@@ -20,13 +20,18 @@ export interface ProviderCatalog {
 
 const EMPTY: ProviderListResponse = { total: 0, providers: [], presets: {}, countries: [] }
 
+/** The catalog's own query, for a page that shows its failure (see loadFailed); the catalog itself is useProviders. */
+export function useProvidersQuery() {
+  return useQuery({ queryKey: ['providers'], queryFn: fetchProviders, staleTime: 5 * 60 * 1000 })
+}
+
 /**
  * The provider catalog served by /providers. Every credential/connector form
  * renders from these schemas, so the list is cached aggressively; admin edits
  * invalidate the ['providers'] query.
  */
 export function useProviders(): ProviderCatalog {
-  const { data, isLoading } = useQuery({ queryKey: ['providers'], queryFn: fetchProviders, staleTime: 5 * 60 * 1000 })
+  const { data, isLoading } = useProvidersQuery()
   const catalog = data ?? EMPTY
   return useMemo(() => {
     const byId: Record<string, ProviderSummary> = {}

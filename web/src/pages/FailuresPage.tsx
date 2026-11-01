@@ -104,8 +104,9 @@ export default function FailuresPage() {
     enabled: !!selectedProjectId && !!meta && !examples.isFetching,
     refetchInterval: 10000,
   })
-  // How many examples are new, or happened again, since the first page was loaded.
-  const newer = head.data?.changed ?? 0
+  // How many examples are new, or happened again, since the first page was loaded. None while the examples reload:
+  // resetting the heads refetches the current one at once, a count against the load being replaced.
+  const newer = examples.isRefetching ? 0 : (head.data?.changed ?? 0)
 
   // Heads kept for earlier loads are emptied too, so a key that comes round again starts without stale data.
   const resetHeads = () => queryClient.resetQueries({ queryKey: ['failures-head', selectedProjectId] })
