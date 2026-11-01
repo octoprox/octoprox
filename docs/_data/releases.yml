@@ -10,6 +10,13 @@
 #   changes  what changed, for the people who use Octoprox; `docs` is a page
 #            on octoprox.com that explains it, such as connecting#exit-headers
 
+- version: 6.4.3
+  date: 2026-11-01
+  title: Load errors with retry and steadier reloads
+  changes:
+    - text: "When a list, panel or settings page fails to load, the web UI now says what could not be loaded and gives the server's reason, with a Try again button. Before, a failed load could look like an empty list."
+    - text: "Tables, charts and panels now show the animated Octoprox logo while their data loads. When you change a time range, filter or page, the current content stays in place, dimmed under the loader, until the new data arrives, so the page no longer jumps."
+
 - version: 6.4.2
   date: 2026-11-01
   title: Animated loading indicator and steadier first loads
