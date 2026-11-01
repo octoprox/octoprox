@@ -23,6 +23,7 @@ import { HelpMenu } from '../HelpMenu'
 import { ProjectPanel } from '../ProjectForm'
 import { NewVersionBanner } from '../NewVersion'
 import { UserMenu } from '../UserMenu'
+import { LogoLoader } from '../ui'
 import { ProjectSwitcher } from './ProjectSwitcher'
 import { PageScopeContext, ShellPanelContext } from './Page'
 import { navItemBase, navItemCollapsed, navItemExpanded, navItemIdle } from './navStyles'
@@ -275,7 +276,7 @@ export default function AppShell({ onLogout, area }: { onLogout: () => void; are
 
         <div className="flex-1 min-h-0 flex">
           {projectPending ? (
-            <div className="flex-1 flex items-center justify-center text-fg-muted text-sm">Loading project…</div>
+            <LogoLoader size="lg" label="Loading project…" className="flex-1 items-center" />
           ) : (
             // Keyed by project, so a switch starts the page afresh instead of keeping the old project's panels and filters.
             <ShellPanelContext

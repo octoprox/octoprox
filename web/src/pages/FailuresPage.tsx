@@ -32,7 +32,7 @@ import { StatusCodeBadge } from '../components/mitm/RequestDetail'
 import {
   FailurePanel, GROUP_INFO, GROUP_ORDER, KindBadge, formatWhen, kindInfo, type FailureGroup,
 } from '../components/failures/FailureDetail'
-import { Alert, Button, Card, ConfirmDialog, InfoTip, Segmented } from '../components/ui'
+import { Alert, Button, Card, ConfirmDialog, InfoTip, LogoLoader, Segmented } from '../components/ui'
 import { compact, formatDateTime, parseApiDate, plural } from '../utils/format'
 import { cn } from '../utils/cn'
 
@@ -217,6 +217,13 @@ export default function FailuresPage() {
   // header carries the range then: the counts outlive the examples, and a
   // wider range can still have some.
   const nothingAtAll = !summaryQuery.isLoading && !examples.isLoading && summary?.total === 0 && records.length === 0 && !kindFilter
+  // Until the counts and the examples have both answered once, with data or an error, the page cannot tell the
+  // empty state from the full page, and shows neither. Later loads stay in place: the counts in their card, the
+  // examples (another kind, the newest) in the table.
+  const settled = !summaryQuery.isPending && !examples.isPending
+  const [answered, setAnswered] = useState(false)
+  useEffect(() => { if (settled) setAnswered(true) }, [settled])
+  const firstLoad = !answered && !settled
   const loadError = summaryQuery.error ?? examples.error
 
   return (
@@ -237,7 +244,9 @@ export default function FailuresPage() {
         <Alert variant="error">Could not load the failures{loadError instanceof Error && loadError.message ? `: ${loadError.message}` : ''}.</Alert>
       )}
 
-      {nothingAtAll ? (
+      {firstLoad ? (
+        <LogoLoader className="py-10" />
+      ) : nothingAtAll ? (
         <EmptyState
           icon={<AlertTriangle />}
           title="No failures"
@@ -282,7 +291,7 @@ export default function FailuresPage() {
             </div>
 
             {examples.isLoading ? (
-              <div className="text-sm text-fg-muted py-10 text-center">Loading…</div>
+              <LogoLoader className="py-10" />
             ) : (
               <DataTable
                 columns={columns}

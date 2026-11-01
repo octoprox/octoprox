@@ -6,7 +6,7 @@ import { useMutation, useQuery } from '@tanstack/react-query'
 import { fetchCurrentUser, updateSelf, UserSelfUpdate } from '../../api/client'
 import { Page } from '../../components/layout/Page'
 import { ApiTokensPanel, LinkedSignInsPanel } from '../../components/AccessPanels'
-import { Alert, Button, Card, Input, Label, Badge } from '../../components/ui'
+import { Alert, Button, Card, Input, Label, Badge, LogoLoader } from '../../components/ui'
 
 export default function AccountSection() {
   const { data: currentUser, isLoading, refetch } = useQuery({
@@ -60,7 +60,7 @@ export default function AccountSection() {
   return (
     <Page title="Account" subtitle="Your sign-in details. Settings here apply to your user, not to a project.">
       {isLoading || !currentUser ? (
-        <div className="text-sm text-fg-muted">Loading…</div>
+        <LogoLoader className="py-10" />
       ) : (
         <div className="space-y-4 max-w-xl">
         <Card className="p-5">

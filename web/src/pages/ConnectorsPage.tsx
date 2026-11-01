@@ -34,7 +34,7 @@ import { targetTotal, describeTarget, isDynamic } from '../utils/connectors'
 import { coverageLabel } from '../components/geo/coverage'
 import { MismatchSummary, rateClass, ratePercent } from '../components/geo/AccuracyDetails'
 import { RichSelect, RichSelectOption } from '../components/RichSelect'
-import { Button, Input, Label, Badge, Alert, ChipInput, Inspector, Tabs, Segmented, Select, ConfirmDialog, KeyValue, InspectorSection, InfoTip } from '../components/ui'
+import { Button, Input, Label, Badge, Alert, ChipInput, Inspector, Tabs, Segmented, Select, ConfirmDialog, KeyValue, InspectorSection, InfoTip, LogoLoader } from '../components/ui'
 
 type DomainFilterMode = 'none' | 'whitelist' | 'blacklist'
 type ConfigTab = string
@@ -297,7 +297,7 @@ export default function ConnectorsPage() {
       panel={panelNode}
     >
       {isLoading ? (
-        <div className="text-sm text-fg-muted py-10 text-center">Loading…</div>
+        <LogoLoader className="py-10" />
       ) : connectors.length === 0 ? (
         <EmptyState
           icon={<Link2 />}

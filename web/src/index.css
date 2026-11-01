@@ -268,11 +268,33 @@ select:-webkit-autofill:focus {
   from { stroke-dashoffset: 10; }
   to { stroke-dashoffset: 0; }
 }
+/* The loading logo's colour: the mask is three and a half logos tall (clear, a
+   quarter-logo soft edge, a logo of solid, a soft edge, clear), so sliding it
+   down pours the colour from the head to the tips, then the grey follows, and
+   each cycle starts and ends on an all-grey logo. */
+@keyframes logo-loader-flow {
+  0% { mask-position: 0 100%; }
+  50% { mask-position: 0 50%; }
+  100% { mask-position: 0 0; }
+}
+@keyframes logo-loader-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
 .animate-panel-in { animation: panel-in 0.18s ease-out; }
 .animate-toast-in { animation: toast-in 0.2s ease-out; }
 .animate-pulse-soft { animation: pulse-soft 1.6s ease-in-out infinite; }
 .animate-edge-flow { animation: edge-flow 0.8s linear infinite; }
+.animate-logo-loader-flow {
+  mask-image: linear-gradient(to bottom, transparent 28.57%, #000 35.71%, #000 64.29%, transparent 71.43%);
+  mask-size: 100% 350%;
+  mask-repeat: no-repeat;
+  animation: logo-loader-flow 2.8s ease-in-out 0.4s infinite;
+}
+/* Shows after a moment, so a quick load does not flash the logo. */
+.animate-logo-loader-in { animation: logo-loader-in 0.3s ease-out 0.2s both; }
 
 @media (prefers-reduced-motion: reduce) {
   .animate-panel-in, .animate-toast-in, .animate-pulse-soft, .animate-edge-flow { animation: none; }
+  .animate-logo-loader-flow { animation: none; mask-image: none; }
 }

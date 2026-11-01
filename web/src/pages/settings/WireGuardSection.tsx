@@ -12,7 +12,7 @@ import { useToast } from '../../contexts/ToastContext'
 import { Page } from '../../components/layout/Page'
 import { TunnelGatewaysCard, TunnelStateBadge, relayedLabel } from '../../components/TunnelGateways'
 import { formatDateTime } from '../../utils/format'
-import { Alert, Button, Card, CardHeader, ConfirmDialog, InfoTip, Input, Label } from '../../components/ui'
+import { Alert, Button, Card, CardHeader, ConfirmDialog, InfoTip, Input, Label, LogoLoader } from '../../components/ui'
 
 /**
  * Admin page for the WireGuard endpoint: the install's identity and what every
@@ -43,7 +43,7 @@ export default function WireGuardSection() {
       toolbar={data && <TunnelStateBadge status={data.status} />}
     >
       {isLoading || !data ? (
-        <div className="text-sm text-fg-muted py-10 text-center">Loading…</div>
+        <LogoLoader className="py-10" />
       ) : (
         <div className="grid gap-4 @4xl:grid-cols-[minmax(0,1fr)_380px]">
           <div className="space-y-4">

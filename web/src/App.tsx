@@ -10,6 +10,7 @@ import ProjectSelection from './components/ProjectSelection'
 import RequireAdmin from './components/RequireAdmin'
 import { ReloadOnNewVersion } from './components/NewVersion'
 import AppShell from './components/layout/AppShell'
+import { LogoLoader } from './components/ui'
 import Overview from './pages/Overview'
 import HostsPage from './pages/HostsPage'
 import FailuresPage from './pages/FailuresPage'
@@ -121,7 +122,7 @@ function AuthenticatedApp() {
   if (isLoading) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-bg">
-        <div className="text-fg-muted text-sm">Loading…</div>
+        <LogoLoader size="lg" />
       </div>
     )
   }

@@ -19,7 +19,7 @@ import { CredentialForm, NewCredentialPanel, TypeCard } from '../components/Cred
 import { useProviders } from '../hooks/useProviders'
 import { ProviderLogo } from '../components/ProviderLogo'
 import { formatDate, formatDateTime } from '../utils/format'
-import { Button, Inspector, ConfirmDialog, KeyValue, InspectorSection } from '../components/ui'
+import { Button, Inspector, ConfirmDialog, KeyValue, InspectorSection, LogoLoader } from '../components/ui'
 
 type PanelState = { kind: 'edit'; id: string } | { kind: 'new' } | null
 
@@ -142,7 +142,7 @@ export default function CredentialsPage() {
       panel={panelNode}
     >
       {isLoading ? (
-        <div className="text-sm text-fg-muted py-10 text-center">Loading…</div>
+        <LogoLoader className="py-10" />
       ) : credentials.length === 0 ? (
         <EmptyCredentials canMutate={canMutate} onAdd={() => setPanel({ kind: 'new' })} />
       ) : (

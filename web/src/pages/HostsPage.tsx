@@ -1,7 +1,7 @@
 // Copyright 2026 Octoprox Authors
 // SPDX-License-Identifier: Apache-2.0
 
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useNavigate } from 'react-router'
 import { useQuery } from '@tanstack/react-query'
 import { ColumnDef } from '@tanstack/react-table'
@@ -22,7 +22,7 @@ import { bytesShort, compact, formatBytes, parseApiDate, plural } from '../utils
 import { DataTable, type DataTableFeatures } from '../components/DataTable'
 import { Page, EmptyState } from '../components/layout/Page'
 import { ProviderLogo } from '../components/ProviderLogo'
-import { Alert, Card, CardHeader, InfoTip, Input, Segmented, Select } from '../components/ui'
+import { Alert, Card, CardHeader, InfoTip, Input, LogoLoader, Segmented, Select } from '../components/ui'
 
 /** How many hosts get a series of their own in the chart; the rest stack as one. */
 const TOP_SERIES = 8
@@ -79,14 +79,14 @@ export default function HostsPage() {
   const [search, setSearch] = useState('')
   const debouncedSearch = useDebounced(search.trim(), 300)
 
-  const { data, isLoading, isError, error } = useQuery({
+  const { data, isLoading, isPending, isError, error } = useQuery({
     queryKey: ['host-metrics', selectedProjectId, range, connectorId, debouncedSearch],
     queryFn: () => fetchProjectHostMetrics(selectedProjectId!, { range, connectorId: connectorId || null, search: debouncedSearch || undefined, limit: TABLE_LIMIT }),
     enabled: !!selectedProjectId,
     refetchInterval: 30000,
     placeholderData: (previous) => previous,
   })
-  const { data: history, dataUpdatedAt: historyUpdatedAt } = useQuery({
+  const { data: history, dataUpdatedAt: historyUpdatedAt, isPending: historyPending } = useQuery({
     queryKey: ['host-history', selectedProjectId, range, connectorId],
     queryFn: () => fetchProjectHostHistory(selectedProjectId!, { range, connectorId: connectorId || null, top: TOP_SERIES }),
     enabled: !!selectedProjectId,
@@ -231,6 +231,12 @@ export default function HostsPage() {
 
   const base = `/projects/${selectedProjectId}`
   const nothingYet = !isLoading && data && totals?.host_count === 0 && !debouncedSearch && !connectorId
+  // Until both queries have answered once, with data or an error, the page cannot tell the empty state from the
+  // charts and table, and shows neither. Later loads keep the page, so the search box stays where it is typed in.
+  const settled = !isPending && !historyPending
+  const [answered, setAnswered] = useState(false)
+  useEffect(() => { if (settled) setAnswered(true) }, [settled])
+  const firstLoad = !answered && !settled
   const transferred = totals ? totals.bytes_sent + totals.bytes_received : 0
   const failureRate = totals && totals.request_count > 0 ? (totals.failure_count / totals.request_count) * 100 : null
 
@@ -271,7 +277,9 @@ export default function HostsPage() {
         <Kpi label="Avg latency" value={totals && totals.success_count > 0 ? `${Math.round(totals.avg_latency_ms)} ms` : '-'} sub="to the upstream proxy" />
       </Card>
 
-      {nothingYet ? (
+      {firstLoad ? (
+        <LogoLoader className="py-10" />
+      ) : nothingYet ? (
         <EmptyState
           icon={<Target />}
           title="No requests recorded yet"

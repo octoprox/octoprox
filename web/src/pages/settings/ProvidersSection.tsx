@@ -13,7 +13,7 @@ import { Page, EmptyState } from '../../components/layout/Page'
 import { ProviderLogo } from '../../components/ProviderLogo'
 import { ProviderBuilder, duplicateSpec } from '../../components/providers/ProviderBuilder'
 import { ProviderDetailPanel } from '../../components/providers/ProviderDetailPanel'
-import { Badge, Button, ConfirmDialog, INSPECTOR_WIDTH_WIDE } from '../../components/ui'
+import { Badge, Button, ConfirmDialog, INSPECTOR_WIDTH_WIDE, LogoLoader } from '../../components/ui'
 
 type PanelState = { kind: 'view'; id: string } | { kind: 'edit'; id: string } | { kind: 'new'; spec?: ProviderSpec } | null
 
@@ -152,7 +152,7 @@ export default function ProvidersSection() {
       panel={panelNode}
     >
       {isLoading ? (
-        <div className="text-sm text-fg-muted py-10 text-center">Loading…</div>
+        <LogoLoader className="py-10" />
       ) : providers.length === 0 ? (
         <EmptyState icon={<Puzzle />} title="No providers" description="The catalog is empty, which should not happen." />
       ) : (

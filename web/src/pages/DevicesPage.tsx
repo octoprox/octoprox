@@ -25,7 +25,7 @@ import { DataTable, type DataTableFeatures } from '../components/DataTable'
 import { Page, EmptyState } from '../components/layout/Page'
 import { formatBytes, formatDateTime, parseApiDate, plural } from '../utils/format'
 import {
-  Alert, Badge, Button, ConfirmDialog, InfoTip, Input, Inspector, InspectorSection, KeyValue, Label, Segmented,
+  Alert, Badge, Button, ConfirmDialog, InfoTip, Input, Inspector, InspectorSection, KeyValue, Label, LogoLoader, Segmented,
 } from '../components/ui'
 
 // --- one shape for every tunnel protocol's devices -------------------------------------------
@@ -320,7 +320,7 @@ export default function DevicesPage() {
         </Alert>
       ))}
       {isLoading ? (
-        <div className="text-sm text-fg-muted py-10 text-center">Loading…</div>
+        <LogoLoader className="py-10" />
       ) : devices.length === 0 ? (
         <EmptyState
           icon={<Router />}

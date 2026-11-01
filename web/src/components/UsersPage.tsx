@@ -5,7 +5,7 @@ import { useState, useMemo } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { ColumnDef } from '@tanstack/react-table'
 import { Plus, Trash2, Send, Copy, Check, KeyRound } from 'lucide-react'
-import { Button, Input, Label, Badge, Alert, Inspector, InspectorSection, KeyValue, ConfirmDialog } from './ui'
+import { Button, Input, Label, Badge, Alert, Inspector, InspectorSection, KeyValue, ConfirmDialog, LogoLoader } from './ui'
 import { DataTable, type DataTableFeatures } from './DataTable'
 import { Page } from './layout/Page'
 import { RichSelect, RichSelectOption } from './RichSelect'
@@ -196,7 +196,7 @@ export default function UsersPage() {
       panel={panelNode}
     >
       {isLoading ? (
-        <div className="text-sm text-fg-muted py-10 text-center">Loading…</div>
+        <LogoLoader className="py-10" />
       ) : (
         <DataTable
           columns={columns}

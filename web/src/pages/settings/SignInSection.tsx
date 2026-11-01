@@ -9,7 +9,7 @@ import { useToast } from '../../contexts/ToastContext'
 import { Page } from '../../components/layout/Page'
 import { ProviderMark } from '../../components/SignInProviderMark'
 import { formatDateTime } from '../../utils/format'
-import { Alert, Badge, Button, Card, CardHeader, InfoTip, Input, Label } from '../../components/ui'
+import { Alert, Badge, Button, Card, CardHeader, InfoTip, Input, Label, LogoLoader } from '../../components/ui'
 
 const DOCS_URL = 'https://octoprox.github.io/octoprox/sso'
 
@@ -33,7 +33,7 @@ export default function SignInSection() {
       subtitle="Let the people you have added sign in with a Google, Microsoft or GitHub account instead of a password."
     >
       {isLoading || !providers ? (
-        <div className="text-sm text-fg-muted py-10 text-center">Loading…</div>
+        <LogoLoader className="py-10" />
       ) : (
         <div className="grid gap-4 @4xl:grid-cols-[minmax(0,1fr)_380px]">
           <div className="space-y-4">

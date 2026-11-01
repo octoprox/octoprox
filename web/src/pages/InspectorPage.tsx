@@ -13,7 +13,7 @@ import { DataTable, type DataTableFeatures } from '../components/DataTable'
 import { Page, EmptyState } from '../components/layout/Page'
 import { MethodBadge, StatusCodeBadge, RequestPanel } from '../components/mitm/RequestDetail'
 import { formatBytes, formatTime } from '../utils/format'
-import { Button, ConfirmDialog } from '../components/ui'
+import { Button, ConfirmDialog, LogoLoader } from '../components/ui'
 
 export default function InspectorPage() {
   const queryClient = useQueryClient()
@@ -124,7 +124,7 @@ export default function InspectorPage() {
       panel={open ? <RequestPanel key={open.id} record={open} onClose={() => setOpenId(null)} /> : null}
     >
       {isLoading ? (
-        <div className="text-sm text-fg-muted py-10 text-center">Loading…</div>
+        <LogoLoader className="py-10" />
       ) : records.length === 0 ? (
         <EmptyState
           icon={<Eye />}

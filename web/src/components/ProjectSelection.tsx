@@ -25,7 +25,7 @@ import { UserMenu } from './UserMenu'
 import { Sparkline } from './charts/Sparkline'
 import octoproxLogo from '../assets/logos/octoprox_horizontal.svg'
 import octoproxLogoDark from '../assets/logos/octoprox_horizontal_dark.svg'
-import { Button, Input, Card, Badge, Inspector, ConfirmDialog, Segmented } from './ui'
+import { Button, Input, Card, Badge, Inspector, ConfirmDialog, Segmented, LogoLoader } from './ui'
 
 type PanelState = { kind: 'new' } | { kind: 'edit'; id: string } | null
 
@@ -223,7 +223,7 @@ export default function ProjectSelection() {
           panel={panelNode}
         >
           {isLoading ? (
-            <div className="text-sm text-fg-muted py-10 text-center">Loading projects…</div>
+            <LogoLoader className="py-10" label="Loading projects…" />
           ) : error ? (
             <div className="text-sm text-danger py-10 text-center">Failed to load projects</div>
           ) : rows.length === 0 ? (

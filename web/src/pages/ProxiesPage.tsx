@@ -19,7 +19,7 @@ import { ProviderLogo } from '../components/ProviderLogo'
 import { useProviders } from '../hooks/useProviders'
 import { RichSelect, RichSelectOption } from '../components/RichSelect'
 import { formatBytes, formatDate, formatDateTime } from '../utils/format'
-import { Button, Input, Select, Label, Alert, Inspector, InspectorSection, StatGrid, KeyValue, ConfirmDialog, CopyButton } from '../components/ui'
+import { Button, Input, Select, Label, Alert, Inspector, InspectorSection, StatGrid, KeyValue, ConfirmDialog, CopyButton, LogoLoader } from '../components/ui'
 
 type PanelState =
   | { kind: 'proxy'; id: string }
@@ -277,7 +277,7 @@ export default function ProxiesPage() {
       panel={panelNode}
     >
       {isLoading ? (
-        <div className="text-sm text-fg-muted py-10 text-center">Loading…</div>
+        <LogoLoader className="py-10" />
       ) : (
         <DataTable
           columns={columns}
