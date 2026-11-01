@@ -7,12 +7,13 @@ import { useTimeRange } from '../contexts/TimeRangeContext'
 import { useConnectorHistory } from './ConnectorTraffic'
 import { LatencyChart } from './charts/LatencyChart'
 import { InspectorSection, Segmented } from './ui'
+import { cn } from '../utils/cn'
 
 /** Inspector section: the connector's latency over the range, by step, to tell its vendor's time from Octoprox's. */
 export function ConnectorLatencySection({ connector, projectId }: { connector: Connector; projectId: string }) {
   const [range, setRange] = useTimeRange(HISTORY_RANGES)
   // The traffic section reads the same history, so the two share one request.
-  const { data: history } = useConnectorHistory(projectId, connector.id, range)
+  const { data: history, isLoading } = useConnectorHistory(projectId, connector.id, range)
   const snapshots = useMemo(() => history?.snapshots ?? [], [history])
   const average = useMemo(() => {
     let sum = 0, successes = 0
@@ -29,10 +30,11 @@ export function ConnectorLatencySection({ connector, projectId }: { connector: C
       title="Latency"
       action={<Segmented options={HISTORY_RANGES.map((r) => ({ value: r, label: r }))} value={range} onChange={setRange} size="sm" />}
     >
-      <p className="text-xs text-fg-muted tabular-nums">
+      {/* Held in place, unseen, while the range loads: it would otherwise claim no requests under the loader. */}
+      <p className={cn('text-xs text-fg-muted tabular-nums', isLoading && 'invisible')}>
         {average == null ? `No successful requests over ${range}` : <>Average <span className="text-fg font-medium">{Math.round(average)} ms</span> over the successful requests of {range}, until the tunnel was up or the response started</>}
       </p>
-      <LatencyChart snapshots={snapshots} range={range} height={110} compact />
+      <LatencyChart snapshots={snapshots} range={range} height={110} compact loading={isLoading} />
     </InspectorSection>
   )
 }

@@ -22,7 +22,8 @@ import { bytesShort, compact, formatBytes, parseApiDate, plural } from '../utils
 import { DataTable, type DataTableFeatures } from '../components/DataTable'
 import { Page, EmptyState } from '../components/layout/Page'
 import { ProviderLogo } from '../components/ProviderLogo'
-import { Alert, Card, CardHeader, InfoTip, Input, LogoLoader, Segmented, Select } from '../components/ui'
+import { Alert, Card, CardHeader, InfoTip, Input, LogoLoader, RELOADING, Reloading, Segmented, Select } from '../components/ui'
+import { cn } from '../utils/cn'
 
 /** How many hosts get a series of their own in the chart; the rest stack as one. */
 const TOP_SERIES = 8
@@ -79,14 +80,14 @@ export default function HostsPage() {
   const [search, setSearch] = useState('')
   const debouncedSearch = useDebounced(search.trim(), 300)
 
-  const { data, isLoading, isPending, isError, error } = useQuery({
+  const { data, isLoading, isPending, isPlaceholderData, isError, error } = useQuery({
     queryKey: ['host-metrics', selectedProjectId, range, connectorId, debouncedSearch],
     queryFn: () => fetchProjectHostMetrics(selectedProjectId!, { range, connectorId: connectorId || null, search: debouncedSearch || undefined, limit: TABLE_LIMIT }),
     enabled: !!selectedProjectId,
     refetchInterval: 30000,
     placeholderData: (previous) => previous,
   })
-  const { data: history, dataUpdatedAt: historyUpdatedAt, isPending: historyPending } = useQuery({
+  const { data: history, dataUpdatedAt: historyUpdatedAt, isPending: historyPending, isPlaceholderData: historyReloading } = useQuery({
     queryKey: ['host-history', selectedProjectId, range, connectorId],
     queryFn: () => fetchProjectHostHistory(selectedProjectId!, { range, connectorId: connectorId || null, top: TOP_SERIES }),
     enabled: !!selectedProjectId,
@@ -269,7 +270,7 @@ export default function HostsPage() {
       )}
 
       {/* KPI row */}
-      <Card className="grid grid-cols-2 @lg:grid-cols-3 @4xl:grid-cols-5 gap-px bg-line overflow-hidden *:bg-surface">
+      <Card className={cn('grid grid-cols-2 @lg:grid-cols-3 @4xl:grid-cols-5 gap-px bg-line overflow-hidden *:bg-surface', isPlaceholderData && RELOADING)}>
         <Kpi label="Hosts" value={totals ? totals.host_count.toLocaleString() : '-'} sub={`in the last ${range}`} />
         <Kpi label="Requests" value={totals ? compact(totals.request_count) : '-'} sub={totals && totals.request_count > 0 ? `${compact(totals.success_count)} ok` : undefined} />
         <Kpi label="Failure rate" value={failureRate == null ? '-' : `${failureRate.toFixed(1)}%`} sub={totals && totals.failure_count > 0 ? `${compact(totals.failure_count)} failed` : undefined} tone={failureRate != null && failureRate >= 10 ? 'danger' : undefined} />
@@ -283,89 +284,95 @@ export default function HostsPage() {
         <EmptyState
           icon={<Target />}
           title="No requests recorded yet"
+          reloading={isPlaceholderData}
           description={<>Hosts appear here once requests go through the project's proxies. The numbers come from flushed history, so a request shows up within a minute or so of completing.</>}
         />
       ) : (
         <>
+          {/* Each card dims for its own query: a search narrows the bars, not the history. */}
           <div className="grid grid-cols-1 @4xl:grid-cols-[minmax(0,3fr)_minmax(0,2fr)] gap-4 items-stretch">
             {/* Busiest hosts over time, stacked */}
-            <Card className="p-4 min-w-0">
-              <CardHeader
-                title={<>{metric === 'requests' ? 'Requests' : 'Data'} over time <span className="text-fg-subtle font-normal">· top {Math.min(TOP_SERIES, seriesHosts.filter((h) => h !== overflow).length)} hosts</span></>}
-                action={<Segmented options={METRIC_OPTIONS} value={metric} onChange={setMetric} size="sm" />}
-                className="mb-2"
-              />
-              {chartData.length === 0 ? (
-                <p className="text-fg-subtle text-sm text-center h-[260px] flex items-center justify-center">No data for this time range</p>
-              ) : (
-                <ResponsiveContainer width="100%" height={260}>
-                  <AreaChart data={chartData} margin={{ top: 8, right: 8, left: metric === 'bytes' ? 4 : -12, bottom: 0 }} aria-label={`${metric === 'requests' ? 'Requests' : 'Data'} over time`}>
-                    <CartesianGrid strokeDasharray="2 4" stroke={gridColor} vertical={false} />
-                    <XAxis dataKey="time" type="number" scale="time" domain={timeDomain} tickFormatter={(v: number) => formatRangeTick(v, range)} tick={{ fontSize: 11, fill: tickColor }} axisLine={false} tickLine={false} minTickGap={48} />
-                    <YAxis allowDecimals={false} tick={{ fontSize: 11, fill: tickColor }} axisLine={false} tickLine={false} tickFormatter={(v: number) => (metric === 'requests' ? compact(v) : bytesShort(v))} width={metric === 'bytes' ? 64 : undefined} />
-                    <Tooltip
-                      labelFormatter={(v) => new Date(Number(v)).toLocaleString()}
-                      formatter={(v, name) => [formatMetric(Number(v)), name === overflow ? 'other hosts' : name]}
-                      contentStyle={tooltipStyle}
-                      itemSorter={(item) => -(item.value as number)}
-                    />
-                    {seriesHosts.map((host, index) => ({ host, index })).reverse().map(({ host, index }) => (
-                      <Area
-                        key={host}
-                        type="monotone"
-                        dataKey={seriesKey(index)}
-                        name={host}
-                        stackId="hosts"
-                        stroke={colorOf(host)}
-                        strokeWidth={1.5}
-                        fill={colorOf(host)}
-                        fillOpacity={host === overflow ? 0.25 : 0.45}
+            <Reloading active={historyReloading} className="h-full">
+              <Card className="p-4 min-w-0 h-full">
+                <CardHeader
+                  title={<>{metric === 'requests' ? 'Requests' : 'Data'} over time <span className="text-fg-subtle font-normal">· top {Math.min(TOP_SERIES, seriesHosts.filter((h) => h !== overflow).length)} hosts</span></>}
+                  action={<Segmented options={METRIC_OPTIONS} value={metric} onChange={setMetric} size="sm" />}
+                  className="mb-2"
+                />
+                {chartData.length === 0 ? (
+                  <p className="text-fg-subtle text-sm text-center h-[260px] flex items-center justify-center">No data for this time range</p>
+                ) : (
+                  <ResponsiveContainer width="100%" height={260}>
+                    <AreaChart data={chartData} margin={{ top: 8, right: 8, left: metric === 'bytes' ? 4 : -12, bottom: 0 }} aria-label={`${metric === 'requests' ? 'Requests' : 'Data'} over time`}>
+                      <CartesianGrid strokeDasharray="2 4" stroke={gridColor} vertical={false} />
+                      <XAxis dataKey="time" type="number" scale="time" domain={timeDomain} tickFormatter={(v: number) => formatRangeTick(v, range)} tick={{ fontSize: 11, fill: tickColor }} axisLine={false} tickLine={false} minTickGap={48} />
+                      <YAxis allowDecimals={false} tick={{ fontSize: 11, fill: tickColor }} axisLine={false} tickLine={false} tickFormatter={(v: number) => (metric === 'requests' ? compact(v) : bytesShort(v))} width={metric === 'bytes' ? 64 : undefined} />
+                      <Tooltip
+                        labelFormatter={(v) => new Date(Number(v)).toLocaleString()}
+                        formatter={(v, name) => [formatMetric(Number(v)), name === overflow ? 'other hosts' : name]}
+                        contentStyle={tooltipStyle}
+                        itemSorter={(item) => -(item.value as number)}
                       />
-                    ))}
-                  </AreaChart>
-                </ResponsiveContainer>
-              )}
-              <div className="flex items-center flex-wrap gap-x-3 gap-y-1 text-[11px] text-fg-muted mt-2">
-                {seriesHosts.map((host) => (
-                  <span key={host} className="inline-flex items-center gap-1.5 min-w-0">
-                    <span className="inline-block w-2.5 h-2.5 rounded-xs flex-none" style={{ background: colorOf(host) }} />
-                    <span className="truncate max-w-[200px]">{host === overflow ? 'other hosts' : host}</span>
-                  </span>
-                ))}
-              </div>
-            </Card>
+                      {seriesHosts.map((host, index) => ({ host, index })).reverse().map(({ host, index }) => (
+                        <Area
+                          key={host}
+                          type="monotone"
+                          dataKey={seriesKey(index)}
+                          name={host}
+                          stackId="hosts"
+                          stroke={colorOf(host)}
+                          strokeWidth={1.5}
+                          fill={colorOf(host)}
+                          fillOpacity={host === overflow ? 0.25 : 0.45}
+                        />
+                      ))}
+                    </AreaChart>
+                  </ResponsiveContainer>
+                )}
+                <div className="flex items-center flex-wrap gap-x-3 gap-y-1 text-[11px] text-fg-muted mt-2">
+                  {seriesHosts.map((host) => (
+                    <span key={host} className="inline-flex items-center gap-1.5 min-w-0">
+                      <span className="inline-block w-2.5 h-2.5 rounded-xs flex-none" style={{ background: colorOf(host) }} />
+                      <span className="truncate max-w-[200px]">{host === overflow ? 'other hosts' : host}</span>
+                    </span>
+                  ))}
+                </div>
+              </Card>
+            </Reloading>
 
             {/* Top hosts as bars */}
-            <Card className="p-4 min-w-0 flex flex-col">
-              <CardHeader
-                title={<>Top hosts <span className="text-fg-subtle font-normal">· by {metric === 'requests' ? 'requests' : 'data'}</span></>}
-                action={debouncedSearch ? <span className="text-xs text-fg-muted">matching "{debouncedSearch}"</span> : undefined}
-                className="mb-2"
-              />
-              {topBars.length === 0 ? (
-                <p className="text-fg-subtle text-sm text-center flex-1 min-h-[200px] flex items-center justify-center">No hosts</p>
-              ) : (
-                <ResponsiveContainer width="100%" height={Math.max(200, topBars.length * 28 + 20)}>
-                  <BarChart data={topBars} layout="vertical" margin={{ top: 4, right: 48, left: 4, bottom: 0 }} barCategoryGap={6} aria-label={`Top hosts by ${metric === 'requests' ? 'requests' : 'data'}`}>
-                    <CartesianGrid strokeDasharray="2 4" stroke={gridColor} horizontal={false} />
-                    <XAxis type="number" tick={{ fontSize: 10, fill: tickColor }} axisLine={false} tickLine={false} tickFormatter={(v: number) => (metric === 'requests' ? compact(v) : bytesShort(v))} />
-                    <YAxis type="category" dataKey="host" width={150} tick={{ fontSize: 11, fill: isDark ? '#d1d5db' : '#374151' }} axisLine={false} tickLine={false} tickFormatter={(v: string) => (v === overflow ? 'other hosts' : v.length > 24 ? `${v.slice(0, 23)}…` : v)} />
-                    <Tooltip
-                      cursor={{ fill: isDark ? 'rgba(255,255,255,0.04)' : 'rgba(0,0,0,0.04)' }}
-                      formatter={(v, _name, item) => [`${formatMetric(Number(v))} · ${formatShare(item.payload?.share ?? 0)}`, metric === 'requests' ? 'Requests' : 'Data']}
-                      labelFormatter={(v) => (v === overflow ? 'other hosts' : v)}
-                      contentStyle={tooltipStyle}
-                    />
-                    <Bar
-                      dataKey="value"
-                      radius={[0, 4, 4, 0]}
-                      label={{ position: 'right', fontSize: 10, fill: tickColor, formatter: (v) => (metric === 'requests' ? compact(Number(v)) : bytesShort(Number(v))) }}
-                      shape={(props: BarShapeProps) => <Rectangle {...props} fill={colorOf(props.payload.host) ?? '#2563eb'} />}
-                    />
-                  </BarChart>
-                </ResponsiveContainer>
-              )}
-            </Card>
+            <Reloading active={isPlaceholderData} className="h-full">
+              <Card className="p-4 min-w-0 flex flex-col h-full">
+                <CardHeader
+                  title={<>Top hosts <span className="text-fg-subtle font-normal">· by {metric === 'requests' ? 'requests' : 'data'}</span></>}
+                  action={debouncedSearch ? <span className="text-xs text-fg-muted">matching "{debouncedSearch}"</span> : undefined}
+                  className="mb-2"
+                />
+                {topBars.length === 0 ? (
+                  <p className="text-fg-subtle text-sm text-center flex-1 min-h-[200px] flex items-center justify-center">No hosts</p>
+                ) : (
+                  <ResponsiveContainer width="100%" height={Math.max(200, topBars.length * 28 + 20)}>
+                    <BarChart data={topBars} layout="vertical" margin={{ top: 4, right: 48, left: 4, bottom: 0 }} barCategoryGap={6} aria-label={`Top hosts by ${metric === 'requests' ? 'requests' : 'data'}`}>
+                      <CartesianGrid strokeDasharray="2 4" stroke={gridColor} horizontal={false} />
+                      <XAxis type="number" tick={{ fontSize: 10, fill: tickColor }} axisLine={false} tickLine={false} tickFormatter={(v: number) => (metric === 'requests' ? compact(v) : bytesShort(v))} />
+                      <YAxis type="category" dataKey="host" width={150} tick={{ fontSize: 11, fill: isDark ? '#d1d5db' : '#374151' }} axisLine={false} tickLine={false} tickFormatter={(v: string) => (v === overflow ? 'other hosts' : v.length > 24 ? `${v.slice(0, 23)}…` : v)} />
+                      <Tooltip
+                        cursor={{ fill: isDark ? 'rgba(255,255,255,0.04)' : 'rgba(0,0,0,0.04)' }}
+                        formatter={(v, _name, item) => [`${formatMetric(Number(v))} · ${formatShare(item.payload?.share ?? 0)}`, metric === 'requests' ? 'Requests' : 'Data']}
+                        labelFormatter={(v) => (v === overflow ? 'other hosts' : v)}
+                        contentStyle={tooltipStyle}
+                      />
+                      <Bar
+                        dataKey="value"
+                        radius={[0, 4, 4, 0]}
+                        label={{ position: 'right', fontSize: 10, fill: tickColor, formatter: (v) => (metric === 'requests' ? compact(Number(v)) : bytesShort(Number(v))) }}
+                        shape={(props: BarShapeProps) => <Rectangle {...props} fill={colorOf(props.payload.host) ?? '#2563eb'} />}
+                      />
+                    </BarChart>
+                  </ResponsiveContainer>
+                )}
+              </Card>
+            </Reloading>
           </div>
 
           {/* The table: every host in the window, expandable to its connectors */}
@@ -386,6 +393,7 @@ export default function HostsPage() {
             data={hosts}
             getRowId={(row) => row.host}
             defaultPageSize={25}
+            reloading={isPlaceholderData}
             emptyMessage={debouncedSearch ? `No hosts match "${debouncedSearch}" in the last ${range}.` : `No requests in the last ${range}.`}
             renderExpandedRow={(row) => (
               <ConnectorBreakdown

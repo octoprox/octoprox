@@ -195,6 +195,6 @@ export default function ProvidersSection() {
 
 function EditBuilder({ providerId, onClose, onSaved, onDelete, onDirtyChange }: { providerId: string; onClose: () => void; onSaved: (p: ProviderDetail) => void; onDelete: () => void; onDirtyChange: (dirty: boolean) => void }) {
   const { data } = useQuery({ queryKey: ['provider', providerId], queryFn: () => fetchProvider(providerId) })
-  if (!data) return <div style={{ width: INSPECTOR_WIDTH_WIDE }} className="flex-none border-l border-line bg-surface p-6 text-sm text-fg-muted">Loading…</div>
+  if (!data) return <div style={{ width: INSPECTOR_WIDTH_WIDE }} className="flex-none border-l border-line bg-surface p-6"><LogoLoader className="py-10" /></div>
   return <ProviderBuilder existing={data} onClose={onClose} onSaved={onSaved} onDelete={onDelete} onDirtyChange={onDirtyChange} />
 }

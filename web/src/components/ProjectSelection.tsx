@@ -25,7 +25,7 @@ import { UserMenu } from './UserMenu'
 import { Sparkline } from './charts/Sparkline'
 import octoproxLogo from '../assets/logos/octoprox_horizontal.svg'
 import octoproxLogoDark from '../assets/logos/octoprox_horizontal_dark.svg'
-import { Button, Input, Card, Badge, Inspector, ConfirmDialog, Segmented, LogoLoader } from './ui'
+import { Button, Input, Card, Badge, Inspector, ConfirmDialog, Segmented, LogoLoader, Reloading } from './ui'
 
 type PanelState = { kind: 'new' } | { kind: 'edit'; id: string } | null
 
@@ -96,7 +96,7 @@ export default function ProjectSelection() {
   const [range, setRange] = useTimeRange(HISTORY_RANGES)
 
   const { data, isLoading, error } = useQuery({ queryKey: ['projects'], queryFn: fetchProjects, refetchInterval: 30000 })
-  const { data: loadData } = useQuery({
+  const { data: loadData, isPlaceholderData: loadReloading } = useQuery({
     queryKey: ['projects-load', range],
     queryFn: () => fetchProjectsLoad(range),
     refetchInterval: 30000,
@@ -242,9 +242,10 @@ export default function ProjectSelection() {
               onOpen={openProject}
               onEdit={editProject}
               onDelete={setPendingDelete}
+              reloading={loadReloading}
             />
           ) : (
-            <div className="grid grid-cols-[repeat(auto-fill,minmax(0,320px))] auto-rows-fr gap-4">
+            <Reloading active={loadReloading} align="top" className="grid grid-cols-[repeat(auto-fill,minmax(0,320px))] auto-rows-fr gap-4">
               {rows.map((project) => (
                 <ProjectCard
                   key={project.id}
@@ -257,7 +258,7 @@ export default function ProjectSelection() {
                   onDelete={() => setPendingDelete(project)}
                 />
               ))}
-            </div>
+            </Reloading>
           )}
         </Page>
       </div>
@@ -280,7 +281,7 @@ export default function ProjectSelection() {
 }
 
 /** The projects as one sortable, filterable row each, for installs with too many to scan as tiles. */
-function ProjectTable({ projects, activeId, panelOpen, canMutate, onOpen, onEdit, onDelete }: {
+function ProjectTable({ projects, activeId, panelOpen, canMutate, onOpen, onEdit, onDelete, reloading }: {
   projects: ProjectRow[]
   activeId: string | null
   panelOpen: boolean
@@ -288,6 +289,8 @@ function ProjectTable({ projects, activeId, panelOpen, canMutate, onOpen, onEdit
   onOpen: (project: ProjectSummary) => void
   onEdit: (project: ProjectSummary) => void
   onDelete: (project: ProjectSummary) => void
+  /** Another range's load is on its way. */
+  reloading: boolean
 }) {
   const columns: ColumnDef<DataTableFeatures, ProjectRow>[] = useMemo(() => [
     {
@@ -430,6 +433,7 @@ function ProjectTable({ projects, activeId, panelOpen, canMutate, onOpen, onEdit
       enableColumnFilters
       defaultPageSize={50}
       emptyMessage="No projects match these filters."
+      reloading={reloading}
     />
   )
 }

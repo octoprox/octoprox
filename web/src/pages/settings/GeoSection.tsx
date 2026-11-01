@@ -19,7 +19,7 @@ import { ObservationsPanel } from '../../components/geo/ObservationsPanel'
 import { ExitIpsPanel } from '../../components/geo/ExitIpsPanel'
 import { formatBytes, formatDateTime, parseApiDate, plural, relativeTime, timeUntil } from '../../utils/format'
 import { isInUse } from '../../utils/geo'
-import { Alert, Badge, Button, Card, ConfirmDialog, Input, Label, Select, Tabs } from '../../components/ui'
+import { Alert, Badge, Button, Card, ConfirmDialog, Input, Label, LogoLoader, Select, Tabs } from '../../components/ui'
 import { cn } from '../../utils/cn'
 
 type Tab = 'databases' | 'policy' | 'accuracy' | 'exits' | 'observations'
@@ -279,7 +279,7 @@ function DatabasesTab() {
         {!isLoading && (databases ?? []).length === 0 ? (
           <EmptyState icon={<Database className="w-5 h-5" />} title="No IP databases" description="Upload a MaxMind, DB-IP, IPinfo or IP2Location file, or register a vendor download URL. Until then attribution uses vendor claims and the echo endpoint only. Add a GeoNames cities file to judge city claims by distance." />
         ) : (
-          <DataTable columns={columns} data={databases ?? []} getRowId={(d) => d.id} enableColumnFilters={false} defaultPageSize={20} />
+          <DataTable columns={columns} data={databases ?? []} getRowId={(d) => d.id} enableColumnFilters={false} defaultPageSize={20} loading={isLoading} />
         )}
       </Card>
 
@@ -545,7 +545,7 @@ function PolicyTab() {
     onSuccess: (saved) => { queryClient.setQueryData(['geo-settings'], saved); setDraft(null); toast.show('Settings saved; every process applies them within a few seconds') },
     onError: (e: Error) => toast.show(e.message || 'Failed to save settings', 'error'),
   })
-  if (isLoading || !policy) return <p className="text-sm text-fg-muted">Loading…</p>
+  if (isLoading || !policy) return <LogoLoader className="py-10" />
 
   const update = (patch: Partial<GeoSettingsDoc>) => setDraft({ ...policy, ...patch })
 

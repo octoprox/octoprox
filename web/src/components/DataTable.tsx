@@ -1,7 +1,7 @@
 // Copyright 2026 Octoprox Authors
 // SPDX-License-Identifier: Apache-2.0
 
-import { Fragment, useState, useEffect, useMemo, type ReactNode } from 'react'
+import { Fragment, useState, useEffect, useLayoutEffect, useMemo, useRef, type ReactNode } from 'react'
 import {
   ColumnDef,
   ColumnFiltersState,
@@ -36,6 +36,7 @@ import {
 } from '@tanstack/react-table'
 import { ChevronUp, ChevronDown, ChevronsUpDown, ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight, X } from 'lucide-react'
 import { cn } from '../utils/cn'
+import { LogoLoader, RELOADING } from './ui'
 
 interface DataTableColumnMeta {
   filterVariant?: 'text' | 'select'
@@ -97,6 +98,22 @@ export interface ManualFiltering {
   onColumnFiltersChange: (filters: ColumnFiltersState) => void
 }
 
+/**
+ * The nearest ancestor of the table that scrolls up and down: the table moves within it. Looked for from the
+ * table's own frame outwards, since its sideways-scrolling wrapper computes to `overflow-y: auto` as well.
+ */
+function scrollParent(el: HTMLElement): HTMLElement | null {
+  for (let node = el.parentElement; node; node = node.parentElement) {
+    if (/auto|scroll/.test(getComputedStyle(node).overflowY) && node.scrollHeight > node.clientHeight) return node
+  }
+  return null
+}
+
+/** What the reader can see of the page inside `scroller` (the window when null), top and bottom, in viewport coordinates. */
+function visibleBox(scroller: HTMLElement | null): { top: number; bottom: number } {
+  return scroller ? scroller.getBoundingClientRect() : { top: 0, bottom: window.innerHeight }
+}
+
 interface DataTableProps<TData extends RowData> {
   columns: ColumnDef<DataTableFeatures, TData>[]
   data: TData[]
@@ -106,6 +123,10 @@ interface DataTableProps<TData extends RowData> {
   manualFiltering?: ManualFiltering
   defaultPageSize?: number
   emptyMessage?: string
+  /** The rows are still on their way: an empty table shows the loader instead of `emptyMessage`. */
+  loading?: boolean
+  /** Other rows are on their way (a filter, a page): the current ones stay, dimmed under the loader, so the table keeps its height. */
+  reloading?: boolean
   enableRowSelection?: boolean
   enableColumnFilters?: boolean
   onSelectionChange?: (selectedRows: TData[]) => void
@@ -129,6 +150,8 @@ export function DataTable<TData extends RowData>({
   manualFiltering,
   defaultPageSize = 20,
   emptyMessage = 'No data available.',
+  loading = false,
+  reloading = false,
   enableRowSelection = false,
   enableColumnFilters = false,
   onSelectionChange,
@@ -223,6 +246,61 @@ export function DataTable<TData extends RowData>({
   // wrapper scrolls sideways instead, with the identifying column still first.
   const minTableWidth = visibleColumns.reduce((sum, col) => sum + (col.getSize() !== 150 ? col.getSize() : UNSIZED_COLUMN_MIN_WIDTH), 0)
 
+  // The loader floats over the rows rather than taking a row of its own, so the page does not move; the header
+  // and its filters stay usable. It keeps to the middle of the rows in view, while the reader scrolls as well, so
+  // it shows after paging at the foot of a long table too. The header filters and the footer's paging still change
+  // the rows meanwhile, so the overlay follows the rows' size as well.
+  const rootRef = useRef<HTMLDivElement>(null)
+  const headRef = useRef<HTMLTableSectionElement>(null)
+  const bodyRef = useRef<HTMLTableSectionElement>(null)
+  const overlayRef = useRef<HTMLDivElement>(null)
+  const loaderRef = useRef<HTMLDivElement>(null)
+  const hasRows = table.getRowModel().rows.length > 0
+  const overlaid = reloading && hasRows
+  // The larger loader when much of the rows is in view, chosen as the reload starts.
+  const [roomy, setRoomy] = useState(false)
+  useLayoutEffect(() => {
+    const root = rootRef.current
+    const body = bodyRef.current
+    if (!overlaid || !root || !body) return
+    const rows = body.getBoundingClientRect()
+    const view = visibleBox(scrollParent(root))
+    setRoomy(Math.min(rows.bottom, view.bottom) - Math.max(rows.top, view.top) >= 140)
+  }, [overlaid])
+  // Placed on the elements themselves, not through state: a scroll would otherwise render the whole table each frame.
+  useLayoutEffect(() => {
+    const root = rootRef.current
+    const head = headRef.current
+    const body = bodyRef.current
+    const overlay = overlayRef.current
+    const loader = loaderRef.current
+    if (!overlaid || !root || !head || !body || !overlay || !loader) return
+    const scroller = scrollParent(root)
+    const half = roomy ? 24 : 16
+    const place = () => {
+      const rows = body.getBoundingClientRect()
+      const view = visibleBox(scroller)
+      overlay.style.top = `${head.offsetHeight}px`
+      overlay.style.height = `${rows.height}px`
+      const top = Math.max(rows.top, view.top)
+      const bottom = Math.min(rows.bottom, view.bottom)
+      const centre = (bottom > top ? (top + bottom) / 2 : rows.top + rows.height / 2) - rows.top
+      loader.style.top = `${Math.min(Math.max(centre, half), Math.max(rows.height - half, half))}px`
+    }
+    place()
+    const target = scroller ?? window
+    target.addEventListener('scroll', place, { passive: true })
+    window.addEventListener('resize', place)
+    const resized = new ResizeObserver(place)
+    resized.observe(head)
+    resized.observe(body)
+    return () => {
+      target.removeEventListener('scroll', place)
+      window.removeEventListener('resize', place)
+      resized.disconnect()
+    }
+  }, [overlaid, roomy])
+
   const handleRowClick = (e: React.MouseEvent, original: TData) => {
     if (!onRowClick) return
     const target = e.target as HTMLElement
@@ -231,10 +309,10 @@ export function DataTable<TData extends RowData>({
   }
 
   return (
-    <div className={cn('bg-surface rounded-lg border border-line overflow-hidden min-w-0 flex flex-col', className)}>
+    <div ref={rootRef} className={cn('relative bg-surface rounded-lg border border-line overflow-hidden min-w-0 flex flex-col', className)} aria-busy={loading || reloading || undefined}>
       <div className="overflow-x-auto @container">
         <table className="w-full text-[13px] table-fixed" style={{ minWidth: minTableWidth }}>
-          <thead>
+          <thead ref={headRef}>
             <tr className="bg-surface-raised border-b border-line">
               {table.getHeaderGroups().map((headerGroup) =>
                 headerGroup.headers.map((header) => {
@@ -282,8 +360,8 @@ export function DataTable<TData extends RowData>({
               </tr>
             )}
           </thead>
-          <tbody className="divide-y divide-line">
-            {table.getRowModel().rows.length > 0 ? (
+          <tbody ref={bodyRef} className={cn('divide-y divide-line', overlaid && RELOADING)}>
+            {hasRows ? (
               table.getRowModel().rows.map((row) => {
                 const isActive = activeRowId != null && row.id === activeRowId
                 return (
@@ -326,13 +404,24 @@ export function DataTable<TData extends RowData>({
               <tr>
                 {/* Centred in the visible width, not the table's, so a phone scrolled to the left still sees it. */}
                 <td colSpan={visibleColumnCount} className="p-0">
-                  <div className="sticky left-0 w-[100cqw] px-3 py-10 text-center text-fg-muted">{emptyMessage}</div>
+                  {loading || reloading ? (
+                    <LogoLoader className="sticky left-0 w-[100cqw] py-10" />
+                  ) : (
+                    <div className="sticky left-0 w-[100cqw] px-3 py-10 text-center text-fg-muted">{emptyMessage}</div>
+                  )}
                 </td>
               </tr>
             )}
           </tbody>
         </table>
       </div>
+      {overlaid && (
+        <div ref={overlayRef} className="pointer-events-none absolute inset-x-0 overflow-hidden">
+          <div ref={loaderRef} className="absolute inset-x-0 -translate-y-1/2">
+            <LogoLoader size={roomy ? 'md' : 'sm'} />
+          </div>
+        </div>
+      )}
 
       {/* Footer: bulk actions or paging summary */}
       {totalRows > 0 && (

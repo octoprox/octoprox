@@ -32,7 +32,7 @@ import { StatusCodeBadge } from '../components/mitm/RequestDetail'
 import {
   FailurePanel, GROUP_INFO, GROUP_ORDER, KindBadge, formatWhen, kindInfo, type FailureGroup,
 } from '../components/failures/FailureDetail'
-import { Alert, Button, Card, ConfirmDialog, InfoTip, LogoLoader, Segmented } from '../components/ui'
+import { Alert, Button, Card, ConfirmDialog, InfoTip, LogoLoader, Reloading, Segmented } from '../components/ui'
 import { compact, formatDateTime, parseApiDate, plural } from '../utils/format'
 import { cn } from '../utils/cn'
 
@@ -88,6 +88,9 @@ export default function FailuresPage() {
     // Loaded once and kept: the table only changes when the reader asks for newer examples.
     staleTime: Infinity,
     refetchOnWindowFocus: false,
+    // Another kind keeps the last examples up, dimmed, until its own arrive, so the table keeps its place. Not
+    // another project's: its meta would drive the switched-off notice and the clear button here.
+    placeholderData: (previous, previousQuery) => (previousQuery?.queryKey[1] === selectedProjectId ? previous : undefined),
   })
   const records = useMemo(() => examples.data?.pages.flatMap((p) => p.records) ?? [], [examples.data])
   // An example keeps its id while it recurs: once reloaded, the open one shows its latest count and times.
@@ -98,7 +101,7 @@ export default function FailuresPage() {
   const head = useQuery({
     queryKey: ['failures-head', selectedProjectId, kindFilter, meta?.newest],
     queryFn: () => fetchFailureHead(selectedProjectId!, meta!.newest, kindFilter),
-    enabled: !!selectedProjectId && !!meta,
+    enabled: !!selectedProjectId && !!meta && !examples.isFetching,
     refetchInterval: 10000,
   })
   // How many examples are new, or happened again, since the first page was loaded.
@@ -107,8 +110,9 @@ export default function FailuresPage() {
   // Heads kept for earlier loads are emptied too, so a key that comes round again starts without stale data.
   const resetHeads = () => queryClient.resetQueries({ queryKey: ['failures-head', selectedProjectId] })
 
+  // The same pages again from the newest, fetched in place: the rows stay up, dimmed, until the new ones arrive.
   const showNewest = () => {
-    queryClient.resetQueries({ queryKey: examplesKey })
+    examples.refetch()
     resetHeads()
   }
 
@@ -250,6 +254,7 @@ export default function FailuresPage() {
         <EmptyState
           icon={<AlertTriangle />}
           title="No failures"
+          reloading={summaryQuery.isPlaceholderData}
           description={`Nothing failed in the last ${range}. Requests that fail or are refused are counted here, with examples of what went wrong: the vendor's answer, a timeout, no proxy for the location, and so on.`}
         />
       ) : (
@@ -258,6 +263,7 @@ export default function FailuresPage() {
             summary={summary}
             updatedAt={summaryQuery.dataUpdatedAt}
             loading={summaryQuery.isLoading}
+            reloading={summaryQuery.isPlaceholderData}
             failed={!!summaryQuery.error}
             range={range}
             onRange={setRange}
@@ -290,21 +296,19 @@ export default function FailuresPage() {
               )}
             </div>
 
-            {examples.isLoading ? (
-              <LogoLoader className="py-10" />
-            ) : (
-              <DataTable
-                columns={columns}
-                data={records}
-                defaultPageSize={50}
-                enableColumnFilters
-                getRowId={(row) => row.id}
-                onRowClick={(row) => setOpen(row)}
-                activeRowId={open?.id ?? null}
-                columnVisibility={open ? { message: false, connector: false } : {}}
-                emptyMessage={kindFilter ? `No examples of ${kindInfo(kindFilter).label.toLowerCase()} are kept right now.` : 'No examples kept right now.'}
-              />
-            )}
+            <DataTable
+              columns={columns}
+              data={records}
+              defaultPageSize={50}
+              enableColumnFilters
+              getRowId={(row) => row.id}
+              onRowClick={(row) => setOpen(row)}
+              activeRowId={open?.id ?? null}
+              columnVisibility={open ? { message: false, connector: false } : {}}
+              loading={examples.isLoading}
+              reloading={examples.isPlaceholderData || examples.isRefetching}
+              emptyMessage={kindFilter ? `No examples of ${kindInfo(kindFilter).label.toLowerCase()} are kept right now.` : 'No examples kept right now.'}
+            />
 
             {meta && (
               <div className="flex items-center justify-between flex-wrap gap-2 text-xs text-fg-subtle">
@@ -344,11 +348,13 @@ export default function FailuresPage() {
 }
 
 /** The counted summary: kinds by group with the vendor's statuses, failures over time by kind, and by connector. */
-function WhatFailed({ summary, updatedAt, loading, failed, range, onRange, isDark, kindFilter, onKind }: {
+function WhatFailed({ summary, updatedAt, loading, reloading, failed, range, onRange, isDark, kindFilter, onKind }: {
   summary: FailureSummary | undefined
   /** When the summary arrived; the chart's axis ends there. */
   updatedAt: number
   loading: boolean
+  /** Another range's counts are loading; these stay up meanwhile. */
+  reloading: boolean
   failed: boolean
   range: (typeof HISTORY_RANGES)[number]
   onRange: (range: (typeof HISTORY_RANGES)[number]) => void
@@ -391,13 +397,13 @@ function WhatFailed({ summary, updatedAt, loading, failed, range, onRange, isDar
         <Segmented options={HISTORY_RANGES.map((r) => ({ value: r, label: r }))} value={range} onChange={onRange} size="sm" className="flex-none" />
       </div>
       {loading && !summary ? (
-        <div className="h-[260px] text-sm text-fg-muted flex items-center justify-center">Loading…</div>
+        <LogoLoader className="h-[260px] items-center" />
       ) : !summary && failed ? (
         <div className="h-[260px] text-sm text-fg-subtle flex items-center justify-center">The counts could not be loaded.</div>
       ) : !summary || summary.total === 0 ? (
-        <div className="h-[260px] text-sm text-fg-subtle flex items-center justify-center">No failures counted in the last {range}.</div>
+        <Reloading active={reloading}><div className="h-[260px] text-sm text-fg-subtle flex items-center justify-center">No failures counted in the last {range}.</div></Reloading>
       ) : (
-        <div className="grid grid-cols-1 @md:grid-cols-[minmax(240px,2fr)_minmax(0,3fr)] gap-x-6 gap-y-4 @md:h-[260px]">
+        <Reloading active={reloading} className="grid grid-cols-1 @md:grid-cols-[minmax(240px,2fr)_minmax(0,3fr)] gap-x-6 gap-y-4 @md:h-[260px]">
           <div className="flex flex-col gap-3 min-w-0 @md:overflow-y-auto @md:pr-1">
             <div className="text-[12.5px] text-fg-muted truncate flex-none">
               <span className="font-semibold text-fg tabular-nums">{summary.total.toLocaleString()}</span> {plural(summary.total, 'failure', 'failures')} in the last {range}
@@ -486,7 +492,7 @@ function WhatFailed({ summary, updatedAt, loading, failed, range, onRange, isDar
               </BarChart>
             </ResponsiveContainer>
           </div>
-        </div>
+        </Reloading>
       )}
     </Card>
   )

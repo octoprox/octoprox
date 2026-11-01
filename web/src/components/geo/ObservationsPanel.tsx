@@ -72,7 +72,7 @@ export function ObservationsPanel({ projectId }: { projectId?: string }) {
   const filters: ObservationFilters = { ...applied, project_id: scope, until }
   // A page the server called off for its time limit is not asked for again
   // until the filters or the page change: each try reads for the whole limit.
-  const { data, isLoading, isError, error } = useQuery({
+  const { data, isLoading, isPlaceholderData, isError, error } = useQuery({
     queryKey: ['geo-observations', filters, pageIndex, pageSize],
     queryFn: () => fetchGeoObservations({ ...filters, limit: pageSize, offset: pageIndex * pageSize }),
     refetchInterval: (query) => (query.state.status === 'error' ? false : 30_000),
@@ -175,13 +175,15 @@ export function ObservationsPanel({ projectId }: { projectId?: string }) {
       )}
       <Card className="p-0 overflow-hidden">
         {!isLoading && !isError && rows.length === 0 && !filtering ? (
-          <EmptyState icon={<Globe className="w-5 h-5" />} title="No observations yet" description="Observations arrive as proxies are discovered, health-checked, located or preflighted. They are written in batches, so allow a minute." />
+          <EmptyState icon={<Globe className="w-5 h-5" />} reloading={isPlaceholderData} title="No observations yet" description="Observations arrive as proxies are discovered, health-checked, located or preflighted. They are written in batches, so allow a minute." />
         ) : (
           <DataTable
             columns={columns}
             data={rows}
             getRowId={(o) => String(o.id)}
-            emptyMessage={isLoading ? 'Loading…' : 'No observations match the filters.'}
+            loading={isLoading}
+            reloading={isPlaceholderData}
+            emptyMessage="No observations match the filters."
             manualFiltering={{ columnFilters, onColumnFiltersChange: setColumnFilters }}
             manualPagination={{
               pageIndex,

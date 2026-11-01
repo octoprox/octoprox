@@ -10,7 +10,7 @@ import { useProviders } from '../../hooks/useProviders'
 import { DataTable, type DataTableFeatures } from '../DataTable'
 import { EmptyState } from '../layout/Page'
 import { ProviderLogo } from '../ProviderLogo'
-import { Alert, Card, CardHeader, Segmented } from '../ui'
+import { Alert, Card, CardHeader, LogoLoader, Reloading, Segmented } from '../ui'
 import { cn } from '../../utils/cn'
 import { HeaderWithTip, TIPS } from './columns'
 import { coverageLabel } from './coverage'
@@ -66,12 +66,15 @@ export function ExitSharingPanel({ projectId }: { projectId: string }) {
   // No timed refetch: each comparison reads the project's whole exit history, and the numbers move by the day. A
   // comparison the server called off for its time limit is not retried either, on focus or remount, since each try
   // reads for the whole limit; picking the window again asks again.
-  const { data, isLoading, isError, error } = useQuery({
+  const { data, isLoading, isPlaceholderData, isError, error } = useQuery({
     queryKey: ['geo-exit-sharing', projectId, days],
     queryFn: () => fetchGeoExitSharing({ project_id: projectId, days }),
     retry: false,
     retryOnMount: false,
     refetchOnWindowFocus: (query) => query.state.status !== 'error',
+    // Another window keeps the last comparison up, dimmed, until its own arrives, so the page does not collapse;
+    // another project's comparison is not shown under this one.
+    placeholderData: (previous, previousQuery) => (previousQuery?.queryKey[1] === projectId ? previous : undefined),
   })
 
   const shared = useMemo(() => pairCounts(data?.pairs ?? []), [data])
@@ -171,11 +174,11 @@ export function ExitSharingPanel({ projectId }: { projectId: string }) {
       {isError && (
         <Alert variant="error">Could not compare the exits{error instanceof Error && error.message ? `: ${error.message}` : ''}</Alert>
       )}
-      {isLoading && <p className="text-sm text-fg-muted">Comparing the exits…</p>}
+      {isLoading && <LogoLoader className="py-10" label="Comparing the exits…" />}
       {!isLoading && !isError && connectorCount === 0 ? (
-        <EmptyState icon={<Share2 />} title="No exits seen in this window" description="Sharing appears once the project's connectors have handed out exit IPs that were observed. Try a longer window." />
+        <EmptyState icon={<Share2 />} reloading={isPlaceholderData} title="No exits seen in this window" description="Sharing appears once the project's connectors have handed out exit IPs that were observed. Try a longer window." />
       ) : data && (
-        <>
+        <Reloading active={isPlaceholderData} align="top" className="space-y-3">
           <Card className="grid grid-cols-2 @lg:grid-cols-3 gap-px bg-line overflow-hidden *:bg-surface">
             <Kpi label="Distinct exits" value={data.exits.toLocaleString()} sub={`across ${connectorCount} ${connectorCount === 1 ? 'connector' : 'connectors'}`} />
             <Kpi label="Shared" value={percentText(data.shared, data.exits)} sub={`${data.shared.toLocaleString()} IPs on 2+ connectors`} />
@@ -216,7 +219,7 @@ export function ExitSharingPanel({ projectId }: { projectId: string }) {
               </>
             )}
           </Card>
-        </>
+        </Reloading>
       )}
     </div>
   )

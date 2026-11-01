@@ -25,7 +25,7 @@ import { Sparkline } from '../components/charts/Sparkline'
 import { ProjectLocations, LocationSummary } from '../components/ProjectLocations'
 import { TrafficSplitPanel, totalSpend } from '../components/TrafficSplit'
 import { PERIOD_LABEL, TrafficUsageBar, describeUsage } from '../components/ConnectorTraffic'
-import { Badge, Card, CardHeader, KeyValue, Segmented } from '../components/ui'
+import { Badge, Card, CardHeader, KeyValue, LogoLoader, Segmented } from '../components/ui'
 import { cn } from '../utils/cn'
 
 type ChartPoint = {
@@ -124,7 +124,7 @@ export default function Overview() {
     enabled: !!selectedProjectId,
     refetchInterval: 10000,
   })
-  const { data: history, dataUpdatedAt: historyUpdatedAt } = useQuery({
+  const { data: history, dataUpdatedAt: historyUpdatedAt, isLoading: historyLoading } = useQuery({
     queryKey: ['metrics-history', selectedProjectId, range],
     queryFn: () => fetchProjectMetricsHistory(selectedProjectId!, range),
     enabled: !!selectedProjectId,
@@ -259,7 +259,9 @@ export default function Overview() {
               action={<ChartLegend items={[['Requests', C.requests], ['Successes', C.successes], ['Failures', C.failures]]} />}
               className="mb-2"
             />
-            {chartData.length === 0 ? (
+            {historyLoading ? (
+              <LogoLoader className="h-[240px] items-center" />
+            ) : chartData.length === 0 ? (
               <p className="text-fg-subtle text-sm text-center h-[240px] flex items-center justify-center">No data for this time range</p>
             ) : (
               <ResponsiveContainer width="100%" height={240}>
@@ -279,11 +281,13 @@ export default function Overview() {
           <div className="grid grid-cols-1 @lg:grid-cols-2 gap-4">
             <Card className="p-3.5">
               <CardHeader title={<span className="text-[13px]">Latency</span>} action={<span className="text-xs text-fg-muted" title="Over the successful requests, since the project started">avg {avgLatency}</span>} className="mb-1" />
-              <LatencyChart snapshots={snapshots} range={range} height={110} domain={timeDomain} compact />
+              <LatencyChart snapshots={snapshots} range={range} height={110} domain={timeDomain} compact loading={historyLoading} />
             </Card>
             <Card className="p-3.5">
               <CardHeader title={<span className="text-[13px]">Traffic</span>} action={<ChartLegend items={[['Sent', C.sent], ['Received', C.received]]} small />} className="mb-1" />
-              {chartData.length === 0 ? (
+              {historyLoading ? (
+                <LogoLoader size="sm" className="h-[110px] items-center" />
+              ) : chartData.length === 0 ? (
                 <p className="text-fg-subtle text-xs text-center h-[110px] flex items-center justify-center">No data</p>
               ) : (
                 <ResponsiveContainer width="100%" height={110}>

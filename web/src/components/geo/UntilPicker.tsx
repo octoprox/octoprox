@@ -129,7 +129,11 @@ export function UntilPicker({ onChange }: { onChange: (until: string | undefined
           </Button>
         </>
       ) : (
-        applied !== null && <span className="text-xs text-fg-subtle tabular-nums">up to {formatDateTime(new Date(applied).toISOString())}</span>
+        // Held in place, unseen, under Now too, and as tall as the custom fields: on a phone it wraps to a line of
+        // its own, and appearing on a click would push the log down.
+        <span className={cn('inline-flex items-center min-h-7 text-xs text-fg-subtle tabular-nums', applied === null && 'invisible')}>
+          up to {formatDateTime(new Date(applied ?? Date.now()).toISOString())}
+        </span>
       )}
     </div>
   )

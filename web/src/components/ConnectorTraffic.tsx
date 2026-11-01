@@ -19,7 +19,8 @@ import { formatBytesDecimal, formatDateTime, formatMoney, parseApiDate, timeUnti
 import { useTheme } from '../contexts/ThemeContext'
 import { formatRangeTick, useTimeRange } from '../contexts/TimeRangeContext'
 import { useToast } from '../contexts/ToastContext'
-import { Badge, ConfirmDialog, InspectorSection, KeyValue, Segmented } from './ui'
+import { Badge, ConfirmDialog, InspectorSection, KeyValue, LogoLoader, Segmented } from './ui'
+import { cn } from '../utils/cn'
 
 export const PERIOD_LABEL: Record<TrafficPeriod, string> = { day: 'today', week: 'this week', month: 'this month' }
 export const ACTION_LABEL = { alert: 'Alert only', block: 'Block new requests', interrupt: 'Block and cut transfers' } as const
@@ -118,7 +119,7 @@ export function ConnectorTrafficSection({ connector, projectId, canMutate }: { c
   const [confirmReset, setConfirmReset] = useState(false)
   const usage = connector.traffic_usage
 
-  const { data: history } = useConnectorHistory(projectId, connector.id, range)
+  const { data: history, isLoading } = useConnectorHistory(projectId, connector.id, range)
   const points = useMemo(() => toPoints(history?.snapshots ?? []), [history])
   const rangeBytes = useMemo(() => points.reduce((a, p) => a + p.bytes, 0), [points])
 
@@ -168,10 +169,13 @@ export function ConnectorTrafficSection({ connector, projectId, canMutate }: { c
 
       <div className="pt-1">
         <div className="flex items-center justify-between mb-1">
-          <span className="text-xs text-fg-muted tabular-nums">{formatBytesDecimal(rangeBytes)} over {range}</span>
+          {/* Unseen while the range loads, rather than "0 B" over the loader. */}
+          <span className={cn('text-xs text-fg-muted tabular-nums', isLoading && 'invisible')}>{formatBytesDecimal(rangeBytes)} over {range}</span>
           <Segmented options={HISTORY_RANGES.map((r) => ({ value: r, label: r }))} value={range} onChange={setRange} size="sm" />
         </div>
-        {points.length === 0 ? (
+        {isLoading ? (
+          <LogoLoader size="sm" className="h-[90px] items-center" />
+        ) : points.length === 0 ? (
           <p className="text-fg-subtle text-xs text-center h-[90px] flex items-center justify-center">No traffic in this range</p>
         ) : (
           <ResponsiveContainer width="100%" height={90}>

@@ -22,7 +22,7 @@ import { useTheme } from '../../contexts/ThemeContext'
 import { useTimeRange } from '../../contexts/TimeRangeContext'
 import { bytesShort, elideMiddle, formatBytes, formatDateTime, parseApiDate, plural, relativeTime } from '../../utils/format'
 import {
-  Alert, Badge, Button, Card, CardHeader, FlowDiagram, FlowNode, Inspector, InspectorSection, KeyValue, Segmented,
+  Alert, Badge, Button, Card, CardHeader, FlowDiagram, FlowNode, Inspector, InspectorSection, KeyValue, LogoLoader, Reloading, Segmented,
   type FlowAnchor, type FlowEdge, type FlowTone,
 } from '../../components/ui'
 import { cn } from '../../utils/cn'
@@ -123,7 +123,7 @@ export default function SystemSection() {
         />
       )}
       {!data ? (
-        <p className="text-sm text-fg-muted py-8 text-center">{isLoading ? 'Loading…' : 'No data'}</p>
+        isLoading ? <LogoLoader className="py-8" /> : <p className="text-sm text-fg-muted py-8 text-center">No data</p>
       ) : (
         <>
           {view === 'list' && (
@@ -1599,7 +1599,7 @@ function TopologyCard({ data, error, selectedId, onSelect }: {
       {error != null && <Alert variant="error" className="mb-3">{(error as Error).message || 'Failed to load the topology'}</Alert>}
       {data?.controller.error && <Alert variant="error" className="mb-3">{data.controller.error}</Alert>}
       {!data ? (
-        <p className="text-xs text-fg-muted py-8 text-center">{error ? 'No data' : 'Loading…'}</p>
+        error ? <p className="text-xs text-fg-muted py-8 text-center">No data</p> : <LogoLoader className="py-8" />
       ) : (
         <Topology data={data} selectedId={selectedId} onSelect={onSelect} />
       )}
@@ -2521,10 +2521,12 @@ type TrendPoint = Record<string, number | null> & { time: number }
  */
 function TrendsSection() {
   const [range, setRange] = useTimeRange(SYSTEM_HISTORY_RANGES)
-  const { data, isLoading } = useQuery({
+  const { data, isLoading, isPlaceholderData } = useQuery({
     queryKey: ['system-history', range],
     queryFn: () => fetchSystemHistory(range),
     refetchInterval: REFRESH_MS * 2,
+    // Another range keeps the last trends up, dimmed, until its own arrive, so the page does not collapse.
+    placeholderData: (previous) => previous,
   })
 
   const points = useMemo(() => buildTrendPoints(data), [data])
@@ -2548,16 +2550,17 @@ function TrendsSection() {
         />
       </div>
 
-      {!hasData ? (
+      {/* Another range on its way: the last range's "only one snapshot" would read as this one's. */}
+      {!hasData && (isLoading || isPlaceholderData) ? (
+        <LogoLoader className="py-8" />
+      ) : !hasData ? (
         <p className="text-xs text-fg-muted py-8 text-center">
-          {isLoading
-            ? 'Loading…'
-            : data && data.snapshots.length > 0
-              ? 'Only one snapshot so far - a trend needs at least two.'
-              : `No snapshots in this range yet. The first arrives within ${formatDuration(data?.interval_seconds ?? 300)}.`}
+          {data && data.snapshots.length > 0
+            ? 'Only one snapshot so far - a trend needs at least two.'
+            : `No snapshots in this range yet. The first arrives within ${formatDuration(data?.interval_seconds ?? 300)}.`}
         </p>
       ) : (
-        <div className="flex flex-col gap-4">
+        <Reloading active={isPlaceholderData} align="top" className="flex flex-col gap-4">
           <DeltaStrip points={points} range={range} />
           {/* Separate charts, so Redis memory - far smaller than the database - keeps its own scale. */}
           <div className="grid grid-cols-1 @3xl:grid-cols-2 gap-4">
@@ -2605,7 +2608,7 @@ function TrendsSection() {
             />
           </div>
           {data && data.table_growth.length > 0 && <TableGrowthList history={data} range={range} />}
-        </div>
+        </Reloading>
       )}
     </Card>
   )

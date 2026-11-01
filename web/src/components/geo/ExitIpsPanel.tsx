@@ -62,7 +62,7 @@ export function ExitIpsPanel({ projectId }: { projectId?: string }) {
   useEffect(() => { setPageIndex(0) }, [scope, applied, pageSize])
 
   const filters: ExitIpFilters = { ...applied, project_id: scope }
-  const { data, isLoading } = useQuery({
+  const { data, isLoading, isPlaceholderData } = useQuery({
     queryKey: ['geo-exit-ips', filters, pageIndex, pageSize],
     queryFn: () => fetchGeoExitIps({ ...filters, limit: pageSize, offset: pageIndex * pageSize }),
     refetchInterval: 60_000,
@@ -151,13 +151,15 @@ export function ExitIpsPanel({ projectId }: { projectId?: string }) {
       </div>
       <Card className="p-0 overflow-hidden">
         {!isLoading && rows.length === 0 && !filtering ? (
-          <EmptyState icon={<Network className="w-5 h-5" />} title="No exit IPs yet" description="Exits appear once a proxy's IP has been seen: on discovery, a health check, a lookup or preflight. They are written in batches, so allow a minute." />
+          <EmptyState icon={<Network className="w-5 h-5" />} reloading={isPlaceholderData} title="No exit IPs yet" description="Exits appear once a proxy's IP has been seen: on discovery, a health check, a lookup or preflight. They are written in batches, so allow a minute." />
         ) : (
           <DataTable
             columns={columns}
             data={rows}
             getRowId={(e) => `${e.connector_id}:${e.ip}`}
-            emptyMessage={isLoading ? 'Loading…' : 'No exit IPs match the filters.'}
+            loading={isLoading}
+            reloading={isPlaceholderData}
+            emptyMessage="No exit IPs match the filters."
             manualFiltering={{ columnFilters, onColumnFiltersChange: setColumnFilters }}
             manualPagination={{
               pageIndex,

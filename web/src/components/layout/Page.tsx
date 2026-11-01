@@ -3,6 +3,7 @@
 
 import { createContext, useContext, type ReactNode } from 'react'
 import { cn } from '../../utils/cn'
+import { Reloading } from '../ui'
 
 /** A panel the shell opens over any page (project settings); it takes the page's panel slot while set, the page's own panel kept hidden. */
 export const ShellPanelContext = createContext<ReactNode>(null)
@@ -67,13 +68,22 @@ export function Page({ title, subtitle, count, belowTitle, actions, toolbar, pan
   )
 }
 
-export function EmptyState({ icon, title, description, action }: { icon?: ReactNode; title: string; description?: ReactNode; action?: ReactNode }) {
+export function EmptyState({ icon, title, description, action, reloading = false }: {
+  icon?: ReactNode
+  title: string
+  description?: ReactNode
+  action?: ReactNode
+  /** Another answer is loading (a range, a filter) and may not be empty: this one stays up under the loader. */
+  reloading?: boolean
+}) {
   return (
-    <div className="bg-surface rounded-lg border border-line p-10 text-center">
-      {icon && <div className="w-10 h-10 mx-auto mb-3 text-fg-subtle [&>svg]:w-10 [&>svg]:h-10">{icon}</div>}
-      <h3 className="text-base font-medium text-fg">{title}</h3>
-      {description && <p className="text-sm text-fg-muted mt-1 max-w-md mx-auto">{description}</p>}
-      {action && <div className="mt-4 flex justify-center">{action}</div>}
-    </div>
+    <Reloading active={reloading}>
+      <div className="bg-surface rounded-lg border border-line p-10 text-center">
+        {icon && <div className="w-10 h-10 mx-auto mb-3 text-fg-subtle [&>svg]:w-10 [&>svg]:h-10">{icon}</div>}
+        <h3 className="text-base font-medium text-fg">{title}</h3>
+        {description && <p className="text-sm text-fg-muted mt-1 max-w-md mx-auto">{description}</p>}
+        {action && <div className="mt-4 flex justify-center">{action}</div>}
+      </div>
+    </Reloading>
   )
 }

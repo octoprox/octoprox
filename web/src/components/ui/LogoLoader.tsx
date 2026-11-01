@@ -6,7 +6,7 @@ import octoproxLogoOnlyDark from '../../assets/logos/octoprox_logo_only_dark.svg
 import { useTheme } from '../../contexts/ThemeContext'
 import { cn } from '../../utils/cn'
 
-const SIZES = { md: 'size-12', lg: 'size-20' }
+const SIZES = { sm: 'size-8', md: 'size-12', lg: 'size-20' }
 
 // The build prefixes mask properties in the stylesheet for Chromium before 120; an inline style needs both by hand.
 const LOGO_SHAPE = { maskImage: `url(${octoproxLogoOnly})`, WebkitMaskImage: `url(${octoproxLogoOnly})` }
@@ -18,7 +18,7 @@ interface LogoLoaderProps {
   className?: string
 }
 
-/** The logo in grey with its colour flowing down from the head to the tentacle tips and draining again, while a page or the app loads. */
+/** The logo in grey with its colour flowing down from the head to the tentacle tips and draining again, while the app, a page, a table or a chart loads. */
 export function LogoLoader({ size = 'md', label = 'Loading…', className }: LogoLoaderProps) {
   const { isDark } = useTheme()
   return (

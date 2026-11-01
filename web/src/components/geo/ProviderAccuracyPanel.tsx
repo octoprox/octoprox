@@ -58,13 +58,16 @@ export function ProviderAccuracyPanel({ projectId, onInspect, inspecting }: {
   const [projectFilter, setProjectFilter] = useState('')
   const scope = projectId ?? (projectFilter || undefined)
   // No timed refetch: each answer reads the connectors' whole exit history, and the numbers move by the day.
-  const { data, isLoading: accuracyLoading } = useQuery({
+  // Another window or project keeps the last answer on screen until its own arrives, so the table keeps its place.
+  const { data, isLoading: accuracyLoading, isPlaceholderData: accuracyReloading } = useQuery({
     queryKey: ['geo-accuracy', scope ?? 'all', days],
     queryFn: () => fetchGeoAccuracy({ days, project_id: scope }),
+    placeholderData: (previous) => previous,
   })
-  const { data: exits, isLoading: exitsLoading } = useQuery({
+  const { data: exits, isLoading: exitsLoading, isPlaceholderData: exitsReloading } = useQuery({
     queryKey: ['geo-exits', scope ?? 'all', days],
     queryFn: () => fetchGeoExits({ days, project_id: scope }),
+    placeholderData: (previous) => previous,
   })
   // A row merges both answers, so the table waits for both: exits alone would read as "no claims".
   const isLoading = accuracyLoading || exitsLoading
@@ -208,9 +211,9 @@ export function ProviderAccuracyPanel({ projectId, onInspect, inspecting }: {
       </div>
       <Card className="p-0 overflow-hidden">
         {!isLoading && rows.length === 0 ? (
-          <EmptyState icon={<CheckCircle2 className="w-5 h-5" />} title="Nothing to compare yet" description="Accuracy appears once proxies with a vendor-declared country have been attributed; unique exits once any exit IP has been seen." />
+          <EmptyState icon={<CheckCircle2 className="w-5 h-5" />} reloading={accuracyReloading || exitsReloading} title="Nothing to compare yet" description="Accuracy appears once proxies with a vendor-declared country have been attributed; unique exits once any exit IP has been seen." />
         ) : (
-          <DataTable columns={columns} data={rows} getRowId={(c) => c.connector_id} enableColumnFilters defaultPageSize={25} emptyMessage={isLoading ? 'Loading…' : undefined} onRowClick={onInspect ? (row) => onInspect(row) : undefined} />
+          <DataTable columns={columns} data={rows} getRowId={(c) => c.connector_id} enableColumnFilters defaultPageSize={25} loading={isLoading} reloading={accuracyReloading || exitsReloading} onRowClick={onInspect ? (row) => onInspect(row) : undefined} />
         )}
       </Card>
     </div>

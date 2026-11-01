@@ -216,7 +216,7 @@ function EditCredentialPanel({ credentialId, usedBy, canMutate, onClose, onDelet
       ) : undefined}
     >
       {isLoading || !detail ? (
-        <div className="text-sm text-fg-muted py-6 text-center">Loading…</div>
+        <LogoLoader className="py-6" />
       ) : (
         <>
           <TypeCard type={detail.type} />

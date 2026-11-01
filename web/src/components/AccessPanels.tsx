@@ -10,7 +10,7 @@ import {
 } from '../api/client'
 import { useToast } from '../contexts/ToastContext'
 import { formatDate, formatDateTime, relativeTime } from '../utils/format'
-import { Alert, Badge, Button, ConfirmDialog, Input, Label, Modal, ModalHeader, Select } from './ui'
+import { Alert, Badge, Button, ConfirmDialog, Input, Label, LogoLoader, Modal, ModalHeader, Select } from './ui'
 import { ProviderMark } from './SignInProviderMark'
 
 /**
@@ -57,7 +57,7 @@ export function ApiTokensPanel({ userId, canCreate = true, compact = false }: { 
         </p>
       )}
       {isLoading ? (
-        <div className="text-xs text-fg-muted">Loading…</div>
+        <LogoLoader size="sm" className="py-4" />
       ) : tokens.length === 0 ? (
         <div className="text-xs text-fg-muted">No tokens.</div>
       ) : (
@@ -190,7 +190,7 @@ export function LinkedSignInsPanel({ userId, compact = false }: { userId?: strin
         </p>
       )}
       {isLoading ? (
-        <div className="text-xs text-fg-muted">Loading…</div>
+        <LogoLoader size="sm" className="py-4" />
       ) : identities.length === 0 ? (
         <div className="text-xs text-fg-muted">None yet.</div>
       ) : (

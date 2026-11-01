@@ -13,6 +13,7 @@ import { HISTORY_GAP_MS, HistoryRange, LatencyStep, MetricsSnapshot } from '../.
 import { formatRangeTick } from '../../contexts/TimeRangeContext'
 import { useTheme } from '../../contexts/ThemeContext'
 import { formatMs, parseApiDate } from '../../utils/format'
+import { LogoLoader } from '../ui'
 
 type Band = LatencyStep | 'unsplit'
 
@@ -78,7 +79,7 @@ function rangeAverages(snapshots: MetricsSnapshot[]) {
   return { averages, unsplit }
 }
 
-export function LatencyChart({ snapshots, range, height, domain, compact }: {
+export function LatencyChart({ snapshots, range, height, domain, compact, loading }: {
   snapshots: MetricsSnapshot[]
   range: HistoryRange
   height: number
@@ -86,6 +87,8 @@ export function LatencyChart({ snapshots, range, height, domain, compact }: {
   domain?: [number, number]
   /** Smaller ticks, for a narrow card or an inspector. */
   compact?: boolean
+  /** The snapshots are still on their way: shows the loader instead of "No data". */
+  loading?: boolean
 }) {
   const { isDark } = useTheme()
   const points = useMemo(() => toPoints(snapshots, range), [snapshots, range])
@@ -96,6 +99,9 @@ export function LatencyChart({ snapshots, range, height, domain, compact }: {
   // Only the steps the range has, so a project without preflight lists none.
   const legend = averages.filter((step) => step.ms > 0)
 
+  if (loading) {
+    return <div className="flex items-center justify-center" style={{ height }}><LogoLoader size="sm" /></div>
+  }
   if (points.length === 0) {
     return <p className="text-fg-subtle text-xs text-center flex items-center justify-center" style={{ height }}>No data</p>
   }

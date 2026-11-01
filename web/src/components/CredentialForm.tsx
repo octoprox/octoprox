@@ -10,7 +10,7 @@ import {
 } from '../api/client'
 import { useProject } from '../contexts/ProjectContext'
 import { useProviders } from '../hooks/useProviders'
-import { Button, Alert, Inspector, Badge } from './ui'
+import { Button, Alert, Inspector, Badge, LogoLoader } from './ui'
 import { ProviderLogo } from './ProviderLogo'
 import { SchemaForm, defaultValues, serializeValues, FormValues } from './SchemaForm'
 
@@ -20,7 +20,7 @@ export function TypePicker({ onPick, hint }: { onPick: (type: CredentialType) =>
   return (
     <div className="space-y-3">
       {hint && <p className="text-xs text-fg-muted">{hint}</p>}
-      {isLoading && <p className="text-xs text-fg-muted">Loading providers…</p>}
+      {isLoading && <LogoLoader className="py-6" label="Loading providers…" />}
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
         {providers.map((p) => (
           <button

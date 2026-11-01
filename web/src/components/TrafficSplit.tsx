@@ -6,7 +6,7 @@ import { ConnectorTrafficShare, HISTORY_RANGES, TrafficSplitResponse, fetchProje
 import { useTimeRange } from '../contexts/TimeRangeContext'
 import { formatBytesDecimal, formatMoney } from '../utils/format'
 import { ProviderLogo } from './ProviderLogo'
-import { Card, CardHeader, InfoTip, Segmented } from './ui'
+import { Card, CardHeader, InfoTip, LogoLoader, Reloading, Segmented } from './ui'
 
 // One hue per connector position, cycling. Fixed palette so the bar and the rows agree.
 const SWATCHES = ['bg-primary', 'bg-success', 'bg-warning', 'bg-purple-500', 'bg-orange-500', 'bg-sky-500', 'bg-pink-500', 'bg-teal-500']
@@ -61,18 +61,21 @@ interface TrafficSplitPanelProps {
 
 export function TrafficSplitPanel({ projectId, variant = 'card', onOpenConnector, className }: TrafficSplitPanelProps) {
   const [range, setRange] = useTimeRange(HISTORY_RANGES)
-  const { data: split, isError, error } = useQuery({
+  const { data: split, isPlaceholderData, isError, error } = useQuery({
     queryKey: ['traffic-split', projectId, range],
     queryFn: () => fetchProjectTrafficSplit(projectId, range),
     enabled: !!projectId,
     refetchInterval: 15000,
+    // Another range keeps the last split up, dimmed, until its own arrives, so the card keeps its height; another
+    // project's split is not shown under this one.
+    placeholderData: (previous, previousQuery) => (previousQuery?.queryKey[1] === projectId ? previous : undefined),
   })
 
   const body = split
-    ? <TrafficSplitBody split={split} onOpenConnector={onOpenConnector} />
+    ? <Reloading active={isPlaceholderData}><TrafficSplitBody split={split} onOpenConnector={onOpenConnector} /></Reloading>
     : isError
       ? <p className="text-xs text-danger py-3">Could not load the traffic split{error instanceof Error && error.message ? `: ${error.message}` : ''}.</p>
-      : <p className="text-xs text-fg-muted py-3">Loading…</p>
+      : <LogoLoader size="sm" className="py-3" />
   const rangePicker = <Segmented options={HISTORY_RANGES.map((r) => ({ value: r, label: r }))} value={range} onChange={setRange} size="sm" />
 
   if (variant === 'inline') {

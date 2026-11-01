@@ -6,7 +6,7 @@ import { useQuery } from '@tanstack/react-query'
 import { Copy, Download, ExternalLink } from 'lucide-react'
 import { exportProviderYaml, fetchProvider, fetchProviderAudit, ProviderSummary } from '../../api/client'
 import { useProviders } from '../../hooks/useProviders'
-import { Badge, Button, Inspector, InspectorSection, KeyValue, Tabs, INSPECTOR_WIDTH_WIDE } from '../ui'
+import { Badge, Button, Inspector, InspectorSection, KeyValue, LogoLoader, Tabs, INSPECTOR_WIDTH_WIDE } from '../ui'
 import { ProviderLogo } from '../ProviderLogo'
 import { TestPanel } from './TestPanel'
 import { formatDateTime } from '../../utils/format'
@@ -54,7 +54,7 @@ export function ProviderDetailPanel({ provider, onClose, onDuplicate, onEdit }: 
     >
       {testable && <Tabs<Tab> tabs={[{ id: 'details', label: 'Details' }, { id: 'test', label: 'Test' }]} active={tab} onChange={setTab} size="sm" />}
       {tab === 'test' && testable ? (
-        detail?.spec ? <TestPanel key={provider.id} spec={detail.spec} presets={presets} stored={provider} /> : <p className="text-xs text-fg-muted">Loading…</p>
+        detail?.spec ? <TestPanel key={provider.id} spec={detail.spec} presets={presets} stored={provider} /> : <LogoLoader className="py-10" />
       ) : (<>
       <div className="flex items-center gap-3 p-3 border border-line rounded-[10px]">
         <ProviderLogo type={provider.id} name={provider.name} className="w-10 h-10 text-[40px]" />
