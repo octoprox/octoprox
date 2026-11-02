@@ -10,6 +10,24 @@
 #   changes  what changed, for the people who use Octoprox; `docs` is a page
 #            on octoprox.com that explains it, such as connecting#exit-headers
 
+- version: 6.5.0
+  date: 2026-11-02
+  title: Reserved and excluded countries, new Countries page
+  changes:
+    - text: "Connectors can reserve countries on their Routing tab. Requests naming a reserved country go only to the connectors that reserve it, split by weight. If none of them can serve it, the request fails instead of going to another connector."
+      docs: routing-strategies#reserved-and-excluded-countries
+    - text: "A connector that lists no countries can exclude countries. Requests naming an excluded country go to the other connectors, and that connector's exits in it take no traffic."
+      docs: routing-strategies#reserved-and-excluded-countries
+    - text: "A new Countries page shows every country your connectors list, reserve, exclude or have an exit in, and where a request naming it goes now. Open a country to set each connector to Off, Serves or Reserved in one save."
+      docs: routing-strategies#reserved-and-excluded-countries
+    - text: "When a request fails because its country is reserved, the `502` message names the connectors that reserve it."
+      docs: routing-strategies#reserved-and-excluded-countries
+    - text: "The traffic split marks a connector that serves only its reserved countries. It takes no requests that name no country."
+      docs: api#traffic-split
+    - text: "The API can read the countries overview and set every connector's role for one country in a single write. Connectors accept `reserved_countries` and `excluded_countries` in their routing config."
+      docs: api#countries
+    - text: "You can now search the exit country picker when you add or edit a proxy."
+
 - version: 6.4.3
   date: 2026-11-01
   title: Load errors with retry and steadier reloads
