@@ -91,7 +91,7 @@ export function MultiCountryPicker({ options, value, onChange, disabled, placeho
           ))}
         </div>
       )}
-      <RichSelect options={available} value="" onChange={add} disabled={disabled} placeholder={placeholder ?? (selected.length ? 'Add another country' : 'All countries')} />
+      <RichSelect options={available} value="" onChange={add} disabled={disabled} placeholder={placeholder ?? (selected.length ? 'Add another country' : 'All countries')} searchable />
     </div>
   )
 }

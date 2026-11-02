@@ -988,6 +988,10 @@ export interface RoutingConfig {
   domain_blacklist?: string[]
   /** Relative share of the project's traffic against its other connectors; omitted means 1. */
   weight?: number
+  /** Countries held for this connector: requests naming one go only to the connectors reserving it, or fail. */
+  reserved_countries?: string[]
+  /** Countries a connector listing none never serves. */
+  excluded_countries?: string[]
 }
 
 export const DEFAULT_ROUTING_WEIGHT = 1
@@ -1421,6 +1425,47 @@ export interface ConnectParams {
 export const fetchConnectInfo = async (projectId: string, params: ConnectParams): Promise<ConnectInfo> =>
   (await api.get(`/projects/${projectId}/connect`, { params })).data
 
+/** How one connector stands to one country: off its list or excluded, serving it, or holding it. */
+export type CountryRole = 'off' | 'serves' | 'reserved'
+
+/** A connector of the project with the country settings each country's role is read from. */
+export interface CountryConnector {
+  id: string
+  name: string
+  credential_type: string
+  enabled: boolean
+  weight: number
+  /** The countries it lists; empty when it serves every country it does not exclude. */
+  countries: string[]
+  /** Its proxies are held per listed country, so taking a country on or off its list creates or drops them. */
+  provisions_per_country: boolean
+  reserved_countries: string[]
+  excluded_countries: string[]
+  dynamic: boolean
+}
+
+/** Where a request naming the country would go now; no routes when it would fail. */
+export interface CountryRoutes {
+  country: string
+  routes: ConnectRoute[]
+}
+
+export interface CountriesOverview {
+  connectors: CountryConnector[]
+  countries: CountryRoutes[]
+  /** A country none of the connectors names or exits in. */
+  other: ConnectRoute[]
+  /** A request naming no country. */
+  untargeted: ConnectRoute[]
+}
+
+export const fetchCountries = async (projectId: string): Promise<CountriesOverview> =>
+  (await api.get(`/projects/${projectId}/countries`)).data
+
+/** Set connectors' roles for one country in one write; connectors left out keep theirs. The new overview. */
+export const setCountryRoles = async (projectId: string, country: string, connectors: Record<string, CountryRole>): Promise<CountriesOverview> =>
+  (await api.put(`/projects/${projectId}/countries/${country}`, { connectors })).data
+
 // Project-scoped Proxy API functions
 export const fetchProjectProxies = async (projectId: string): Promise<ProxyListResponse> => {
   const response = await api.get(`/projects/${projectId}/proxies`)
@@ -1517,7 +1562,8 @@ export interface ConnectorTrafficShare {
   eligible_proxies: number
   /** Share of untargeted requests this connector takes right now, 0-100. */
   expected_share: number
-  excluded_reason: 'disabled' | 'traffic_limit' | 'no_eligible_proxies' | null
+  /** reserved_only: it serves only requests naming a country it reserves, none that name no country. */
+  excluded_reason: 'disabled' | 'traffic_limit' | 'reserved_only' | 'no_eligible_proxies' | null
   observed_requests: number
   /** Share of the window's requests that went through this connector, 0-100; null when nothing was observed. */
   observed_share: number | null

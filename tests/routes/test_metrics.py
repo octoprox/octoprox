@@ -497,6 +497,25 @@ class TestTrafficSplit:
         assert (shares["Priced"]["cost"], shares["Priced"]["currency"]) == (0.0, "USD")
         assert (shares["Plain"]["observed_bytes"], shares["Plain"]["cost"], shares["Plain"]["currency"]) == (50, None, None)
 
+    def test_a_connector_reserving_every_country_it_lists_takes_no_untargeted_share(
+        self, authenticated_client: TestClient, created_project: dict[str, Any], created_credential: dict[str, Any],
+    ) -> None:
+        """Its proxy is healthy: it serves only requests for its reserved country, which is not "no healthy proxy"."""
+        client, project = authenticated_client, created_project
+        gb = _connector(
+            client, project, created_credential, "GB only",
+            config={"countries": ["GB"]}, routing_config={"reserved_countries": ["GB"]},
+        )
+        empty = _connector(client, project, created_credential, "Empty", routing_config={"reserved_countries": ["FR"]})
+        _add_proxy(client, gb["id"], ProxyStatus.HEALTHY)
+
+        data = client.get(f"/api/v1/projects/{project['id']}/metrics/traffic-split").json()
+
+        reasons = {s["name"]: s["excluded_reason"] for s in data["connectors"]}
+        # A reservation with nothing to serve it is still no healthy proxy.
+        assert reasons == {"Empty": "no_eligible_proxies", "GB only": "reserved_only"}
+        assert empty["routing_config"] == {"reserved_countries": ["FR"]}
+
     def test_the_strategy_is_the_projects(
         self, authenticated_client: TestClient, created_project: dict[str, Any],
     ) -> None:

@@ -334,7 +334,7 @@ class Router:
         if wanted is not None:
             views = self._on_demand_pools(snapshot, project_id, None, wanted)
         else:
-            enabled = self._enabled_connectors(snapshot, project_id, None)
+            enabled = self._enabled_connectors(snapshot, project_id, None, target.country if target is not None else None)
             views = [view for view in enabled if view.connector.id in by_connector]
         total = sum(max(view.weight, 1) for view in views)
         return [
@@ -353,14 +353,19 @@ class Router:
         """What a client of the project can ask for now, as hints: ``(countries, any_country, places)``.
 
         ``any_country`` says a country nobody lists is served too, and places are the states and cities healthy fixed
-        exits are in, busiest first, at most ``limit``.
+        exits are in, busiest first, at most ``limit``. A country other connectors reserve is no connector's to hint.
         """
         snapshot = self._snapshot
         countries: set[str] = set()
         any_country = False
         places: Counter[tuple[str, str | None, str | None]] = Counter()
+
+        def held_elsewhere(view: ConnectorView, country: str) -> bool:
+            holders = self._reserved_for(snapshot, project_id, None, country)
+            return bool(holders) and view not in holders
+
         for view in self._enabled_connectors(snapshot, project_id, None):
-            countries.update(view.declared_countries)
+            countries.update(country for country in view.declared_countries if not held_elsewhere(view, country))
             any_country = any_country or view.accepts_request_country
             for proxy in view.proxies:
                 if proxy.status != ProxyStatus.HEALTHY or self._is_excluded(snapshot, proxy.id):
@@ -369,7 +374,7 @@ class Router:
                     any_country = any_country or not view.declared_countries
                     continue
                 country = proxy.country
-                if country is None:
+                if country is None or country in view.excluded or held_elsewhere(view, country):
                     continue
                 countries.add(country)
                 state, city = proxy.state_code, proxy.city_slug
@@ -383,6 +388,21 @@ class Router:
                 for (country, state, city), count in places.most_common(limit)
             ],
         )
+
+    def countries_in_play(self, project_id: str) -> list[str]:
+        """Every country a connector of the project lists, reserves or excludes, or holds an exit in; sorted."""
+        countries: set[str] = set()
+        for view in self._snapshot.connector_views(project_id):
+            if view.connector.pending_deletion:
+                continue
+            countries.update(view.declared_countries, view.reserved, view.excluded)
+            countries.update(country for proxy in view.proxies if (country := proxy.country) is not None)
+        return sorted(countries)
+
+    def reserved_by(self, project_id: str, target_host: str | None, location: LocationTarget | None) -> list[str]:
+        """The names of the connectors holding a request's country for its host, for its refusal; empty when none do."""
+        country = location.country if location is not None else None
+        return [view.connector.name for view in self._reserved_for(self._snapshot, project_id, target_host, country)]
 
     # --- Eligibility ------------------------------------------------------------------------
     #
@@ -399,9 +419,14 @@ class Router:
     #   - a dynamic-sessions gateway row serves any country its connector
     #     allows (every country when it declares none): the code is rendered
     #     into the vendor credentials per request, so nothing is provisioned.
+    # A country some connectors reserve, for a host their domain filters let
+    # through, is served by those connectors alone: when none of them can
+    # serve it (disabled, over its traffic limit, quarantined), the request
+    # fails rather than going to the others. A connector excluding a country
+    # never serves it, and its exits known to be there take no traffic.
     # Without a requested country every proxy is eligible, except the on-demand
     # groups of "All countries" pools, which keep serving only the clients that
-    # asked for their country.
+    # asked for their country, and the exits of reserved countries.
     # A state or city below the country is served only by dynamic-sessions
     # gateways whose descriptor renders it and by fixed exits whose known
     # region and city match; nothing is provisioned for it.
@@ -411,19 +436,35 @@ class Router:
         snapshot: RoutingSnapshot,
         project_id: str,
         target_host: str | None,
+        country: str | None = None,
         *,
         include_traffic_blocked: bool = False,
     ) -> list[ConnectorView]:
-        """The project's connectors that take requests and let ``target_host`` through.
+        """The project's connectors that take requests and let ``target_host`` through; only those holding ``country``
+        for the host when any do.
 
         A connector held back by its traffic limit is left out unless
         ``include_traffic_blocked`` asks for it, to tell "over the limit" from
         "nothing configured" when a request finds no proxy.
         """
+        views = self._reserved_for(snapshot, project_id, target_host, country) or snapshot.connector_views(project_id)
         return [
             view
-            for view in snapshot.connector_views(project_id)
+            for view in views
             if self._takes(snapshot, view, target_host, include_traffic_blocked=include_traffic_blocked)
+        ]
+
+    @staticmethod
+    def _reserved_for(
+        snapshot: RoutingSnapshot, project_id: str, target_host: str | None, country: str | None
+    ) -> list[ConnectorView]:
+        """The connectors reserving ``country`` whose domain filter lets ``target_host`` through, taking requests or not."""
+        if not country:
+            return []
+        return [
+            view
+            for view in snapshot.reserving(project_id, country)
+            if not target_host or view.allows_host(target_host)
         ]
 
     @staticmethod
@@ -464,7 +505,7 @@ class Router:
         excluded = self._excluded(snapshot, include_quarantined=include_quarantined)
         eligible: list[Proxy] = []
         for view in self._enabled_connectors(
-            snapshot, project_id, target_host, include_traffic_blocked=include_traffic_blocked
+            snapshot, project_id, target_host, wanted, include_traffic_blocked=include_traffic_blocked
         ):
             for proxy in view.candidates(wanted or None, rules):
                 if proxy.id in excluded:
@@ -496,9 +537,13 @@ class Router:
             return []
         if not self._takes(snapshot, view, target_host, include_traffic_blocked=include_traffic_blocked):
             return []
+        country = target.country if target is not None else None
+        reserved = self._reserved_for(snapshot, project_id, target_host, country)
+        if reserved and view not in reserved:
+            return []
         if self._exclusions.is_retired(proxy.id) or (not include_quarantined and self._is_quarantined(snapshot, proxy.id)):
             return []
-        if not view.can_serve(proxy, target.country if target is not None else None, rules, pinned=True):
+        if not view.can_serve(proxy, country, rules, pinned=True):
             return []
         if target is not None and target.below_country and not self._serves_place(view, proxy, rules, target):
             return []
@@ -553,8 +598,8 @@ class Router:
         """The "All countries" pools holding no row of a ``country`` slot group: the misses the feed may fill."""
         return [
             view
-            for view in self._enabled_connectors(snapshot, project_id, target_host)
-            if view.accepts_request_country and not view.has_geo_group(country)
+            for view in self._enabled_connectors(snapshot, project_id, target_host, country)
+            if view.accepts_request_country and view.names_country(country) and not view.has_geo_group(country)
         ]
 
     async def _await_country_group(
@@ -652,6 +697,8 @@ class Router:
         if view is None or provider is None or not provider.is_dynamic:
             # The row says dynamic but its connector no longer does (mid-sync): use it as the feed has it.
             return proxy
-        rendered = provider.render_request(proxy, sessid=session_id, location=location, scope=project_id)
+        rendered = provider.render_request(
+            proxy, sessid=session_id, location=location, scope=project_id, untargeted=view.untargeted_countries or None
+        )
         # Rendering puts the secrets back as placeholders; the section's credential fills them.
         return resolve_credentials(rendered, view.credential, view.connector)

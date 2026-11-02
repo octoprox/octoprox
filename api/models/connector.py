@@ -206,16 +206,45 @@ class RoutingConfig(BaseModel):
     # 25/75), whatever the proxies each holds, so a dynamic sessions gateway of
     # one row and a pool of fifty slots split evenly at equal weights.
     weight: int = Field(default=DEFAULT_ROUTING_WEIGHT, ge=1, le=MAX_ROUTING_WEIGHT)
+    # Countries the connector holds for itself: a request naming one goes only
+    # to the project's connectors reserving it for the target host, split by
+    # weight, and fails when none of them can serve it. Requests naming no
+    # country keep off the connector's exits in these countries.
+    reserved_countries: list[str] = Field(default_factory=list)
+    # Countries a connector that lists none never serves ("all except"):
+    # requests naming one go to the other connectors, and its exits known to
+    # be in one take no traffic at all.
+    excluded_countries: list[str] = Field(default_factory=list)
+
+    @field_validator('reserved_countries', 'excluded_countries', mode='before')
+    @classmethod
+    def _normalize_countries(cls, value: Any) -> list[str]:
+        return normalize_country_list(value)
 
     @model_validator(mode='after')
     def validate_mutual_exclusivity(self) -> 'RoutingConfig':
-        """Ensure whitelist and blacklist are mutually exclusive."""
+        """Ensure whitelist and blacklist are mutually exclusive, and no country is both reserved and excluded."""
         # Normalize: strip whitespace, lowercase, remove empty strings
         self.domain_whitelist = [d.strip().lower() for d in self.domain_whitelist if d.strip()]
         self.domain_blacklist = [d.strip().lower() for d in self.domain_blacklist if d.strip()]
         if self.domain_whitelist and self.domain_blacklist:
             raise ValueError('domain_whitelist and domain_blacklist are mutually exclusive; only one can be set')
+        both = [code for code in self.reserved_countries if code in self.excluded_countries]
+        if both:
+            raise ValueError(f"A country cannot be both reserved and excluded: {', '.join(both)}")
         return self
+
+    def check_countries(self, declared: list[str]) -> None:
+        """Raise ValueError unless the reservations and exclusions fit the countries the connector lists.
+
+        A connector listing countries reserves only listed ones, and excludes none, since its list already is the
+        allow-list.
+        """
+        if declared and self.excluded_countries:
+            raise ValueError("A connector that lists countries cannot exclude any; take them off its list instead")
+        unlisted = [code for code in self.reserved_countries if declared and code not in declared]
+        if unlisted:
+            raise ValueError(f"Reserved countries must be on the connector's country list: {', '.join(unlisted)}")
 
 
 class RateLimitConfig(BaseModel):

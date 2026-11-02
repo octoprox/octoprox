@@ -2,7 +2,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { useMemo, useState, type ReactNode } from 'react'
-import { useNavigate } from 'react-router'
 import { useQuery } from '@tanstack/react-query'
 import { AlertTriangle, Download, Eye, EyeOff, RefreshCw } from 'lucide-react'
 import { downloadCaCertificate, fetchConnectInfo, type ConnectInfo, type ConnectParams } from '../api/client'
@@ -10,6 +9,7 @@ import { useProject } from '../contexts/ProjectContext'
 import { useToast } from '../contexts/ToastContext'
 import { useDebounced } from '../hooks/useDebounced'
 import { Page } from '../components/layout/Page'
+import { RouteList } from '../components/RouteList'
 import { Alert, Button, Card, CardHeader, CopyButton, InfoTip, Input, Label, Segmented, Select, Tabs } from '../components/ui'
 import {
   COUNTRY_CODES, SNIPPETS, US_STATES, countryLabel, effectivePort, formatEndpoint, needsEncoding, omitsPort, parseEndpoint,
@@ -66,7 +66,6 @@ const plainSlug = (text: string) => text.trim().toLowerCase().replace(/[\s-]+/g,
 export default function ConnectPage() {
   const { selectedProjectId, selectedProject } = useProject()
   const toast = useToast()
-  const navigate = useNavigate()
   const [country, setCountry] = useState('')
   const [state, setState] = useState('')
   const [city, setCity] = useState('')
@@ -308,23 +307,7 @@ export default function ConnectPage() {
               </Alert>
             ) : (
               <>
-                <ul className="divide-y divide-line">
-                  {info.routes.map((route) => (
-                    <li key={route.connector_id} className="flex items-center gap-3 py-2 text-[13px]">
-                      <button type="button" onClick={() => navigate(`/projects/${selectedProjectId}/connectors?open=${route.connector_id}`)} className="font-medium text-fg hover:text-primary truncate text-left min-w-0">
-                        {route.connector_name}
-                      </button>
-                      <span className="text-xs text-fg-muted flex-1 truncate">
-                        {route.on_demand
-                          ? 'creates sessions for the country on the first request'
-                          : route.dynamic
-                            ? 'dynamic sessions: the place is rendered into each vendor session'
-                            : `${route.proxies} ${route.proxies === 1 ? 'proxy' : 'proxies'}`}
-                      </span>
-                      <span className="text-xs tabular-nums text-fg-muted flex-none" title="Expected share of requests, by connector weight">{Math.round(route.share * 100)}%</span>
-                    </li>
-                  ))}
-                </ul>
+                <RouteList projectId={selectedProjectId!} routes={info.routes} />
                 <p className="text-xs text-fg-subtle mt-2">Shares follow the connectors' weights. A connector with a domain filter only takes the hosts it allows.</p>
               </>
             )}

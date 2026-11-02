@@ -16,6 +16,7 @@ import HostsPage from './pages/HostsPage'
 import FailuresPage from './pages/FailuresPage'
 import ProxiesPage from './pages/ProxiesPage'
 import ConnectorsPage from './pages/ConnectorsPage'
+import CountriesPage from './pages/CountriesPage'
 import CredentialsPage from './pages/CredentialsPage'
 import InspectorPage from './pages/InspectorPage'
 import LocationsPage from './pages/LocationsPage'
@@ -173,6 +174,7 @@ function AuthenticatedApp() {
               <Route path="metrics" element={<Navigate to="../overview" replace />} />
               <Route path="proxies" element={<ProxiesPage />} />
               <Route path="connectors" element={<ConnectorsPage />} />
+              <Route path="countries" element={<CountriesPage />} />
               <Route path="credentials" element={<CredentialsPage />} />
               <Route path="connect" element={<ConnectPage />} />
               <Route path="mitm-inspector" element={<InspectorPage />} />

@@ -66,11 +66,18 @@ def normalize_country_code(value: str | None) -> str | None:
 def normalize_country_list(value: Any) -> list[str]:
     """Normalise a countries value (list, or comma-separated string) to unique upper-case codes.
 
-    Order is preserved; blanks are dropped. Raises ValueError on a malformed code.
+    Order is preserved; blanks are dropped. Raises ValueError on a malformed code, or a value that is no list.
     """
     if value is None:
         return []
-    raw: list[Any] = value.split(",") if isinstance(value, str) else list(value)
+    if isinstance(value, str):
+        raw: list[Any] = value.split(",")
+    else:
+        try:
+            raw = list(value)
+        except TypeError:
+            # A ValueError, so pydantic validators answer 422 and callers reading stored configs treat it as unreadable.
+            raise ValueError(f"countries must be a list of codes, got {value!r}") from None
     result: list[str] = []
     for item in raw:
         code = normalize_country_code(str(item)) if item is not None else None

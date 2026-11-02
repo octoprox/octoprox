@@ -431,7 +431,7 @@ function ProxyPanel({ proxy, connectorType, canMutate, onClose, onRelease, onDel
               <Label className="text-xs">Exit country</Label>
               <div className="flex items-start gap-2">
                 <div className="flex-1 min-w-0">
-                  <RichSelect options={countryOptions} value={form.country} onChange={(v) => setForm({ ...form, country: v })} placeholder="Unknown" disabled={!canMutate} />
+                  <RichSelect options={countryOptions} value={form.country} onChange={(v) => setForm({ ...form, country: v })} placeholder="Unknown" disabled={!canMutate} searchable />
                 </div>
                 {canMutate && (
                   <Button type="button" variant="outline" size="sm" onClick={() => locateMutation.mutate()} disabled={locateMutation.isPending} title="Request through this proxy to detect its exit IP and country">
@@ -569,7 +569,7 @@ function NewProxyPanel({ connectors, onClose, onCreated }: { connectors: { id: s
         </div>
         <div>
           <Label className="text-xs">Exit country</Label>
-          <RichSelect options={countryOptions} value={form.country} onChange={(v) => setForm({ ...form, country: v })} placeholder="Detect automatically" />
+          <RichSelect options={countryOptions} value={form.country} onChange={(v) => setForm({ ...form, country: v })} placeholder="Detect automatically" searchable />
         </div>
         <div className="grid grid-cols-2 gap-3">
           <div>

@@ -41,6 +41,7 @@ export function strategyExplanation(strategy: string): string {
 export function describeShare(c: ConnectorTrafficShare, split: TrafficSplitResponse): string {
   if (c.excluded_reason === 'disabled') return `${c.name} is disabled and takes no traffic.`
   if (c.excluded_reason === 'traffic_limit') return `${c.name} is over its traffic limit and takes no traffic until its period resets or the limit is raised; the others share its weight.`
+  if (c.excluded_reason === 'reserved_only') return `${c.name} serves only requests naming a country it reserves, so it takes none of the requests that name no country; the others share them.`
   if (c.excluded_reason === 'no_eligible_proxies') return `${c.name} has no healthy proxy right now, so its weight does not count and the others share its traffic.`
   const active = split.connectors.filter((x) => !x.excluded_reason)
   if (active.length === 1) return `${c.name} is the only connector with healthy proxies and takes every request.`
@@ -169,6 +170,7 @@ function TrafficSplitBody({ split, onOpenConnector }: { split: TrafficSplitRespo
                 {c.dynamic && <span className="text-fg-subtle text-[11px] flex-none">dynamic</span>}
                 {c.excluded_reason === 'disabled' && <span className="text-fg-subtle text-[11px] flex-none">disabled</span>}
                 {c.excluded_reason === 'traffic_limit' && <span className="text-orange-500 text-[11px] flex-none">over traffic limit</span>}
+                {c.excluded_reason === 'reserved_only' && <span className="text-primary text-[11px] flex-none">reserved countries only</span>}
                 {c.excluded_reason === 'no_eligible_proxies' && <span className="text-warning text-[11px] flex-none">no healthy proxy</span>}
               </span>
               {/* Stacked: one line under the name. Wide: `contents` hands the three cells to the row grid. */}

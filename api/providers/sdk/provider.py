@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import random
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 
 from api.models.connector import Connector, ProxyTarget
@@ -179,6 +179,17 @@ class DescriptorProvider(ProxyProvider):
         return self._dynamic
 
     @property
+    def provisions_per_country(self) -> bool:
+        """Whether proxies are held per listed country, so a change to the list creates or drops proxies.
+
+        Pools geo-targeted per country and port types filtering discovery by country do; a dynamic gateway renders the
+        country per request instead.
+        """
+        if self._dynamic or self._country_list_key is None:
+            return False
+        return self._geo_targeted or self._ptype.mode == "port"
+
+    @property
     def exit_sample_percent(self) -> int:
         """Share (0-100) of session-less requests preflight echoes to see their exit; dynamic only."""
         raw = self._ctx.lookup(self._ptype.exit_sample_field)
@@ -218,7 +229,15 @@ class DescriptorProvider(ProxyProvider):
             return True
         return self._dynamic and self._targeting.serves(location, self._ptype)
 
-    def render_request(self, proxy: Proxy, *, sessid: str | None, location: LocationTarget | None, scope: str) -> Proxy:
+    def render_request(
+        self,
+        proxy: Proxy,
+        *,
+        sessid: str | None,
+        location: LocationTarget | None,
+        scope: str,
+        untargeted: Sequence[str] | None = None,
+    ) -> Proxy:
         """The gateway row as one request should use it.
 
         Returns a copy of ``proxy`` whose credentials carry the vendor session
@@ -228,9 +247,9 @@ class DescriptorProvider(ProxyProvider):
         its exit across requests and instances. Without one a fresh id is
         minted and the vendor rotates. ``location`` is what the username asked
         for; with no country, a
-        connector listing countries gets one of them (fixed per client
-        session, random per rotating request) and an unrestricted connector
-        renders no country at all. Templates read the place through the
+        connector listing countries gets one of them, of ``untargeted`` when
+        routing narrows them (fixed per client session, random per rotating
+        request), and an unrestricted connector renders no country at all. Templates read the place through the
         ``geo`` namespace. The whole location is part of the derivation:
         a client session holds one vendor session per place it asks for, so
         switching ``-cc-`` or ``-city-`` moves to another exit instead of
@@ -249,9 +268,10 @@ class DescriptorProvider(ProxyProvider):
             if wanted and (not allowed or wanted in allowed):
                 code = wanted
             elif not wanted and allowed:
+                choices = list(untargeted) if untargeted else allowed
                 # A client session keeps one country, or the vendor would move
                 # its exit between requests despite the unchanged session id.
-                code = _stable_choice(seed, allowed) if seed else random.choice(allowed)
+                code = _stable_choice(seed, choices) if seed else random.choice(choices)
         rendered_target = target.with_country(code)
         ctx = ctx.with_place(rendered_target or None)
         if seed and not rendered_target.is_empty:

@@ -32,6 +32,7 @@ const PAGE_DOCS: Record<string, DocLink[]> = {
   failures: [{ title: 'Failures: why requests failed', path: 'metrics#failures-why-requests-failed' }],
   proxies: [{ title: 'Rate limiting and quarantine', path: 'rate-limiting' }, { title: 'Location routing', path: 'location-routing' }],
   connectors: [{ title: 'Providers and connectors', path: 'providers' }, { title: 'Traffic limits and billing', path: 'traffic-limits' }, { title: 'Domain filtering', path: 'domain-filtering' }],
+  countries: [{ title: 'Reserved and excluded countries', path: 'routing-strategies#reserved-and-excluded-countries' }, { title: 'Country, state and city routing', path: 'routing-strategies#country-routing' }],
   credentials: [{ title: 'Providers and credentials', path: 'providers' }],
   connect: [{ title: 'Connecting clients', path: 'connecting' }, { title: 'Country, state and city routing', path: 'routing-strategies#country-routing' }],
   'mitm-inspector': [{ title: 'TLS interception', path: 'tls-interception' }],

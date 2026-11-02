@@ -8,13 +8,14 @@ Each write but an error's is announced after its commit, and the runs it needs a
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from typing import TYPE_CHECKING, Any
 
 import structlog
 from sqlalchemy.exc import IntegrityError
 
 from api.core import utc_now
+from api.core.logging import error_text
 from api.core.roles import JobKind
 from api.db.redis import (
     AUTOSCALER_STATE_KEY,
@@ -37,8 +38,10 @@ from api.models.connector import (
     validate_routing_config,
     validate_traffic_config,
 )
+from api.models.countries import CountryRole
 from api.models.proxy import ProxyStatus
 from api.services.errors import (
+    InvalidConfigError,
     NameConflictError,
     NotFoundError,
     WriteRejectedError,
@@ -103,6 +106,7 @@ class ConnectorService:
                 traffic_config=_given(validate_traffic_config, data.traffic_config),
                 enabled=data.enabled,
             )
+            self._check_countries(connector, credential)
             try:
                 await ConnectorRepository(session).create(connector)
                 await session.commit()
@@ -143,6 +147,9 @@ class ConnectorService:
             if data.enabled is not None:
                 changes["enabled"] = data.enabled
             edited = current.model_copy(update=changes)
+            if changes.keys() & {"config", "routing_config", "credential_id"}:
+                # Only an edit of what the check reads, so a connector stored unreadable can still be disabled or renamed.
+                self._check_countries(edited, credential)
             # Proxies quarantined under the old rate limit are released (read now, lifted after the commit).
             lifted = (
                 [proxy.id for proxy in await ProxyRepository(session).get_by_connector(connector_id)]
@@ -165,6 +172,33 @@ class ConnectorService:
             # Decided again now, so a raised limit lifts a block at once rather than at the next minute's re-check.
             await self._ask_for_traffic_decision(connector_id)
         return saved
+
+    async def set_country(self, project_id: str, country: str, roles: Mapping[str, CountryRole]) -> None:
+        """Set how each connector named in ``roles`` stands to ``country``, all in one transaction or none.
+
+        A connector listing countries gets the country on or off its list, which provisions or drops its slots; one
+        listing none gets it excluded or not. Either reserves it or not.
+        """
+        edited: list[tuple[Connector, Connector]] = []
+        async with self._session_factory() as session:
+            connectors = ConnectorRepository(session)
+            credentials = CredentialRepository(session)
+            for connector_id, role in roles.items():
+                current = await connectors.get_in_project(project_id, connector_id)
+                if current is None:
+                    raise NotFoundError("Connector not found")
+                credential = await credentials.get_by_id(current.credential_id)
+                changed = self._with_country_role(current, credential, country, role)
+                if changed.config == current.config and changed.routing_config == current.routing_config:
+                    continue
+                self._check_countries(changed, credential)
+                edited.append((current, await self._save(session, changed)))
+            await session.commit()
+        for current, saved in edited:
+            logger.info("Updated connector", connector_id=saved.id, name=saved.name, country=country)
+            await self._changes.record(ChangeKind.CONNECTOR, saved.id)
+            if saved.config != current.config:
+                await self._start_work(saved)
 
     async def remove(self, project_id: str, connector_id: str) -> None:
         """Delete a connector of the project, as the api's delete does: any but a cloud connector goes now.
@@ -264,6 +298,56 @@ class ConnectorService:
         if credential.project_id != project_id:
             raise WriteRejectedError("Credential does not belong to this project")
         return credential
+
+    def _with_country_role(
+        self, connector: Connector, credential: Credential | None, country: str, role: CountryRole
+    ) -> Connector:
+        """``connector`` with ``country`` in the role asked: listed or not when it lists any, else excluded or not."""
+        routing = validated(validate_routing_config, connector.routing_config)
+        reserved = [code for code in routing.get("reserved_countries", []) if code != country]
+        excluded = [code for code in routing.get("excluded_countries", []) if code != country]
+        if role is CountryRole.RESERVED:
+            reserved.append(country)
+        config = connector.config
+        declared = self._declared(connector, credential)
+        listed = country in declared
+        if not declared:
+            if role is CountryRole.OFF:
+                excluded.append(country)
+        elif listed == (role is CountryRole.OFF):
+            key = self._registry.country_list_key(connector.credential_type)
+            if key is None:
+                raise InvalidConfigError(f"The countries of {connector.name} cannot be edited")
+            if listed and declared == [country]:
+                raise InvalidConfigError(
+                    f"{connector.name} lists only {country}; taking it off would make it serve every country, "
+                    "so edit or disable the connector instead"
+                )
+            countries = [code for code in declared if code != country] if listed else [*declared, country]
+            config = {**config, key: countries}
+            if credential is not None:
+                config = self._provider_config(credential, config)
+        routing_config = validated(
+            validate_routing_config,
+            {**routing, "reserved_countries": reserved, "excluded_countries": excluded},
+        )
+        return connector.model_copy(update={"config": config, "routing_config": routing_config})
+
+    def _check_countries(self, connector: Connector, credential: Credential | None) -> None:
+        """Refuse reservations and exclusions that do not fit the countries the connector lists."""
+        try:
+            routing = connector.parsed_routing_config
+            if routing.reserved_countries or routing.excluded_countries:
+                routing.check_countries(self._declared(connector, credential))
+        except ValueError as exc:
+            raise InvalidConfigError(str(exc)) from None
+
+    def _declared(self, connector: Connector, credential: Credential | None) -> list[str]:
+        """The countries the connector lists, as routing reads them."""
+        try:
+            return self._registry.declared_countries(connector, credential)
+        except Exception as exc:
+            raise InvalidConfigError(f"The countries of {connector.name} could not be read: {error_text(exc)}") from None
 
     def _provider_config(self, credential: Credential, config: dict[str, Any]) -> dict[str, Any]:
         """``config`` validated for the provider type of ``credential``."""

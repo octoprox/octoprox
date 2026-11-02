@@ -28,6 +28,7 @@ from api.db.repository import ConnectorRepository, ProxyRepository
 from api.db.streams import ChangeKind
 from api.jobs.queue import JobQueue
 from api.models.connector import Connector, ConnectorCreate, ConnectorUpdate
+from api.models.countries import CountryRole
 from api.models.credential import Credential, CredentialCreate
 from api.models.project import Project
 from api.models.proxy import Proxy, ProxyStatus
@@ -45,6 +46,7 @@ from tests.services.conftest import (
     AWS,
     OXYLABS_POOL,
     STATIC,
+    Connect,
     Executed,
     Witness,
     announced,
@@ -296,6 +298,111 @@ class TestUpdate:
             await connector_service.remove(other_project.id, static_connector.id)
         with pytest.raises(NotFoundError, match="Connector not found"):
             await connector_service.reset_traffic(other_project.id, static_connector.id)
+
+
+class TestCountries:
+    """Reserved and excluded countries, and the Countries page's edit of one country across connectors."""
+
+    async def test_reservations_and_exclusions_must_fit_the_connector_list(
+        self, connector_service: ConnectorService, project: Project, static_credential: Credential
+    ) -> None:
+        def isp(name: str, **fields: object) -> ConnectorCreate:
+            return ConnectorCreate.model_validate({"name": name, "credential_id": static_credential.id, **fields})
+
+        with pytest.raises(InvalidConfigError, match="country list: DE"):
+            await connector_service.create(
+                project.id, isp("A", config={"countries": ["GB"]}, routing_config={"reserved_countries": ["DE"]})
+            )
+        with pytest.raises(InvalidConfigError, match="cannot exclude any"):
+            await connector_service.create(
+                project.id, isp("B", config={"countries": ["GB"]}, routing_config={"excluded_countries": ["FR"]})
+            )
+        listed = await connector_service.create(
+            project.id, isp("C", config={"countries": ["GB"]}, routing_config={"reserved_countries": ["gb"]})
+        )
+        assert listed.routing_config == {"reserved_countries": ["GB"]}
+        # Taking the country off the list keeps the reservation unlisted: refused.
+        with pytest.raises(InvalidConfigError, match="country list: GB"):
+            await connector_service.update(project.id, listed.id, ConnectorUpdate(config={"countries": ["US"]}))
+
+    async def test_one_country_is_set_across_connectors(
+        self,
+        connector_service: ConnectorService,
+        project: Project,
+        static_credential: Credential,
+        static_connector: Connector,
+        pool: Connector,
+        sessions: async_sessionmaker[AsyncSession],
+    ) -> None:
+        listing = await connector_service.create(
+            project.id,
+            ConnectorCreate(name="UK", credential_id=static_credential.id, config={"countries": ["GB", "US"]}),
+        )
+
+        await connector_service.set_country(
+            project.id,
+            "GB",
+            {listing.id: CountryRole.RESERVED, pool.id: CountryRole.OFF, static_connector.id: CountryRole.SERVES},
+        )
+
+        uk, oxy, isp = [await stored(sessions, c.id) for c in (listing, pool, static_connector)]
+        assert uk is not None and oxy is not None and isp is not None
+        assert (uk.config, uk.routing_config) == ({"countries": ["GB", "US"]}, {"reserved_countries": ["GB"]})
+        # A connector listing none excludes the country it does not serve.
+        assert oxy.routing_config == {"excluded_countries": ["GB"]} and oxy.config == pool.config
+        assert isp == static_connector
+
+        # Serving an unlisted country lists it; turning a listed one off takes it off and drops its reservation.
+        await connector_service.set_country(project.id, "DE", {listing.id: CountryRole.SERVES})
+        await connector_service.set_country(project.id, "GB", {listing.id: CountryRole.OFF, pool.id: CountryRole.SERVES})
+        uk, oxy = await stored(sessions, listing.id), await stored(sessions, pool.id)
+        assert uk is not None and (uk.config, uk.routing_config) == ({"countries": ["US", "DE"]}, {})
+        assert oxy is not None and oxy.routing_config == {}
+
+    async def test_a_refused_role_changes_no_connector(
+        self,
+        connector_service: ConnectorService,
+        project: Project,
+        static_credential: Credential,
+        pool: Connector,
+        sessions: async_sessionmaker[AsyncSession],
+    ) -> None:
+        only_gb = await connector_service.create(
+            project.id, ConnectorCreate(name="UK", credential_id=static_credential.id, config={"countries": ["GB"]})
+        )
+
+        with pytest.raises(InvalidConfigError, match="UK lists only GB"):
+            await connector_service.set_country(
+                project.id, "GB", {pool.id: CountryRole.RESERVED, only_gb.id: CountryRole.OFF}
+            )
+        with pytest.raises(NotFoundError, match="Connector not found"):
+            await connector_service.set_country(project.id, "GB", {pool.id: CountryRole.RESERVED, "nope": CountryRole.OFF})
+
+        assert await stored(sessions, pool.id) == pool
+        assert await stored(sessions, only_gb.id) == only_gb
+
+    async def test_only_a_list_change_syncs_again(
+        self,
+        connector_service: ConnectorService,
+        connect: Connect,
+        project: Project,
+        redis_client: RedisClient,
+        sessions: async_sessionmaker[AsyncSession],
+    ) -> None:
+        pool = await connect(project, "US pool", OXYLABS_POOL)
+        await connector_service.update(
+            project.id, pool.id, ConnectorUpdate(config={**OXYLABS_POOL.connector, "country_code": ["US"]})
+        )
+        await redis_client.client.flushdb()
+
+        await connector_service.set_country(project.id, "US", {pool.id: CountryRole.RESERVED})
+        assert await queued_job_keys(redis_client, JobKind.SYNC) == []
+        assert await announced(redis_client) == [(ChangeKind.CONNECTOR, pool.id)]
+
+        await connector_service.set_country(project.id, "DE", {pool.id: CountryRole.SERVES})
+        saved = await stored(sessions, pool.id)
+        assert saved is not None and saved.config["country_code"] == ["US", "DE"]
+        assert await queued_job_keys(redis_client, JobKind.SYNC) == [pool.id]
 
 
 class TestRemove:

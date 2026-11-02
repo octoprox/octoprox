@@ -12,7 +12,7 @@ import asyncio
 import base64
 import errno
 import hmac
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from typing import TYPE_CHECKING, cast
 
 import structlog
@@ -331,12 +331,18 @@ class ProxyServer:
         )
 
     @staticmethod
-    def _no_proxy_message(location: LocationTarget | None, pinned_proxy_id: str | None = None) -> str:
-        """Human-readable 502 body when no upstream proxy matched the request."""
+    def _no_proxy_message(
+        location: LocationTarget | None, pinned_proxy_id: str | None = None, reserved_by: Sequence[str] = ()
+    ) -> str:
+        """Human-readable 502 body when no upstream proxy matched the request, naming the connectors its country is reserved for."""
         wanted = f"{location.describe()} and this domain" if location else "this domain"
         if pinned_proxy_id is not None:
-            return f"Proxy {pinned_proxy_id} is not available for {wanted}"
-        return f"No upstream proxy available for {wanted}"
+            message = f"Proxy {pinned_proxy_id} is not available for {wanted}"
+        else:
+            message = f"No upstream proxy available for {wanted}"
+        if location and reserved_by:
+            message += f": {location.country} is reserved for {', '.join(reserved_by)}"
+        return message
 
     async def _reject_no_proxy(
         self,
@@ -387,7 +393,9 @@ class ProxyServer:
                 build_failure(project_id, FailureKind.TRAFFIC_LIMIT_EXCEEDED, limit_status, message)
             )
             return
-        message = self._no_proxy_message(location, pinned_proxy_id)
+        message = self._no_proxy_message(
+            location, pinned_proxy_id, self._router.reserved_by(project_id, target_host, location)
+        )
         await self._send_error(client_writer, 502, "Bad Gateway", message)
         await request_rejected.send_async(self, project_id=project_id, reason="no_proxy_available")
         await self._publish_failure(build_failure(project_id, FailureKind.NO_PROXY_AVAILABLE, 502, message))

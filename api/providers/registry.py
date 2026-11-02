@@ -238,6 +238,21 @@ class ProviderRegistry:
             raise UnknownProviderError(f"Unknown credential type: {type_id}")
         return ptype
 
+    def declared_countries(self, connector: Connector, credential: Credential | None) -> list[str]:
+        """The countries ``connector`` declares for ``-cc-`` routing, as the feed compiler derives them.
+
+        Raises what the type's factory raises.
+        """
+        provider = self.descriptor_provider(connector, credential)
+        return provider.countries if provider is not None else connector.countries
+
+    def country_list_key(self, type_id: str) -> str | None:
+        """The connector config key a type lists countries under; None when its connectors list none."""
+        ptype = self._types.get(type_id)
+        if ptype is None:
+            return None
+        return next((f.key for f in ptype.connector_fields if FieldSetValidator.is_country_field(f)), None)
+
     def list(self) -> list[ProviderType]:
         return sorted(self._types.values(), key=lambda t: (t.kind != "code", t.name.lower()))
 

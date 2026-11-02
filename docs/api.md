@@ -215,6 +215,48 @@ The username is composed from the project's and the parameters, then read by the
 | `any_country` | A country outside `countries` is served too: a dynamic-sessions connector or residential pool lists no countries |
 | `places` | States and cities healthy fixed exits are known to be in, busiest first, at most 200 |
 
+### Countries
+
+The project's connectors with their country settings, and where a request naming each country would go now. This is what the Countries page shows:
+
+```bash
+GET /api/v1/projects/{project_id}/countries
+```
+
+```json
+{
+  "connectors": [
+    {"id": "...", "name": "GB residential", "credential_type": "oxylabs", "enabled": true, "weight": 1,
+     "countries": ["GB"], "provisions_per_country": false, "reserved_countries": ["GB"], "excluded_countries": [], "dynamic": true},
+    {"id": "...", "name": "Residential", "credential_type": "brightdata", "enabled": true, "weight": 1,
+     "countries": [], "provisions_per_country": false, "reserved_countries": [], "excluded_countries": [], "dynamic": true}
+  ],
+  "countries": [
+    {"country": "GB", "routes": [{"connector_id": "...", "connector_name": "GB residential", "dynamic": true, "on_demand": false, "proxies": 1, "share": 1.0}]}
+  ],
+  "other": [{"connector_id": "...", "connector_name": "Residential", "dynamic": true, "on_demand": false, "proxies": 1, "share": 1.0}],
+  "untargeted": [{"connector_id": "...", "connector_name": "Residential", "dynamic": true, "on_demand": false, "proxies": 1, "share": 1.0}]
+}
+```
+
+| Field | Meaning |
+|-------|---------|
+| `connectors` | Every connector of the project: `countries` it lists (empty: all countries it does not exclude), `provisions_per_country` whether its proxies are held per listed country (a pool or port type, so taking a country on or off its list creates or drops proxies), its reserved and excluded countries, and whether it is a dynamic-sessions connector |
+| `countries` | Every country a connector lists, reserves or excludes, or has an exit in, with its `routes` as on [Connect](#connect). No routes means requests naming it fail |
+| `other` | Where a request for any other country would go |
+| `untargeted` | Where a request naming no country would go |
+
+To set how connectors stand to one country, in one write:
+
+```bash
+PUT /api/v1/projects/{project_id}/countries/{country}
+Content-Type: application/json
+
+{"connectors": {"<id of the GB connector>": "reserved", "<id of another connector>": "off"}}
+```
+
+Each role is `off`, `serves` or `reserved`; connectors left out keep theirs. For a connector that lists countries, `off` takes the country off its list and `serves` or `reserved` adds it, which provisions or drops a pool's proxies there; for one listing none, `off` excludes the country. Every connector is saved, or none: a refused role answers `422`, for instance turning off the only country a connector lists, since an empty list means every country. Answers with the new overview. Editors only.
+
 ---
 
 ## Credentials
@@ -373,6 +415,17 @@ No restrictions (default):
 ```json
 {
   "routing_config": {}
+}
+```
+
+#### Reserved and excluded countries (routing_config)
+
+`routing_config.reserved_countries` holds countries for the connector: requests naming one go only to the project's connectors reserving it (for a host their domain filters allow), split by weight, and fail when none of them can serve it. `routing_config.excluded_countries` lists the countries a connector listing none never serves. Codes are normalised like the country list; a country cannot be both, a connector listing countries reserves only listed ones and excludes none, and other values are answered with `422`. Empty lists are not stored. See [Reserved and excluded countries]({{ site.baseurl }}/routing-strategies#reserved-and-excluded-countries).
+
+```json
+{
+  "config": {"countries": ["GB"]},
+  "routing_config": {"reserved_countries": ["GB"]}
 }
 ```
 
@@ -749,7 +802,7 @@ GET /api/v1/projects/{project_id}/metrics/traffic-split?range=1h
 }
 ```
 
-`expected_share` (0-100) is what an untargeted request sees right now: every enabled connector with at least one eligible proxy takes `weight / total_weight`. A connector taking nothing has `excluded_reason` set to `disabled`, `traffic_limit` (blocked by its [traffic limit]({{ site.baseurl }}/traffic-limits)) or `no_eligible_proxies`. `observed_share` is the connector's part of the requests in the window, `null` when there were none; `observed_bytes` is its traffic in the window and `cost` what that traffic costs at the connector's price per GB (`null` when unpriced). The observed figures come from the connector's own metrics history, so they survive proxy rotation. The response also carries `observed_bytes` for the whole project.
+`expected_share` (0-100) is what an untargeted request sees right now: every enabled connector with at least one eligible proxy takes `weight / total_weight`. A connector taking nothing has `excluded_reason` set to `disabled`, `traffic_limit` (blocked by its [traffic limit]({{ site.baseurl }}/traffic-limits)), `reserved_only` (it serves only requests naming a country it [reserves]({{ site.baseurl }}/routing-strategies#reserved-and-excluded-countries), so no untargeted ones) or `no_eligible_proxies`. `observed_share` is the connector's part of the requests in the window, `null` when there were none; `observed_bytes` is its traffic in the window and `cost` what that traffic costs at the connector's price per GB (`null` when unpriced). The observed figures come from the connector's own metrics history, so they survive proxy rotation. The response also carries `observed_bytes` for the whole project.
 
 ### Hosts
 

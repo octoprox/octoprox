@@ -58,6 +58,13 @@ class TestCountryAuth:
         )
         assert "for this domain" in ProxyServer._no_proxy_message(None)
 
+    def test_no_proxy_message_names_the_reservation(self) -> None:
+        gb = LocationTarget(country="GB")
+        assert ProxyServer._no_proxy_message(gb, reserved_by=["GB pool", "UK backup"]) == (
+            "No upstream proxy available for GB and this domain: GB is reserved for GB pool, UK backup"
+        )
+        assert ProxyServer._no_proxy_message(gb, "px-1", ["GB pool"]).endswith(": GB is reserved for GB pool")
+
     def test_state_and_city_are_extracted(self) -> None:
         project = Project(name="P", username="geo", password="pw")
         result = _server(project)._authenticate_project(_headers("geo-cc-us-st-ny-city-new_york-sessid-abc", "pw"))
@@ -88,6 +95,7 @@ class TestCredentials:
         router.select_proxy_for_project.return_value = None
         router.are_all_proxies_quarantined.return_value = False
         router.traffic_limit_status.return_value = None
+        router.reserved_by.return_value = []
         token = base64.b64encode(b"geo-cc-us:s3cret-pw").decode()
         await server.start()
         try:

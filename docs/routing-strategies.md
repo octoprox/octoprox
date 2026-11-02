@@ -161,13 +161,33 @@ For every port-based type with countries listed, the periodic IP refresh re-read
 
 Octoprox narrows the project's healthy proxies before the routing strategy runs, so country routing composes with every strategy and with [domain filtering]({{ site.baseurl }}/domain-filtering):
 
-1. Connectors that list countries only serve the countries they list.
+1. Connectors that list countries only serve the countries they list, and a connector never serves a country it excludes. When connectors [reserve](#reserved-and-excluded-countries) the requested country, only they are considered.
 2. A proxy with a known exit country must match exactly. The exit country is what [IP attribution]({{ site.baseurl }}/ip-attribution) resolved for the proxy's exit IP from the local IP databases, then the echo endpoint, then the vendor's claim (list-mode entries, known-IP APIs, the country a slot was provisioned for), which fills only what nothing independent answered. A proxy whose resolved country lies outside its connector's listed countries is never eligible, whatever was asked.
    The project's two location decisions then read the verdict on the row. With `location_contradicted: refuse`, a proxy whose vendor-declared country is contradicted by attribution is not eligible at all; with `evidence` it serves on the country the evidence puts it in, and with `vendor` on the vendor's claim. With `location_unknown: refuse`, a claim the sources could not settle or place is left out. A `-st-` or `-city-` request reads the row's state or city verdict the same way.
 3. A proxy with no known country is eligible only through its connector's list.
 4. A residential or mobile pool with **no** countries listed that has no slot group yet for the requested country creates one on the first request: `num_proxies` fresh sessions geo-targeted to that country. The gateway asks a worker for the group and holds the request until the group reaches it through the routing feed, usually within two or three seconds and at most 5, then routes it; when the group does not arrive in time the request is refused as if nothing served the country. Gateways that miss the same country at the same moment get the one group between them. Later requests rotate across that group like any other, and the periodic sync keeps it alive. Pools that list countries are provisioned up front and never expand on demand.
 
 If nothing in the project serves the requested country, the request is rejected with `502 Bad Gateway`. Octoprox never silently falls back to another country. What happens when a proxy's exit turns out not to be where it should, and how that differs between pooled sessions, dynamic sessions and fixed exits, is worked through on [Location routing]({{ site.baseurl }}/location-routing).
+
+### Reserved and excluded countries
+
+Weights share a country between the connectors that serve it. Two settings on a connector's Routing tab say who serves it at all:
+
+- **Reserved countries.** Requests naming a reserved country go only to the connectors reserving it, split by their weights. When none of them can serve it (disabled, over its traffic limit, every proxy rate limited, or no exit for the state or city asked for), the request fails with the usual status (`502`, the traffic-limit status, or `429`) instead of going to another connector. The `502` names the connectors the country is reserved for. A connector that lists countries can reserve only listed ones.
+- **Excluded countries.** A connector that lists no countries serves every country except these. Requests naming one go to the other connectors, and its exits known to be in one take no traffic at all. A connector that lists countries has nothing to exclude: its list already is the allow-list.
+
+A reservation follows the reserving connector's [domain filter]({{ site.baseurl }}/domain-filtering): hosts it refuses go to the other connectors as before. Requests naming no country keep off a reserving connector's exits in its reserved countries; a dynamic-sessions connector listing countries renders them in its unreserved countries only, and takes none when all of them are reserved. One that lists no countries renders no country for them, so its vendor still picks one.
+
+**Example:** one vendor for Great Britain, every other country on the rest. Add a connector listing `GB` and reserve `GB` on it. `-cc-gb` requests now go to it alone, other countries never reach it, and requests naming no country keep off it. No weight needs changing.
+
+```json
+{
+  "config": {"countries": ["GB"]},
+  "routing_config": {"reserved_countries": ["GB"]}
+}
+```
+
+The project's **Countries** page shows every country a connector lists, reserves or excludes, or has an exit in, with where a request naming it goes now; it also shows any other country and requests naming no country. Opening a country sets each connector's role for it in one save: **Off** (off the list, or excluded for a connector listing none), **Serves**, or **Reserved**. Turning a country on or off for a connector that lists countries edits its list, so a pool provisions or drops its proxies there. A connector that lists only that country cannot be turned off for it there, since an empty list means every country: disable or edit the connector instead.
 
 ## State and City Routing
 

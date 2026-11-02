@@ -64,6 +64,11 @@ class ConnectorView:
     traffic: TrafficConfig
     # The countries the connector declares, as the compiler derived them; empty declares none.
     declared_countries: tuple[str, ...]
+    # The countries it reserves and excludes (routing config); none when that is unreadable.
+    reserved: frozenset[str]
+    excluded: frozenset[str]
+    # The declared countries it does not reserve: what a request naming no country may be rendered in.
+    untargeted_countries: tuple[str, ...]
     # Feed order: (created_at, id).
     proxies: tuple[Proxy, ...]
     # Built from the section's credential for descriptor types. None for static and
@@ -88,6 +93,7 @@ class ConnectorView:
         connector = section.connector
         routing = cls._routing(connector)
         declared = tuple(section.declared_countries)
+        reserved = frozenset(routing.reserved_countries) if routing is not None else frozenset()
         try:
             provider = registry.descriptor_provider(connector, section.credential)
         except Exception as exc:
@@ -106,6 +112,9 @@ class ConnectorView:
             rate_limit=cls._rate_limit(connector),
             traffic=connector.parsed_traffic_config,
             declared_countries=declared,
+            reserved=reserved,
+            excluded=frozenset(routing.excluded_countries) if routing is not None else frozenset(),
+            untargeted_countries=tuple(country for country in declared if country not in reserved),
             proxies=tuple(section.proxies),
             provider=provider,
             accepts_request_country=not declared and provider is not None and provider.accepts_request_country(),
@@ -167,6 +176,11 @@ class ConnectorView:
         """Whether a dynamic request through this connector can be rendered with every level ``target`` names."""
         return self.provider is not None and self.provider.serves_location(target)
 
+    def names_country(self, country: str) -> bool:
+        """Whether the connector takes requests naming ``country`` at all: listed when it lists any, and not excluded."""
+        declared = self.declared_countries
+        return country not in self.excluded and (not declared or country in declared)
+
     def has_geo_group(self, country: str) -> bool:
         """Whether some row of the connector carries ``country`` as its slot group, whatever its state."""
         return country in self.geo_countries
@@ -180,8 +194,7 @@ class ConnectorView:
         key = (country, rules)
         rows = self._candidates.get(key)
         if rows is None:
-            declared = self.declared_countries
-            if country and declared and country not in declared:
+            if country and not self.names_country(country):
                 rows = ()
             else:
                 rows = tuple(proxy for proxy in self.proxies if self._can_serve(proxy, country, rules))
@@ -193,18 +206,21 @@ class ConnectorView:
 
         ``pinned``, a request naming the row, may use an on-demand country group's slot without naming its country.
         """
-        declared = self.declared_countries
-        if country and declared and country not in declared:
+        if country and not self.names_country(country):
             return False
         return self._can_serve(proxy, country, rules, pinned=pinned)
 
     def _can_serve(self, proxy: Proxy, country: str | None, rules: LocationRules, *, pinned: bool = False) -> bool:
         """Whether a row of a connector that serves ``country`` at all is one of its ``candidates``."""
+        known = None if is_dynamic_gateway(proxy) else proxy.country
         if (
             proxy.status != ProxyStatus.HEALTHY
             or GeoService.outside_declared_countries(proxy, self.declared_countries)
+            or (known is not None and known in self.excluded)
             or not eligible_under(rules, proxy.metadata)
         ):
+            return False
+        if not country and not pinned and self._exits_in_reserved(known):
             return False
         if is_dynamic_gateway(proxy):
             # The connector's allow-list was applied above; the row itself has no country.
@@ -212,8 +228,19 @@ class ConnectorView:
         if not country:
             # Untargeted traffic keeps off the on-demand groups of an "All countries" pool, unless it named the slot.
             return pinned or not (self.accepts_request_country and proxy.metadata.get(META_GEO_COUNTRY))
-        known = proxy.country
         return known == country if known is not None else country in self.declared_countries
+
+    def _exits_in_reserved(self, known: str | None) -> bool:
+        """Whether a row of known country ``known`` exits in a reserved country, which untargeted traffic keeps off.
+
+        A row of unknown country, a dynamic gateway among them, counts as one when every country the connector lists is
+        reserved; with no list, a gateway renders no country and the vendor picks.
+        """
+        if not self.reserved:
+            return False
+        if known is not None:
+            return known in self.reserved
+        return bool(self.declared_countries) and not self.untargeted_countries
 
 
 @dataclass(frozen=True, eq=False)
@@ -245,6 +272,15 @@ class RoutingSnapshot:
         for view in sorted(views.values(), key=lambda v: (v.connector.created_at, v.connector.id)):
             self._by_project.setdefault(view.connector.project_id, []).append(view)
         self._proxies = {proxy.id: proxy for view in views.values() for proxy in view.proxies}
+        # (project id, country) -> the connectors reserving it, in creation order. A disabled connector keeps its
+        # reservations, so requests for its countries fail; one being deleted holds none.
+        self._reserving: dict[tuple[str, str], list[ConnectorView]] = {}
+        for project_id, project_views in self._by_project.items():
+            for view in project_views:
+                if view.connector.pending_deletion:
+                    continue
+                for country in view.reserved:
+                    self._reserving.setdefault((project_id, country), []).append(view)
 
     @classmethod
     def from_sections(
@@ -298,6 +334,10 @@ class RoutingSnapshot:
     def connector_views(self, project_id: str) -> Sequence[ConnectorView]:
         """The project's connectors in creation order, whether they take requests or not."""
         return self._by_project.get(project_id, ())
+
+    def reserving(self, project_id: str, country: str) -> Sequence[ConnectorView]:
+        """The project's connectors reserving ``country``, whether they take requests or not, in creation order."""
+        return self._reserving.get((project_id, country), ())
 
     def view_of(self, proxy_id: str) -> ConnectorView | None:
         """The connector a proxy belongs to; what request metering reads its limits from."""

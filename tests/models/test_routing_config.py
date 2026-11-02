@@ -147,3 +147,32 @@ class TestRoutingWeight:
         assert Connector(**base, routing_config={"weight": "x"}).weight == 1
         assert Connector(**base, routing_config={"weight": 500}).weight == 1
         assert Connector(**base, routing_config={"weight": 0}).weight == 1
+
+
+class TestCountryLists:
+    """Reserved and excluded countries."""
+
+    def test_codes_are_normalised_and_empty_lists_are_not_stored(self) -> None:
+        stored = validate_routing_config({"reserved_countries": ["uk", "de", "DE"], "excluded_countries": []})
+        assert stored == {"reserved_countries": ["GB", "DE"]}
+
+    def test_a_country_cannot_be_both_reserved_and_excluded(self) -> None:
+        with pytest.raises(ValidationError, match="both reserved and excluded: GB"):
+            RoutingConfig(reserved_countries=["GB"], excluded_countries=["gb", "FR"])
+
+    def test_malformed_codes_are_refused(self) -> None:
+        with pytest.raises(ValidationError):
+            RoutingConfig(excluded_countries=["GBR"])
+        # A value that is no list is a validation error too (a 422), not a TypeError (a 500, or a gateway's snapshot
+        # failing on a hand-edited row).
+        with pytest.raises(ValidationError, match="must be a list"):
+            RoutingConfig(reserved_countries=True)
+
+    def test_reservations_and_exclusions_fit_the_connector_list(self) -> None:
+        # A connector listing none may reserve and exclude any country.
+        RoutingConfig(reserved_countries=["GB"], excluded_countries=["FR"]).check_countries([])
+        RoutingConfig(reserved_countries=["GB"]).check_countries(["GB", "US"])
+        with pytest.raises(ValueError, match="must be on the connector's country list: DE"):
+            RoutingConfig(reserved_countries=["GB", "DE"]).check_countries(["GB", "US"])
+        with pytest.raises(ValueError, match="cannot exclude any"):
+            RoutingConfig(excluded_countries=["FR"]).check_countries(["GB"])

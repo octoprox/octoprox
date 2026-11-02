@@ -63,6 +63,7 @@ def _router(proxy: Proxy | None, *, quarantined: bool = False) -> MagicMock:
     router.select_proxy_for_project.return_value = proxy
     router.are_all_proxies_quarantined.return_value = quarantined
     router.traffic_limit_status.return_value = None
+    router.reserved_by.return_value = []
     return router
 
 

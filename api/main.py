@@ -140,6 +140,7 @@ def _include_api(app: FastAPI) -> None:
         auth,
         backup,
         connectors,
+        countries,
         credentials,
         echo,
         failures,
@@ -189,6 +190,9 @@ def _include_api(app: FastAPI) -> None:
         prefix="/api/v1",
         tags=["Connectors"],
         dependencies=auth_dependency,
+    )
+    app.include_router(
+        countries.router, prefix="/api/v1", tags=["Countries"], dependencies=auth_dependency
     )
     app.include_router(
         proxies.router, prefix="/api/v1", tags=["Proxies"], dependencies=auth_dependency

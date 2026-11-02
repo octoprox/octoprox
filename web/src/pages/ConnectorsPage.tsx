@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { useEffect, useMemo, useState } from 'react'
-import { useSearchParams } from 'react-router'
+import { Link, useSearchParams } from 'react-router'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { ColumnDef } from '@tanstack/react-table'
 import { Link2, Trash2, Plus, AlertTriangle } from 'lucide-react'
@@ -28,7 +28,7 @@ import { DataTable, type DataTableFeatures } from '../components/DataTable'
 import { Page, EmptyState } from '../components/layout/Page'
 import { NewCredentialPanel, TypePicker, TypeCard } from '../components/CredentialForm'
 import { ProviderLogo } from '../components/ProviderLogo'
-import { SchemaForm, MultiCountryPicker, defaultValues, serializeValues, splitCountries } from '../components/SchemaForm'
+import { SchemaForm, MultiCountryPicker, defaultValues, isCountryField, serializeValues, splitCountries } from '../components/SchemaForm'
 import { relativeTime, formatDateTime, formatDate, formatBytesDecimal, formatMoney } from '../utils/format'
 import { targetTotal, describeTarget, isDynamic } from '../utils/connectors'
 import { coverageLabel } from '../components/geo/coverage'
@@ -205,6 +205,8 @@ export default function ConnectorsPage() {
           ? undefined
           : share.excluded_reason === 'disabled'
             ? 'Disabled: takes no traffic'
+            : share.excluded_reason === 'reserved_only'
+              ? 'Serves only requests naming a country it reserves: takes no untargeted requests'
             : share.excluded_reason === 'no_eligible_proxies'
               ? 'No healthy proxy right now: takes no traffic'
               : `About ${formatShare(share.expected_share)} of untargeted requests at the current weights and health`
@@ -452,6 +454,15 @@ function ConnectorEditor({ connector, siblings, canMutate, onClose, onDelete, on
   }
 
   const schemaScopes = { credential: (selectedCredentialData?.config as Record<string, unknown>) ?? {}, connector: formData.config }
+  // The countries the connector lists, from whichever field its type keeps them in; none means every country.
+  const countryKey = isDescriptor ? descriptorFields.find(isCountryField)?.key : 'countries'
+  const listedCountries = countryKey ? splitCountries(formData.config[countryKey]) : []
+  // What is stored: reservations narrowed to the list, and no exclusions beside one.
+  const routingForSubmit = (): RoutingConfig => {
+    const { reserved_countries: reserved = [], excluded_countries: excluded = [], ...rest } = formData.routing_config
+    const kept = listedCountries.length ? reserved.filter((c) => listedCountries.includes(c)) : reserved
+    return { ...rest, ...(kept.length ? { reserved_countries: kept } : {}), ...(!listedCountries.length && excluded.length ? { excluded_countries: excluded } : {}) }
+  }
 
   const prepareConfigForSubmit = (config: Record<string, string>): Record<string, unknown> => {
     const result: Record<string, unknown> = { ...config }
@@ -470,9 +481,9 @@ function ConnectorEditor({ connector, siblings, canMutate, onClose, onDelete, on
     if (!formData.credential_id) { setError('Select or create a credential first.'); return }
     const preparedConfig = isDescriptor ? serializeValues(descriptorFields, formData.config, schemaScopes) : prepareConfigForSubmit(formData.config)
     if (isEdit) {
-      updateMutation.mutate({ name: formData.name, credential_id: formData.credential_id, enabled: formData.enabled, config: preparedConfig, routing_config: formData.routing_config, rate_limit_config: formData.rate_limit_config, traffic_config: formData.traffic_config })
+      updateMutation.mutate({ name: formData.name, credential_id: formData.credential_id, enabled: formData.enabled, config: preparedConfig, routing_config: routingForSubmit(), rate_limit_config: formData.rate_limit_config, traffic_config: formData.traffic_config })
     } else {
-      createMutation.mutate({ name: formData.name, credential_id: formData.credential_id, config: preparedConfig, routing_config: formData.routing_config, rate_limit_config: formData.rate_limit_config, traffic_config: formData.traffic_config, enabled: formData.enabled })
+      createMutation.mutate({ name: formData.name, credential_id: formData.credential_id, config: preparedConfig, routing_config: routingForSubmit(), rate_limit_config: formData.rate_limit_config, traffic_config: formData.traffic_config, enabled: formData.enabled })
     }
   }
 
@@ -514,16 +525,31 @@ function ConnectorEditor({ connector, siblings, canMutate, onClose, onDelete, on
     if (rc.domain_blacklist && rc.domain_blacklist.length > 0) return rc.domain_blacklist
     return []
   }
-  const weightPart = (): Pick<RoutingConfig, 'weight'> => (formData.routing_config.weight != null ? { weight: formData.routing_config.weight } : {})
+  const withoutDomains = (): RoutingConfig => {
+    const { domain_whitelist: _allowed, domain_blacklist: _blocked, ...rest } = formData.routing_config
+    return rest
+  }
   const handleRoutingModeChange = (mode: DomainFilterMode) => {
-    if (mode === 'none') { setFormData({ ...formData, routing_config: { ...weightPart() } }); return }
+    if (mode === 'none') { setFormData({ ...formData, routing_config: withoutDomains() }); return }
     const domains = getRoutingDomainsArray()
-    setFormData({ ...formData, routing_config: { ...weightPart(), ...(mode === 'whitelist' ? { domain_whitelist: domains } : { domain_blacklist: domains }) } })
+    setFormData({ ...formData, routing_config: { ...withoutDomains(), ...(mode === 'whitelist' ? { domain_whitelist: domains } : { domain_blacklist: domains }) } })
   }
   const setRoutingDomains = (domains: string[]) => {
     const mode = getRoutingMode()
-    setFormData({ ...formData, routing_config: { ...weightPart(), ...(mode === 'whitelist' ? { domain_whitelist: domains } : { domain_blacklist: domains }) } })
+    setFormData({ ...formData, routing_config: { ...withoutDomains(), ...(mode === 'whitelist' ? { domain_whitelist: domains } : { domain_blacklist: domains }) } })
   }
+  // Reserved and excluded countries. A connector listing countries reserves only listed ones and excludes none.
+  const reservedCountries = formData.routing_config.reserved_countries ?? []
+  const excludedCountries = formData.routing_config.excluded_countries ?? []
+  const setRoutingCountries = (key: 'reserved_countries' | 'excluded_countries', codes: string[]) => {
+    const { [key]: _drop, ...rest } = formData.routing_config
+    setFormData({ ...formData, routing_config: codes.length ? { ...rest, [key]: codes } : rest })
+  }
+  const allReserved = listedCountries.length > 0 && listedCountries.every((c) => reservedCountries.includes(c))
+  const countryOptions = presets.countries ?? []
+  const reservableOptions = listedCountries.length
+    ? countryOptions.filter((o) => listedCountries.includes(o.value.toUpperCase()))
+    : countryOptions.filter((o) => !excludedCountries.includes(o.value.toUpperCase()))
   const weight = connectorWeight(formData.routing_config)
   // The field holds what is typed (so clearing it does not snap back to 1 mid-edit); the config gets the normalised number.
   const setWeight = (raw: string) => {
@@ -560,12 +586,39 @@ function ConnectorEditor({ connector, siblings, canMutate, onClose, onDelete, on
         <div className="flex items-center gap-3 mt-1">
           <Input type="number" min={1} max={MAX_ROUTING_WEIGHT} step={1} value={weightText} onChange={(e) => setWeight(e.target.value)} onBlur={settleWeight} disabled={readOnly} className="w-24 px-3 py-1.5 text-sm" />
           <span className="text-xs text-fg-muted">
+            {previewShare != null && allReserved && 'Every country it lists is reserved, so it takes no requests that name no country; the weight splits its reserved countries with the other connectors reserving them.'}
             {previewShare == null && 'Disabled connectors take no traffic.'}
-            {previewShare != null && otherWeight === 0 && (siblings.filter((c) => c.id !== connector?.id).length === 0 ? 'The only connector in this project; weight matters once a second one is added.' : 'The only enabled connector; it takes every request until another one is enabled.')}
-            {previewShare != null && otherWeight > 0 && <>About <b className="font-semibold text-fg">{formatShare(previewShare)}</b> of untargeted requests at the other connectors' current weights ({weight} of {weight + otherWeight}).</>}
+            {previewShare != null && !allReserved && otherWeight === 0 && (siblings.filter((c) => c.id !== connector?.id).length === 0 ? 'The only connector in this project; weight matters once a second one is added.' : 'The only enabled connector; it takes every request until another one is enabled.')}
+            {previewShare != null && !allReserved && otherWeight > 0 && <>About <b className="font-semibold text-fg">{formatShare(previewShare)}</b> of untargeted requests at the other connectors' current weights ({weight} of {weight + otherWeight}).</>}
           </span>
         </div>
       </div>
+      <div>
+        <Label className="text-xs">
+          <span className="inline-flex items-center gap-1.5">
+            <span>Reserved countries</span>
+            <InfoTip label="About reserved countries">
+              Requests naming a reserved country go only to the connectors reserving it, split by their weights. When none of them can serve it (disabled, over its traffic limit, every proxy resting), the request fails instead of going to another connector. Requests naming no country keep off this connector's exits in its reserved countries. A domain filter narrows the reservation: hosts this connector refuses go to the others.
+            </InfoTip>
+          </span>
+        </Label>
+        <div className="mt-1">
+          <MultiCountryPicker options={reservableOptions} value={reservedCountries.join(',')} onChange={(val) => setRoutingCountries('reserved_countries', splitCountries(val))} disabled={readOnly} placeholder={reservedCountries.length ? 'Reserve another country' : 'None reserved'} />
+        </div>
+        <p className="text-xs text-fg-muted mt-1.5">
+          {listedCountries.length ? 'Pick from the countries this connector lists.' : 'Any country this connector serves.'}
+          {selectedProjectId && <> Every connector at once: <Link to={`/projects/${selectedProjectId}/countries`} className="text-primary hover:underline">Countries</Link>.</>}
+        </p>
+      </div>
+      {listedCountries.length === 0 && (
+        <div>
+          <Label className="text-xs">Excluded countries</Label>
+          <div className="mt-1">
+            <MultiCountryPicker options={countryOptions.filter((o) => !reservedCountries.includes(o.value.toUpperCase()))} value={excludedCountries.join(',')} onChange={(val) => setRoutingCountries('excluded_countries', splitCountries(val))} disabled={readOnly} placeholder={excludedCountries.length ? 'Exclude another country' : 'None excluded'} />
+          </div>
+          <p className="text-xs text-fg-muted mt-1.5">Every country except these. Requests for them go to the other connectors, and exits found in them take no traffic.</p>
+        </div>
+      )}
       <div>
         <Label className="text-xs">Domain filter mode</Label>
         <div className="flex gap-1.5 mt-1 flex-wrap">

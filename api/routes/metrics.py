@@ -20,6 +20,7 @@ from api.core.stats import HOST_OVERFLOW, MetricDelta, normalize_host
 from api.core.telemetry import CONTENT_TYPE
 from api.db.redis import PROJECT_WINDOWS
 from api.db.repository import ConnectorRepository, MetricsRepository, ProxyRepository
+from api.models.location import LocationTarget
 from api.providers.sdk.strategies import is_dynamic_gateway
 from api.routes.common import (
     api_runtime_of,
@@ -28,6 +29,7 @@ from api.routes.common import (
     session_factory_of,
     settings_of,
 )
+from api.routing.router import Router
 from api.services.read_model import ConnectorRow, PoolCounts
 from api.strategies import STRATEGY_NAMES, served_strategy
 
@@ -166,7 +168,8 @@ class ConnectorTrafficShare(BaseModel):
     # Zero when the connector is disabled or has no eligible proxy.
     expected_share: float
     # Why the connector takes nothing, when it does: "disabled", "traffic_limit"
-    # (blocked by its traffic limit) or "no_eligible_proxies".
+    # (blocked by its traffic limit), "reserved_only" (it serves only requests
+    # naming a country it reserves) or "no_eligible_proxies".
     excluded_reason: str | None = None
     observed_requests: int
     # Share of the project's requests in the window that went through this connector, 0-100.
@@ -342,6 +345,19 @@ def _label_value(value: str) -> str:
     return value.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
 
 
+def _serving_reserved(preview: Router, project_id: str) -> set[str]:
+    """The connectors with a proxy taking requests for a country they reserve, which untargeted ones keep off.
+
+    A reserved country's requests reach only the connectors reserving it, so each of its routable proxies is theirs.
+    """
+    reserved = sorted({country for view in preview.snapshot.connector_views(project_id) for country in view.reserved})
+    return {
+        proxy.connector_id
+        for country in reserved
+        for proxy in preview.get_routable_proxies_for_project(project_id, location=LocationTarget(country=country))
+    }
+
+
 @router.get("/traffic-split", response_model=TrafficSplitResponse)
 async def get_traffic_split(
     request: Request,
@@ -362,6 +378,7 @@ async def get_traffic_split(
         g.key: g for g in preview.group_by_connector(preview.get_routable_proxies_for_project(project_id))
     }
     total_weight = sum(g.weight for g in eligible_groups.values())
+    serving_reserved = _serving_reserved(preview, project_id)
 
     delta, _limit, _bucket = RANGE_CONFIG[range]
     since = utc_now() - delta
@@ -389,6 +406,8 @@ async def get_traffic_split(
             reason: str | None = "disabled"
         elif preview.is_traffic_blocked(connector.id):
             reason = "traffic_limit"
+        elif group is None and connector.id in serving_reserved:
+            reason = "reserved_only"
         elif group is None:
             reason = "no_eligible_proxies"
         else:

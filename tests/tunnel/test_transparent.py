@@ -134,6 +134,7 @@ def _server(
     )
     router.are_all_proxies_quarantined.return_value = False
     router.traffic_limit_status.return_value = None
+    router.reserved_by.return_value = []
     metering = RecordingMetering()
     server = TransparentProxyServer(
         router, metering, peers, FakeIpDirectory(pool), port=0, timeout=30.0,
