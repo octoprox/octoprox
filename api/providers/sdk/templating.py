@@ -50,6 +50,7 @@ from urllib.parse import quote
 from api.models.location import LocationTarget
 from api.providers.sdk.descriptor import (
     Condition,
+    HttpCallSpec,
     ProviderDescriptor,
     ProxyTypeSpec,
     Template,
@@ -303,26 +304,43 @@ def country_field_key(descriptor: ProviderDescriptor, ptype: ProxyTypeSpec) -> s
     Returns the key of the descriptor's connector field of type ``country``
     (or using the ``countries`` preset) when the proxy type's username,
     password, host or port template reads ``{geo.country}``, the country a
-    slot or request targets. None when none of them carries a country, or
-    the descriptor has no country field to draw the list from. Templates
-    that depend on list items are excluded, since list-mode credentials come
-    from the vendor.
+    slot or request targets, or when a list type's list call does. None when
+    none of them carries a country, or the descriptor has no country field to
+    draw the list from. Credential templates that depend on list items are
+    excluded, since list-mode credentials come from the vendor.
 
     Proxy types with such a key are provisioned as one slot group per
-    country, and can take unlisted countries on demand from ``-cc-``
-    requests.
+    country (a list type reads each country's list on its own), and session
+    types can take unlisted countries on demand from ``-cc-`` requests.
     """
-    paths = TemplateRenderer.referenced_paths(ptype.username) | TemplateRenderer.referenced_paths(
-        ptype.password
-    )
     # Regional gateways encode the country in the host (or port) rather than the credentials.
-    paths |= TemplateRenderer.referenced_paths(ptype.host) | TemplateRenderer.referenced_paths(ptype.port_template)
+    paths = _credential_paths(ptype)
     if any(path.startswith("item.") for path in paths):
-        return None
+        paths = set()
+    if ptype.mode == "list" and ptype.source is not None:
+        paths |= _call_paths(ptype.source.call)
     if "geo.country" not in paths:
         return None
     field_spec = descriptor.country_field()
     return field_spec.key if field_spec is not None else None
+
+
+def _call_paths(call: HttpCallSpec) -> set[str]:
+    """Every variable path a call's URL, headers, params and body strings reference."""
+    texts: list[str] = [call.url, *call.headers.values(), *call.params.values()]
+    stack: list[Any] = [call.body]
+    while stack:
+        value = stack.pop()
+        if isinstance(value, str):
+            texts.append(value)
+        elif isinstance(value, dict):
+            stack.extend(value.values())
+        elif isinstance(value, list):
+            stack.extend(value)
+    paths: set[str] = set()
+    for text in texts:
+        paths |= TemplateRenderer.referenced_paths(text)
+    return paths
 
 
 def _credential_paths(ptype: ProxyTypeSpec) -> set[str]:

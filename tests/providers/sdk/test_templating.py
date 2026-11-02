@@ -128,10 +128,19 @@ class TestCountryFieldKey:
         assert country_field_key(oxy, oxy.get_proxy_type("isp")) is None
         assert country_field_key(oxy, oxy.get_proxy_type("datacenter")) is None
 
-    def test_list_mode_filter_field_is_not_a_credential_country(self, builtins: dict) -> None:
+    def test_list_type_whose_call_takes_the_country_is_per_country(self, builtins: dict) -> None:
         webshare = builtins["webshare"]
         for ptype in webshare.proxy_types:
-            assert country_field_key(webshare, ptype) is None
+            assert country_field_key(webshare, ptype) == "country_code"
+
+    def test_list_credentials_built_from_items_still_follow_the_call(self, builtins: dict) -> None:
+        webshare = builtins["webshare"]
+        ptype = webshare.proxy_types[0].model_copy(update={"username": "{item.username}-{geo.country}"})
+        assert country_field_key(webshare, ptype) == "country_code"
+        without_call_country = ptype.model_copy(
+            update={"source": ptype.source.model_copy(update={"call": ptype.source.call.model_copy(update={"params": {}})})}
+        )
+        assert country_field_key(webshare, without_call_country) is None
 
 
 class TestListValuesAndSlotCountry:

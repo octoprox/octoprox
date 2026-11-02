@@ -17,6 +17,7 @@ from pydantic import BaseModel, Field
 
 from api.models.connector import Connector
 from api.models.credential import Credential
+from api.models.location import LocationTarget, normalize_country_list
 from api.models.proxy import Proxy
 from api.providers.sdk.descriptor import (
     HttpCallSpec,
@@ -33,7 +34,7 @@ from api.providers.sdk.http import CallTrace, HttpCallError, HttpCallExecutor, _
 from api.providers.sdk.provider import DescriptorProvider, SdkRuntime
 from api.providers.sdk.sources import ListSource, default_proxied_client_factory
 from api.providers.sdk.strategies import ProxyBuilder
-from api.providers.sdk.templating import RenderContext, TemplateRenderer
+from api.providers.sdk.templating import RenderContext, TemplateRenderer, country_field_key
 
 logger = structlog.get_logger()
 
@@ -384,8 +385,16 @@ class DescriptorTester:
         if missing:
             return DiscoveryOutcome(ok=False, message=f"Missing connector values: {', '.join(missing)}")
         ctx = _context(self._descriptor, credential_config, connector_config)
+        # A list type whose call takes the country reads each listed country's list, as its sync does.
+        country_key = country_field_key(self._descriptor, ptype)
         try:
-            listed = await ListSource(ptype.source, self._executor, ValueExtractor()).fetch(ctx)
+            countries = normalize_country_list(connector_config.get(country_key)) if country_key else []
+        except ValueError as exc:
+            return DiscoveryOutcome(ok=False, message=str(exc))
+        contexts = [ctx.with_place(LocationTarget(country=country)) for country in countries] or [ctx]
+        source = ListSource(ptype.source, self._executor, ValueExtractor())
+        try:
+            listed = [proxy for country_ctx in contexts for proxy in await source.fetch(country_ctx)]
         except HttpCallError as exc:
             return DiscoveryOutcome(ok=False, message=str(exc), traces=[exc.trace] if exc.trace else [])
         preview = [

@@ -118,6 +118,8 @@ class DescriptorProvider(ProxyProvider):
         #    mobile sessions such as Oxylabs "cc-{connector.country_code}",
         #    Bright Data ISP picking IPs per country from its zone list): one
         #    slot group per country, each rendered with that country;
+        #  - a list type whose list call takes the country (Webshare): one group
+        #    per country, each that country's list, the count per country;
         #  - the credentials cannot carry a country but the type discovers IPs
         #    (Oxylabs and Decodo ISP/datacenter, where each port is pinned to
         #    an IP): a single group, where discovery keeps only IPs located in
@@ -144,6 +146,9 @@ class DescriptorProvider(ProxyProvider):
         self._builder = ProxyBuilder(descriptor, self._ptype, connector.id, TemplateRenderer())
         self._extractor = ValueExtractor()
         self._strategy = self._build_strategy(self._ctx)
+        # One strategy per country group, built when first asked for: a sync refreshes and then syncs each group,
+        # and a list type reads the group's list once for both.
+        self._country_strategies: dict[str, SyncStrategy] = {}
 
     @property
     def descriptor(self) -> ProviderDescriptor:
@@ -328,7 +333,11 @@ class DescriptorProvider(ProxyProvider):
         """Strategy rendering one country's slot group (``None`` = the ungeo-targeted group)."""
         if not self._geo_targeted or country is None or self._dynamic:
             return self._strategy
-        return self._build_strategy(self._ctx.with_place(LocationTarget(country=country)))
+        strategy = self._country_strategies.get(country)
+        if strategy is None:
+            strategy = self._build_strategy(self._ctx.with_place(LocationTarget(country=country)))
+            self._country_strategies[country] = strategy
+        return strategy
 
     # --- per-country slot groups -----------------------------------------------------
 
@@ -361,6 +370,10 @@ class DescriptorProvider(ProxyProvider):
         if configured:
             return list(configured)
         targets: list[str | None] = [None]
+        if self._ptype.mode == "list":
+            # The whole list already holds every country's entries, and a list type takes no country on demand: a
+            # country group left from an earlier list goes, or its proxies would be mirrored twice.
+            return targets
         for geo in provisioned:
             if isinstance(geo, str) and geo.strip() and geo.strip().upper() not in targets:
                 targets.append(geo.strip().upper())

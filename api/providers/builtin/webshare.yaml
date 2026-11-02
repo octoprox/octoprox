@@ -32,16 +32,19 @@ connector_fields:
   - key: plan_id
     label: Plan ID
     help: Leave empty for the account's default plan.
-  - key: country_codes
+  - key: country_code
     label: Countries
-    placeholder: US,FR
-    help: Comma-separated ISO country codes to filter the list (optional).
-    transform: upper
+    type: select
+    options_preset: countries
+    help: Leave empty for all countries.
+    details: >-
+      Each listed country is read from the account's list on its own, up to "Maximum proxies" per country. Left
+      empty, the whole list is mirrored, up to "Maximum proxies" in all.
   - key: num_proxies
     label: Maximum proxies
     type: number
     min: 1
-    help: Leave empty to mirror the whole list.
+    help: Per listed country. Leave empty to mirror the whole list.
 
 validation:
   call:
@@ -63,7 +66,7 @@ proxy_types:
           mode: "{connector.mode}"
           page_size: "100"
           plan_id: "{connector.plan_id}"
-          country_code__in: "{connector.country_codes}"
+          country_code__in: "{geo.country}"
         paginate:
           next_url: next
       items: results

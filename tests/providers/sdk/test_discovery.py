@@ -148,6 +148,27 @@ class TestDescriptorTester:
         outcome = await DescriptorTester(builtins["webshare"], vendor.runtime()).run("list_proxies", {"api_key": "K"}, {"mode": "direct"})
         assert outcome.ok and outcome.message == "1 proxies"
         assert outcome.result == [{"host": "1.1.1.1", "port": 80, "username": "u", "country": "US", "identity": "1"}]
+        assert "country_code__in" not in vendor.api_requests[0].url.params
+
+    async def test_list_proxies_preview_reads_each_listed_country(self, builtins: dict[str, ProviderDescriptor]) -> None:
+        def api(request: httpx.Request) -> httpx.Response:
+            country = request.url.params["country_code__in"]
+            return json_response({"results": [{"id": country, "proxy_address": "1.1.1.1", "port": 80, "valid": True, "country_code": country}], "next": None})
+
+        vendor = MockVendor(api_handler=api)
+        outcome = await DescriptorTester(builtins["webshare"], vendor.runtime()).run(
+            "list_proxies", {"api_key": "K"}, {"mode": "direct", "country_code": ["AU", "US"]}
+        )
+        assert outcome.ok and outcome.message == "2 proxies"
+        assert [entry["identity"] for entry in outcome.result] == ["AU", "US"]
+
+    async def test_list_proxies_preview_refuses_a_malformed_country(self, builtins: dict[str, ProviderDescriptor]) -> None:
+        vendor = MockVendor(api_handler=lambda request: json_response({"results": [], "next": None}))
+        outcome = await DescriptorTester(builtins["webshare"], vendor.runtime()).run(
+            "list_proxies", {"api_key": "K"}, {"mode": "direct", "country_code": "USA"}
+        )
+        assert not outcome.ok and "USA" in outcome.message
+        assert vendor.api_requests == []
 
 
 def _ip_echo(ip: str) -> httpx.Response:

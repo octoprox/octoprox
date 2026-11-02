@@ -128,3 +128,52 @@ async def test_listed_city_is_the_vendor_claim(builtins: dict[str, ProviderDescr
     by_host = {p.host: p.metadata for p in to_add}
     assert by_host["1.1.1.1"]["vendor_country"] == "US" and by_host["1.1.1.1"]["vendor_city"] == "new_york"
     assert "vendor_city" not in by_host["3.3.3.3"] and by_host["3.3.3.3"]["vendor_country"] == "DE"
+
+
+def _by_country(request: httpx.Request) -> httpx.Response:
+    """Two valid proxies per country asked for, then a next page that must not be read under a cap of 1."""
+    country = request.url.params["country_code__in"]
+    assert request.url.params.get("page") is None, "the cap was reached on the first page"
+    return json_response({
+        "next": f"https://proxy.webshare.io/api/v2/proxy/list/?country_code__in={country}&page=2",
+        "results": [
+            {"id": f"{country}-{n}", "username": "u", "password": "p", "proxy_address": f"10.0.{n}.{len(country)}", "port": 8000 + n, "valid": True, "country_code": country}
+            for n in (1, 2)
+        ],
+    })
+
+
+async def test_countries_are_the_connector_country_list(builtins: dict[str, ProviderDescriptor]) -> None:
+    """The countries dropdown is the connector's country list, so routing and the Countries page know it."""
+    provider = _provider(builtins, MockVendor(api_handler=_by_country), {"country_code": ["AU"]})
+    assert provider.countries == ["AU"]
+    assert provider.geo_targeted and provider.provisions_per_country
+    assert not provider.accepts_request_country()
+
+
+async def test_each_listed_country_is_read_on_its_own_up_to_the_cap(builtins: dict[str, ProviderDescriptor]) -> None:
+    vendor = MockVendor(api_handler=_by_country)
+    to_add, _ = await _provider(builtins, vendor, {"country_code": ["AU", "US"], "num_proxies": 1}).sync_proxies([])
+    assert [(p.metadata["list_identity"], p.metadata["geo"]) for p in to_add] == [("AU-1", "AU"), ("US-1", "US")]
+    assert [request.url.params["country_code__in"] for request in vendor.api_requests] == ["AU", "US"]
+
+
+async def test_refresh_and_sync_read_each_country_once(builtins: dict[str, ProviderDescriptor]) -> None:
+    vendor = MockVendor(api_handler=_by_country)
+    provider = _provider(builtins, vendor, {"country_code": ["AU", "US"], "num_proxies": 1})
+    stored = [Proxy(id="au", host="10.0.1.2", port=8001, username="u", password="p", connector_id="conn-1", metadata={"list_identity": "AU-1", "geo": "AU"})]
+    _updated, removed = await provider.refresh_ips(stored)
+    to_add, _ = await provider.sync_proxies(stored)
+    assert removed == []
+    assert [p.metadata["list_identity"] for p in to_add] == ["US-1"]
+    assert len(vendor.api_requests) == 2  # one per country, for the refresh and the sync together
+
+
+async def test_clearing_the_countries_drops_their_groups_for_the_whole_list(builtins: dict[str, ProviderDescriptor]) -> None:
+    """With no countries the whole list is mirrored; rows kept per country before go, or they would be there twice."""
+    vendor = MockVendor(api_handler=_api)
+    stored = [Proxy(id="au", host="1.1.1.1", port=8000, connector_id="conn-1", metadata={"list_identity": "a", "geo": "AU"})]
+    to_add, to_remove = await _provider(builtins, vendor, {}).sync_proxies(stored)
+    assert to_remove == ["au"]
+    assert [p.metadata["list_identity"] for p in to_add] == ["a", "c"]
+    assert all("geo" not in p.metadata for p in to_add)
