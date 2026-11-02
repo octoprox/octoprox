@@ -3,6 +3,9 @@
 
 """Tests for the declarative HTTP executor."""
 
+from datetime import UTC, datetime, timedelta
+from email.utils import format_datetime
+
 import httpx
 import pytest
 
@@ -34,13 +37,24 @@ def _descriptor(**overrides: object) -> ProviderDescriptor:
     return ProviderDescriptor.model_validate(base)
 
 
-def _executor(descriptor: ProviderDescriptor, handler, *, policy: EgressPolicy = TEST_POLICY, max_bytes: int = 0) -> HttpCallExecutor:  # type: ignore[no-untyped-def]
+class _Sleeps:
+    """Records the waits the executor asks for instead of taking them."""
+
+    def __init__(self) -> None:
+        self.waits: list[float] = []
+
+    async def __call__(self, seconds: float) -> None:
+        self.waits.append(seconds)
+
+
+def _executor(descriptor: ProviderDescriptor, handler, *, policy: EgressPolicy = TEST_POLICY, max_bytes: int = 0, sleep: _Sleeps | None = None) -> HttpCallExecutor:  # type: ignore[no-untyped-def]
     return HttpCallExecutor(
         descriptor,
         egress=EgressGuard(policy),
         client_factory=lambda: httpx.AsyncClient(transport=httpx.MockTransport(handler)),
         max_response_bytes=max_bytes,
         token_cache=AuthTokenCache(),
+        sleep=sleep or _Sleeps(),
     )
 
 
@@ -132,6 +146,109 @@ async def test_pagination_follows_same_host_only() -> None:
 
     with pytest.raises(HttpCallError, match="different host"):
         await _executor(_descriptor(), evil).execute(call, RenderContext())
+
+
+async def test_on_page_stops_pagination() -> None:
+    requested: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        page = request.url.params.get("page", "1")
+        requested.append(page)
+        return json_response({"results": [int(page)], "next": f"https://api.vendor.test/list?page={int(page) + 1}"})
+
+    call = HttpCallSpec(url="https://api.vendor.test/list", paginate=PaginationSpec(next_url="next"))
+    seen: list[object] = []
+
+    def on_page(page: object) -> bool:
+        seen.append(page)
+        return len(seen) < 2
+
+    result = await _executor(_descriptor(), handler).execute(call, RenderContext(), on_page=on_page)
+    assert requested == ["1", "2"]
+    assert len(result.pages) == len(seen) == 2
+
+
+async def test_rate_limited_page_is_sent_again_after_retry_after() -> None:
+    answers = iter([
+        json_response({"results": [1], "next": "https://api.vendor.test/list?page=2"}),
+        httpx.Response(429, headers={"retry-after": "2"}),
+        json_response({"results": [2], "next": None}),
+    ])
+    sleeps = _Sleeps()
+    call = HttpCallSpec(url="https://api.vendor.test/list", paginate=PaginationSpec(next_url="next"))
+    result = await _executor(_descriptor(), lambda request: next(answers), sleep=sleeps).execute(call, RenderContext())
+    assert sleeps.waits == [2.0]
+    assert result.ok and len(result.pages) == 2
+    assert [(trace.page, trace.status) for trace in result.traces] == [(1, 200), (2, 429), (2, 200)]
+
+
+async def test_rate_limit_takes_an_http_date_retry_after() -> None:
+    when = format_datetime(datetime.now(UTC) + timedelta(seconds=30), usegmt=True)
+    answers = iter([httpx.Response(429, headers={"retry-after": when}), json_response({"ok": True})])
+    sleeps = _Sleeps()
+    result = await _executor(_descriptor(), lambda request: next(answers), sleep=sleeps).execute(
+        HttpCallSpec(url="https://api.vendor.test/status"), RenderContext()
+    )
+    assert result.data == {"ok": True}
+    assert len(sleeps.waits) == 1 and 25 <= sleeps.waits[0] <= 30
+
+
+async def test_rate_limit_without_retry_after_backs_off_then_fails() -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(429)
+
+    sleeps = _Sleeps()
+    with pytest.raises(HttpCallError, match="HTTP 429") as excinfo:
+        await _executor(_descriptor(), handler, sleep=sleeps).execute(HttpCallSpec(url="https://api.vendor.test/status"), RenderContext())
+    assert sleeps.waits == [5.0, 10.0, 20.0]
+    assert len(requests) == 4
+    assert excinfo.value.trace is not None and excinfo.value.trace.status == 429
+
+
+async def test_rate_limit_with_a_malformed_retry_after_backs_off() -> None:
+    answers = iter([httpx.Response(429, headers={"retry-after": "nan"}), json_response({"ok": True})])
+    sleeps = _Sleeps()
+    result = await _executor(_descriptor(), lambda request: next(answers), sleep=sleeps).execute(
+        HttpCallSpec(url="https://api.vendor.test/status"), RenderContext()
+    )
+    assert result.data == {"ok": True}
+    assert sleeps.waits == [5.0]
+
+
+async def test_rate_limit_waits_are_capped_per_call_across_pages() -> None:
+    """Each page is rate limited once for 50 s: two waits fit the call's 120 s, the third fails it."""
+    limited: set[str] = set()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        page = request.url.params.get("page", "1")
+        if page not in limited:
+            limited.add(page)
+            return httpx.Response(429, headers={"retry-after": "50"})
+        return json_response({"results": [int(page)], "next": f"https://api.vendor.test/list?page={int(page) + 1}"})
+
+    sleeps = _Sleeps()
+    call = HttpCallSpec(url="https://api.vendor.test/list", paginate=PaginationSpec(next_url="next"))
+    with pytest.raises(HttpCallError, match="HTTP 429") as excinfo:
+        await _executor(_descriptor(), handler, sleep=sleeps).execute(call, RenderContext())
+    assert sleeps.waits == [50.0, 50.0]
+    assert excinfo.value.trace is not None and excinfo.value.trace.page == 3
+
+
+async def test_rate_limit_longer_than_the_longest_wait_fails_at_once() -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(429, headers={"retry-after": "3600"})
+
+    sleeps = _Sleeps()
+    with pytest.raises(HttpCallError, match="HTTP 429"):
+        await _executor(_descriptor(), handler, sleep=sleeps).execute(HttpCallSpec(url="https://api.vendor.test/status"), RenderContext())
+    assert sleeps.waits == []
+    assert len(requests) == 1
 
 
 async def test_redirects_are_not_followed() -> None:

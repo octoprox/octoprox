@@ -255,45 +255,56 @@ class ListSource:
         self._executor = executor
         self._extractor = extractor
 
-    async def fetch(self, ctx: RenderContext) -> list[ListedProxy]:
-        """Return the listed proxies; raises :class:`HttpCallError` on failure."""
-        result = await self._executor.execute(self._spec.call, ctx)
+    async def fetch(self, ctx: RenderContext, limit: int | None = None) -> list[ListedProxy]:
+        """Return the listed proxies, the first ``limit`` of them when given; raises :class:`HttpCallError` on failure.
+
+        With a limit the pages stop once that many proxies are listed, so a small cap on a long list is one request.
+        """
         proxies: list[ListedProxy] = []
         seen: set[str] = set()
-        for item in result.items(self._extractor, self._spec.items):
-            if not self._extractor.truthy(self._spec.filter, item):
-                continue
-            host = self._extractor.extract_str(self._spec.host, item)
-            port_text = self._extractor.extract_str(self._spec.port, item)
-            if not host or not port_text:
-                continue
-            try:
-                port = int(float(port_text))
-            except ValueError:
-                continue
-            identity = self._extractor.extract_str(self._spec.identity, item) or f"{host}:{port}"
-            if identity in seen:
-                continue
-            seen.add(identity)
-            protocol_text = (self._extractor.extract_str(self._spec.protocol, item) or "http").lower()
-            try:
-                protocol = ProxyProtocol(protocol_text)
-            except ValueError:
-                protocol = ProxyProtocol.HTTP
-            proxies.append(
-                ListedProxy(
-                    identity=identity,
-                    host=host,
-                    port=port,
-                    username=self._extractor.extract_str(self._spec.username, item),
-                    password=self._extractor.extract_str(self._spec.password, item),
-                    protocol=protocol,
-                    place=LocationTarget.reported(
-                        self._extractor.extract_str(self._spec.country, item) if self._spec.country else None,
-                        self._extractor.extract_str(self._spec.state, item) if self._spec.state else None,
-                        self._extractor.extract_str(self._spec.city, item) if self._spec.city else None,
-                    ),
-                    raw=item if isinstance(item, dict) else {},
-                )
-            )
-        return proxies
+
+        def take(page: Any) -> bool:
+            for item in self._extractor.extract_list(self._spec.items, page):
+                proxy = self._listed(item, seen)
+                if proxy is not None:
+                    proxies.append(proxy)
+            return limit is None or len(proxies) < limit
+
+        await self._executor.execute(self._spec.call, ctx, on_page=take)
+        return proxies if limit is None else proxies[:limit]
+
+    def _listed(self, item: Any, seen: set[str]) -> ListedProxy | None:
+        """The proxy one list entry describes; None for one the filter drops, one without an endpoint and a repeat."""
+        if not self._extractor.truthy(self._spec.filter, item):
+            return None
+        host = self._extractor.extract_str(self._spec.host, item)
+        port_text = self._extractor.extract_str(self._spec.port, item)
+        if not host or not port_text:
+            return None
+        try:
+            port = int(float(port_text))
+        except ValueError:
+            return None
+        identity = self._extractor.extract_str(self._spec.identity, item) or f"{host}:{port}"
+        if identity in seen:
+            return None
+        seen.add(identity)
+        protocol_text = (self._extractor.extract_str(self._spec.protocol, item) or "http").lower()
+        try:
+            protocol = ProxyProtocol(protocol_text)
+        except ValueError:
+            protocol = ProxyProtocol.HTTP
+        return ListedProxy(
+            identity=identity,
+            host=host,
+            port=port,
+            username=self._extractor.extract_str(self._spec.username, item),
+            password=self._extractor.extract_str(self._spec.password, item),
+            protocol=protocol,
+            place=LocationTarget.reported(
+                self._extractor.extract_str(self._spec.country, item) if self._spec.country else None,
+                self._extractor.extract_str(self._spec.state, item) if self._spec.state else None,
+                self._extractor.extract_str(self._spec.city, item) if self._spec.city else None,
+            ),
+            raw=item if isinstance(item, dict) else {},
+        )

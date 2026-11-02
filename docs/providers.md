@@ -192,7 +192,7 @@ Secret fields render as `{key}` runtime placeholders inside stored proxies; ever
 
 `host` and `port` are templates too, so a connector field can override the vendor default: `host: "{connector.gateway_host|or:proxy.geonode.io}"`, `port: "{connector.gateway_port|or:10000}"`. A port template must render to a number between 1 and 65535, and in `port` mode it is the first port of the sequence.
 
-`count_field` (default `connector.num_proxies`) names the variable holding the desired slot count; in list mode it is an optional cap. `proxy_type_field` selects the proxy type from a select field when a descriptor has more than one.
+`count_field` (default `connector.num_proxies`) names the variable holding the desired slot count; in list mode it is an optional cap: the connector mirrors the first that many proxies the vendor lists, and stops reading pages once it has them, so a small cap on a long list is a single request. `proxy_type_field` selects the proxy type from a select field when a descriptor has more than one.
 
 **Dynamic sessions.** A `session` type provisions a fixed pool of sessions by default: `num_proxies` rows, each with a baked-in session id, and a group per country. Residential and mobile products do not need that. Set the connector field named by `session_mode_field` (default `connector.session_mode`) to `dynamic` and the connector holds exactly **one gateway row** whose credentials are rendered per request instead:
 
@@ -210,7 +210,7 @@ The gateway row is not health-checked: no single exit speaks for a pool that han
 
 ### HTTP calls, auth flows, options and validation
 
-- **Call**: `method`, `url`, `headers`, `params` (empty rendered values are dropped), `body` (JSON, strings templated), `auth` (name of an auth flow), `paginate: { next_url: <JMESPath> }`.
+- **Call**: `method`, `url`, `headers`, `params` (empty rendered values are dropped), `body` (JSON, strings templated), `auth` (name of an auth flow), `paginate: { next_url: <JMESPath> }`. A request the vendor answers with `429 Too Many Requests` is sent again up to 3 times: after the wait its `Retry-After` names, or after 5, 10 and 20 seconds when it names none. When `Retry-After` asks for more than 60 seconds, or a wait would take the call past 120 seconds of waiting in all, across its pages, the call fails with the `429` at once; a sync tries again on its next run. This holds for every call, the admin screens' options, validation and test calls included.
 - **Auth flow** (`auth.<name>`): a call plus `token_path`; the token is cached for `ttl_seconds` and exposed as `{auth.token}`.
 - **Options source** (`options.<name>`): a call plus `items`, `value`, `label`, `description`, `extra` (named JMESPath or value mappings), `enrich` (per-option follow-up calls with `when` and `merge`), `filter` and `cache_seconds`. `label` and `description` are evaluated over the enriched option, so they can mention values from follow-up calls. `group_by_value: true` collapses items sharing a value into one option with a `count` extra - how Bright Data turns a list of exit IPs into countries with IP counts.
 - **Validation**: a call plus optional `success` predicate, `capture` (stored on the credential), `error_message` and `when`.

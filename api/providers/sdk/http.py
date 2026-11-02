@@ -5,17 +5,21 @@
 
 Responsibilities: render templates, run a two-step auth flow when the call
 asks for one (with a short-lived token cache), apply the egress policy, follow
-declared pagination, decode the body and record a redacted trace for the
-admin test panel and logs.
+declared pagination, wait out a vendor's rate limit, decode the body and
+record a redacted trace for the admin test panel and logs.
 """
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
+import math
 import time
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
+from email.utils import parsedate_to_datetime
 from typing import Any
 
 import httpx
@@ -29,6 +33,20 @@ from api.providers.sdk.templating import RenderContext, TemplateRenderer
 logger = structlog.get_logger()
 
 ClientFactory = Callable[[], httpx.AsyncClient]
+Sleep = Callable[[float], Awaitable[None]]
+
+# A request the vendor answers with 429 Too Many Requests is sent again, up to
+# RATE_LIMIT_RETRIES more times, after the wait its Retry-After names, or after
+# RATE_LIMIT_BACKOFF_SECONDS, doubling per retry, when it names none. A vendor
+# that asks for longer than RATE_LIMIT_MAX_WAIT_SECONDS is not waited for, and
+# one call waits RATE_LIMIT_MAX_TOTAL_WAIT_SECONDS at most across all its pages,
+# so a rate-limited vendor holds neither a sync slot nor an admin request for
+# long: past either, the call fails with the 429 at once (a sync asks again on
+# its next run).
+RATE_LIMIT_RETRIES = 3
+RATE_LIMIT_BACKOFF_SECONDS = 5.0
+RATE_LIMIT_MAX_WAIT_SECONDS = 60.0
+RATE_LIMIT_MAX_TOTAL_WAIT_SECONDS = 120.0
 
 _SENSITIVE_HEADERS = frozenset(
     {"authorization", "x-api-key", "x-access-token", "x-auth-token", "api-key", "token", "cookie"}
@@ -149,6 +167,7 @@ class HttpCallExecutor:
         max_response_bytes: int = 0,
         client_factory: ClientFactory | None = None,
         token_cache: AuthTokenCache | None = None,
+        sleep: Sleep = asyncio.sleep,
     ) -> None:
         self._descriptor = descriptor
         self._egress = egress
@@ -158,11 +177,21 @@ class HttpCallExecutor:
         self._max_bytes = max_response_bytes
         self._client_factory = client_factory or default_client_factory(timeout_seconds)
         self._token_cache = token_cache or _default_token_cache
+        self._sleep = sleep
 
     async def execute(
-        self, call: HttpCallSpec, ctx: RenderContext, *, raise_for_status: bool = True
+        self,
+        call: HttpCallSpec,
+        ctx: RenderContext,
+        *,
+        raise_for_status: bool = True,
+        on_page: Callable[[Any], bool] | None = None,
     ) -> CallResult:
-        """Run ``call``; with ``raise_for_status`` a non-2xx raises :class:`HttpCallError`."""
+        """Run ``call``; with ``raise_for_status`` a non-2xx raises :class:`HttpCallError`.
+
+        ``on_page`` sees each decoded page as it arrives and answers whether the next one is wanted, so a caller that
+        has what it needs stops the pagination there.
+        """
         if call.auth is not None:
             ctx = await self._authenticate(call.auth, ctx)
 
@@ -176,6 +205,7 @@ class HttpCallExecutor:
         pages: list[Any] = []
         statuses: list[int] = []
         traces: list[CallTrace] = []
+        budget = _WaitBudget(RATE_LIMIT_MAX_TOTAL_WAIT_SECONDS)
         try:
             first_host = self._egress.check_static(url)
         except EgressDeniedError as exc:
@@ -187,17 +217,17 @@ class HttpCallExecutor:
             next_url: str | None = url
             next_params: dict[str, str] | None = params
             while next_url is not None:
-                status, decoded, trace = await self._send(
-                    client, call.method, next_url, headers, next_params, body, timeout, secrets, page_no
+                status, decoded, trace = await self._send_page(
+                    client, call.method, next_url, headers, next_params, body, timeout, secrets, page_no, traces, budget
                 )
-                traces.append(trace)
                 if raise_for_status and not 200 <= status < 300:
                     raise HttpCallError(f"{call.method} {trace.url} returned HTTP {status}", trace)
                 pages.append(decoded)
                 statuses.append(status)
+                wanted = on_page is None or on_page(decoded)
                 next_url = None
                 next_params = None
-                if call.paginate is not None and page_no < call.paginate.max_pages:
+                if wanted and call.paginate is not None and page_no < call.paginate.max_pages:
                     candidate = self._extractor.extract_str(call.paginate.next_url, decoded)
                     if candidate:
                         if self._egress.check_static(candidate) != first_host:
@@ -237,6 +267,40 @@ class HttpCallExecutor:
 
     # --- transport ---------------------------------------------------------------
 
+    async def _send_page(
+        self,
+        client: httpx.AsyncClient,
+        method: str,
+        url: str,
+        headers: dict[str, str],
+        params: dict[str, str] | None,
+        body: Any,
+        timeout: float,
+        secrets: list[str],
+        page_no: int,
+        traces: list[CallTrace],
+        budget: _WaitBudget,
+    ) -> tuple[int, Any, CallTrace]:
+        """Send one page, sending it again after a 429 as the rate-limit settings and the call's ``budget`` allow.
+
+        Each try's trace joins ``traces``.
+        """
+        retry = 0
+        while True:
+            status, decoded, trace, retry_after = await self._send(
+                client, method, url, headers, params, body, timeout, secrets, page_no
+            )
+            traces.append(trace)
+            wait = _rate_limit_wait(retry_after, retry) if status == 429 and retry < RATE_LIMIT_RETRIES else None
+            if wait is None or not budget.spend(wait):
+                return status, decoded, trace
+            retry += 1
+            logger.info(
+                "Vendor rate limited the call; sending it again",
+                descriptor=self._descriptor.id, url=trace.url, wait_seconds=round(wait, 1), retry=retry,
+            )
+            await self._sleep(wait)
+
     async def _send(
         self,
         client: httpx.AsyncClient,
@@ -248,7 +312,8 @@ class HttpCallExecutor:
         timeout: float,
         secrets: list[str],
         page_no: int,
-    ) -> tuple[int, Any, CallTrace]:
+    ) -> tuple[int, Any, CallTrace, str | None]:
+        """One exchange: its status, decoded body, trace and Retry-After header."""
         trace = CallTrace(
             method=method,
             url=_redact_url(url, params, secrets),
@@ -280,6 +345,7 @@ class HttpCallExecutor:
                 raw = await self._read_body(response, trace)
                 trace.status = response.status_code
                 content_type = response.headers.get("content-type", "")
+                retry_after = response.headers.get("retry-after")
         except HttpCallError:
             raise
         except httpx.HTTPError as exc:
@@ -287,7 +353,7 @@ class HttpCallExecutor:
             trace.elapsed_ms = (time.monotonic() - started) * 1000
             raise HttpCallError(f"{method} {trace.url} failed: {trace.error}", trace) from exc
         trace.elapsed_ms = (time.monotonic() - started) * 1000
-        return response.status_code, _decode_body(raw, content_type), trace
+        return response.status_code, _decode_body(raw, content_type), trace, retry_after
 
     async def _read_body(self, response: httpx.Response, trace: CallTrace) -> bytes:
         chunks: list[bytes] = []
@@ -299,6 +365,44 @@ class HttpCallExecutor:
                 raise ResponseTooLargeError(trace.error, trace)
             chunks.append(chunk)
         return b"".join(chunks)
+
+
+class _WaitBudget:
+    """What one call may still spend waiting out rate limits, in seconds, across all its pages."""
+
+    def __init__(self, seconds: float) -> None:
+        self.remaining = seconds
+
+    def spend(self, seconds: float) -> bool:
+        """Take ``seconds`` from the budget; False, taking nothing, when that is more than is left."""
+        if seconds > self.remaining:
+            return False
+        self.remaining -= seconds
+        return True
+
+
+def _rate_limit_wait(retry_after: str | None, retry: int) -> float | None:
+    """Seconds to wait before retry ``retry`` of a 429: its Retry-After, else the backoff; None past the longest wait.
+
+    Retry-After is seconds or an HTTP date; one that is neither counts as absent.
+    """
+    backoff = RATE_LIMIT_BACKOFF_SECONDS * 2.0**retry
+    if retry_after is None:
+        return backoff
+    try:
+        wait = float(retry_after)
+    except ValueError:
+        try:
+            when = parsedate_to_datetime(retry_after)
+        except (TypeError, ValueError):
+            return backoff
+        if when.tzinfo is None:
+            when = when.replace(tzinfo=UTC)
+        wait = (when - datetime.now(UTC)).total_seconds()
+    if not math.isfinite(wait):
+        return backoff
+    wait = max(wait, 0.0)
+    return wait if wait <= RATE_LIMIT_MAX_WAIT_SECONDS else None
 
 
 def _decode_body(raw: bytes, content_type: str) -> Any:

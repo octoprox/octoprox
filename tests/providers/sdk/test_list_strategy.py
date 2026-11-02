@@ -71,6 +71,43 @@ async def test_sync_diff_and_cap(builtins: dict[str, ProviderDescriptor]) -> Non
     assert [p.metadata["list_identity"] for p in capped_add] == ["a"]
 
 
+async def test_cap_stops_paging_once_reached(builtins: dict[str, ProviderDescriptor]) -> None:
+    """A cap the first page fills is one request; one it does not fill reads on, counting only kept entries."""
+    one_page = MockVendor(api_handler=_api)
+    capped, _ = await _provider(builtins, one_page, {"num_proxies": 1}).sync_proxies([])
+    assert [p.metadata["list_identity"] for p in capped] == ["a"]
+    assert len(one_page.api_requests) == 1
+
+    two_pages = MockVendor(api_handler=_api)
+    capped, _ = await _provider(builtins, two_pages, {"num_proxies": 2}).sync_proxies([])
+    assert [p.metadata["list_identity"] for p in capped] == ["a", "c"]  # 'b' is not valid, so page 2 is read
+    assert len(two_pages.api_requests) == 2
+
+
+async def test_cap_cuts_a_page_short(builtins: dict[str, ProviderDescriptor]) -> None:
+    """A cap below one page's kept entries mirrors the first of them, from that one page."""
+    entries = [
+        {"id": name, "username": "u", "password": "p", "proxy_address": f"10.0.0.{n}", "port": 8000 + n, "valid": True}
+        for n, name in enumerate(["x", "y", "z"], start=1)
+    ]
+    vendor = MockVendor(api_handler=lambda request: json_response({"count": 6, "next": PAGE_1["next"], "results": entries}))
+    capped, _ = await _provider(builtins, vendor, {"num_proxies": 2}).sync_proxies([])
+    assert [p.metadata["list_identity"] for p in capped] == ["x", "y"]
+    assert len(vendor.api_requests) == 1
+
+
+async def test_refresh_and_sync_read_one_listing(builtins: dict[str, ProviderDescriptor]) -> None:
+    """A sync refreshes the stored rows and then adds the new ones; the vendor's list is fetched once for both."""
+    vendor = MockVendor(api_handler=_api)
+    provider = _provider(builtins, vendor, {})
+    stored = [Proxy(id="a", host="1.1.1.1", port=8000, username="u1", password="p1", connector_id="conn-1", metadata={"list_identity": "a"})]
+    _updated, removed = await provider.refresh_ips(stored)
+    to_add, _ = await provider.sync_proxies(stored)
+    assert removed == []
+    assert [p.metadata["list_identity"] for p in to_add] == ["c"]
+    assert len(vendor.api_requests) == 2  # pages 1 and 2, once
+
+
 async def test_refresh_updates_credentials_in_place(builtins: dict[str, ProviderDescriptor]) -> None:
     vendor = MockVendor(api_handler=_api)
     proxies = [

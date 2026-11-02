@@ -845,6 +845,7 @@ class ListModeStrategy(SyncStrategy):
         self._builder = builder
         self._ctx = ctx
         self._source = source
+        self._listing: list[ListedProxy] | None = None
 
     def is_session_based(self) -> bool:
         return False
@@ -853,7 +854,7 @@ class ListModeStrategy(SyncStrategy):
         return True
 
     async def sync(self, existing: list[Proxy]) -> SyncResult:
-        listed = await self._fetch_capped()
+        listed = await self._listed()
         wanted = {entry.identity: entry for entry in listed}
         current = {self._identity(p): p for p in existing}
         to_remove = [p.id for identity, p in current.items() if identity not in wanted]
@@ -865,7 +866,7 @@ class ListModeStrategy(SyncStrategy):
         return to_add, to_remove
 
     async def refresh(self, proxies: list[Proxy]) -> SyncResult:
-        listed = await self._fetch_capped()
+        listed = await self._listed()
         wanted = {entry.identity: entry for entry in listed}
         updated: list[Proxy] = []
         to_remove: list[str] = []
@@ -878,17 +879,22 @@ class ListModeStrategy(SyncStrategy):
                 updated.append(proxy)
         return updated, to_remove
 
-    async def _fetch_capped(self) -> list[ListedProxy]:
-        listed = await self._source.fetch(self._ctx)
-        cap_raw = self._ctx.lookup(self._builder.ptype.count_field)
-        if cap_raw not in (None, ""):
-            try:
-                cap = int(float(cap_raw))
-            except (TypeError, ValueError):
-                cap = 0
-            if cap > 0:
-                listed = listed[:cap]
-        return listed
+    async def _listed(self) -> list[ListedProxy]:
+        """The vendor's list up to the cap, fetched once: a provider is built per sync, whose refresh and sync both read it."""
+        if self._listing is None:
+            self._listing = await self._source.fetch(self._ctx, limit=self._cap())
+        return self._listing
+
+    def _cap(self) -> int | None:
+        """How many listed proxies to mirror (``count_field``); None mirrors the whole list."""
+        raw = self._ctx.lookup(self._builder.ptype.count_field)
+        if raw in (None, ""):
+            return None
+        try:
+            cap = int(float(raw))
+        except (TypeError, ValueError):
+            return None
+        return cap if cap > 0 else None
 
     def _apply_entry(self, proxy: Proxy, entry: ListedProxy) -> bool:
         fresh = self._builder.build_listed(entry, self._ctx)
