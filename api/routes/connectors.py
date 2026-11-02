@@ -24,6 +24,7 @@ from api.routes.common import (
     require_project,
     runtime_view_of,
     session_factory_of,
+    settings_of,
 )
 from api.routes.metrics import RANGE_CONFIG, MetricsHistoryResponse, MetricsSnapshot
 from api.services.read_model import ConnectorRow
@@ -37,7 +38,7 @@ class ConnectorListResponse(BaseModel):
     connectors: list[ConnectorResponse]
 
 
-def _connector_to_response(view: ConnectorRow) -> ConnectorResponse:
+def _connector_to_response(view: ConnectorRow, default_health_check_interval: int) -> ConnectorResponse:
     """The full API view of a connector: its definition, credential, pool, target and traffic."""
     connector = view.connector
     return ConnectorResponse(
@@ -51,6 +52,9 @@ def _connector_to_response(view: ConnectorRow) -> ConnectorResponse:
         routing_config=connector.routing_config,
         rate_limit_config=connector.rate_limit_config,
         traffic_config=connector.traffic_config,
+        health_check_config=connector.health_check_config,
+        health_check_interval=connector.health_check_interval(default_health_check_interval),
+        default_health_check_interval=default_health_check_interval,
         traffic_reset_at=connector.traffic_reset_at,
         traffic_usage=view.traffic_usage,
         enabled=connector.enabled,
@@ -69,7 +73,7 @@ async def _describe(request: Request, project_id: str, connector_id: str) -> Con
     view = await runtime_view_of(request).connector(project_id, connector_id)
     if view is None:
         raise HTTPException(status_code=404, detail="Connector not found")
-    return _connector_to_response(view)
+    return _connector_to_response(view, settings_of(request).health_check_interval)
 
 
 @router.get("", response_model=ConnectorListResponse)
@@ -77,7 +81,8 @@ async def list_connectors(request: Request, project_id: str) -> ConnectorListRes
     """List all connectors for a project, oldest first."""
     await require_project(request, project_id)
     views = await runtime_view_of(request).connectors(project_id)
-    return ConnectorListResponse(total=len(views), connectors=[_connector_to_response(view) for view in views])
+    default = settings_of(request).health_check_interval
+    return ConnectorListResponse(total=len(views), connectors=[_connector_to_response(view, default) for view in views])
 
 
 @router.post("", response_model=ConnectorResponse, status_code=201)

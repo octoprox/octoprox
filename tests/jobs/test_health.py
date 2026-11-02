@@ -302,6 +302,19 @@ class TestChecks:
         # A check that passed needs no word from the echo itself.
         assert echo.requests == []
 
+    async def test_a_connector_checked_once_a_day_keeps_its_proxies_soft_health_three_days(
+        self, job: HealthCheckJob, rows: Rows, project: Project, upstream: FakeUpstream, redis_client: RedisClient
+    ) -> None:
+        # Kept a day only, the failures in a row would run out about when the next check reads them.
+        upstream.answer({}, status=502)
+        daily = await rows.connector(project, health_check_config={"interval_seconds": 86400})
+        proxy = await rows.proxy(daily, port=upstream.port)
+
+        await job.run(batch_of(proxy.id))
+
+        ttl = await redis_client.client.ttl(PROXY_HEALTH_KEY.format(proxy_id=proxy.id))
+        assert 3 * 86400 - 10 < ttl <= 3 * 86400
+
     async def test_the_check_goes_through_the_proxy_with_its_placeholders_filled(
         self, job: HealthCheckJob, rows: Rows, project: Project, upstream: FakeUpstream
     ) -> None:

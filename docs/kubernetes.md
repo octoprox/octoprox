@@ -93,7 +93,8 @@ Give each role only what it reads. Gateways in particular face the internet and 
 | Cloud identity (IRSA, Pod Identity, Workload Identity) | | | | yes | |
 | `OCTOPROX_PROVIDERS_DIR` and provider plugins | yes | yes | yes | yes | |
 | `OCTOPROX_RECONCILE_INTERVAL` | yes | yes | yes | yes | |
-| Feed compile interval, the periods of the periodic jobs (`health_check_interval`, `ip_refresh_interval`, `metrics_flush_interval`, `geo.updater`) | | | yes | | |
+| Feed compile interval, the periods of the periodic jobs (`ip_refresh_interval`, `metrics_flush_interval`, `geo.updater`) | | | yes | | |
+| `OCTOPROX_HEALTH_CHECK_INTERVAL` (the api shows it as the interval of connectors without their own) | yes | | yes | | |
 | Health check timeout and concurrency, `OCTOPROX_WORKER_JOBS` | | | | yes | |
 | `system.metrics_interval` (and `system.metrics_retention_days` on workers) | yes | | yes | yes | |
 

@@ -225,7 +225,8 @@ METRICS_TAKEN_TTL_SECONDS = 86400
 # reads it on the next; the api shows it. The status itself is a Postgres
 # column. Checks come a minute apart by default, so the day runs out only for
 # a proxy no longer checked (deleted, draining, disabled), and nothing has to
-# delete its hash.
+# delete its hash. A connector with a check interval of its own (up to a day)
+# keeps its proxies' hashes three of its intervals when that is longer.
 PROXY_HEALTH_KEY = KEY_PREFIX + "proxy:health:{proxy_id}"
 PROXY_HEALTH_TTL_SECONDS = 86400
 # Every active quarantine in one sorted set: member the proxy id, score the

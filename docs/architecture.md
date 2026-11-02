@@ -211,7 +211,7 @@ Each periodic kind has one producer on the leader, a loop with a cycle every sec
 - **No burst after a stall.** A cycle publishes the slots of every second after the last one published, up to now, at most five of them; older seconds wait a period. A whole period at once (20,000 health keys) would ask the workers' autoscaler for a hundred workers for nothing.
 - **Nothing lost to a refusal.** The last second moves only once the publish returned, so a publish Redis refused is sent by the next cycle; otherwise a missed `sync` slice would wait an hour.
 - **Keyed and install-wide kinds.** Health, sync and scale publish the last compile's keys and nothing before the first; the install-wide kinds publish the one key `all` from the start.
-- **Periods.** Health `health_check_interval`, sync `ip_refresh_interval`, scale 30 s, metrics flush `metrics_flush_interval`, compaction 3600 s, snapshot `system_metrics_interval` (no producer at 0), IP database updates `geo_updater_interval`, tunnel last seen 10 s (the gateways' status interval), index hygiene 60 s; whole seconds, at least 1.
+- **Periods.** Health `health_check_interval`, or a connector's own `health_check_config.interval_seconds` for its proxies, sync `ip_refresh_interval`, scale 30 s, metrics flush `metrics_flush_interval`, compaction 3600 s, snapshot `system_metrics_interval` (no producer at 0), IP database updates `geo_updater_interval`, tunnel last seen 10 s (the gateways' status interval), index hygiene 60 s; whole seconds, at least 1.
 - **Clocks.** The leader's wall clock picks the slot seconds, so a failover between controllers whose clocks differ may publish a slot second twice or skip it once; a skipped key waits a period.
 
 ## Jobs
@@ -233,7 +233,7 @@ flowchart TD
 
 | Kind | Key | Published by the controller | Asked for at once by | Batch x concurrency per worker |
 |------|-----|-----------------------------|----------------------|--------------------------------|
-| `health` | proxy | every `health_check_interval` | a proxy added | 10 x max(2, 4 x probes / 10): 200 keys at the default 50 probes |
+| `health` | proxy | every `health_check_interval`, or its connector's own interval | a proxy added | 10 x max(2, 4 x probes / 10): 200 keys at the default 50 probes |
 | `sync` | connector | every `ip_refresh_interval` | a connector created or edited; synced proxies deleted | 1 x 4 |
 | `scale` | connector | every 30 s | a cloud connector created, edited or deleted; a cloud proxy marked terminating | 1 x 4 |
 | `provision` | `<connector>:<country>` | never | a gateway's `-cc-` miss | 1 x 4 |

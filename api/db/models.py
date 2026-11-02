@@ -132,8 +132,6 @@ class ProjectModel(Base):
 
     # Project-level settings
     routing_strategy: Mapped[str] = mapped_column(String(50), default="round_robin")
-    health_check_interval: Mapped[int] = mapped_column(Integer, default=60)
-    health_check_timeout: Mapped[int] = mapped_column(Integer, default=30)
     connection_timeout: Mapped[int] = mapped_column(Integer, default=30)
     max_retries: Mapped[int] = mapped_column(Integer, default=3)
     tls_mitm_mode: Mapped[str] = mapped_column(String(20), default="off")
@@ -211,6 +209,7 @@ class ConnectorModel(Base):
     traffic_config: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     traffic_reset_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     rate_limit_config: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    health_check_config: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now, onupdate=utc_now)
 

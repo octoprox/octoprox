@@ -648,6 +648,31 @@ class TestConnectorWeight:
         assert response.json()["routing_config"] == {}
 
 
+class TestConnectorHealthCheckInterval:
+    """health_check_config through the API, and the interval its proxies are checked at."""
+
+    def test_the_interval_is_the_installs_until_the_connector_sets_its_own(
+        self, authenticated_client: TestClient, created_project: dict[str, Any], created_connector: dict[str, Any],
+    ) -> None:
+        assert created_connector["health_check_config"] == {}
+        assert created_connector["health_check_interval"] == created_connector["default_health_check_interval"] == 3600
+        url = f"/api/v1/projects/{created_project['id']}/connectors/{created_connector['id']}"
+        response = authenticated_client.patch(url, json={"health_check_config": {"interval_seconds": 600}})
+        assert response.status_code == 200
+        assert (response.json()["health_check_config"], response.json()["health_check_interval"]) == ({"interval_seconds": 600}, 600)
+        assert response.json()["default_health_check_interval"] == 3600  # the test settings' install-wide interval
+        # An empty config goes back to the install's.
+        response = authenticated_client.patch(url, json={"health_check_config": {}})
+        assert (response.json()["health_check_config"], response.json()["health_check_interval"]) == ({}, 3600)
+
+    def test_an_interval_out_of_range_is_refused(
+        self, authenticated_client: TestClient, created_project: dict[str, Any], created_connector: dict[str, Any],
+    ) -> None:
+        url = f"/api/v1/projects/{created_project['id']}/connectors/{created_connector['id']}"
+        for config in ({"interval_seconds": 5}, {"interval_seconds": 86401}, {"every": 60}):
+            assert authenticated_client.patch(url, json={"health_check_config": config}).status_code == 422, config
+
+
 async def _pin_created_at(session_factory: SessionFactory, connector_ids: list[str], at: datetime) -> None:
     """Give the connectors one creation time, as a bulk import can."""
     async with session_factory() as session:

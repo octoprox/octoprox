@@ -58,8 +58,8 @@ class Recorder(JobQueue):
 class Compiles:
     """The feed builder as a producer reads it: the job keys of its last compile, which a test compiles anew."""
 
-    def __init__(self, **keys: frozenset[str]) -> None:
-        self.job_keys = JobKeys(**keys)
+    def __init__(self, **keys: frozenset[str] | dict[str, int]) -> None:
+        self.job_keys = JobKeys(**keys)  # type: ignore[arg-type]
 
     def compile(self, **keys: frozenset[str]) -> None:
         """A new compile, making keys of its own."""
@@ -158,6 +158,24 @@ class TestJobKeys:
         # Every cloud connector: a disabled or deleted one is drained by its scale job.
         assert sorted(keys.scale) == ["cloud", "deleted-cloud"]
 
+    def test_a_connector_with_its_own_interval_gives_its_proxies_that_period(self, registry: ProviderRegistry) -> None:
+        connectors = {
+            "list": section(
+                "list", "static_proxy_provider", proxy("slow-1", "list"), proxy("slow-2", "list"),
+                proxy("booting", "list", ProxyStatus.INITIALIZING), health_check_config={"interval_seconds": 600},
+            ),
+            "pool": section("pool", "oxylabs", proxy("slot", "pool")),
+            "hand-edited": section("hand-edited", "oxylabs", proxy("odd", "hand-edited"), health_check_config={"interval_seconds": 1}),
+        }
+        keys = JobKeys.of(connectors, registry)
+        assert keys.health == {"slow-1", "slow-2", "booting", "slot", "odd"}
+        assert [keys.period_of(JobKind.HEALTH, key) for key in ("slow-1", "slow-2", "slot")] == [600, 600, None]
+        # A proxy still starting up is checked at the install's period until it is healthy.
+        assert keys.period_of(JobKind.HEALTH, "booting") is None
+        # A stored value the model rejects reads as unset: the install's period.
+        assert keys.period_of(JobKind.HEALTH, "odd") is None
+        assert keys.period_of(JobKind.SYNC, "list") is None
+
     def test_health_sync_and_scale_take_the_compiles_keys_and_every_other_kind_the_installs(
         self, registry: ProviderRegistry
     ) -> None:
@@ -220,6 +238,27 @@ class TestPublishing:
         assert max(len(got) for got in published.values()) < 20
         # What was published is on the kind's stream.
         assert sorted(await queued_job_keys(redis_client, JobKind.HEALTH)) == sorted(list(keys) * 2)
+
+    async def test_a_key_with_a_period_of_its_own_is_published_once_in_it(
+        self, clock: Clock, jobs: Recorder, lease: Lease
+    ) -> None:
+        slow = frozenset(f"slow-{n}" for n in range(20))
+        fast = proxy_keys(20)
+        compiles = Compiles(health=slow | fast, health_periods=dict.fromkeys(slow, 120))
+        producer = JobProducer(jobs, JobKind.HEALTH, compiles, period=30, lease=lease)
+        await producer._on_term(1)
+
+        published = await cycles(producer, clock, jobs, 240)
+
+        times: dict[str, list[int]] = {}
+        for second, got in published.items():
+            for key in got:
+                times.setdefault(key, []).append(second)
+        assert set(times) == slow | fast
+        # The install's period for most keys, the connector's for its own, each at the key's second of its period.
+        assert all(len(times[key]) == 8 for key in fast)
+        assert all(len(times[key]) == 2 and times[key][1] - times[key][0] == 120 for key in slow)
+        assert all(times[key][0] % 120 == producer.slot(key, 120) for key in slow)
 
     async def test_the_keys_are_the_latest_compiles(self, clock: Clock, jobs: Recorder, lease: Lease) -> None:
         compiles = Compiles(health=proxy_keys(100))

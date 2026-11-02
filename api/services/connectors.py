@@ -34,6 +34,7 @@ from api.models.connector import (
     Connector,
     ConnectorCreate,
     ConnectorUpdate,
+    validate_health_check_config,
     validate_rate_limit_config,
     validate_routing_config,
     validate_traffic_config,
@@ -104,6 +105,7 @@ class ConnectorService:
                 routing_config=_given(validate_routing_config, data.routing_config),
                 rate_limit_config=_given(validate_rate_limit_config, data.rate_limit_config),
                 traffic_config=_given(validate_traffic_config, data.traffic_config),
+                health_check_config=_given(validate_health_check_config, data.health_check_config),
                 enabled=data.enabled,
             )
             self._check_countries(connector, credential)
@@ -144,6 +146,8 @@ class ConnectorService:
                 changes["rate_limit_config"] = validated(validate_rate_limit_config, data.rate_limit_config)
             if data.traffic_config is not None:
                 changes["traffic_config"] = validated(validate_traffic_config, data.traffic_config)
+            if data.health_check_config is not None:
+                changes["health_check_config"] = validated(validate_health_check_config, data.health_check_config)
             if data.enabled is not None:
                 changes["enabled"] = data.enabled
             edited = current.model_copy(update=changes)

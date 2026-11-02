@@ -160,8 +160,6 @@ export interface Project {
   username: string
   password: string
   routing_strategy: string
-  health_check_interval: number
-  health_check_timeout: number
   connection_timeout: number
   max_retries: number
   tls_mitm_mode: string
@@ -226,8 +224,6 @@ export interface ProjectCreate {
   username: string
   password: string
   routing_strategy?: string
-  health_check_interval?: number
-  health_check_timeout?: number
   connection_timeout?: number
   max_retries?: number
   tls_mitm_mode?: string
@@ -250,8 +246,6 @@ export interface ProjectUpdate {
   username?: string
   password?: string
   routing_strategy?: string
-  health_check_interval?: number
-  health_check_timeout?: number
   connection_timeout?: number
   max_retries?: number
   tls_mitm_mode?: string
@@ -1015,6 +1009,12 @@ export type TrafficPeriod = 'day' | 'week' | 'month'
 export type TrafficLimitAction = 'alert' | 'block' | 'interrupt'
 export type TrafficLimitStatus = 429 | 509
 
+/** How often the connector's proxies are health-checked; empty, the install's health_check_interval. */
+export interface HealthCheckConfig {
+  /** Seconds between two checks of each proxy, 10 to 86400. */
+  interval_seconds?: number
+}
+
 /**
  * Traffic accounting, limit and pricing for a connector. Only explicit choices are
  * stored; a missing key means the default in TRAFFIC_DEFAULTS.
@@ -1098,6 +1098,11 @@ export interface Connector {
   routing_config: RoutingConfig
   rate_limit_config: RateLimitConfig
   traffic_config: TrafficConfig
+  health_check_config: HealthCheckConfig
+  /** Seconds between two health checks of each proxy: the connector's own interval, or the install's default. */
+  health_check_interval: number
+  /** The install's default interval, which a connector without its own uses. */
+  default_health_check_interval: number
   traffic_reset_at: string | null
   traffic_usage: TrafficUsage | null
   enabled: boolean
@@ -1123,6 +1128,7 @@ export interface ConnectorCreate {
   routing_config?: RoutingConfig
   rate_limit_config?: RateLimitConfig
   traffic_config?: TrafficConfig
+  health_check_config?: HealthCheckConfig
   enabled?: boolean
 }
 
@@ -1133,6 +1139,7 @@ export interface ConnectorUpdate {
   routing_config?: RoutingConfig
   rate_limit_config?: RateLimitConfig
   traffic_config?: TrafficConfig
+  health_check_config?: HealthCheckConfig
   enabled?: boolean
 }
 

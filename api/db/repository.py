@@ -151,8 +151,6 @@ class ProjectRepository:
             username=project.username,
             password=project.password,
             routing_strategy=project.routing_strategy,
-            health_check_interval=project.health_check_interval,
-            health_check_timeout=project.health_check_timeout,
             connection_timeout=project.connection_timeout,
             max_retries=project.max_retries,
             tls_mitm_mode=project.tls_mitm_mode,
@@ -186,8 +184,6 @@ class ProjectRepository:
             model.username = project.username
             model.password = project.password
             model.routing_strategy = project.routing_strategy
-            model.health_check_interval = project.health_check_interval
-            model.health_check_timeout = project.health_check_timeout
             model.connection_timeout = project.connection_timeout
             model.max_retries = project.max_retries
             model.tls_mitm_mode = project.tls_mitm_mode
@@ -256,8 +252,6 @@ class ProjectRepository:
             username=model.username,
             password=model.password,
             routing_strategy=model.routing_strategy,
-            health_check_interval=model.health_check_interval,
-            health_check_timeout=model.health_check_timeout,
             connection_timeout=model.connection_timeout,
             max_retries=model.max_retries,
             tls_mitm_mode=MitmMode(model.tls_mitm_mode),
@@ -481,6 +475,7 @@ class ConnectorRepository:
             routing_config=connector.routing_config,
             rate_limit_config=connector.rate_limit_config,
             traffic_config=connector.traffic_config,
+            health_check_config=connector.health_check_config,
             traffic_reset_at=connector.traffic_reset_at,
             enabled=connector.enabled,
             pending_deletion=connector.pending_deletion,
@@ -507,6 +502,7 @@ class ConnectorRepository:
             model.routing_config = connector.routing_config
             model.rate_limit_config = connector.rate_limit_config
             model.traffic_config = connector.traffic_config
+            model.health_check_config = connector.health_check_config
             model.traffic_reset_at = connector.traffic_reset_at
             model.enabled = connector.enabled
             model.pending_deletion = connector.pending_deletion
@@ -566,6 +562,7 @@ class ConnectorRepository:
             routing_config=model.routing_config or {},
             rate_limit_config=model.rate_limit_config or {},
             traffic_config=model.traffic_config or {},
+            health_check_config=model.health_check_config or {},
             traffic_reset_at=model.traffic_reset_at,
             enabled=model.enabled,
             pending_deletion=model.pending_deletion,

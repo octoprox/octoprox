@@ -2,6 +2,7 @@
 node_modules/
 web/dist/
 web/node_modules/
+*.tsbuildinfo
 *.local
 
 # Byte-compiled / optimized / DLL files

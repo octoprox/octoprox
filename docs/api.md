@@ -480,6 +480,22 @@ Disabled (default):
 }
 ```
 
+#### Health Checks (health_check_config)
+
+How often the connector's proxies are health-checked. Empty, they are checked every `OCTOPROX_HEALTH_CHECK_INTERVAL` of the install (60 seconds by default). Each check is a request through the proxy, so a large list of fixed exits can be checked less often than a residential pool. An update replaces the whole object; `{}` goes back to the install's interval.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `interval_seconds` | integer | the install's | Seconds between two checks of each proxy, 10 to 86400 |
+
+```json
+{
+  "health_check_config": { "interval_seconds": 600 }
+}
+```
+
+Every connector response also carries `health_check_interval`, the seconds its proxies are checked at now (its own interval or the install's), and `default_health_check_interval`, the install's. A proxy still initializing (a new cloud instance) is checked at the install's interval until a check finds it healthy, whatever its connector sets.
+
 #### Traffic Limits (traffic_config)
 
 Connectors meter the bytes through their proxies per billing period and can cap them. `traffic_config` holds the period, the limit, what happens at the limit and the price per GB; see the [Traffic Limits & Billing]({{ site.baseurl }}/traffic-limits) guide. Only explicit choices are stored, a key at its default is dropped.

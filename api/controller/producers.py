@@ -11,13 +11,14 @@ from __future__ import annotations
 import hashlib
 import time
 from collections.abc import Collection, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, ClassVar
 
 from api.core.loops import PeriodicLoop
 from api.core.roles import JobKind
 from api.core.workers import job_producer_name
 from api.jobs.health import HealthCheckJob
+from api.models.proxy import ProxyStatus
 
 if TYPE_CHECKING:
     from api.controller.feed_builder import FeedBuilder
@@ -48,6 +49,10 @@ class JobKeys:
 
     # Proxies to health-check: those the health job wants to check.
     health: frozenset[str] = frozenset()
+    # Health keys whose connector sets its own check interval, with that
+    # interval in seconds; the others, and proxies still initializing, are
+    # checked every health_check_interval.
+    health_periods: Mapping[str, int] = field(default_factory=dict, hash=False)
     # Enabled connectors whose provider syncs with its vendor.
     sync: frozenset[str] = frozenset()
     # Every cloud connector, enabled or not: a disabled or deleted one is
@@ -58,6 +63,7 @@ class JobKeys:
     def of(cls, connectors: Mapping[str, ConnectorSection], registry: ProviderRegistry) -> JobKeys:
         """The keys a compile's connectors call for, by ID; the registry says which connector types sync and which scale."""
         health: list[str] = []
+        health_periods: dict[str, int] = {}
         sync: list[str] = []
         scale: list[str] = []
         for connector_id, section in connectors.items():
@@ -68,8 +74,18 @@ class JobKeys:
                 continue
             if registry.is_syncable(connector.credential_type):
                 sync.append(connector_id)
-            health.extend(proxy.id for proxy in section.proxies if HealthCheckJob.wants_check(proxy, connector))
-        return cls(health=frozenset(health), sync=frozenset(sync), scale=frozenset(scale))
+            checked = [proxy for proxy in section.proxies if HealthCheckJob.wants_check(proxy, connector)]
+            health.extend(proxy.id for proxy in checked)
+            own = connector.own_health_check_interval
+            if own is not None:
+                # A proxy still starting up keeps the install's period until a check finds it healthy, so an
+                # instance whose first check fails during boot is not left out of routing for a whole long interval.
+                health_periods.update(
+                    (proxy.id, own) for proxy in checked if proxy.status != ProxyStatus.INITIALIZING
+                )
+        return cls(
+            health=frozenset(health), health_periods=health_periods, sync=frozenset(sync), scale=frozenset(scale)
+        )
 
     def of_kind(self, kind: JobKind) -> Collection[str]:
         """The keys ``kind`` is published for: the compile's for health, sync and scale, the install's one for any other."""
@@ -81,12 +97,17 @@ class JobKeys:
             return self.scale
         return INSTALL_WIDE_KEYS
 
+    def period_of(self, kind: JobKind, key: str) -> int | None:
+        """The period ``key`` of ``kind`` is published at when it has its own, in seconds; None for the producer's."""
+        return self.health_periods.get(key) if kind == JobKind.HEALTH else None
+
 
 class JobProducer(PeriodicLoop):
     """Publishes a periodic kind's keys each once a period, at the second each key's stable hash picks; the leader runs it.
 
     Args:
-        period: seconds between two publishes of a key, rounded to whole seconds, at least 1.
+        period: seconds between two publishes of a key, rounded to whole seconds, at least 1; a key with a period of
+            its own (:meth:`JobKeys.period_of`, a connector's health check interval) is published at that instead.
     """
 
     # A cycle a second, the first at once, of the loop and of each new lead.
@@ -109,14 +130,14 @@ class JobProducer(PeriodicLoop):
         # The last second (epoch) this lead published the slice of, empty or
         # not; None until its first, which starts at the current second.
         self._last: int | None = None
-        # The compile's keys the slot map was built from, and the map: second
-        # of the period -> the keys published at it.
+        # The compile's keys the slot map was built from, and the map: each
+        # period in use -> second of that period -> the keys published at it.
         self._source: JobKeys | None = None
-        self._slots: dict[int, list[str]] = {}
+        self._slots: dict[int, dict[int, list[str]]] = {}
 
-    def slot(self, key: str) -> int:
-        """The second of the period ``key`` is published at."""
-        return int(stable_jitter(f"{self.kind}:{key}") * self.period)
+    def slot(self, key: str, period: int | None = None) -> int:
+        """The second of ``period`` (the producer's when None) ``key`` is published at."""
+        return int(stable_jitter(f"{self.kind}:{key}") * (period or self.period))
 
     async def _on_term(self, term: int) -> None:
         """A new lead starts at the current second: what the lead before left waits a period, with no burst."""
@@ -132,18 +153,24 @@ class JobProducer(PeriodicLoop):
         keys = self._builder.job_keys
         # Each compile makes its own keys: the map is built once per compile, not each second.
         if keys is not self._source:
-            self._slots = self._slot_map(keys.of_kind(self.kind))
+            self._slots = self._slot_map(keys)
             self._source = keys
         first = now if self._last is None else max(self._last + 1, now - CATCH_UP_SECONDS + 1)
-        due = [key for second in range(first, now + 1) for key in self._slots.get(second % self.period, ())]
+        due = [
+            key
+            for second in range(first, now + 1)
+            for period, seconds in self._slots.items()
+            for key in seconds.get(second % period, ())
+        ]
         if due:
             await self._jobs.publish(self.kind, due)
         self._last = now
         return bool(due)
 
-    def _slot_map(self, keys: Collection[str]) -> dict[int, list[str]]:
-        """Each second of the period with the keys published at it, in key order."""
-        slots: dict[int, list[str]] = {}
-        for key in sorted(keys):
-            slots.setdefault(self.slot(key), []).append(key)
+    def _slot_map(self, keys: JobKeys) -> dict[int, dict[int, list[str]]]:
+        """Each period the kind's keys use, with each of its seconds and the keys published at it, in key order."""
+        slots: dict[int, dict[int, list[str]]] = {}
+        for key in sorted(keys.of_kind(self.kind)):
+            period = max(1, keys.period_of(self.kind, key) or self.period)
+            slots.setdefault(period, {}).setdefault(self.slot(key, period), []).append(key)
         return slots

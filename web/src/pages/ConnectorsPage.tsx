@@ -11,7 +11,7 @@ import {
   fetchProjectConnectors, fetchProjectCredentials, fetchProjectCredential, fetchConnectorOptions,
   createProjectConnector, updateProjectConnector, deleteProjectConnector,
   Connector, CredentialType, ConnectorCreate, ConnectorUpdate, ConnectorOptions, ProviderField,
-  RoutingConfig, RateLimitConfig, TrafficConfig, TrafficPeriod, TrafficLimitAction, TrafficLimitStatus, TRAFFIC_DEFAULTS, BYTES_PER_GB,
+  RoutingConfig, RateLimitConfig, TrafficConfig, HealthCheckConfig, TrafficPeriod, TrafficLimitAction, TrafficLimitStatus, TRAFFIC_DEFAULTS, BYTES_PER_GB,
   Credential, CredentialDetail,
   connectorWeight, DEFAULT_ROUTING_WEIGHT, MAX_ROUTING_WEIGHT, fetchProjectTrafficSplit, ConnectorTrafficShare,
   HISTORY_RANGES,
@@ -29,7 +29,7 @@ import { Page, EmptyState } from '../components/layout/Page'
 import { NewCredentialPanel, TypePicker, TypeCard } from '../components/CredentialForm'
 import { ProviderLogo } from '../components/ProviderLogo'
 import { SchemaForm, MultiCountryPicker, defaultValues, isCountryField, serializeValues, splitCountries } from '../components/SchemaForm'
-import { relativeTime, formatDateTime, formatDate, formatBytesDecimal, formatMoney } from '../utils/format'
+import { relativeTime, formatDateTime, formatDate, formatBytesDecimal, formatMoney, plural } from '../utils/format'
 import { targetTotal, describeTarget, isDynamic } from '../utils/connectors'
 import { coverageLabel } from '../components/geo/coverage'
 import { MismatchSummary, rateClass, ratePercent } from '../components/geo/AccuracyDetails'
@@ -46,10 +46,21 @@ interface ConnectorFormData {
   routing_config: RoutingConfig
   rate_limit_config: RateLimitConfig
   traffic_config: TrafficConfig
+  health_check_config: HealthCheckConfig
   enabled: boolean
 }
 
-const EMPTY_FORM: ConnectorFormData = { name: '', credential_id: '', config: {}, routing_config: {}, rate_limit_config: {}, traffic_config: {}, enabled: true }
+const EMPTY_FORM: ConnectorFormData = { name: '', credential_id: '', config: {}, routing_config: {}, rate_limit_config: {}, traffic_config: {}, health_check_config: {}, enabled: true }
+
+// Health check intervals the form offers, in seconds; the API takes any from 10 to 86400.
+const HEALTH_CHECK_CHOICES = [60, 300, 600, 1800, 3600]
+
+/** "1 min", "10 min", "1 hour", or seconds when it is not whole minutes. */
+const everyLabel = (seconds: number) => {
+  if (seconds % 3600 === 0) return `${seconds / 3600} ${plural(seconds / 3600, 'hour', 'hours')}`
+  if (seconds % 60 === 0) return `${seconds / 60} min`
+  return `${seconds} s`
+}
 
 const WEEKDAYS = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']
 const DEFAULT_LIMIT_GB = 100
@@ -383,6 +394,7 @@ function ConnectorEditor({ connector, siblings, canMutate, onClose, onDelete, on
       routing_config: connector.routing_config || {},
       rate_limit_config: connector.rate_limit_config || {},
       traffic_config: connector.traffic_config || {},
+      health_check_config: connector.health_check_config || {},
       enabled: connector.enabled,
     }
   })
@@ -481,9 +493,9 @@ function ConnectorEditor({ connector, siblings, canMutate, onClose, onDelete, on
     if (!formData.credential_id) { setError('Select or create a credential first.'); return }
     const preparedConfig = isDescriptor ? serializeValues(descriptorFields, formData.config, schemaScopes) : prepareConfigForSubmit(formData.config)
     if (isEdit) {
-      updateMutation.mutate({ name: formData.name, credential_id: formData.credential_id, enabled: formData.enabled, config: preparedConfig, routing_config: routingForSubmit(), rate_limit_config: formData.rate_limit_config, traffic_config: formData.traffic_config })
+      updateMutation.mutate({ name: formData.name, credential_id: formData.credential_id, enabled: formData.enabled, config: preparedConfig, routing_config: routingForSubmit(), rate_limit_config: formData.rate_limit_config, traffic_config: formData.traffic_config, health_check_config: formData.health_check_config })
     } else {
-      createMutation.mutate({ name: formData.name, credential_id: formData.credential_id, config: preparedConfig, routing_config: routingForSubmit(), rate_limit_config: formData.rate_limit_config, traffic_config: formData.traffic_config, enabled: formData.enabled })
+      createMutation.mutate({ name: formData.name, credential_id: formData.credential_id, config: preparedConfig, routing_config: routingForSubmit(), rate_limit_config: formData.rate_limit_config, traffic_config: formData.traffic_config, health_check_config: formData.health_check_config, enabled: formData.enabled })
     }
   }
 
@@ -651,8 +663,32 @@ function ConnectorEditor({ connector, siblings, canMutate, onClose, onDelete, on
           <p className="text-xs text-fg-muted mt-1">Subdomains are included automatically (<code className="bg-surface-raised px-1 rounded-sm">bing.com</code> also matches <code className="bg-surface-raised px-1 rounded-sm">www.bing.com</code>).</p>
         </div>
       )}
+      {!(connector && isDynamic(connector)) && renderHealthChecks()}
     </div>
   )
+
+  // The install's interval, which every connector reports; a new connector in an empty project has none to ask.
+  const installHealthInterval = (connector ?? siblings[0])?.default_health_check_interval
+  const renderHealthChecks = () => {
+    const own = formData.health_check_config.interval_seconds
+    const choices = own && !HEALTH_CHECK_CHOICES.includes(own) ? [...HEALTH_CHECK_CHOICES, own].sort((a, b) => a - b) : HEALTH_CHECK_CHOICES
+    return (
+      <div className="border-t border-line pt-3">
+        <Label className="text-xs">Health checks</Label>
+        <Select
+          value={own ?? ''}
+          onChange={(e) => setFormData({ ...formData, health_check_config: e.target.value ? { interval_seconds: Number(e.target.value) } : {} })}
+          className="px-3 py-2.5 sm:py-1.5 text-base sm:text-sm mt-1"
+          disabled={readOnly}
+          aria-label="Health check interval"
+        >
+          <option value="">{installHealthInterval ? `Install default, every ${everyLabel(installHealthInterval)}` : 'Install default'}</option>
+          {choices.map((seconds) => <option key={seconds} value={seconds}>Every {everyLabel(seconds)}</option>)}
+        </Select>
+        <p className="text-xs text-fg-muted mt-1.5">How often each of this connector's proxies is checked. Each check is a request through the proxy, so a large list of fixed exits can be checked less often than a residential pool.</p>
+      </div>
+    )
+  }
 
   const Toggle = ({ checked, onChange }: { checked: boolean; onChange: (v: boolean) => void }) => (
     <label className="relative inline-flex items-center cursor-pointer shrink-0">

@@ -93,8 +93,6 @@ class Project(BaseModel):
 
     # Project-level settings (override global defaults)
     routing_strategy: str = "round_robin"
-    health_check_interval: int = 60  # seconds
-    health_check_timeout: int = 30  # seconds
     connection_timeout: int = 30  # seconds
     max_retries: int = 3
 
@@ -167,8 +165,6 @@ class ProjectCreate(BaseModel):
     username: str
     password: str
     routing_strategy: str = "round_robin"
-    health_check_interval: int = 60
-    health_check_timeout: int = 30
     connection_timeout: int = 30
     max_retries: int = 3
     tls_mitm_mode: MitmMode = MitmMode.OFF
@@ -200,8 +196,6 @@ class ProjectUpdate(BaseModel):
     username: str | None = None
     password: str | None = None
     routing_strategy: str | None = None
-    health_check_interval: int | None = None
-    health_check_timeout: int | None = None
     connection_timeout: int | None = None
     max_retries: int | None = None
     tls_mitm_mode: MitmMode | None = None
@@ -237,8 +231,6 @@ class ProjectResponse(BaseModel):
     username: str
     password: str
     routing_strategy: str
-    health_check_interval: int
-    health_check_timeout: int
     connection_timeout: int
     max_retries: int
     tls_mitm_mode: MitmMode

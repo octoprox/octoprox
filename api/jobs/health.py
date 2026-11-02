@@ -233,6 +233,14 @@ class HealthCheckJob(Job):
         return connector.enabled and not proxy.status.retiring and not is_dynamic_gateway(proxy)
 
     @staticmethod
+    def soft_health_ttl(connector: Connector) -> int:
+        """Seconds a checked proxy's soft health is kept: a day, or three of its connector's own intervals when longer.
+
+        So the next check, even one a period late, still finds the failures in a row.
+        """
+        return max(PROXY_HEALTH_TTL_SECONDS, 3 * (connector.own_health_check_interval or 0))
+
+    @staticmethod
     def in_grace_period(proxy: Proxy, now: datetime) -> bool:
         """Whether ``proxy`` is a new instance still initializing, so its failed checks do not count yet."""
         return proxy.status == ProxyStatus.INITIALIZING and now - proxy.created_at < INITIALIZATION_GRACE_PERIOD
@@ -264,6 +272,7 @@ class HealthCheckJob(Job):
         echo_down = echo_failed and await self._echo.is_down(echo_url)
         now = utc_now()
         results: dict[str, tuple[ProxyStatus, HealthSoft]] = {}
+        kept_for: dict[str, int] = {}
         sightings: list[Sighting] = []
         uncounted = 0
         for target, probe in zip(targets, probes, strict=True):
@@ -274,6 +283,7 @@ class HealthCheckJob(Job):
                 continue
             status, failures = self.judge_check(proxy, self._previous_failures(proxy, soft.get(proxy.id)), probe.ok, now)
             results[proxy.id] = (status, HealthSoft(failures=failures, latency_ms=probe.latency_ms, checked_at=now))
+            kept_for[proxy.id] = self.soft_health_ttl(target.connector)
             if probe.exit_ip:
                 sightings.append(Sighting(
                     proxy.id,
@@ -286,7 +296,9 @@ class HealthCheckJob(Job):
                 logger.debug("Proxy health check failed", proxy_id=proxy.id, reason=probe.reason, failures=failures)
         if uncounted:
             logger.debug("Failed health checks not counted: the echo endpoint does not answer", count=uncounted)
-        await self._write_soft_health({proxy_id: soft_health for proxy_id, (_, soft_health) in results.items()})
+        await self._write_soft_health(
+            {proxy_id: soft_health for proxy_id, (_, soft_health) in results.items()}, kept_for
+        )
         await self._write_statuses([target.proxy for target in targets if target.proxy.id in results], results)
         await self._attribution.observe(sightings)
 
@@ -308,8 +320,8 @@ class HealthCheckJob(Job):
             for proxy, connector, credential in rows
         }
 
-    async def _write_soft_health(self, results: dict[str, HealthSoft]) -> None:
-        """Every checked proxy's soft health, with a day's expiry, in one round trip."""
+    async def _write_soft_health(self, results: dict[str, HealthSoft], kept_for: dict[str, int]) -> None:
+        """Every checked proxy's soft health, each kept for its seconds in ``kept_for``, in one round trip."""
         if not results:
             return
         pipe = self._redis.client.pipeline(transaction=False)
@@ -317,7 +329,7 @@ class HealthCheckJob(Job):
             key = PROXY_HEALTH_KEY.format(proxy_id=proxy_id)
             # redis-py types the mapping's keys as a union, and a mapping is invariant in its key type.
             pipe.hset(key, mapping=soft.model_dump(mode="json"))  # type: ignore[arg-type]
-            pipe.expire(key, PROXY_HEALTH_TTL_SECONDS)
+            pipe.expire(key, kept_for[proxy_id])
         await pipe.execute()
 
     async def _write_statuses(

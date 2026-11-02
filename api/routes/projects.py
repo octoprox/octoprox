@@ -80,8 +80,6 @@ def _project_to_response(
         username=project.username,
         password=project.password,
         routing_strategy=project.routing_strategy,
-        health_check_interval=project.health_check_interval,
-        health_check_timeout=project.health_check_timeout,
         connection_timeout=project.connection_timeout,
         max_retries=project.max_retries,
         tls_mitm_mode=project.tls_mitm_mode,

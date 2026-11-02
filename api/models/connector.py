@@ -9,7 +9,7 @@ from enum import StrEnum
 from typing import Any, Literal
 from uuid import uuid4
 
-from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
 from api.core import utc_now
 from api.core.demand_tracker import DemandLevel
@@ -247,6 +247,14 @@ class RoutingConfig(BaseModel):
             raise ValueError(f"Reserved countries must be on the connector's country list: {', '.join(unlisted)}")
 
 
+class HealthCheckConfig(BaseModel):
+    """How often the connector's proxies are health-checked; unset, the install's ``health_check_interval``."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    interval_seconds: int | None = Field(default=None, ge=10, le=86400)
+
+
 class RateLimitConfig(BaseModel):
     """Per-proxy rate limiting: a proxy that handles ``max_requests`` within a sliding ``window_seconds`` is quarantined.
 
@@ -440,6 +448,11 @@ def validate_rate_limit_config(config: dict[str, Any]) -> dict[str, Any]:
     return validated.model_dump()
 
 
+def validate_health_check_config(config: dict[str, Any]) -> dict[str, Any]:
+    """Validate a health check config and return the dict to store: only what is set, so the default stores ``{}``."""
+    return HealthCheckConfig(**config).model_dump(exclude_none=True)
+
+
 def validate_traffic_config(config: dict[str, Any]) -> dict[str, Any]:
     """Validate traffic config and return the dict to store.
 
@@ -506,6 +519,7 @@ class Connector(BaseModel):
     routing_config: dict[str, Any] = Field(default_factory=dict)
     rate_limit_config: dict[str, Any] = Field(default_factory=dict)
     traffic_config: dict[str, Any] = Field(default_factory=dict)
+    health_check_config: dict[str, Any] = Field(default_factory=dict)
     # Usage in the current period counts from here when set inside it (manual reset).
     traffic_reset_at: datetime | None = None
     enabled: bool = True
@@ -597,6 +611,22 @@ class Connector(BaseModel):
         except ValidationError:
             return TrafficConfig()
 
+    @property
+    def own_health_check_interval(self) -> int | None:
+        """Seconds between two health checks of each of its proxies, as its config sets; None leaves it to the install.
+
+        A stored value the model rejects (hand-edited JSON) reads as unset.
+        """
+        try:
+            return HealthCheckConfig(**self.health_check_config).interval_seconds
+        except (TypeError, ValidationError):
+            return None
+
+    def health_check_interval(self, default: int) -> int:
+        """Seconds between two health checks of each of its proxies: its own interval, else ``default``."""
+        own = self.own_health_check_interval
+        return own if own is not None else default
+
 
 class ConnectorCreate(BaseModel):
     """Schema for creating a new connector."""
@@ -606,6 +636,7 @@ class ConnectorCreate(BaseModel):
     routing_config: dict[str, Any] = Field(default_factory=dict)
     rate_limit_config: dict[str, Any] = Field(default_factory=dict)
     traffic_config: dict[str, Any] = Field(default_factory=dict)
+    health_check_config: dict[str, Any] = Field(default_factory=dict)
     enabled: bool = True
     # Note: config validation happens in the route after fetching credential type
 
@@ -618,6 +649,7 @@ class ConnectorUpdate(BaseModel):
     routing_config: dict[str, Any] | None = None
     rate_limit_config: dict[str, Any] | None = None
     traffic_config: dict[str, Any] | None = None
+    health_check_config: dict[str, Any] | None = None
     enabled: bool | None = None
 
 
@@ -648,6 +680,11 @@ class ConnectorResponse(BaseModel):
     routing_config: dict[str, Any] = Field(default_factory=dict)
     rate_limit_config: dict[str, Any] = Field(default_factory=dict)
     traffic_config: dict[str, Any] = Field(default_factory=dict)
+    health_check_config: dict[str, Any] = Field(default_factory=dict)
+    # Seconds between two health checks of each proxy: the connector's own, or the install's default.
+    health_check_interval: int
+    # The install's default (health_check_interval of its settings), which a connector without its own uses.
+    default_health_check_interval: int
     traffic_reset_at: datetime | None = None
     # Traffic in the current period against the limit and price; None only
     # when the serving instance has no usage yet for the connector.
