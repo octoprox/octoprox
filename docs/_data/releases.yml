@@ -10,6 +10,18 @@
 #   changes  what changed, for the people who use Octoprox; `docs` is a page
 #            on octoprox.com that explains it, such as connecting#exit-headers
 
+- version: 6.5.1
+  date: 2026-11-02
+  title: Webshare country lists and vendor rate limit retries
+  changes:
+    - text: "Webshare connectors now pick their countries from the same countries dropdown as other providers. Routing, the Countries page and reserved or excluded countries now see a Webshare connector's countries."
+      docs: providers#proxy-type-modes
+    - text: "Upgrade note: on Webshare connectors, Maximum proxies now counts per listed country, so a connector with several countries can mirror more proxies than before. Existing country filters move to the new field automatically."
+      docs: providers#proxy-type-modes
+    - text: "Connectors that mirror a vendor's proxy list now read the list once per sync, and only as many pages as Maximum proxies needs. Webshare connectors with long lists no longer hit the vendor's rate limit and end up with no proxies."
+    - text: "When a vendor answers an API call with `429 Too Many Requests`, Octoprox waits as long as `Retry-After` asks, or 5, 10 and then 20 seconds, and tries again up to 3 times. If the vendor asks for more than 60 seconds, or the waits would pass 2 minutes in total, the call fails and the next sync tries again."
+      docs: providers#http-calls-auth-flows-options-and-validation
+
 - version: 6.5.0
   date: 2026-11-02
   title: Reserved and excluded countries, new Countries page
