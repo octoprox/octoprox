@@ -82,6 +82,27 @@ async def test_renders_templates_and_drops_empty_params() -> None:
     assert "T0K" not in trace.url
 
 
+async def test_a_failed_calls_error_ends_with_the_start_of_the_vendors_reply() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/list":
+            return httpx.Response(404, content=b'{"detail": "Invalid page."}', headers={"content-type": "application/json"})
+        return httpx.Response(500, text="<html>\n  <body>Bad token T0K\n" + "x" * 500 + "</body></html>")
+
+    executor = _executor(_descriptor(), handler)
+    ctx = RenderContext(credential={"token": "T0K"}, secret_keys=frozenset({"token"}))
+    with pytest.raises(HttpCallError) as short:
+        await executor.execute(HttpCallSpec(url="https://api.vendor.test/list"), ctx)
+    assert str(short.value) == 'GET https://api.vendor.test/list returned HTTP 404: {"detail": "Invalid page."}'
+    assert short.value.trace is not None and short.value.trace.error == '{"detail": "Invalid page."}'
+
+    # A long reply is cut, its whitespace collapsed, and a secret in it redacted before the cut.
+    with pytest.raises(HttpCallError) as long:
+        await executor.execute(HttpCallSpec(url="https://api.vendor.test/boom"), ctx)
+    excerpt = long.value.trace.error if long.value.trace else None
+    assert excerpt is not None and excerpt.startswith("<html> <body>Bad token *** xxx") and excerpt.endswith("...")
+    assert len(excerpt) == 200 and "T0K" not in str(long.value)
+
+
 async def test_non_2xx_raises_unless_asked_not_to() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return json_response({"error": "nope"}, 401)

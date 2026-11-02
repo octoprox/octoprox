@@ -48,6 +48,10 @@ RATE_LIMIT_BACKOFF_SECONDS = 5.0
 RATE_LIMIT_MAX_WAIT_SECONDS = 60.0
 RATE_LIMIT_MAX_TOTAL_WAIT_SECONDS = 120.0
 
+# How much of a vendor's error reply a failed call keeps: enough for its reason
+# ({"detail": "Invalid page."}), never a whole error page.
+ERROR_EXCERPT_CHARS = 200
+
 _SENSITIVE_HEADERS = frozenset(
     {"authorization", "x-api-key", "x-access-token", "x-auth-token", "api-key", "token", "cookie"}
 )
@@ -221,7 +225,8 @@ class HttpCallExecutor:
                     client, call.method, next_url, headers, next_params, body, timeout, secrets, page_no, traces, budget
                 )
                 if raise_for_status and not 200 <= status < 300:
-                    raise HttpCallError(f"{call.method} {trace.url} returned HTTP {status}", trace)
+                    reason = f": {trace.error}" if trace.error else ""
+                    raise HttpCallError(f"{call.method} {trace.url} returned HTTP {status}{reason}", trace)
                 pages.append(decoded)
                 statuses.append(status)
                 wanted = on_page is None or on_page(decoded)
@@ -353,6 +358,8 @@ class HttpCallExecutor:
             trace.elapsed_ms = (time.monotonic() - started) * 1000
             raise HttpCallError(f"{method} {trace.url} failed: {trace.error}", trace) from exc
         trace.elapsed_ms = (time.monotonic() - started) * 1000
+        if not 200 <= response.status_code < 300:
+            trace.error = _error_excerpt(raw, secrets) or None
         return response.status_code, _decode_body(raw, content_type), trace, retry_after
 
     async def _read_body(self, response: httpx.Response, trace: CallTrace) -> bytes:
@@ -403,6 +410,15 @@ def _rate_limit_wait(retry_after: str | None, retry: int) -> float | None:
         return backoff
     wait = max(wait, 0.0)
     return wait if wait <= RATE_LIMIT_MAX_WAIT_SECONDS else None
+
+
+def _error_excerpt(raw: bytes, secrets: list[str]) -> str:
+    """The start of a vendor's error reply, for the error and the trace: whitespace collapsed, secrets redacted.
+
+    Redacted before it is cut, so a secret is never left half shown.
+    """
+    text = _redact_text(" ".join(raw.decode("utf-8", errors="replace").split()), secrets)
+    return text if len(text) <= ERROR_EXCERPT_CHARS else text[: ERROR_EXCERPT_CHARS - 3] + "..."
 
 
 def _decode_body(raw: bytes, content_type: str) -> Any:
