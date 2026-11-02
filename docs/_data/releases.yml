@@ -10,6 +10,20 @@
 #   changes  what changed, for the people who use Octoprox; `docs` is a page
 #            on octoprox.com that explains it, such as connecting#exit-headers
 
+- version: 6.5.2
+  date: 2026-11-02
+  title: Per-connector health check intervals and vendor error details
+  changes:
+    - text: "Each connector can set its own health check interval on its Routing tab, from 10 seconds to one day. A large list of fixed exits can now be checked less often than a residential pool. Connectors without their own interval keep using `OCTOPROX_HEALTH_CHECK_INTERVAL`."
+      docs: api#health-checks-health_check_config
+    - text: "The API sets the interval with `health_check_config` on a connector. Connector responses show the interval in use and the install's default. A new cloud instance is checked at the install's interval until it is healthy."
+      docs: api#health-checks-health_check_config
+    - text: "Upgrade note: projects no longer have `health_check_interval` and `health_check_timeout` in the API. They never had any effect, because checks always used the install's settings. The API ignores them if you still send them."
+    - text: "On Kubernetes, also give the api `OCTOPROX_HEALTH_CHECK_INTERVAL`, so the web UI shows the right interval for connectors without their own."
+      docs: kubernetes
+    - text: "When a call to a vendor's API fails, the error now ends with the first 200 characters of the vendor's reply, with secrets hidden, so you can see why it failed. You see it in the admin screens and in the test panel's request list."
+      docs: providers#http-calls-auth-flows-options-and-validation
+
 - version: 6.5.1
   date: 2026-11-02
   title: Webshare country lists and vendor rate limit retries
