@@ -113,6 +113,25 @@ class TestUpsert:
         totals = await metrics_repo.get_totals(PROXY_WINDOWS, deltas)
         assert len(totals) == 4500 and totals["p04499"].request_count == 4500
 
+    async def test_flushes_of_any_size_share_one_upsert_and_one_read(
+        self, metrics_repo: MetricsRepository, db_session: AsyncSession
+    ) -> None:
+        """A statement per number of entities would leave a plan per size in every pooled connection's backend."""
+        for size in (1, 2, 3):
+            ids = [f"p{n}" for n in range(size)]
+            await metrics_repo.upsert_totals(PROXY_WINDOWS, dict.fromkeys(ids, MetricDelta(request_count=1)))
+            await metrics_repo.get_totals(PROXY_WINDOWS, ids)
+        prepared = await db_session.execute(
+            text(
+                "SELECT count(DISTINCT statement) FROM pg_prepared_statements "
+                "WHERE statement LIKE 'INSERT INTO metric_totals%' OR statement LIKE 'SELECT metric_totals.%'"
+            )
+        )
+        await db_session.commit()
+
+        assert prepared.scalar_one() == 2
+        assert (await metrics_repo.get_totals(PROXY_WINDOWS, ["p0"]))["p0"].request_count == 3
+
 
 class TestRebuild:
     async def test_the_totals_become_the_sums_of_the_history(

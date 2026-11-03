@@ -662,32 +662,74 @@ class TestObservations:
 
 @pytest.mark.usefixtures("db_engine")
 class TestStatementSize:
-    async def test_exit_upserts_and_judgements_go_out_in_bounded_statements(
-        self, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """asyncpg binds at most 32767 values per statement; one statement for a 5000-row batch would overflow."""
+    async def test_exit_upserts_of_any_size_are_one_statement(self, db_session: AsyncSession) -> None:
+        """A statement per batch size, or per set of None columns, would leave a plan each in every pooled connection's backend.
+
+        2500 rows bind 42500 values as rows, past asyncpg's 32767 per statement; as arrays they bind 17.
+        """
         await _connectors(db_session, "conn-1")
-        monkeypatch.setattr(ObservationRepository, "_EXIT_UPSERT_ROWS", 2)
-        monkeypatch.setattr(ObservationRepository, "_JUDGEMENT_ROWS", 1)
         repo = ObservationRepository(db_session)
 
         day = datetime(2026, 9, 1, 8, 0, 0)
-        sightings = [_observation(ip=f"10.9.0.{n}", observed_at=day) for n in range(5)]
-        await repo.add_exit_ips(ExitSighting.fold([(o, True) for o in sightings]))
-        # The same exits again add to the rows, whichever statement they land in.
-        await repo.add_exit_ips(ExitSighting.fold([(o, True) for o in sightings]))
-        # Two judgements of one row, out of order: the newer stays, and the row counts once.
-        applied = await repo.apply_judgements([
-            ExitJudgement(proxy_id="proxy-1", connector_id="conn-1", ip="10.9.0.0", judged_at=day + timedelta(hours=3), claimed_country="DE"),
-            ExitJudgement(proxy_id="proxy-1", connector_id="conn-1", ip="10.9.0.1", judged_at=day + timedelta(hours=2), claimed_country="FR"),
-            ExitJudgement(proxy_id="proxy-1", connector_id="conn-1", ip="10.9.0.0", judged_at=day + timedelta(hours=1), claimed_country="FR"),
-        ])
+        for size in (1, 2, 2500):
+            sightings = [
+                _observation(ip=f"10.8.{n // 250}.{n % 250}", observed_at=day, claimed_country=None if n % 2 else "US")
+                for n in range(size)
+            ]
+            await repo.add_exit_ips(ExitSighting.fold([(o, True) for o in sightings]))
+        prepared = await db_session.execute(
+            text(
+                "SELECT count(DISTINCT statement) FROM pg_prepared_statements "
+                "WHERE statement LIKE 'INSERT INTO connector_exit_ips%'"
+            )
+        )
         await db_session.commit()
 
-        assert applied == 2
-        rows = {r["ip"]: r for r in (await repo.exit_ips(connector_ids=["conn-1"], limit=1000))[0]}
-        assert all(rows[f"10.9.0.{n}"]["sightings"] == 2 for n in range(5))
-        assert (rows["10.9.0.0"]["claimed_country"], rows["10.9.0.1"]["claimed_country"]) == ("DE", "FR")
+        assert prepared.scalar_one() == 1
+        rows = {r["ip"]: r for r in (await repo.exit_ips(connector_ids=["conn-1"], limit=3000))[0]}
+        assert len(rows) == 2500 and rows["10.8.0.0"]["sightings"] == 3 and rows["10.8.9.249"]["sightings"] == 1
+
+    async def test_an_id_longer_than_its_column_matches_nothing(self, db_session: AsyncSession) -> None:
+        """Bound as an array of the column's ``varchar(n)``, it would be cut to ``n`` and match the row it begins with."""
+        connector_id = "c" * 36
+        await _connectors(db_session, connector_id)
+        repo = ObservationRepository(db_session)
+
+        assert await repo.existing_connector_ids({connector_id + "x"}) == set()
+        assert await repo.existing_connector_ids({connector_id}) == {connector_id}
+
+    async def test_judgements_of_any_size_are_one_statement(self, db_session: AsyncSession) -> None:
+        """A statement per batch size would leave a plan each in every pooled connection's backend.
+
+        2498 judgements bind 34972 values as rows, past asyncpg's 32767 per statement; as arrays they bind 14.
+        """
+        await _connectors(db_session, "conn-1")
+        repo = ObservationRepository(db_session)
+
+        day = datetime(2026, 9, 1, 8, 0, 0)
+        ips = [f"10.9.{n // 250}.{n % 250}" for n in range(2500)]
+        await repo.add_exit_ips(ExitSighting.fold([(_observation(ip=ip, observed_at=day), True) for ip in ips]))
+        # Two judgements of one row, out of order: the newer stays, and the row counts once.
+        applied = await repo.apply_judgements([
+            ExitJudgement(proxy_id="proxy-1", connector_id="conn-1", ip=ips[0], judged_at=day + timedelta(hours=3), claimed_country="DE"),
+            ExitJudgement(proxy_id="proxy-1", connector_id="conn-1", ip=ips[1], judged_at=day + timedelta(hours=2), claimed_country="FR"),
+            ExitJudgement(proxy_id="proxy-1", connector_id="conn-1", ip=ips[0], judged_at=day + timedelta(hours=1), claimed_country="FR"),
+        ])
+        rest = await repo.apply_judgements([
+            ExitJudgement(proxy_id="proxy-1", connector_id="conn-1", ip=ip, judged_at=day + timedelta(hours=1), claimed_country="GB")
+            for ip in ips[2:]
+        ])
+        prepared = await db_session.execute(
+            text(
+                "SELECT count(DISTINCT statement) FROM pg_prepared_statements "
+                "WHERE statement LIKE 'UPDATE connector_exit_ips%'"
+            )
+        )
+        await db_session.commit()
+
+        assert (applied, rest, prepared.scalar_one()) == (2, 2498, 1)
+        rows = {r["ip"]: r for r in (await repo.exit_ips(connector_ids=["conn-1"], limit=3000))[0]}
+        assert [rows[ip]["claimed_country"] for ip in (ips[0], ips[1], ips[-1])] == ["DE", "FR", "GB"]
 
 
 class TestLockOrder:

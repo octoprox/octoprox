@@ -9,11 +9,12 @@ from collections.abc import Sequence
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import DateTime, String, column, delete, or_, select, update, values
+from sqlalchemy import delete, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.core import utc_now
+from api.db.filters import rows_of
 from api.db.models import TunnelPeerMetricsModel, WireGuardPeerModel, WireGuardSettingsModel
 from api.models.wireguard import WireGuardPeer, WireGuardServerSettings
 
@@ -169,9 +170,10 @@ class WireGuardPeerRepository:
         """
         if not sightings:
             return 0
-        seen = values(
-            column("public_key", String), column("handshake_at", DateTime), column("endpoint", String), name="seen"
-        ).data(list(sightings))
+        m = WireGuardPeerModel
+        seen = rows_of(
+            "seen", {"public_key": m.public_key, "handshake_at": m.last_handshake_at, "endpoint": m.last_endpoint}, sightings
+        )
         result = await self._session.execute(
             update(WireGuardPeerModel)
             .where(WireGuardPeerModel.public_key == seen.c.public_key)

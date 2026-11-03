@@ -16,35 +16,33 @@ import structlog
 from sqlalchemy import (
     BigInteger,
     Boolean,
-    DateTime,
     Integer,
     Select,
     String,
     Table,
     and_,
+    any_,
     case,
     column,
     delete,
     func,
-    literal,
     literal_column,
     or_,
     select,
     text,
     true,
-    tuple_,
     update,
     values,
 )
 from sqlalchemy import (
     cast as cast_sql,
 )
-from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession
 
 from api.core import utc_now
+from api.db.filters import any_of, array_of, none_of, rows_of
 from api.db.models import (
     ConnectorExitIpModel,
     ConnectorModel,
@@ -449,7 +447,8 @@ class ObservationRepository:
             }
             for o in observations
         ]
-        await self._session.execute(pg_insert(IpObservationModel), rows)
+        # NULLs rendered, or the ORM's bulk insert leaves a row's None columns out: a statement per set of them.
+        await self._session.execute(pg_insert(IpObservationModel).execution_options(render_nulls=True), rows)
         return len(rows)
 
     @staticmethod
@@ -648,7 +647,7 @@ class ObservationRepository:
             .group_by(m.connector_id, counted_in.c.level, counted_in.c.claimed, counted_in.c.observed)
         )
         if connector_ids is not None:
-            query = query.where(m.connector_id.in_(connector_ids))
+            query = query.where(any_of(m.connector_id, connector_ids))
         if since is not None:
             query = query.where(m.last_seen >= since)
         found = (await self._session.execute(query)).all()
@@ -685,7 +684,7 @@ class ObservationRepository:
             if days != default_days:
                 own.setdefault(days, []).append(project_id)
         statements = [
-            delete(m).where(m.observed_at < now - timedelta(days=days), m.project_id.in_(project_ids))
+            delete(m).where(m.observed_at < now - timedelta(days=days), any_of(m.project_id, project_ids))
             for days, project_ids in own.items()
             if days > 0
         ]
@@ -693,7 +692,7 @@ class ObservationRepository:
             rest = delete(m).where(m.observed_at < now - timedelta(days=default_days))
             if own:
                 others = [project_id for project_ids in own.values() for project_id in project_ids]
-                rest = rest.where(or_(m.project_id.is_(None), m.project_id.not_in(others)))
+                rest = rest.where(or_(m.project_id.is_(None), none_of(m.project_id, others)))
             statements.append(rest)
         deleted = 0
         for statement in statements:
@@ -711,7 +710,7 @@ class ObservationRepository:
         if not connector_ids:
             return set()
         result = await self._session.execute(
-            select(ConnectorModel.id).where(ConnectorModel.id.in_(sorted(connector_ids)))
+            select(ConnectorModel.id).where(any_of(ConnectorModel.id, connector_ids))
         )
         return {row[0] for row in result.all()}
 
@@ -721,11 +720,6 @@ class ObservationRepository:
         "proxy_id", "source", "claimed_country", "resolved_source", "country_conflict",
         "claimed_state", "claimed_city", "resolved_state", "resolved_city", "state_conflict", "city_conflict",
     )
-    # Rows per statement. asyncpg takes at most 32767 bound values per
-    # statement: an exit upsert row binds 17 (under 1928 rows fit), a
-    # judgement 14 (under 2341).
-    _EXIT_UPSERT_ROWS = 1000
-    _JUDGEMENT_ROWS = 1000
 
     async def add_exit_ips(self, exits: dict[tuple[str, str], ExitSighting]) -> None:
         """Upsert (connector, ip) rows: first sighting kept, last sighting and count advanced, in the caller's transaction.
@@ -734,42 +728,39 @@ class ObservationRepository:
         """
         if not exits:
             return
+        m = ConnectorExitIpModel
+        names = ["connector_id", "ip", "first_seen", "last_seen", "sightings", "country", *self._LATEST_STATE]
+        # The batch as one array per column, unnested: one statement and one execution whatever its size, where a
+        # VALUES list would be new SQL text for every size and each pooled connection keeps up to a hundred planned.
         # In key order, so two workers writing overlapping exits lock them in the same order: one waits for the
         # other, where opposite orders would each hold a row the other wants, a deadlock Postgres ends by failing one.
-        rows = [
-            {
-                "connector_id": connector_id,
-                "ip": ip,
-                "first_seen": sighting.first_seen,
-                "last_seen": sighting.last_seen,
-                "sightings": sighting.count,
-                "country": sighting.country,
-                **{name: getattr(sighting, name) for name in self._LATEST_STATE},
-            }
-            for (connector_id, ip), sighting in sorted(exits.items(), key=lambda item: item[0])
-        ]
-        for start in range(0, len(rows), self._EXIT_UPSERT_ROWS):
-            await self._upsert_exit_rows(rows[start:start + self._EXIT_UPSERT_ROWS])
-
-    async def _upsert_exit_rows(self, rows: list[dict[str, Any]]) -> None:
-        statement = pg_insert(ConnectorExitIpModel).values(rows)
-        newer = statement.excluded.last_seen >= ConnectorExitIpModel.last_seen
+        sighted = rows_of(
+            "sighted",
+            {name: getattr(m, name) for name in names},
+            (
+                (
+                    connector_id,
+                    ip,
+                    sighting.first_seen,
+                    sighting.last_seen,
+                    sighting.count,
+                    sighting.country,
+                    *(getattr(sighting, name) for name in self._LATEST_STATE),
+                )
+                for (connector_id, ip), sighting in sorted(exits.items(), key=lambda item: item[0])
+            ),
+        )
+        statement = pg_insert(m).from_select(names, select(*(sighted.c[name] for name in names)))
+        newer = statement.excluded.last_seen >= m.last_seen
         statement = statement.on_conflict_do_update(
-            index_elements=[ConnectorExitIpModel.connector_id, ConnectorExitIpModel.ip],
+            index_elements=[m.connector_id, m.ip],
             set_={
-                "first_seen": func.least(
-                    ConnectorExitIpModel.first_seen, statement.excluded.first_seen
-                ),
-                "last_seen": func.greatest(
-                    ConnectorExitIpModel.last_seen, statement.excluded.last_seen
-                ),
-                "sightings": ConnectorExitIpModel.sightings + statement.excluded.sightings,
-                "country": func.coalesce(statement.excluded.country, ConnectorExitIpModel.country),
+                "first_seen": func.least(m.first_seen, statement.excluded.first_seen),
+                "last_seen": func.greatest(m.last_seen, statement.excluded.last_seen),
+                "sightings": m.sightings + statement.excluded.sightings,
+                "country": func.coalesce(statement.excluded.country, m.country),
                 **{
-                    name: case(
-                        (newer, getattr(statement.excluded, name)),
-                        else_=getattr(ConnectorExitIpModel, name),
-                    )
+                    name: case((newer, getattr(statement.excluded, name)), else_=getattr(m, name))
                     for name in self._LATEST_STATE
                 },
             },
@@ -785,50 +776,48 @@ class ObservationRepository:
         for j in sorted(judgements, key=lambda j: j.judged_at):
             if j.connector_id:
                 newest[(j.connector_id, j.ip, j.proxy_id)] = j
-        data = [
-            (
-                j.connector_id,
-                j.ip,
-                j.proxy_id,
-                j.judged_at,
-                j.claimed_country,
-                j.resolved_country,
-                j.resolved_source.value if j.resolved_source else None,
-                j.country_conflict,
-                j.claimed_state,
-                j.claimed_city,
-                j.resolved_state,
-                j.resolved_city,
-                j.state_conflict,
-                j.city_conflict,
-            )
-            # In key order, like the exit upserts in the same transaction.
-            for _key, j in sorted(newest.items(), key=lambda item: item[0])
-        ]
-        rewritten = 0
-        for start in range(0, len(data), self._JUDGEMENT_ROWS):
-            rewritten += await self._apply_judgement_rows(data[start:start + self._JUDGEMENT_ROWS])
-        return rewritten
-
-    async def _apply_judgement_rows(self, data: list[tuple[Any, ...]]) -> int:
-        judged = values(
-            column("connector_id", String),
-            column("ip", String),
-            column("proxy_id", String),
-            column("judged_at", DateTime),
-            column("claimed_country", String),
-            column("country", String),
-            column("resolved_source", String),
-            column("country_conflict", Boolean),
-            column("claimed_state", String),
-            column("claimed_city", String),
-            column("resolved_state", String),
-            column("resolved_city", String),
-            column("state_conflict", Boolean),
-            column("city_conflict", Boolean),
-            name="judged",
-        ).data(data)
+        if not newest:
+            return 0
         table = cast("Table", ConnectorExitIpModel.__table__)
+        judged = rows_of(
+            "judged",
+            {
+                "connector_id": table.c.connector_id,
+                "ip": table.c.ip,
+                "proxy_id": table.c.proxy_id,
+                "judged_at": table.c.last_seen,
+                "claimed_country": table.c.claimed_country,
+                "country": table.c.country,
+                "resolved_source": table.c.resolved_source,
+                "country_conflict": table.c.country_conflict,
+                "claimed_state": table.c.claimed_state,
+                "claimed_city": table.c.claimed_city,
+                "resolved_state": table.c.resolved_state,
+                "resolved_city": table.c.resolved_city,
+                "state_conflict": table.c.state_conflict,
+                "city_conflict": table.c.city_conflict,
+            },
+            (
+                (
+                    j.connector_id,
+                    j.ip,
+                    j.proxy_id,
+                    j.judged_at,
+                    j.claimed_country,
+                    j.resolved_country,
+                    j.resolved_source.value if j.resolved_source else None,
+                    j.country_conflict,
+                    j.claimed_state,
+                    j.claimed_city,
+                    j.resolved_state,
+                    j.resolved_city,
+                    j.state_conflict,
+                    j.city_conflict,
+                )
+                # In key order, like the exit upserts in the same transaction.
+                for _key, j in sorted(newest.items(), key=lambda item: item[0])
+            ),
+        )
         statement = (
             update(table)
             .where(
@@ -842,15 +831,13 @@ class ObservationRepository:
                 claimed_country=judged.c.claimed_country,
                 country=func.coalesce(judged.c.country, table.c.country),
                 resolved_source=judged.c.resolved_source,
-                # A VALUES column that is NULL in every row is untyped text to
-                # Postgres; the casts keep an all-NULL batch assignable.
-                country_conflict=cast_sql(judged.c.country_conflict, Boolean),
-                claimed_state=cast_sql(judged.c.claimed_state, String),
-                claimed_city=cast_sql(judged.c.claimed_city, String),
-                resolved_state=cast_sql(judged.c.resolved_state, String),
-                resolved_city=cast_sql(judged.c.resolved_city, String),
-                state_conflict=cast_sql(judged.c.state_conflict, Boolean),
-                city_conflict=cast_sql(judged.c.city_conflict, Boolean),
+                country_conflict=judged.c.country_conflict,
+                claimed_state=judged.c.claimed_state,
+                claimed_city=judged.c.claimed_city,
+                resolved_state=judged.c.resolved_state,
+                resolved_city=judged.c.resolved_city,
+                state_conflict=judged.c.state_conflict,
+                city_conflict=judged.c.city_conflict,
             )
         )
         result = await self._session.execute(statement)
@@ -865,7 +852,10 @@ class ObservationRepository:
         if not keys:
             return {}
         m = ConnectorExitIpModel
-        query = select(m.connector_id, m.ip, m.proxy_id).where(tuple_(m.connector_id, m.ip).in_(list(keys)))
+        asked = rows_of("asked", {"connector_id": m.connector_id, "ip": m.ip}, keys)
+        query = select(m.connector_id, m.ip, m.proxy_id).join(
+            asked, and_(m.connector_id == asked.c.connector_id, m.ip == asked.c.ip)
+        )
         return {(row.connector_id, row.ip): row.proxy_id for row in (await self._session.execute(query)).all()}
 
     async def exit_summary(
@@ -889,7 +879,7 @@ class ObservationRepository:
         if connector_ids is not None:
             if not connector_ids:
                 return []
-            query = query.where(ConnectorExitIpModel.connector_id.in_(connector_ids))
+            query = query.where(any_of(ConnectorExitIpModel.connector_id, connector_ids))
         result = await self._session.execute(query)
         return [
             {
@@ -917,7 +907,8 @@ class ObservationRepository:
             return {"exits": 0, "shared": 0, "connectors": [], "pairs": []}
         m = ConnectorExitIpModel
         # A connector's bit is its place in the list, bound once as one array parameter however often it is used.
-        position = func.array_position(literal(connector_ids, ARRAY(String)), m.connector_id, type_=Integer) - 1
+        ids = array_of(m.connector_id, connector_ids)
+        position = func.array_position(ids, m.connector_id, type_=Integer) - 1
         words = range((len(connector_ids) + _MASK_BITS - 1) // _MASK_BITS)
 
         def bit(word: int) -> Any:
@@ -928,7 +919,7 @@ class ObservationRepository:
                 *(func.bit_or(bit(word)).label(f"held_{word}") for word in words),
                 *(func.bit_or(case((m.sightings > 1, bit(word)), else_=0)).label(f"reused_{word}") for word in words),
             )
-            .where(m.connector_id.in_(connector_ids), m.last_seen >= since)
+            .where(m.connector_id == any_(ids), m.last_seen >= since)
             .group_by(m.ip)
             .subquery()
         )
@@ -984,7 +975,7 @@ class ObservationRepository:
         """
         m = ConnectorExitIpModel
         if connector_ids is not None:
-            query = query.where(m.connector_id.in_(connector_ids))
+            query = query.where(any_of(m.connector_id, connector_ids))
         if ip:
             query = query.where(m.ip == ip)
         if proxy_id:

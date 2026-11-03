@@ -9,11 +9,12 @@ from collections.abc import Sequence
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import DateTime, String, column, delete, or_, select, update, values
+from sqlalchemy import delete, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.core import utc_now
+from api.db.filters import rows_of
 from api.db.models import OpenVpnPeerModel, OpenVpnSettingsModel, TunnelPeerMetricsModel
 from api.models.openvpn import OpenVpnPeer, OpenVpnServerSettings
 
@@ -161,9 +162,8 @@ class OpenVpnPeerRepository:
         """Move each device's last connection forward to its sighting's, matched by id, in one statement; how many moved."""
         if not sightings:
             return 0
-        seen = values(
-            column("id", String), column("connected_at", DateTime), column("endpoint", String), name="seen"
-        ).data(list(sightings))
+        m = OpenVpnPeerModel
+        seen = rows_of("seen", {"id": m.id, "connected_at": m.last_connected_at, "endpoint": m.last_endpoint}, sightings)
         result = await self._session.execute(
             update(OpenVpnPeerModel)
             .where(OpenVpnPeerModel.id == seen.c.id)
