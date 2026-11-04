@@ -90,8 +90,9 @@ def project_service(
     jobs: JobQueue,
     redis_client: RedisClient,
     change_log: ChangeLog,
+    connector_service: ConnectorService,
 ) -> ProjectService:
-    return ProjectService(sessions, jobs, redis_client, changes=change_log)
+    return ProjectService(sessions, jobs, redis_client, changes=change_log, connectors=connector_service)
 
 
 @pytest.fixture

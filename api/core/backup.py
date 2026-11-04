@@ -21,7 +21,7 @@ import structlog
 from cryptography.fernet import Fernet, InvalidToken
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
-from sqlalchemy import DateTime, LargeBinary, delete, inspect, select
+from sqlalchemy import DateTime, LargeBinary, delete, inspect, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.types import TypeEngine
 
@@ -56,7 +56,13 @@ from api.db.models import (
     WireGuardSettingsModel,
 )
 from api.db.redis import project_keys
-from api.db.repository import MetricsRepository
+from api.db.repository import (
+    ConnectorRepository,
+    CredentialRepository,
+    MetricsRepository,
+    ProjectRepository,
+    ProxyRepository,
+)
 from api.models.backup import (
     BackupEnvelope,
     BackupKdf,
@@ -64,9 +70,13 @@ from api.models.backup import (
     ImportSummary,
     UserConflict,
 )
+from api.models.project import Project
 
 if TYPE_CHECKING:
     from api.db.redis import RedisClient
+    from api.models.connector import Connector
+    from api.models.credential import Credential
+    from api.providers.registry import ProviderRegistry
 
 logger = structlog.get_logger()
 
@@ -379,6 +389,9 @@ class ImportResult:
     removed_project_ids: list[str] = field(default_factory=list)
     # Running metric totals recomputed from the imported history.
     totals_rebuilt: int = 0
+    # Cloud connectors the install had that the backup does not carry, moved
+    # to projects of their own pending deletion: they need a scale run.
+    deleting_connector_ids: list[str] = field(default_factory=list)
 
     async def forget_removed_projects(self, redis_client: RedisClient) -> int:
         """Delete the removed projects' keys that never expire (``project_keys``); how many went."""
@@ -387,6 +400,23 @@ class ImportResult:
         for start in range(0, len(keys), _FORGET_BATCH):
             deleted += int(await redis_client.client.delete(*keys[start:start + _FORGET_BATCH]))
         return deleted
+
+
+# The longest project name and username the columns hold.
+_PROJECT_TEXT_CHARS = 255
+
+
+def _free(base: str, suffix: str, taken: set[str], *, separator: str) -> str:
+    """``base`` with ``suffix``, then the first number after it that ``taken`` lacks, ``base`` cut short so the whole
+    fits the column; taken from then on."""
+    number = 1
+    while True:
+        tail = suffix if number == 1 else f"{suffix}{separator}{number}"
+        chosen = base[: _PROJECT_TEXT_CHARS - len(tail)] + tail
+        if chosen not in taken:
+            taken.add(chosen)
+            return chosen
+        number += 1
 
 
 class BackupRepository:
@@ -414,16 +444,25 @@ class BackupRepository:
             payload[spec.key] = rows
         return payload
 
-    async def replace_all(self, payload: BackupPayload, keep_user_id: str | None = None) -> ImportResult:
+    async def replace_all(
+        self, payload: BackupPayload, registry: ProviderRegistry, keep_user_id: str | None = None
+    ) -> ImportResult:
         """Wipe every entity and restore ``payload``'s, then recompute the running totals; on a raise the caller rolls back.
 
+        A cloud connector the backup does not carry is deleted as the connector delete deletes it, from a project of
+        its own pending deletion (``_hand_to_deletion``), so its instances are terminated before it goes.
+
         Args:
+            registry: says which connector types are clouds.
             keep_user_id: the user who survives the wipe, imported users colliding with it changed; None wipes every user.
         """
         kept = await self._kept_user(keep_user_id) if keep_user_id is not None else None
         # The projects before the wipe: those the backup does not carry are removed.
         old_project_ids = set((await self._session.execute(select(ProjectModel.id))).scalars().all())
-        await self._wipe(keep_user_id)
+        carried = {str(row.get("id")) for row in payload.connectors}
+        leaving = await self._cloud_connectors_leaving(carried, registry)
+        holders = await self._hand_to_deletion(leaving, payload)
+        await self._wipe(keep_user_id, spared_project_ids=holders)
 
         data = payload.model_dump()
         user_conflicts: list[UserConflict] = []
@@ -450,6 +489,7 @@ class BackupRepository:
             kept_current_user=kept is not None,
             user_conflicts=len(user_conflicts),
             removed_projects=len(removed),
+            deleting_cloud_connectors=len(leaving),
             totals_rebuilt=totals,
             **counts,
         )
@@ -458,10 +498,72 @@ class BackupRepository:
                 **counts,
                 kept_current_user=kept is not None,
                 user_conflicts=user_conflicts,
+                deleting_cloud_connectors=len(leaving),
             ),
             removed_project_ids=removed,
             totals_rebuilt=totals,
+            deleting_connector_ids=[connector.id for connector, _credential in leaving],
         )
+
+    async def _cloud_connectors_leaving(
+        self, carried: set[str], registry: ProviderRegistry
+    ) -> list[tuple[Connector, Credential]]:
+        """The install's cloud connectors not among ``carried``, each with its credential."""
+        connectors = ConnectorRepository(self._session)
+        leaving = [
+            connector.id
+            for connector in await connectors.get_all()
+            if connector.id not in carried and registry.is_cloud(connector.credential_type)
+        ]
+        return await connectors.get_many_with_credentials(leaving)
+
+    async def _hand_to_deletion(self, leaving: list[tuple[Connector, Credential]], payload: BackupPayload) -> list[str]:
+        """Move each leaving cloud connector, with a copy of its credential, into '<its project> (deleting)', a project
+        pending deletion, and mark it as the connector delete does; the IDs of those projects, which the wipe spares.
+
+        The scale job then terminates the instances and deletes the connectors, and the project with the last of them.
+        Its own project is restored from the backup or removed, so the connector cannot stay in it, and a name or
+        username the backup carries, or a project still here before the wipe has, gets a number after it.
+        """
+        current = (await self._session.execute(select(ProjectModel.name, ProjectModel.username))).all()
+        names = {str(row.get("name")) for row in payload.projects} | {name for name, _username in current}
+        usernames = {str(row.get("username")) for row in payload.projects} | {username for _name, username in current}
+        projects, credentials, connectors, proxies = (
+            ProjectRepository(self._session),
+            CredentialRepository(self._session),
+            ConnectorRepository(self._session),
+            ProxyRepository(self._session),
+        )
+        holders: dict[str, Project] = {}
+        copies: dict[str, Credential] = {}
+        for connector, credential in leaving:
+            holder = holders.get(connector.project_id)
+            if holder is None:
+                source = await projects.get_by_id(connector.project_id)
+                assert source is not None  # the connector's foreign key
+                holder = Project(
+                    name=_free(source.name, " (deleting)", names, separator=" "),
+                    username=_free(source.username, "-deleting", usernames, separator=""),
+                    password=source.password,
+                    description=source.description,
+                )
+                await projects.create(holder)
+                await projects.mark_pending_deletion(holder.id)
+                holders[connector.project_id] = holder
+            copy = copies.get(credential.id)
+            if copy is None:
+                copy = credential.model_copy(update={"id": str(uuid.uuid4()), "project_id": holder.id})
+                await credentials.create(copy)
+                copies[credential.id] = copy
+            await self._session.execute(
+                update(ConnectorModel)
+                .where(ConnectorModel.id == connector.id)
+                .values(project_id=holder.id, credential_id=copy.id)
+            )
+            await proxies.mark_terminating(connector.id)
+            await connectors.mark_pending_deletion(connector.id)
+        logger.info("Backup import hands cloud connectors to deletion", connectors=len(leaving), projects=len(holders))
+        return [holder.id for holder in holders.values()]
 
     async def _kept_user(self, keep_user_id: str) -> _KeptUser:
         """The user to keep, as it is before the wipe."""
@@ -473,11 +575,12 @@ class BackupRepository:
             )
         return _KeptUser(id=user.id, username=user.username, email=user.email or "")
 
-    async def _wipe(self, keep_user_id: str | None) -> None:
-        """Delete every entity a backup carries, and every user but the kept one."""
+    async def _wipe(self, keep_user_id: str | None, spared_project_ids: list[str]) -> None:
+        """Delete every entity a backup carries, and every user but the kept one; the projects pending deletion that
+        ``_hand_to_deletion`` made stay."""
         # Deleting projects cascades (DB-level ON DELETE CASCADE) to credentials,
         # connectors, proxies and both metrics tables. Users are independent.
-        await self._session.execute(delete(ProjectModel))
+        await self._session.execute(delete(ProjectModel).where(ProjectModel.id.not_in(spared_project_ids)))
         # Provider descriptors are global (not project-scoped) and their audit log
         # has no FK, so both are wiped explicitly. Likewise the attribution
         # settings row, the database rows (their blobs cascade) and the raw

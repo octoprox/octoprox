@@ -175,10 +175,11 @@ def services(
     registry: ProviderRegistry,
     change_log: ChangeLog,
 ) -> Services:
+    connectors = ConnectorService(sessions, jobs, redis_client, registry, changes=change_log)
     return Services(
-        projects=ProjectService(sessions, jobs, redis_client, changes=change_log),
+        projects=ProjectService(sessions, jobs, redis_client, changes=change_log, connectors=connectors),
         credentials=CredentialService(sessions, registry, changes=change_log),
-        connectors=ConnectorService(sessions, jobs, redis_client, registry, changes=change_log),
+        connectors=connectors,
         proxies=ProxyService(sessions, jobs, redis_client, registry, changes=change_log),
     )
 

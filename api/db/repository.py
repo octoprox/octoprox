@@ -123,11 +123,16 @@ class ProjectRepository:
         models = result.scalars().all()
         return [self._to_domain(m) for m in models]
 
-    async def get_by_id(self, project_id: str) -> Project | None:
-        """Get project by ID."""
-        result = await self._session.execute(
-            select(ProjectModel).where(ProjectModel.id == project_id)
-        )
+    async def get_by_id(self, project_id: str, *, for_share: bool = False) -> Project | None:
+        """Get project by ID.
+
+        ``for_share`` holds the row against a delete marking it until the transaction ends, so what is written under the
+        project was decided on whether it is pending deletion as stored.
+        """
+        statement = select(ProjectModel).where(ProjectModel.id == project_id)
+        if for_share:
+            statement = statement.with_for_update(read=True)
+        result = await self._session.execute(statement)
         model = result.scalar_one_or_none()
         return self._to_domain(model) if model else None
 
@@ -212,6 +217,24 @@ class ProjectRepository:
         )
         return bool(result.rowcount and result.rowcount > 0)  # type: ignore[attr-defined]
 
+    async def mark_pending_deletion(self, project_id: str) -> bool:
+        """Mark a project pending deletion; False when there is no such project."""
+        result = await self._session.execute(
+            update(ProjectModel).where(ProjectModel.id == project_id).values(pending_deletion=True)
+        )
+        return bool(result.rowcount and result.rowcount > 0)  # type: ignore[attr-defined]
+
+    async def delete_if_emptied(self, project_id: str) -> bool:
+        """Delete a project pending deletion that holds no connector, with what else it holds by cascade; whether it went."""
+        result = await self._session.execute(
+            delete(ProjectModel).where(
+                ProjectModel.id == project_id,
+                ProjectModel.pending_deletion.is_(True),
+                ~exists().where(ConnectorModel.project_id == project_id),
+            )
+        )
+        return bool(result.rowcount and result.rowcount > 0)  # type: ignore[attr-defined]
+
     async def get_counts(self, project_id: str | None = None) -> dict[str, ProjectCounts]:
         """What each project holds (credentials, connectors, proxies by status), by project id, in one round trip.
 
@@ -269,6 +292,7 @@ class ProjectRepository:
             exit_headers=bool(model.exit_headers),
             observation_log=bool(model.observation_log),
             observation_retention_days=model.observation_retention_days,
+            pending_deletion=bool(model.pending_deletion),
             created_at=model.created_at,
             updated_at=model.updated_at,
         )
@@ -286,7 +310,7 @@ class CredentialRepository:
             select(CredentialModel).order_by(CredentialModel.created_at)
         )
         models = result.scalars().all()
-        return [self._to_domain(m) for m in models]
+        return [self.to_domain(m) for m in models]
 
     async def get_by_project(self, project_id: str) -> list[Credential]:
         """Get all credentials for a project, ordered by creation time."""
@@ -296,7 +320,7 @@ class CredentialRepository:
             .order_by(CredentialModel.created_at)
         )
         models = result.scalars().all()
-        return [self._to_domain(m) for m in models]
+        return [self.to_domain(m) for m in models]
 
     async def get_by_id(self, credential_id: str) -> Credential | None:
         """Get credential by ID."""
@@ -304,7 +328,7 @@ class CredentialRepository:
             select(CredentialModel).where(CredentialModel.id == credential_id)
         )
         model = result.scalar_one_or_none()
-        return self._to_domain(model) if model else None
+        return self.to_domain(model) if model else None
 
     async def get_in_project(self, project_id: str, credential_id: str) -> Credential | None:
         """The credential with this id if it belongs to the project, else None (a route under another project 404s)."""
@@ -314,7 +338,7 @@ class CredentialRepository:
             )
         )
         model = result.scalar_one_or_none()
-        return self._to_domain(model) if model else None
+        return self.to_domain(model) if model else None
 
     async def usage_by_type(self, type_id: str | None = None) -> dict[str, tuple[int, int]]:
         """How many credentials each provider type has, and connectors on them; a type nothing uses is absent.
@@ -360,7 +384,7 @@ class CredentialRepository:
             model.config = credential.config
             model.updated_at = utc_now()
             await self._session.flush()
-        return self._to_domain(model) if model else None
+        return self.to_domain(model) if model else None
 
     async def delete(self, credential_id: str) -> bool:
         """Delete a credential."""
@@ -369,8 +393,9 @@ class CredentialRepository:
         )
         return bool(result.rowcount and result.rowcount > 0)  # type: ignore[attr-defined]
 
-    def _to_domain(self, model: CredentialModel) -> Credential:
-        """Convert database model to domain model."""
+    @staticmethod
+    def to_domain(model: CredentialModel) -> Credential:
+        """The credential a row holds; any query that loads one maps it with this."""
         return Credential(
             id=model.id,
             name=model.name,
@@ -396,7 +421,7 @@ class ConnectorRepository:
             .order_by(ConnectorModel.created_at)
         )
         models = result.scalars().all()
-        return [self._to_domain(m) for m in models]
+        return [self.to_domain(m) for m in models]
 
     async def get_by_project(self, project_id: str) -> list[Connector]:
         """Get all connectors for a project, ordered by creation time."""
@@ -407,7 +432,7 @@ class ConnectorRepository:
             .order_by(ConnectorModel.created_at)
         )
         models = result.scalars().all()
-        return [self._to_domain(m) for m in models]
+        return [self.to_domain(m) for m in models]
 
     async def get_by_id(self, connector_id: str) -> Connector | None:
         """Get connector by ID."""
@@ -417,7 +442,7 @@ class ConnectorRepository:
             .options(selectinload(ConnectorModel.credential))
         )
         model = result.scalar_one_or_none()
-        return self._to_domain(model) if model else None
+        return self.to_domain(model) if model else None
 
     async def get_in_project(self, project_id: str, connector_id: str) -> Connector | None:
         """The connector with this id if it belongs to the project, else None (a route under another project 404s)."""
@@ -427,7 +452,7 @@ class ConnectorRepository:
             .options(selectinload(ConnectorModel.credential))
         )
         model = result.scalar_one_or_none()
-        return self._to_domain(model) if model else None
+        return self.to_domain(model) if model else None
 
     async def get_with_credential(
         self, connector_id: str, *, project_id: str | None = None
@@ -443,7 +468,7 @@ class ConnectorRepository:
         model = (await self._session.execute(query)).scalar_one_or_none()
         if model is None:
             return None
-        return self._to_domain(model), CredentialRepository(self._session)._to_domain(model.credential)
+        return self.to_domain(model), CredentialRepository.to_domain(model.credential)
 
     async def get_many(self, connector_ids: Iterable[str]) -> list[Connector]:
         """The connectors among ``connector_ids`` that exist, in id order; one statement however many are asked for."""
@@ -460,9 +485,8 @@ class ConnectorRepository:
             .options(joinedload(ConnectorModel.credential))
             .order_by(ConnectorModel.id)
         )
-        credentials = CredentialRepository(self._session)
         return [
-            (self._to_domain(model), credentials._to_domain(model.credential))
+            (self.to_domain(model), CredentialRepository.to_domain(model.credential))
             for model in result.scalars().unique().all()
         ]
 
@@ -492,7 +516,11 @@ class ConnectorRepository:
         return connector
 
     async def update(self, connector: Connector) -> Connector | None:
-        """Write a stored connector as ``connector`` has it; the row as stored, ``updated_at`` stamped, or None when it is gone."""
+        """Write a stored connector as ``connector`` has it; the row as stored, ``updated_at`` stamped, or None when it is gone.
+
+        ``pending_deletion`` is never written here but by ``mark_pending_deletion``, and ``enabled`` not on a row pending
+        deletion, so a save built from a read taken before the delete cannot bring the connector back.
+        """
         result = await self._session.execute(
             select(ConnectorModel).where(ConnectorModel.id == connector.id)
         )
@@ -506,8 +534,8 @@ class ConnectorRepository:
             model.traffic_config = connector.traffic_config
             model.health_check_config = connector.health_check_config
             model.traffic_reset_at = connector.traffic_reset_at
-            model.enabled = connector.enabled
-            model.pending_deletion = connector.pending_deletion
+            if not model.pending_deletion:
+                model.enabled = connector.enabled
             model.last_error = connector.last_error
             model.last_error_at = connector.last_error_at
             model.consecutive_errors = connector.consecutive_errors
@@ -517,12 +545,24 @@ class ConnectorRepository:
             self._session.expire(model)
         return await self.get_by_id(connector.id) if model else None
 
-    async def delete(self, connector_id: str) -> bool:
-        """Delete a connector."""
+    async def mark_pending_deletion(self, connector_id: str) -> bool:
+        """Disable a connector and mark it pending deletion; False when there is no such connector.
+
+        A delete marks its proxies terminating first (``ProxyRepository.mark_terminating``).
+        """
         result = await self._session.execute(
-            delete(ConnectorModel).where(ConnectorModel.id == connector_id)
+            update(ConnectorModel)
+            .where(ConnectorModel.id == connector_id)
+            .values(enabled=False, pending_deletion=True, updated_at=utc_now())
         )
         return bool(result.rowcount and result.rowcount > 0)  # type: ignore[attr-defined]
+
+    async def delete(self, connector_id: str) -> str | None:
+        """Delete a connector; the project it was in as it went, or None when it was gone already."""
+        result = await self._session.execute(
+            delete(ConnectorModel).where(ConnectorModel.id == connector_id).returning(ConnectorModel.project_id)
+        )
+        return result.scalar_one_or_none()
 
     async def record_error(self, connector_id: str, error: str | None) -> bool:
         """Record a cloud error, ``consecutive_errors`` counted in SQL, or clear the error state for None; False when nothing was written."""
@@ -552,8 +592,9 @@ class ConnectorRepository:
         )
         return bool(result.rowcount)  # type: ignore[attr-defined]
 
-    def _to_domain(self, model: ConnectorModel) -> Connector:
-        """Convert database model to domain model."""
+    @staticmethod
+    def to_domain(model: ConnectorModel) -> Connector:
+        """The connector a row holds, its credential loaded with it; any query that loads one maps it with this."""
         return Connector(
             id=model.id,
             name=model.name,
@@ -653,12 +694,11 @@ class ProxyRepository:
             .options(joinedload(ProxyModel.connector).joinedload(ConnectorModel.credential))
             .order_by(ProxyModel.id)
         )
-        connectors, credentials = ConnectorRepository(self._session), CredentialRepository(self._session)
         return [
             (
                 self._to_domain(model),
-                connectors._to_domain(model.connector),
-                credentials._to_domain(model.connector.credential),
+                ConnectorRepository.to_domain(model.connector),
+                CredentialRepository.to_domain(model.connector.credential),
             )
             for model in result.scalars().unique().all()
         ]
@@ -787,6 +827,13 @@ class ProxyRepository:
             .execution_options(synchronize_session=False)
         )
         return bool(result.rowcount)  # type: ignore[attr-defined]
+
+    async def mark_terminating(self, connector_id: str) -> list[str]:
+        """Mark every proxy of a connector terminating, in id order as every batch writer locks them; their IDs."""
+        proxy_ids = sorted(proxy.id for proxy in await self.get_by_connector(connector_id))
+        for proxy_id in proxy_ids:
+            await self.set_status(proxy_id, ProxyStatus.TERMINATING)
+        return proxy_ids
 
     async def set_status(self, proxy_id: str, status: ProxyStatus) -> bool:
         """Put a proxy in ``status`` (drain and terminate); False when gone, already there, or past it.

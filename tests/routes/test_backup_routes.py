@@ -20,10 +20,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.testclient import TestClient
 
 from api.core.config import Settings
-from api.core.roles import Role
+from api.core.roles import JobKind, Role
 from api.core.stats import MetricDelta
 from api.db.redis import (
     FAILURE_LOG_DATA_KEY,
+    JOB_STREAM_KEY,
     MITM_REQUESTS_KEY,
     PROJECT_WINDOWS,
     PROXY_WINDOWS,
@@ -31,13 +32,14 @@ from api.db.redis import (
 )
 from api.db.repository import (
     MetricsRepository,
+    ProjectRepository,
     ProviderDescriptorRepository,
 )
 from api.db.streams import ChangeKind
 from api.models.provider import ProviderRecord
 from api.models.proxy import Proxy, ProxyProtocol, ProxyStatus
 from api.routes.auth import create_jwt
-from tests.conftest import api_runtime, on_app_loop
+from tests.conftest import api_runtime, on_app_loop, queued_jobs
 from tests.geo.test_readers import MAXMIND_RECORD, write_mmdb
 from tests.routes.test_providers import Unheard, announced_since, stream_head
 
@@ -282,6 +284,36 @@ class TestBackupRoundTrip:
         assert on_app_loop(authenticated_client, redis.exists, kept_capture) == 1
         assert on_app_loop(authenticated_client, redis.exists, *removed_keys) == 0
         on_app_loop(authenticated_client, redis.delete, kept_capture)
+
+    def test_a_cloud_connector_the_file_does_not_carry_is_handed_to_the_connector_delete(
+        self, authenticated_client: TestClient, created_project: dict[str, Any]
+    ) -> None:
+        file_bytes = _export(authenticated_client)
+        url = f"/api/v1/projects/{created_project['id']}"
+        credential = authenticated_client.post(
+            f"{url}/credentials",
+            json={"name": "aws", "type": "aws", "config": {"access_key": "AKIAIOSFODNN7EXAMPLE", "secret_key": "x" * 40}},
+        ).json()
+        config = {
+            "instance_name": "octo",
+            "region": "us-east-1",
+            "instance_type": "t3.micro",
+            "key_pair_name": "octo",
+            "security_group": "octo",
+        }
+        cloud = authenticated_client.post(
+            f"{url}/connectors", json={"name": "aws", "credential_id": credential["id"], "config": config}
+        ).json()
+        redis = api_runtime(authenticated_client).redis_client.client
+        on_app_loop(authenticated_client, redis.delete, JOB_STREAM_KEY.format(kind=JobKind.SCALE))
+
+        response = _import(authenticated_client, file_bytes)
+
+        assert response.status_code == 200 and response.json()["deleting_cloud_connectors"] == 1
+        assert queued_jobs(authenticated_client, JobKind.SCALE) == {cloud["id"]}
+        projects = _in_session(authenticated_client, lambda session: ProjectRepository(session).get_all())
+        # The file may carry projects other tests left pending deletion.
+        assert f"{created_project['name']} (deleting)" in [p.name for p in projects if p.pending_deletion]
 
     def test_attribution_settings_and_databases_round_trip(
         self, authenticated_client: TestClient, created_project: dict[str, Any], tmp_path: Path

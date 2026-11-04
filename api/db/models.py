@@ -157,6 +157,8 @@ class ProjectModel(Base):
     # many days (0 forever); null days inherit geo_settings.observation_retention_days.
     observation_log: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")
     observation_retention_days: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Set by a delete; the project goes once no connector holds it (its cloud instances terminated).
+    pending_deletion: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
 
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now, onupdate=utc_now)

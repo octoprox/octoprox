@@ -191,6 +191,9 @@ class TransparentProxyServer(ProxyServer):
             if project is None:
                 logger.warning("Peer belongs to a project this gateway does not know", peer_id=peer.id)
                 return
+            if project.pending_deletion:
+                logger.debug("Connection from a peer of a project being deleted", peer=peer.name)
+                return
 
             destination = self._destination_of(client_writer)
             if destination is None:

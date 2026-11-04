@@ -245,7 +245,7 @@ class ConnectorView:
 
 @dataclass(frozen=True, eq=False)
 class _ProjectIndex:
-    """The global section's projects, by id and by proxy username."""
+    """The global section's projects, by id and by proxy username; one pending deletion has no username, so its clients are turned away."""
 
     section: GlobalSection
     by_id: dict[str, Project]
@@ -256,7 +256,7 @@ class _ProjectIndex:
         return cls(
             section=section,
             by_id={project.id: project for project in section.projects},
-            by_username={project.username: project for project in section.projects},
+            by_username={project.username: project for project in section.projects if not project.pending_deletion},
         )
 
 

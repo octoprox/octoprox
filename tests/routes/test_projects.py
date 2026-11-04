@@ -222,6 +222,40 @@ class TestProjectEndpoints:
         get_response = authenticated_client.get(f"/api/v1/projects/{project_id}")
         assert get_response.status_code == 404
 
+    def test_a_project_with_a_cloud_connector_is_accepted_for_deletion_and_listed_until_it_goes(
+        self,
+        authenticated_client: TestClient,
+        created_project: dict[str, Any],
+    ) -> None:
+        """202: the scale job terminates the instances first; meanwhile the project shows as deleting and takes no connector."""
+        url = f"/api/v1/projects/{created_project['id']}"
+        credential = authenticated_client.post(
+            f"{url}/credentials",
+            json={"name": "aws", "type": "aws", "config": {"access_key": "AKIAIOSFODNN7EXAMPLE", "secret_key": "x" * 40}},
+        ).json()
+        aws = {
+            "instance_name": "octo",
+            "region": "us-east-1",
+            "instance_type": "t3.micro",
+            "key_pair_name": "octo",
+            "security_group": "octo",
+        }
+        created = authenticated_client.post(
+            f"{url}/connectors", json={"name": "aws", "credential_id": credential["id"], "config": aws}
+        )
+        assert created.status_code == 201, created.text
+
+        response = authenticated_client.request("DELETE", url, json={"confirmation": "permanently delete"})
+
+        assert response.status_code == 202
+        assert authenticated_client.get(url).json()["pending_deletion"] is True
+        listed = {p["id"]: p for p in authenticated_client.get("/api/v1/projects").json()["projects"]}
+        assert listed[created_project["id"]]["pending_deletion"] is True
+        refused = authenticated_client.post(
+            f"{url}/connectors", json={"name": "more", "credential_id": credential["id"], "config": aws}
+        )
+        assert refused.status_code == 400 and "being deleted" in refused.json()["detail"]
+
     def test_delete_project_without_confirmation(
         self,
         authenticated_client: TestClient,

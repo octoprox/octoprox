@@ -40,7 +40,6 @@ from api.models.connector import (
     validate_traffic_config,
 )
 from api.models.countries import CountryRole
-from api.models.proxy import ProxyStatus
 from api.services.errors import (
     InvalidConfigError,
     NameConflictError,
@@ -91,10 +90,16 @@ class ConnectorService:
         self._changes = changes
 
     async def create(self, project_id: str, data: ConnectorCreate) -> Connector:
-        """Validate and store a new connector of the project; the saved connector."""
+        """Validate and store a new connector of the project; the saved connector.
+
+        A project being deleted takes none, since its deletion removes only the connectors it found.
+        """
         async with self._session_factory() as session:
-            if await ProjectRepository(session).get_by_id(project_id) is None:
+            project = await ProjectRepository(session).get_by_id(project_id, for_share=True)
+            if project is None:
                 raise NotFoundError("Project not found")
+            if project.pending_deletion:
+                raise WriteRejectedError("The project is being deleted")
             credential = await self._credential_of(session, data.credential_id, project_id)
             connector = Connector(
                 name=data.name,
@@ -124,13 +129,15 @@ class ConnectorService:
 
         A new provider config is validated for the connector's credential
         type, the new credential's when the edit also moves it to another
-        credential of the project.
+        credential of the project. A connector being deleted takes no edit.
         """
         async with self._session_factory() as session:
             connectors = ConnectorRepository(session)
             current = await connectors.get_in_project(project_id, connector_id)
             if current is None:
                 raise NotFoundError("Connector not found")
+            if current.pending_deletion:
+                raise WriteRejectedError("The connector is being deleted")
             credential = await CredentialRepository(session).get_by_id(current.credential_id)
             changes: dict[str, Any] = {}
             if data.name is not None:
@@ -217,12 +224,8 @@ class ConnectorService:
                 raise NotFoundError("Connector not found")
             cloud = self._registry.is_cloud(connector.credential_type)
             if cloud:
-                proxies = ProxyRepository(session)
-                # Rows in id order, as every batch writer locks them.
-                proxy_ids = sorted(proxy.id for proxy in await proxies.get_by_connector(connector_id))
-                for proxy_id in proxy_ids:
-                    await proxies.set_status(proxy_id, ProxyStatus.TERMINATING)
-                await self._save(session, connector.model_copy(update={"enabled": False, "pending_deletion": True}))
+                proxy_ids = await ProxyRepository(session).mark_terminating(connector_id)
+                await ConnectorRepository(session).mark_pending_deletion(connector_id)
             else:
                 await ConnectorRepository(session).delete(connector_id)
             await session.commit()
@@ -233,19 +236,20 @@ class ConnectorService:
         logger.info("Marked cloud connector for deletion", connector_id=connector_id, proxy_count=len(proxy_ids))
         await self._jobs.request_now(JobKind.SCALE, [connector_id])
 
-    async def delete(self, connector_id: str) -> bool:
-        """Delete a connector now, with its proxies and history by cascade; False when it was already gone.
+    async def delete(self, connector_id: str) -> str | None:
+        """Delete a connector now, with its proxies and history by cascade; the project it was in as it went, or None
+        when it was gone already.
 
         The scale job calls this for a cloud connector pending deletion once
         its last instance is terminated.
         """
         async with self._session_factory() as session:
-            deleted = await ConnectorRepository(session).delete(connector_id)
+            project_id = await ConnectorRepository(session).delete(connector_id)
             await session.commit()
-        if deleted:
+        if project_id is not None:
             await self._changes.record(ChangeKind.CONNECTOR, connector_id)
             await self._removed(connector_id)
-        return deleted
+        return project_id
 
     async def forget(self, connector_id: str) -> None:
         """Delete the Redis keys a gone connector leaves: its autoscaler state and its instances being created.

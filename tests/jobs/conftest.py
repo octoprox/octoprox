@@ -45,6 +45,7 @@ from api.models.project import Project
 from api.models.proxy import Proxy, ProxyProtocol
 from api.providers.registry import ProviderRegistry, build_registry
 from api.services.connectors import ConnectorService
+from api.services.projects import ProjectService
 from api.services.proxies import ProxyService
 from tests.conftest import queued_job_keys
 from tests.geo.test_readers import MAXMIND_RECORD, write_mmdb
@@ -160,6 +161,17 @@ def connector_service(
     change_log: ChangeLog,
 ) -> ConnectorService:
     return ConnectorService(sessions, jobs, redis_client, registry, changes=change_log)
+
+
+@pytest.fixture
+def project_service(
+    sessions: async_sessionmaker[AsyncSession],
+    jobs: JobQueue,
+    redis_client: RedisClient,
+    change_log: ChangeLog,
+    connector_service: ConnectorService,
+) -> ProjectService:
+    return ProjectService(sessions, jobs, redis_client, changes=change_log, connectors=connector_service)
 
 
 def geo_settings(tmp_path: Path, **overrides: Any) -> Settings:

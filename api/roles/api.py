@@ -88,11 +88,13 @@ class ApiRuntime(RoleRuntime):
         self._cluster = ClusterReader(redis_client)
         self.demand_tracker = DemandTracker(redis_client)
         self.runtime_view = RuntimeView(session_factory, self.state_reader, self.provider_registry, self.demand_tracker)
-        self.project_service = ProjectService(session_factory, jobs, redis_client, changes=changes)
-        self.credential_service = CredentialService(session_factory, self.provider_registry, changes=changes)
         self.connector_service = ConnectorService(
             session_factory, jobs, redis_client, self.provider_registry, changes=changes
         )
+        self.project_service = ProjectService(
+            session_factory, jobs, redis_client, changes=changes, connectors=self.connector_service
+        )
+        self.credential_service = CredentialService(session_factory, self.provider_registry, changes=changes)
         self.proxy_service = ProxyService(session_factory, jobs, redis_client, self.provider_registry, changes=changes)
         self.geo = geo
         self.geo_service = geo.geo_service

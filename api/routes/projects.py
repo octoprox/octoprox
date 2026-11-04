@@ -14,7 +14,7 @@ from datetime import timedelta
 from pathlib import Path
 from typing import Literal
 
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, HTTPException, Query, Request, Response
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
@@ -95,6 +95,7 @@ def _project_to_response(
         exit_headers=project.exit_headers,
         observation_log=project.observation_log,
         observation_retention_days=project.observation_retention_days,
+        pending_deletion=project.pending_deletion,
         created_at=project.created_at,
         updated_at=project.updated_at,
         credential_count=credential_count,
@@ -138,6 +139,7 @@ def _view_to_summary(view: ProjectView) -> ProjectSummary:
         exit_headers=project.exit_headers,
         observation_log=project.observation_log,
         observation_retention_days=project.observation_retention_days,
+        pending_deletion=project.pending_deletion,
         credential_count=view.credentials,
         connector_count=view.connectors,
         proxy_count=view.pool.total,
@@ -322,18 +324,19 @@ async def update_project(
     return _view_to_response(await _project_with_counts(request, project_id))
 
 
-@router.delete("/{project_id}", status_code=204)
+@router.delete("/{project_id}", status_code=204, responses={202: {"description": "Deleting: its cloud instances go first"}})
 async def delete_project(
     request: Request, project_id: str, body: DeleteConfirmation, _guard: RequireEditorDep
-) -> None:
-    """Delete a project.
+) -> Response:
+    """Delete a project with everything it holds: 204 when it is gone, 202 while its cloud instances are terminated first.
 
-    Requires confirmation by typing "permanently delete" in the request body.
-    This will cascade delete all sources and proxies associated with the project.
+    Requires confirmation by typing "permanently delete" in the request body. Until it goes, the project is listed with
+    ``pending_deletion`` set, its clients are turned away and it takes no new connector.
     """
     if body.confirmation != _DELETE_CONFIRMATION:
         raise HTTPException(
             status_code=400,
             detail="Confirmation required. Please set confirmation to 'permanently delete'",
         )
-    await project_service_of(request).delete(project_id)
+    gone = await project_service_of(request).delete(project_id)
+    return Response(status_code=204 if gone else 202)

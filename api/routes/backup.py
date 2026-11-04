@@ -19,9 +19,17 @@ from api.core import utc_now
 from api.core.auth import DbDep, RequireAdminDep
 from api.core.backup import BackupError, BackupFile, BackupRepository, ImportResult
 from api.core.logging import error_text
+from api.core.roles import JobKind
 from api.db.streams import ChangeKind
 from api.models.backup import ExportRequest, ImportSummary
-from api.routes.common import change_log_of, geo_service_of, provider_store_of, redis_client_of
+from api.routes.common import (
+    change_log_of,
+    geo_service_of,
+    jobs_of,
+    provider_registry_of,
+    provider_store_of,
+    redis_client_of,
+)
 
 logger = structlog.get_logger()
 
@@ -98,7 +106,9 @@ async def import_backup(
 
     # 3. Wipe and restore in one transaction: a failure rolls everything back.
     try:
-        result = await repository.replace_all(payload, keep_user_id=admin.id if keep_current_user else None)
+        result = await repository.replace_all(
+            payload, provider_registry_of(request), keep_user_id=admin.id if keep_current_user else None
+        )
     except BackupError as exc:
         await session.rollback()
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -119,12 +129,17 @@ async def import_backup(
 
 
 async def _follow_import(request: Request, result: ImportResult) -> None:
-    """What follows a committed import here: forget the removed projects' keys, and read the imported definitions.
+    """What follows a committed import here: forget the removed projects' keys, ask for the removed cloud connectors'
+    scale runs, and read the imported definitions.
 
-    Both are best effort: the import stands, the keys left behind are never
-    read again, and the definitions refresher reads what this misses when
-    the import's change entry reaches it.
+    All best effort: the import stands, the keys left behind are never read
+    again, the scale producer publishes the removed connectors' runs once the
+    import's change entry is compiled, and the definitions refresher reads
+    what this misses when that entry reaches it.
     """
+    if result.deleting_connector_ids:
+        # Never raises: what Redis refuses is logged and left to the producer.
+        await jobs_of(request).request_now(JobKind.SCALE, result.deleting_connector_ids)
     if result.removed_project_ids:
         redis = redis_client_of(request)
         await redis.after_commit(

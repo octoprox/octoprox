@@ -38,6 +38,7 @@ from api.models.system import JobKindStats, WorkerSnapshot
 from api.roles.refresh import DefinitionsRefresher
 from api.roles.runtime import RoleRuntime
 from api.services.connectors import ConnectorService
+from api.services.projects import ProjectService
 from api.services.proxies import ProxyService
 
 if TYPE_CHECKING:
@@ -90,6 +91,7 @@ class WorkerRuntime(RoleRuntime):
             changes=changes,
         )
         connectors = ConnectorService(session_factory, self.jobs, redis_client, registry, changes=changes)
+        projects = ProjectService(session_factory, self.jobs, redis_client, changes=changes, connectors=connectors)
         attribution = Attribution(
             ProxyAttributor(geo.geo_service, lookup_enabled=settings.geo_lookup_enabled),
             session_factory,
@@ -109,7 +111,9 @@ class WorkerRuntime(RoleRuntime):
                 probes=settings.health_check_concurrency,
             ),
             ProviderSyncJob(session_factory, registry, proxies, attribution, refresher=self.refresher),
-            AutoscaleJob(session_factory, redis_client, registry, proxies, connectors, DemandTracker(redis_client)),
+            AutoscaleJob(
+                session_factory, redis_client, registry, proxies, connectors, projects, DemandTracker(redis_client)
+            ),
             ProvisionJob(session_factory, registry, proxies),
             ReattributeJob(attribution, geo.geo_service),
             EnrichJob(attribution),

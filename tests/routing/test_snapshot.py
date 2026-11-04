@@ -68,6 +68,13 @@ class TestIndexes:
         assert snapshot.project_by_username("client") is project
         assert snapshot.project_by_username("nobody") is None and snapshot.project("gone") is None
 
+    def test_a_project_pending_deletion_turns_its_clients_away(self, feed: FeedBuilder) -> None:
+        """Its username matches nothing, as a deleted project's; its connectors keep their project while they drain."""
+        feed.add(Project(id="leaving", name="L", username="leaving", password="pw", pending_deletion=True))
+        snapshot = feed.snapshot()
+        assert snapshot.project_by_username("leaving") is None
+        assert snapshot.project("leaving") is not None
+
     def test_connectors_of_a_project_in_creation_order(self, feed: FeedBuilder) -> None:
         snapshot = feed.snapshot()
         assert [view.connector.id for view in snapshot.connector_views("project-1")] == ["dyn", "static"]

@@ -46,6 +46,7 @@ if TYPE_CHECKING:
     from api.providers.cloud import CloudInstance
     from api.providers.registry import ProviderRegistry
     from api.services.connectors import ConnectorService
+    from api.services.projects import ProjectService
     from api.services.proxies import ProxyService
 
 logger = structlog.get_logger()
@@ -303,6 +304,7 @@ class AutoscaleJob(Job):
         registry: ProviderRegistry,
         proxies: ProxyService,
         connectors: ConnectorService,
+        projects: ProjectService,
         demand: DemandTracker,
         *,
         cloud: Callable[[Connector, Credential], CloudProvider | None] = CloudProvider.of,
@@ -313,6 +315,7 @@ class AutoscaleJob(Job):
         self._registry = registry
         self._proxies = proxies
         self._connectors = connectors
+        self._projects = projects
         self._demand = demand
         self._cloud = cloud
         self._hold_script: AsyncScript | None = None
@@ -337,7 +340,7 @@ class AutoscaleJob(Job):
             return
         run = await self._read(connector, cloud)
         await self._terminate_unrecorded(run)
-        if connector.enabled:
+        if connector.enabled and not connector.pending_deletion:
             await self._check_scaling(run)
             await self._check_instances(run)
         elif await self._retire_all(run):
@@ -463,9 +466,10 @@ class AutoscaleJob(Job):
     # --- disabled connectors -----------------------------------------------------------
 
     async def _retire_all(self, run: _Run) -> bool:
-        """Drain, terminate and delete every instance of a disabled connector; True once the connector is gone.
+        """Drain, terminate and delete every instance of a disabled connector, or one pending deletion; True once the connector is gone.
 
-        A connector pending deletion goes once a run finds no rows, no entries and no instance listed.
+        A connector pending deletion goes once a run finds no rows, no entries and no instance listed, and with the last
+        one of a project pending deletion the project goes too.
         """
         if run.proxies:
             counters = await self._counters([p for p in run.proxies if p.status == ProxyStatus.DRAINING])
@@ -485,7 +489,10 @@ class AutoscaleJob(Job):
         if not run.connector.pending_deletion or run.creating or run.listed is None or run.listed:
             return False
         logger.info("Removing connector pending deletion: its instances are gone", connector_id=run.connector.id)
-        await self._connectors.delete(run.connector.id)
+        # The project it was in as it went: a backup import may have moved it since this run read it.
+        project_id = await self._connectors.delete(run.connector.id)
+        if project_id is not None:
+            await self._projects.delete_if_emptied(project_id)
         return True
 
     # --- scaling -----------------------------------------------------------------------

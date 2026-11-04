@@ -125,6 +125,7 @@ function ImportCard() {
             <p>
               Import complete: {summary.projects} projects, {summary.credentials} credentials, {summary.connectors} connectors, {summary.proxies} proxies, {summary.users} users, {summary.provider_descriptors ?? 0} custom providers, {summary.geo_databases ?? 0} IP databases ({summary.geo_database_blobs ?? 0} with files) restored.{' '}
               {(summary.ip_observations ?? 0) > 0 && `${summary.ip_observations.toLocaleString()} exit IP observations restored. `}
+              {summary.deleting_cloud_connectors > 0 && `${summary.deleting_cloud_connectors} cloud connector${summary.deleting_cloud_connectors === 1 ? '' : 's'} not in the backup ${summary.deleting_cloud_connectors === 1 ? 'is' : 'are'} being deleted: ${summary.deleting_cloud_connectors === 1 ? 'its' : 'their'} instances are terminated first, under projects marked Deleting. `}
               {summary.kept_current_user ? 'Your account was kept and you remain signed in.' : 'You will be signed out - please log in again.'}
             </p>
             {summary.user_conflicts.length > 0 && (
@@ -175,7 +176,7 @@ function ImportCard() {
       {confirmOpen && (
         <ConfirmDialog
           title="Replace all data?"
-          message={<>This permanently deletes every project, credential, connector, proxy and user{keepCurrentUser ? ' (except your own account)' : ''} on this instance and replaces them with the backup. This cannot be undone.</>}
+          message={<>This permanently deletes every project, credential, connector, proxy and user{keepCurrentUser ? ' (except your own account)' : ''} on this instance and replaces them with the backup. Cloud connectors the backup does not hold are moved to projects marked Deleting until their instances are terminated. This cannot be undone.</>}
           confirmLabel="Yes, replace everything"
           onCancel={() => setConfirmOpen(false)}
           onConfirm={() => mutation.mutate()}

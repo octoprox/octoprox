@@ -11,6 +11,7 @@ import { useQuery } from '@tanstack/react-query'
 import { Check, ChevronsUpDown, FolderOpen, LayoutGrid, Search, Settings } from 'lucide-react'
 import { fetchProjects, type ProjectSummary } from '../../api/client'
 import { cn } from '../../utils/cn'
+import { DeletingBadge } from '../DeletingBadge'
 import { MENU_GUTTER, PopoverMenu, usePopoverMenu } from '../ui/PopoverMenu'
 
 const MENU_WIDTH = 272
@@ -146,10 +147,12 @@ function ProjectItem({ project, current, onPick }: { project: ProjectSummary; cu
     >
       <Check className={cn('w-3.5 h-3.5 flex-none text-primary', !current && 'invisible')} />
       <span className="truncate flex-1" title={project.name}>{project.name}</span>
-      <span className="flex-none inline-flex items-center gap-1.5 text-xs text-fg-subtle tabular-nums" title={`${healthy} of ${total} proxies healthy`}>
-        <span className={cn('w-2 h-2 rounded-full', total === 0 ? 'bg-fg-subtle/50' : healthy === total ? 'bg-success' : healthy === 0 ? 'bg-danger' : 'bg-warning')} />
-        {healthy}/{total}
-      </span>
+      {project.pending_deletion ? <DeletingBadge className="py-0.5" /> : (
+        <span className="flex-none inline-flex items-center gap-1.5 text-xs text-fg-subtle tabular-nums" title={`${healthy} of ${total} proxies healthy`}>
+          <span className={cn('w-2 h-2 rounded-full', total === 0 ? 'bg-fg-subtle/50' : healthy === total ? 'bg-success' : healthy === 0 ? 'bg-danger' : 'bg-warning')} />
+          {healthy}/{total}
+        </span>
+      )}
     </button>
   )
 }

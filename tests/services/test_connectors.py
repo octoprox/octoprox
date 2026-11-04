@@ -406,6 +406,34 @@ class TestCountries:
 
 
 class TestRemove:
+    async def test_a_connector_being_deleted_takes_no_edit(
+        self, connector_service: ConnectorService, project: Project, cloud: Connector
+    ) -> None:
+        await connector_service.remove(project.id, cloud.id)
+
+        with pytest.raises(WriteRejectedError, match="being deleted"):
+            await connector_service.update(project.id, cloud.id, ConnectorUpdate(enabled=True))
+
+    async def test_a_save_read_before_the_delete_leaves_it_pending_deletion(
+        self,
+        connector_service: ConnectorService,
+        project: Project,
+        cloud: Connector,
+        sessions: async_sessionmaker[AsyncSession],
+    ) -> None:
+        """An edit that read the connector before the delete committed writes after it: the deletion stands."""
+        await connector_service.remove(project.id, cloud.id)
+        async with sessions() as session:
+            await ConnectorRepository(session).update(cloud.model_copy(update={"name": "Renamed"}))
+            await session.commit()
+
+        connector = await stored(sessions, cloud.id)
+        assert connector is not None and (connector.name, connector.pending_deletion, connector.enabled) == (
+            "Renamed",
+            True,
+            False,
+        )
+
     async def test_a_connector_is_deleted_with_its_proxies_and_scale_state(
         self,
         connector_service: ConnectorService,
@@ -465,12 +493,12 @@ class TestRemove:
         other = SCALE_CREATING_KEY.format(connector_id="other")
         await redis_client.client.hset(other, mapping={"octo-2-abcdef": '{"purpose": "scale", "at": 0}'})
 
-        assert await connector_service.delete(cloud.id) is True
+        assert await connector_service.delete(cloud.id) == project.id
 
         assert await stored(sessions, cloud.id) is None
         assert await redis_client.client.exists(state, creating) == 0
         assert await redis_client.client.exists(other) == 1
-        assert await connector_service.delete(cloud.id) is False
+        assert await connector_service.delete(cloud.id) is None
 
 
 class TestTrafficAndErrors:
@@ -656,9 +684,9 @@ class TestChangeEntries:
         await forget_announcements(redis_client)
 
         await connector_service.remove(project.id, cloud.id)
-        assert await connector_service.delete(cloud.id) is True
+        assert await connector_service.delete(cloud.id) == project.id
         # Already gone: nothing changed, nothing to announce.
-        assert await connector_service.delete(cloud.id) is False
+        assert await connector_service.delete(cloud.id) is None
 
         assert await announced(redis_client) == [("connector", cloud.id)] * 2
 

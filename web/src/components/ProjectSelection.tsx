@@ -18,6 +18,7 @@ import { useToast } from '../contexts/ToastContext'
 import { setSettingsOrigin } from '../utils/settingsOrigin'
 import { bytesShort, compact } from '../utils/format'
 import { ProjectForm } from './ProjectForm'
+import { DeletingBadge } from './DeletingBadge'
 import { DataTable, type DataTableFeatures } from './DataTable'
 import { Page } from './layout/Page'
 import { NewVersionBanner } from './NewVersion'
@@ -122,11 +123,11 @@ export default function ProjectSelection() {
   })
   const deleteMutation = useMutation({
     mutationFn: ({ id, confirmation }: { id: string; confirmation: string }) => deleteProject(id, confirmation),
-    onSuccess: () => {
+    onSuccess: (gone) => {
       queryClient.invalidateQueries({ queryKey: ['projects'] })
       setPendingDelete(null)
       setDeleteConfirmation('')
-      toast.show('Project deleted')
+      toast.show(gone ? 'Project deleted' : 'Deleting project: its cloud instances are terminated first')
     },
     onError: (e: Error) => toast.show(e.message || 'Failed to delete project', 'error'),
   })
@@ -266,7 +267,7 @@ export default function ProjectSelection() {
       {pendingDelete && (
         <ConfirmDialog
           title="Delete project?"
-          message={<>This deletes <b className="text-fg">{pendingDelete.name}</b> together with all of its credentials, connectors and proxies. Type <b className="text-fg font-mono text-xs">permanently delete</b> to confirm.</>}
+          message={<>This deletes <b className="text-fg">{pendingDelete.name}</b> together with all of its credentials, connectors and proxies. Its cloud instances are terminated first; until then the project shows as Deleting and turns its clients away. Type <b className="text-fg font-mono text-xs">permanently delete</b> to confirm.</>}
           confirmLabel="Delete project"
           confirmDisabled={deleteConfirmation !== 'permanently delete'}
           onCancel={() => { setPendingDelete(null); setDeleteConfirmation('') }}
@@ -297,7 +298,12 @@ function ProjectTable({ projects, activeId, panelOpen, canMutate, onOpen, onEdit
       accessorKey: 'name',
       header: 'Project',
       meta: { filterVariant: 'text' as const },
-      cell: ({ row }) => <span className="font-medium truncate block" title={row.original.name}>{row.original.name}</span>,
+      cell: ({ row }) => (
+        <span className="flex items-center gap-2 min-w-0">
+          <span className="font-medium truncate" title={row.original.name}>{row.original.name}</span>
+          {row.original.pending_deletion && <DeletingBadge />}
+        </span>
+      ),
     },
     {
       accessorKey: 'description',
@@ -459,7 +465,10 @@ function ProjectCard({ project, range, active, canMutate, onOpen, onEdit, onDele
     >
       <div className="flex items-start justify-between gap-2">
         <div className="min-w-0">
-          <h3 className="text-[15px] font-semibold text-fg truncate" title={project.name}>{project.name}</h3>
+          <div className="flex items-center gap-2 min-w-0">
+            <h3 className="text-[15px] font-semibold text-fg truncate" title={project.name}>{project.name}</h3>
+            {project.pending_deletion && <DeletingBadge />}
+          </div>
           <p className="text-xs text-fg-muted mt-0.5 line-clamp-2 h-8 leading-4" title={project.description || undefined}>
             {project.description || <span className="text-fg-subtle italic">No description</span>}
           </p>

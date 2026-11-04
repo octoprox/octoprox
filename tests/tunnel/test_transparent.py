@@ -217,10 +217,12 @@ async def test_literal_destination_without_a_name_goes_by_address(upstream: _Con
 
 
 @pytest.mark.asyncio
-async def test_unknown_or_disabled_peer_is_closed_without_bytes(upstream: _ConnectProxy) -> None:
+async def test_unknown_or_disabled_peer_or_one_of_a_project_being_deleted_is_closed_without_bytes(
+    upstream: _ConnectProxy,
+) -> None:
     pool = FakeIpPool("198.18.0.0/15")
     peers = PeerDirectory()
-    server, _, _ = _server(upstream, ("203.0.113.7", 80), pool, peers)
+    server, router, _ = _server(upstream, ("203.0.113.7", 80), pool, peers)
     await server.listen("127.0.0.1")
     try:
         reader, writer = await asyncio.open_connection("127.0.0.1", server.port)
@@ -229,6 +231,12 @@ async def test_unknown_or_disabled_peer_is_closed_without_bytes(upstream: _Conne
         assert server.unknown_peers == 1
 
         peers.put(PEER.model_copy(update={"enabled": False}))
+        reader, writer = await asyncio.open_connection("127.0.0.1", server.port)
+        assert await asyncio.wait_for(reader.read(10), 3) == b""
+        writer.close()
+
+        peers.put(PEER)
+        router.get_project.return_value = PROJECT.model_copy(update={"pending_deletion": True})
         reader, writer = await asyncio.open_connection("127.0.0.1", server.port)
         assert await asyncio.wait_for(reader.read(10), 3) == b""
         writer.close()

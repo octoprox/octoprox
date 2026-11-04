@@ -10,6 +10,7 @@ test Redis.
 from dataclasses import replace
 from datetime import datetime
 from typing import Any
+from uuid import uuid4
 
 import pytest
 from sqlalchemy import select, text
@@ -25,6 +26,7 @@ from api.core.backup import (
     BackupRepository,
     ImportResult,
     _EntitySpec,
+    _free,
     _KeptUser,
 )
 from api.core.stats import FailureKind
@@ -46,12 +48,22 @@ from api.db.redis import (
     RedisClient,
     project_keys,
 )
-from api.db.repository import ProjectRepository
+from api.db.repository import (
+    ConnectorRepository,
+    CredentialRepository,
+    ProjectRepository,
+    ProxyRepository,
+)
 from api.models.backup import BackupPayload, ImportSummary
+from api.models.connector import Connector
+from api.models.credential import Credential
 from api.models.project import Project
+from api.models.proxy import Proxy, ProxyStatus
+from api.providers.registry import build_registry
 from tests.conftest import HEAD
 
 PASSPHRASE = "correct horse battery"
+REGISTRY = build_registry(include_plugins=False)
 SCHEMA = "019_add_entity_version_columns"
 
 
@@ -337,7 +349,7 @@ class TestOnTheDatabase:
 
         backup = BackupFile.read(built.content)
         backup.check_compatibility(await repository.schema_version())
-        result = await repository.replace_all(backup.decrypt(PASSPHRASE))
+        result = await repository.replace_all(backup.decrypt(PASSPHRASE), REGISTRY)
         await db_session.commit()
 
         assert set(payload) == {spec.key for spec in _ENTITY_SPECS}
@@ -368,7 +380,7 @@ class TestOnTheDatabase:
             ],
         )
 
-        result = await BackupRepository(db_session).replace_all(payload, keep_user_id="kept-user")
+        result = await BackupRepository(db_session).replace_all(payload, REGISTRY, keep_user_id="kept-user")
         await db_session.commit()
 
         copy = (await db_session.execute(select(UserModel.id).where(UserModel.username == "kept-imported"))).scalar_one()
@@ -380,3 +392,100 @@ class TestOnTheDatabase:
         assert identities == {"ki": "kept-user", "i-follows": copy}
         assert tokens == {"kt": "kept-user", "t-follows": copy}
         assert [conflict.original_username for conflict in result.summary.user_conflicts] == ["kept"]
+
+
+
+class TestCloudConnectorsLeaving:
+    """A cloud connector the backup does not carry goes through the connector delete, from a project of its own."""
+
+    async def _project(self, db_session: AsyncSession, name: str = "Current") -> Project:
+        project = Project(name=name, username=name.lower(), password="pw")
+        await ProjectRepository(db_session).create(project)
+        return project
+
+    async def _connector(self, db_session: AsyncSession, project: Project, type_: str = "aws") -> Connector:
+        credential = Credential(name=f"{type_}-{uuid4().hex[:6]}", type=type_, project_id=project.id, config={"k": "v"})
+        connector = Connector(
+            name=credential.name, credential_id=credential.id, credential_type=type_, project_id=project.id
+        )
+        await CredentialRepository(db_session).create(credential)
+        await ConnectorRepository(db_session).create(connector)
+        return connector
+
+    async def test_one_of_a_removed_project_is_moved_to_a_deleting_project_and_marked_as_a_delete_marks_it(
+        self, db_session: AsyncSession
+    ) -> None:
+        project = await self._project(db_session)
+        cloud = await self._connector(db_session, project)
+        static = await self._connector(db_session, project, "static_proxy_provider")
+        instance = Proxy(host="10.0.0.1", port=3128, connector_id=cloud.id, status=ProxyStatus.HEALTHY)
+        await ProxyRepository(db_session).create(instance)
+        await db_session.commit()
+
+        result = await BackupRepository(db_session).replace_all(BackupPayload(), REGISTRY)
+        await db_session.commit()
+
+        assert result.deleting_connector_ids == [cloud.id]
+        assert result.summary.deleting_cloud_connectors == 1
+        [holder] = await ProjectRepository(db_session).get_all()
+        assert (holder.name, holder.username, holder.pending_deletion) == ("Current (deleting)", "current-deleting", True)
+        moved = await ConnectorRepository(db_session).get_by_id(cloud.id)
+        assert moved is not None
+        assert (moved.project_id, moved.enabled, moved.pending_deletion) == (holder.id, False, True)
+        [copy] = await CredentialRepository(db_session).get_by_project(holder.id)
+        assert (copy.id, copy.type, copy.config) == (moved.credential_id, "aws", {"k": "v"})
+        assert copy.id != cloud.credential_id
+        assert [proxy.status for proxy in await ProxyRepository(db_session).get_by_connector(cloud.id)] == [
+            ProxyStatus.TERMINATING
+        ]
+        assert await ConnectorRepository(db_session).get_by_id(static.id) is None
+
+    async def test_one_the_backup_leaves_out_of_a_project_it_restores_moves_out_while_a_carried_one_stays(
+        self, db_session: AsyncSession
+    ) -> None:
+        project = await self._project(db_session)
+        carried = await self._connector(db_session, project)
+        await db_session.commit()
+        repository = BackupRepository(db_session)
+        payload = BackupPayload.model_validate(await repository.export(include_metrics=False))
+        added = await self._connector(db_session, project)
+        await db_session.commit()
+
+        result = await repository.replace_all(payload, REGISTRY)
+        await db_session.commit()
+
+        assert result.deleting_connector_ids == [added.id]
+        restored = await ProjectRepository(db_session).get_by_id(project.id)
+        assert restored is not None and not restored.pending_deletion
+        stays = await ConnectorRepository(db_session).get_by_id(carried.id)
+        assert stays is not None and (stays.project_id, stays.pending_deletion) == (project.id, False)
+        moved = await ConnectorRepository(db_session).get_by_id(added.id)
+        assert moved is not None and moved.project_id != project.id and moved.pending_deletion
+
+    async def test_a_name_or_username_a_project_still_here_has_gets_a_number(self, db_session: AsyncSession) -> None:
+        """Holders are made before the wipe: an earlier import's holder still here takes the plain name."""
+        project = await self._project(db_session)
+        cloud = await self._connector(db_session, project)
+        earlier = Project(name="Current (deleting)", username="current-deleting", password="pw")
+        await ProjectRepository(db_session).create(earlier)
+        await db_session.commit()
+
+        result = await BackupRepository(db_session).replace_all(BackupPayload(), REGISTRY)
+        await db_session.commit()
+
+        assert result.deleting_connector_ids == [cloud.id]
+        [holder] = await ProjectRepository(db_session).get_all()
+        assert (holder.name, holder.username) == ("Current (deleting) 2", "current-deleting2")
+
+    def test_a_name_or_username_the_backup_carries_gets_the_first_free_number(self) -> None:
+        names = {"Current (deleting)", "Current (deleting) 2"}
+        assert _free("Current", " (deleting)", names, separator=" ") == "Current (deleting) 3"
+        assert _free("current", "-deleting", {"current-deleting"}, separator="") == "current-deleting2"
+        assert _free("Other", " (deleting)", names, separator=" ") == "Other (deleting)"
+
+    def test_a_long_name_is_cut_short_so_the_holder_fits_the_column(self) -> None:
+        long = "x" * 255
+        first = _free(long, " (deleting)", set(), separator=" ")
+        assert len(first) == 255 and first.endswith("x (deleting)")
+        second = _free(long, " (deleting)", {first}, separator=" ")
+        assert len(second) == 255 and second.endswith("x (deleting) 2")

@@ -130,6 +130,10 @@ class Project(BaseModel):
     observation_log: bool = True
     observation_retention_days: int | None = Field(default=None, ge=0, le=MAX_OBSERVATION_RETENTION_DAYS)
 
+    # Deleted, and waiting for its cloud instances to be terminated: its clients are turned away and it takes no new
+    # connector. Only a delete sets it (``ProjectRepository.mark_pending_deletion``); create and edit never write it.
+    pending_deletion: bool = False
+
     # Metadata
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
@@ -251,6 +255,7 @@ class ProjectResponse(BaseModel):
     exit_headers: bool = False
     observation_log: bool = True
     observation_retention_days: int | None = None
+    pending_deletion: bool = False
     created_at: datetime
     updated_at: datetime
     # Aggregated stats (populated by API)
@@ -281,6 +286,7 @@ class ProjectSummary(BaseModel):
     exit_headers: bool = False
     observation_log: bool = True
     observation_retention_days: int | None = None
+    pending_deletion: bool = False
     credential_count: int = 0
     connector_count: int = 0
     proxy_count: int = 0

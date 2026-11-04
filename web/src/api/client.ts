@@ -183,6 +183,8 @@ export interface Project {
   observation_log: boolean
   /** Days the project's observation log is kept (0 forever); null inherits the install's. */
   observation_retention_days: number | null
+  /** Deleted, and waiting for its cloud instances to be terminated: its clients are turned away until it goes. */
+  pending_deletion: boolean
   created_at: string
   updated_at: string
 }
@@ -1293,6 +1295,8 @@ export interface ImportSummary {
   connector_exit_ips: number
   kept_current_user: boolean
   user_conflicts: UserConflict[]
+  /** Cloud connectors the backup does not hold, moved to '<project> (deleting)' projects until their instances are terminated. */
+  deleting_cloud_connectors: number
 }
 
 export const exportBackup = async (
@@ -1380,8 +1384,10 @@ export const updateProject = async (id: string, data: ProjectUpdate): Promise<Pr
   return response.data
 }
 
-export const deleteProject = async (id: string, confirmation: string): Promise<void> => {
-  await api.delete(`/projects/${id}`, { data: { confirmation } })
+/** Whether the project went at once (204); false while its cloud instances are terminated first (202). */
+export const deleteProject = async (id: string, confirmation: string): Promise<boolean> => {
+  const response = await api.delete(`/projects/${id}`, { data: { confirmation } })
+  return response.status !== 202
 }
 
 /** One connector a request with the generated username would reach now. */

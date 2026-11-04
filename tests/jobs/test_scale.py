@@ -20,11 +20,13 @@ from typing import Any
 
 import pytest
 import structlog
+from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from api.core import utc_now
 from api.core.demand_tracker import DEMAND_WINDOW_SECONDS, DemandLevel, DemandTracker
 from api.core.stats import MetricDelta
+from api.db.models import ConnectorModel
 from api.db.redis import (
     AUTOSCALER_STATE_KEY,
     PROXY_WINDOWS,
@@ -33,7 +35,12 @@ from api.db.redis import (
     MetricWindows,
     RedisClient,
 )
-from api.db.repository import ConnectorRepository, MetricsRepository, ProxyRepository
+from api.db.repository import (
+    ConnectorRepository,
+    MetricsRepository,
+    ProjectRepository,
+    ProxyRepository,
+)
 from api.jobs.job import JobBatch
 from api.jobs.scale import (
     CREATE_TIMEOUT_SECONDS,
@@ -52,6 +59,7 @@ from api.models.proxy import Proxy, ProxyStatus
 from api.providers.cloud import CloudInstance, CloudProvider
 from api.providers.registry import ProviderRegistry
 from api.services.connectors import ConnectorService
+from api.services.projects import ProjectService
 from api.services.proxies import ProxyService
 from tests.conftest import Clock
 from tests.jobs.conftest import Rows
@@ -228,6 +236,7 @@ def harness(
     registry: ProviderRegistry,
     proxy_service: ProxyService,
     connector_service: ConnectorService,
+    project_service: ProjectService,
 ) -> Harness:
     account, demand = FakeAccount(), Demand(redis_client)
     job = AutoscaleJob(
@@ -236,6 +245,7 @@ def harness(
         registry,
         proxy_service,
         connector_service,
+        project_service,
         demand,
         cloud=lambda connector, credential: FakeCloud(connector, credential, account),
     )
@@ -1006,16 +1016,18 @@ class TestConnectorReadAgain:
         await harness.run(aws)
         assert await rows.connector_as_stored(aws.id) is None
 
-    async def test_a_connector_pending_deletion_creates_nothing_though_enabled_again(
+    async def test_a_connector_pending_deletion_is_retired_though_enabled_again(
         self, harness: Harness, rows: Rows, project: Project, redis_client: RedisClient
     ) -> None:
-        """An edit can enable a connector its user removed; it is still on its way out."""
+        """A row enabled again before edits of a connector being deleted were refused: it creates nothing and still goes."""
         connector = await rows.connector(project, "aws", config=AWS_CONFIG, pending_deletion=True)
+        await _instances(rows, connector, 1)
 
         await harness.run(connector)
 
         assert harness.account.created == []
         assert await _creating(redis_client, connector) == {}
+        assert await _statuses(rows, connector) == [ProxyStatus.DRAINING]
 
     async def test_a_step_reads_the_connector_again_before_each_create(
         self,
@@ -1701,6 +1713,50 @@ class TestDisabledConnectors:
         assert await rows.connector_as_stored(doomed.id) is None
         assert not await redis_client.client.exists(AUTOSCALER_STATE_KEY.format(connector_id=doomed.id))
 
+    async def test_the_last_connector_of_a_project_pending_deletion_takes_the_project_with_it(
+        self, harness: Harness, rows: Rows, sessions: async_sessionmaker[AsyncSession]
+    ) -> None:
+        kept, deleted = await rows.project(), await rows.project()
+        async with sessions() as session:
+            await ProjectRepository(session).mark_pending_deletion(deleted.id)
+            await session.commit()
+        first = await rows.connector(deleted, "aws", config=AWS_CONFIG, enabled=False, pending_deletion=True)
+        last = await rows.connector(deleted, "aws", config=AWS_CONFIG, enabled=False, pending_deletion=True)
+        alone = await rows.connector(kept, "aws", config=AWS_CONFIG, enabled=False, pending_deletion=True)
+
+        await harness.run(first, alone)
+        async with sessions() as session:
+            assert await ProjectRepository(session).get_by_id(deleted.id) is not None
+            assert await ProjectRepository(session).get_by_id(kept.id) is not None
+
+        await harness.run(last)
+        async with sessions() as session:
+            assert await ProjectRepository(session).get_by_id(deleted.id) is None
+
+    async def test_a_connector_moved_while_its_run_lists_takes_the_project_it_was_moved_to(
+        self, harness: Harness, rows: Rows, project: Project, sessions: async_sessionmaker[AsyncSession]
+    ) -> None:
+        """A backup import moved it into a project pending deletion after the run read it: that project goes with it."""
+        doomed = await rows.connector(project, "aws", config=AWS_CONFIG, enabled=False, pending_deletion=True)
+        holder = await rows.project()
+        async with sessions() as session:
+            await ProjectRepository(session).mark_pending_deletion(holder.id)
+            await session.commit()
+
+        async def moved() -> None:
+            async with sessions() as session:
+                await session.execute(
+                    update(ConnectorModel).where(ConnectorModel.id == doomed.id).values(project_id=holder.id)
+                )
+                await session.commit()
+
+        harness.account.before_listing = moved
+        await harness.run(doomed)
+
+        async with sessions() as session:
+            assert await ProjectRepository(session).get_by_id(holder.id) is None
+            assert await ProjectRepository(session).get_by_id(project.id) is not None
+
     async def test_a_disabled_connector_that_is_kept_stays_once_empty(
         self, harness: Harness, rows: Rows, project: Project
     ) -> None:
@@ -1781,11 +1837,12 @@ class TestWhatIsScaled:
         registry: ProviderRegistry,
         proxy_service: ProxyService,
         connector_service: ConnectorService,
+        project_service: ProjectService,
         rows: Rows,
         aws: Connector,
     ) -> None:
         job = AutoscaleJob(
-            sessions, redis_client, registry, proxy_service, connector_service, Demand(redis_client),
+            sessions, redis_client, registry, proxy_service, connector_service, project_service, Demand(redis_client),
             cloud=lambda connector, credential: None,
         )
         await job.run(JobBatch(ids=("1-0",), keys=(aws.id,)))

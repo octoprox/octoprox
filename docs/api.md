@@ -176,7 +176,17 @@ Content-Type: application/json
 
 ```bash
 DELETE /api/v1/projects/{project_id}
+Content-Type: application/json
+
+{"confirmation": "permanently delete"}
 ```
+
+Deletes the project with its credentials, connectors and proxies. Every connector is removed as [Delete Connector](#delete-connector) removes it, so cloud instances are terminated before their rows go:
+
+- `204`: the project held no cloud connector and is gone.
+- `202`: the project stays, with `pending_deletion` set, until a worker has terminated its cloud instances and deleted its last cloud connector, then it goes too. Meanwhile its proxy clients get `407` as for a deleted project, each new connection of its tunnel devices is closed, and creating a connector in it is a `400`; its other connectors are already gone.
+
+A cloud connector whose credential no longer works holds the deletion, with the error on the connector, until the credential is fixed. Asking again is safe: it carries on from where it stopped, and deletes the project at once when no connector is left.
 
 ### Connect
 
@@ -613,7 +623,7 @@ Content-Type: application/json
 }
 ```
 
-Returns the updated connector. After the edit is saved, it asks for the work that follows, for a worker to run within seconds:
+Returns the updated connector. A connector being deleted takes no edit (`400`). After the edit is saved, it asks for the work that follows, for a worker to run within seconds:
 
 - a reconcile (`sync`) for a connector of a syncing provider, and a scaling check (`scale`) for a cloud connector;
 - a traffic decision when the edit changes the limit, the action, the period or the reset day of `traffic_config`; until it is stored, the answer shows the stored block with `traffic_usage.pending` true. An edit of the price, the currency, `warn_percent` or `limit_status` applies at once and asks for nothing;
@@ -1097,7 +1107,15 @@ last step rebuilds the running metric totals from the imported history (the
 totals themselves are never in the file). Afterwards the Redis keys of the
 projects the import removed (MITM captures, failure examples) are deleted, and
 the api that answered reads the imported provider descriptors and attribution
-settings at once. Every other process follows the change entry the import
+settings at once. A cloud connector the install had that the backup does not
+carry is deleted as [Delete Connector](#delete-connector) deletes it, so its
+instances are terminated first: the import moves it, with a copy of its
+credential, into a project named `<project> (deleting)` (a number is added if
+the backup has that name), which is pending deletion and goes with its last
+connector, as after [Delete Project](#delete-project). The answer counts them in
+`deleting_cloud_connectors`. A connector the backup carries runs as its
+restored rows say, and its instances without a restored row are terminated
+within the hour. Every other process follows the change entry the import
 appends: the controller compiles the imported definitions and the gateways
 receive them through the routing feed, and the other api and worker processes
 read them again, within moments.

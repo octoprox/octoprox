@@ -25,6 +25,7 @@ import { NewVersionBanner } from '../NewVersion'
 import { UserMenu } from '../UserMenu'
 import { LogoLoader } from '../ui'
 import { ProjectSwitcher } from './ProjectSwitcher'
+import { DeletingBadge } from '../DeletingBadge'
 import { PageScopeContext, ShellPanelContext } from './Page'
 import { navItemBase, navItemCollapsed, navItemExpanded, navItemIdle } from './navStyles'
 import { cn } from '../../utils/cn'
@@ -266,7 +267,10 @@ export default function AppShell({ onLogout, area }: { onLogout: () => void; are
             {area ? (
               <span className="text-fg-muted truncate">{AREAS[area].title}</span>
             ) : selectedProject ? (
-              <button onClick={() => navigate(`${base}/overview`)} className="text-fg-muted hover:text-fg truncate">{selectedProject.name}</button>
+              <>
+                <button onClick={() => navigate(`${base}/overview`)} className="text-fg-muted hover:text-fg truncate">{selectedProject.name}</button>
+                {selectedProject.pending_deletion && <DeletingBadge className="py-0.5" />}
+              </>
             ) : (
               <button onClick={() => navigate('/')} className="text-fg-muted hover:text-fg">Projects</button>
             )}

@@ -1,14 +1,15 @@
 # Copyright 2026 Octoprox Authors
 # SPDX-License-Identifier: Apache-2.0
 
-"""Project writes: create, edit and delete, each one Postgres transaction announced with a ``project`` change entry.
+"""Project writes: create, edit and delete, each Postgres transaction announced with a ``project`` change entry.
 
-An edit to how locations are judged asks for ``reattribute project:<id>``, and a delete removes the Redis keys only the
-project writes.
+An edit to how locations are judged asks for ``reattribute project:<id>``. A delete removes the project's connectors as
+the connector delete does and the project once none is left, then the Redis keys only the project writes.
 """
 
 from __future__ import annotations
 
+import contextlib
 from typing import TYPE_CHECKING
 
 import structlog
@@ -16,7 +17,7 @@ from sqlalchemy.exc import IntegrityError
 
 from api.core.roles import JobKind
 from api.db.redis import project_keys
-from api.db.repository import ProjectRepository
+from api.db.repository import ConnectorRepository, ProjectRepository
 from api.db.streams import ChangeKind
 from api.jobs.attribution import ReattributeScope
 from api.models.project import Project, ProjectCreate, ProjectUpdate
@@ -28,6 +29,7 @@ if TYPE_CHECKING:
     from api.db.session import SessionFactory
     from api.db.streams import ChangeLog
     from api.jobs.queue import JobQueue
+    from api.services.connectors import ConnectorService
 
 logger = structlog.get_logger()
 
@@ -42,6 +44,7 @@ class ProjectService:
 
     Args:
         redis_client: Deletes a deleted project's captures and failure log, under its request deadline.
+        connectors: Removes a deleted project's connectors, a cloud one once the scale job has terminated its instances.
     """
 
     def __init__(
@@ -51,11 +54,13 @@ class ProjectService:
         redis_client: RedisClient,
         *,
         changes: ChangeLog,
+        connectors: ConnectorService,
     ) -> None:
         self._session_factory = session_factory
         self._jobs = jobs
         self._redis = redis_client
         self._changes = changes
+        self._connectors = connectors
 
     async def create(self, data: ProjectCreate) -> Project:
         """Store a new project; the saved project."""
@@ -103,18 +108,45 @@ class ProjectService:
             await self._jobs.request_now(JobKind.REATTRIBUTE, [ReattributeScope(project_id=project_id).key])
         return saved
 
-    async def delete(self, project_id: str) -> None:
-        """Delete a project and, by cascade, everything it holds."""
+    async def delete(self, project_id: str) -> bool:
+        """Delete a project and, by cascade, everything it holds, its cloud instances terminated first; whether it went now.
+
+        The project is marked pending deletion, which turns its clients away and refuses new connectors, then each
+        connector is removed as the connector delete removes it. Holding no cloud connector, the project goes at once;
+        otherwise the scale run that deletes its last one deletes it (``delete_if_emptied``). Asked again, it carries on.
+        """
         async with self._session_factory() as session:
-            if not await ProjectRepository(session).delete(project_id):
+            if not await ProjectRepository(session).mark_pending_deletion(project_id):
                 raise NotFoundError("Project not found")
+            connectors = await ConnectorRepository(session).get_by_project(project_id)
             await session.commit()
+        await self._changes.record(ChangeKind.PROJECT, project_id)
+        for connector in connectors:
+            # Gone already: the scale job deleted it, or another delete removed it.
+            with contextlib.suppress(NotFoundError):
+                await self._connectors.remove(project_id, connector.id)
+        if await self.delete_if_emptied(project_id):
+            return True
+        logger.info("Marked project for deletion", project_id=project_id)
+        return False
+
+    async def delete_if_emptied(self, project_id: str) -> bool:
+        """Delete a project pending deletion once it holds no connector; whether it went.
+
+        The scale job asks after each cloud connector it deletes, so the project goes with its last one.
+        """
+        async with self._session_factory() as session:
+            deleted = await ProjectRepository(session).delete_if_emptied(project_id)
+            await session.commit()
+        if not deleted:
+            return False
         logger.info("Removed project", project_id=project_id)
         await self._changes.record(ChangeKind.PROJECT, project_id)
         keys = project_keys(project_id)
         await self._redis.after_commit(
             lambda: self._redis.client.delete(*keys), "delete the project's keys", project_id=project_id
         )
+        return True
 
 
 def _require_strategy(name: str) -> None:

@@ -152,3 +152,6 @@ class ImportSummary(BaseModel):
     tunnel_peer_metrics: int = 0
     kept_current_user: bool = False
     user_conflicts: list[UserConflict] = Field(default_factory=list)
+    # Cloud connectors the install had that the backup does not carry: moved to
+    # projects named '<project> (deleting)', which go once their instances are terminated.
+    deleting_cloud_connectors: int = 0
