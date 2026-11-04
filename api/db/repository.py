@@ -159,6 +159,7 @@ class ProjectRepository:
             location_contradicted=project.location_contradicted.value,
             location_unknown=project.location_unknown.value,
             location_preflight=project.location_preflight,
+            location_session_move=project.location_session_move,
             location_conflict_rule=project.location_conflict_rule.value if project.location_conflict_rule else None,
             location_city_radius_km=project.location_city_radius_km,
             exit_headers=project.exit_headers,
@@ -192,6 +193,7 @@ class ProjectRepository:
             model.location_contradicted = project.location_contradicted.value
             model.location_unknown = project.location_unknown.value
             model.location_preflight = project.location_preflight
+            model.location_session_move = project.location_session_move
             model.location_conflict_rule = (
                 project.location_conflict_rule.value if project.location_conflict_rule else None
             )
@@ -261,6 +263,7 @@ class ProjectRepository:
             location_contradicted=ContradictedAction(model.location_contradicted or "evidence"),
             location_unknown=UnknownAction(model.location_unknown or "vendor"),
             location_preflight=bool(model.location_preflight),
+            location_session_move=bool(model.location_session_move),
             location_conflict_rule=ConflictRule(model.location_conflict_rule) if model.location_conflict_rule else None,
             location_city_radius_km=model.location_city_radius_km,
             exit_headers=bool(model.exit_headers),

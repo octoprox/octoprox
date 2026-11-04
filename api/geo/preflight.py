@@ -12,7 +12,7 @@ import json
 import random
 import time
 from collections.abc import Sequence
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, NamedTuple
 
 import structlog
@@ -42,7 +42,9 @@ from api.providers.sdk.strategies import (
     META_SESSION_ID,
     META_SESSION_SECONDS,
     is_dynamic_gateway,
+    session_generation,
 )
+from api.strategies.sticky import STICKY_BINDING_TTL_SECONDS
 
 if TYPE_CHECKING:
     from api.gateway.sightings import SightingPublisher
@@ -53,6 +55,12 @@ logger = structlog.get_logger()
 # Who set a preflight requirement (``PreflightVerdict.required_by``).
 REQUIRED_BY_REQUEST = "request"
 REQUIRED_BY_VENDOR = "vendor"
+
+# How long a moved client session keeps its generation past its verdict, in
+# seconds: the sticky binding's idle time. A session in use echoes again when
+# its verdict ends, on the generation it moved to, and that echo keeps the key;
+# one idle longer starts over at generation 0.
+MOVED_SESSION_IDLE_SECONDS = STICKY_BINDING_TTL_SECONDS
 
 
 class PreflightVerdict(NamedTuple):
@@ -82,8 +90,17 @@ class PreflightVerdict(NamedTuple):
     replaced: bool = False
     # When the echo answered, naive UTC; None for a verdict no echo answered.
     checked_at: datetime | None = None
+    # The client session's generation the echo went through (0 until preflight first moves it).
+    generation: int = 0
+    # Until when a cached verdict is trusted, naive UTC: set on a moved session's
+    # only, whose key outlives it; any other lives as long as its key.
+    fresh_until: datetime | None = None
     # True when the verdict was read from the cache rather than echoed for this request; never stored.
     cached: bool = False
+
+    def is_fresh(self, now: datetime) -> bool:
+        """Whether a cached verdict still answers for its session at ``now``."""
+        return self.fresh_until is None or self.fresh_until > now
 
     def acceptable(self, rules: LocationRules, allowed: Sequence[str] = ()) -> bool:
         """Whether this verdict lets the request through under the project's ``rules``; one with no requirement never refuses.
@@ -173,6 +190,8 @@ class PreflightVerdict(NamedTuple):
                 "city_conflict": self.city_conflict,
                 "required_by": self.required_by,
                 "checked_at": self.checked_at.isoformat() if self.checked_at else None,
+                "generation": self.generation,
+                "fresh_until": self.fresh_until.isoformat() if self.fresh_until else None,
             }
         )
 
@@ -186,6 +205,7 @@ class PreflightVerdict(NamedTuple):
                 # A verdict cached by a previous version: unreadable, so a miss and verified again.
                 return None
             checked_at = data.get("checked_at")
+            fresh_until = data.get("fresh_until")
             return cls(
                 ok=bool(data["ok"]),
                 expected=LocationTarget.from_dict(expected),
@@ -198,6 +218,8 @@ class PreflightVerdict(NamedTuple):
                 city_conflict=data.get("city_conflict"),
                 required_by=data.get("required_by"),
                 checked_at=datetime.fromisoformat(checked_at) if checked_at else None,
+                generation=int(data.get("generation") or 0),
+                fresh_until=datetime.fromisoformat(fresh_until) if fresh_until else None,
             )
         except (TypeError, ValueError, KeyError):
             return None
@@ -314,8 +336,10 @@ class PreflightChecker:
     ) -> PreflightVerdict:
         """Verify the exit of ``proxy``, its credentials resolved, against the location the request requires.
 
-        A verdict is cached per project and proxy (and per vendor session and place on a dynamic gateway) for the
-        session TTL, and the echo of a pooled slot is also a sighting for the workers.
+        A verdict is cached per project and proxy (and per client session and place on a dynamic gateway) for the
+        session TTL, and the echo of a pooled slot is also a sighting for the workers. A client session's verdict names
+        the generation it was echoed at and answers only for that one; one the cache holds at a later generation than
+        ``proxy``'s, fresh or not, comes back as it is, for the caller to render the session there and go on.
 
         Args:
             allowed: the connector's declared countries, which with the rules decide whether a vendor's promise can refuse.
@@ -344,16 +368,23 @@ class PreflightChecker:
         if vendor_session:
             # The same client session may ask for another place next time; the
             # vendor then routes it elsewhere, so the verdict is per place too.
-            key = f"{key}:{vendor_session}:{expected.key if expected else '-'}"
+            # Every generation of the session shares the key.
+            key = f"{key}:{session_id}:{expected.key if expected else '-'}"
         elif rotating:
             key = None
         cached = await self._cached(key) if key else None
+        generation = session_generation(proxy)
         # A pooled slot's key names no requirement, and the same slot may serve
         # a request that asked for a place and one that rode on the vendor's
         # promise, which ``acceptable`` judges differently; a verdict is reused
-        # only for the requirement it answered.
+        # only for the requirement it answered, and a session's only for the
+        # vendor session it echoed, while fresh.
         if cached is not None and cached.expected == expected and cached.required_by == required_by:
-            return cached
+            if cached.generation > generation:
+                # Another request moved the session further meanwhile: it goes on from there.
+                return cached
+            if cached.generation == generation and cached.is_fresh(utc_now()):
+                return cached
 
         self.checks += 1
         started = time.monotonic()
@@ -367,7 +398,8 @@ class PreflightChecker:
         observed_at = utc_now()
         if ip is None:
             verdict = PreflightVerdict(
-                ok=True, expected=expected, observed=None, ip=None, reason="echo request failed", required_by=required_by
+                ok=True, expected=expected, observed=None, ip=None, reason="echo request failed", required_by=required_by,
+                generation=generation,
             )
             # Short cache so a broken echo endpoint does not add a timeout to every request.
             if key:
@@ -414,6 +446,7 @@ class PreflightChecker:
             city_conflict=resolution.city_conflict,
             required_by=required_by,
             checked_at=observed_at,
+            generation=generation,
         )
 
         if dynamic:
@@ -528,12 +561,21 @@ class PreflightChecker:
         return verdict._replace(cached=True) if verdict else None
 
     async def _store(self, key: str, verdict: PreflightVerdict, *, ttl: int) -> None:
-        """Cache ``verdict`` under ``key`` for ``ttl`` seconds; a Redis that does not answer in time keeps none."""
+        """Cache ``verdict`` under ``key``, trusted for ``ttl`` seconds; a Redis that does not answer in time keeps none.
+
+        A moved session's key lives :data:`MOVED_SESSION_IDLE_SECONDS` longer than its verdict, which then carries its
+        own end, so the session keeps its generation. A slower request may write an earlier generation over it: the
+        next request then moves the session again, to the same vendor session, for the price of one echo.
+        """
         if self._redis is None:
             return
+        ttl = max(int(ttl), 1)
+        if verdict.generation:
+            verdict = verdict._replace(fresh_until=utc_now() + timedelta(seconds=ttl))
+            ttl += MOVED_SESSION_IDLE_SECONDS
         try:
             async with self._redis.request_deadline():
-                await self._redis.client.set(key, verdict.to_json(), ex=max(int(ttl), 1))
+                await self._redis.client.set(key, verdict.to_json(), ex=ttl)
         except Exception as exc:
             logger.debug("Could not cache preflight verdict", error=error_text(exc))
 

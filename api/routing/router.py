@@ -683,6 +683,20 @@ class Router:
             or not view.rate_limit.sticky_quarantine
         )
 
+    def render_session(
+        self, proxy: Proxy, project_id: str, session_id: str, location: LocationTarget | None, generation: int
+    ) -> Proxy:
+        """The dynamic gateway row ``proxy`` was selected from, rendered for the client session at ``generation``.
+
+        What preflight forwards through once it moved the session off a refused exit; ``proxy`` itself when the feed no
+        longer holds the row.
+        """
+        snapshot = self._snapshot
+        row = snapshot.proxy(proxy.id)
+        if row is None:
+            return proxy
+        return self._render(snapshot, row, project_id, session_id, location or None, generation)
+
     @staticmethod
     def _render(
         snapshot: RoutingSnapshot,
@@ -690,6 +704,7 @@ class Router:
         project_id: str,
         session_id: str | None,
         location: LocationTarget | None,
+        generation: int = 0,
     ) -> Proxy:
         """The gateway row as one request uses it: the vendor session and place rendered, credentials filled."""
         view = snapshot.connector_view(proxy.connector_id)
@@ -698,7 +713,8 @@ class Router:
             # The row says dynamic but its connector no longer does (mid-sync): use it as the feed has it.
             return proxy
         rendered = provider.render_request(
-            proxy, sessid=session_id, location=location, scope=project_id, untargeted=view.untargeted_countries or None
+            proxy, sessid=session_id, location=location, scope=project_id, untargeted=view.untargeted_countries or None,
+            generation=generation,
         )
         # Rendering puts the secrets back as placeholders; the section's credential fills them.
         return resolve_credentials(rendered, view.credential, view.connector)

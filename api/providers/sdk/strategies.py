@@ -65,6 +65,11 @@ def is_dynamic_gateway(proxy: Proxy) -> bool:
     return proxy.metadata.get(META_DYNAMIC_SESSIONS) == "true"
 
 
+def session_generation(proxy: Proxy) -> int:
+    """How many times the client session ``proxy`` was rendered for has moved to a new vendor session; 0 when never."""
+    return int(proxy.metadata.get(META_SESSION_GENERATION) or 0)
+
+
 # Where a source's word about an exit's place is kept, per level: the vendor's
 # (its list, known-IP API or own discovery endpoint) and an independent endpoint's.
 _VENDOR_PLACE_KEYS = (META_VENDOR_COUNTRY, META_VENDOR_STATE, META_VENDOR_CITY)
@@ -102,6 +107,9 @@ META_EXIT_SAMPLE_PERCENT = "exit_sample_percent"
 # On a request rendered for a client session: how long the vendor keeps the
 # session's exit, in seconds, when the connector sets it.
 META_SESSION_SECONDS = "session_seconds"
+# On a request rendered for a client session that preflight moved off a refused
+# exit: how many times it moved.
+META_SESSION_GENERATION = "session_generation"
 META_LIST_IDENTITY = "list_identity"
 META_PROVIDER = "provider"
 

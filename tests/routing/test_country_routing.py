@@ -197,6 +197,24 @@ class TestDynamicSessions:
         selected = await router.select_proxy_for_project("project-1", "order-1")
         assert selected is not None and selected.password == "s3cret"
 
+    async def test_a_session_renders_at_a_later_generation(self, feed: FeedBuilder) -> None:
+        """What preflight moves a refused session to: the same row and place under another vendor session."""
+        router = feed.router()
+        de = LocationTarget(country="DE")
+        selected = await router.select_proxy_for_project("project-1", "order-1", location=de)
+        assert selected is not None
+        moved = router.render_session(selected, "project-1", "order-1", de, 1)
+        assert moved.id == "gw" and moved.password == "s3cret" and moved.metadata["geo"] == "DE"
+        assert moved.metadata["session_id"] != selected.metadata["session_id"]
+        assert moved.metadata["session_id"] in (moved.username or "")
+        assert moved.metadata["session_generation"] == 1
+        assert router.render_session(selected, "project-1", "order-1", de, 1).username == moved.username
+        back = router.render_session(moved, "project-1", "order-1", de, 0)
+        assert back.username == selected.username and "session_generation" not in back.metadata
+        # A row the feed no longer holds is used as it is.
+        gone = selected.model_copy(update={"id": "gone"})
+        assert router.render_session(gone, "project-1", "order-1", de, 2) is gone
+
     async def test_a_pinned_gateway_renders_the_session_and_place_as_ever(self, feed: FeedBuilder) -> None:
         router = feed.router()
         de = LocationTarget(country="DE")

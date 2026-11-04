@@ -102,6 +102,7 @@ export interface ScenarioInput {
   contradicted: ContradictedAction
   unknown: UnknownAction
   strategy: string
+  sessionMove: boolean
   maxAttempts: number
 }
 
@@ -115,6 +116,8 @@ export interface ScenarioStep {
 export function scenarioSteps(i: ScenarioInput): ScenarioStep[] {
   const steps: ScenarioStep[] = []
   const sticky = i.strategy === 'sticky'
+  // A refused client session moves to a new exit and keeps it, under every strategy.
+  const moves = i.session && i.sessionMove
   const holdsVendor = i.contradicted === 'refuse'
   const refusesUnknown = i.unknown === 'refuse'
   const canRefuseAsk = i.contradicted !== 'vendor' || refusesUnknown
@@ -161,7 +164,7 @@ export function scenarioSteps(i: ScenarioInput): ScenarioStep[] {
       ? { title: `Preflight on this request`, text: `One echo per session, compared with the requested country. The verdict is cached for the preflight TTL (10 minutes by default, set under Administration → IP attribution; not tied to the sticky session) and dropped early when a health check sees the exit move.` }
       : { title: `Preflight on this request`, text: `Not echoed: the client named no place, so there is nothing to compare the exit with. The slot's own claim is still judged on the row, by the health check and by echoes from requests that do name a country.` })
   } else if (i.session) {
-    steps.push({ title: `Preflight on this request`, text: `One echo per vendor session, cached for the preflight TTL (10 minutes by default, not extended by use). The vendor session comes from the -sessid- and the place together, so the same -sessid- asking for another place gets a new session and a new echo.${promised ? ` With nothing asked, the country picked from the connector's list is the vendor's promise.` : ``}` })
+    steps.push({ title: `Preflight on this request`, text: `One echo per vendor session, cached for the preflight TTL (10 minutes by default, not extended by use). The vendor session comes from the -sessid- and the place together, so the same -sessid- asking for another place gets a new session and a new echo.${i.sessionMove ? ` A session moved off a refused exit is echoed on the vendor session it moved to.` : ``}${promised ? ` With nothing asked, the country picked from the connector's list is the vendor's promise.` : ``}` })
   } else if (i.ask !== 'none') {
     steps.push(canRefuseAsk
       ? { title: `Preflight on this request`, text: `Every request is echoed: without a -sessid- each request gets a fresh vendor session, so there is no cached verdict to reuse, and sampling would let misplaced exits through.` }
@@ -183,9 +186,11 @@ export function scenarioSteps(i: ScenarioInput): ScenarioStep[] {
     ? `The slot is kept, and nothing is provisioned.`
     : i.kind === 'fixed'
       ? `A fixed exit is never replaced.`
-      : i.session
-        ? `Nothing is written on the gateway. The same -sessid- asking for the same place gets the same vendor session, and the cached refusal answers 502 for the preflight TTL; a new -sessid- or another place gets a fresh session.`
-        : `Nothing is written on the gateway; the next request mints another session.`
+      : moves
+        ? `Nothing is written on the gateway. The session moves to a new vendor session, which its later requests keep.`
+        : i.session
+          ? `Nothing is written on the gateway. The same -sessid- asking for the same place gets the same vendor session, and the cached refusal answers 502 for the preflight TTL; a new -sessid- or another place gets a fresh session.`
+          : `Nothing is written on the gateway; the next request mints another session.`
   const quiet = i.kind === 'dynamic' && i.ask === 'none' && !i.declared
   const unchecked = i.kind === 'dynamic' && !i.preflight
   if (unchecked) {
@@ -232,14 +237,19 @@ export function scenarioSteps(i: ScenarioInput): ScenarioStep[] {
   const refusable = i.ask === 'none'
     ? promised && (holdsVendor || refusesUnknown || i.contradicted === 'evidence')
     : canRefuseAsk
+  const otherSlot = `The slot is excluded and another one for the country is tried, up to ${i.maxAttempts} attempts in all, then 502. If no other slot serves the country, that is a 502 right away.${i.declared ? `` : ` The refused slot still counts as the country's group, so the retry asks for no new one.`}`
   if (preflighted && refusable) {
-    if (sticky && i.session) {
+    if (moves) {
+      steps.push({ title: `On a refused request`, text: i.kind === 'pooled'
+        ? `${otherSlot}${sticky ? ` The -sessid- is bound to the slot it lands on.` : ``}`
+        : `The same gateway is tried again under a new vendor session for this -sessid-, up to ${i.maxAttempts} attempts in all, then 502. The session keeps the vendor session it lands on, so its later requests go out through the new exit. Once every attempt was refused, its next request moves on from the last one.` })
+    } else if (sticky && i.session) {
       steps.push({ title: `On a refused request`, text: i.kind === 'pooled'
         ? `502 at once, since sticky promised the session one exit. If the slot was replaced, the next request with this -sessid- binds to another slot; otherwise the binding holds until the re-judged slot no longer serves the country.`
         : `502 at once, since sticky promised the session one exit. The refusal is cached, so the same -sessid- and place keep getting 502 for the preflight TTL: switch to a new -sessid-.` })
     } else {
       steps.push({ title: `On a refused request`, text: i.kind === 'pooled'
-        ? `The slot is excluded and another one for the country is tried, up to ${i.maxAttempts} attempts in all, then 502. If no other slot serves the country, that is a 502 right away.${i.declared ? `` : ` The refused slot still counts as the country's group, so the retry asks for no new one.`}`
+        ? otherSlot
         : i.session
           ? `The gateway is excluded and another connector is tried with the same -sessid-, up to ${i.maxAttempts} attempts in all; with no other connector, 502.`
           : `The same gateway is tried again with a fresh vendor session, up to ${i.maxAttempts} attempts in all, then 502.` })

@@ -902,6 +902,7 @@ class TestProjectPolicies:
                 "location_contradicted": "refuse",
                 "location_unknown": "refuse",
                 "location_preflight": True,
+                "location_session_move": True,
                 "exit_headers": True,
             },
         )
@@ -909,11 +910,16 @@ class TestProjectPolicies:
         body = created.json()
         assert body["location_contradicted"] == "refuse" and body["location_unknown"] == "refuse"
         assert body["location_preflight"] is True and body["exit_headers"] is True
+        assert body["location_session_move"] is True
         updated = authenticated_client.patch(
             f"/api/v1/projects/{body['id']}",
             json={"location_preflight": False, "location_contradicted": "vendor", "exit_headers": False},
         ).json()
         assert updated["location_preflight"] is False and updated["exit_headers"] is False
+        # An edit that does not name it keeps it.
+        assert updated["location_session_move"] is True
+        moved_off = authenticated_client.patch(f"/api/v1/projects/{body['id']}", json={"location_session_move": False})
+        assert moved_off.json()["location_session_move"] is False
         assert updated["location_contradicted"] == "vendor" and updated["location_unknown"] == "refuse"
         listed = authenticated_client.get("/api/v1/projects").json()["projects"]
         assert any(p["location_unknown"] == "refuse" for p in listed)
@@ -935,6 +941,7 @@ class TestProjectPolicies:
         ).json()
         assert plain["location_contradicted"] == "evidence" and plain["location_unknown"] == "vendor"
         assert plain["location_preflight"] is False and plain["exit_headers"] is False
+        assert plain["location_session_move"] is False
 
     def test_project_source_policy_override_and_lookup(
         self, authenticated_client: TestClient, tmp_path: Path

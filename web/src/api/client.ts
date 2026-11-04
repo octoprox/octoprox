@@ -172,6 +172,7 @@ export interface Project {
   location_unknown: UnknownAction
   /** IP attribution: verify a session's exit before its first request (one echo per session). */
   location_preflight: boolean
+  location_session_move: boolean
   /** Conflict rule override; null inherits the install default. */
   location_conflict_rule: ConflictRule | null
   /** Km from a claimed city that still confirms it (0 compares names only); null inherits the install default. */
@@ -233,6 +234,7 @@ export interface ProjectCreate {
   location_contradicted?: ContradictedAction
   location_unknown?: UnknownAction
   location_preflight?: boolean
+  location_session_move?: boolean
   location_conflict_rule?: ConflictRule | null
   location_city_radius_km?: number | null
   exit_headers?: boolean
@@ -255,6 +257,7 @@ export interface ProjectUpdate {
   location_contradicted?: ContradictedAction
   location_unknown?: UnknownAction
   location_preflight?: boolean
+  location_session_move?: boolean
   /** An empty string clears the override. */
   location_conflict_rule?: ConflictRule | '' | null
   /** An empty string clears the override. */

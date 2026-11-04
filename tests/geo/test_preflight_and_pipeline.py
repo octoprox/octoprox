@@ -11,6 +11,7 @@ from unittest.mock import MagicMock
 import httpx
 import pytest
 
+from api.core import utc_now
 from api.core.config import Settings
 from api.core.http_tunnel import TunnelRefusedError
 from api.db.redis import GEO_PREFLIGHT_KEY, RedisClient
@@ -262,7 +263,7 @@ class TestPreflight:
         assert PreflightChecker.applies(OBSERVE, None, gateway)
         assert not PreflightChecker.applies(OFF, LocationTarget(country="GB"), gateway)
 
-    async def test_dynamic_session_is_verified_and_cached_per_vendor_session(self, geo_service: GeoService) -> None:
+    async def test_dynamic_session_is_verified_and_cached_per_client_session(self, geo_service: GeoService) -> None:
         checker = _checker(geo_service, {"ip": GB_IP, "country": "GB"})
         stored: dict[str, str] = {}
 
@@ -278,7 +279,8 @@ class TestPreflight:
         rendered = _proxy(dynamic_sessions="true", session_id="abc123", geo="GB")
         verdict = await checker.check(VERIFIED, rendered, session_id="order-1", requested=LocationTarget(country="GB"))
         assert verdict.ok and verdict.reason == "match" and checker.checks == 1
-        assert list(stored) == [GEO_PREFLIGHT_KEY.format(project_id="proj", proxy_id=rendered.id) + ":abc123:GB"]
+        # Keyed by the client session, which every generation of its vendor session shares.
+        assert list(stored) == [GEO_PREFLIGHT_KEY.format(project_id="proj", proxy_id=rendered.id) + ":order-1:GB"]
         assert geo_service.observation_recorder._buffer[-1].session_id == "abc123"
         # Same vendor session again: served from the cache.
         again = await checker.check(VERIFIED, rendered, session_id="order-1", requested=LocationTarget(country="GB"))
@@ -288,7 +290,7 @@ class TestPreflight:
         moved.id = rendered.id
         mismatch = await checker.check(VERIFIED, moved, session_id="order-1", requested=LocationTarget(country="US"))
         assert not mismatch.ok and mismatch.expected == LocationTarget(country="US") and checker.checks == 2
-        assert GEO_PREFLIGHT_KEY.format(project_id="proj", proxy_id=rendered.id) + ":abc123:US" in stored
+        assert GEO_PREFLIGHT_KEY.format(project_id="proj", proxy_id=rendered.id) + ":order-1:US" in stored
         # Another session on the same gateway row is its own verification.
         other = _proxy(dynamic_sessions="true", session_id="zzz999", geo="US")
         other.id = rendered.id
@@ -437,6 +439,8 @@ class TestPreflight:
         verdict = PreflightVerdict(ok=False, expected=LocationTarget(country="US", state="NY"), observed=LocationTarget(country="GB", state="ENG"), ip=GB_IP, reason="mismatch", endpoint_country="GB", country_conflict=False, state_conflict=True, checked_at=datetime(2026, 10, 27, 9, 30, 5))
         parsed = PreflightVerdict.from_json(verdict.to_json())
         assert parsed == verdict
+        moved = verdict._replace(generation=2, fresh_until=datetime(2026, 10, 27, 9, 40, 5))
+        assert PreflightVerdict.from_json(moved.to_json()) == moved
         # Being read from the cache is not stored with the verdict.
         assert PreflightVerdict.from_json(verdict._replace(cached=True).to_json()) == verdict
         # A verdict cached before it carried its check time is still read, without one.
@@ -458,6 +462,56 @@ class TestPreflightCache:
         assert await checker._cached(key) == verdict._replace(cached=True)
         await checker.invalidate("p", "x")
         assert await checker._cached(key) is None and await checker._cached(other) == verdict._replace(cached=True)
+
+    async def test_a_moved_sessions_key_outlives_its_verdict(self, redis_client: RedisClient) -> None:
+        """A moved session keeps its generation past its verdict; any other verdict lives as its key, as before."""
+        checker = PreflightChecker(MagicMock(spec=GeoService), redis_client, sightings=Sightings(), exclusions=Retired())
+        gb = LocationTarget(country="GB")
+        refused = PreflightVerdict(ok=False, expected=gb, observed=LocationTarget(country="US"), ip="203.0.113.9", reason="mismatch")
+        moved = PreflightVerdict(ok=True, expected=gb, observed=gb, ip=GB_IP, reason="match", generation=1)
+        key = GEO_PREFLIGHT_KEY.format(project_id="p", proxy_id="gw") + ":s:GB"
+        await checker._store(key, refused, ttl=600)
+        held = await checker._cached(key)
+        assert held == refused._replace(cached=True) and await redis_client.client.ttl(key) <= 600
+        await checker._store(key, moved, ttl=600)
+        held = await checker._cached(key)
+        assert held is not None and held.generation == 1 and held.ok and held.fresh_until is not None
+        assert 600 < await redis_client.client.ttl(key) <= 900
+        # A slower request's earlier generation simply replaces it: the next request moves the session again.
+        await checker._store(key, refused, ttl=600)
+        held = await checker._cached(key)
+        assert held is not None and held.generation == 0
+
+    async def test_a_session_moved_further_comes_back_for_the_caller_to_follow(
+        self, geo_service: GeoService, redis_client: RedisClient
+    ) -> None:
+        """Preflight never renders: a later generation's verdict comes back as it is, and is echoed once asked there."""
+        checker = _checker(geo_service, {"ip": GB_IP, "country": "GB"})
+        checker._redis = redis_client
+        gb = LocationTarget(country="GB")
+        key = GEO_PREFLIGHT_KEY.format(project_id="proj", proxy_id="gw") + ":s:GB"
+        stale = PreflightVerdict(
+            ok=True, expected=gb, observed=gb, ip=GB_IP, reason="match", required_by="request", generation=2,
+            fresh_until=datetime(2026, 1, 1),
+        )
+        await redis_client.client.set(key, stale.to_json(), ex=300)
+
+        def gateway(generation: int) -> Proxy:
+            proxy = _proxy(dynamic_sessions="true", session_id=f"vendor-{generation}")
+            proxy.id = "gw"
+            if generation:
+                proxy.metadata["session_generation"] = generation
+            return proxy
+
+        # Rendered at generation 0, the session is told where it is, stale or not, without an echo.
+        verdict = await checker.check(VERIFIED, gateway(0), session_id="s", requested=gb)
+        assert verdict == stale._replace(cached=True) and checker.checks == 0
+        # Rendered there, a stale verdict is echoed again on that generation, never on the one it left.
+        verdict = await checker.check(VERIFIED, gateway(2), session_id="s", requested=gb)
+        assert verdict.generation == 2 and not verdict.cached and checker.checks == 1
+        assert geo_service.observation_recorder._buffer[-1].session_id == "vendor-2"
+        held = await checker._cached(key)
+        assert held is not None and held.generation == 2 and held.is_fresh(utc_now())
 
     async def test_a_cache_without_redis_is_a_miss(self) -> None:
         checker = PreflightChecker(MagicMock(spec=GeoService), None, sightings=Sightings(), exclusions=Retired())

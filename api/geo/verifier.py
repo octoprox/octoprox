@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING
 import structlog
 from python_socks import ProxyConnectionError
 
+from api.core import utc_now
 from api.core.http_tunnel import TunnelRefusedError
 from api.geo.attributor import ProxyAttributor
 from api.geo.models import LocationRules
@@ -29,7 +30,7 @@ from api.models.location import LocationTarget
 from api.models.project import Project
 from api.models.proxy import Proxy
 from api.providers.sdk.sources import UPSTREAM_ERRORS
-from api.providers.sdk.strategies import META_DISCOVERED_IP, is_dynamic_gateway
+from api.providers.sdk.strategies import META_DISCOVERED_IP, is_dynamic_gateway, session_generation
 
 if TYPE_CHECKING:
     from api.routing.router import Router
@@ -122,6 +123,11 @@ def _upstream_at_fault(error: BaseException) -> bool:
     return _refused_by_vendor(error) or isinstance(error, ProxyConnectionError)
 
 
+def _unreachable(error: BaseException) -> bool:
+    """Whether the upstream proxy itself could not be reached: no other vendor session through it would fare better."""
+    return isinstance(error, ProxyConnectionError)
+
+
 class ExitVerifier:
     """Runs preflight for a selected upstream and applies the project's mode."""
 
@@ -160,6 +166,12 @@ class ExitVerifier:
         echo that failed past the upstream. Such an echo checked nothing: it
         refuses the request wherever the rules could have refused on an
         answer, and lets it through elsewhere.
+
+        With the project's ``location_session_move`` on, a refused client
+        session moves as a session-less request would, and keeps where it
+        lands: on a dynamic gateway to its next vendor session, which the
+        verdict cache hands every later request of the session; on a pooled
+        slot to another proxy, which sticky binds it to.
         """
         if not self.applies(project, location, proxy):
             return ExitDecision(proxy)
@@ -168,7 +180,8 @@ class ExitVerifier:
         # selecting the same row again mints a fresh vendor session, so the
         # row is not excluded and the strategy's promise about rows holds.
         rerender = is_dynamic_gateway(proxy) and not session_id
-        can_retry = rerender or self._router.strategy_for_project(project.id).allows_exit_reselection(session_id)
+        moves = bool(session_id) and project.location_session_move
+        can_retry = rerender or moves or self._router.strategy_for_project(project.id).allows_exit_reselection(session_id)
         excluded: set[str] = set()
         excluded_connectors: set[str] = set()
         attempts = 0
@@ -180,15 +193,30 @@ class ExitVerifier:
                 verdict = await self._preflight_checker.check(
                     project, proxy, session_id=session_id, requested=location, allowed=allowed
                 )
+                while session_id and verdict.generation > session_generation(proxy):
+                    # Another request moved the session further meanwhile: it goes on from there,
+                    # echoed again once that verdict is no longer trusted. That check may find the
+                    # session moved further still, so it is followed until verdict and session agree.
+                    target = verdict.generation
+                    proxy = self._router.render_session(proxy, project.id, session_id, location, target)
+                    if verdict.is_fresh(utc_now()):
+                        break
+                    verdict = await self._preflight_checker.check(
+                        project, proxy, session_id=session_id, requested=location, allowed=allowed
+                    )
+                    if session_generation(proxy) != target:
+                        # The row left the feed and could not be rendered there: judged as it is below.
+                        break
             except UPSTREAM_ERRORS as exc:
                 upstream_error = exc
-                logger.debug(
-                    "Upstream failed the preflight echo",
-                    proxy_id=proxy.id, project_id=project.id, error=str(exc), attempt=attempts,
-                )
             except Exception as exc:
                 logger.warning("Preflight check errored", proxy_id=proxy.id, error=str(exc))
                 return ExitDecision(proxy)
+            if upstream_error is not None:
+                logger.debug(
+                    "Upstream failed the preflight echo",
+                    proxy_id=proxy.id, project_id=project.id, error=str(upstream_error), attempt=attempts,
+                )
             else:
                 if not rerender and self._router.get_proxy(proxy.id) is None:
                     # The slot left the pool while it was being checked: its own
@@ -215,6 +243,24 @@ class ExitVerifier:
                 excluded_connectors.add(proxy.connector_id)
             retry = can_retry and (upstream_error is None or refused or _worth_retrying(upstream_error))
             if retry and attempts < self._preflight_checker.max_attempts:
+                gone = upstream_error is None and verdict.replaced
+                unreachable = upstream_error is not None and _unreachable(upstream_error)
+                moved = None
+                if moves and session_id and is_dynamic_gateway(proxy) and not (refused or unreachable or gone):
+                    # The same gateway under a new vendor session. After a vendor's 4xx, which a new
+                    # session would get too, a gateway out of reach, or once the row left the feed
+                    # (also when it left during an echo that failed), another connector instead (below).
+                    moved = self._router.render_session(
+                        proxy, project.id, session_id, location, session_generation(proxy) + 1
+                    )
+                if moved is not None and session_generation(moved) > session_generation(proxy):
+                    proxy = moved
+                    logger.info(
+                        "Preflight moving the session to a new vendor session",
+                        project_id=project.id, proxy_id=proxy.id, generation=session_generation(proxy),
+                        attempt=attempts + 1,
+                    )
+                    continue
                 if not rerender:
                     excluded.add(proxy.id)
                 replacement = await self._router.select_proxy_for_project(

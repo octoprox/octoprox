@@ -145,6 +145,8 @@ class ProjectModel(Base):
     location_contradicted: Mapped[str] = mapped_column(String(10), nullable=False, default="evidence", server_default="evidence")
     location_unknown: Mapped[str] = mapped_column(String(10), nullable=False, default="vendor", server_default="vendor")
     location_preflight: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    # Whether a client session preflight refused moves to a new exit instead of being refused.
+    location_session_move: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
     # Null inherits the install default from geo_settings.
     location_conflict_rule: Mapped[str | None] = mapped_column(String(10), nullable=True)
     # Km from a claimed city that still confirms it; null inherits geo_settings.default_city_radius_km.

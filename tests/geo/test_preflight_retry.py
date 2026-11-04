@@ -14,6 +14,7 @@ from python_socks import ProxyConnectionError, ProxyError, ProxyTimeoutError
 
 from api.core.config import Settings
 from api.core.http_tunnel import TunnelRefusedError
+from api.db.redis import RedisClient
 from api.geo.models import ContradictedAction, LocationRules, UnknownAction
 from api.geo.observations import ObservationRecorder
 from api.geo.preflight import PreflightChecker, PreflightVerdict
@@ -78,10 +79,10 @@ VERIFYING = LocationRules(ContradictedAction.REFUSE, UnknownAction.VENDOR)
 STRICT = LocationRules(ContradictedAction.REFUSE, UnknownAction.REFUSE)
 
 
-def _project(rules: LocationRules = VERIFYING, preflight: bool = True) -> Project:
+def _project(rules: LocationRules = VERIFYING, preflight: bool = True, move: bool = False) -> Project:
     return Project(
         id="proj", name="P", username="u", password="p", location_preflight=preflight,
-        location_contradicted=rules.contradicted, location_unknown=rules.unknown,
+        location_contradicted=rules.contradicted, location_unknown=rules.unknown, location_session_move=move,
     )
 
 
@@ -223,6 +224,189 @@ class TestVerify:
         assert not decision.rejected and decision.proxy is not None and decision.proxy.id == "gb"
         assert router.select_proxy_for_project.await_args.kwargs["exclude"] == frozenset({"down"})
         assert len(refusals.events) == 1 and refusals.events[0]["proxy_id"] == "down"
+
+
+def _session_gateway(generation: int, host: str) -> Proxy:
+    """The dynamic gateway rendered for one client session at ``generation``; ``host`` names the exit its echo sees."""
+    metadata: dict[str, object] = {"dynamic_sessions": "true", "session_id": f"vendor-{generation}"}
+    if generation:
+        metadata["session_generation"] = generation
+    return Proxy(
+        id="gw", host=host, port=8000, connector_id="conn", username="u", password="p",
+        status=ProxyStatus.HEALTHY, metadata=metadata,
+    )
+
+
+def _session_router(exits: dict[int, str], strategy: str = "round_robin", picks: list[Proxy | None] | None = None) -> MagicMock:
+    """A router whose one dynamic gateway renders the session at each generation through the exit ``exits`` names."""
+    router = _router(strategy, picks)
+    router.render_session = MagicMock(
+        side_effect=lambda proxy, project_id, session_id, location, generation: _session_gateway(generation, exits[generation])
+    )
+    return router
+
+
+def _rendered_generations(router: MagicMock) -> list[int]:
+    return [call.args[4] for call in router.render_session.call_args_list]
+
+
+@pytest.fixture
+async def cached_checker(checker: PreflightChecker, redis_client: RedisClient) -> PreflightChecker:
+    """The same checker with the verdict cache every gateway shares."""
+    return PreflightChecker(checker._geo_service, redis_client, sightings=Sightings(), exclusions=Retired())
+
+
+class TestMovingSessions:
+    """``location_session_move``: a refused client session gets a new exit, which it keeps."""
+
+    GB = LocationTarget(country="GB")
+
+    @pytest.mark.parametrize("strategy", ["round_robin", "sticky"])
+    async def test_a_refused_session_moves_to_a_new_vendor_session(
+        self, checker: PreflightChecker, refusals: Refusals, strategy: str
+    ) -> None:
+        router = _session_router({1: "gb"}, strategy)
+        decision = await ExitVerifier(checker, router).verify(
+            _project(move=True), _session_gateway(0, "us"), session_id="s", location=self.GB, target_host="x"
+        )
+        assert not decision.rejected and decision.proxy is not None and decision.proxy.host == "gb"
+        assert decision.proxy.metadata["session_generation"] == 1
+        assert decision.exit_ip is not None and decision.exit_ip.ip == GB_IP
+        assert _rendered_generations(router) == [1]
+        router.select_proxy_for_project.assert_not_called()  # the same gateway, never another connector
+        assert len(refusals.events) == 1 and checker.checks == 2
+
+    async def test_without_the_setting_a_session_is_handled_as_before(self, checker: PreflightChecker) -> None:
+        router = _session_router({1: "gb"}, "sticky")
+        decision = await ExitVerifier(checker, router).verify(
+            _project(), _session_gateway(0, "us"), session_id="s", location=self.GB, target_host="x"
+        )
+        assert decision.rejected
+        router.render_session.assert_not_called()
+        # A movable strategy excludes the gateway and tries another connector.
+        router = _session_router({1: "gb"}, picks=[None])
+        decision = await ExitVerifier(checker, router).verify(
+            _project(), _session_gateway(0, "us"), session_id="s", location=self.GB, target_host="x"
+        )
+        assert decision.rejected and router.select_proxy_for_project.await_args.kwargs["exclude"] == frozenset({"gw"})
+        router.render_session.assert_not_called()
+
+    async def test_the_session_moves_until_an_exit_passes(self, checker: PreflightChecker, refusals: Refusals) -> None:
+        router = _session_router({1: "us2", 2: "gb"})
+        decision = await ExitVerifier(checker, router).verify(
+            _project(move=True), _session_gateway(0, "us"), session_id="s", location=self.GB, target_host="x"
+        )
+        assert not decision.rejected and decision.proxy is not None and decision.proxy.metadata["session_generation"] == 2
+        assert _rendered_generations(router) == [1, 2] and len(refusals.events) == 2
+
+    async def test_every_attempt_refused_is_a_502(self, checker: PreflightChecker, refusals: Refusals) -> None:
+        router = _session_router({1: "us2", 2: "us"})
+        decision = await ExitVerifier(checker, router).verify(
+            _project(move=True), _session_gateway(0, "us"), session_id="s", location=self.GB, target_host="x"
+        )
+        assert decision.rejected and "requested GB" in (decision.rejection or "")
+        # The refusal names the last vendor session tried, the one the next request moves on from.
+        assert decision.proxy is not None and decision.proxy.metadata["session_generation"] == 2
+        assert _rendered_generations(router) == [1, 2] and checker.checks == 3
+
+    async def test_a_failure_another_try_could_pass_moves_the_session(self, checker: PreflightChecker) -> None:
+        use_echo_by_proxy(checker._geo_service, {"slow": ProxyTimeoutError("timed out"), "gb": (GB_IP, "GB")})
+        router = _session_router({1: "gb"})
+        decision = await ExitVerifier(checker, router).verify(
+            _project(move=True), _session_gateway(0, "slow"), session_id="s", location=self.GB, target_host="x"
+        )
+        assert decision.upstream_error is None and decision.proxy is not None and decision.proxy.host == "gb"
+        assert _rendered_generations(router) == [1]
+
+    async def test_a_gateway_out_of_reach_moves_to_another_connector_not_another_session(
+        self, checker: PreflightChecker
+    ) -> None:
+        """No vendor session through a gateway nobody can connect to would fare better."""
+        use_echo_by_proxy(checker._geo_service, {"down": ProxyConnectionError(None, "Couldn't connect to proxy"), "gb": (GB_IP, "GB")})
+        elsewhere = _proxy("gb")
+        elsewhere.connector_id = "conn2"
+        router = _session_router({1: "gb"}, picks=[elsewhere])
+        decision = await ExitVerifier(checker, router).verify(
+            _project(move=True), _session_gateway(0, "down"), session_id="s", location=self.GB, target_host="x"
+        )
+        assert decision.proxy is not None and decision.proxy.connector_id == "conn2" and decision.upstream_error is None
+        router.render_session.assert_not_called()
+        assert router.select_proxy_for_project.await_args.kwargs["exclude"] == frozenset({"gw"})
+
+    async def test_a_vendor_4xx_moves_to_another_connector_not_another_session(self, checker: PreflightChecker) -> None:
+        """A new session would get the vendor's same answer."""
+        use_echo_by_proxy(checker._geo_service, {"bad": NO_UPSTREAM, "gb": (GB_IP, "GB")})
+        elsewhere = _proxy("gb")
+        elsewhere.connector_id = "conn2"
+        router = _session_router({1: "gb"}, picks=[elsewhere])
+        decision = await ExitVerifier(checker, router).verify(
+            _project(move=True), _session_gateway(0, "bad"), session_id="s", location=self.GB, target_host="x"
+        )
+        assert decision.proxy is not None and decision.proxy.connector_id == "conn2"
+        router.render_session.assert_not_called()
+        kwargs = router.select_proxy_for_project.await_args.kwargs
+        assert (kwargs["exclude"], kwargs["exclude_connectors"]) == (frozenset({"gw"}), frozenset({"conn"}))
+
+    async def test_a_gateway_that_left_the_feed_moves_to_another_connector(self, checker: PreflightChecker) -> None:
+        """A row the feed no longer holds cannot be rendered again: another connector is tried instead."""
+        elsewhere = _proxy("gb")
+        elsewhere.connector_id = "conn2"
+        router = _session_router({1: "gb"}, picks=[elsewhere])
+        router.get_proxy = MagicMock(side_effect=lambda proxy_id: None if proxy_id == "gw" else _proxy(proxy_id))
+        decision = await ExitVerifier(checker, router).verify(
+            _project(move=True), _session_gateway(0, "gb"), session_id="s", location=self.GB, target_host="x"
+        )
+        assert not decision.rejected and decision.proxy is not None and decision.proxy.connector_id == "conn2"
+        router.render_session.assert_not_called()
+        assert router.select_proxy_for_project.await_args.kwargs["exclude"] == frozenset({"gw"})
+
+    async def test_a_sticky_session_on_a_pooled_slot_moves_to_another_slot(self, checker: PreflightChecker) -> None:
+        router = _router("sticky", picks=[_proxy("gb")])
+        decision = await ExitVerifier(checker, router).verify(
+            _project(move=True), _proxy("us"), session_id="s", location=self.GB, target_host="x"
+        )
+        assert not decision.rejected and decision.proxy is not None and decision.proxy.id == "gb"
+        assert router.select_proxy_for_project.await_args.args[1] == "s"  # sticky binds the session where it lands
+        assert router.select_proxy_for_project.await_args.kwargs["exclude"] == frozenset({"us"})
+
+    async def test_the_sessions_next_request_keeps_the_new_exit(self, cached_checker: PreflightChecker) -> None:
+        """Every request selects the session at generation 0; the cache moves it to where the first one landed."""
+        router = _session_router({1: "gb"})
+        verifier = ExitVerifier(cached_checker, router)
+        await verifier.verify(_project(move=True), _session_gateway(0, "us"), session_id="s", location=self.GB, target_host="x")
+        assert cached_checker.checks == 2
+        # The next request, on this gateway or another, and with the setting turned off since.
+        for project in (_project(move=True), _project()):
+            decision = await verifier.verify(project, _session_gateway(0, "us"), session_id="s", location=self.GB, target_host="x")
+            assert not decision.rejected and decision.proxy is not None and decision.proxy.host == "gb"
+            assert decision.exit_ip is not None and decision.exit_ip.source == ExitSource.CACHED
+        assert cached_checker.checks == 2  # no echo: the moved session's verdict answered
+
+    async def test_a_refused_session_moves_on_from_where_it_was_left(self, cached_checker: PreflightChecker) -> None:
+        router = _session_router({1: "us2", 2: "us", 3: "gb"})
+        verifier = ExitVerifier(cached_checker, router)
+        first = await verifier.verify(_project(move=True), _session_gateway(0, "us"), session_id="s", location=self.GB, target_host="x")
+        assert first.rejected and cached_checker.checks == 3
+        second = await verifier.verify(_project(move=True), _session_gateway(0, "us"), session_id="s", location=self.GB, target_host="x")
+        assert not second.rejected and second.proxy is not None and second.proxy.metadata["session_generation"] == 3
+        # Generation 2's cached refusal answered without an echo; only generation 3 was echoed.
+        assert cached_checker.checks == 4
+
+    async def test_a_session_moved_further_during_its_check_is_followed(self, checker: PreflightChecker) -> None:
+        """A stale verdict's second read may find another request moved the session on again: it goes there too."""
+        stale = PreflightVerdict(
+            ok=True, expected=self.GB, observed=self.GB, ip=GB_IP, reason="match", required_by="request",
+            generation=1, fresh_until=datetime(2026, 1, 1),
+        )
+        reads = iter([stale, stale._replace(generation=2, fresh_until=datetime(2999, 1, 1))])
+        checker._cached = AsyncMock(side_effect=lambda key: next(reads)._replace(cached=True))  # type: ignore[method-assign]
+        router = _session_router({1: "us2", 2: "gb"})
+        decision = await ExitVerifier(checker, router).verify(
+            _project(move=True), _session_gateway(0, "us"), session_id="s", location=self.GB, target_host="x"
+        )
+        # Forwarded on the generation the verdict answers for, never the one the session left.
+        assert not decision.rejected and decision.proxy is not None and decision.proxy.metadata["session_generation"] == 2
+        assert _rendered_generations(router) == [1, 2] and checker.checks == 0
 
 
 class TestExitIp:

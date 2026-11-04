@@ -36,6 +36,7 @@ from api.providers.sdk.strategies import (
     META_GEO_CITY,
     META_GEO_COUNTRY,
     META_GEO_STATE,
+    META_SESSION_GENERATION,
     META_SESSION_ID,
     META_SESSION_SECONDS,
     DynamicSessionStrategy,
@@ -242,6 +243,7 @@ class DescriptorProvider(ProxyProvider):
         location: LocationTarget | None,
         scope: str,
         untargeted: Sequence[str] | None = None,
+        generation: int = 0,
     ) -> Proxy:
         """The gateway row as one request should use it.
 
@@ -249,7 +251,10 @@ class DescriptorProvider(ProxyProvider):
         for this request and the location it asked for. ``sessid`` is the
         client's ``-sessid-`` value: the same value always derives the same
         vendor session id (``scope`` keeps projects apart), so the client keeps
-        its exit across requests and instances. Without one a fresh id is
+        its exit across requests and instances. ``generation`` counts the times
+        preflight moved that session off a refused exit: each derives another
+        vendor session in the same place, and generation 0 is the one a session
+        that never moved has. Without a ``sessid`` a fresh id is
         minted and the vendor rotates. ``location`` is what the username asked
         for; with no country, a
         connector listing countries gets one of them, of ``untargeted`` when
@@ -281,6 +286,9 @@ class DescriptorProvider(ProxyProvider):
         ctx = ctx.with_place(rendered_target or None)
         if seed and not rendered_target.is_empty:
             seed = f"{seed}:{rendered_target.key}"
+        if seed and generation:
+            # A project id holds no colon or slash, so no first seed reads as another session's later one.
+            seed = f"{scope}/{generation}{seed[len(scope):]}"
         session_id = self._session_ids.derive(seed) if seed else self._session_ids.generate()
         ctx = ctx.with_slot(session_id=session_id)
         rendered = proxy.model_copy(deep=True)
@@ -288,8 +296,11 @@ class DescriptorProvider(ProxyProvider):
         self._builder.rerender_endpoint(rendered, ctx)
         rendered.metadata[META_EXIT_SAMPLE_PERCENT] = self.exit_sample_percent
         rendered.metadata.pop(META_SESSION_SECONDS, None)
+        rendered.metadata.pop(META_SESSION_GENERATION, None)
         if seed:
             rendered.metadata[META_SESSION_ID] = session_id
+            if generation:
+                rendered.metadata[META_SESSION_GENERATION] = generation
             # Preflight trusts the session's verdict no longer than the vendor keeps its exit.
             if self._session_seconds:
                 rendered.metadata[META_SESSION_SECONDS] = self._session_seconds

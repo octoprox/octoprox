@@ -111,6 +111,9 @@ class Project(BaseModel):
     location_contradicted: ContradictedAction = ContradictedAction.EVIDENCE
     location_unknown: UnknownAction = UnknownAction.VENDOR
     location_preflight: bool = False
+    # Whether a client session preflight refused moves to a new exit, which it
+    # then keeps, instead of being refused (see docs/location-routing.md).
+    location_session_move: bool = False
     # When a vendor counts as contradicted. None inherits the install default (GeoSettings).
     location_conflict_rule: ConflictRule | None = None
     # How far from a claimed city an answer may be and still confirm it, in km;
@@ -174,6 +177,7 @@ class ProjectCreate(BaseModel):
     location_contradicted: ContradictedAction = ContradictedAction.EVIDENCE
     location_unknown: UnknownAction = UnknownAction.VENDOR
     location_preflight: bool = False
+    location_session_move: bool = False
     location_conflict_rule: ConflictRule | None = None
     location_city_radius_km: float | None = Field(default=None, ge=0, le=MAX_CITY_RADIUS_KM)
     exit_headers: bool = False
@@ -205,6 +209,7 @@ class ProjectUpdate(BaseModel):
     location_contradicted: ContradictedAction | None = None
     location_unknown: UnknownAction | None = None
     location_preflight: bool | None = None
+    location_session_move: bool | None = None
     # "" clears the override (inherit the install default).
     location_conflict_rule: ConflictRule | Literal[""] | None = None
     # "" clears the override (inherit the install default).
@@ -240,6 +245,7 @@ class ProjectResponse(BaseModel):
     location_contradicted: ContradictedAction = ContradictedAction.EVIDENCE
     location_unknown: UnknownAction = UnknownAction.VENDOR
     location_preflight: bool = False
+    location_session_move: bool = False
     location_conflict_rule: ConflictRule | None = None
     location_city_radius_km: float | None = None
     exit_headers: bool = False
@@ -269,6 +275,7 @@ class ProjectSummary(BaseModel):
     location_contradicted: ContradictedAction = ContradictedAction.EVIDENCE
     location_unknown: UnknownAction = UnknownAction.VENDOR
     location_preflight: bool = False
+    location_session_move: bool = False
     location_conflict_rule: ConflictRule | None = None
     location_city_radius_km: float | None = None
     exit_headers: bool = False

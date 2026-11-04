@@ -19,6 +19,7 @@ from api.providers.sdk.strategies import (
     META_GEO_CITY,
     META_GEO_COUNTRY,
     META_GEO_STATE,
+    META_SESSION_GENERATION,
     META_SESSION_ID,
     META_SESSION_SECONDS,
 )
@@ -176,6 +177,29 @@ class TestRenderRequest:
         assert len(sessions) == 3  # the vendor is never asked to move a placed session to another country
         again = provider.render_request(gateway, sessid="order-1", location=LocationTarget(country="DE"), scope="p")
         assert again.username == de.username  # coming back finds the same session and exit
+
+    async def test_a_later_generation_is_another_vendor_session_in_the_same_place(
+        self, builtins: dict[str, ProviderDescriptor], runtime: SdkRuntime
+    ) -> None:
+        """What preflight moves a refused client session to."""
+        provider = _oxylabs(builtins, runtime, country_code=["US", "DE", "FR"])
+        gateway = (await provider.sync_proxies([]))[0][0]
+        first = provider.render_request(gateway, sessid="order-1", location=None, scope="p")
+        assert provider.render_request(gateway, sessid="order-1", location=None, scope="p", generation=0).username == first.username
+        assert META_SESSION_GENERATION not in first.metadata
+        moved = [provider.render_request(gateway, sessid="order-1", location=None, scope="p", generation=g) for g in (1, 2)]
+        sessions = {first.metadata[META_SESSION_ID], *(r.metadata[META_SESSION_ID] for r in moved)}
+        assert len(sessions) == 3
+        for generation, rendered in enumerate(moved, start=1):
+            assert rendered.metadata[META_SESSION_GENERATION] == generation
+            # The allow-list pick is the session's, not the generation's.
+            assert rendered.metadata[META_GEO_COUNTRY] == first.metadata[META_GEO_COUNTRY]
+            assert rendered.metadata[META_SESSION_SECONDS] == 600
+        again = provider.render_request(gateway, sessid="order-1", location=None, scope="p", generation=1)
+        assert again.username == moved[0].username  # every gateway renders the same move
+        # A rotating request has no session to move.
+        rotating = provider.render_request(gateway, sessid=None, location=None, scope="p", generation=3)
+        assert META_SESSION_ID not in rotating.metadata and META_SESSION_GENERATION not in rotating.metadata
 
     async def test_explicit_country_meets_the_allow_list_pick(self, builtins: dict[str, ProviderDescriptor], runtime: SdkRuntime) -> None:
         provider = _oxylabs(builtins, runtime, country_code=["US", "DE"])

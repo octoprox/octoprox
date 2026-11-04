@@ -110,6 +110,7 @@ export function ProjectForm({ project, onSave, error, formId }: ProjectFormProps
     location_contradicted: project?.location_contradicted ?? 'evidence',
     location_unknown: project?.location_unknown ?? 'vendor',
     location_preflight: project?.location_preflight ?? false,
+    location_session_move: project?.location_session_move ?? false,
     location_conflict_rule: project?.location_conflict_rule ?? undefined,
     location_city_radius_km: project?.location_city_radius_km ?? undefined,
     exit_headers: project?.exit_headers ?? false,
@@ -292,6 +293,13 @@ export function ProjectForm({ project, onSave, error, formId }: ProjectFormProps
           </div>
           <div>
             <label className="inline-flex items-center gap-2 text-[13px]">
+              <input type="checkbox" checked={formData.location_session_move ?? false} onChange={(e) => setFormData({ ...formData, location_session_move: e.target.checked })} className="w-4 h-4" />
+              <span>Move refused sessions</span>
+              <InfoTip label="About moving refused sessions">When on, a client session (-sessid-) whose exit preflight refuses gets a new exit instead of a 502, under every strategy: a new vendor session on the same dynamic-sessions connector, which its later requests keep, or another pooled slot, which sticky binds it to. Each move costs one more echo, within the install's preflight attempts. When off, a refused session keeps getting 502 until its verdict expires, unless the strategy moves it to another proxy. Needs preflight on.</InfoTip>
+            </label>
+          </div>
+          <div>
+            <label className="inline-flex items-center gap-2 text-[13px]">
               <input type="checkbox" checked={formData.exit_headers ?? false} onChange={(e) => setFormData({ ...formData, exit_headers: e.target.checked })} className="w-4 h-4" />
               <span>Exit headers</span>
               <InfoTip label="About exit headers">When on, clients are told which exit IP served each request, in X-Octoprox-Exit-Ip, -Exit-Source (preflight, cached or last-seen), -Exit-Checked-At and -Proxy-Id headers: on the 200 answering a CONNECT, and on a plain HTTP response. A dynamic-sessions exit is known only when preflight echoed the request. See Connecting in the docs.</InfoTip>
@@ -351,13 +359,14 @@ export function ProjectForm({ project, onSave, error, formId }: ProjectFormProps
                   <label className="inline-flex items-center gap-1.5"><input type="checkbox" className="w-3.5 h-3.5" checked={exampleDeclared} onChange={(e) => setExampleDeclared(e.target.checked)} />Connector declares countries</label>
                 </div>
                 <p>
-                  Settings in play: rule <span className="text-fg">{rule}</span>{inherited && defaults && <span> (inherited)</span>}, contradicted <span className="text-fg">{contradicted}</span>, unknown <span className="text-fg">{unknown}</span>, preflight <span className="text-fg">{formData.location_preflight ? 'on' : 'off'}</span>, strategy <span className="text-fg">{formData.routing_strategy ?? 'round_robin'}</span>.
+                  Settings in play: rule <span className="text-fg">{rule}</span>{inherited && defaults && <span> (inherited)</span>}, contradicted <span className="text-fg">{contradicted}</span>, unknown <span className="text-fg">{unknown}</span>, preflight <span className="text-fg">{formData.location_preflight ? 'on' : 'off'}</span>, refused sessions <span className="text-fg">{formData.location_session_move ? 'move' : 'stay'}</span>, strategy <span className="text-fg">{formData.routing_strategy ?? 'round_robin'}</span>.
                 </p>
                 <dl className="space-y-1.5">
                   {scenarioSteps({
                     kind: exampleKind, ask: exampleAsk, session: exampleSession, declared: exampleDeclared,
                     preflight: formData.location_preflight ?? false, contradicted, unknown,
-                    strategy: formData.routing_strategy ?? 'round_robin', maxAttempts: defaults?.preflight_max_attempts ?? 3,
+                    strategy: formData.routing_strategy ?? 'round_robin', sessionMove: formData.location_session_move ?? false,
+                    maxAttempts: defaults?.preflight_max_attempts ?? 3,
                   }).map((step) => (
                     <div key={step.title} className={step.warn ? 'text-warning' : undefined}>
                       <dt className="inline font-medium text-fg">{step.title}: </dt>
@@ -428,7 +437,7 @@ export function ProjectForm({ project, onSave, error, formId }: ProjectFormProps
           <div className="flex gap-2 p-3 rounded-lg border border-line bg-surface-raised/50 text-xs leading-relaxed text-fg-muted">
             <MapPin className="w-4 h-4 shrink-0 mt-0.5" />
             <span>
-              The routing value is the databases in their priority, then the echo endpoint, then the vendor's claim where nothing independent answers; the two decisions above say what a contradicted or an open claim does, on the row and at preflight alike. A proxy outside its connector's declared countries is never routed to, a row not judged yet always is, and a hand-pinned country is kept unless you <strong>refuse the proxy</strong> on a contradiction. Refusing unknown exits needs an IP database loaded. Whether a refused request moves is the routing strategy's call: a sticky session fails fast with 502, the other strategies try another proxy up to the install-wide attempt limit. Only <strong>refuse the proxy</strong> on a contradiction replaces a misplaced pooled vendor session.
+              The routing value is the databases in their priority, then the echo endpoint, then the vendor's claim where nothing independent answers; the two decisions above say what a contradicted or an open claim does, on the row and at preflight alike. A proxy outside its connector's declared countries is never routed to, a row not judged yet always is, and a hand-pinned country is kept unless you <strong>refuse the proxy</strong> on a contradiction. Refusing unknown exits needs an IP database loaded. Whether a refused request moves is the routing strategy's call: a sticky session fails fast with 502, the other strategies try another proxy up to the install-wide attempt limit. With <strong>Move refused sessions</strong> on, a refused session gets a new exit under every strategy, which a dynamic session keeps and sticky binds a pooled one to. Only <strong>refuse the proxy</strong> on a contradiction replaces a misplaced pooled vendor session.
             </span>
           </div>
         </div>
