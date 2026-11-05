@@ -34,7 +34,7 @@ import { targetTotal, describeTarget, isDynamic } from '../utils/connectors'
 import { coverageLabel } from '../components/geo/coverage'
 import { MismatchSummary, rateClass, ratePercent } from '../components/geo/AccuracyDetails'
 import { RichSelect, RichSelectOption } from '../components/RichSelect'
-import { Button, Input, Label, Badge, Alert, ChipInput, Inspector, Tabs, Segmented, Select, ConfirmDialog, KeyValue, InspectorSection, InfoTip, QueryContent } from '../components/ui'
+import { Button, Input, Label, Badge, Alert, ChipInput, Inspector, Tabs, Segmented, Select, ConfirmDialog, KeyValue, InspectorSection, InfoTip, CopyButton, QueryContent } from '../components/ui'
 
 type DomainFilterMode = 'none' | 'whitelist' | 'blacklist'
 type ConfigTab = string
@@ -1102,6 +1102,16 @@ function ConnectorEditor({ connector, siblings, canMutate, onClose, onDelete, on
 
       {isEdit && connector && (
         <InspectorSection title="Details">
+          <KeyValue
+            label="ID"
+            value={
+              <span className="flex items-center justify-end gap-1 min-w-0">
+                <span className="truncate" title={connector.id}>{connector.id}</span>
+                <CopyButton text={connector.id} label="Copy connector ID, as sent in X-Octoprox-Connector-Id" />
+              </span>
+            }
+            mono
+          />
           <KeyValue label="Proxies" value={<span title={describeTarget(connector)}>{connector.proxy_count}{isDynamic(connector) ? <span className="text-fg-subtle font-normal"> · dynamic sessions</span> : targetTotal(connector) != null && <span className="text-fg-subtle font-normal"> / {targetTotal(connector)}</span>}</span>} />
           {connector.target?.per_country != null && connector.target.countries.length > 0 && (
             <KeyValue label="Per country" value={<span title={connector.target.countries.join(', ')}>{connector.target.per_country} × {connector.target.countries.length}{connector.target.on_demand.length > 0 && <span className="text-fg-subtle font-normal"> ({connector.target.on_demand.length} on demand)</span>}</span>} />

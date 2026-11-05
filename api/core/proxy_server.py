@@ -514,11 +514,11 @@ class ProxyServer:
     def _exit_headers(project: Project, decision: ExitDecision) -> bytes:
         """The header lines naming the exit ``decision`` forwards through; none unless the project asked for them.
 
-        The proxy row always, and the exit IP where Octoprox knows it (:meth:`ExitDecision.known_exit`).
+        The proxy row and its connector always, and the exit IP where Octoprox knows it (:meth:`ExitDecision.known_exit`).
         """
         if not project.exit_headers:
             return b""
-        lines = [f"X-Octoprox-Proxy-Id: {decision.proxy.id}"]
+        lines = [f"X-Octoprox-Proxy-Id: {decision.proxy.id}", f"X-Octoprox-Connector-Id: {decision.proxy.connector_id}"]
         exit_ip = decision.known_exit()
         if exit_ip is not None:
             lines.append(f"X-Octoprox-Exit-Ip: {exit_ip.ip}")

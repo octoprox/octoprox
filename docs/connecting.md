@@ -132,6 +132,7 @@ With **Exit headers** on (the project's Location tab, `exit_headers` in the [API
 | Header | Value |
 |--------|-------|
 | `X-Octoprox-Proxy-Id` | The proxy row the request went through, the same id the Proxies page, the [observation log]({{ site.baseurl }}/ip-attribution) and the API use. Always sent |
+| `X-Octoprox-Connector-Id` | The connector that proxy belongs to, for counting requests per connector. It is the id under Details when you open the connector on the Connectors page, with a button that copies it, and the `id` in [`GET /api/v1/projects/{project_id}/connectors`]({{ site.baseurl }}/api#list-connectors). Always sent |
 | `X-Octoprox-Exit-Ip` | The exit IP, when Octoprox knows it |
 | `X-Octoprox-Exit-Source` | Where the IP came from, below |
 | `X-Octoprox-Exit-Checked-At` | When that IP was seen, in UTC (`2026-10-27T09:30:05Z`); left out when nothing recorded it |
@@ -144,7 +145,7 @@ An HTTPS request gets them on the `200 Connection Established` that answers its 
 | `cached` | An earlier echo on the same session, reused for up to `preflight_session_ttl_seconds` (600 by default), or the vendor's session length when that is shorter, and dropped early when a health check sees the exit move. The vendor may still have moved the session in between |
 | `last-seen` | No echo answered for the request (preflight off or not needed, or its echo failed), so this is the row's last recorded exit, from discovery, a health check or an earlier preflight. The check time is when Octoprox recorded that exit: a later sighting of the same IP does not move it |
 
-When no IP is known, only the proxy id is sent. A dynamic-sessions connector picks its exit per request, so its exit is known only when preflight echoed that request: preflight has to be on, and a request without `-sessid-` and without a place that could be refused is echoed only for the connector's `exit_sample_percent` of requests. A row no sighting has placed yet has no IP either.
+When no IP is known, only the proxy and connector ids are sent. A dynamic-sessions connector picks its exit per request, so its exit is known only when preflight echoed that request: preflight has to be on, and a request without `-sessid-` and without a place that could be refused is echoed only for the connector's `exit_sample_percent` of requests. A row no sighting has placed yet has no IP either.
 
 Most HTTP libraries do not pass the headers of a successful `CONNECT` on to the caller. curl shows them with `-i` or `-D` (unless `--suppress-connect-headers` is given), Go through `http.Transport.OnProxyConnectResponse`, and Python's `http.client` through `HTTPConnection.get_proxy_response_headers()` (Python 3.12 and later). Python requests, httpx, aiohttp and browsers, Playwright included, do not, so with them the headers can only be read on plain `http://` requests.
 

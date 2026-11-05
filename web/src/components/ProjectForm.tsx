@@ -302,7 +302,7 @@ export function ProjectForm({ project, onSave, error, formId }: ProjectFormProps
             <label className="inline-flex items-center gap-2 text-[13px]">
               <input type="checkbox" checked={formData.exit_headers ?? false} onChange={(e) => setFormData({ ...formData, exit_headers: e.target.checked })} className="w-4 h-4" />
               <span>Exit headers</span>
-              <InfoTip label="About exit headers">When on, clients are told which exit IP served each request, in X-Octoprox-Exit-Ip, -Exit-Source (preflight, cached or last-seen), -Exit-Checked-At and -Proxy-Id headers: on the 200 answering a CONNECT, and on a plain HTTP response. A dynamic-sessions exit is known only when preflight echoed the request. See Connecting in the docs.</InfoTip>
+              <InfoTip label="About exit headers">When on, clients are told which exit IP served each request, in X-Octoprox-Exit-Ip, -Exit-Source (preflight, cached or last-seen), -Exit-Checked-At, -Proxy-Id and -Connector-Id headers: on the 200 answering a CONNECT, and on a plain HTTP response. A dynamic-sessions exit is known only when preflight echoed the request. See Connecting in the docs.</InfoTip>
             </label>
           </div>
           <div>

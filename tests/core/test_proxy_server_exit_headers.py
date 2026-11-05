@@ -66,6 +66,7 @@ class TestHeaderLines:
     def test_an_echoed_exit(self) -> None:
         assert ProxyServer._exit_headers(PROJECT, ExitDecision(_slot(), exit_ip=ECHOED)) == (
             b"X-Octoprox-Proxy-Id: slot-1\r\n"
+            b"X-Octoprox-Connector-Id: connector-1\r\n"
             b"X-Octoprox-Exit-Ip: 81.2.69.160\r\n"
             b"X-Octoprox-Exit-Source: preflight\r\n"
             b"X-Octoprox-Exit-Checked-At: 2026-10-27T09:30:05Z\r\n"
@@ -75,13 +76,17 @@ class TestHeaderLines:
         slot = _slot(discovered_ip="203.0.113.9")
         assert ProxyServer._exit_headers(PROJECT, ExitDecision(slot)) == (
             b"X-Octoprox-Proxy-Id: slot-1\r\n"
+            b"X-Octoprox-Connector-Id: connector-1\r\n"
             b"X-Octoprox-Exit-Ip: 203.0.113.9\r\n"
             b"X-Octoprox-Exit-Source: last-seen\r\n"
         )
 
-    def test_an_unknown_exit_names_the_proxy_alone(self) -> None:
+    def test_an_unknown_exit_names_the_proxy_and_connector_alone(self) -> None:
         gateway = _slot(dynamic_sessions="true")
-        assert ProxyServer._exit_headers(PROJECT, ExitDecision(gateway)) == b"X-Octoprox-Proxy-Id: slot-1\r\n"
+        assert ProxyServer._exit_headers(PROJECT, ExitDecision(gateway)) == (
+            b"X-Octoprox-Proxy-Id: slot-1\r\n"
+            b"X-Octoprox-Connector-Id: connector-1\r\n"
+        )
 
 
 class TestConnect:
@@ -92,6 +97,7 @@ class TestConnect:
         assert head.decode().split("\r\n") == [
             "HTTP/1.1 200 Connection Established",
             f"X-Octoprox-Proxy-Id: {upstream.id}",
+            f"X-Octoprox-Connector-Id: {upstream.connector_id}",
             "X-Octoprox-Exit-Ip: 81.2.69.160",
             "X-Octoprox-Exit-Source: preflight",
             "X-Octoprox-Exit-Checked-At: 2026-10-27T09:30:05Z",
@@ -139,6 +145,7 @@ class TestPlainHttp:
             "X-Other: kept",
             "Content-Length: 2",
             "X-Octoprox-Proxy-Id: slot-1",
+            "X-Octoprox-Connector-Id: connector-1",
             "X-Octoprox-Exit-Ip: 203.0.113.9",
             "X-Octoprox-Exit-Source: last-seen",
             "X-Octoprox-Exit-Checked-At: 2026-10-27T09:30:05Z",
