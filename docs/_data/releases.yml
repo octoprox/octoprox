@@ -10,6 +10,14 @@
 #   changes  what changed, for the people who use Octoprox; `docs` is a page
 #            on octoprox.com that explains it, such as connecting#exit-headers
 
+- version: 6.6.2
+  date: 2026-11-05
+  title: Connector ID exit header
+  changes:
+    - text: "With exit headers on, every response through the proxy now carries `X-Octoprox-Connector-Id`, so you can count requests per connector. It is sent even when the exit IP is unknown."
+      docs: connecting#exit-headers
+    - text: "Opening a connector on the Connectors page now shows its ID under Details, with a button that copies it."
+
 - version: 6.6.1
   date: 2026-11-05
   title: Faster observation log cleanup
