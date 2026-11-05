@@ -11,7 +11,7 @@ from typing import Any
 
 import pytest
 import structlog
-from sqlalchemy import text
+from sqlalchemy import event, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from api.core import utc_now
@@ -625,6 +625,25 @@ class TestObservations:
         assert await repo.delete_expired(now, 0, {"short": 0, "inherits": 1}) == 1
         await db_session.commit()
         assert await kept() == {"short": 1, "forever": 3, "inherits": 1, "same": 2, None: 2, "deleted": 2}
+
+    async def test_retention_does_not_read_back_the_rows_it_deletes(self, db_session: AsyncSession) -> None:
+        """An hourly run deletes millions of rows; returning each id stalled the worker's loop for seconds."""
+        repo = ObservationRepository(db_session)
+        statements: list[str] = []
+
+        def record(conn: object, cursor: object, statement: str, *args: object) -> None:
+            if statement.lstrip().upper().startswith("DELETE"):
+                statements.append(statement)
+
+        engine = db_session.bind.sync_engine  # type: ignore[union-attr]
+        event.listen(engine, "before_cursor_execute", record)
+        try:
+            await repo.delete_expired(utc_now(), 7, {"short": 1})
+        finally:
+            event.remove(engine, "before_cursor_execute", record)
+
+        assert len(statements) == 2
+        assert not [statement for statement in statements if "RETURNING" in statement.upper()]
 
     async def test_the_log_is_planned_for_its_own_filter_values(self, db_session: AsyncSession) -> None:
         """A cached generic plan would sort a busy proxy's every row, or walk the whole history for a rare one."""

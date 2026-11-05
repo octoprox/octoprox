@@ -696,7 +696,9 @@ class ObservationRepository:
             statements.append(rest)
         deleted = 0
         for statement in statements:
-            deleted += int((await self._session.execute(statement)).rowcount or 0)  # type: ignore[attr-defined]
+            # The ORM can't evaluate ANY/ALL in Python, so it would sync the session by RETURNING every deleted id.
+            result = await self._session.execute(statement.execution_options(synchronize_session=False))
+            deleted += int(result.rowcount or 0)  # type: ignore[attr-defined]
         return deleted
 
     async def unlogged_project_ids(self) -> set[str]:
