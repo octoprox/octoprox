@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 from abc import ABC, abstractmethod
 from typing import Any, Literal
+from uuid import UUID, uuid5
 
 import structlog
 
@@ -113,6 +114,9 @@ META_SESSION_GENERATION = "session_generation"
 META_LIST_IDENTITY = "list_identity"
 META_PROVIDER = "provider"
 
+# Namespace of the proxy IDs derived from what a row stands for (ProxyBuilder.stable_id).
+_STABLE_PROXY_IDS = UUID("40469fb7-f914-4101-abe6-ebacafcae08c")
+
 
 class ProxyBuilder:
     """Assembles proxy rows for one proxy type from render contexts."""
@@ -149,6 +153,15 @@ class ProxyBuilder:
             ) from exc
         return check_port_range(number)
 
+    def stable_id(self, key: str) -> str:
+        """The ID of the connector's row for ``key`` (what the row stands for), the same in every sync.
+
+        Two syncs that race build the same rows, and the insert skips an ID that is stored, so one row lands. Only for
+        what comes back as itself: a fresh vendor session keeps a random ID, or it would take over the quarantine,
+        health and verdicts of the session it replaces.
+        """
+        return str(uuid5(_STABLE_PROXY_IDS, f"{self._connector_id}/{key}"))
+
     def build(self, ctx: RenderContext, *, port: int | None = None, status: ProxyStatus) -> Proxy:
         """Create a proxy for a gateway-style (session/port) type."""
         host = self._renderer.render(self._ptype.host, ctx, "proxy")
@@ -166,7 +179,7 @@ class ProxyBuilder:
         return proxy
 
     def build_listed(self, listed: ListedProxy, ctx: RenderContext) -> Proxy:
-        """Create a proxy for a list-mode entry (credentials come from the vendor)."""
+        """Create a proxy for a list-mode entry (credentials come from the vendor), its ID derived from the entry."""
         username = listed.username
         password = listed.password
         if self._ptype.username is not None:
@@ -184,6 +197,7 @@ class ProxyBuilder:
         if listed.place:
             record_place_claim(metadata, listed.place, vendor=True)
         return Proxy(
+            id=self.stable_id(f"list/{ctx.target_country or ''}/{listed.identity}"),
             host=listed.host,
             port=listed.port,
             protocol=listed.protocol,
@@ -324,10 +338,12 @@ class DynamicSessionStrategy(SyncStrategy):
         return True
 
     def build_gateway(self) -> Proxy:
+        """The connector's gateway row, the same ID each time: its verdicts are per client session, which outlive it."""
         proxy = self._builder.build(
             self._ctx.with_slot(session_id=self._session_ids.generate()),
             status=ProxyStatus.HEALTHY,
         )
+        proxy.id = self._builder.stable_id("gateway")
         proxy.metadata[META_DYNAMIC_SESSIONS] = "true"
         return proxy
 
@@ -394,10 +410,30 @@ class PortModeStrategy(SyncStrategy):
     async def sync(self, existing: list[Proxy]) -> SyncResult:
         target = self._builder.slot_count(self._ctx)
         if self._countries:
-            return await self._sync_by_country(existing, target)
+            to_add, to_remove = await self._sync_by_country(existing, target)
+        elif self._sequential:
+            to_add, to_remove = await self._sync_sequential(existing, target)
+        else:
+            to_add, to_remove = await self._sync_fixed(existing, target)
+        # A refresh that re-pins a fixed row keeps its ID, derived from its first IP: a new row of that IP takes the
+        # next ID of its key no row holds, which two syncs reading the same rows pick alike.
+        held = {proxy.id for proxy in existing}
+        for proxy in to_add:
+            key = self._row_key(proxy)
+            stable = self._builder.stable_id(key)
+            number = 1
+            while stable in held:
+                number += 1
+                stable = self._builder.stable_id(f"{key}/{number}")
+            proxy.id = stable
+        return to_add, to_remove
+
+    def _row_key(self, proxy: Proxy) -> str:
+        """What a new row stands for: its gateway port (sequential), or the exit IP its username pins (fixed)."""
+        group = self._ctx.target_country or ""
         if self._sequential:
-            return await self._sync_sequential(existing, target)
-        return await self._sync_fixed(existing, target)
+            return f"port/{group}/{proxy.port}"
+        return f"ip/{group}/{proxy.metadata[META_DISCOVERED_IP]}"
 
     # --- country-filtered sync ------------------------------------------------------
 
@@ -616,7 +652,8 @@ class PortModeStrategy(SyncStrategy):
         known = await self._known_ips.fetch(self._ctx)
         if not known:
             return None
-        available = [entry for entry in known if entry.ip not in existing_ips]
+        # One entry per IP: an IP listed twice would pin two slots to one exit, under one ID.
+        available = list({entry.ip: entry for entry in known if entry.ip not in existing_ips}.values())
         if len(available) < len(slots):
             logger.warning(
                 "Not enough IPs available from provider",
@@ -862,10 +899,22 @@ class ListModeStrategy(SyncStrategy):
         return True
 
     async def sync(self, existing: list[Proxy]) -> SyncResult:
+        """Add the entries no row holds and remove the rows of entries gone from the list.
+
+        A second row of one entry goes too, the oldest staying: syncs that raced before rows took IDs derived from
+        their entries stored the list twice.
+        """
         listed = await self._listed()
         wanted = {entry.identity: entry for entry in listed}
-        current = {self._identity(p): p for p in existing}
-        to_remove = [p.id for identity, p in current.items() if identity not in wanted]
+        current: dict[str, Proxy] = {}
+        to_remove: list[str] = []
+        for proxy in sorted(existing, key=lambda p: (p.created_at, p.id)):
+            identity = self._identity(proxy)
+            if identity in current:
+                to_remove.append(proxy.id)
+            else:
+                current[identity] = proxy
+        to_remove.extend(p.id for identity, p in current.items() if identity not in wanted)
         to_add = [
             self._builder.build_listed(entry, self._ctx)
             for identity, entry in wanted.items()

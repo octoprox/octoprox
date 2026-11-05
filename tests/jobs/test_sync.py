@@ -9,11 +9,13 @@ vendor round trip, and a scripted plugin provider (:class:`Vendor`) for the refr
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any
 
 import pytest
+import structlog
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from api.core.roles import JobKind
@@ -255,6 +257,35 @@ class TestWhatIsSynced:
     ) -> None:
         await job.run(batch_of(scripted.id))
         assert vendor.calls == ["sync"]
+
+
+class TestRacingRuns:
+    async def test_two_runs_that_read_an_empty_pool_store_its_rows_once(
+        self, job: ProviderSyncJob, rows: Rows, scripted: Connector, vendor: Vendor, redis_client: RedisClient
+    ) -> None:
+        """A create's sync and the hourly one at once: both build the same IDs, and the second insert stores nothing."""
+        both_read = asyncio.Barrier(2)
+
+        async def sync(existing: list[Proxy]) -> tuple[list[Proxy], list[str]]:
+            assert existing == []
+            await both_read.wait()
+            listed = [
+                Proxy(id=f"listed-{n}", host="10.0.0.1", port=8000 + n, connector_id=scripted.id, status=ProxyStatus.HEALTHY)
+                for n in range(2)
+            ]
+            return listed, []
+
+        vendor.sync = sync
+
+        # Bounded, so a run that never reaches the vendor fails the test instead of leaving the other at the barrier.
+        with structlog.testing.capture_logs() as logs:
+            async with asyncio.timeout(10):
+                await asyncio.gather(job.sync(scripted.id), job.sync(scripted.id))
+
+        assert sorted(proxy.id for proxy in await rows.of(scripted)) == ["listed-0", "listed-1"]
+        # Only the run whose insert stored the rows announced and logged them.
+        assert await announced(redis_client) == [("proxy", "")]
+        assert [log["added"] for log in logs if log["event"] == "Connector synced"] == [2]
 
 
 class TestRefresh:

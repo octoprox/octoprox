@@ -211,8 +211,8 @@ async def delete_proxy(request: Request, project_id: str, proxy_id: str, _guard:
     """Remove a proxy from the pool: a cloud provider's (AWS, GCP, Azure) is marked TERMINATING and the scale job
     terminates its instance, then deletes the row.
 
-    Any other proxy is removed at once; a vendor slot is then brought back
-    fresh by a sync of its connector.
+    Any other proxy is removed at once, and a sync of its connector brings a vendor slot back: a session slot as a
+    fresh session, a list entry, port or gateway under its old ID, with what is still kept against that ID.
     """
     await proxy_service_of(request).remove(project_id, proxy_id)
 

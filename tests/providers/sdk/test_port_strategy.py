@@ -55,6 +55,16 @@ class TestOxylabsSequentialPorts:
         assert proxy_url == "http://user-alice:pw@isp.oxylabs.io:8001"
         assert str(request.url) == "https://ip.oxylabs.io/location"
 
+    async def test_a_row_id_derives_from_its_port(self, builtins: dict[str, ProviderDescriptor]) -> None:
+        """Two syncs that raced build the same row for a port whatever exit each found, so the insert stores it once."""
+        rows = []
+        for ips in ({8001: "1.1.1.1", 8002: "2.2.2.2"}, {8001: "5.5.5.5", 8002: "2.2.2.2"}):
+            vendor = MockVendor(api_handler=lambda r: json_response({}))
+            vendor.discovery_handler = _discovery_by_port(ips)(vendor)
+            to_add, _ = await self._provider(builtins, vendor, 2).sync_proxies([])
+            rows.append({p.port: p.id for p in to_add})
+        assert rows[0] == rows[1] and len(set(rows[0].values())) == 2
+
     async def test_stops_at_first_failing_port(self, builtins: dict[str, ProviderDescriptor]) -> None:
         vendor = MockVendor(api_handler=lambda r: json_response({}))
         vendor.discovery_handler = _discovery_by_port({8001: "1.1.1.1", 8002: None, 8003: "3.3.3.3"})(vendor)
@@ -115,6 +125,35 @@ class TestBrightDataPinnedIps:
             assert proxy.metadata["index"] == str(index)
             assert proxy.status == ProxyStatus.HEALTHY
         assert vendor.discovery_requests == []  # no per-proxy discovery needed
+
+    async def test_a_row_id_derives_from_its_pinned_ip(self, builtins: dict[str, ProviderDescriptor]) -> None:
+        """The same IP is the same row whatever slot it lands in; another IP is another exit, so another row."""
+        rows = []
+        for listed in (["5.5.5.5", "6.6.6.6"], ["6.6.6.6", "5.5.5.5"], ["7.7.7.7"]):
+            vendor = MockVendor(api_handler=lambda r, listed=listed: json_response([{"ip": ip, "country": "us"} for ip in listed]))
+            to_add, _ = await self._provider(builtins, vendor, {"num_proxies": 2}).sync_proxies([])
+            rows.append({p.display_host: p.id for p in to_add})
+        assert rows[0] == rows[1] and len(set(rows[0].values())) == 2
+        assert not set(rows[2].values()) & set(rows[0].values())
+
+    async def test_a_new_row_of_the_ip_a_row_was_re_pinned_off_takes_the_next_id(self, builtins: dict[str, ProviderDescriptor]) -> None:
+        """A refresh that re-pins a row keeps its ID, so a new row of the row's first IP takes the next ID of that IP:
+        the same in two syncs that raced from the same rows, so the insert still stores one."""
+        vendor = MockVendor(api_handler=lambda r: json_response([{"ip": "5.5.5.5", "country": "us"}]))
+        (first,), _ = await self._provider(builtins, vendor, {"num_proxies": 1}).sync_proxies([])
+        repinned = first.model_copy(update={"display_host": "9.9.9.9", "metadata": {**first.metadata, "discovered_ip": "9.9.9.9"}})
+        ids = []
+        for _ in range(2):
+            to_add, _ = await self._provider(builtins, vendor, {"num_proxies": 2}).sync_proxies([repinned])
+            assert [p.display_host for p in to_add] == ["5.5.5.5"]
+            ids.append(to_add[0].id)
+        assert ids[0] == ids[1] != first.id
+
+    async def test_an_ip_listed_twice_fills_one_slot(self, builtins: dict[str, ProviderDescriptor]) -> None:
+        listed = ["5.5.5.5", "5.5.5.5", "6.6.6.6"]
+        vendor = MockVendor(api_handler=lambda r: json_response([{"ip": ip, "country": "us"} for ip in listed]))
+        to_add, _ = await self._provider(builtins, vendor, {"num_proxies": 2}).sync_proxies([])
+        assert [p.display_host for p in to_add] == ["5.5.5.5", "6.6.6.6"]
 
     async def test_falls_back_to_discovery_when_api_empty(self, builtins: dict[str, ProviderDescriptor]) -> None:
         vendor = MockVendor(api_handler=lambda r: json_response([]))

@@ -41,6 +41,14 @@ class TestOxylabsResidential:
             assert proxy.tags == ["oxylabs", "residential"]
         assert len({p.metadata["session_id"] for p in to_add}) == 3
 
+    async def test_slots_keep_random_ids(self, builtins: dict[str, ProviderDescriptor], runtime: SdkRuntime) -> None:
+        """A fresh session is a new exit, not the slot it replaces: an ID derived from the slot would hand it the old
+        one's quarantine, health and verdicts."""
+        provider = self._provider(builtins, runtime, {"num_proxies": 2})
+        first, _ = await provider.sync_proxies([])
+        second, _ = await provider.sync_proxies([])
+        assert not {p.id for p in first} & {p.id for p in second}
+
     async def test_country_is_omitted_when_unset(self, builtins: dict[str, ProviderDescriptor], runtime: SdkRuntime) -> None:
         provider = self._provider(builtins, runtime, {"num_proxies": 1})
         to_add, _ = await provider.sync_proxies([])

@@ -80,6 +80,16 @@ class TestGatewayRow:
         assert await provider.sync_proxies(to_add) == ([], [])
         assert await provider.refresh_ips(to_add) == ([], [])
 
+    async def test_the_gateway_has_one_id_per_connector(self, builtins: dict[str, ProviderDescriptor], runtime: SdkRuntime) -> None:
+        """Two syncs that raced build the same gateway row, so the insert stores one."""
+        first, _ = await _oxylabs(builtins, runtime).sync_proxies([])
+        second, _ = await _oxylabs(builtins, runtime).sync_proxies([])
+        assert first[0].id == second[0].id
+        credential = make_credential("oxylabs", {"proxy_type": "residential", "username": "alice", "password": "pw"})
+        other = make_connector("oxylabs", {"session_mode": "dynamic"}, connector_id="conn-2")
+        elsewhere, _ = await DescriptorProvider(builtins["oxylabs"], other, credential, runtime).sync_proxies([])
+        assert elsewhere[0].id != first[0].id
+
     async def test_switching_a_pool_to_dynamic_replaces_its_slots(self, builtins: dict[str, ProviderDescriptor], runtime: SdkRuntime) -> None:
         provider = _oxylabs(builtins, runtime)
         slots = [

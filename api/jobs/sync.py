@@ -101,8 +101,8 @@ class ProviderSyncJob(Job):
 
         kept = [proxy for proxy in refreshed if proxy.id not in gone]
         await self._proxies.apply_sync([SyncEdit.between(before[proxy.id], proxy) for proxy in kept], removed)
-        if added:
-            await self._proxies.bulk_add(added)
+        # A row another sync of the connector stored first, under the same ID, is not stored again.
+        added = await self._proxies.bulk_add(added)
         sightings = [Sighting.discovered(proxy) for proxy in [*kept, *added]]
         await self._attribution.observe([sighting for sighting in sightings if sighting is not None])
 

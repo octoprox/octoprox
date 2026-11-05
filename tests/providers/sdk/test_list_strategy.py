@@ -3,6 +3,8 @@
 
 """List-mode provisioning through the Webshare descriptor."""
 
+from datetime import UTC, datetime
+
 import httpx
 
 from api.models.proxy import Proxy, ProxyProtocol
@@ -69,6 +71,29 @@ async def test_sync_diff_and_cap(builtins: dict[str, ProviderDescriptor]) -> Non
 
     capped_add, _ = await _provider(builtins, vendor, {"num_proxies": 1}).sync_proxies([])
     assert [p.metadata["list_identity"] for p in capped_add] == ["a"]
+
+
+async def test_two_syncs_of_one_connector_build_the_same_rows(builtins: dict[str, ProviderDescriptor]) -> None:
+    """Two syncs that raced both found the pool empty: they build the same IDs, so the insert stores the list once."""
+    first, _ = await _provider(builtins, MockVendor(api_handler=_api), {}).sync_proxies([])
+    second, _ = await _provider(builtins, MockVendor(api_handler=_api), {}).sync_proxies([])
+    assert [p.id for p in second] == [p.id for p in first] and len({p.id for p in first}) == 2
+
+    credential = make_credential("webshare", {"api_key": "KEY"})
+    other = make_connector("webshare", {"mode": "direct"}, connector_id="conn-2")
+    elsewhere, _ = await DescriptorProvider(builtins["webshare"], other, credential, MockVendor(api_handler=_api).runtime()).sync_proxies([])
+    assert not {p.id for p in elsewhere} & {p.id for p in first}
+
+
+async def test_a_second_row_of_one_entry_goes_and_the_oldest_stays(builtins: dict[str, ProviderDescriptor]) -> None:
+    """Syncs that raced before rows took IDs derived from their entries stored the list twice; the next sync mends it."""
+    def row(proxy_id: str, second: int) -> Proxy:
+        created = datetime(2026, 11, 4, 14, 46, second, tzinfo=UTC)
+        return Proxy(id=proxy_id, host="1.1.1.1", port=8000, connector_id="conn-1", metadata={"list_identity": "a"}, created_at=created)
+
+    to_add, to_remove = await _provider(builtins, MockVendor(api_handler=_api), {}).sync_proxies([row("a-newer", 31), row("b-older", 9)])
+    assert to_remove == ["a-newer"]
+    assert [p.metadata["list_identity"] for p in to_add] == ["c"]
 
 
 async def test_cap_stops_paging_once_reached(builtins: dict[str, ProviderDescriptor]) -> None:
