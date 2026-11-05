@@ -10,6 +10,19 @@
 #   changes  what changed, for the people who use Octoprox; `docs` is a page
 #            on octoprox.com that explains it, such as connecting#exit-headers
 
+- version: 6.6.0
+  date: 2026-11-05
+  title: Move refused sessions, safer project deletion and restore
+  changes:
+    - text: "A new Move refused sessions setting on the project's Location tab gives a client session a new exit when preflight refuses it, instead of a 502. The session keeps that exit for its later requests. It is off by default and needs preflight on."
+      docs: location-routing#moving-a-refused-session
+    - text: "Deleting a project with cloud connectors now terminates their instances first. Until they are gone, the project shows as deleting, its clients get 407 and it takes no new connectors. The API answers 202 and sets `pending_deletion` on the project during this time."
+      docs: api#delete-project
+    - text: "Restoring a backup now terminates the instances of cloud connectors that the backup does not hold. Those connectors move to a project named '<project> (deleting)', which goes away once their instances are terminated."
+      docs: api
+    - text: "Provider syncs that run at the same time no longer add the same proxy twice. A list sync also removes duplicate entries left behind by earlier versions."
+      docs: providers
+
 - version: 6.5.3
   date: 2026-11-03
   title: Lower Postgres memory use
