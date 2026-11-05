@@ -10,6 +10,12 @@
 #   changes  what changed, for the people who use Octoprox; `docs` is a page
 #            on octoprox.com that explains it, such as connecting#exit-headers
 
+- version: 6.6.1
+  date: 2026-11-05
+  title: Faster observation log cleanup
+  changes:
+    - text: "The hourly cleanup of expired observation log entries runs faster. Workers no longer stall for a few seconds while old entries are removed."
+
 - version: 6.6.0
   date: 2026-11-05
   title: Move refused sessions, safer project deletion and restore
