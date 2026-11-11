@@ -10,6 +10,27 @@
 #   changes  what changed, for the people who use Octoprox; `docs` is a page
 #            on octoprox.com that explains it, such as connecting#exit-headers
 
+- version: 6.7.0
+  date: 2026-11-11
+  title: Audit log, History tabs and Octoprox Enterprise
+  changes:
+    - text: "Every change a person makes, in the web UI or through the API, is now recorded in an audit log. Each entry says who made the change, when, and which fields changed. Secrets are never stored, only whether they were set, changed or cleared."
+      docs: audit-log
+    - text: "Projects, connectors, credentials, proxies, tunnel devices, users and custom providers now have a History tab in their inspector. Settings cards under Administration, such as IP attribution, Sign-in, WireGuard, OpenVPN and Backup & Migration, have a History button."
+      docs: audit-log#where-to-read-it
+    - text: "When a change is made with a personal access token, its entry names the token. A token's first call now sets its last use, even when that call is refused."
+      docs: sso#personal-access-tokens
+    - text: "Admins choose how long the audit log keeps entries on the Activity page under Administration. The default is 365 days, and 0 keeps entries forever."
+      docs: audit-log#retention
+    - text: "Backups now include the audit log, the retention setting and the license key. A restore keeps the install's own history, adds the entries from the backup and records the restore itself."
+      docs: audit-log#backups
+    - text: "Octoprox Enterprise is a new licensed edition that runs from its own image on the same database. It records every sign-in and token event with the client address. It also shows the whole install's activity on one page and exports it as JSON lines for a SIEM."
+      docs: enterprise
+    - text: "Upgrade note: the existing history of custom providers moves into the audit log and now follows its retention. Entries older than 365 days are deleted unless an admin sets a longer retention or 0. The provider audit endpoint under /api/v1/providers is gone, so read a provider's history from /api/v1/audit/provider/{id} instead."
+      docs: api#audit-log
+    - text: "Upgrade note: during a rolling upgrade from 6.6, do not change custom providers or export or import backups until every api runs 6.7. To go back to 6.6, first downgrade the database to revision 057 with the 6.7 image."
+      docs: deployment#restarts-and-upgrades
+
 - version: 6.6.2
   date: 2026-11-05
   title: Connector ID exit header
