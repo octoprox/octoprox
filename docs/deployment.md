@@ -114,6 +114,16 @@ Browsers with the web UI open notice an upgrade on their next call to an api. A 
 
 **An upgrade from 6.3 or earlier can roll, at the cost of a few IP observations.** The new release drops two fields from the observation log rows that older releases still write. While old and new processes run together, an older worker fails the observation batches it takes, and another worker runs them again a minute later, usually one of the new release; a batch that fails five times is dropped. An older worker also skips the preflight sightings the new gateways send, and the observation log page fails on an older api. Stop the old release before starting the new one to avoid all of it. A 6.3 started on the upgraded database records no IP observations.
 
+**An upgrade from 6.6 can roll, with custom providers and backups left alone until it is done.** The new release moves the custom provider history into the new [audit log]({{ site.baseurl }}/audit-log) and drops the table 6.6 kept it in. While old and new processes run together, an api of the older release fails to change a custom provider or show its history, and to export or import a backup: leave those until every api runs the new release. Going back to 6.6 means downgrading the database to revision 057 with the new release's image first, since 6.6 does not start on the upgraded database. Stop the new release, run the downgrade in a one-off container of its image with the api's settings, then start 6.6. With docker compose, while the file still names the new image (the service is `octoprox` in `docker-compose.ghcr.yml`):
+
+```bash
+docker compose -f docker-compose.cluster.ghcr.yml stop
+docker compose -f docker-compose.cluster.ghcr.yml run --rm api-1 \
+  python -c "from alembic import command; from api.core.config import settings; from api.db.migrations import alembic_config; command.downgrade(alembic_config(settings.database_url_sync), '057')"
+```
+
+The downgrade keeps the custom provider entries and drops the rest of the audit log, the audit retention setting and the license key.
+
 ## When Redis or Postgres is lost
 
 **Redis.** Gateways go on routing on the feed they have. Calls on the request path fail open after the request deadline (`redis_request_timeout`, 2 seconds): a sticky session is bound afresh, preflight sends its echo instead of reading the cache, a rate window lets the request through. Counters, sightings and observations wait in memory, bounded. When Redis returns, empty or not, the controller takes its lease again and republishes the feed. After a wipe, the workers create their consumer groups again, the producers refill the job streams within a period of each kind, the controller asks for every proxy to be re-attributed, and traffic blocks are decided again as soon as a limited connector carries bytes. A wipe loses soft state and the work in hand only: quarantines, rate windows, sticky bindings, preflight verdicts, traffic blocks, the counts not flushed yet (up to a minute), job entries in flight, queued observations and sightings, failure examples and MITM captures. See [Redis loss and recovery]({{ site.baseurl }}/architecture#redis-loss-and-recovery).
@@ -205,7 +215,7 @@ Each carrying gateway publishes its peer status to Redis every 10 seconds and th
 
 ## Echo endpoint
 
-The api serves `GET /echo` on port 8000 for [IP attribution]({{ site.baseurl }}/ip-attribution): health checks, discovery and preflight request it *through* a proxy to learn the exit IP. The bundled nginx config adds `X-Forwarded-For` on the API listener; set `geo.echo.trusted_proxies` on the api services to the nginx address range so they report the real client instead of the balancer.
+The api serves `GET /echo` on port 8000 for [IP attribution]({{ site.baseurl }}/ip-attribution): health checks, discovery and preflight request it *through* a proxy to learn the exit IP. The bundled nginx config adds `X-Forwarded-For` on the API listener; set `geo.echo.trusted_proxies` on the api services to the nginx address range so they report the real client instead of the balancer. Octoprox Enterprise reads the address of each sign-in through the same setting for its [audit log]({{ site.baseurl }}/audit-log#client-addresses). List balancers there. Keep uvicorn's `FORWARDED_ALLOW_IPS` at its default only while nothing forwards to the api over `127.0.0.1`; with a proxy or sidecar on the same host or in the same pod, set it to an empty value, so that one setting decides which `X-Forwarded-For` entries are believed (see [Client addresses]({{ site.baseurl }}/audit-log#client-addresses)).
 
 The request travels out through the vendor and back in from the public internet, so the echo URL in the attribution settings must be reachable from there. When the cluster sits on a private network, or to keep echo traffic off the api, run a process of role `echo` on a public host (same image, port 8000, no Postgres, Redis or secret) and point the settings' echo URL at it. See [IP Attribution]({{ site.baseurl }}/ip-attribution#echo-endpoint).
 

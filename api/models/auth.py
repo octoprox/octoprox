@@ -11,11 +11,13 @@ self-registers. See docs/sso.md.
 
 from datetime import datetime
 from enum import StrEnum
+from typing import ClassVar
 from uuid import uuid4
 
 from pydantic import BaseModel, Field, field_validator
 
 from api.core import utc_now
+from api.models.audit import Audited, AuditEntityType
 
 
 class AuthProviderKind(StrEnum):
@@ -38,8 +40,13 @@ PROVIDER_LABELS: dict[AuthProviderKind, str] = {
 MICROSOFT_MULTI_TENANT_ALIASES = frozenset({"common", "organizations", "consumers"})
 
 
-class AuthProviderConfig(BaseModel):
+class AuthProviderConfig(Audited):
     """What is stored for one provider: the OAuth client and whether it is on."""
+
+    audit_type: ClassVar[AuditEntityType] = AuditEntityType.SIGN_IN_PROVIDER
+    # The kind is the entry's entity id.
+    audit_ignored: ClassVar[frozenset[str]] = Audited.audit_ignored | {"kind", "updated_by"}
+    audit_masked: ClassVar[frozenset[str]] = frozenset({"client_secret"})
 
     kind: AuthProviderKind
     enabled: bool = False
@@ -48,6 +55,12 @@ class AuthProviderConfig(BaseModel):
     tenant_id: str = ""
     updated_by: str | None = None
     updated_at: datetime = Field(default_factory=utc_now)
+
+    def audit_id(self) -> str:
+        return self.kind.value
+
+    def audit_name(self) -> str:
+        return PROVIDER_LABELS[self.kind]
 
     @property
     def needs_tenant(self) -> bool:

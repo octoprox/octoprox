@@ -1,21 +1,29 @@
 # Copyright 2026 Octoprox Authors
 # SPDX-License-Identifier: Apache-2.0
 
-"""The heartbeat snapshot every process publishes, and the admin System view built from them.
+"""The heartbeat snapshot every process publishes, the admin System view built from them, and the install's settings.
 
-:class:`InstanceSnapshot` is one process's account of itself; :class:`SystemStats` is the cluster as the stores describe it.
+:class:`InstanceSnapshot` is one process's account of itself; :class:`SystemStats` is the cluster as the stores describe
+it; :class:`SystemSettings` is what an admin set for the whole install.
 """
 
 from __future__ import annotations
 
 from datetime import datetime
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, ClassVar, Literal
 
 from pydantic import BaseModel, Field, computed_field
 
 from api.core.leadership import LEASE_TTL_MS, STANDBY_POLL_MS
 from api.core.logging import error_label
 from api.core.roles import JobKind, Role
+from api.models.audit import (
+    DEFAULT_AUDIT_RETENTION_DAYS,
+    INSTALL_ENTITY_ID,
+    Audited,
+    AuditEntityType,
+    AuditRetention,
+)
 from api.models.tunnel import TunnelEndpointState
 
 if TYPE_CHECKING:
@@ -595,3 +603,29 @@ class SystemMetricsHistory(BaseModel):
     interval_seconds: int
     snapshots: list[SystemMetricsPoint] = Field(default_factory=list)
     table_growth: list[TableGrowth] = Field(default_factory=list)
+
+
+# --- Install settings --------------------------------------------------------------------------
+
+
+class SystemSettings(Audited):
+    """What an admin set for the whole install (``system_settings``): the audit log's retention and the license key.
+
+    The public code stores the key and never reads it; an extension does.
+    """
+
+    audit_type: ClassVar[AuditEntityType] = AuditEntityType.SYSTEM_SETTINGS
+    audit_masked: ClassVar[frozenset[str]] = frozenset({"license_key"})
+
+    audit_retention_days: int = DEFAULT_AUDIT_RETENTION_DAYS
+    license_key: str | None = None
+
+    def audit_id(self) -> str:
+        return INSTALL_ENTITY_ID
+
+    def audit_name(self) -> str:
+        return "System settings"
+
+    def audit_retention(self) -> AuditRetention:
+        """The audit log's retention as the Activity page shows it."""
+        return AuditRetention(days=self.audit_retention_days)

@@ -8,7 +8,7 @@ The api and workers read it again on its change entry, the controller adopts its
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import structlog
 from pydantic import ValidationError
@@ -17,6 +17,9 @@ from api.core.config import Settings
 from api.db.geo_repository import GeoSettingsRepository
 from api.db.session import SessionFactory
 from api.geo.models import GeoSettings, SourcePolicy
+
+if TYPE_CHECKING:
+    from api.core.audit import Actor
 
 logger = structlog.get_logger()
 
@@ -91,15 +94,21 @@ class GeoSettingsStore:
             self.adopt(row, stored=True)
         return self._settings
 
-    async def save(self, settings: GeoSettings, updated_by: str | None) -> GeoSettings:
-        """Persist and adopt ``settings``; the caller announces the save, which is how other processes learn of it."""
+    async def save(self, settings: GeoSettings, actor: Actor) -> GeoSettings:
+        """Persist and adopt ``settings``, recorded as ``actor``'s change; the caller announces the save, which is how
+        other processes learn of it."""
         if self._session_factory is None:
             self._settings = settings
             return settings
         async with self._session_factory() as session:
-            await GeoSettingsRepository(session).save(settings, updated_by=updated_by)
+            repository = GeoSettingsRepository(session)
+            # Until an admin first saves, the install runs on the config defaults: that save changes them.
+            stored = await repository.get()
+            before = stored if stored is not None else defaults_from_config(self._config)
+            await repository.save(settings, updated_by=actor.name)
+            await actor.updated(session, before, settings)
             await session.commit()
         self._settings = settings
         self._from_database = True
-        logger.info("Geo settings saved", updated_by=updated_by, conflict_rule=settings.default_conflict_rule.value)
+        logger.info("Geo settings saved", updated_by=actor.name, conflict_rule=settings.default_conflict_rule.value)
         return settings

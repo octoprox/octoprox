@@ -124,13 +124,15 @@ class AuthIdentityRepository:
             .values(last_login_at=utc_now(), email=email)
         )
 
-    async def delete(self, user_id: str, identity_id: str) -> bool:
+    async def delete(self, user_id: str, identity_id: str) -> AuthIdentity | None:
+        """Unlink one of a user's identities; the identity as it was, or None when the user has no such identity."""
         result = await self._session.execute(
-            delete(AuthIdentityModel).where(
-                AuthIdentityModel.id == identity_id, AuthIdentityModel.user_id == user_id
-            )
+            delete(AuthIdentityModel)
+            .where(AuthIdentityModel.id == identity_id, AuthIdentityModel.user_id == user_id)
+            .returning(AuthIdentityModel)
         )
-        return bool(result.rowcount and result.rowcount > 0)  # type: ignore[attr-defined]
+        model = result.scalar_one_or_none()
+        return self._to_domain(model) if model else None
 
     @staticmethod
     def _to_domain(model: AuthIdentityModel) -> AuthIdentity:
@@ -184,11 +186,27 @@ class ApiTokenRepository:
             update(ApiTokenModel).where(ApiTokenModel.id == token_id).values(last_used_at=when)
         )
 
-    async def delete(self, user_id: str, token_id: str) -> bool:
+    async def touch_first_use(self, token_id: str, when: datetime) -> bool:
+        """Stamp a token's first use, unless a use is stamped already; whether this call stamped it.
+
+        A concurrent first use waits on the row's lock, then finds the stamp and changes nothing.
+        """
         result = await self._session.execute(
-            delete(ApiTokenModel).where(ApiTokenModel.id == token_id, ApiTokenModel.user_id == user_id)
+            update(ApiTokenModel)
+            .where(ApiTokenModel.id == token_id, ApiTokenModel.last_used_at.is_(None))
+            .values(last_used_at=when)
         )
-        return bool(result.rowcount and result.rowcount > 0)  # type: ignore[attr-defined]
+        return bool(result.rowcount == 1)  # type: ignore[attr-defined]
+
+    async def delete(self, user_id: str, token_id: str) -> ApiToken | None:
+        """Revoke one of a user's tokens; the token as it was, or None when the user has no such token."""
+        result = await self._session.execute(
+            delete(ApiTokenModel)
+            .where(ApiTokenModel.id == token_id, ApiTokenModel.user_id == user_id)
+            .returning(ApiTokenModel)
+        )
+        model = result.scalar_one_or_none()
+        return self._to_domain(model) if model else None
 
     @staticmethod
     def _to_domain(model: ApiTokenModel) -> ApiToken:

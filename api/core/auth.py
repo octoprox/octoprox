@@ -20,6 +20,7 @@ from api.db.repository import UserRepository
 from api.db.session import get_db
 from api.models.user import UserRole
 from api.routes.auth import verify_jwt
+from api.routes.common import audit_log_of
 
 # A token's last use is stamped at most this often, so a busy script does
 # not turn every call into a write.
@@ -41,12 +42,15 @@ class CurrentUser:
     # How the caller proved who they are: a session JWT (the UI, or a
     # script that logged in with a password) or a personal access token.
     auth_method: Literal["jwt", "token"] = "jwt"
+    # The personal access token the caller authenticated with; None for a session JWT.
+    token_id: str | None = None
+    token_name: str | None = None
 
 
 DbDep = Annotated[AsyncSession, Depends(get_db)]
 
 
-async def user_from_api_token(session: AsyncSession, bearer: str) -> CurrentUser:
+async def user_from_api_token(request: Request, session: AsyncSession, bearer: str) -> CurrentUser:
     """Resolve a personal access token to its user, as the user is right now.
 
     Unlike a JWT, nothing is baked in: the role and the active flag come
@@ -69,9 +73,23 @@ async def user_from_api_token(session: AsyncSession, bearer: str) -> CurrentUser
             headers={"WWW-Authenticate": "Bearer"},
         )
     now = utc_now()
-    if token.last_used_at is None or now - token.last_used_at >= _LAST_USED_GRANULARITY:
+    if token.last_used_at is None:
+        first = await tokens.touch_first_use(token.id, now)
+        # Committed now: the hook records in a transaction of its own, so a
+        # call refused further on must not take back the stamp it was told of.
+        await session.commit()
+        if first:
+            await audit_log_of(request).token_first_used(request, token, user)
+    elif now - token.last_used_at >= _LAST_USED_GRANULARITY:
         await tokens.touch_last_used(token.id, now)
-    return CurrentUser(id=user.id, username=user.username, role=user.role, auth_method="token")
+    return CurrentUser(
+        id=user.id,
+        username=user.username,
+        role=user.role,
+        auth_method="token",
+        token_id=token.id,
+        token_name=token.name,
+    )
 
 
 async def get_current_user(
@@ -98,7 +116,7 @@ async def get_current_user(
         )
 
     if looks_like_token(credentials.credentials):
-        user = await user_from_api_token(session, credentials.credentials)
+        user = await user_from_api_token(request, session, credentials.credentials)
     else:
         payload = verify_jwt(credentials.credentials, settings.jwt_secret)
         if not payload:

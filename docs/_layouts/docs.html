@@ -92,6 +92,13 @@
     .content h1 { font-size: 26px; font-weight: 600; letter-spacing: -0.01em; line-height: 1.25; margin-bottom: 6px; }
     .content .subtitle { font-size: 15px; color: var(--muted); margin-bottom: 28px; }
     .content .release-meta { font-size: 13px; color: var(--muted); margin-top: -4px; }
+    /* A call to action: a button, then a note; under the subtitle it sits closer */
+    .content .cta { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 14px; margin: 0 0 28px; font-size: 14px; color: var(--muted); }
+    .content .subtitle + .cta { margin-top: -12px; }
+    .content .cta a { display: inline-flex; align-items: center; height: 40px; padding: 0 18px; border-radius: 8px; background: var(--primary); color: #fff; font-weight: 500; }
+    .content .cta a:hover { background: var(--primary-hover); color: #fff; }
+    /* The address Get in touch shows (assets/contact.js) */
+    .content .contact-address { overflow-wrap: anywhere; -webkit-user-select: all; user-select: all; }
     .content h2 { font-size: 18px; font-weight: 600; margin-top: 40px; margin-bottom: 12px; padding-bottom: 8px; border-bottom: 1px solid var(--line); }
     .content h3 { font-size: 15px; font-weight: 600; margin-top: 28px; margin-bottom: 8px; }
     .content h4 { font-size: 13.5px; font-weight: 600; margin-top: 20px; margin-bottom: 6px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; }
@@ -139,6 +146,13 @@
       .content h2 { font-size: 17px; }
       .docs-main { padding: 20px 16px 40px; }
     }
+    /* Touch screens: 44 px targets */
+    @media (pointer: coarse) {
+      header nav a { display: inline-flex; align-items: center; min-height: 44px; }
+      header .theme-toggle, header .menu-toggle { width: 44px; height: 44px; }
+      .sidebar-section a { height: 44px; }
+      .content .cta a { height: 44px; }
+    }
     /* Theme toggle */
     .theme-toggle { display: inline-flex; align-items: center; justify-content: center; width: 34px; height: 34px; border-radius: 6px; border: 1px solid var(--line); background: var(--surface); color: var(--muted); cursor: pointer; flex: none; }
     .theme-toggle:hover { color: var(--fg); background: var(--raised); }
@@ -159,7 +173,8 @@
     </a>
     <div class="header-right">
       <nav class="header-nav">
-        <a href="{{ site.baseurl }}/getting-started" class="active">Docs</a>
+        <a href="{{ site.baseurl }}/getting-started" {% if page.nav_id != 'enterprise' %}class="active"{% endif %}>Docs</a>
+        <a href="{{ site.baseurl }}/enterprise" {% if page.nav_id == 'enterprise' %}class="active"{% endif %}>Enterprise</a>
         <a href="https://github.com/octoprox/octoprox">GitHub</a>
       </nav>
       <button class="theme-toggle" type="button" onclick="toggleTheme()" aria-label="Toggle dark mode" title="Toggle dark mode">
@@ -178,6 +193,8 @@
         <a href="{{ site.baseurl }}/connecting" {% if page.nav_id == 'connecting' %}class="active"{% endif %}>Connecting Clients</a>
         <a href="{{ site.baseurl }}/configuration" {% if page.nav_id == 'configuration' %}class="active"{% endif %}>Configuration</a>
         <a href="{{ site.baseurl }}/sso" {% if page.nav_id == 'sso' %}class="active"{% endif %}>Single Sign-On &amp; API Tokens</a>
+        <a href="{{ site.baseurl }}/audit-log" {% if page.nav_id == 'audit-log' %}class="active"{% endif %}>Audit Log</a>
+        <a href="{{ site.baseurl }}/enterprise" {% if page.nav_id == 'enterprise' %}class="active"{% endif %}>Octoprox Enterprise</a>
         <a href="{{ site.baseurl }}/scrapoxy-migration" {% if page.nav_id == 'scrapoxy-migration' %}class="active"{% endif %}>Migrating from Scrapoxy</a>
       </div>
       <div class="sidebar-section">
@@ -237,6 +254,7 @@
       document.getElementById('sidebar').classList.toggle('open');
     }
   </script>
+  <script src="{{ site.baseurl }}/assets/contact.js"></script>
   <!-- Mermaid diagrams. A ```mermaid fence reaches the page in one of two shapes:
        plain kramdown gives <pre><code class="language-mermaid">, and GitHub Pages
        (kramdown + Rouge) gives <div class="language-mermaid highlighter-rouge">

@@ -15,6 +15,7 @@ from datetime import datetime, timedelta
 from typing import Any
 
 import pytest
+import structlog
 from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -26,7 +27,9 @@ from api.core.stats import (
     StepMetricDelta,
     TunnelPeerMetricDelta,
 )
+from api.db.audit_repository import AuditRepository, SystemSettingsRepository
 from api.db.models import (
+    AuditLogModel,
     ConnectorExitIpModel,
     ConnectorMetricsModel,
     FailureMetricsModel,
@@ -53,6 +56,7 @@ from api.db.wireguard_repository import WireGuardPeerRepository
 from api.geo.runtime import GeoStack
 from api.jobs.job import JobBatch
 from api.jobs.metrics import CompactionJob, MetricsFlushJob
+from api.models.audit import AuditEntry
 from api.models.connector import Connector
 from api.models.openvpn import OpenVpnPeer
 from api.models.project import Project
@@ -140,6 +144,32 @@ async def stored(sessions: async_sessionmaker[AsyncSession], *rows: Any) -> None
     """Write ``rows``, committed."""
     async with sessions() as session:
         session.add_all(rows)
+        await session.commit()
+
+
+async def audited(sessions: async_sessionmaker[AsyncSession], now: datetime, *ages: int) -> None:
+    """One audit entry recorded each of ``ages`` days before ``now``, committed."""
+    async with sessions() as session:
+        await AuditRepository(session).add(
+            [
+                AuditEntry(created_at=now - timedelta(days=age), action="updated", entity_type="project", entity_id=f"p{age}")
+                for age in ages
+            ]
+        )
+        await session.commit()
+
+
+async def audit_ages(sessions: async_sessionmaker[AsyncSession], now: datetime) -> list[int]:
+    """How many days before ``now`` each audit entry left was recorded, youngest first."""
+    async with sessions() as session:
+        recorded_at = (await session.execute(select(AuditLogModel.created_at))).scalars().all()
+    return sorted((now - at).days for at in recorded_at)
+
+
+async def keep_audit_entries(sessions: async_sessionmaker[AsyncSession], days: int) -> None:
+    """Set the audit log's retention, as an admin does."""
+    async with sessions() as session:
+        await SystemSettingsRepository(session).set_audit_retention(days)
         await session.commit()
 
 
@@ -853,3 +883,31 @@ class TestCompaction:
 
         assert await totals(sessions, PROJECT_WINDOWS, project.id, "gone") == {project.id: 3}
         assert await totals(sessions, PROXY_WINDOWS, "gone-proxy") == {}
+
+    async def test_audit_entries_are_kept_a_year_until_an_admin_sets_their_retention(
+        self, compaction: CompactionJob, sessions: async_sessionmaker[AsyncSession]
+    ) -> None:
+        now = utc_now()
+        await audited(sessions, now, 400, 366, 364, 1)
+
+        with structlog.testing.capture_logs() as logs:
+            await compaction.run(COMPACTION)
+
+        assert await audit_ages(sessions, now) == [1, 364]
+        assert [log["audit_entries_deleted"] for log in logs if log["event"] == "Metrics compaction complete"] == [2]
+
+    async def test_audit_entries_past_the_retention_an_admin_set_are_deleted_and_none_at_zero_days(
+        self, compaction: CompactionJob, sessions: async_sessionmaker[AsyncSession]
+    ) -> None:
+        now = utc_now()
+        await audited(sessions, now, 1000, 31, 29)
+        await keep_audit_entries(sessions, 30)
+
+        await compaction.run(COMPACTION)
+        assert await audit_ages(sessions, now) == [29]
+
+        await audited(sessions, now, 5000)
+        await keep_audit_entries(sessions, 0)
+
+        await compaction.run(COMPACTION)
+        assert await audit_ages(sessions, now) == [29, 5000]

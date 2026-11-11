@@ -21,7 +21,7 @@ Request bodies are JSON, and a request that sends one must say so with `Content-
 
 ## Authentication
 
-All API endpoints except `/api/v1/auth/*` and the ops endpoints (`/live`, `/ready`, `/health`, `/metrics`, see [Health Check](#health-check)) require a bearer token: either a session token from a login, or a personal access token. Mutation endpoints require at least Editor role; user management requires Admin role.
+All API endpoints except `/api/v1/auth/*`, `/api/v1/edition` ([Edition](#edition)) and the ops endpoints (`/live`, `/ready`, `/health`, `/metrics`, see [Health Check](#health-check)) require a bearer token: either a session token from a login, or a personal access token. Mutation endpoints require at least Editor role; user management requires Admin role.
 
 The API is served by the api role (or a single instance); any api process answers any request, a write included, since every one reads the entities from Postgres on each request, and the provider catalog (`GET /api/v1/providers`, `GET /api/v1/providers/{provider_id}`) and the attribution settings (`GET /api/v1/geo/settings`) as well. Each api also keeps the custom provider descriptors, the attribution settings and the IP database list in memory for its other routes (credential checks, previews, lookups); those follow a change made through another api as soon as the change stream announces it.
 
@@ -82,6 +82,8 @@ curl -X POST -H "Authorization: Bearer <session token>" -H "Content-Type: applic
 curl -H "Authorization: Bearer octo_..." http://localhost:8000/api/v1/projects
 ```
 
+`last_used_at` is set by the token's first authenticated call, even one that is then refused (a viewer's token trying a write gets 403 and is still used), and moves at most once a minute after that. A change made with a token is recorded in the [audit log](#audit-log) with the token's name and ID, as `auth_token` and `auth_token_id` in the entry's `details`.
+
 ### Sign in with a Provider
 
 The round trip through Google, Microsoft or GitHub is driven by the browser, not by API clients; scripts use a personal access token. These endpoints are public. See [Single Sign-On and API Tokens]({{ site.baseurl }}/sso).
@@ -101,6 +103,20 @@ The providers themselves are set up by an admin:
 | PUT | `/sso/providers/{kind}` | Save `{enabled, client_id, client_secret, tenant_id}`; a null `client_secret` keeps the stored one. Microsoft requires a single tenant ID |
 
 Linked provider accounts are listed and removed under `/users/me/identities` and `/users/{user_id}/identities` (admin), each with `provider`, `email`, `created_at` and `last_login_at`. User responses carry `sign_in_providers`, the kinds linked to the user.
+
+### Edition
+
+```bash
+GET /api/v1/edition
+```
+
+Public, since the login page asks before anyone signs in. Which edition the server runs, and on Octoprox Enterprise the organisation its license names while the license is active or in its grace period:
+
+```json
+{"name": "free", "organisation": null}
+```
+
+The public image always answers `free`, the Octoprox Enterprise image `enterprise`. Ask before calling the [Octoprox Enterprise endpoints](#octoprox-enterprise-endpoints): the public image has none of them, and answers a `GET` under `/api/v1` that no route serves with the web UI's page rather than a 404.
 
 ---
 
@@ -1083,9 +1099,13 @@ POST /api/v1/backup/export
 header.
 
 The file covers users (including password hashes), projects, credentials,
-connectors, proxies, custom provider descriptors and their audit log, and the
-IP attribution settings and database records. Optionally it also carries the
-history (metrics and attribution observations) and the IP database files.
+connectors, proxies, custom provider descriptors, the IP attribution settings
+and database records, the [audit log](#audit-log), and the install's system
+settings (the audit retention and the Octoprox Enterprise license key), under
+the payload keys `audit_log` and `system_settings`. The audit log travels
+whether or not history is included. Optionally the file also
+carries the history (metrics and attribution observations) and the IP database
+files.
 
 ### Import Backup
 
@@ -1101,7 +1121,14 @@ Content-Type: multipart/form-data
 | `mode` | string | Only `replace` is supported (default). |
 | `keep_current_user` | boolean | Default `false`. See below. |
 
-**Import replaces all existing data** on the install. The wipe and restore run
+**Import replaces all existing data** on the install, except its audit history
+and its license key. The backup's audit entries are added to the install's own,
+an entry the install already has left as it is; the backup's system settings
+are taken only when the install has never saved its own, and a missing license
+key is filled in from the backup's. The import itself is recorded last, in the
+import's transaction: one `imported` entry on `backup` `1` naming the admin, with
+the backup's `backup_created_at`, `app_version`, `includes_metrics` and
+`kept_current_user` in its details. The wipe and restore run
 in a single transaction, so a failure leaves the existing data untouched; the
 last step rebuilds the running metric totals from the imported history (the
 totals themselves are never in the file). Afterwards the Redis keys of the
@@ -1144,12 +1171,13 @@ again with credentials that are valid in the backup.
   "proxy_metrics": 0,
   "project_metrics": 0,
   "provider_descriptors": 0,
-  "provider_audit_log": 0,
   "geo_settings": 1,
   "geo_databases": 2,
   "geo_database_blobs": 0,
   "ip_observations": 0,
   "connector_exit_ips": 0,
+  "system_settings": 0,
+  "audit_log": 48,
   "kept_current_user": true,
   "user_conflicts": [
     {
@@ -1163,6 +1191,9 @@ again with credentials that are valid in the backup.
 ```
 
 `users` counts imported rows only; the kept account is not included.
+`audit_log` counts the backup's entries added to the install's, and
+`system_settings` is 1 when the backup's settings were taken or filled in the
+install's missing license key.
 
 **Errors (HTTP 400):**
 
@@ -1195,8 +1226,81 @@ encrypted:
 
 The ciphertext is gzipped JSON encrypted with Fernet (AES-128-CBC + HMAC-SHA256).
 The key is derived from the passphrase with PBKDF2-HMAC-SHA256 and a random
-per-file salt. Treat the file as sensitive: it contains password hashes and
-provider credentials, protected only by the passphrase.
+per-file salt. Treat the file as sensitive: it contains password hashes,
+provider credentials and the license key, protected only by the passphrase.
+
+---
+
+## Audit Log
+
+Every change a person makes is recorded with who made it, when, in which request, and the fields it changed, secrets masked. See [Audit Log]({{ site.baseurl }}/audit-log) for what is recorded and what is not. Each entity's history is read on its own; the install-wide list, its export and the license are [Octoprox Enterprise endpoints](#octoprox-enterprise-endpoints).
+
+| Method | Path | Description |
+|---|---|---|
+| GET | `/audit/{type}/{id}` | One entity's entries, newest first, as `entries`, and `more` while older ones remain. `limit` 1 to 200, default 50; `before`, the `id` of the oldest entry already shown, reads the next page |
+| GET | `/audit/retention` | How many `days` entries are kept, 0 for ever (admin), as the `PUT` below answers |
+| PUT | `/audit/retention` | Set the `days` (admin), from 0 to 36500, 0 keeping entries forever. The change is recorded itself, on the system settings, and applies within the hour, when older entries are deleted |
+
+The type is one of the project's, whose history every signed-in user may read, as they may read the entities: `project`, `connector`, `credential`, `proxy`, `wireguard_device`, `openvpn_device`. Or one of the install's, which answer 403 to anyone but an admin: `provider`, `user`, `sign_in_provider`, `geo_settings`, `geo_database`, `wireguard_settings`, `openvpn_settings`, `system_settings`, `backup`. Any other type is a 422. The id is the entity's ID; a sign-in provider's is its kind (`google`, `microsoft`, `github`), and the install's settings and its restores use `1`. A deleted entity's history is still read by its ID.
+
+```bash
+curl -H "Authorization: Bearer <token>" \
+  "http://localhost:8000/api/v1/audit/connector/5f6eef8a-4603-4cad-8c57-dd6a1b9e351b?limit=50"
+# The next page: add &before=<id of the last entry returned>
+
+curl -X PUT -H "Authorization: Bearer <admin token>" -H "Content-Type: application/json" \
+  -d '{"days": 365}' http://localhost:8000/api/v1/audit/retention
+# {"days": 365}
+```
+
+**An entry:**
+```json
+{
+  "id": "0bed08cd-9ab7-40a6-bc71-1cdf0f56b95b",
+  "created_at": "2026-11-10T14:03:22.123456",
+  "action": "updated",
+  "entity_type": "connector",
+  "entity_id": "5f6eef8a-4603-4cad-8c57-dd6a1b9e351b",
+  "entity_name": "brightdata-eu",
+  "project_id": "3c49da3c-a997-45a0-9a26-dc3b3ae6c920",
+  "actor_id": "9d59c651-da69-42f4-8222-7b5a766d0188",
+  "actor": "ivan",
+  "request_id": "5c7db5e7ad1f4e56bb90ef86bcfb38ab",
+  "changes": {"routing_config.weight": [null, 3], "config.zone_password": ["********", "********"]},
+  "details": {}
+}
+```
+
+- `id`: the entry's ID, kept by backups.
+- `created_at`: when, in UTC.
+- `action`: `created`, `updated`, `deleted`, `imported`, `traffic_reset`, `invited`, `invite_reissued` or `rotated`; on Octoprox Enterprise also `signed_in`, `sign_in_failed`, `token_issued`, `token_first_used`, `token_revoked` and `identity_unlinked`.
+- `entity_type`, `entity_id`: what the entry is about. `entity_id` is empty for a sign-in under a name no user has.
+- `entity_name`: its name at the time.
+- `project_id`: the project, for a project's entities; null otherwise.
+- `actor_id`, `actor`: the user who acted, by ID and by username at the time. `actor` is empty when nobody was signed in (a sign-in refused under an unknown name), and `actor_id` is null then, and for provider entries carried over from releases before the audit log, which kept only the username.
+- `request_id`: the request's `X-Request-ID` (see [Request IDs](#request-ids)).
+- `changes`: each changed field as `[before, after]`: a created entity's fields as `[null, value]`, a deleted one's as `[value, null]`, settings kept as a set of keys one key down (`routing_config.weight`), and a secret as `"********"` while set and `null` while empty.
+- `details`: what else the action carries: for an entry made with a personal access token, the token's name and ID as `auth_token` and `auth_token_id`; how an entity was created as `via` (`upload`, `invite`); a provider change's `hosts_added` and `hosts_removed`, the Countries page's `country`, an OpenVPN CA rotation's `devices_reissued`, and a restore's `backup_created_at`, `app_version`, `includes_metrics` and `kept_current_user`. On Octoprox Enterprise also a sign-in's `method`, `provider`, `linked`, `reason`, `client_ip` and `user_agent`, a token event's `token_id`, `token_name`, `token_prefix` and `expires_at` (the token issued, used or revoked; `auth_token` names the token a revocation was made with), and an unlinked account's `provider` and `email`.
+
+The former `GET /api/v1/providers/{id}/audit` is gone: a provider's history is `GET /api/v1/audit/provider/{id}`, with field changes in place of descriptor snapshots.
+
+### Octoprox Enterprise endpoints
+
+These exist only on the Octoprox Enterprise image (ask [Edition](#edition) first), and all are for admins:
+
+| Method | Path | Description |
+|---|---|---|
+| GET | `/license` | The license as the License card shows it: `state` (`none`, `invalid`, `active`, `grace`, `expired`), `organisation`, `license_id`, `expires` and `grace_ends` (dates, UTC), `seats`, `seats_used`, `features`, `banner` (the sentence admins see on every page, or null), `refusal` (why a stored key is refused) |
+| PUT | `/license` | Store the `key` sent once it checks out (whitespace in it is ignored), answering the status as `GET` does. A key that does not check out, or a license whose grace period has already ended, is a 400 whose `detail` gives the reason, and nothing is saved. Recorded on the system settings, the key masked |
+| GET | `/audit` | Every entry of the install, newest first, as `entries`, with the exact `total`. Filters: `entity_type`, `action`, `actor` (a username, in any case), `project_id`, and `until` (ISO time: entries up to it; without an offset it is UTC). Paging with `limit` (1 to 500, default 100) and `offset` |
+| GET | `/audit/export` | Every entry under the same filters, oldest first, as JSON lines: a line is an entry as above, its `created_at` ending in `Z` |
+
+The export is `application/x-ndjson`, sent as an attachment named `octoprox-audit-<UTC time>.jsonl`. It reads the log as it streams, so entries recorded meanwhile can follow at its end; an `until` already past gives a set that cannot grow. `GET /audit` and the export answer 403 `An Octoprox Enterprise license is needed` unless a genuine license with the audit log is stored; one past its grace period still reads. See [Audit Log]({{ site.baseurl }}/audit-log#octoprox-enterprise).
+
+```bash
+curl -H "Authorization: Bearer <admin token>" -o audit.jsonl \
+  "http://localhost:8000/api/v1/audit/export?action=sign_in_failed&until=2026-11-10T00:00:00Z"
+```
 
 ---
 

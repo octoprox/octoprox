@@ -11,12 +11,13 @@ from __future__ import annotations
 import ipaddress
 from collections.abc import Iterable, Mapping
 from datetime import datetime
-from typing import Any, Literal
+from typing import Any, ClassVar, Literal
 from uuid import uuid4
 
 from pydantic import BaseModel, Field, ValidationInfo, field_validator, model_validator
 
 from api.core import utc_now
+from api.models.audit import INSTALL_ENTITY_ID, Audited, AuditEntityType
 from api.models.location import LocationTarget, normalize_level
 from api.models.tunnel import (
     TunnelPeerMetrics,
@@ -26,6 +27,7 @@ from api.models.tunnel import (
     validate_endpoint_host,
     validate_tunnel_subnet,
 )
+from api.openvpn import pki
 
 DEFAULT_SUBNET = "10.67.0.0/16"
 DEFAULT_ENDPOINT_PORT = 1194
@@ -39,8 +41,13 @@ def validate_subnet(value: str) -> str:
 # --- server ----------------------------------------------------------------------------------
 
 
-class OpenVpnServerSettings(BaseModel):
+class OpenVpnServerSettings(Audited):
     """The install-wide OpenVPN identity and the defaults every device profile carries."""
+
+    audit_type: ClassVar[AuditEntityType] = AuditEntityType.OPENVPN_SETTINGS
+    # The certificates are recorded as the CA's fingerprint and expiry (``audit_fields``), the keys only as changed.
+    audit_ignored: ClassVar[frozenset[str]] = Audited.audit_ignored | {"ca_cert", "server_cert"}
+    audit_masked: ClassVar[frozenset[str]] = frozenset({"ca_key", "server_key", "tls_crypt_key"})
 
     ca_cert: str
     ca_key: str
@@ -89,6 +96,20 @@ class OpenVpnServerSettings(BaseModel):
     @property
     def configured(self) -> bool:
         return bool(self.endpoint_host)
+
+    def audit_id(self) -> str:
+        return INSTALL_ENTITY_ID
+
+    def audit_name(self) -> str:
+        return "OpenVPN settings"
+
+    def audit_fields(self) -> dict[str, Any]:
+        """The recorded fields, with the CA's fingerprint and expiry standing for the certificates."""
+        return {
+            **super().audit_fields(),
+            "ca_fingerprint": pki.fingerprint_of(self.ca_cert),
+            "ca_expires_at": pki.not_after_of(self.ca_cert).isoformat(),
+        }
 
 
 class OpenVpnServerSettingsDoc(BaseModel):
@@ -139,8 +160,19 @@ class OpenVpnServerSettingsResponse(BaseModel):
 # --- peers -----------------------------------------------------------------------------------
 
 
-class OpenVpnPeer(BaseModel):
+class OpenVpnPeer(Audited):
     """A device that may connect, and how its traffic is routed."""
+
+    audit_type: ClassVar[AuditEntityType] = AuditEntityType.OPENVPN_DEVICE
+    # The certificate is recorded as its serial and expiry; where the device last connected from is the gateways'
+    # sighting, not an edit.
+    audit_ignored: ClassVar[frozenset[str]] = Audited.audit_ignored | {
+        "project_id",
+        "certificate",
+        "last_connected_at",
+        "last_endpoint",
+    }
+    audit_masked: ClassVar[frozenset[str]] = frozenset({"private_key"})
 
     id: str = Field(default_factory=lambda: str(uuid4()))
     project_id: str

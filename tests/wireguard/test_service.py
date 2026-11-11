@@ -1,16 +1,16 @@
 # Copyright 2026 Octoprox Authors
 # SPDX-License-Identifier: Apache-2.0
 
-"""The api's WireGuard service against Postgres and Redis: settings, devices, addresses, status.
+"""The api's WireGuard service against Postgres and Redis: settings, devices, addresses, status, the audit log.
 
 What a write announces is read off the changes stream, through a :class:`~api.db.streams.ChangeLog` on the test Redis
-unless a test gives the service a change log of its own.
+unless a test gives the service a change log of its own; what it records is read off the audit log in Postgres.
 """
 
 import asyncio
 import json
 import time
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from datetime import timedelta
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
@@ -21,13 +21,16 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from api.core import utc_now
+from api.core.audit import AuditLog
 from api.core.config import Settings
 from api.core.stats import TunnelPeerMetricDelta
+from api.db.audit_repository import AuditRepository
 from api.db.openvpn_repository import OpenVpnSettingsRepository
 from api.db.redis import CHANGES_STREAM_KEY, TUNNEL_PEER_METRICS_KEY, RedisClient
 from api.db.repository import ProjectRepository
 from api.db.streams import ChangeKind, ChangeLog, ref_of
 from api.db.wireguard_repository import WireGuardPeerRepository, WireGuardSettingsRepository
+from api.models.audit import MASK, AuditEntityType, AuditEntry
 from api.models.project import Project
 from api.models.tunnel import TunnelAddressError, TunnelEndpointState, TunnelValidationError
 from api.models.wireguard import (
@@ -42,6 +45,9 @@ from api.wireguard.service import WireGuardService, defaults_from_config, seed_t
 
 Factory = async_sessionmaker[AsyncSession]
 
+# Who makes the tests' writes: an admin whose changes the audit log records in Postgres.
+ACTOR = AuditLog().actor("u1", "admin", "req-1")
+
 
 class Recorded(ChangeLog):
     """A change log that keeps what it is told instead of appending it, for a test that reads entries per writer."""
@@ -52,6 +58,13 @@ class Recorded(ChangeLog):
 
     async def record(self, kind: ChangeKind, *ids: str) -> None:
         self.entries.append((kind, ref_of(ids)))
+
+
+class Unrecorded(AuditLog):
+    """An audit log that cannot record, as when its insert fails."""
+
+    async def record(self, session: AsyncSession, entries: Sequence[AuditEntry]) -> None:
+        raise RuntimeError("audit log unavailable")
 
 
 class Totals:
@@ -107,6 +120,28 @@ async def announced(redis: RedisClient) -> list[tuple[str, str]]:
 async def forget_announcements(redis: RedisClient) -> None:
     """Empty the changes stream, so a test sees only what its own writes announce."""
     await redis.client.delete(CHANGES_STREAM_KEY)
+
+
+async def recorded(factory: Factory, entity_type: AuditEntityType, entity_id: str) -> list[AuditEntry]:
+    """An entity's audit entries, oldest first."""
+    async with factory() as session:
+        history = await AuditRepository(session).history(entity_type, entity_id, 100)
+    return history.entries[::-1]
+
+
+async def entry_count(factory: Factory) -> int:
+    """How many audit entries there are, whatever they are about."""
+    async with factory() as session:
+        return int((await session.execute(text("SELECT count(*) FROM audit_log"))).scalar_one())
+
+
+async def leaked(factory: Factory, secrets: Iterable[str]) -> list[str]:
+    """The secrets that show in any entry's changes or details, as given or as JSON escapes them (a PEM's newlines)."""
+    async with factory() as session:
+        stored = (
+            await session.execute(text("SELECT string_agg(CAST(changes AS text) || CAST(details AS text), '') FROM audit_log"))
+        ).scalar_one() or ""
+    return [secret for secret in secrets if secret in stored or json.dumps(secret)[1:-1] in stored]
 
 
 @pytest.fixture
@@ -178,25 +213,25 @@ class TestSettings:
     ) -> None:
         service = _service(db_session_factory, redis_client)
         await seed_tunnel_settings(db_session_factory, Settings(_env_file=None), Recorded(redis_client))  # type: ignore[call-arg]
-        peer = await service.add_peer(project.id, WireGuardPeerCreate(name="tv"))
+        peer = await service.add_peer(project.id, WireGuardPeerCreate(name="tv"), ACTOR)
         assert peer.address == "10.66.0.2"
 
         doc = WireGuardServerSettingsDoc(endpoint_host="vpn.example.net", subnet="10.66.0.0/24", persistent_keepalive=15)
         await forget_announcements(redis_client)
-        saved = await service.save_settings(doc, "admin")
+        saved = await service.save_settings(doc, ACTOR)
         assert (saved.endpoint_host, saved.subnet, saved.persistent_keepalive) == ("vpn.example.net", "10.66.0.0/24", 15)
         assert await announced(redis_client) == [("wireguard", "")]
 
         with pytest.raises(TunnelValidationError, match="outside 10.99.0.0/24"):
-            await service.save_settings(WireGuardServerSettingsDoc(subnet="10.99.0.0/24"), "admin")
+            await service.save_settings(WireGuardServerSettingsDoc(subnet="10.99.0.0/24"), ACTOR)
         # A device on the new subnet's gateway (its first host) could not be told from the gateway.
         await WireGuardPeerRepository(db_session).update(peer.model_copy(update={"address": "10.66.1.1"}))
         await db_session.commit()
         with pytest.raises(TunnelValidationError, match="on its gateway 10.66.1.1"):
-            await service.save_settings(WireGuardServerSettingsDoc(subnet="10.66.1.0/24"), "admin")
+            await service.save_settings(WireGuardServerSettingsDoc(subnet="10.66.1.0/24"), ACTOR)
         # The data plane tells devices apart by address across both protocols.
         with pytest.raises(TunnelValidationError, match="overlaps the OpenVPN subnet"):
-            await service.save_settings(WireGuardServerSettingsDoc(subnet="10.64.0.0/14"), "admin")
+            await service.save_settings(WireGuardServerSettingsDoc(subnet="10.64.0.0/14"), ACTOR)
         assert (await service.settings()).subnet == "10.66.0.0/24"
         # A refused save announces nothing.
         assert await announced(redis_client) == [("wireguard", "")]
@@ -204,7 +239,7 @@ class TestSettings:
     async def test_rotating_the_key(self, db_session_factory: Factory, redis_client: RedisClient) -> None:
         service = _service(db_session_factory, redis_client)
         before = await service.settings()
-        rotated = await service.rotate_key("admin")
+        rotated = await service.rotate_key(ACTOR)
         assert rotated.public_key != before.public_key and rotated.public_key == keys.public_key_of(rotated.private_key)
         assert (await service.settings()).private_key == rotated.private_key
 
@@ -212,94 +247,94 @@ class TestSettings:
 class TestDevices:
     async def test_keys_are_generated_or_brought(self, db_session_factory: Factory, redis_client: RedisClient, project: Project) -> None:
         service = _service(db_session_factory, redis_client)
-        generated = await service.add_peer(project.id, WireGuardPeerCreate(name="tv"))
+        generated = await service.add_peer(project.id, WireGuardPeerCreate(name="tv"), ACTOR)
         assert generated.private_key is not None and generated.public_key == keys.public_key_of(generated.private_key)
         assert generated.preshared_key is not None
         brought_key = keys.generate_keypair()[1]
-        brought = await service.add_peer(project.id, WireGuardPeerCreate(name="laptop", public_key=brought_key, preshared=False))
+        brought = await service.add_peer(project.id, WireGuardPeerCreate(name="laptop", public_key=brought_key, preshared=False), ACTOR)
         assert brought.private_key is None and brought.public_key == brought_key and brought.preshared_key is None
         assert [p.id for p in await service.peers(project.id)] == [generated.id, brought.id]
 
     async def test_addresses_come_from_postgres(self, db_session_factory: Factory, redis_client: RedisClient, project: Project) -> None:
         service = _service(db_session_factory, redis_client, defaults={"subnet": "10.66.0.0/29"})
-        first = await service.add_peer(project.id, WireGuardPeerCreate(name="a"))
-        second = await service.add_peer(project.id, WireGuardPeerCreate(name="b"))
+        first = await service.add_peer(project.id, WireGuardPeerCreate(name="a"), ACTOR)
+        second = await service.add_peer(project.id, WireGuardPeerCreate(name="b"), ACTOR)
         # The gateway (.1) is skipped; each device takes the lowest free host.
         assert (first.address, second.address) == ("10.66.0.2", "10.66.0.3")
-        assert await service.remove_peer(project.id, first.id)
-        assert (await service.add_peer(project.id, WireGuardPeerCreate(name="c"))).address == "10.66.0.2"
+        assert await service.remove_peer(project.id, first.id, ACTOR)
+        assert (await service.add_peer(project.id, WireGuardPeerCreate(name="c"), ACTOR)).address == "10.66.0.2"
         for name in ("d", "e", "f"):
-            await service.add_peer(project.id, WireGuardPeerCreate(name=name))
+            await service.add_peer(project.id, WireGuardPeerCreate(name=name), ACTOR)
         with pytest.raises(TunnelAddressError, match="no free address left in 10.66.0.0/29"):
-            await service.add_peer(project.id, WireGuardPeerCreate(name="g"))
+            await service.add_peer(project.id, WireGuardPeerCreate(name="g"), ACTOR)
 
     async def test_a_device_created_at_the_same_moment_is_a_conflict_to_retry(
         self, db_session_factory: Factory, redis_client: RedisClient, project: Project, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         service = _service(db_session_factory, redis_client)
-        await service.add_peer(project.id, WireGuardPeerCreate(name="first"))
+        await service.add_peer(project.id, WireGuardPeerCreate(name="first"), ACTOR)
         # Another api replica read the used addresses before the first insert committed.
         monkeypatch.setattr(WireGuardPeerRepository, "used_addresses", AsyncMock(return_value=set()))
         with pytest.raises(TunnelAddressError, match="taken concurrently; retry"):
-            await service.add_peer(project.id, WireGuardPeerCreate(name="second"))
+            await service.add_peer(project.id, WireGuardPeerCreate(name="second"), ACTOR)
         monkeypatch.undo()
-        assert (await service.add_peer(project.id, WireGuardPeerCreate(name="second"))).address == "10.66.0.3"
+        assert (await service.add_peer(project.id, WireGuardPeerCreate(name="second"), ACTOR)).address == "10.66.0.3"
 
     async def test_names_and_keys_are_unique(self, db_session: AsyncSession, db_session_factory: Factory, redis_client: RedisClient, project: Project) -> None:
         service = _service(db_session_factory, redis_client)
-        tv = await service.add_peer(project.id, WireGuardPeerCreate(name="TV"))
+        tv = await service.add_peer(project.id, WireGuardPeerCreate(name="TV"), ACTOR)
         with pytest.raises(TunnelValidationError, match="named 'tv' already exists"):
-            await service.add_peer(project.id, WireGuardPeerCreate(name="tv"))
+            await service.add_peer(project.id, WireGuardPeerCreate(name="tv"), ACTOR)
         with pytest.raises(TunnelValidationError, match="this public key already exists"):
-            await service.add_peer(project.id, WireGuardPeerCreate(name="other", public_key=tv.public_key))
+            await service.add_peer(project.id, WireGuardPeerCreate(name="other", public_key=tv.public_key), ACTOR)
         elsewhere = await _project(db_session, "Kitchen")
-        assert (await service.add_peer(elsewhere.id, WireGuardPeerCreate(name="TV"))).project_id == elsewhere.id
+        assert (await service.add_peer(elsewhere.id, WireGuardPeerCreate(name="TV"), ACTOR)).project_id == elsewhere.id
 
     async def test_updates_are_partial_and_scoped_to_the_project(
         self, db_session: AsyncSession, db_session_factory: Factory, redis_client: RedisClient, project: Project
     ) -> None:
         service = _service(db_session_factory, redis_client)
-        tv = await service.add_peer(project.id, WireGuardPeerCreate(name="tv", country="de", session_id="s1"))
-        await service.add_peer(project.id, WireGuardPeerCreate(name="console"))
+        tv = await service.add_peer(project.id, WireGuardPeerCreate(name="tv", country="de", session_id="s1"), ACTOR)
+        await service.add_peer(project.id, WireGuardPeerCreate(name="console"), ACTOR)
         await forget_announcements(redis_client)
 
         # A null name or enabled is ignored; "" clears an optional field.
-        updated = await service.update_peer(project.id, tv.id, WireGuardPeerUpdate(name=None, enabled=False, session_id=""))
+        updated = await service.update_peer(project.id, tv.id, WireGuardPeerUpdate(name=None, enabled=False, session_id=""), ACTOR)
         assert updated is not None and (updated.name, updated.enabled, updated.session_id, updated.country) == ("tv", False, None, "DE")
         assert await announced(redis_client) == [("wireguard", tv.id)]
         assert (await service.peer(project.id, tv.id)).enabled is False  # type: ignore[union-attr]
 
         with pytest.raises(TunnelValidationError, match="country"):
-            await service.update_peer(project.id, tv.id, WireGuardPeerUpdate(country="", city="Berlin"))
+            await service.update_peer(project.id, tv.id, WireGuardPeerUpdate(country="", city="Berlin"), ACTOR)
         with pytest.raises(TunnelValidationError, match="named 'console' already exists"):
-            await service.update_peer(project.id, tv.id, WireGuardPeerUpdate(name="console"))
+            await service.update_peer(project.id, tv.id, WireGuardPeerUpdate(name="console"), ACTOR)
         elsewhere = await _project(db_session, "Kitchen")
-        assert await service.update_peer(elsewhere.id, tv.id, WireGuardPeerUpdate(enabled=True)) is None
+        assert await service.update_peer(elsewhere.id, tv.id, WireGuardPeerUpdate(enabled=True), ACTOR) is None
         assert await service.peer(elsewhere.id, tv.id) is None
-        assert await service.rotate_peer_keys(elsewhere.id, tv.id) is None
-        assert await service.remove_peer(elsewhere.id, tv.id) is False
+        assert await service.rotate_peer_keys(elsewhere.id, tv.id, ACTOR) is None
+        assert await service.remove_peer(elsewhere.id, tv.id, ACTOR) is False
         assert await service.client_config(elsewhere.id, tv.id) is None
         # Refused or not the project's: nothing more was announced.
         assert await announced(redis_client) == [("wireguard", tv.id)]
 
     async def test_rotating_a_devices_keys(self, db_session_factory: Factory, redis_client: RedisClient, project: Project) -> None:
         service = _service(db_session_factory, redis_client)
-        with_psk = await service.add_peer(project.id, WireGuardPeerCreate(name="tv"))
-        without = await service.add_peer(project.id, WireGuardPeerCreate(name="laptop", preshared=False))
-        rotated = await service.rotate_peer_keys(project.id, with_psk.id)
+        with_psk = await service.add_peer(project.id, WireGuardPeerCreate(name="tv"), ACTOR)
+        without = await service.add_peer(project.id, WireGuardPeerCreate(name="laptop", preshared=False), ACTOR)
+        rotated = await service.rotate_peer_keys(project.id, with_psk.id, ACTOR)
         assert rotated is not None and rotated.public_key != with_psk.public_key
         assert rotated.preshared_key is not None and rotated.preshared_key != with_psk.preshared_key
-        assert (await service.rotate_peer_keys(project.id, without.id)).preshared_key is None  # type: ignore[union-attr]
+        assert (await service.rotate_peer_keys(project.id, without.id, ACTOR)).preshared_key is None  # type: ignore[union-attr]
         assert (await service.peer(project.id, with_psk.id)).public_key == rotated.public_key  # type: ignore[union-attr]
 
     async def test_removing_drops_the_row_and_the_unflushed_window(
         self, db_session_factory: Factory, redis_client: RedisClient, project: Project
     ) -> None:
         service = _service(db_session_factory, redis_client)
-        tv = await service.add_peer(project.id, WireGuardPeerCreate(name="tv"))
+        tv = await service.add_peer(project.id, WireGuardPeerCreate(name="tv"), ACTOR)
         key = TUNNEL_PEER_METRICS_KEY.format(peer_id=tv.id)
         await redis_client.client.hset(key, mapping={"request_count": "3"})
-        assert await service.remove_peer(project.id, tv.id) is True
+        assert await service.remove_peer(project.id, tv.id, ACTOR) is True
         assert await service.peer(project.id, tv.id) is None
         assert not await redis_client.client.exists(key)
 
@@ -307,14 +342,14 @@ class TestDevices:
         self, db_session_factory: Factory, redis_client: RedisClient, project: Project, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         service = _service(db_session_factory, redis_client)
-        tv = await service.add_peer(project.id, WireGuardPeerCreate(name="tv"))
+        tv = await service.add_peer(project.id, WireGuardPeerCreate(name="tv"), ACTOR)
 
         async def down(peer_id: str) -> None:
             raise ConnectionError("Redis is down")
 
         monkeypatch.setattr(redis_client, "delete_tunnel_peer_window", down)
         with structlog.testing.capture_logs() as logs:
-            assert await service.remove_peer(project.id, tv.id) is True
+            assert await service.remove_peer(project.id, tv.id, ACTOR) is True
         assert await service.peer(project.id, tv.id) is None
         assert [log["step"] for log in logs if log["event"] == "Redis step after a write failed"] == [
             "drop a deleted device's metric window"
@@ -322,13 +357,13 @@ class TestDevices:
 
     async def test_the_device_config(self, db_session_factory: Factory, redis_client: RedisClient, project: Project) -> None:
         service = _service(db_session_factory, redis_client)
-        tv = await service.add_peer(project.id, WireGuardPeerCreate(name="Living room TV"))
+        tv = await service.add_peer(project.id, WireGuardPeerCreate(name="Living room TV"), ACTOR)
         config = await service.client_config(project.id, tv.id)
         assert config is not None and config.filename == "Living-room-TV.conf"
         assert f"Address = {tv.address}/32" in config.config and "DNS = 10.66.0.1" in config.config
         # Issued before the endpoint is set, and flagged as such.
         assert (config.complete, config.server_configured) == (False, False)
-        await service.save_settings(WireGuardServerSettingsDoc(endpoint_host="vpn.example.net"), "admin")
+        await service.save_settings(WireGuardServerSettingsDoc(endpoint_host="vpn.example.net"), ACTOR)
         config = await service.client_config(project.id, tv.id)
         assert config is not None and config.complete and "Endpoint = vpn.example.net:51820" in config.config
 
@@ -391,8 +426,8 @@ class TestStatus:
         totals = Totals()
         gateways = [_gateway("gw-b", backend="kernel"), _gateway("gw-ovpn", protocol="openvpn"), _gateway("gw-a", backend="userspace")]
         service = _service(db_session_factory, redis_client, gateways=gateways, totals=totals)
-        a = await service.add_peer(project.id, WireGuardPeerCreate(name="a"))
-        b = await service.add_peer(project.id, WireGuardPeerCreate(name="b", enabled=False))
+        a = await service.add_peer(project.id, WireGuardPeerCreate(name="a"), ACTOR)
+        b = await service.add_peer(project.id, WireGuardPeerCreate(name="b", enabled=False), ACTOR)
         totals.by_id = {a.id: TunnelPeerMetricDelta(by_address=2, encrypted_dns_blocked=1), b.id: TunnelPeerMetricDelta(by_address=3)}
         await redis_client.set_tunnel_peer_status("wireguard", "gw-a", {
             a.public_key: json.dumps({"latest_handshake": int(time.time()) - 5, "rx_bytes": 1, "tx_bytes": 2, "endpoint": "1.1.1.1:1"}),
@@ -429,7 +464,7 @@ class TestStatus:
             defaults={},
             changes=Recorded(redis),
         )
-        peer = await service.add_peer(project.id, WireGuardPeerCreate(name="tv"))
+        peer = await service.add_peer(project.id, WireGuardPeerCreate(name="tv"), ACTOR)
         status = await service.status()
         assert status.gateways == [] and status.peers_total == 1 and status.peers_online == 0
         assert (await service.response(peer)).status.live is False
@@ -443,12 +478,12 @@ class TestChangeEntries:
         await service.settings()
         await forget_announcements(redis_client)
 
-        await service.save_settings(WireGuardServerSettingsDoc(endpoint_host="vpn.example.net"), "admin")
-        await service.rotate_key("admin")
-        tv = await service.add_peer(project.id, WireGuardPeerCreate(name="tv"))
-        await service.update_peer(project.id, tv.id, WireGuardPeerUpdate(enabled=False))
-        await service.rotate_peer_keys(project.id, tv.id)
-        await service.remove_peer(project.id, tv.id)
+        await service.save_settings(WireGuardServerSettingsDoc(endpoint_host="vpn.example.net"), ACTOR)
+        await service.rotate_key(ACTOR)
+        tv = await service.add_peer(project.id, WireGuardPeerCreate(name="tv"), ACTOR)
+        await service.update_peer(project.id, tv.id, WireGuardPeerUpdate(enabled=False), ACTOR)
+        await service.rotate_peer_keys(project.id, tv.id, ACTOR)
+        await service.remove_peer(project.id, tv.id, ACTOR)
 
         assert await announced(redis_client) == [
             ("wireguard", ""),
@@ -464,7 +499,7 @@ class TestChangeEntries:
     ) -> None:
         """A backup restored without the row: the read that writes it again tells the gateways."""
         service = _service(db_session_factory, redis_client)
-        tv = await service.add_peer(project.id, WireGuardPeerCreate(name="tv"))
+        tv = await service.add_peer(project.id, WireGuardPeerCreate(name="tv"), ACTOR)
         await forget_announcements(redis_client)
 
         await service.client_config(project.id, tv.id)
@@ -497,8 +532,181 @@ class TestChangeEntries:
         await service.settings()
         seen.clear()
 
-        rotated = await service.rotate_key("admin")
-        tv = await service.add_peer(project.id, WireGuardPeerCreate(name="tv"))
-        await service.remove_peer(project.id, tv.id)
+        rotated = await service.rotate_key(ACTOR)
+        tv = await service.add_peer(project.id, WireGuardPeerCreate(name="tv"), ACTOR)
+        await service.remove_peer(project.id, tv.id, ACTOR)
 
         assert seen == [rotated.public_key, tv, None]
+
+
+class TestAuditLog:
+    """Each write is one entry, in the write's transaction and as its actor's; a refused write, a seed or a sighting is
+    none."""
+
+    async def test_settings_saves_and_key_rotations(
+        self, db_session: AsyncSession, db_session_factory: Factory, redis_client: RedisClient
+    ) -> None:
+        await seed_tunnel_settings(db_session_factory, Settings(_env_file=None), Recorded(redis_client))  # type: ignore[call-arg]
+        service = _service(db_session_factory, redis_client)
+        seeded = await service.settings()
+        doc = WireGuardServerSettingsDoc(endpoint_host="vpn.example.net", persistent_keepalive=15)
+
+        await service.save_settings(doc, ACTOR)
+        # A save that changes nothing, and one refused, add no entry.
+        await service.save_settings(doc, ACTOR)
+        with pytest.raises(TunnelValidationError, match="overlaps the OpenVPN subnet"):
+            await service.save_settings(WireGuardServerSettingsDoc(subnet="10.64.0.0/14"), ACTOR)
+        rotated = await service.rotate_key(ACTOR)
+
+        entries = await recorded(db_session_factory, AuditEntityType.WIREGUARD_SETTINGS, "1")
+        assert [(e.action, e.entity_name, e.project_id, e.actor_id, e.actor, e.request_id) for e in entries] == [
+            ("updated", "WireGuard settings", None, "u1", "admin", "req-1"),
+            ("rotated", "WireGuard settings", None, "u1", "admin", "req-1"),
+        ]
+        assert entries[0].changes == {"endpoint_host": ["", "vpn.example.net"], "persistent_keepalive": [25, 15]}
+        assert entries[1].changes == {"private_key": [MASK, MASK], "public_key": [seeded.public_key, rotated.public_key]}
+        # The row names the actor as the one who saved it last.
+        assert (await db_session.execute(text("SELECT updated_by FROM wireguard_settings"))).scalar_one() == "admin"
+
+    async def test_device_writes(self, db_session_factory: Factory, redis_client: RedisClient, project: Project) -> None:
+        service = _service(db_session_factory, redis_client)
+        tv = await service.add_peer(project.id, WireGuardPeerCreate(name="tv", country="de", session_id="s1"), ACTOR)
+        await service.update_peer(project.id, tv.id, WireGuardPeerUpdate(enabled=False, session_id=""), ACTOR)
+        # An update that changes nothing adds no entry.
+        await service.update_peer(project.id, tv.id, WireGuardPeerUpdate(enabled=False), ACTOR)
+        rotated = await service.rotate_peer_keys(project.id, tv.id, ACTOR)
+        assert rotated is not None
+        assert await service.remove_peer(project.id, tv.id, ACTOR)
+
+        entries = await recorded(db_session_factory, AuditEntityType.WIREGUARD_DEVICE, tv.id)
+        assert [(e.action, e.entity_name, e.project_id, e.actor) for e in entries] == [
+            (action, "tv", project.id, "admin") for action in ("created", "updated", "rotated", "deleted")
+        ]
+        created, updated, rotation, deleted = (entry.changes for entry in entries)
+        assert created == {
+            "name": [None, "tv"],
+            "public_key": [None, tv.public_key],
+            "private_key": [None, MASK],
+            "preshared_key": [None, MASK],
+            "address": [None, "10.66.0.2"],
+            "enabled": [None, True],
+            "session_id": [None, "s1"],
+            "country": [None, "DE"],
+        }
+        assert updated == {"enabled": [True, False], "session_id": ["s1", None]}
+        assert rotation == {
+            "public_key": [tv.public_key, rotated.public_key],
+            "private_key": [MASK, MASK],
+            "preshared_key": [MASK, MASK],
+        }
+        # The device's last state outlives it.
+        assert deleted == {
+            "name": ["tv", None],
+            "public_key": [rotated.public_key, None],
+            "private_key": [MASK, None],
+            "preshared_key": [MASK, None],
+            "address": ["10.66.0.2", None],
+            "enabled": [False, None],
+            "country": ["DE", None],
+        }
+
+    async def test_refused_writes_and_another_projects_device_record_nothing(
+        self, db_session: AsyncSession, db_session_factory: Factory, redis_client: RedisClient, project: Project
+    ) -> None:
+        service = _service(db_session_factory, redis_client)
+        tv = await service.add_peer(project.id, WireGuardPeerCreate(name="tv"), ACTOR)
+        await service.add_peer(project.id, WireGuardPeerCreate(name="console"), ACTOR)
+        elsewhere = await _project(db_session, "Kitchen")
+
+        with pytest.raises(TunnelValidationError):
+            await service.add_peer(project.id, WireGuardPeerCreate(name="TV"), ACTOR)
+        with pytest.raises(TunnelValidationError):
+            await service.update_peer(project.id, tv.id, WireGuardPeerUpdate(name="console"), ACTOR)
+        with pytest.raises(TunnelValidationError):
+            await service.update_peer(project.id, tv.id, WireGuardPeerUpdate(country="", city="Berlin"), ACTOR)
+        assert await service.update_peer(elsewhere.id, tv.id, WireGuardPeerUpdate(enabled=False), ACTOR) is None
+        assert await service.rotate_peer_keys(elsewhere.id, tv.id, ACTOR) is None
+        assert await service.remove_peer(elsewhere.id, tv.id, ACTOR) is False
+
+        assert [e.action for e in await recorded(db_session_factory, AuditEntityType.WIREGUARD_DEVICE, tv.id)] == ["created"]
+        assert await entry_count(db_session_factory) == 2
+
+    async def test_a_removal_that_finds_the_row_gone_records_nothing(
+        self, db_session_factory: Factory, redis_client: RedisClient, project: Project, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Two removals at once both read the device, and the one whose delete comes second leaves the entry to the
+        other."""
+        service = _service(db_session_factory, redis_client)
+        tv = await service.add_peer(project.id, WireGuardPeerCreate(name="tv"), ACTOR)
+        delete_row = WireGuardPeerRepository.delete
+
+        async def deleted_first_elsewhere(repository: WireGuardPeerRepository, peer_id: str) -> bool:
+            async with db_session_factory() as session:
+                await delete_row(WireGuardPeerRepository(session), peer_id)
+                await session.commit()
+            return await delete_row(repository, peer_id)
+
+        monkeypatch.setattr(WireGuardPeerRepository, "delete", deleted_first_elsewhere)
+
+        assert await service.remove_peer(project.id, tv.id, ACTOR) is True
+        assert [e.action for e in await recorded(db_session_factory, AuditEntityType.WIREGUARD_DEVICE, tv.id)] == ["created"]
+
+    async def test_a_change_that_cannot_be_recorded_is_not_made(
+        self, db_session_factory: Factory, redis_client: RedisClient, project: Project
+    ) -> None:
+        service = _service(db_session_factory, redis_client)
+        tv = await service.add_peer(project.id, WireGuardPeerCreate(name="tv"), ACTOR)
+        await forget_announcements(redis_client)
+        unrecorded = Unrecorded().actor("u1", "admin", "req-1")
+
+        with pytest.raises(RuntimeError, match="audit log unavailable"):
+            await service.add_peer(project.id, WireGuardPeerCreate(name="console"), unrecorded)
+        with pytest.raises(RuntimeError, match="audit log unavailable"):
+            await service.remove_peer(project.id, tv.id, unrecorded)
+
+        assert [peer.name for peer in await service.peers(project.id)] == ["tv"]
+        assert await announced(redis_client) == []
+
+    async def test_seeds_and_sightings_record_nothing(
+        self, db_session: AsyncSession, db_session_factory: Factory, redis_client: RedisClient, project: Project
+    ) -> None:
+        """A row written because none was there, and where the gateways last saw a device, are not anyone's change."""
+        await seed_tunnel_settings(db_session_factory, Settings(_env_file=None), Recorded(redis_client))  # type: ignore[call-arg]
+        service = _service(db_session_factory, redis_client)
+        tv = await service.add_peer(project.id, WireGuardPeerCreate(name="tv"), ACTOR)
+        await db_session.execute(text("DELETE FROM wireguard_settings"))
+        await db_session.commit()
+
+        await service.peer_list(project.id)
+        await service.client_config(project.id, tv.id)
+        await service.settings_response()
+        async with db_session_factory() as session:
+            assert await WireGuardPeerRepository(session).record_last_seen([(tv.public_key, utc_now(), "198.51.100.1:2")]) == 1
+            await session.commit()
+
+        # The device's creation is the one entry.
+        assert await entry_count(db_session_factory) == 1
+
+    async def test_no_key_reaches_the_audit_log(
+        self, db_session_factory: Factory, redis_client: RedisClient, project: Project
+    ) -> None:
+        """Every private and preshared key, set, changed and cleared, is recorded only as such."""
+        service = _service(db_session_factory, redis_client)
+        server = [await service.settings(), await service.rotate_key(ACTOR)]
+        generated = await service.add_peer(project.id, WireGuardPeerCreate(name="tv"), ACTOR)
+        brought = await service.add_peer(
+            project.id, WireGuardPeerCreate(name="phone", public_key=keys.generate_keypair()[1], preshared=False), ACTOR
+        )
+        devices = [generated, brought]
+        for device in (generated, brought):
+            rotated = await service.rotate_peer_keys(project.id, device.id, ACTOR)
+            assert rotated is not None
+            devices.append(rotated)
+            assert await service.remove_peer(project.id, device.id, ACTOR)
+
+        # A device that brought its own key is given one by a rotation, and it goes with the device.
+        brought_entries = await recorded(db_session_factory, AuditEntityType.WIREGUARD_DEVICE, brought.id)
+        assert [entry.changes.get("private_key") for entry in brought_entries] == [None, [None, MASK], [MASK, None]]
+        secrets = [s.private_key for s in server] + [k for d in devices for k in (d.private_key, d.preshared_key) if k]
+        assert len(secrets) == 7 and await entry_count(db_session_factory) == 7
+        assert await leaked(db_session_factory, secrets) == []

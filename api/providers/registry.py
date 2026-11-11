@@ -20,7 +20,7 @@ from api.models.connector import Connector
 from api.models.credential import Credential
 from api.providers.base import SyncableProvider
 from api.providers.code_types import code_provider_definitions, code_validators
-from api.providers.sdk.descriptor import FieldSpec, OptionSpec, ProviderDescriptor
+from api.providers.sdk.descriptor import FieldScope, FieldSpec, OptionSpec, ProviderDescriptor
 from api.providers.sdk.egress import EgressPolicy
 from api.providers.sdk.loader import (
     load_builtin_descriptors,
@@ -245,6 +245,18 @@ class ProviderRegistry:
         """
         provider = self.descriptor_provider(connector, credential)
         return provider.countries if provider is not None else connector.countries
+
+    def audit_masked(self, scope: FieldScope, *type_ids: str) -> list[str]:
+        """What an audit entry masks of a ``scope`` config of these provider types: each one's secret fields as
+        ``config.<key>``, or every key while one of them is no longer registered."""
+        masked: list[str] = []
+        for type_id in type_ids:
+            ptype = self._types.get(type_id)
+            if ptype is None:
+                return ["config.*"]
+            fields = ptype.credential_fields if scope == "credential" else ptype.connector_fields
+            masked.extend(f"config.{spec.key}" for spec in fields if spec.secret)
+        return masked
 
     def country_list_key(self, type_id: str) -> str | None:
         """The connector config key a type lists countries under; None when its connectors list none."""

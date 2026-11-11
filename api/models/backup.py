@@ -84,7 +84,6 @@ class BackupPayload(BaseModel):
     host_metrics: list[dict[str, Any]] = Field(default_factory=list)
     failure_metrics: list[dict[str, Any]] = Field(default_factory=list)
     provider_descriptors: list[dict[str, Any]] = Field(default_factory=list)
-    provider_audit_log: list[dict[str, Any]] = Field(default_factory=list)
     geo_settings: list[dict[str, Any]] = Field(default_factory=list)
     geo_databases: list[dict[str, Any]] = Field(default_factory=list)
     geo_database_blobs: list[dict[str, Any]] = Field(default_factory=list)
@@ -95,6 +94,8 @@ class BackupPayload(BaseModel):
     openvpn_settings: list[dict[str, Any]] = Field(default_factory=list)
     openvpn_peers: list[dict[str, Any]] = Field(default_factory=list)
     tunnel_peer_metrics: list[dict[str, Any]] = Field(default_factory=list)
+    system_settings: list[dict[str, Any]] = Field(default_factory=list)
+    audit_log: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class ExportRequest(BaseModel):
@@ -139,7 +140,6 @@ class ImportSummary(BaseModel):
     host_metrics: int = 0
     failure_metrics: int = 0
     provider_descriptors: int = 0
-    provider_audit_log: int = 0
     geo_settings: int = 0
     geo_databases: int = 0
     geo_database_blobs: int = 0
@@ -150,6 +150,10 @@ class ImportSummary(BaseModel):
     openvpn_settings: int = 0
     openvpn_peers: int = 0
     tunnel_peer_metrics: int = 0
+    # 1 when the backup's settings row was taken, or filled in the install's missing license key.
+    system_settings: int = 0
+    # The backup's entries added to the install's.
+    audit_log: int = 0
     kept_current_user: bool = False
     user_conflicts: list[UserConflict] = Field(default_factory=list)
     # Cloud connectors the install had that the backup does not carry: moved to

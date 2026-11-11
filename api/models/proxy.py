@@ -6,14 +6,15 @@
 from collections.abc import Mapping
 from datetime import datetime
 from enum import StrEnum
-from typing import Any
+from typing import Any, ClassVar
 from urllib.parse import quote
 from uuid import uuid4
 
 from pydantic import BaseModel, Field, field_validator
 
 from api.core import utc_now
-from api.geo.models import LocationVerdict
+from api.geo.models import MANUAL_SOURCE, META_COUNTRY_SOURCE, LocationVerdict
+from api.models.audit import Audited, AuditEntityType
 from api.models.location import (
     META_MANUAL_LOCATION,
     LocationTarget,
@@ -62,8 +63,14 @@ class ProxyStatus(StrEnum):
         return self in (ProxyStatus.DRAINING, ProxyStatus.TERMINATING)
 
 
-class Proxy(BaseModel):
-    """Represents a proxy server."""
+class Proxy(Audited):
+    """Represents a proxy server.
+
+    Its entries record what a person sets (``audit_fields``); the service names the project, which the row does not hold.
+    """
+
+    audit_type: ClassVar[AuditEntityType] = AuditEntityType.PROXY
+    audit_masked: ClassVar[frozenset[str]] = frozenset({"password"})
 
     id: str = Field(default_factory=lambda: str(uuid4()))
     host: str
@@ -91,6 +98,19 @@ class Proxy(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
+
+    def audit_name(self) -> str:
+        return f"{self.host}:{self.port}"
+
+    def audit_fields(self) -> dict[str, Any]:
+        """The definition and tags a person sets, and the country, state and city pinned by hand; never what health
+        checks, syncs or attribution write."""
+        fields = self.model_dump(mode="json", include={"host", "port", "protocol", "username", "password", "tags"})
+        pinned = self.manual_location
+        fields["country"] = self.country if self.metadata.get(META_COUNTRY_SOURCE) == MANUAL_SOURCE else None
+        fields["state"] = pinned.get("state_code")
+        fields["city"] = pinned.get("city")
+        return fields
 
     @property
     def url(self) -> str:

@@ -18,6 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from api.controller import producers
 from api.controller.feed_builder import FeedBuilder
+from api.core.audit import Actor, AuditLog
 from api.core.config import Settings
 from api.core.leadership import Lease
 from api.core.workers import LeaseName
@@ -148,23 +149,24 @@ def clock(monkeypatch: pytest.MonkeyPatch) -> Clock:
 
 @dataclass
 class Services:
-    """The write services, as the api and the workers use them."""
+    """The write services, as the api and the workers use them, and the user a person's writes are made by."""
 
     projects: ProjectService
     credentials: CredentialService
     connectors: ConnectorService
     proxies: ProxyService
+    actor: Actor
 
     async def project(self, name: str = "Acme") -> Project:
-        return await self.projects.create(ProjectCreate(name=name, username=name.lower(), password="pw"))
+        return await self.projects.create(ProjectCreate(name=name, username=name.lower(), password="pw"), self.actor)
 
     async def connect(self, project: Project, name: str, provider: Provider, **fields: object) -> Connector:
         """A connector of ``provider`` in the project, on a credential of its own."""
         credential = await self.credentials.create(
-            project.id, CredentialCreate(name=name, type=provider.type, config=provider.credential)
+            project.id, CredentialCreate(name=name, type=provider.type, config=provider.credential), self.actor
         )
         data = ConnectorCreate(name=name, credential_id=credential.id, config=provider.connector, **fields)
-        return await self.connectors.create(project.id, data)
+        return await self.connectors.create(project.id, data, self.actor)
 
 
 @pytest.fixture
@@ -181,6 +183,7 @@ def services(
         credentials=CredentialService(sessions, registry, changes=change_log),
         connectors=connectors,
         proxies=ProxyService(sessions, jobs, redis_client, registry, changes=change_log),
+        actor=AuditLog().actor("user-1", "alice"),
     )
 
 

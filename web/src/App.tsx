@@ -26,6 +26,7 @@ import AccountSection from './pages/settings/AccountSection'
 import AppearanceSection from './pages/settings/AppearanceSection'
 import UsersSection from './pages/settings/UsersSection'
 import BackupSection from './pages/settings/BackupSection'
+import ActivitySection from './pages/settings/ActivitySection'
 import ProvidersSection from './pages/settings/ProvidersSection'
 import SystemSection from './pages/settings/SystemSection'
 import GeoSection from './pages/settings/GeoSection'
@@ -154,6 +155,7 @@ function AuthenticatedApp() {
               <Route path="users" element={<UsersSection />} />
               <Route path="sign-in" element={<SignInSection />} />
               <Route path="backup" element={<BackupSection />} />
+              <Route path="activity" element={<ActivitySection />} />
               <Route path="providers" element={<ProvidersSection />} />
               <Route path="geo" element={<GeoSection />} />
               <Route path="wireguard" element={<WireGuardSection />} />

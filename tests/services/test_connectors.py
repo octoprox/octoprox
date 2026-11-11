@@ -15,6 +15,7 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from api.core import utc_now
+from api.core.audit import Actor
 from api.core.roles import JobKind
 from api.db.redis import (
     AUTOSCALER_STATE_KEY,
@@ -24,9 +25,10 @@ from api.db.redis import (
     TRAFFIC_PENDING_KEY,
     RedisClient,
 )
-from api.db.repository import ConnectorRepository, ProxyRepository
+from api.db.repository import ConnectorRepository, CredentialRepository, ProxyRepository
 from api.db.streams import ChangeKind
 from api.jobs.queue import JobQueue
+from api.models.audit import MASK
 from api.models.connector import Connector, ConnectorCreate, ConnectorUpdate
 from api.models.countries import CountryRole
 from api.models.credential import Credential, CredentialCreate
@@ -43,6 +45,7 @@ from api.services.errors import (
 )
 from tests.conftest import queued_job_keys
 from tests.services.conftest import (
+    ACTOR_NAME,
     AWS,
     OXYLABS_POOL,
     STATIC,
@@ -50,6 +53,8 @@ from tests.services.conftest import (
     Executed,
     Witness,
     announced,
+    audit_entries,
+    audit_text,
     forget_announcements,
     runtime_entries,
 )
@@ -58,6 +63,8 @@ from tests.services.conftest import (
 RATE_LIMIT = {"max_requests": 10, "window_seconds": 60, "quarantine_seconds_min": 60, "quarantine_seconds_max": 120}
 # A traffic config with a block, a price and a warning line, each field away from its default.
 LIMITED = {"limit_bytes": 1000, "action": "block", "reset_day": 2, "warn_percent": 70, "price_per_gb": 1.5, "currency": "EUR"}
+# A Bright Data zone: its password is the one secret a built-in connector config holds.
+ZONE = {"zone_name": "residential_1", "zone_password": "zone-secret-1", "proxy_type": "residential"}
 
 
 async def stored(sessions: async_sessionmaker[AsyncSession], connector_id: str) -> Connector | None:
@@ -68,6 +75,18 @@ async def stored(sessions: async_sessionmaker[AsyncSession], connector_id: str) 
 async def pending_marks(redis_client: RedisClient) -> dict[str, str]:
     """The connectors marked waiting for a traffic decision, with when it was asked (ISO)."""
     return await redis_client.client.hgetall(TRAFFIC_PENDING_KEY)
+
+
+@pytest.fixture
+async def bright_data(project: Project, sessions: async_sessionmaker[AsyncSession]) -> Credential:
+    """A Bright Data credential as its vendor check leaves it, stored without asking the vendor."""
+    credential = Credential(
+        name="Bright", type="brightdata", project_id=project.id, config={"token": "T", "customer_id": "c_777"}
+    )
+    async with sessions() as session:
+        await CredentialRepository(session).create(credential)
+        await session.commit()
+    return credential
 
 
 async def add_proxies(
@@ -90,6 +109,7 @@ class TestCreate:
         project: Project,
         static_credential: Credential,
         sessions: async_sessionmaker[AsyncSession],
+        actor: Actor,
     ) -> None:
         connector = await connector_service.create(
             project.id,
@@ -100,6 +120,7 @@ class TestCreate:
                 routing_config={"weight": 3},
                 traffic_config={"limit_bytes": 1000, "action": "block"},
             ),
+            actor,
         )
 
         assert connector.config == {"countries": ["DE", "US"]}
@@ -129,14 +150,15 @@ class TestCreate:
         project: Project,
         static_credential: Credential,
         sessions: async_sessionmaker[AsyncSession],
+        actor: Actor,
     ) -> None:
         def isp(**fields: object) -> ConnectorCreate:
             return ConnectorCreate.model_validate({"name": "ISP", "credential_id": static_credential.id, **fields})
 
         with pytest.raises(InvalidConfigError, match="limit_status"):
-            await connector_service.create(project.id, isp(traffic_config={"limit_status": 200}))
+            await connector_service.create(project.id, isp(traffic_config={"limit_status": 200}), actor)
         with pytest.raises(InvalidConfigError, match="two-letter ISO 3166-1 alpha-2 code, got 'zz-top'"):
-            await connector_service.create(project.id, isp(config={"countries": ["zz-top"]}))
+            await connector_service.create(project.id, isp(config={"countries": ["zz-top"]}), actor)
 
         async with sessions() as session:
             assert await ConnectorRepository(session).get_by_project(project.id) == []
@@ -147,22 +169,25 @@ class TestCreate:
         credential_service: CredentialService,
         project: Project,
         other_project: Project,
+        actor: Actor,
     ) -> None:
-        theirs = await credential_service.create(other_project.id, CredentialCreate(name="Theirs", type=STATIC.type))
+        theirs = await credential_service.create(
+            other_project.id, CredentialCreate(name="Theirs", type=STATIC.type), actor
+        )
 
         with pytest.raises(NotFoundError, match="Credential not found"):
-            await connector_service.create(project.id, ConnectorCreate(name="ISP", credential_id="nope"))
+            await connector_service.create(project.id, ConnectorCreate(name="ISP", credential_id="nope"), actor)
         with pytest.raises(WriteRejectedError, match="Credential does not belong to this project"):
-            await connector_service.create(project.id, ConnectorCreate(name="ISP", credential_id=theirs.id))
+            await connector_service.create(project.id, ConnectorCreate(name="ISP", credential_id=theirs.id), actor)
         with pytest.raises(NotFoundError, match="Project not found"):
-            await connector_service.create("nope", ConnectorCreate(name="ISP", credential_id=theirs.id))
+            await connector_service.create("nope", ConnectorCreate(name="ISP", credential_id=theirs.id), actor)
 
     async def test_names_are_unique_per_project_whatever_their_case(
-        self, connector_service: ConnectorService, project: Project, static_connector: Connector
+        self, connector_service: ConnectorService, project: Project, static_connector: Connector, actor: Actor
     ) -> None:
         with pytest.raises(NameConflictError, match="A connector named 'isp' already exists in this project"):
             await connector_service.create(
-                project.id, ConnectorCreate(name="isp", credential_id=static_connector.credential_id)
+                project.id, ConnectorCreate(name="isp", credential_id=static_connector.credential_id), actor
             )
 
 
@@ -173,10 +198,11 @@ class TestUpdate:
         project: Project,
         static_connector: Connector,
         sessions: async_sessionmaker[AsyncSession],
+        actor: Actor,
     ) -> None:
         edit = ConnectorUpdate(name="Renamed", enabled=False, routing_config={"weight": 5})
 
-        saved = await connector_service.update(project.id, static_connector.id, edit)
+        saved = await connector_service.update(project.id, static_connector.id, edit, actor)
 
         assert (saved.name, saved.enabled, saved.weight) == ("Renamed", False, 5)
         assert saved.updated_at > static_connector.updated_at
@@ -188,12 +214,13 @@ class TestUpdate:
         project: Project,
         static_connector: Connector,
         sessions: async_sessionmaker[AsyncSession],
+        actor: Actor,
     ) -> None:
         """Validated on a loaded copy: the name set beside a bad config does not land (today's route kept it)."""
         edit = ConnectorUpdate(name="Renamed", traffic_config={"limit_status": 200})
 
         with pytest.raises(InvalidConfigError, match="limit_status"):
-            await connector_service.update(project.id, static_connector.id, edit)
+            await connector_service.update(project.id, static_connector.id, edit, actor)
 
         assert await stored(sessions, static_connector.id) == static_connector
 
@@ -204,20 +231,25 @@ class TestUpdate:
         project: Project,
         other_project: Project,
         static_connector: Connector,
+        actor: Actor,
     ) -> None:
         aws = await credential_service.create(
-            project.id, CredentialCreate(name="AWS", type=AWS.type, config=AWS.credential)
+            project.id, CredentialCreate(name="AWS", type=AWS.type, config=AWS.credential), actor
         )
-        theirs = await credential_service.create(other_project.id, CredentialCreate(name="Theirs", type=STATIC.type))
+        theirs = await credential_service.create(
+            other_project.id, CredentialCreate(name="Theirs", type=STATIC.type), actor
+        )
 
         # The new config is validated for the new credential's type, and the type is read back from it.
         saved = await connector_service.update(
-            project.id, static_connector.id, ConnectorUpdate(credential_id=aws.id, config=AWS.connector)
+            project.id, static_connector.id, ConnectorUpdate(credential_id=aws.id, config=AWS.connector), actor
         )
         assert (saved.credential_id, saved.credential_type, saved.config["max_proxies"]) == (aws.id, "aws", 4)
 
         with pytest.raises(WriteRejectedError, match="Credential does not belong to this project"):
-            await connector_service.update(project.id, static_connector.id, ConnectorUpdate(credential_id=theirs.id))
+            await connector_service.update(
+                project.id, static_connector.id, ConnectorUpdate(credential_id=theirs.id), actor
+            )
 
     async def test_an_edit_syncs_and_scales_again(
         self,
@@ -226,14 +258,15 @@ class TestUpdate:
         pool: Connector,
         cloud: Connector,
         redis_client: RedisClient,
+        actor: Actor,
     ) -> None:
         await redis_client.client.flushdb()
 
         await connector_service.update(
-            project.id, pool.id, ConnectorUpdate(config={**OXYLABS_POOL.connector, "num_proxies": 3})
+            project.id, pool.id, ConnectorUpdate(config={**OXYLABS_POOL.connector, "num_proxies": 3}), actor
         )
         await connector_service.update(
-            project.id, cloud.id, ConnectorUpdate(config={**AWS.connector, "max_proxies": 6})
+            project.id, cloud.id, ConnectorUpdate(config={**AWS.connector, "max_proxies": 6}), actor
         )
 
         assert await queued_job_keys(redis_client, JobKind.SYNC) == [pool.id]
@@ -247,13 +280,14 @@ class TestUpdate:
         static_credential: Credential,
         sessions: async_sessionmaker[AsyncSession],
         redis_client: RedisClient,
+        actor: Actor,
     ) -> None:
         """They were tripped under limits that no longer apply.
 
         Today's update compared the cached connector with itself, so it never lifted them.
         """
         other = await connector_service.create(
-            project.id, ConnectorCreate(name="Other", credential_id=static_credential.id)
+            project.id, ConnectorCreate(name="Other", credential_id=static_credential.id), actor
         )
         ours = await add_proxies(sessions, static_connector, 2)
         theirs = await add_proxies(sessions, other, 1)
@@ -261,11 +295,13 @@ class TestUpdate:
         await redis_client.client.zadd(QUARANTINE_KEY, {p.id: until for p in [*ours, *theirs]})
 
         # Another edit leaves them quarantined, and says nothing on the runtime stream.
-        await connector_service.update(project.id, static_connector.id, ConnectorUpdate(name="Renamed"))
+        await connector_service.update(project.id, static_connector.id, ConnectorUpdate(name="Renamed"), actor)
         assert await redis_client.client.zcard(QUARANTINE_KEY) == 3
         assert await runtime_entries(redis_client) == []
 
-        await connector_service.update(project.id, static_connector.id, ConnectorUpdate(rate_limit_config=RATE_LIMIT))
+        await connector_service.update(
+            project.id, static_connector.id, ConnectorUpdate(rate_limit_config=RATE_LIMIT), actor
+        )
 
         assert await redis_client.client.zrange(QUARANTINE_KEY, 0, -1) == [theirs[0].id]
         # The controller is told, so gateways route to them again at once; two proxies, so no one ref.
@@ -279,51 +315,54 @@ class TestUpdate:
         sessions: async_sessionmaker[AsyncSession],
         redis_client: RedisClient,
         pipelines: Executed,
+        actor: Actor,
     ) -> None:
         """Never one without the other: an entry without the lift, or a lift the controller is never told of."""
         (proxy,) = await add_proxies(sessions, static_connector, 1)
         await redis_client.client.zadd(QUARANTINE_KEY, {proxy.id: time.time() + 600})
 
-        await connector_service.update(project.id, static_connector.id, ConnectorUpdate(rate_limit_config=RATE_LIMIT))
+        await connector_service.update(
+            project.id, static_connector.id, ConnectorUpdate(rate_limit_config=RATE_LIMIT), actor
+        )
 
         assert pipelines == [(True, ["ZREM", "XADD"])]
         assert await runtime_entries(redis_client) == [("quarantine", proxy.id)]
 
     async def test_a_connector_of_another_project_is_not_found(
-        self, connector_service: ConnectorService, other_project: Project, static_connector: Connector
+        self, connector_service: ConnectorService, other_project: Project, static_connector: Connector, actor: Actor
     ) -> None:
         with pytest.raises(NotFoundError, match="Connector not found"):
-            await connector_service.update(other_project.id, static_connector.id, ConnectorUpdate(name="Mine"))
+            await connector_service.update(other_project.id, static_connector.id, ConnectorUpdate(name="Mine"), actor)
         with pytest.raises(NotFoundError, match="Connector not found"):
-            await connector_service.remove(other_project.id, static_connector.id)
+            await connector_service.remove(other_project.id, static_connector.id, actor)
         with pytest.raises(NotFoundError, match="Connector not found"):
-            await connector_service.reset_traffic(other_project.id, static_connector.id)
+            await connector_service.reset_traffic(other_project.id, static_connector.id, actor)
 
 
 class TestCountries:
     """Reserved and excluded countries, and the Countries page's edit of one country across connectors."""
 
     async def test_reservations_and_exclusions_must_fit_the_connector_list(
-        self, connector_service: ConnectorService, project: Project, static_credential: Credential
+        self, connector_service: ConnectorService, project: Project, static_credential: Credential, actor: Actor
     ) -> None:
         def isp(name: str, **fields: object) -> ConnectorCreate:
             return ConnectorCreate.model_validate({"name": name, "credential_id": static_credential.id, **fields})
 
         with pytest.raises(InvalidConfigError, match="country list: DE"):
             await connector_service.create(
-                project.id, isp("A", config={"countries": ["GB"]}, routing_config={"reserved_countries": ["DE"]})
+                project.id, isp("A", config={"countries": ["GB"]}, routing_config={"reserved_countries": ["DE"]}), actor
             )
         with pytest.raises(InvalidConfigError, match="cannot exclude any"):
             await connector_service.create(
-                project.id, isp("B", config={"countries": ["GB"]}, routing_config={"excluded_countries": ["FR"]})
+                project.id, isp("B", config={"countries": ["GB"]}, routing_config={"excluded_countries": ["FR"]}), actor
             )
         listed = await connector_service.create(
-            project.id, isp("C", config={"countries": ["GB"]}, routing_config={"reserved_countries": ["gb"]})
+            project.id, isp("C", config={"countries": ["GB"]}, routing_config={"reserved_countries": ["gb"]}), actor
         )
         assert listed.routing_config == {"reserved_countries": ["GB"]}
         # Taking the country off the list keeps the reservation unlisted: refused.
         with pytest.raises(InvalidConfigError, match="country list: GB"):
-            await connector_service.update(project.id, listed.id, ConnectorUpdate(config={"countries": ["US"]}))
+            await connector_service.update(project.id, listed.id, ConnectorUpdate(config={"countries": ["US"]}), actor)
 
     async def test_one_country_is_set_across_connectors(
         self,
@@ -333,16 +372,19 @@ class TestCountries:
         static_connector: Connector,
         pool: Connector,
         sessions: async_sessionmaker[AsyncSession],
+        actor: Actor,
     ) -> None:
         listing = await connector_service.create(
             project.id,
             ConnectorCreate(name="UK", credential_id=static_credential.id, config={"countries": ["GB", "US"]}),
+            actor,
         )
 
         await connector_service.set_country(
             project.id,
             "GB",
             {listing.id: CountryRole.RESERVED, pool.id: CountryRole.OFF, static_connector.id: CountryRole.SERVES},
+            actor,
         )
 
         uk, oxy, isp = [await stored(sessions, c.id) for c in (listing, pool, static_connector)]
@@ -353,8 +395,10 @@ class TestCountries:
         assert isp == static_connector
 
         # Serving an unlisted country lists it; turning a listed one off takes it off and drops its reservation.
-        await connector_service.set_country(project.id, "DE", {listing.id: CountryRole.SERVES})
-        await connector_service.set_country(project.id, "GB", {listing.id: CountryRole.OFF, pool.id: CountryRole.SERVES})
+        await connector_service.set_country(project.id, "DE", {listing.id: CountryRole.SERVES}, actor)
+        await connector_service.set_country(
+            project.id, "GB", {listing.id: CountryRole.OFF, pool.id: CountryRole.SERVES}, actor
+        )
         uk, oxy = await stored(sessions, listing.id), await stored(sessions, pool.id)
         assert uk is not None and (uk.config, uk.routing_config) == ({"countries": ["US", "DE"]}, {})
         assert oxy is not None and oxy.routing_config == {}
@@ -366,17 +410,22 @@ class TestCountries:
         static_credential: Credential,
         pool: Connector,
         sessions: async_sessionmaker[AsyncSession],
+        actor: Actor,
     ) -> None:
         only_gb = await connector_service.create(
-            project.id, ConnectorCreate(name="UK", credential_id=static_credential.id, config={"countries": ["GB"]})
+            project.id,
+            ConnectorCreate(name="UK", credential_id=static_credential.id, config={"countries": ["GB"]}),
+            actor,
         )
 
         with pytest.raises(InvalidConfigError, match="UK lists only GB"):
             await connector_service.set_country(
-                project.id, "GB", {pool.id: CountryRole.RESERVED, only_gb.id: CountryRole.OFF}
+                project.id, "GB", {pool.id: CountryRole.RESERVED, only_gb.id: CountryRole.OFF}, actor
             )
         with pytest.raises(NotFoundError, match="Connector not found"):
-            await connector_service.set_country(project.id, "GB", {pool.id: CountryRole.RESERVED, "nope": CountryRole.OFF})
+            await connector_service.set_country(
+                project.id, "GB", {pool.id: CountryRole.RESERVED, "nope": CountryRole.OFF}, actor
+            )
 
         assert await stored(sessions, pool.id) == pool
         assert await stored(sessions, only_gb.id) == only_gb
@@ -388,18 +437,19 @@ class TestCountries:
         project: Project,
         redis_client: RedisClient,
         sessions: async_sessionmaker[AsyncSession],
+        actor: Actor,
     ) -> None:
         pool = await connect(project, "US pool", OXYLABS_POOL)
         await connector_service.update(
-            project.id, pool.id, ConnectorUpdate(config={**OXYLABS_POOL.connector, "country_code": ["US"]})
+            project.id, pool.id, ConnectorUpdate(config={**OXYLABS_POOL.connector, "country_code": ["US"]}), actor
         )
         await redis_client.client.flushdb()
 
-        await connector_service.set_country(project.id, "US", {pool.id: CountryRole.RESERVED})
+        await connector_service.set_country(project.id, "US", {pool.id: CountryRole.RESERVED}, actor)
         assert await queued_job_keys(redis_client, JobKind.SYNC) == []
         assert await announced(redis_client) == [(ChangeKind.CONNECTOR, pool.id)]
 
-        await connector_service.set_country(project.id, "DE", {pool.id: CountryRole.SERVES})
+        await connector_service.set_country(project.id, "DE", {pool.id: CountryRole.SERVES}, actor)
         saved = await stored(sessions, pool.id)
         assert saved is not None and saved.config["country_code"] == ["US", "DE"]
         assert await queued_job_keys(redis_client, JobKind.SYNC) == [pool.id]
@@ -407,12 +457,12 @@ class TestCountries:
 
 class TestRemove:
     async def test_a_connector_being_deleted_takes_no_edit(
-        self, connector_service: ConnectorService, project: Project, cloud: Connector
+        self, connector_service: ConnectorService, project: Project, cloud: Connector, actor: Actor
     ) -> None:
-        await connector_service.remove(project.id, cloud.id)
+        await connector_service.remove(project.id, cloud.id, actor)
 
         with pytest.raises(WriteRejectedError, match="being deleted"):
-            await connector_service.update(project.id, cloud.id, ConnectorUpdate(enabled=True))
+            await connector_service.update(project.id, cloud.id, ConnectorUpdate(enabled=True), actor)
 
     async def test_a_save_read_before_the_delete_leaves_it_pending_deletion(
         self,
@@ -420,9 +470,10 @@ class TestRemove:
         project: Project,
         cloud: Connector,
         sessions: async_sessionmaker[AsyncSession],
+        actor: Actor,
     ) -> None:
         """An edit that read the connector before the delete committed writes after it: the deletion stands."""
-        await connector_service.remove(project.id, cloud.id)
+        await connector_service.remove(project.id, cloud.id, actor)
         async with sessions() as session:
             await ConnectorRepository(session).update(cloud.model_copy(update={"name": "Renamed"}))
             await session.commit()
@@ -441,12 +492,13 @@ class TestRemove:
         static_connector: Connector,
         sessions: async_sessionmaker[AsyncSession],
         redis_client: RedisClient,
+        actor: Actor,
     ) -> None:
         await add_proxies(sessions, static_connector, 2)
         state = AUTOSCALER_STATE_KEY.format(connector_id=static_connector.id)
         await redis_client.client.hset(state, mapping={"cooldown_until": "0"})
 
-        await connector_service.remove(project.id, static_connector.id)
+        await connector_service.remove(project.id, static_connector.id, actor)
 
         assert await stored(sessions, static_connector.id) is None
         async with sessions() as session:
@@ -460,13 +512,14 @@ class TestRemove:
         cloud: Connector,
         sessions: async_sessionmaker[AsyncSession],
         redis_client: RedisClient,
+        actor: Actor,
     ) -> None:
         """The scale job terminates the instances, then deletes the connector."""
         await add_proxies(sessions, cloud, 1)
         await add_proxies(sessions, cloud, 1, ProxyStatus.DRAINING)
         await redis_client.client.flushdb()
 
-        await connector_service.remove(project.id, cloud.id)
+        await connector_service.remove(project.id, cloud.id, actor)
 
         connector = await stored(sessions, cloud.id)
         assert connector is not None
@@ -483,9 +536,10 @@ class TestRemove:
         cloud: Connector,
         sessions: async_sessionmaker[AsyncSession],
         redis_client: RedisClient,
+        actor: Actor,
     ) -> None:
         """The autoscaler hash and the instances being created go with the connector, so a later one starts clean."""
-        await connector_service.remove(project.id, cloud.id)
+        await connector_service.remove(project.id, cloud.id, actor)
         state = AUTOSCALER_STATE_KEY.format(connector_id=cloud.id)
         creating = SCALE_CREATING_KEY.format(connector_id=cloud.id)
         await redis_client.client.hset(state, mapping={"cooldown_until": "0"})
@@ -503,19 +557,24 @@ class TestRemove:
 
 class TestTrafficAndErrors:
     async def test_a_traffic_reset_stores_the_point_usage_counts_from(
-        self, connector_service: ConnectorService, project: Project, static_connector: Connector
+        self, connector_service: ConnectorService, project: Project, static_connector: Connector, actor: Actor
     ) -> None:
-        saved = await connector_service.reset_traffic(project.id, static_connector.id)
+        saved = await connector_service.reset_traffic(project.id, static_connector.id, actor)
 
         assert saved.traffic_reset_at is not None
         assert saved.traffic_reset_at >= static_connector.created_at
 
     async def test_a_traffic_reset_asks_for_a_traffic_decision_now_and_marks_it_pending_from_then(
-        self, connector_service: ConnectorService, project: Project, static_connector: Connector, redis_client: RedisClient
+        self,
+        connector_service: ConnectorService,
+        project: Project,
+        static_connector: Connector,
+        redis_client: RedisClient,
+        actor: Actor,
     ) -> None:
         """The block it lifts is the traffic job's to lift: asked for now, not at the next minute's re-check."""
         before = utc_now()
-        await connector_service.reset_traffic(project.id, static_connector.id)
+        await connector_service.reset_traffic(project.id, static_connector.id, actor)
 
         assert await queued_job_keys(redis_client, JobKind.TRAFFIC) == [static_connector.id]
         [(connector_id, asked)] = (await pending_marks(redis_client)).items()
@@ -527,24 +586,33 @@ class TestTrafficAndErrors:
         project: Project,
         static_connector: Connector,
         pipelines: Executed,
+        actor: Actor,
     ) -> None:
         """Never one without the other: a mark no decision was asked for, or a decision the api never shows as awaited."""
-        await connector_service.reset_traffic(project.id, static_connector.id)
+        await connector_service.reset_traffic(project.id, static_connector.id, actor)
 
         assert pipelines == [(True, ["HSET", "XADD"])]
 
     async def test_a_traffic_limit_edit_asks_for_a_traffic_decision_and_other_edits_do_not(
-        self, connector_service: ConnectorService, project: Project, static_connector: Connector, redis_client: RedisClient
+        self,
+        connector_service: ConnectorService,
+        project: Project,
+        static_connector: Connector,
+        redis_client: RedisClient,
+        actor: Actor,
     ) -> None:
         """A raised limit lifts the block at once; a rename, or the same limit saved again, decides nothing new."""
         limited = ConnectorUpdate(traffic_config={"limit_bytes": 1000, "action": "block"})
-        await connector_service.update(project.id, static_connector.id, limited)
+        await connector_service.update(project.id, static_connector.id, limited, actor)
         first = await pending_marks(redis_client)
-        await connector_service.update(project.id, static_connector.id, ConnectorUpdate(name="Renamed"))
-        await connector_service.update(project.id, static_connector.id, limited)
+        await connector_service.update(project.id, static_connector.id, ConnectorUpdate(name="Renamed"), actor)
+        await connector_service.update(project.id, static_connector.id, limited, actor)
         assert await pending_marks(redis_client) == first
         await connector_service.update(
-            project.id, static_connector.id, ConnectorUpdate(traffic_config={"limit_bytes": 5000, "action": "block"})
+            project.id,
+            static_connector.id,
+            ConnectorUpdate(traffic_config={"limit_bytes": 5000, "action": "block"}),
+            actor,
         )
 
         assert await queued_job_keys(redis_client, JobKind.TRAFFIC) == [static_connector.id] * 2
@@ -565,12 +633,13 @@ class TestTrafficAndErrors:
         project: Project,
         static_connector: Connector,
         redis_client: RedisClient,
+        actor: Actor,
     ) -> None:
-        await connector_service.update(project.id, static_connector.id, ConnectorUpdate(traffic_config=LIMITED))
+        await connector_service.update(project.id, static_connector.id, ConnectorUpdate(traffic_config=LIMITED), actor)
         first = await pending_marks(redis_client)
 
         await connector_service.update(
-            project.id, static_connector.id, ConnectorUpdate(traffic_config={**LIMITED, **change})
+            project.id, static_connector.id, ConnectorUpdate(traffic_config={**LIMITED, **change}), actor
         )
 
         assert await queued_job_keys(redis_client, JobKind.TRAFFIC) == [static_connector.id] * 2
@@ -589,13 +658,14 @@ class TestTrafficAndErrors:
         project: Project,
         static_connector: Connector,
         redis_client: RedisClient,
+        actor: Actor,
     ) -> None:
         """Usage, spend and the status clients get follow the edit at once; the stored block cannot change with it."""
-        await connector_service.update(project.id, static_connector.id, ConnectorUpdate(traffic_config=LIMITED))
+        await connector_service.update(project.id, static_connector.id, ConnectorUpdate(traffic_config=LIMITED), actor)
         first = await pending_marks(redis_client)
 
         saved = await connector_service.update(
-            project.id, static_connector.id, ConnectorUpdate(traffic_config={**LIMITED, **change})
+            project.id, static_connector.id, ConnectorUpdate(traffic_config={**LIMITED, **change}), actor
         )
 
         assert saved.traffic_config == {**LIMITED, **change}
@@ -603,15 +673,23 @@ class TestTrafficAndErrors:
         assert await pending_marks(redis_client) == first
 
     async def test_a_request_leaves_what_gateways_enforce_to_the_traffic_job(
-        self, connector_service: ConnectorService, project: Project, static_connector: Connector, redis_client: RedisClient
+        self,
+        connector_service: ConnectorService,
+        project: Project,
+        static_connector: Connector,
+        redis_client: RedisClient,
+        actor: Actor,
     ) -> None:
         """The stored block stands, and the controller hears of nothing, until a worker's decision changes the block."""
         until = (utc_now() + timedelta(days=1)).isoformat()
         await redis_client.client.hset(TRAFFIC_BLOCKED_KEY, static_connector.id, until)
 
-        await connector_service.reset_traffic(project.id, static_connector.id)
+        await connector_service.reset_traffic(project.id, static_connector.id, actor)
         await connector_service.update(
-            project.id, static_connector.id, ConnectorUpdate(traffic_config={"limit_bytes": 5000, "action": "block"})
+            project.id,
+            static_connector.id,
+            ConnectorUpdate(traffic_config={"limit_bytes": 5000, "action": "block"}),
+            actor,
         )
 
         assert await redis_client.client.hgetall(TRAFFIC_BLOCKED_KEY) == {static_connector.id: until}
@@ -634,10 +712,10 @@ class TestTrafficAndErrors:
         assert (cleared.last_error, cleared.last_error_at, cleared.consecutive_errors) == (None, None, 0)
 
     async def test_an_error_never_undoes_an_edit(
-        self, connector_service: ConnectorService, project: Project, cloud: Connector
+        self, connector_service: ConnectorService, project: Project, cloud: Connector, actor: Actor
     ) -> None:
         """One targeted UPDATE of the error columns, where today's write saved the whole cached connector."""
-        await connector_service.update(project.id, cloud.id, ConnectorUpdate(name="Renamed"))
+        await connector_service.update(project.id, cloud.id, ConnectorUpdate(name="Renamed"), actor)
 
         recorded = await connector_service.record_error(cloud.id, "quota exceeded")
 
@@ -666,24 +744,30 @@ class TestChangeEntries:
         project: Project,
         static_credential: Credential,
         redis_client: RedisClient,
+        actor: Actor,
     ) -> None:
         await forget_announcements(redis_client)
 
         connector = await connector_service.create(
-            project.id, ConnectorCreate(name="ISP", credential_id=static_credential.id)
+            project.id, ConnectorCreate(name="ISP", credential_id=static_credential.id), actor
         )
-        await connector_service.update(project.id, connector.id, ConnectorUpdate(name="Renamed"))
-        await connector_service.reset_traffic(project.id, connector.id)
-        await connector_service.remove(project.id, connector.id)
+        await connector_service.update(project.id, connector.id, ConnectorUpdate(name="Renamed"), actor)
+        await connector_service.reset_traffic(project.id, connector.id, actor)
+        await connector_service.remove(project.id, connector.id, actor)
 
         assert await announced(redis_client) == [("connector", connector.id)] * 4
 
     async def test_a_cloud_connector_is_announced_when_marked_and_when_the_scale_job_deletes_it(
-        self, connector_service: ConnectorService, project: Project, cloud: Connector, redis_client: RedisClient
+        self,
+        connector_service: ConnectorService,
+        project: Project,
+        cloud: Connector,
+        redis_client: RedisClient,
+        actor: Actor,
     ) -> None:
         await forget_announcements(redis_client)
 
-        await connector_service.remove(project.id, cloud.id)
+        await connector_service.remove(project.id, cloud.id, actor)
         assert await connector_service.delete(cloud.id) == project.id
         # Already gone: nothing changed, nothing to announce.
         assert await connector_service.delete(cloud.id) is None
@@ -698,14 +782,17 @@ class TestChangeEntries:
         registry: ProviderRegistry,
         project: Project,
         static_credential: Credential,
+        actor: Actor,
     ) -> None:
         """A consumer woken by an entry reads Postgres: the write must be there by then, or it is missed."""
         witness = Witness(redis_client, lambda ref: stored(sessions, ref))
         service = ConnectorService(sessions, jobs, redis_client, registry, changes=witness)
 
-        connector = await service.create(project.id, ConnectorCreate(name="ISP", credential_id=static_credential.id))
-        renamed = await service.update(project.id, connector.id, ConnectorUpdate(name="Renamed"))
-        await service.remove(project.id, connector.id)
+        connector = await service.create(
+            project.id, ConnectorCreate(name="ISP", credential_id=static_credential.id), actor
+        )
+        renamed = await service.update(project.id, connector.id, ConnectorUpdate(name="Renamed"), actor)
+        await service.remove(project.id, connector.id, actor)
 
         assert witness.seen == [
             (ChangeKind.CONNECTOR, connector.id, connector),
@@ -719,18 +806,187 @@ class TestChangeEntries:
         project: Project,
         static_connector: Connector,
         redis_client: RedisClient,
+        actor: Actor,
     ) -> None:
         await forget_announcements(redis_client)
 
         with pytest.raises(InvalidConfigError):
             await connector_service.update(
-                project.id, static_connector.id, ConnectorUpdate(traffic_config={"limit_status": 200})
+                project.id, static_connector.id, ConnectorUpdate(traffic_config={"limit_status": 200}), actor
             )
         with pytest.raises(NameConflictError):
             await connector_service.create(
-                project.id, ConnectorCreate(name="isp", credential_id=static_connector.credential_id)
+                project.id, ConnectorCreate(name="isp", credential_id=static_connector.credential_id), actor
             )
         with pytest.raises(NotFoundError):
-            await connector_service.remove(project.id, "nope")
+            await connector_service.remove(project.id, "nope", actor)
 
         assert await announced(redis_client) == []
+
+
+class TestAuditLog:
+    async def test_a_create_records_each_setting_one_key_down_with_the_types_secret_masked(
+        self,
+        connector_service: ConnectorService,
+        project: Project,
+        bright_data: Credential,
+        sessions: async_sessionmaker[AsyncSession],
+        actor: Actor,
+    ) -> None:
+        connector = await connector_service.create(
+            project.id,
+            ConnectorCreate(name="Bright", credential_id=bright_data.id, config=ZONE, routing_config={"weight": 3}),
+            actor,
+        )
+
+        [entry] = await audit_entries(sessions, connector.id)
+        assert (entry.action, entry.entity_type, entry.entity_name, entry.project_id, entry.actor) == (
+            "created",
+            "connector",
+            "Bright",
+            project.id,
+            ACTOR_NAME,
+        )
+        assert (entry.changes["config.zone_password"], entry.changes["config.zone_name"]) == (
+            [None, MASK],
+            [None, "residential_1"],
+        )
+        assert (entry.changes["routing_config.weight"], entry.changes["credential_id"]) == ([None, 3], [None, bright_data.id])
+        # What its state, its credential's type and the counts say is never a person's edit.
+        assert not entry.changes.keys() & {"project_id", "credential_type", "pending_deletion", "proxy_count"}
+
+    async def test_an_edit_records_what_it_changed_and_one_that_changes_nothing_records_nothing(
+        self,
+        connector_service: ConnectorService,
+        project: Project,
+        static_connector: Connector,
+        sessions: async_sessionmaker[AsyncSession],
+        actor: Actor,
+    ) -> None:
+        edit = ConnectorUpdate(name="Renamed", routing_config={"weight": 3})
+        await connector_service.update(project.id, static_connector.id, edit, actor)
+        await connector_service.update(project.id, static_connector.id, edit, actor)
+
+        created, *edited = await audit_entries(sessions, static_connector.id)
+        assert created.action == "created"
+        assert [(e.action, e.entity_name, e.changes) for e in edited] == [
+            ("updated", "Renamed", {"name": ["ISP", "Renamed"], "routing_config.weight": [None, 3]}),
+        ]
+
+    async def test_a_secret_config_key_is_recorded_as_set_changed_or_cleared_and_never_stored(
+        self,
+        connector_service: ConnectorService,
+        project: Project,
+        bright_data: Credential,
+        static_credential: Credential,
+        sessions: async_sessionmaker[AsyncSession],
+        actor: Actor,
+    ) -> None:
+        connector = await connector_service.create(
+            project.id, ConnectorCreate(name="Bright", credential_id=bright_data.id, config=ZONE), actor
+        )
+        changed = ConnectorUpdate(config={**ZONE, "zone_password": "zone-secret-2"})
+        await connector_service.update(project.id, connector.id, changed, actor)
+        # Moved to a type whose config has no such key: the old type's secret is still masked as it goes.
+        moved = ConnectorUpdate(credential_id=static_credential.id, config={})
+        await connector_service.update(project.id, connector.id, moved, actor)
+
+        assert [e.changes.get("config.zone_password") for e in await audit_entries(sessions, connector.id)] == [
+            [None, MASK],
+            [MASK, MASK],
+            [MASK, None],
+        ]
+        stored = await audit_text(sessions)
+        assert "zone-secret-1" not in stored and "zone-secret-2" not in stored
+
+    async def test_a_type_no_longer_registered_masks_its_whole_config(
+        self,
+        connector_service: ConnectorService,
+        registry: ProviderRegistry,
+        project: Project,
+        bright_data: Credential,
+        sessions: async_sessionmaker[AsyncSession],
+        actor: Actor,
+    ) -> None:
+        """A custom provider disabled since: which of its keys were secret is no longer known."""
+        connector = await connector_service.create(
+            project.id, ConnectorCreate(name="Bright", credential_id=bright_data.id, config=ZONE), actor
+        )
+        registry.unregister("brightdata")
+
+        await connector_service.remove(project.id, connector.id, actor)
+
+        deleted = (await audit_entries(sessions, connector.id))[-1]
+        assert deleted.action == "deleted"
+        assert {key: value for key, value in deleted.changes.items() if key.startswith("config.")} == {
+            "config.zone_name": [MASK, None],
+            "config.zone_password": [MASK, None],
+            "config.proxy_type": [MASK, None],
+            "config.session_mode": [MASK, None],
+            "config.num_proxies": [MASK, None],
+        }
+
+    async def test_a_country_set_across_connectors_records_one_entry_per_connector_it_changed(
+        self,
+        connector_service: ConnectorService,
+        project: Project,
+        static_credential: Credential,
+        static_connector: Connector,
+        pool: Connector,
+        sessions: async_sessionmaker[AsyncSession],
+        actor: Actor,
+    ) -> None:
+        listing = await connector_service.create(
+            project.id,
+            ConnectorCreate(name="UK", credential_id=static_credential.id, config={"countries": ["GB", "US"]}),
+            actor,
+        )
+        roles = {listing.id: CountryRole.RESERVED, pool.id: CountryRole.OFF, static_connector.id: CountryRole.SERVES}
+
+        await connector_service.set_country(project.id, "GB", roles, actor)
+
+        # The static connector lists none and serves it already: unchanged, so no entry.
+        edits = [e for e in await audit_entries(sessions) if e.action == "updated"]
+        assert {e.entity_id: (e.changes, e.details) for e in edits} == {
+            listing.id: ({"routing_config.reserved_countries": [None, ["GB"]]}, {"country": "GB"}),
+            pool.id: ({"routing_config.excluded_countries": [None, ["GB"]]}, {"country": "GB"}),
+        }
+
+    async def test_a_traffic_reset_is_recorded_as_its_own_action(
+        self,
+        connector_service: ConnectorService,
+        project: Project,
+        static_connector: Connector,
+        sessions: async_sessionmaker[AsyncSession],
+        actor: Actor,
+    ) -> None:
+        saved = await connector_service.reset_traffic(project.id, static_connector.id, actor)
+
+        entry = (await audit_entries(sessions, static_connector.id))[-1]
+        assert (entry.action, list(entry.changes)) == ("traffic_reset", ["traffic_reset_at"])
+        before, after = entry.changes["traffic_reset_at"]
+        assert before is None and datetime.fromisoformat(after) == saved.traffic_reset_at
+
+    async def test_a_delete_is_recorded_once_and_the_scale_jobs_delete_never(
+        self,
+        connector_service: ConnectorService,
+        project: Project,
+        static_connector: Connector,
+        cloud: Connector,
+        sessions: async_sessionmaker[AsyncSession],
+        actor: Actor,
+    ) -> None:
+        await connector_service.remove(project.id, static_connector.id, actor)
+        await connector_service.remove(project.id, cloud.id, actor)
+        # Waiting for its instances, asked again: it marks nothing new.
+        await connector_service.remove(project.id, cloud.id, actor)
+        # Emptied, the scale job deletes it: a system write.
+        assert await connector_service.delete(cloud.id) == project.id
+
+        deleted = [e for e in await audit_entries(sessions) if e.action == "deleted"]
+        assert [(e.entity_id, e.entity_name, e.changes["name"]) for e in deleted] == [
+            (static_connector.id, "ISP", ["ISP", None]),
+            (cloud.id, "AWS", ["AWS", None]),
+        ]
+        # As the cloud connector stood when the delete marked it: enabled.
+        assert deleted[1].changes["enabled"] == [True, None]

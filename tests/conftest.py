@@ -37,7 +37,7 @@ _TRUNCATE_TABLES = text(
     "TRUNCATE TABLE "
     "metric_totals, metric_flushes, proxy_metrics, connector_metrics, host_metrics, failure_metrics, system_metrics, "
     "proxies, connectors, credentials, projects, api_tokens, auth_identities, auth_providers, users, "
-    "provider_audit_log, provider_descriptors, ip_observations, connector_exit_ips, geo_database_blobs, "
+    "audit_log, system_settings, provider_descriptors, ip_observations, connector_exit_ips, geo_database_blobs, "
     "geo_databases, geo_settings, tunnel_peer_metrics, wireguard_peers, wireguard_settings, "
     "openvpn_peers, openvpn_settings "
     "CASCADE"

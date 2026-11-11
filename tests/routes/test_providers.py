@@ -16,6 +16,7 @@ from unittest.mock import AsyncMock, patch
 
 import httpx
 import pytest
+from fastapi.routing import iter_route_contexts
 from sqlalchemy import create_engine, text
 from starlette.testclient import TestClient
 
@@ -81,11 +82,11 @@ def _acme_api(request: httpx.Request) -> httpx.Response:
 
 @pytest.fixture(autouse=True)
 def clean_custom_providers(test_settings: Settings) -> Iterator[None]:
-    """Custom descriptors are global rows; wipe them so tests do not see each other."""
+    """Custom descriptors are global rows; wipe them and their history so tests do not see each other."""
     yield
     engine = create_engine(test_settings.database_url_sync)
     with engine.begin() as conn:
-        conn.execute(text("DELETE FROM provider_audit_log"))
+        conn.execute(text("DELETE FROM audit_log WHERE entity_type = 'provider'"))
         conn.execute(text("DELETE FROM provider_descriptors"))
     engine.dispose()
 
@@ -290,9 +291,10 @@ class TestAuthoring:
         response = authenticated_client.put("/api/v1/providers/acme", json={"spec": new_host, "confirmed_hosts": ["api.acme.test", "other.acme.test"]})
         assert response.status_code == 200
 
-        audit = authenticated_client.get("/api/v1/providers/acme/audit").json()
-        assert [e["action"] for e in audit["entries"]] == ["updated", "updated", "created"]
-        assert audit["entries"][0]["hosts_changed"] is True and audit["entries"][2]["actor"] == "testadmin"
+        history = authenticated_client.get("/api/v1/audit/provider/acme").json()
+        assert [e["action"] for e in history["entries"]] == ["updated", "updated", "created"]
+        assert history["entries"][0]["details"] == {"hosts_added": ["other.acme.test"]}
+        assert history["entries"][2]["actor"] == "testadmin"
 
         export = authenticated_client.get("/api/v1/providers/acme/export")
         assert export.status_code == 200 and export.text.startswith("id: acme")
@@ -345,6 +347,125 @@ class TestAuthoring:
         assert client.get("/api/v1/providers/oxylabs/export", headers=viewer_auth_headers).status_code == 403
         # Editors may resolve options; viewers may not.
         assert client.post("/api/v1/providers/oxylabs/options/x", json={}, headers=viewer_auth_headers).status_code == 403
+
+
+class TestHistory:
+    """Every descriptor write is recorded in the audit log: the document compared one top-level key at a time."""
+
+    @staticmethod
+    def _entries(client: TestClient, provider_id: str) -> list[dict[str, Any]]:
+        """The provider's entries, oldest first."""
+        response = client.get(f"/api/v1/audit/provider/{provider_id}")
+        assert response.status_code == 200, response.text
+        return list(reversed(response.json()["entries"]))
+
+    def test_each_write_records_what_it_changed_and_the_hosts(self, authenticated_client: TestClient) -> None:
+        client = authenticated_client
+        provider_id = _create_unique_acme(client)
+        spec = dict(ACME_SPEC, id=provider_id)
+        renamed = dict(spec, name="Acme Renamed")
+        extra = {"extra": {"call": {"url": "https://other.acme.test/x"}, "value": "id"}}
+        added = dict(renamed, options={**renamed["options"], **extra})
+        assert client.put(f"/api/v1/providers/{provider_id}", json={"spec": renamed}).status_code == 200
+        # The same document again changes nothing recorded, though the record's version moves on.
+        assert client.put(f"/api/v1/providers/{provider_id}", json={"spec": renamed}).status_code == 200
+        assert client.put(
+            f"/api/v1/providers/{provider_id}", json={"spec": added, "confirmed_hosts": ["other.acme.test"]}
+        ).status_code == 200
+        assert client.put(f"/api/v1/providers/{provider_id}", json={"spec": renamed}).status_code == 200
+        assert client.delete(f"/api/v1/providers/{provider_id}").status_code == 204
+
+        created, rename, add_host, remove_host, deleted = self._entries(client, provider_id)
+        assert (created["action"], created["entity_name"], created["actor"]) == ("created", "Acme Proxies", "testadmin")
+        assert created["details"] == {"hosts_added": ["api.acme.test"]}
+        assert created["changes"]["name"] == [None, "Acme Proxies"]
+        assert created["changes"]["enabled"] == [None, True]
+        assert created["changes"]["spec.proxy_types"][1][0]["host"] == "gw.acme.test"
+        assert "version" not in created["changes"] and "created_by" not in created["changes"]
+        assert (rename["entity_name"], rename["details"]) == ("Acme Renamed", {})
+        assert rename["changes"] == {"name": ["Acme Proxies", "Acme Renamed"], "spec.name": ["Acme Proxies", "Acme Renamed"]}
+        assert add_host["details"] == {"hosts_added": ["other.acme.test"]} and list(add_host["changes"]) == ["spec.options"]
+        assert remove_host["details"] == {"hosts_removed": ["other.acme.test"]}
+        assert (deleted["action"], deleted["changes"]["spec.name"]) == ("deleted", ["Acme Renamed", None])
+
+    def test_a_delete_that_finds_the_row_gone_records_nothing(
+        self, authenticated_client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Two deletes at once both read the descriptor, and the one whose delete comes second leaves the entry to the
+        other."""
+        client = authenticated_client
+        provider_id = _create_unique_acme(client)
+        delete_row = ProviderDescriptorRepository.delete
+
+        async def deleted_first_elsewhere(repository: ProviderDescriptorRepository, provider_id: str) -> bool:
+            async with api_runtime(client).session_factory() as session:
+                await delete_row(ProviderDescriptorRepository(session), provider_id)
+                await session.commit()
+            return await delete_row(repository, provider_id)
+
+        monkeypatch.setattr(ProviderDescriptorRepository, "delete", deleted_first_elsewhere)
+
+        assert client.delete(f"/api/v1/providers/{provider_id}").status_code == 204
+        assert [e["action"] for e in self._entries(client, provider_id)] == ["created"]
+
+    def test_turning_one_off_records_the_flag(self, authenticated_client: TestClient) -> None:
+        provider_id = _create_unique_acme(authenticated_client)
+
+        assert authenticated_client.put(f"/api/v1/providers/{provider_id}", json={"enabled": False}).status_code == 200
+
+        assert self._entries(authenticated_client, provider_id)[-1]["changes"] == {"enabled": [True, False]}
+
+    def test_an_import_is_recorded_as_one(self, authenticated_client: TestClient) -> None:
+        provider_id = f"acme_{uuid.uuid4().hex[:8]}"
+        yaml_text = authenticated_client.post(
+            "/api/v1/providers/validate", json={"spec": dict(ACME_SPEC, id=provider_id)}
+        ).json()["yaml"]
+
+        response = authenticated_client.post(
+            "/api/v1/providers/import", json={"yaml": yaml_text, "confirmed_hosts": ["api.acme.test"]}
+        )
+
+        assert response.status_code == 201, response.text
+        assert [e["action"] for e in self._entries(authenticated_client, provider_id)] == ["imported"]
+
+    def test_the_logos_are_recorded_as_set_changed_or_cleared_only(
+        self, authenticated_client: TestClient, test_settings: Settings
+    ) -> None:
+        client = authenticated_client
+        provider_id = f"acme_{uuid.uuid4().hex[:8]}"
+        first, second = "data:image/svg+xml;base64,Zmlyc3Q=", "data:image/svg+xml;base64,c2Vjb25k"
+        dark = "data:image/png;base64,ZGFyaw=="
+        _create_acme(client, dict(ACME_SPEC, id=provider_id, logo=first, logo_dark=dark))
+        for logos in ({"logo": second, "logo_dark": dark}, {}):
+            response = client.put(f"/api/v1/providers/{provider_id}", json={"spec": dict(ACME_SPEC, id=provider_id, **logos)})
+            assert response.status_code == 200, response.text
+
+        logged = [(e["changes"].get("spec.logo"), e["changes"].get("spec.logo_dark")) for e in self._entries(client, provider_id)]
+        assert logged == [
+            ([None, "********"], [None, "********"]),
+            (["********", "********"], None),
+            (["********", None], ["********", None]),
+        ]
+        engine = create_engine(test_settings.database_url_sync)
+        try:
+            with engine.connect() as conn:
+                stored = conn.execute(
+                    text("SELECT string_agg(CAST(changes AS text) || CAST(details AS text), '') FROM audit_log WHERE entity_id = :id"),
+                    {"id": provider_id},
+                ).scalar_one()
+        finally:
+            engine.dispose()
+        assert all(logo.split(",")[1] not in stored for logo in (first, second, dark))
+
+    def test_is_for_admins(self, authenticated_client: TestClient, editor_auth_headers: dict[str, str]) -> None:
+        provider_id = _create_unique_acme(authenticated_client)
+
+        response = authenticated_client.get(f"/api/v1/audit/provider/{provider_id}", headers=editor_auth_headers)
+
+        assert response.status_code == 403
+        # The provider's own audit route is gone: its history is the audit log's.
+        paths = {context.path for context in iter_route_contexts(authenticated_client.app.routes)}  # type: ignore[attr-defined]
+        assert "/api/v1/providers/{provider_id}/audit" not in paths
 
 
 class TestDefinitionsFollowPostgres:

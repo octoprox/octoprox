@@ -21,6 +21,7 @@ import structlog
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from api.core import utc_now
+from api.core.audit import Actor
 from api.core.demand_tracker import DemandLevel, DemandTracker
 from api.core.stats import MetricDelta, StepMetricDelta, TunnelPeerMetricDelta
 from api.core.traffic_limiter import ConnectorTraffic
@@ -166,14 +167,15 @@ async def world(
     proxy_service: ProxyService,
     sessions: async_sessionmaker[AsyncSession],
     redis_client: RedisClient,
+    actor: Actor,
 ) -> World:
     def static(name: str, **fields: Any) -> ConnectorCreate:
         return ConnectorCreate(name=name, credential_id=static_credential.id, **fields)
 
-    isp = await connector_service.create(project.id, static("ISP"))
-    off = await connector_service.create(project.id, static("Off", enabled=False))
+    isp = await connector_service.create(project.id, static("ISP"), actor)
+    off = await connector_service.create(project.id, static("Off", enabled=False), actor)
     capped = await connector_service.create(
-        project.id, static("Capped", traffic_config={"limit_bytes": LIMIT_BYTES, "action": "block"})
+        project.id, static("Capped", traffic_config={"limit_bytes": LIMIT_BYTES, "action": "block"}), actor
     )
     healthy, quarantined, unhealthy, draining = await proxy_service.bulk_add(
         rows(isp, ProxyStatus.HEALTHY, ProxyStatus.HEALTHY, ProxyStatus.UNHEALTHY, ProxyStatus.DRAINING)
@@ -321,13 +323,14 @@ class TestConnectors:
         connector_service: ConnectorService,
         sessions: async_sessionmaker[AsyncSession],
         redis_client: RedisClient,
+        actor: Actor,
     ) -> None:
         """Usage counts from the reset at once; the block is the one gateways enforce, pending, until the traffic job decides."""
         blocked = await view.connector(world.project.id, world.capped.id)
         # Blocked by a decision no request waits on.
         assert blocked is not None and (blocked.traffic_usage.blocked, blocked.traffic_usage.pending) == (True, False)
 
-        reset = await connector_service.reset_traffic(world.project.id, world.capped.id)
+        reset = await connector_service.reset_traffic(world.project.id, world.capped.id, actor)
 
         capped = await view.connector(world.project.id, world.capped.id)
 
@@ -376,6 +379,7 @@ class TestConnectors:
         static_connector: Connector,
         connect: Connect,
         project_service: ProjectService,
+        actor: Actor,
     ) -> None:
         dynamic = await connect(project, "Dynamic", OXYLABS_DYNAMIC)
         # A session pool's exits are its rows', which health checks see.
@@ -385,7 +389,7 @@ class TestConnectors:
         # Without preflight nothing sees a dynamic connector's exits but Detect or a plugin.
         assert await view.exit_coverage(ids) == {dynamic.id: ExitCoverage(preflight_on=False, sampled_percent=0)}
 
-        await project_service.update(project.id, ProjectUpdate(location_preflight=True))
+        await project_service.update(project.id, ProjectUpdate(location_preflight=True), actor)
         assert await view.exit_coverage(ids) == {dynamic.id: ExitCoverage(preflight_on=True, sampled_percent=5)}
 
     async def test_a_provider_its_config_cannot_build_reads_as_none(

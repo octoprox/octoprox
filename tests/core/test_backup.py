@@ -30,8 +30,10 @@ from api.core.backup import (
     _KeptUser,
 )
 from api.core.stats import FailureKind
+from api.db.audit_repository import AuditRepository, SystemSettingsRepository
 from api.db.models import (
     ApiTokenModel,
+    AuditLogModel,
     AuthIdentityModel,
     GeoDatabaseBlobModel,
     IpObservationModel,
@@ -54,6 +56,7 @@ from api.db.repository import (
     ProjectRepository,
     ProxyRepository,
 )
+from api.models.audit import AuditEntry
 from api.models.backup import BackupPayload, ImportSummary
 from api.models.connector import Connector
 from api.models.credential import Credential
@@ -393,6 +396,80 @@ class TestOnTheDatabase:
         assert tokens == {"kt": "kept-user", "t-follows": copy}
         assert [conflict.original_username for conflict in result.summary.user_conflicts] == ["kept"]
 
+
+class TestTheInstallsOwnRowsStay:
+    """An import keeps the install's audit trail and settings, and adds the backup's to them."""
+
+    @staticmethod
+    def _entry(entry_id: str, name: str) -> AuditEntry:
+        return AuditEntry(
+            id=entry_id, created_at=datetime(2026, 11, 1), action="updated", entity_type="connector", entity_name=name
+        )
+
+    async def test_the_trail_keeps_its_entries_and_gains_the_backups_new_ones(self, db_session: AsyncSession) -> None:
+        await AuditRepository(db_session).add([self._entry("kept", "install"), self._entry("both", "install")])
+        await db_session.commit()
+        # As an export dumps a row: the backup's copy of "both" says otherwise, and "new" is the install's to gain.
+        row = {
+            "id": "new", "created_at": "2026-10-01T00:00:00", "action": "created", "entity_type": "proxy",
+            "entity_id": "x1", "entity_name": "backup", "project_id": None, "actor_id": None, "actor": "",
+            "request_id": None, "changes": {"host": [None, "h"]}, "details": {},
+        }
+
+        result = await BackupRepository(db_session).replace_all(
+            BackupPayload(audit_log=[{**row, "id": "both"}, row]), REGISTRY
+        )
+        await db_session.commit()
+
+        names = dict((await db_session.execute(select(AuditLogModel.id, AuditLogModel.entity_name))).all())
+        assert names == {"kept": "install", "both": "install", "new": "backup"}
+        assert result.summary.audit_log == 1
+
+    @pytest.mark.parametrize(
+        ("install", "backup", "kept", "taken"),
+        [
+            (None, (30, "oxl1.backup"), (30, "oxl1.backup"), 1),
+            ((90, None), (30, "oxl1.backup"), (90, "oxl1.backup"), 1),
+            ((90, "oxl1.install"), (30, "oxl1.backup"), (90, "oxl1.install"), 0),
+            ((90, None), (30, None), (90, None), 0),
+            ((90, "oxl1.install"), None, (90, "oxl1.install"), 0),
+        ],
+        ids=["no-row", "fills-the-key", "keeps-the-key", "nothing-to-fill", "no-backup-row"],
+    )
+    async def test_the_settings_stay_and_a_missing_license_key_is_filled_in(
+        self,
+        db_session: AsyncSession,
+        install: tuple[int, str | None] | None,
+        backup: tuple[int, str | None] | None,
+        kept: tuple[int, str | None],
+        taken: int,
+    ) -> None:
+        settings = SystemSettingsRepository(db_session)
+        if install is not None:
+            await settings.set_audit_retention(install[0])
+            await settings.set_license_key(install[1])
+            await db_session.commit()
+        rows = []
+        if backup is not None:
+            rows = [{"id": 1, "audit_retention_days": backup[0], "license_key": backup[1]}]
+
+        result = await BackupRepository(db_session).replace_all(BackupPayload(system_settings=rows), REGISTRY)
+        await db_session.commit()
+
+        stored = await settings.get()
+        assert (stored.audit_retention_days, stored.license_key) == kept
+        assert result.summary.system_settings == taken
+
+    async def test_an_export_carries_both(self, db_session: AsyncSession) -> None:
+        await AuditRepository(db_session).add([self._entry("e1", "install")])
+        await SystemSettingsRepository(db_session).set_audit_retention(30)
+        await db_session.commit()
+
+        payload = await BackupRepository(db_session).export(include_metrics=False)
+
+        assert [row["id"] for row in payload["audit_log"]] == ["e1"]
+        assert [(row["id"], row["audit_retention_days"]) for row in payload["system_settings"]] == [(1, 30)]
+        assert BackupPayload.model_validate(payload).audit_log[0]["entity_name"] == "install"
 
 
 class TestCloudConnectorsLeaving:

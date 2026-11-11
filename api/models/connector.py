@@ -6,13 +6,14 @@
 import math
 from datetime import datetime, timedelta
 from enum import StrEnum
-from typing import Any, Literal
+from typing import Any, ClassVar, Literal
 from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
 from api.core import utc_now
 from api.core.demand_tracker import DemandLevel
+from api.models.audit import Audited, AuditEntityType
 from api.models.cloud_options import (
     AWS_INSTANCE_TYPES,
     AWS_REGIONS,
@@ -507,8 +508,27 @@ def get_cloud_config(
         return None
 
 
-class Connector(BaseModel):
-    """Represents a connector that provides proxies."""
+class Connector(Audited):
+    """Represents a connector that provides proxies.
+
+    Its entries compare each JSON setting one key down; the service masks the secret keys of the provider type's config.
+    """
+
+    audit_type: ClassVar[AuditEntityType] = AuditEntityType.CONNECTOR
+    # Never a person's edit: its project, its credential's type (the credential itself is recorded), the delete mark,
+    # cloud errors and the proxy count.
+    audit_ignored: ClassVar[frozenset[str]] = Audited.audit_ignored | {
+        "project_id",
+        "credential_type",
+        "pending_deletion",
+        "last_error",
+        "last_error_at",
+        "consecutive_errors",
+        "proxy_count",
+    }
+    audit_nested: ClassVar[frozenset[str]] = frozenset(
+        {"config", "routing_config", "rate_limit_config", "traffic_config", "health_check_config"}
+    )
 
     id: str = Field(default_factory=lambda: str(uuid4()))
     name: str

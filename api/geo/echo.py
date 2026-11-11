@@ -18,7 +18,7 @@ read from ``X-Forwarded-For`` only when the peer is in ``trusted_proxies``.
 from __future__ import annotations
 
 import ipaddress
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, Field
 
@@ -26,6 +26,9 @@ from api.core import utc_now
 from api.geo.models import IpLocation
 from api.geo.readers import is_ip
 from api.geo.store import GeoDatabaseStore
+
+if TYPE_CHECKING:
+    from starlette.datastructures import Headers
 
 
 class EchoResponse(BaseModel):
@@ -60,18 +63,27 @@ def parse_trusted(cidrs: list[str]) -> list[ipaddress.IPv4Network | ipaddress.IP
     return networks
 
 
+def forwarded_for_of(headers: Headers) -> str | None:
+    """Every ``X-Forwarded-For`` line of a request joined in order, or None when there is none.
+
+    A balancer may add a line of its own rather than append to the client's,
+    as HAProxy does, so the first line alone can be the client's forgery.
+    """
+    return ", ".join(headers.getlist("x-forwarded-for")) or None
+
+
 def client_ip(
     peer: str | None,
     forwarded_for: str | None,
     trusted: list[ipaddress.IPv4Network | ipaddress.IPv6Network],
 ) -> str | None:
-    """The address to echo: the peer, or the exit the trusted balancer saw.
+    """A client's address: the peer, or the address a trusted balancer saw connect.
 
     ``X-Forwarded-For`` is appended to by every hop, so its rightmost entry
     not belonging to a trusted network is the address that connected to the
-    balancer: the proxy's exit. Anything to the left was written by the proxy
-    itself, typically the address of whoever asked it (Octoprox's own), and
-    must not be trusted.
+    balancer: for the echo the proxy's exit, for a sign-in the person's
+    browser. Anything to the left was written by the client itself and must
+    not be trusted.
     """
     if not peer or not is_ip(peer):
         return None

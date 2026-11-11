@@ -30,6 +30,7 @@ from api.db.repository import (
     ProxyRepository,
 )
 from api.db.streams import ChangeKind, RuntimeSignal
+from api.models.audit import AuditAction
 from api.models.connector import (
     Connector,
     ConnectorCreate,
@@ -52,6 +53,7 @@ from api.services.errors import (
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
 
+    from api.core.audit import Actor
     from api.db.redis import RedisClient
     from api.db.session import SessionFactory
     from api.db.streams import ChangeLog
@@ -89,7 +91,7 @@ class ConnectorService:
         self._registry = provider_registry
         self._changes = changes
 
-    async def create(self, project_id: str, data: ConnectorCreate) -> Connector:
+    async def create(self, project_id: str, data: ConnectorCreate, actor: Actor) -> Connector:
         """Validate and store a new connector of the project; the saved connector.
 
         A project being deleted takes none, since its deletion removes only the connectors it found.
@@ -116,6 +118,8 @@ class ConnectorService:
             self._check_countries(connector, credential)
             try:
                 await ConnectorRepository(session).create(connector)
+                masked = self._registry.audit_masked("connector", connector.credential_type)
+                await actor.created(session, connector, masked=masked)
                 await session.commit()
             except IntegrityError as exc:
                 raise _taken(exc, connector.name) from None
@@ -124,7 +128,7 @@ class ConnectorService:
         await self._start_work(connector)
         return connector
 
-    async def update(self, project_id: str, connector_id: str, data: ConnectorUpdate) -> Connector:
+    async def update(self, project_id: str, connector_id: str, data: ConnectorUpdate, actor: Actor) -> Connector:
         """Apply the fields ``data`` sets to a connector of the project; the saved connector.
 
         A new provider config is validated for the connector's credential
@@ -169,6 +173,8 @@ class ConnectorService:
             )
             try:
                 saved = await self._save(session, edited)
+                masked = self._registry.audit_masked("connector", current.credential_type, saved.credential_type)
+                await actor.updated(session, current, saved, masked=masked)
                 await session.commit()
             except IntegrityError as exc:
                 raise _taken(exc, edited.name) from None
@@ -184,7 +190,9 @@ class ConnectorService:
             await self._ask_for_traffic_decision(connector_id)
         return saved
 
-    async def set_country(self, project_id: str, country: str, roles: Mapping[str, CountryRole]) -> None:
+    async def set_country(
+        self, project_id: str, country: str, roles: Mapping[str, CountryRole], actor: Actor
+    ) -> None:
         """Set how each connector named in ``roles`` stands to ``country``, all in one transaction or none.
 
         A connector listing countries gets the country on or off its list, which provisions or drops its slots; one
@@ -203,7 +211,10 @@ class ConnectorService:
                 if changed.config == current.config and changed.routing_config == current.routing_config:
                     continue
                 self._check_countries(changed, credential)
-                edited.append((current, await self._save(session, changed)))
+                saved = await self._save(session, changed)
+                masked = self._registry.audit_masked("connector", current.credential_type)
+                await actor.updated(session, current, saved, masked=masked, details={"country": country})
+                edited.append((current, saved))
             await session.commit()
         for current, saved in edited:
             logger.info("Updated connector", connector_id=saved.id, name=saved.name, country=country)
@@ -211,7 +222,7 @@ class ConnectorService:
             if saved.config != current.config:
                 await self._start_work(saved)
 
-    async def remove(self, project_id: str, connector_id: str) -> None:
+    async def remove(self, project_id: str, connector_id: str, actor: Actor) -> None:
         """Delete a connector of the project, as the api's delete does: any but a cloud connector goes now.
 
         A cloud connector's instances are the scale job's to terminate first: its proxies are marked terminating, it is
@@ -219,15 +230,19 @@ class ConnectorService:
         """
         proxy_ids: list[str] = []
         async with self._session_factory() as session:
-            connector = await ConnectorRepository(session).get_in_project(project_id, connector_id)
+            connectors = ConnectorRepository(session)
+            connector = await connectors.get_in_project(project_id, connector_id)
             if connector is None:
                 raise NotFoundError("Connector not found")
             cloud = self._registry.is_cloud(connector.credential_type)
             if cloud:
                 proxy_ids = await ProxyRepository(session).mark_terminating(connector_id)
-                await ConnectorRepository(session).mark_pending_deletion(connector_id)
+                removed = await connectors.mark_pending_deletion(connector_id)
             else:
-                await ConnectorRepository(session).delete(connector_id)
+                removed = await connectors.delete(connector_id) is not None
+            if removed:
+                masked = self._registry.audit_masked("connector", connector.credential_type)
+                await actor.deleted(session, connector, masked=masked)
             await session.commit()
         await self._changes.record(ChangeKind.CONNECTOR, connector_id)
         if not cloud:
@@ -258,7 +273,7 @@ class ConnectorService:
         """
         await self._redis.client.delete(*(key.format(connector_id=connector_id) for key in _SCALE_KEYS))
 
-    async def reset_traffic(self, project_id: str, connector_id: str) -> Connector:
+    async def reset_traffic(self, project_id: str, connector_id: str, actor: Actor) -> Connector:
         """Start the connector's traffic usage over from now, for a vendor top-up or a plan change; the saved connector.
 
         History is untouched: the current period counts from this moment, and a traffic decision is asked for now.
@@ -268,6 +283,13 @@ class ConnectorService:
             if connector is None:
                 raise NotFoundError("Connector not found")
             saved = await self._save(session, connector.model_copy(update={"traffic_reset_at": utc_now()}))
+            await actor.updated(
+                session,
+                connector,
+                saved,
+                masked=self._registry.audit_masked("connector", connector.credential_type),
+                action=AuditAction.TRAFFIC_RESET,
+            )
             await session.commit()
         logger.info("Connector traffic usage reset", connector_id=connector_id, name=saved.name)
         await self._changes.record(ChangeKind.CONNECTOR, connector_id)

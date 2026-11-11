@@ -316,8 +316,8 @@ WORKERS: dict[WorkerName, WorkerInfo] = {
     ),
     WorkerName.JOB_RUNNER_COMPACTION: WorkerInfo(
         "Rolls old metric rows up into coarser granularities and deletes the ones past each "
-        "project's retention, the raw IP observations and exit IPs past theirs, and the records of "
-        "past metrics flushes",
+        "project's retention, the raw IP observations and exit IPs past theirs, the records of "
+        "past metrics flushes, and the audit entries past the audit log's retention",
         roles=_WORKER,
     ),
     WorkerName.JOB_RUNNER_SNAPSHOT: WorkerInfo(

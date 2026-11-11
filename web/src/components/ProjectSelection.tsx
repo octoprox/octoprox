@@ -22,6 +22,7 @@ import { DeletingBadge } from './DeletingBadge'
 import { DataTable, type DataTableFeatures } from './DataTable'
 import { Page } from './layout/Page'
 import { NewVersionBanner } from './NewVersion'
+import { LicenseBanner } from './license/LicenseBanner'
 import { UserMenu } from './UserMenu'
 import { Sparkline } from './charts/Sparkline'
 import octoproxLogo from '../assets/logos/octoprox_horizontal.svg'
@@ -91,6 +92,9 @@ export default function ProjectSelection() {
   const { canMutate, isAdmin } = useAuth()
   const toast = useToast()
   const [panel, setPanel] = useState<PanelState>(null)
+  // The open editor while its History tab shows, Save and Delete stepping aside meanwhile. The editor itself rather
+  // than the project, so opening that project again starts on General with its footer.
+  const [historyIn, setHistoryIn] = useState<PanelState>(null)
   const [pendingDelete, setPendingDelete] = useState<ProjectSummary | null>(null)
   const [deleteConfirmation, setDeleteConfirmation] = useState('')
   const [view, setView] = useProjectsView()
@@ -148,7 +152,8 @@ export default function ProjectSelection() {
   const resetUpdate = updateMutation.reset
   const editProject = useCallback((project: ProjectSummary) => {
     resetUpdate()
-    setPanel({ kind: 'edit', id: project.id })
+    // The editor already open for this project stays as it is, on whichever tab.
+    setPanel((current) => (current?.kind === 'edit' && current.id === project.id ? current : { kind: 'edit', id: project.id }))
   }, [resetUpdate])
 
   const projects = data?.projects
@@ -182,16 +187,16 @@ export default function ProjectSelection() {
         title="Project settings"
         subtitle={`${editing.name} · only this project`}
         onClose={() => setPanel(null)}
-        footer={
+        footer={historyIn !== null && historyIn === panel ? undefined : (
           <>
             <Button type="button" variant="danger-ghost" size="sm" onClick={() => setPendingDelete(editing)}><Trash2 className="w-3.5 h-3.5" /> Delete</Button>
             <span className="flex-1" />
             <Button type="button" variant="outline" size="sm" onClick={() => setPanel(null)}>Cancel</Button>
             <Button type="submit" form="project-form" size="sm" disabled={updateMutation.isPending}>{updateMutation.isPending ? 'Saving…' : 'Save changes'}</Button>
           </>
-        }
+        )}
       >
-        <ProjectForm key={editing.id} project={editing} onSave={(d) => updateMutation.mutate({ id: editing.id, data: d })} error={updateMutation.error?.message} formId="project-form" />
+        <ProjectForm key={editing.id} project={editing} onSave={(d) => updateMutation.mutate({ id: editing.id, data: d })} error={updateMutation.error?.message} formId="project-form" onHistoryChange={(showing) => setHistoryIn(showing ? panel : null)} />
       </Inspector>
     )
   }
@@ -199,10 +204,12 @@ export default function ProjectSelection() {
   return (
     <div className="h-screen flex flex-col bg-bg text-fg overflow-hidden">
       <NewVersionBanner />
+      <LicenseBanner />
       <header className="h-14 flex-none flex items-center justify-between px-5 border-b border-line bg-surface">
         <img src={isDark ? octoproxLogoDark : octoproxLogo} alt="Octoprox" className="h-[26px] w-auto" />
         <div className="flex items-center gap-2">
-          {isAdmin && <Button variant="ghost" size="sm" onClick={openAdmin}><Shield className="w-3.5 h-3.5" /> Administration</Button>}
+          {/* On a phone the shield alone, as in the sidebar's rail, so the user menu fits beside it. */}
+          {isAdmin && <Button variant="ghost" size="sm" onClick={openAdmin} className="pointer-coarse:h-11 pointer-coarse:min-w-11"><Shield className="w-3.5 h-3.5" /> <span className="max-sm:sr-only">Administration</span></Button>}
           <div className={isAdmin ? 'pl-2 border-l border-line' : undefined}>
             <UserMenu placement="header" onSignOut={() => logout()} />
           </div>

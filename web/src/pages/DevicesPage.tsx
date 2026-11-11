@@ -13,7 +13,7 @@ import {
   fetchWireGuardPeerConfig, fetchWireGuardPeerMetricsHistory, fetchWireGuardPeers,
   rotateOpenVpnPeerCertificate, rotateWireGuardPeerKeys, updateOpenVpnPeer, updateWireGuardPeer,
   OpenVpnPeer, TunnelPeerMetrics, TunnelPeerMetricsHistoryResponse, TunnelPeerMetricsSnapshot, WireGuardPeer, WireGuardPeerUpdate,
-  HISTORY_RANGES,
+  HISTORY_RANGES, type AuditEntityType,
 } from '../api/client'
 import { useProject } from '../contexts/ProjectContext'
 import { useAuth } from '../contexts/AuthContext'
@@ -21,11 +21,12 @@ import { useTheme } from '../contexts/ThemeContext'
 import { formatRangeTick, useTimeRange } from '../contexts/TimeRangeContext'
 import { useToast } from '../contexts/ToastContext'
 import { AdminLink } from '../components/AdminLink'
+import { EntityHistory } from '../components/audit/EntityHistory'
 import { DataTable, type DataTableFeatures } from '../components/DataTable'
 import { Page, EmptyState } from '../components/layout/Page'
 import { formatBytes, formatDateTime, parseApiDate, plural } from '../utils/format'
 import {
-  Alert, Badge, Button, ConfirmDialog, InfoTip, Input, Inspector, InspectorSection, KeyValue, Label, QueryContent, Segmented,
+  Alert, Badge, Button, ConfirmDialog, InfoTip, Input, Inspector, InspectorSection, KeyValue, Label, QueryContent, Segmented, Tabs,
 } from '../components/ui'
 
 // --- one shape for every tunnel protocol's devices -------------------------------------------
@@ -81,6 +82,8 @@ interface Adapter {
   fileLabel: string
   /** Whether the config is small enough for a QR code and the apps scan one. */
   qr: boolean
+  /** What the audit log records the protocol's devices as. */
+  auditType: AuditEntityType
   list(projectId: string): Promise<{ devices: Device[]; serverConfigured: boolean }>
   create(projectId: string, input: CreateInput): Promise<Device>
   update(projectId: string, id: string, data: WireGuardPeerUpdate): Promise<Device>
@@ -121,6 +124,7 @@ const ADAPTERS: Record<Protocol, Adapter> = {
     adminPage: 'wireguard',
     fileLabel: '.conf',
     qr: true,
+    auditType: 'wireguard_device',
     list: async (projectId) => {
       const r = await fetchWireGuardPeers(projectId)
       return { devices: r.peers.map(fromWireGuard), serverConfigured: r.server_configured }
@@ -141,6 +145,7 @@ const ADAPTERS: Record<Protocol, Adapter> = {
     adminPage: 'openvpn',
     fileLabel: '.ovpn',
     qr: false,
+    auditType: 'openvpn_device',
     list: async (projectId) => {
       const r = await fetchOpenVpnPeers(projectId)
       return { devices: r.peers.map(fromOpenVpn), serverConfigured: r.server_configured }
@@ -158,6 +163,9 @@ const ADAPTERS: Record<Protocol, Adapter> = {
 const PROTOCOLS: Protocol[] = ['wireguard', 'openvpn']
 
 type PanelState = { kind: 'edit'; protocol: Protocol; id: string } | { kind: 'new' } | null
+
+/** What an open device shows: its details, or its History in their place. */
+type DeviceView = 'details' | 'history'
 
 /**
  * The project's tunnel devices: anything that cannot speak to a proxy (TVs,
@@ -526,6 +534,7 @@ function DevicePanel({ device, serverConfigured, canMutate, onClose, onDelete, o
     session_id: device.session_id ?? '', country: device.country ?? '', state: device.state ?? '', city: device.city ?? '',
   })
   const [confirmRotate, setConfirmRotate] = useState(false)
+  const [view, setView] = useState<DeviceView>('details')
   useEffect(() => {
     setName(device.name)
     setRouting({ session_id: device.session_id ?? '', country: device.country ?? '', state: device.state ?? '', city: device.city ?? '' })
@@ -575,7 +584,7 @@ function DevicePanel({ device, serverConfigured, canMutate, onClose, onDelete, o
       title={device.name}
       subtitle={`${adapter.label} · ${device.address} · ${statusLabel(device)}`}
       onClose={onClose}
-      footer={canMutate ? (
+      footer={canMutate && view === 'details' ? (
         <>
           <Button type="button" variant="danger-ghost" size="sm" onClick={onDelete}><Trash2 className="w-3.5 h-3.5" /> Remove</Button>
           <span className="flex-1" />
@@ -584,6 +593,14 @@ function DevicePanel({ device, serverConfigured, canMutate, onClose, onDelete, o
         </>
       ) : undefined}
     >
+      <Tabs<DeviceView>
+        tabs={[{ id: 'details', label: 'Details' }, { id: 'history', label: 'History' }]}
+        active={view}
+        onChange={setView}
+        className="pointer-coarse:*:min-h-11"
+      />
+      {/* Hidden rather than unmounted while History shows, so an edit not saved yet is still there afterwards. */}
+      <div hidden={view === 'history'} className="space-y-4">
       {canMutate && (
         <div className="flex items-center justify-between gap-3 rounded-lg border border-line px-3 py-2">
           <div className="text-sm">
@@ -661,6 +678,9 @@ function DevicePanel({ device, serverConfigured, canMutate, onClose, onDelete, o
         />
         <KeyValue label="Encrypted DNS blocked" value={device.metrics.encrypted_dns_blocked} />
       </InspectorSection>
+      </div>
+
+      {view === 'history' && <EntityHistory entityType={adapter.auditType} entityId={device.id} />}
 
       {confirmRotate && (
         <ConfirmDialog

@@ -24,6 +24,7 @@ from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from api.core import utc_now
+from api.core.audit import Actor, AuditLog
 from api.core.demand_tracker import DEMAND_WINDOW_SECONDS, DemandLevel, DemandTracker
 from api.core.stats import MetricDelta
 from api.db.models import ConnectorModel
@@ -63,6 +64,7 @@ from api.services.projects import ProjectService
 from api.services.proxies import ProxyService
 from tests.conftest import Clock
 from tests.jobs.conftest import Rows
+from tests.services.conftest import ACTOR_ID, ACTOR_NAME, audit_entries
 
 AWS_CONFIG: dict[str, Any] = {
     "region": "us-east-1",
@@ -272,6 +274,12 @@ async def emptiable(rows: Rows, project: Project) -> Connector:
 async def doomed(rows: Rows, project: Project) -> Connector:
     """A cloud connector its user removed: disabled, and pending deletion until a run finds it holds nothing."""
     return await rows.connector(project, "aws", config=AWS_CONFIG, enabled=False, pending_deletion=True)
+
+
+@pytest.fixture
+def actor() -> Actor:
+    """The user a test's deletes are made by, recorded in the audit log as an api process records them."""
+    return AuditLog().actor(ACTOR_ID, ACTOR_NAME)
 
 
 async def _state(redis_client: RedisClient, connector: Connector) -> AutoscalerState:
@@ -953,12 +961,13 @@ class TestConnectorReadAgain:
         redis_client: RedisClient,
         connector_service: ConnectorService,
         monkeypatch: pytest.MonkeyPatch,
+        actor: Actor,
     ) -> None:
         """The run read the connector as enabled; the change lands once its entry is written, before it reads again."""
 
         async def meanwhile() -> None:
             if change == "removed":
-                await connector_service.remove(project.id, aws.id)
+                await connector_service.remove(project.id, aws.id, actor)
                 # A deletion run now finds the entry, so it waits for it.
                 await harness.run(aws)
                 assert await rows.connector_as_stored(aws.id) is not None
@@ -994,11 +1003,12 @@ class TestConnectorReadAgain:
         aws: Connector,
         redis_client: RedisClient,
         connector_service: ConnectorService,
+        actor: Actor,
     ) -> None:
         """The run found the connector enabled and creates; a deletion run before the instance is listed finds the entry."""
 
         async def meanwhile() -> None:
-            await connector_service.remove(project.id, aws.id)
+            await connector_service.remove(project.id, aws.id, actor)
             await harness.run(aws)
             assert await rows.connector_as_stored(aws.id) is not None
             assert harness.account.terminated == []
@@ -1695,6 +1705,33 @@ class TestRotation:
 
 
 class TestDisabledConnectors:
+    async def test_a_deletion_is_recorded_once_by_its_user_and_never_by_the_runs_that_finish_it(
+        self,
+        harness: Harness,
+        rows: Rows,
+        project: Project,
+        aws: Connector,
+        project_service: ProjectService,
+        sessions: async_sessionmaker[AsyncSession],
+        actor: Actor,
+    ) -> None:
+        """The runs terminate the instances and delete their rows, the connector and its project: system writes."""
+        await _instances(rows, aws, 2)
+        assert await project_service.delete(project.id, actor) is False
+        # Asked again, as an admin retries a stalled deletion: nothing new happened, so nothing new is recorded.
+        assert await project_service.delete(project.id, actor) is False
+
+        await harness.run(aws)  # terminated
+        await harness.run(aws)  # deleted, its project with it
+
+        assert len(harness.account.terminated) == 2
+        async with sessions() as session:
+            assert await ProjectRepository(session).get_by_id(project.id) is None
+        assert [(e.action, e.entity_type, e.entity_id, e.actor) for e in await audit_entries(sessions)] == [
+            ("deleted", "project", project.id, ACTOR_NAME),
+            ("deleted", "connector", aws.id, ACTOR_NAME),
+        ]
+
     async def test_a_disabled_connector_drains_terminates_and_once_empty_is_deleted_if_pending_deletion(
         self, harness: Harness, rows: Rows, doomed: Connector, redis_client: RedisClient
     ) -> None:

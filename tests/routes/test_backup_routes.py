@@ -3,19 +3,21 @@
 
 """Integration tests for the admin backup (export/import) endpoints, on an api process.
 
-An import replaces every row in one transaction, recomputes the metric totals from the history it restored and appends
-one ``all`` entry, and the answering process reads the imported definitions back at once.
+An import replaces every row but the install's audit trail and settings in one transaction, recomputes the metric
+totals from the history it restored, records itself and appends one ``all`` entry, and the answering process reads the
+imported definitions back at once.
 """
 
 import json
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterator
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, patch
 
 import pytest
 from fastapi import FastAPI
+from sqlalchemy import create_engine, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.testclient import TestClient
 
@@ -392,6 +394,94 @@ class TestBackupRoundTrip:
         # The record survived, so the admin sees what to re-upload or refresh.
         assert listed[db_id]["has_file"] is False
         authenticated_client.delete(f"/api/v1/geo/databases/{db_id}")
+
+
+class TestTheAuditTrail:
+    """An import keeps the install's audit trail and settings, adds what of the backup's the install lacks, and is
+    recorded last."""
+
+    @pytest.fixture(autouse=True)
+    def no_system_settings(self, migrated_database: str) -> Iterator[None]:
+        """No ``system_settings`` row, nor its entries, before and after each test: the row is the install's one."""
+        engine = create_engine(migrated_database)
+
+        def clear() -> None:
+            with engine.begin() as conn:
+                conn.execute(text("DELETE FROM system_settings"))
+                conn.execute(text("DELETE FROM audit_log WHERE entity_type = 'system_settings'"))
+
+        clear()
+        yield
+        clear()
+        engine.dispose()
+
+    @staticmethod
+    def _settings_changes(client: TestClient) -> list[dict[str, Any]]:
+        response = client.get("/api/v1/audit/system_settings/1")
+        assert response.status_code == 200, response.text
+        return [entry["changes"] for entry in response.json()["entries"]]
+
+    def test_an_import_is_recorded_and_the_installs_settings_and_trail_stay(
+        self, authenticated_client: TestClient
+    ) -> None:
+        client = authenticated_client
+        assert client.put("/api/v1/audit/retention", json={"days": 30}).status_code == 200
+        file_bytes = _export(client)
+        assert client.put("/api/v1/audit/retention", json={"days": 60}).status_code == 200
+
+        response = _import(client, file_bytes)
+
+        assert response.status_code == 200, response.text
+        assert (response.json()["audit_log"], response.json()["system_settings"]) == (0, 0)
+        assert client.get("/api/v1/audit/retention").json()["days"] == 60
+        assert self._settings_changes(client) == [
+            {"audit_retention_days": [30, 60]},
+            {"audit_retention_days": [365, 30]},
+        ]
+        latest = client.get("/api/v1/audit/backup/1").json()["entries"][0]
+        envelope = json.loads(file_bytes)
+        assert latest["request_id"] == response.headers["x-request-id"]
+        assert {key: latest[key] for key in ("action", "entity_id", "entity_name", "actor_id", "actor", "changes")} == {
+            "action": "imported",
+            "entity_id": "1",
+            "entity_name": "Backup",
+            "actor_id": "test-admin-id",
+            "actor": "testadmin",
+            "changes": {},
+        }
+        assert latest["details"] == {
+            "backup_created_at": envelope["created_at"],
+            "app_version": envelope["app_version"],
+            "includes_metrics": False,
+            "kept_current_user": False,
+        }
+
+    def test_entries_the_install_no_longer_has_come_back_from_the_backup(
+        self, authenticated_client: TestClient, migrated_database: str
+    ) -> None:
+        client = authenticated_client
+        assert client.put("/api/v1/audit/retention", json={"days": 30}).status_code == 200
+        file_bytes = _export(client)
+        engine = create_engine(migrated_database)
+        try:
+            with engine.begin() as conn:
+                conn.execute(text("DELETE FROM audit_log WHERE entity_type = 'system_settings'"))
+        finally:
+            engine.dispose()
+
+        response = _import(client, file_bytes)
+
+        assert response.status_code == 200, response.text
+        assert response.json()["audit_log"] == 1
+        assert self._settings_changes(client) == [{"audit_retention_days": [365, 30]}]
+
+    def test_a_refused_import_records_nothing(self, authenticated_client: TestClient) -> None:
+        file_bytes = _export(authenticated_client)
+        before = authenticated_client.get("/api/v1/audit/backup/1").json()["entries"]
+
+        assert _import(authenticated_client, file_bytes, passphrase="wrong-passphrase").status_code == 400
+
+        assert authenticated_client.get("/api/v1/audit/backup/1").json()["entries"] == before
 
 
 class TestImportedDefinitionsHere:

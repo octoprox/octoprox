@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING
 from fastapi import FastAPI, HTTPException, Request
 
 from api import __version__
-from api.geo.echo import EchoResponse, build_echo, client_ip, parse_trusted
+from api.geo.echo import EchoResponse, build_echo, client_ip, forwarded_for_of, parse_trusted
 
 if TYPE_CHECKING:
     from api.core.config import Settings
@@ -42,7 +42,7 @@ def create_echo_app(settings: Settings, *, lifespan: Lifespan) -> FastAPI:
         IP is read from ``X-Forwarded-For`` instead of the balancer's.
         """
         peer = request.client.host if request.client else None
-        ip = client_ip(peer, request.headers.get("x-forwarded-for"), trusted)
+        ip = client_ip(peer, forwarded_for_of(request.headers), trusted)
         if ip is None:
             raise HTTPException(status_code=400, detail="Could not determine the client address")
         return build_echo(ip, _store_of(request), nonce)

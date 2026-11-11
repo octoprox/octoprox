@@ -1,10 +1,10 @@
 # Copyright 2026 Octoprox Authors
 # SPDX-License-Identifier: Apache-2.0
 
-"""The api's OpenVPN service against Postgres and Redis: CA, certificates, devices, status.
+"""The api's OpenVPN service against Postgres and Redis: CA, certificates, devices, status, the audit log.
 
-What a write announces is read off the changes stream, as in the WireGuard
-service's tests.
+What a write announces is read off the changes stream, and what it records
+off the audit log, as in the WireGuard service's tests.
 """
 
 import json
@@ -23,19 +23,30 @@ from api.core.stats import TunnelPeerMetricDelta
 from api.db.openvpn_repository import OpenVpnPeerRepository
 from api.db.redis import RedisClient
 from api.db.streams import ChangeKind, ChangeLog, ref_of
-from api.models.openvpn import OpenVpnPeerCreate, OpenVpnPeerUpdate, OpenVpnServerSettingsDoc
+from api.models.audit import MASK, AuditEntityType
+from api.models.openvpn import (
+    OpenVpnPeer,
+    OpenVpnPeerCreate,
+    OpenVpnPeerUpdate,
+    OpenVpnServerSettingsDoc,
+)
 from api.models.project import Project
 from api.models.tunnel import TunnelEndpointState, TunnelValidationError
 from api.openvpn import pki
 from api.openvpn.service import OpenVpnService, defaults_from_config
 from api.wireguard.service import seed_tunnel_settings
 from tests.wireguard.test_service import (
+    ACTOR,
     Recorded,
     Totals,
+    Unrecorded,
     _gateway,
     _project,
     announced,
+    entry_count,
     forget_announcements,
+    leaked,
+    recorded,
 )
 
 Factory = async_sessionmaker[AsyncSession]
@@ -77,14 +88,14 @@ def test_defaults_seed_from_config() -> None:
 class TestCertificates:
     async def test_devices_are_issued_by_the_ca_in_the_row(self, db_session_factory: Factory, redis_client: RedisClient, project: Project) -> None:
         service = _service(db_session_factory, redis_client)
-        peer = await service.add_peer(project.id, OpenVpnPeerCreate(name="tv", country="DE"))
+        peer = await service.add_peer(project.id, OpenVpnPeerCreate(name="tv", country="DE"), ACTOR)
         server = await service.settings()
         assert peer.address == "10.67.0.2" and pki.common_name_of(peer.certificate) == peer.id
         assert pki.is_issued_by(peer.certificate, server.ca_cert) and peer.serial == pki.serial_of(peer.certificate)
         assert peer.certificate_expires_at == pki.not_after_of(peer.certificate)
 
         await forget_announcements(redis_client)
-        rotated = await service.rotate_certificate(project.id, peer.id)
+        rotated = await service.rotate_certificate(project.id, peer.id, ACTOR)
         assert rotated is not None and rotated.serial != peer.serial and rotated.address == peer.address
         assert pki.is_issued_by(rotated.certificate, server.ca_cert)
         assert (await service.peer(project.id, peer.id)).serial == rotated.serial  # type: ignore[union-attr]
@@ -94,10 +105,10 @@ class TestCertificates:
         self, db_session: AsyncSession, db_session_factory: Factory, redis_client: RedisClient, project: Project
     ) -> None:
         service = _service(db_session_factory, redis_client)
-        devices = [await service.add_peer(project.id, OpenVpnPeerCreate(name=name)) for name in ("tv", "console")]
+        devices = [await service.add_peer(project.id, OpenVpnPeerCreate(name=name), ACTOR) for name in ("tv", "console")]
         old = await service.settings()
         await forget_announcements(redis_client)
-        rotated = await service.rotate_identity("admin")
+        rotated = await service.rotate_identity(ACTOR)
         assert rotated.ca_cert != old.ca_cert and pki.is_issued_by(rotated.server_cert, rotated.ca_cert)
         reissued = await OpenVpnPeerRepository(db_session).get_all()
         assert {p.id for p in reissued} == {d.id for d in devices}
@@ -109,12 +120,12 @@ class TestCertificates:
 
     async def test_the_device_profile(self, db_session_factory: Factory, redis_client: RedisClient, project: Project) -> None:
         service = _service(db_session_factory, redis_client)
-        tv = await service.add_peer(project.id, OpenVpnPeerCreate(name="Living room TV"))
+        tv = await service.add_peer(project.id, OpenVpnPeerCreate(name="Living room TV"), ACTOR)
         profile = await service.client_profile(project.id, tv.id)
         assert profile is not None and profile.filename == "Living-room-TV.ovpn"
         assert "<cert>" in profile.config and "remote <set the public endpoint" in profile.config
         assert (profile.complete, profile.server_configured) == (False, False)
-        await service.save_settings(OpenVpnServerSettingsDoc(endpoint_host="vpn.example.net"), "admin")
+        await service.save_settings(OpenVpnServerSettingsDoc(endpoint_host="vpn.example.net"), ACTOR)
         profile = await service.client_profile(project.id, tv.id)
         assert profile is not None and profile.complete and "remote vpn.example.net 1194" in profile.config
 
@@ -125,42 +136,42 @@ class TestSettingsAndDevices:
     ) -> None:
         await seed_tunnel_settings(db_session_factory, Settings(_env_file=None), Recorded(redis_client))  # type: ignore[call-arg]
         service = _service(db_session_factory, redis_client)
-        await service.add_peer(project.id, OpenVpnPeerCreate(name="tv"))
-        saved = await service.save_settings(OpenVpnServerSettingsDoc(subnet="10.67.0.0/24", protocol="tcp"), "admin")
+        await service.add_peer(project.id, OpenVpnPeerCreate(name="tv"), ACTOR)
+        saved = await service.save_settings(OpenVpnServerSettingsDoc(subnet="10.67.0.0/24", protocol="tcp"), ACTOR)
         assert (saved.subnet, saved.protocol) == ("10.67.0.0/24", "tcp")
         with pytest.raises(TunnelValidationError, match="outside 10.68.0.0/24"):
-            await service.save_settings(OpenVpnServerSettingsDoc(subnet="10.68.0.0/24"), "admin")
+            await service.save_settings(OpenVpnServerSettingsDoc(subnet="10.68.0.0/24"), ACTOR)
         with pytest.raises(TunnelValidationError, match="overlaps the WireGuard subnet"):
-            await service.save_settings(OpenVpnServerSettingsDoc(subnet="10.64.0.0/14"), "admin")
+            await service.save_settings(OpenVpnServerSettingsDoc(subnet="10.64.0.0/14"), ACTOR)
 
     async def test_updates_and_removal(self, db_session: AsyncSession, db_session_factory: Factory, redis_client: RedisClient, project: Project) -> None:
         service = _service(db_session_factory, redis_client)
-        tv = await service.add_peer(project.id, OpenVpnPeerCreate(name="tv"))
-        await service.add_peer(project.id, OpenVpnPeerCreate(name="console"))
-        updated = await service.update_peer(project.id, tv.id, OpenVpnPeerUpdate(enabled=False, country="de", state="BE"))
+        tv = await service.add_peer(project.id, OpenVpnPeerCreate(name="tv"), ACTOR)
+        await service.add_peer(project.id, OpenVpnPeerCreate(name="console"), ACTOR)
+        updated = await service.update_peer(project.id, tv.id, OpenVpnPeerUpdate(enabled=False, country="de", state="BE"), ACTOR)
         assert updated is not None and (updated.enabled, updated.country, updated.state) == (False, "DE", "BE")
         assert updated.serial == tv.serial
         with pytest.raises(TunnelValidationError, match="named 'Console' already exists"):
-            await service.update_peer(project.id, tv.id, OpenVpnPeerUpdate(name="Console"))
+            await service.update_peer(project.id, tv.id, OpenVpnPeerUpdate(name="Console"), ACTOR)
         elsewhere = await _project(db_session, "Kitchen")
-        assert await service.update_peer(elsewhere.id, tv.id, OpenVpnPeerUpdate(enabled=True)) is None
-        assert await service.rotate_certificate(elsewhere.id, tv.id) is None
-        assert await service.remove_peer(elsewhere.id, tv.id) is False
-        assert await service.remove_peer(project.id, tv.id) is True
+        assert await service.update_peer(elsewhere.id, tv.id, OpenVpnPeerUpdate(enabled=True), ACTOR) is None
+        assert await service.rotate_certificate(elsewhere.id, tv.id, ACTOR) is None
+        assert await service.remove_peer(elsewhere.id, tv.id, ACTOR) is False
+        assert await service.remove_peer(project.id, tv.id, ACTOR) is True
         assert [p.name for p in await service.peers(project.id)] == ["console"]
 
     async def test_a_removal_stands_when_the_window_cannot_be_dropped(
         self, db_session_factory: Factory, redis_client: RedisClient, project: Project, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         service = _service(db_session_factory, redis_client)
-        tv = await service.add_peer(project.id, OpenVpnPeerCreate(name="tv"))
+        tv = await service.add_peer(project.id, OpenVpnPeerCreate(name="tv"), ACTOR)
 
         async def down(peer_id: str) -> None:
             raise ConnectionError("Redis is down")
 
         monkeypatch.setattr(redis_client, "delete_tunnel_peer_window", down)
         with structlog.testing.capture_logs() as logs:
-            assert await service.remove_peer(project.id, tv.id) is True
+            assert await service.remove_peer(project.id, tv.id, ACTOR) is True
         assert await service.peer(project.id, tv.id) is None
         assert [log["step"] for log in logs if log["event"] == "Redis step after a write failed"] == [
             "drop a deleted device's metric window"
@@ -176,8 +187,8 @@ class TestStatus:
             db_session_factory, redis_client, totals=totals,
             gateways=[_gateway("gw-2", protocol="openvpn", daemon_version="OpenVPN 2.6.3"), _gateway("gw-wg")],
         )
-        tv = await service.add_peer(project.id, OpenVpnPeerCreate(name="tv"))
-        console = await service.add_peer(project.id, OpenVpnPeerCreate(name="console"))
+        tv = await service.add_peer(project.id, OpenVpnPeerCreate(name="tv"), ACTOR)
+        console = await service.add_peer(project.id, OpenVpnPeerCreate(name="console"), ACTOR)
         totals.by_id = {tv.id: TunnelPeerMetricDelta(request_count=4, encrypted_dns_blocked=2)}
         now = int(time.time())
         # Two gateways: the newer session is where the device is now.
@@ -216,7 +227,7 @@ class TestLastSeen:
 
     async def test_last_connections_only_move_forward(self, db_session_factory: Factory, redis_client: RedisClient, project: Project) -> None:
         service = _service(db_session_factory, redis_client)
-        tv = await service.add_peer(project.id, OpenVpnPeerCreate(name="tv"))
+        tv = await service.add_peer(project.id, OpenVpnPeerCreate(name="tv"), ACTOR)
         stored = await service.peer(project.id, tv.id)
         assert stored is not None
         newer, older = utc_now(), utc_now() - timedelta(minutes=5)
@@ -240,12 +251,12 @@ class TestChangeEntries:
         await service.settings()
         await forget_announcements(redis_client)
 
-        await service.save_settings(OpenVpnServerSettingsDoc(endpoint_host="vpn.example.net"), "admin")
-        tv = await service.add_peer(project.id, OpenVpnPeerCreate(name="tv"))
-        await service.update_peer(project.id, tv.id, OpenVpnPeerUpdate(enabled=False))
-        await service.rotate_certificate(project.id, tv.id)
-        await service.rotate_identity("admin")
-        await service.remove_peer(project.id, tv.id)
+        await service.save_settings(OpenVpnServerSettingsDoc(endpoint_host="vpn.example.net"), ACTOR)
+        tv = await service.add_peer(project.id, OpenVpnPeerCreate(name="tv"), ACTOR)
+        await service.update_peer(project.id, tv.id, OpenVpnPeerUpdate(enabled=False), ACTOR)
+        await service.rotate_certificate(project.id, tv.id, ACTOR)
+        await service.rotate_identity(ACTOR)
+        await service.remove_peer(project.id, tv.id, ACTOR)
 
         assert await announced(redis_client) == [
             ("openvpn", ""),
@@ -260,18 +271,18 @@ class TestChangeEntries:
         self, db_session: AsyncSession, db_session_factory: Factory, redis_client: RedisClient, project: Project
     ) -> None:
         service = _service(db_session_factory, redis_client)
-        tv = await service.add_peer(project.id, OpenVpnPeerCreate(name="tv"))
-        await service.add_peer(project.id, OpenVpnPeerCreate(name="console"))
+        tv = await service.add_peer(project.id, OpenVpnPeerCreate(name="tv"), ACTOR)
+        await service.add_peer(project.id, OpenVpnPeerCreate(name="console"), ACTOR)
         elsewhere = await _project(db_session, "Kitchen")
         await forget_announcements(redis_client)
 
         with pytest.raises(TunnelValidationError):
-            await service.update_peer(project.id, tv.id, OpenVpnPeerUpdate(name="Console"))
+            await service.update_peer(project.id, tv.id, OpenVpnPeerUpdate(name="Console"), ACTOR)
         with pytest.raises(TunnelValidationError, match="outside 10.68.0.0/24"):
-            await service.save_settings(OpenVpnServerSettingsDoc(subnet="10.68.0.0/24"), "admin")
-        assert await service.update_peer(elsewhere.id, tv.id, OpenVpnPeerUpdate(enabled=True)) is None
-        assert await service.rotate_certificate(elsewhere.id, tv.id) is None
-        assert await service.remove_peer(elsewhere.id, tv.id) is False
+            await service.save_settings(OpenVpnServerSettingsDoc(subnet="10.68.0.0/24"), ACTOR)
+        assert await service.update_peer(elsewhere.id, tv.id, OpenVpnPeerUpdate(enabled=True), ACTOR) is None
+        assert await service.rotate_certificate(elsewhere.id, tv.id, ACTOR) is None
+        assert await service.remove_peer(elsewhere.id, tv.id, ACTOR) is False
 
         assert await announced(redis_client) == []
 
@@ -280,7 +291,7 @@ class TestChangeEntries:
     ) -> None:
         """A backup restored without the row: the read that writes it again tells the gateways."""
         service = _service(db_session_factory, redis_client)
-        tv = await service.add_peer(project.id, OpenVpnPeerCreate(name="tv"))
+        tv = await service.add_peer(project.id, OpenVpnPeerCreate(name="tv"), ACTOR)
         await forget_announcements(redis_client)
 
         await service.client_profile(project.id, tv.id)
@@ -311,8 +322,176 @@ class TestChangeEntries:
         await service.settings()
         seen.clear()
 
-        rotated = await service.rotate_identity("admin")
-        tv = await service.add_peer(project.id, OpenVpnPeerCreate(name="tv"))
-        await service.remove_peer(project.id, tv.id)
+        rotated = await service.rotate_identity(ACTOR)
+        tv = await service.add_peer(project.id, OpenVpnPeerCreate(name="tv"), ACTOR)
+        await service.remove_peer(project.id, tv.id, ACTOR)
 
         assert seen == [rotated.ca_cert, tv, None]
+
+
+class TestAuditLog:
+    """Each write is one entry, in the write's transaction and as its actor's; rotating the identity is one entry for
+    every device it reissues."""
+
+    async def test_settings_saves_and_identity_rotations(
+        self, db_session_factory: Factory, redis_client: RedisClient, project: Project
+    ) -> None:
+        await seed_tunnel_settings(db_session_factory, Settings(_env_file=None), Recorded(redis_client))  # type: ignore[call-arg]
+        service = _service(db_session_factory, redis_client)
+        devices = [await service.add_peer(project.id, OpenVpnPeerCreate(name=name), ACTOR) for name in ("tv", "console")]
+        doc = OpenVpnServerSettingsDoc(endpoint_host="vpn.example.net", protocol="tcp")
+
+        await service.save_settings(doc, ACTOR)
+        # A save that changes nothing, and one refused, add no entry.
+        await service.save_settings(doc, ACTOR)
+        with pytest.raises(TunnelValidationError, match="overlaps the WireGuard subnet"):
+            await service.save_settings(OpenVpnServerSettingsDoc(subnet="10.64.0.0/14"), ACTOR)
+        before = await service.settings()
+        rotated = await service.rotate_identity(ACTOR)
+
+        entries = await recorded(db_session_factory, AuditEntityType.OPENVPN_SETTINGS, "1")
+        assert [(e.action, e.entity_name, e.project_id, e.actor, e.request_id) for e in entries] == [
+            ("updated", "OpenVPN settings", None, "admin", "req-1"),
+            ("rotated", "OpenVPN settings", None, "admin", "req-1"),
+        ]
+        assert entries[0].changes == {"endpoint_host": ["", "vpn.example.net"], "protocol": ["udp", "tcp"]}
+        # The certificates show as the CA's fingerprint and expiry (to the second, so a CA made in the same second as
+        # the last one shows none), the keys only as changed.
+        expiry = [pki.not_after_of(server.ca_cert).isoformat() for server in (before, rotated)]
+        assert entries[1].changes == {
+            "ca_fingerprint": [pki.fingerprint_of(before.ca_cert), pki.fingerprint_of(rotated.ca_cert)],
+            "ca_key": [MASK, MASK],
+            "server_key": [MASK, MASK],
+            "tls_crypt_key": [MASK, MASK],
+            **({"ca_expires_at": expiry} if expiry[0] != expiry[1] else {}),
+        }
+        assert entries[1].details == {"devices_reissued": 2}
+        # The devices it reissued have no entries of their own.
+        for device in devices:
+            assert [e.action for e in await recorded(db_session_factory, AuditEntityType.OPENVPN_DEVICE, device.id)] == [
+                "created"
+            ]
+
+    async def test_device_writes(self, db_session_factory: Factory, redis_client: RedisClient, project: Project) -> None:
+        service = _service(db_session_factory, redis_client)
+        tv = await service.add_peer(project.id, OpenVpnPeerCreate(name="tv", country="de"), ACTOR)
+        await service.update_peer(project.id, tv.id, OpenVpnPeerUpdate(name="Living room TV", state="BE"), ACTOR)
+        # An update that changes nothing adds no entry.
+        await service.update_peer(project.id, tv.id, OpenVpnPeerUpdate(state="BE"), ACTOR)
+        rotated = await service.rotate_certificate(project.id, tv.id, ACTOR)
+        assert rotated is not None
+        assert await service.remove_peer(project.id, tv.id, ACTOR)
+
+        entries = await recorded(db_session_factory, AuditEntityType.OPENVPN_DEVICE, tv.id)
+        assert [(e.action, e.entity_name, e.project_id, e.actor) for e in entries] == [
+            ("created", "tv", project.id, "admin"),
+            ("updated", "Living room TV", project.id, "admin"),
+            ("rotated", "Living room TV", project.id, "admin"),
+            ("deleted", "Living room TV", project.id, "admin"),
+        ]
+        created, updated, rotation, deleted = (entry.changes for entry in entries)
+        # The certificate shows as its serial and expiry, the key only as set, changed or cleared.
+        expiry = [device.certificate_expires_at.isoformat() for device in (tv, rotated)]
+        assert created == {
+            "name": [None, "tv"],
+            "private_key": [None, MASK],
+            "serial": [None, tv.serial],
+            "certificate_expires_at": [None, expiry[0]],
+            "address": [None, "10.67.0.2"],
+            "enabled": [None, True],
+            "country": [None, "DE"],
+        }
+        assert updated == {"name": ["tv", "Living room TV"], "state": [None, "BE"]}
+        assert rotation == {
+            "private_key": [MASK, MASK],
+            "serial": [tv.serial, rotated.serial],
+            **({"certificate_expires_at": expiry} if expiry[0] != expiry[1] else {}),
+        }
+        assert deleted == {
+            "name": ["Living room TV", None],
+            "private_key": [MASK, None],
+            "serial": [rotated.serial, None],
+            "certificate_expires_at": [expiry[1], None],
+            "address": ["10.67.0.2", None],
+            "enabled": [True, None],
+            "country": ["DE", None],
+            "state": ["BE", None],
+        }
+
+    async def test_a_removal_that_finds_the_row_gone_records_nothing(
+        self, db_session_factory: Factory, redis_client: RedisClient, project: Project, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Two removals at once both read the device, and the one whose delete comes second leaves the entry to the
+        other."""
+        service = _service(db_session_factory, redis_client)
+        tv = await service.add_peer(project.id, OpenVpnPeerCreate(name="tv"), ACTOR)
+        delete_row = OpenVpnPeerRepository.delete
+
+        async def deleted_first_elsewhere(repository: OpenVpnPeerRepository, peer_id: str) -> bool:
+            async with db_session_factory() as session:
+                await delete_row(OpenVpnPeerRepository(session), peer_id)
+                await session.commit()
+            return await delete_row(repository, peer_id)
+
+        monkeypatch.setattr(OpenVpnPeerRepository, "delete", deleted_first_elsewhere)
+
+        assert await service.remove_peer(project.id, tv.id, ACTOR) is True
+        assert [e.action for e in await recorded(db_session_factory, AuditEntityType.OPENVPN_DEVICE, tv.id)] == ["created"]
+
+    async def test_a_rotation_that_cannot_be_recorded_is_not_made(
+        self, db_session_factory: Factory, redis_client: RedisClient, project: Project
+    ) -> None:
+        service = _service(db_session_factory, redis_client)
+        tv = await service.add_peer(project.id, OpenVpnPeerCreate(name="tv"), ACTOR)
+        before = await service.settings()
+        await forget_announcements(redis_client)
+
+        with pytest.raises(RuntimeError, match="audit log unavailable"):
+            await service.rotate_identity(Unrecorded().actor("u1", "admin", "req-1"))
+
+        # The CA, and the certificate it issued the device, are as they were.
+        assert (await service.settings()).ca_cert == before.ca_cert
+        stored = await service.peer(project.id, tv.id)
+        assert stored is not None and (stored.certificate, stored.serial) == (tv.certificate, tv.serial)
+        assert await announced(redis_client) == []
+
+    async def test_seeds_and_sightings_record_nothing(
+        self, db_session: AsyncSession, db_session_factory: Factory, redis_client: RedisClient, project: Project
+    ) -> None:
+        """A row written because none was there, and where the gateways last saw a device, are not anyone's change."""
+        service = _service(db_session_factory, redis_client)
+        tv = await service.add_peer(project.id, OpenVpnPeerCreate(name="tv"), ACTOR)
+        await db_session.execute(text("DELETE FROM openvpn_settings"))
+        await db_session.commit()
+
+        await service.client_profile(project.id, tv.id)
+        await service.peer_list(project.id)
+        await service.settings_response()
+        async with db_session_factory() as session:
+            assert await OpenVpnPeerRepository(session).record_last_seen([(tv.id, utc_now(), "198.51.100.1:2")]) == 1
+            await session.commit()
+
+        # The device's creation is the one entry.
+        assert await entry_count(db_session_factory) == 1
+
+    async def test_no_key_or_certificate_reaches_the_audit_log(
+        self, db_session_factory: Factory, redis_client: RedisClient, project: Project
+    ) -> None:
+        """The CA, server, tls-crypt and device keys, set, changed and cleared, are recorded only as such; no
+        certificate is recorded at all."""
+        service = _service(db_session_factory, redis_client)
+        identities = [await service.settings()]
+        tv = await service.add_peer(project.id, OpenVpnPeerCreate(name="tv"), ACTOR)
+        devices: list[OpenVpnPeer | None] = [tv, await service.rotate_certificate(project.id, tv.id, ACTOR)]
+        identities.append(await service.rotate_identity(ACTOR))
+        devices.append(await service.peer(project.id, tv.id))
+        assert await service.remove_peer(project.id, tv.id, ACTOR)
+
+        issued = [device for device in devices if device is not None]
+        secrets = [key for s in identities for key in (s.ca_key, s.server_key, s.tls_crypt_key)] + [
+            device.private_key for device in issued
+        ]
+        certificates = [pem for s in identities for pem in (s.ca_cert, s.server_cert)] + [d.certificate for d in issued]
+        assert len(set(secrets)) == 9 and len(set(certificates)) == 7
+        assert await entry_count(db_session_factory) == 4
+        assert await leaked(db_session_factory, secrets + certificates) == []

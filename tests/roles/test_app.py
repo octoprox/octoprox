@@ -99,6 +99,12 @@ class TestEveryRoleBoots:
         with TestClient(app, client=("127.0.0.1", 50000)) as client:
             forwarded = client.get("/echo", headers={"X-Forwarded-For": "81.2.69.160"}).json()
             assert forwarded["ip"] == "81.2.69.160" and forwarded["country"] == "GB" and forwarded["city"] == "London"
+            # Every line is read: a balancer's own line after the client's forged one, as HAProxy adds it, or one
+            # line the balancer appended to.
+            lines = [("X-Forwarded-For", "203.0.113.66"), ("X-Forwarded-For", "198.51.100.7")]
+            assert client.get("/echo", headers=lines).json()["ip"] == "198.51.100.7"
+            appended = {"X-Forwarded-For": "203.0.113.66, 198.51.100.7"}
+            assert client.get("/echo", headers=appended).json()["ip"] == "198.51.100.7"
             assert client.get("/echo?nonce=n1").json()["nonce"] == "n1"
 
             assert client.get("/live").status_code == 200

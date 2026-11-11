@@ -53,6 +53,7 @@ from api.jobs.attribution import REATTRIBUTE_ALL, ReattributeScope
 from api.models.location import LocationTarget
 from api.routes.common import (
     UNAVAILABLE_RETRY_AFTER_SECONDS,
+    actor_of,
     api_runtime_of,
     change_log_of,
     geo_database_store_of,
@@ -480,7 +481,7 @@ def _path_records(
 
 
 def _record_from_info(
-    info: Any, *, name: str, priority: int, enabled: bool, actor: str
+    info: Any, *, name: str, priority: int, enabled: bool, uploaded_by: str
 ) -> GeoDatabaseRecord:
     return GeoDatabaseRecord(
         name=name,
@@ -499,7 +500,7 @@ def _record_from_info(
         languages=info.languages,
         description=info.description,
         attribution=info.attribution,
-        uploaded_by=actor,
+        uploaded_by=uploaded_by,
     )
 
 
@@ -552,7 +553,7 @@ async def put_settings(
     # re-judging this save calls for.
     await store.load()
     inherited = store.settings.default_policy
-    await store.save(body, updated_by=admin.username)
+    await store.save(body, actor_of(request, admin))
     await change_log_of(request).record(ChangeKind.GEO_SETTINGS)
     if body.default_policy != inherited:
         await _reattribute_all(request, "default policy changed")
@@ -609,9 +610,10 @@ async def upload_database(
         name=(name or "").strip() or Path(file.filename or "database").stem,
         priority=priority,
         enabled=enabled,
-        actor=admin.username,
+        uploaded_by=admin.username,
     )
     await GeoDatabaseRepository(session).create(record, raw)
+    await actor_of(request, admin).created(session, record)
     await session.commit()
     await change_log_of(request).record(ChangeKind.GEO_DATABASE, record.id)
     await geo_database_store_of(request).apply_record(record, raw)
@@ -650,6 +652,7 @@ async def add_database_from_url(
         uploaded_by=admin.username,
     )
     await GeoDatabaseRepository(session).create(record, None)
+    await actor_of(request, admin).created(session, record)
     await session.commit()
     await change_log_of(request).record(ChangeKind.GEO_DATABASE, record.id)
     refreshed = await geo_updater_of(request).refresh(record)
@@ -683,7 +686,8 @@ async def update_database(
     record = await repo.get_by_id(database_id)
     if record is None:
         raise HTTPException(status_code=404, detail="Database not found")
-    was_enabled, was_priority = record.enabled, record.priority
+    # The record is changed in place below; its audit entry compares with this copy.
+    before = record.model_copy(deep=True)
     if body.name is not None:
         record.name = body.name.strip()
     if body.enabled is not None:
@@ -701,10 +705,11 @@ async def update_database(
     if body.update_paused is not None:
         record.update_paused = body.update_paused
     await repo.update(record)
+    await actor_of(request, admin).updated(session, before, record)
     await session.commit()
     await change_log_of(request).record(ChangeKind.GEO_DATABASE, database_id)
     await geo_database_store_of(request).apply_record(record)
-    if record.enabled != was_enabled or (record.enabled and record.priority != was_priority):
+    if record.enabled != before.enabled or (record.enabled and record.priority != before.priority):
         await _reattribute_all(request, "database order changed")
     return await _row(request, record)
 
@@ -749,7 +754,9 @@ async def delete_database(
                 detail="Operator-managed databases are removed from the config file",
             )
         raise HTTPException(status_code=404, detail="Database not found")
-    await repo.delete(database_id)
+    # A delete that lost a race with another finds the row gone: that one records it.
+    if await repo.delete(database_id):
+        await actor_of(request, admin).deleted(session, record)
     await session.commit()
     await change_log_of(request).record(ChangeKind.GEO_DATABASE, database_id)
     store.remove(database_id)

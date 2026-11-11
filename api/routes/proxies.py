@@ -28,6 +28,7 @@ from api.geo.service import GeoService
 from api.models.connector import Connector
 from api.models.proxy import Proxy, ProxyCreate, ProxyResponse, ProxyUpdate
 from api.routes.common import (
+    actor_of,
     attribution_of,
     proxy_service_of,
     require_project,
@@ -142,7 +143,7 @@ async def list_proxies(request: Request, project_id: str) -> ProxyListResponse:
 
 @router.post("", response_model=ProxyResponse, status_code=201)
 async def create_proxy(
-    request: Request, proxy_data: ProxyCreate, project_id: str, _guard: RequireEditorDep
+    request: Request, proxy_data: ProxyCreate, project_id: str, user: RequireEditorDep
 ) -> ProxyResponse:
     """Add a new proxy to the pool of a STATIC_PROXY_PROVIDER connector, the only kind that takes one.
 
@@ -151,7 +152,7 @@ async def create_proxy(
     job, with the ``proxy.geo_lookup`` settings and the attribution echo
     endpoint); the response waits for neither.
     """
-    proxy = await proxy_service_of(request).create(project_id, proxy_data)
+    proxy = await proxy_service_of(request).create(project_id, proxy_data, actor_of(request, user))
     return await _describe(request, project_id, proxy.id)
 
 
@@ -161,7 +162,7 @@ async def upload_proxies(
     project_id: str,
     file: Annotated[UploadFile, File(...)],
     connector_id: Annotated[str, Form(...)],
-    _guard: RequireEditorDep,
+    user: RequireEditorDep,
 ) -> ProxyUploadResponse:
     """Upload proxies from a file of one URL per line, ``protocol://[username:password@]host:port`` with protocol http, https, socks4 or socks5.
 
@@ -172,7 +173,7 @@ async def upload_proxies(
         text = (await file.read()).decode("utf-8")
     except UnicodeDecodeError as exc:
         raise HTTPException(status_code=400, detail="File must be UTF-8 encoded") from exc
-    upload = await proxy_service_of(request).upload(project_id, connector_id, text)
+    upload = await proxy_service_of(request).upload(project_id, connector_id, text, actor_of(request, user))
     async with session_factory_of(request)() as session:
         connector = await ConnectorRepository(session).get_in_project(project_id, connector_id)
     return ProxyUploadResponse(
@@ -195,26 +196,26 @@ async def get_proxy(request: Request, project_id: str, proxy_id: str) -> ProxyRe
 
 @router.patch("/{proxy_id}", response_model=ProxyResponse)
 async def update_proxy(
-    request: Request, project_id: str, proxy_id: str, proxy_data: ProxyUpdate, _guard: RequireEditorDep
+    request: Request, project_id: str, proxy_id: str, proxy_data: ProxyUpdate, user: RequireEditorDep
 ) -> ProxyResponse:
     """Update a proxy's definition; its status is the health checks' to move, never an edit's.
 
     A country, state or city set here is pinned as what routing matches the
     proxy on (an empty string unpins it), ahead of what attribution finds.
     """
-    await proxy_service_of(request).update(project_id, proxy_id, proxy_data)
+    await proxy_service_of(request).update(project_id, proxy_id, proxy_data, actor_of(request, user))
     return await _describe(request, project_id, proxy_id)
 
 
 @router.delete("/{proxy_id}", status_code=204)
-async def delete_proxy(request: Request, project_id: str, proxy_id: str, _guard: RequireEditorDep) -> None:
+async def delete_proxy(request: Request, project_id: str, proxy_id: str, user: RequireEditorDep) -> None:
     """Remove a proxy from the pool: a cloud provider's (AWS, GCP, Azure) is marked TERMINATING and the scale job
     terminates its instance, then deletes the row.
 
     Any other proxy is removed at once, and a sync of its connector brings a vendor slot back: a session slot as a
     fresh session, a list entry, port or gateway under its old ID, with what is still kept against that ID.
     """
-    await proxy_service_of(request).remove(project_id, proxy_id)
+    await proxy_service_of(request).remove(project_id, proxy_id, actor_of(request, user))
 
 
 @router.post("/{proxy_id}/locate", response_model=ProxyResponse)

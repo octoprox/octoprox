@@ -5,11 +5,12 @@ import { useState, useMemo } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { ColumnDef } from '@tanstack/react-table'
 import { Plus, Trash2, Send, Copy, Check, KeyRound } from 'lucide-react'
-import { Button, Input, Label, Badge, Alert, Inspector, InspectorSection, KeyValue, ConfirmDialog, QueryContent } from './ui'
+import { Button, Input, Label, Badge, Alert, Inspector, InspectorSection, KeyValue, ConfirmDialog, QueryContent, Tabs } from './ui'
 import { DataTable, type DataTableFeatures } from './DataTable'
 import { Page } from './layout/Page'
 import { RichSelect, RichSelectOption } from './RichSelect'
 import { ApiTokensPanel, LinkedSignInsPanel } from './AccessPanels'
+import { EntityHistory } from './audit/EntityHistory'
 import { ProviderMark } from './SignInProviderMark'
 import { useAuth } from '../contexts/AuthContext'
 import { formatDate, formatDateTime, relativeTime } from '../utils/format'
@@ -31,6 +32,9 @@ const roleOptions: RichSelectOption[] = [
 ]
 
 type PanelState = { kind: 'edit'; id: string } | { kind: 'new' } | null
+
+/** What an open user shows: their details, or their History in their place. */
+type UserView = 'details' | 'history'
 
 export default function UsersPage() {
   const queryClient = useQueryClient()
@@ -241,6 +245,7 @@ function UserPanel({ user, isSelf, inviteUrl, onClose, onDelete, onReinvite, onS
   const [isActive, setIsActive] = useState(user?.is_active ?? true)
   const [useInvite, setUseInvite] = useState(isCreate)
   const [error, setError] = useState<string | null>(null)
+  const [view, setView] = useState<UserView>('details')
 
   const invalidate = () => queryClient.invalidateQueries({ queryKey: ['users'] })
   const createMutation = useMutation({
@@ -285,7 +290,7 @@ function UserPanel({ user, isSelf, inviteUrl, onClose, onDelete, onReinvite, onS
       title={isCreate ? 'Add user' : user!.username}
       subtitle={isCreate ? 'Invite by link, set a password, or let them sign in with a provider' : `${user!.role} · ${!user!.is_active ? 'disabled' : invitePending(user!) ? 'invite pending' : 'active'}`}
       onClose={onClose}
-      footer={
+      footer={view === 'history' ? undefined : (
         <>
           {!isCreate && onDelete && !isSelf && <Button type="button" variant="danger-ghost" size="sm" onClick={onDelete}><Trash2 className="w-3.5 h-3.5" /> Delete</Button>}
           <span className="flex-1" />
@@ -294,8 +299,18 @@ function UserPanel({ user, isSelf, inviteUrl, onClose, onDelete, onReinvite, onS
             {saving ? 'Saving…' : isCreate ? (useInvite ? 'Send invite' : 'Create user') : 'Save changes'}
           </Button>
         </>
-      }
+      )}
     >
+      {user && (
+        <Tabs<UserView>
+          tabs={[{ id: 'details', label: 'Details' }, { id: 'history', label: 'History' }]}
+          active={view}
+          onChange={setView}
+          className="pointer-coarse:*:min-h-11"
+        />
+      )}
+      {/* Hidden rather than unmounted while History shows, so an edit not saved yet is still there afterwards. */}
+      <div hidden={view === 'history'} className="space-y-4">
       {inviteUrl && <InviteLink url={inviteUrl} />}
       {!isCreate && !user!.has_password && !inviteUrl && onReinvite && (
         <Alert variant={invitePending(user!) ? 'warning' : 'info'} className="flex items-center justify-between gap-3 text-xs">
@@ -358,6 +373,9 @@ function UserPanel({ user, isSelf, inviteUrl, onClose, onDelete, onReinvite, onS
           <KeyValue label="Updated" value={formatDateTime(user.updated_at)} />
         </InspectorSection>
       )}
+      </div>
+
+      {view === 'history' && user && <EntityHistory entityType="user" entityId={user.id} />}
     </Inspector>
   )
 }

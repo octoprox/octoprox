@@ -299,7 +299,7 @@ docker run -d -p 8000:8000 -e OCTOPROX_ROLE=echo \
   -v /srv/geoip:/data:ro ghcr.io/octoprox/octoprox:latest
 ```
 
-Behind a load balancer the peer address is the balancer's, so list its addresses in `geo.echo.trusted_proxies` (`OCTOPROX_GEO_ECHO_TRUSTED_PROXIES`, a JSON list, for either the api or the echo role) and the client IP is read from `X-Forwarded-For`. The bundled nginx config sets that header on the API listener.
+Behind a load balancer the peer address is the balancer's, so list its addresses in `geo.echo.trusted_proxies` (`OCTOPROX_GEO_ECHO_TRUSTED_PROXIES`, a JSON list, for either the api or the echo role) and the client IP is read from `X-Forwarded-For`. The bundled nginx config sets that header on the API listener. For the hosts uvicorn's `FORWARDED_ALLOW_IPS` lists, uvicorn replaces the peer with an address from that header before Octoprox sees it. Keep its default, the loopback addresses, only while nothing forwards to the api or the echo role over `127.0.0.1`; with a proxy or sidecar on the same host or in the same pod, set it to an empty value and list the real balancers in `geo.echo.trusted_proxies` (see [Client addresses]({{ site.baseurl }}/audit-log#client-addresses)). On Octoprox Enterprise the same setting gives the address of each sign-in in the [audit log]({{ site.baseurl }}/audit-log#client-addresses).
 
 ## Health checks
 

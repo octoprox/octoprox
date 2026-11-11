@@ -108,7 +108,7 @@ In a cluster the first three go to the api alone, which signs users in; `OCTOPRO
 
 - **Always set a strong `OCTOPROX_JWT_SECRET` and `OCTOPROX_INTERNAL_SECRET`** in production, two different values. The defaults are insecure. Gateways never get the JWT secret, so a gateway, the role that faces the internet, cannot mint a sign-in.
 - **Never commit credentials** to version control. Use environment variables or `.env` files (which should be gitignored).
-- The `/api/v1/auth/login` and `/api/v1/auth/status` endpoints are always public, as are the `/api/v1/auth/sso/*` endpoints the browser's sign-in round trip uses.
+- The `/api/v1/auth/login` and `/api/v1/auth/status` endpoints are always public, as are the `/api/v1/auth/sso/*` endpoints the browser's sign-in round trip uses and `/api/v1/edition`, which tells the login page which edition runs.
 - The `/live`, `/ready`, `/health` and `/metrics` endpoints are always public, on every role, for probes, load balancer health checks and Prometheus. The bundled cluster's nginx refuses `/metrics` on its public port, where it would reach whichever api it picked: scrape each container's port 8000 instead.
 - The internal endpoints under `/internal/v1` take a token derived from `OCTOPROX_INTERNAL_SECRET`, not a sign-in; only gateways call them, and the bundled nginx config refuses them on its public port.
 - All other API endpoints require authentication.
@@ -176,7 +176,7 @@ The install-wide settings (default conflict rule and city radius, echo endpoint,
 | `geo.databases` | Operator-managed database files: list of `{path, name, priority, enabled}` entries loaded at startup; a GeoNames table (zipped or `.txt`) may be listed too. The echo role serves from these alone | [] |
 | `geo.defaults` | Initial settings for a fresh install: `default_conflict_rule`, `default_city_radius_km`, `echo_url`, `echo_ip_path`, `echo_country_path`, `echo_state_path`, `echo_city_path`, `echo_timeout_seconds`, `health_check_attribution`, `preflight_session_ttl_seconds`, `preflight_max_attempts`, `observation_retention_days`, `exit_ip_retention_days` | built-in |
 | `geo.echo.enabled` | Serve the public `/echo` endpoint on the api | true |
-| `geo.echo.trusted_proxies` | CIDRs of load balancers whose `X-Forwarded-For` the `/echo` endpoint trusts for the client IP | [] |
+| `geo.echo.trusted_proxies` | CIDRs of load balancers whose `X-Forwarded-For` is trusted for the client's address: the one the `/echo` endpoint answers with, and on Octoprox Enterprise the one the [audit log]({{ site.baseurl }}/audit-log#client-addresses) records for each sign-in and a token's first use. List balancers here. Keep uvicorn's `FORWARDED_ALLOW_IPS` at its default only when nothing forwards to the api over `127.0.0.1`; otherwise set it to an empty value (see [Client addresses]({{ site.baseurl }}/audit-log#client-addresses)) | [] |
 | `geo.observations.publish_interval_seconds` | How often buffered IP observations and preflight sightings are appended to their Redis streams; the workers write them to Postgres as they arrive | 5 |
 | `geo.observations.max_buffer` | Observations (and sightings) one process keeps in memory before dropping the oldest | 5000 |
 | `geo.updater.check_interval_seconds` | How often the controller publishes the `geo_update` job, which downloads on a worker the scheduled databases that are due | 3600 |
@@ -294,6 +294,10 @@ failure_log:
 | `failure_log.max_per_window` | How many distinct examples of each kind one gateway keeps per project in each 5-second window. Beyond that, failures are only counted | `100` |
 
 An example is a few hundred bytes, so a kind that fills its examples at the default takes a few hundred kilobytes of Redis, and a project takes that for each kind it actually sees. Lower `max_entries` on an install with many projects: the counts stay complete whatever it is set to. The settings can also be set as `OCTOPROX_FAILURE_LOG_ENABLED`, `OCTOPROX_FAILURE_LOG_MAX_ENTRIES`, `OCTOPROX_FAILURE_LOG_RETENTION_HOURS` and `OCTOPROX_FAILURE_LOG_MAX_PER_WINDOW`; gateways record the failures and the api shows them, so set them alike on both.
+
+## Audit Log
+
+The [audit log]({{ site.baseurl }}/audit-log) has no setting in the configuration file or the environment. How long it keeps entries is set by an admin under **Administration → Activity** (365 days until one is saved; 0 keeps them forever) and stored in the database, so every process follows the same value and a backup carries it. The hourly compaction, on the workers, applies it. On Octoprox Enterprise the address of a sign-in is read through `geo.echo.trusted_proxies` (see [IP Attribution](#ip-attribution)), and each entry is also an `audit` line in the [log](#logging), written whatever `OCTOPROX_LOG_LEVEL` is set to.
 
 ## Database Configuration
 

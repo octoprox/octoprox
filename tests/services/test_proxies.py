@@ -9,17 +9,22 @@ did is read back from the repository, the changes and runtime streams, and the j
 
 import asyncio
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 
 import pytest
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy import event
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from api.core import utc_now
+from api.core.audit import Actor
 from api.core.roles import JobKind
 from api.db.redis import PROXY_REQUESTS_KEY, QUARANTINE_KEY, RedisClient
 from api.db.repository import ProxyRepository
 from api.db.streams import ChangeKind, ChangeLog
 from api.geo.models import META_LOCATION_CHECKED_AT
 from api.jobs.queue import JobQueue
+from api.models.audit import MASK
 from api.models.connector import Connector, ConnectorUpdate
 from api.models.project import Project
 from api.models.proxy import Proxy, ProxyCreate, ProxyProtocol, ProxyStatus, ProxyUpdate
@@ -34,6 +39,8 @@ from tests.services.conftest import (
     Executed,
     Witness,
     announced,
+    audit_entries,
+    audit_text,
     forget_announcements,
     runtime_entries,
 )
@@ -44,6 +51,22 @@ async def stored(sessions: async_sessionmaker[AsyncSession], proxy_id: str) -> P
         return await ProxyRepository(session).get_by_id(proxy_id)
 
 
+@contextmanager
+def audit_inserts(engine: AsyncEngine) -> Iterator[list[str]]:
+    """The statements that insert audit entries while the block runs."""
+    statements: list[str] = []
+
+    def before(conn: object, cursor: object, statement: str, *args: object) -> None:
+        if statement.lstrip().upper().startswith("INSERT INTO AUDIT_LOG"):
+            statements.append(statement)
+
+    event.listen(engine.sync_engine, "before_cursor_execute", before)
+    try:
+        yield statements
+    finally:
+        event.remove(engine.sync_engine, "before_cursor_execute", before)
+
+
 def slot(connector: Connector, status: ProxyStatus = ProxyStatus.HEALTHY) -> Proxy:
     """A row as a job builds it: a vendor session slot, or a cloud instance."""
     return Proxy(host="pr.oxylabs.io", port=7777, connector_id=connector.id, status=status)
@@ -51,11 +74,11 @@ def slot(connector: Connector, status: ProxyStatus = ProxyStatus.HEALTHY) -> Pro
 
 @pytest.fixture
 async def manual(
-    proxy_service: ProxyService, project: Project, static_connector: Connector, redis_client: RedisClient
+    proxy_service: ProxyService, project: Project, static_connector: Connector, redis_client: RedisClient, actor: Actor
 ) -> Proxy:
     """A proxy added by hand, with the jobs its add requested cleared away."""
     proxy = await proxy_service.create(
-        project.id, ProxyCreate(host="10.0.0.1", port=8080, connector_id=static_connector.id)
+        project.id, ProxyCreate(host="10.0.0.1", port=8080, connector_id=static_connector.id), actor
     )
     await redis_client.client.flushdb()
     return proxy
@@ -69,9 +92,10 @@ class TestCreate:
         static_connector: Connector,
         sessions: async_sessionmaker[AsyncSession],
         redis_client: RedisClient,
+        actor: Actor,
     ) -> None:
         proxy = await proxy_service.create(
-            project.id, ProxyCreate(host="10.0.0.1", port=8080, connector_id=static_connector.id, tags=["a"])
+            project.id, ProxyCreate(host="10.0.0.1", port=8080, connector_id=static_connector.id, tags=["a"]), actor
         )
 
         assert await stored(sessions, proxy.id) == proxy
@@ -80,13 +104,18 @@ class TestCreate:
         assert await queued_job_keys(redis_client, JobKind.ENRICH) == [proxy.id]
 
     async def test_a_country_set_by_hand_is_pinned_and_not_looked_up(
-        self, proxy_service: ProxyService, project: Project, static_connector: Connector, redis_client: RedisClient
+        self,
+        proxy_service: ProxyService,
+        project: Project,
+        static_connector: Connector,
+        redis_client: RedisClient,
+        actor: Actor,
     ) -> None:
         pinned = ProxyCreate(
             host="10.0.0.1", port=8080, connector_id=static_connector.id, country="de", state="by", city="Munich"
         )
 
-        proxy = await proxy_service.create(project.id, pinned)
+        proxy = await proxy_service.create(project.id, pinned, actor)
 
         assert (proxy.country, proxy.metadata["country_source"]) == ("DE", "manual")
         assert (proxy.state_code, proxy.city_slug) == ("BY", "munich")
@@ -102,13 +131,14 @@ class TestCreate:
         change_log: ChangeLog,
         project: Project,
         static_connector: Connector,
+        actor: Actor,
     ) -> None:
         """``geo_lookup_enabled`` off: the enrich job would only drop the run, so none is queued."""
         service = ProxyService(sessions, jobs, redis_client, registry, changes=change_log, lookup_enabled=False)
 
         added = ProxyCreate(host="10.0.0.1", port=8080, connector_id=static_connector.id)
-        proxy = await service.create(project.id, added)
-        upload = await service.upload(project.id, static_connector.id, "http://10.0.0.2:8080")
+        proxy = await service.create(project.id, added, actor)
+        upload = await service.upload(project.id, static_connector.id, "http://10.0.0.2:8080", actor)
 
         assert await queued_job_keys(redis_client, JobKind.HEALTH) == [proxy.id, upload.added[0].id]
         assert await queued_job_keys(redis_client, JobKind.ENRICH) == []
@@ -120,18 +150,19 @@ class TestCreate:
         other_project: Project,
         pool: Connector,
         static_connector: Connector,
+        actor: Actor,
     ) -> None:
         def add(connector_id: str) -> ProxyCreate:
             return ProxyCreate(host="10.0.0.1", port=8080, connector_id=connector_id)
 
         with pytest.raises(WriteRejectedError, match="only be manually added to STATIC_PROXY_PROVIDER"):
-            await proxy_service.create(project.id, add(pool.id))
+            await proxy_service.create(project.id, add(pool.id), actor)
         with pytest.raises(WriteRejectedError, match="Connector does not belong to this project"):
-            await proxy_service.create(other_project.id, add(static_connector.id))
+            await proxy_service.create(other_project.id, add(static_connector.id), actor)
         with pytest.raises(NotFoundError, match="Connector not found"):
-            await proxy_service.create(project.id, add("nope"))
+            await proxy_service.create(project.id, add("nope"), actor)
         with pytest.raises(NotFoundError, match="Project not found"):
-            await proxy_service.create("nope", add(static_connector.id))
+            await proxy_service.create("nope", add(static_connector.id), actor)
 
 
 class TestUpload:
@@ -142,10 +173,11 @@ class TestUpload:
         static_connector: Connector,
         sessions: async_sessionmaker[AsyncSession],
         redis_client: RedisClient,
+        actor: Actor,
     ) -> None:
         text = "http://10.0.0.1:8080\n\n  socks5://user:pass@10.0.0.2:1080  \nnot a proxy\nftp://10.0.0.3:21\n"
 
-        upload = await proxy_service.upload(project.id, static_connector.id, text)
+        upload = await proxy_service.upload(project.id, static_connector.id, text, actor)
 
         assert upload.total_lines == 4
         assert [(p.host, p.port, p.protocol, p.username) for p in upload.added] == [
@@ -161,10 +193,15 @@ class TestUpload:
         assert await queued_job_keys(redis_client, JobKind.ENRICH) == [p.id for p in upload.added]
 
     async def test_only_a_static_connector_takes_an_upload(
-        self, proxy_service: ProxyService, project: Project, pool: Connector, sessions: async_sessionmaker[AsyncSession]
+        self,
+        proxy_service: ProxyService,
+        project: Project,
+        pool: Connector,
+        sessions: async_sessionmaker[AsyncSession],
+        actor: Actor,
     ) -> None:
         with pytest.raises(WriteRejectedError, match="only be uploaded to STATIC_PROXY_PROVIDER"):
-            await proxy_service.upload(project.id, pool.id, "http://10.0.0.1:8080")
+            await proxy_service.upload(project.id, pool.id, "http://10.0.0.1:8080", actor)
 
         async with sessions() as session:
             assert await ProxyRepository(session).get_by_project(project.id) == []
@@ -243,36 +280,48 @@ class TestJobAdds:
 
 class TestUpdate:
     async def test_applies_the_definition_and_never_the_status(
-        self, proxy_service: ProxyService, project: Project, manual: Proxy, sessions: async_sessionmaker[AsyncSession]
+        self,
+        proxy_service: ProxyService,
+        project: Project,
+        manual: Proxy,
+        sessions: async_sessionmaker[AsyncSession],
+        actor: Actor,
     ) -> None:
         await proxy_service.drain(manual.id)
         edit = ProxyUpdate(host="10.9.9.9", port=3128, tags=["x"], metadata={"note": "kept"})
 
-        saved = await proxy_service.update(project.id, manual.id, edit)
+        saved = await proxy_service.update(project.id, manual.id, edit, actor)
 
         assert (saved.host, saved.port, saved.tags, saved.metadata) == ("10.9.9.9", 3128, ["x"], {"note": "kept"})
         assert saved.status == ProxyStatus.DRAINING
         assert await stored(sessions, manual.id) == saved
 
     async def test_pins_and_unpins_the_country_and_place(
-        self, proxy_service: ProxyService, project: Project, manual: Proxy
+        self, proxy_service: ProxyService, project: Project, manual: Proxy, actor: Actor
     ) -> None:
-        pinned = await proxy_service.update(project.id, manual.id, ProxyUpdate(country="FR", state="IDF", city="Paris"))
+        pinned = await proxy_service.update(
+            project.id, manual.id, ProxyUpdate(country="FR", state="IDF", city="Paris"), actor
+        )
         assert (pinned.country, pinned.metadata["country_source"], pinned.state_code, pinned.city_slug) == (
             "FR", "manual", "IDF", "paris",
         )
 
-        unpinned = await proxy_service.update(project.id, manual.id, ProxyUpdate(country="", state="", city=""))
+        unpinned = await proxy_service.update(project.id, manual.id, ProxyUpdate(country="", state="", city=""), actor)
         assert (unpinned.country, unpinned.state_code, unpinned.city_slug) == (None, None, None)
         assert "country_source" not in unpinned.metadata
 
     async def test_an_edit_waits_for_a_write_in_flight_and_keeps_what_it_wrote(
-        self, proxy_service: ProxyService, project: Project, manual: Proxy, sessions: async_sessionmaker[AsyncSession]
+        self,
+        proxy_service: ProxyService,
+        project: Project,
+        manual: Proxy,
+        sessions: async_sessionmaker[AsyncSession],
+        actor: Actor,
     ) -> None:
         async with sessions() as session:
             # Attribution's patch, written and not committed yet: it holds the row.
             assert await ProxyRepository(session).patch_metadata(manual.id, {"note": "patched"}, (), None)
-            edit = asyncio.create_task(proxy_service.update(project.id, manual.id, ProxyUpdate(country="FR")))
+            edit = asyncio.create_task(proxy_service.update(project.id, manual.id, ProxyUpdate(country="FR"), actor))
             await asyncio.sleep(0.3)
             assert not edit.done()
             await session.commit()
@@ -283,12 +332,12 @@ class TestUpdate:
         assert await stored(sessions, manual.id) == saved
 
     async def test_a_proxy_of_another_project_is_not_found(
-        self, proxy_service: ProxyService, other_project: Project, manual: Proxy
+        self, proxy_service: ProxyService, other_project: Project, manual: Proxy, actor: Actor
     ) -> None:
         with pytest.raises(NotFoundError, match="Proxy not found"):
-            await proxy_service.update(other_project.id, manual.id, ProxyUpdate(host="mine"))
+            await proxy_service.update(other_project.id, manual.id, ProxyUpdate(host="mine"), actor)
         with pytest.raises(NotFoundError, match="Proxy not found"):
-            await proxy_service.remove(other_project.id, manual.id)
+            await proxy_service.remove(other_project.id, manual.id, actor)
         with pytest.raises(NotFoundError, match="Proxy not found"):
             await proxy_service.unquarantine(other_project.id, manual.id)
 
@@ -301,8 +350,9 @@ class TestDelete:
         manual: Proxy,
         sessions: async_sessionmaker[AsyncSession],
         redis_client: RedisClient,
+        actor: Actor,
     ) -> None:
-        await proxy_service.remove(project.id, manual.id)
+        await proxy_service.remove(project.id, manual.id, actor)
 
         assert await stored(sessions, manual.id) is None
         assert await queued_job_keys(redis_client, JobKind.SYNC) == []
@@ -314,11 +364,12 @@ class TestDelete:
         pool: Connector,
         sessions: async_sessionmaker[AsyncSession],
         redis_client: RedisClient,
+        actor: Actor,
     ) -> None:
         removed, other = await proxy_service.bulk_add([slot(pool), slot(pool)])
         await redis_client.client.flushdb()
 
-        await proxy_service.remove(project.id, removed.id)
+        await proxy_service.remove(project.id, removed.id, actor)
         assert await stored(sessions, removed.id) is None
         assert await queued_job_keys(redis_client, JobKind.SYNC) == [pool.id]
 
@@ -336,10 +387,11 @@ class TestDelete:
         project: Project,
         pool: Connector,
         redis_client: RedisClient,
+        actor: Actor,
     ) -> None:
         added = slot(pool)
         await proxy_service.add(added)
-        await connector_service.update(project.id, pool.id, ConnectorUpdate(enabled=False))
+        await connector_service.update(project.id, pool.id, ConnectorUpdate(enabled=False), actor)
         await redis_client.client.flushdb()
 
         assert await proxy_service.delete(added.id) is True
@@ -353,13 +405,14 @@ class TestDelete:
         cloud: Connector,
         sessions: async_sessionmaker[AsyncSession],
         redis_client: RedisClient,
+        actor: Actor,
     ) -> None:
         """The instance has to go first: the row is marked and a scale run deletes both."""
         instance = slot(cloud)
         await proxy_service.add(instance)
         await redis_client.client.flushdb()
 
-        await proxy_service.remove(project.id, instance.id)
+        await proxy_service.remove(project.id, instance.id, actor)
 
         row = await stored(sessions, instance.id)
         assert row is not None and row.status == ProxyStatus.TERMINATING
@@ -558,19 +611,20 @@ class TestChangeEntries:
         project: Project,
         static_connector: Connector,
         redis_client: RedisClient,
+        actor: Actor,
     ) -> None:
         await forget_announcements(redis_client)
 
         proxy = await proxy_service.create(
-            project.id, ProxyCreate(host="10.0.0.1", port=8080, connector_id=static_connector.id)
+            project.id, ProxyCreate(host="10.0.0.1", port=8080, connector_id=static_connector.id), actor
         )
         upload = await proxy_service.upload(
-            project.id, static_connector.id, "http://10.0.0.2:8080\nhttp://10.0.0.3:8080"
+            project.id, static_connector.id, "http://10.0.0.2:8080\nhttp://10.0.0.3:8080", actor
         )
         # Nothing it could read, nothing stored, nothing announced.
-        await proxy_service.upload(project.id, static_connector.id, "not a proxy")
-        await proxy_service.update(project.id, proxy.id, ProxyUpdate(tags=["x"]))
-        await proxy_service.remove(project.id, upload.added[0].id)
+        await proxy_service.upload(project.id, static_connector.id, "not a proxy", actor)
+        await proxy_service.update(project.id, proxy.id, ProxyUpdate(tags=["x"]), actor)
+        await proxy_service.remove(project.id, upload.added[0].id, actor)
 
         assert await announced(redis_client) == [
             ("proxy", proxy.id),
@@ -580,15 +634,15 @@ class TestChangeEntries:
         ]
 
     async def test_a_cloud_proxy_is_announced_once_when_marked_for_termination(
-        self, proxy_service: ProxyService, project: Project, cloud: Connector, redis_client: RedisClient
+        self, proxy_service: ProxyService, project: Project, cloud: Connector, redis_client: RedisClient, actor: Actor
     ) -> None:
         instance = slot(cloud)
         await proxy_service.add(instance)
         await forget_announcements(redis_client)
 
-        await proxy_service.remove(project.id, instance.id)
+        await proxy_service.remove(project.id, instance.id, actor)
         # Terminating already: the second delete changes no row.
-        await proxy_service.remove(project.id, instance.id)
+        await proxy_service.remove(project.id, instance.id, actor)
 
         assert await announced(redis_client) == [("proxy", instance.id)]
 
@@ -639,17 +693,18 @@ class TestChangeEntries:
         registry: ProviderRegistry,
         project: Project,
         static_connector: Connector,
+        actor: Actor,
     ) -> None:
         """A consumer woken by an entry reads Postgres: the write must be there by then, or it is missed."""
         witness = Witness(redis_client, lambda ref: stored(sessions, ref))
         service = ProxyService(sessions, jobs, redis_client, registry, changes=witness)
 
         added = ProxyCreate(host="10.0.0.1", port=8080, connector_id=static_connector.id)
-        proxy = await service.create(project.id, added)
-        edited = await service.update(project.id, proxy.id, ProxyUpdate(tags=["x"]))
+        proxy = await service.create(project.id, added, actor)
+        edited = await service.update(project.id, proxy.id, ProxyUpdate(tags=["x"]), actor)
         assert await service.drain(proxy.id) is True
         drained = await stored(sessions, proxy.id)
-        await service.remove(project.id, proxy.id)
+        await service.remove(project.id, proxy.id, actor)
 
         assert witness.seen == [
             (ChangeKind.PROXY, proxy.id, proxy),
@@ -657,3 +712,169 @@ class TestChangeEntries:
             (ChangeKind.PROXY, proxy.id, drained),
             (ChangeKind.PROXY, proxy.id, None),
         ]
+
+
+class TestAuditLog:
+    async def test_a_proxy_added_by_hand_records_what_a_person_sets(
+        self,
+        proxy_service: ProxyService,
+        project: Project,
+        static_connector: Connector,
+        sessions: async_sessionmaker[AsyncSession],
+        actor: Actor,
+    ) -> None:
+        added = ProxyCreate(
+            host="10.0.0.1",
+            port=8080,
+            connector_id=static_connector.id,
+            username="u",
+            password="p",
+            tags=["a"],
+            metadata={"note": "kept"},
+            country="de",
+            state="by",
+            city="Munich",
+        )
+
+        proxy = await proxy_service.create(project.id, added, actor)
+
+        [entry] = await audit_entries(sessions, proxy.id)
+        assert (entry.action, entry.entity_type, entry.entity_name, entry.project_id) == (
+            "created",
+            "proxy",
+            "10.0.0.1:8080",
+            project.id,
+        )
+        # The pins, not the metadata they are kept in, nor the status or the connector.
+        assert entry.changes == {
+            "host": [None, "10.0.0.1"],
+            "port": [None, 8080],
+            "protocol": [None, "http"],
+            "username": [None, "u"],
+            "password": [None, MASK],
+            "tags": [None, ["a"]],
+            "country": [None, "DE"],
+            "state": [None, "BY"],
+            "city": [None, "munich"],
+        }
+
+    async def test_an_upload_records_one_entry_per_proxy_in_one_insert(
+        self,
+        proxy_service: ProxyService,
+        project: Project,
+        static_connector: Connector,
+        sessions: async_sessionmaker[AsyncSession],
+        db_engine: AsyncEngine,
+        actor: Actor,
+    ) -> None:
+        text = "http://10.0.0.1:8080\nnot a proxy\nsocks5://u:p@10.0.0.2:1080\nhttp://10.0.0.3:8080"
+
+        with audit_inserts(db_engine) as inserts:
+            upload = await proxy_service.upload(project.id, static_connector.id, text, actor)
+
+        assert len(inserts) == 1
+        entries = [e for e in await audit_entries(sessions) if e.entity_type == "proxy"]
+        assert sorted((e.entity_id, e.entity_name, e.action, e.project_id, e.details) for e in entries) == sorted(
+            (p.id, f"{p.host}:{p.port}", "created", project.id, {"via": "upload"}) for p in upload.added
+        )
+        assert len(entries) == 3
+
+    async def test_an_edit_records_what_it_changed_and_one_that_changes_nothing_records_nothing(
+        self,
+        proxy_service: ProxyService,
+        project: Project,
+        manual: Proxy,
+        sessions: async_sessionmaker[AsyncSession],
+        actor: Actor,
+    ) -> None:
+        await proxy_service.update(project.id, manual.id, ProxyUpdate(port=3128, country="FR"), actor)
+        await proxy_service.update(project.id, manual.id, ProxyUpdate(port=3128, country="FR"), actor)
+
+        created, *edited = await audit_entries(sessions, manual.id)
+        assert created.action == "created"
+        assert [(e.action, e.entity_name, e.changes) for e in edited] == [
+            ("updated", "10.0.0.1:3128", {"port": [8080, 3128], "country": [None, "FR"]}),
+        ]
+
+    async def test_the_password_is_recorded_as_set_changed_or_cleared_and_never_stored(
+        self,
+        proxy_service: ProxyService,
+        project: Project,
+        static_connector: Connector,
+        sessions: async_sessionmaker[AsyncSession],
+        actor: Actor,
+    ) -> None:
+        added = ProxyCreate(
+            host="10.0.0.1", port=8080, connector_id=static_connector.id, username="u", password="first-secret"
+        )
+        proxy = await proxy_service.create(project.id, added, actor)
+        await proxy_service.update(project.id, proxy.id, ProxyUpdate(password="second-secret"), actor)
+        await proxy_service.update(project.id, proxy.id, ProxyUpdate(password=""), actor)
+        await proxy_service.upload(project.id, static_connector.id, "http://u:third-secret@10.0.0.2:8080", actor)
+
+        assert [e.changes["password"] for e in await audit_entries(sessions, proxy.id)] == [
+            [None, MASK],
+            [MASK, MASK],
+            [MASK, None],
+        ]
+        stored = await audit_text(sessions)
+        assert not any(secret in stored for secret in ("first-secret", "second-secret", "third-secret"))
+
+    async def test_the_longest_host_a_proxy_takes_records_its_name_cut_to_fit(
+        self,
+        proxy_service: ProxyService,
+        project: Project,
+        static_connector: Connector,
+        sessions: async_sessionmaker[AsyncSession],
+        actor: Actor,
+    ) -> None:
+        """A host the table's full 255 characters wide names the entry host:port, too long for its column: cut, never
+        refused."""
+        host = "x" * 251 + ".com"
+
+        proxy = await proxy_service.create(project.id, ProxyCreate(host=host, port=8080, connector_id=static_connector.id), actor)
+
+        [entry] = await audit_entries(sessions, proxy.id)
+        assert entry.entity_name == f"{host}:8080"[:255]
+        assert entry.changes["host"] == [None, host]
+
+    async def test_a_delete_is_recorded_once_whether_it_deletes_the_row_or_marks_it(
+        self,
+        proxy_service: ProxyService,
+        project: Project,
+        manual: Proxy,
+        cloud: Connector,
+        sessions: async_sessionmaker[AsyncSession],
+        actor: Actor,
+    ) -> None:
+        instance = slot(cloud)
+        await proxy_service.add(instance)
+
+        await proxy_service.remove(project.id, manual.id, actor)
+        await proxy_service.remove(project.id, instance.id, actor)
+        # Terminating already, asked again: it marks nothing new.
+        await proxy_service.remove(project.id, instance.id, actor)
+
+        deleted = [e for e in await audit_entries(sessions) if e.action == "deleted"]
+        assert [(e.entity_id, e.entity_name, e.project_id, e.changes["host"]) for e in deleted] == [
+            (manual.id, "10.0.0.1:8080", project.id, ["10.0.0.1", None]),
+            (instance.id, "pr.oxylabs.io:7777", project.id, ["pr.oxylabs.io", None]),
+        ]
+
+    async def test_the_jobs_writes_record_nothing(
+        self,
+        proxy_service: ProxyService,
+        pool: Connector,
+        cloud: Connector,
+        sessions: async_sessionmaker[AsyncSession],
+    ) -> None:
+        """Syncs, health checks, rotations and the scale job hold no actor: a system write is never credited to a person."""
+        first, second, third, fourth = await proxy_service.bulk_add([slot(pool), slot(pool), slot(pool), slot(cloud)])
+        await proxy_service.set_statuses_if({first.id: StatusMove(ProxyStatus.UNHEALTHY, ProxyStatus.HEALTHY)})
+        await proxy_service.apply_sync([SyncEdit(first.id, {"port": 7778}, {}, ())], [second.id])
+        await proxy_service.drain(first.id)
+        assert await proxy_service.delete_many([third.id]) == [third.id]
+        assert await proxy_service.terminate(fourth.id) is True
+        assert await proxy_service.delete(fourth.id) is True
+
+        assert [e for e in await audit_entries(sessions) if e.entity_type == "proxy"] == []

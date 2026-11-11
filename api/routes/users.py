@@ -1,7 +1,11 @@
 # Copyright 2026 Octoprox Authors
 # SPDX-License-Identifier: Apache-2.0
 
-"""User management routes for Octoprox."""
+"""User management routes for Octoprox.
+
+Each change to a user is recorded in the audit log; issuing and revoking a
+token and unlinking a sign-in are told to its hooks.
+"""
 
 import secrets
 from datetime import timedelta
@@ -14,12 +18,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.core import utc_now
 from api.core.api_tokens import generate_token
+from api.core.audit import Actor
 from api.core.auth import CurrentUser, CurrentUserDep, RequireAdminDep
 from api.core.config import settings
 from api.core.password import hash_password, verify_password
 from api.db.auth_repository import ApiTokenRepository, AuthIdentityRepository
 from api.db.repository import UserRepository
 from api.db.session import get_db
+from api.models.audit import AuditAction
 from api.models.auth import (
     PROVIDER_LABELS,
     ApiToken,
@@ -40,7 +46,7 @@ from api.models.user import (
     UserSelfUpdate,
     UserUpdate,
 )
-from api.routes.common import external_base_url
+from api.routes.common import actor_of, external_base_url
 
 logger = structlog.get_logger()
 
@@ -103,7 +109,7 @@ async def get_self(session: DbDep, user: CurrentUserDep) -> UserResponse:
 
 @router.patch("/me", response_model=UserResponse)
 async def update_self(
-    session: DbDep, data: UserSelfUpdate, user: CurrentUserDep
+    request: Request, session: DbDep, data: UserSelfUpdate, user: CurrentUserDep
 ) -> UserResponse:
     """Update the current user's own profile (email, password, theme).
 
@@ -118,6 +124,7 @@ async def update_self(
     db_user = await repo.get_by_id(user.id)
     if not db_user:
         raise HTTPException(status_code=404, detail="User not found")
+    before = db_user.model_copy()
 
     if data.password is not None:
         _require_session(user, "set a password")
@@ -143,6 +150,7 @@ async def update_self(
         db_user.theme_preference = data.theme_preference
 
     await repo.update(db_user)
+    await actor_of(request, user).updated(session, before, db_user)
 
     return _to_response(db_user, await _providers_of(session, db_user.id))
 
@@ -183,7 +191,7 @@ async def _list_tokens(session: AsyncSession, user_id: str) -> ApiTokenListRespo
 
 
 async def _create_token(
-    session: AsyncSession, user_id: str, data: ApiTokenCreate, actor: CurrentUser
+    session: AsyncSession, user_id: str, data: ApiTokenCreate, actor: Actor
 ) -> ApiTokenCreatedResponse:
     secret, token_hash, prefix = generate_token()
     token = ApiToken(
@@ -191,18 +199,21 @@ async def _create_token(
         name=data.name,
         token_hash=token_hash,
         token_prefix=prefix,
-        created_by=actor.username,
+        created_by=actor.name,
         expires_at=utc_now() + timedelta(days=data.expires_in_days) if data.expires_in_days else None,
     )
     await ApiTokenRepository(session).create(token)
-    logger.info("API token created", user_id=user_id, token_id=token.id, name=token.name, by=actor.username)
+    await actor.token_issued(session, token)
+    logger.info("API token created", user_id=user_id, token_id=token.id, name=token.name, by=actor.name)
     return ApiTokenCreatedResponse(token=secret, api_token=_token_response(token))
 
 
-async def _delete_token(session: AsyncSession, user_id: str, token_id: str, actor: CurrentUser) -> None:
-    if not await ApiTokenRepository(session).delete(user_id, token_id):
+async def _delete_token(session: AsyncSession, user_id: str, token_id: str, actor: Actor) -> None:
+    token = await ApiTokenRepository(session).delete(user_id, token_id)
+    if token is None:
         raise HTTPException(status_code=404, detail="Token not found")
-    logger.info("API token revoked", user_id=user_id, token_id=token_id, by=actor.username)
+    await actor.token_revoked(session, token)
+    logger.info("API token revoked", user_id=user_id, token_id=token_id, by=actor.name)
 
 
 async def _list_identities(session: AsyncSession, user_id: str) -> AuthIdentityListResponse:
@@ -210,10 +221,12 @@ async def _list_identities(session: AsyncSession, user_id: str) -> AuthIdentityL
     return AuthIdentityListResponse(identities=[_identity_response(i) for i in identities])
 
 
-async def _delete_identity(session: AsyncSession, user_id: str, identity_id: str, actor: CurrentUser) -> None:
-    if not await AuthIdentityRepository(session).delete(user_id, identity_id):
+async def _delete_identity(session: AsyncSession, user_id: str, identity_id: str, actor: Actor) -> None:
+    identity = await AuthIdentityRepository(session).delete(user_id, identity_id)
+    if identity is None:
         raise HTTPException(status_code=404, detail="Linked sign-in not found")
-    logger.info("Sign-in provider unlinked", user_id=user_id, identity_id=identity_id, by=actor.username)
+    await actor.identity_unlinked(session, identity)
+    logger.info("Sign-in provider unlinked", user_id=user_id, identity_id=identity_id, by=actor.name)
 
 
 @router.get("/me/tokens", response_model=ApiTokenListResponse)
@@ -223,18 +236,20 @@ async def list_my_tokens(session: DbDep, user: CurrentUserDep) -> ApiTokenListRe
 
 
 @router.post("/me/tokens", response_model=ApiTokenCreatedResponse, status_code=201)
-async def create_my_token(session: DbDep, data: ApiTokenCreate, user: CurrentUserDep) -> ApiTokenCreatedResponse:
+async def create_my_token(
+    request: Request, session: DbDep, data: ApiTokenCreate, user: CurrentUserDep
+) -> ApiTokenCreatedResponse:
     """Mint a token for the current user. The secret is in this response and nowhere else."""
     _require_session(user, "create tokens")
     if await UserRepository(session).get_by_id(user.id) is None:
         raise HTTPException(status_code=404, detail="User not found")
-    return await _create_token(session, user.id, data, user)
+    return await _create_token(session, user.id, data, actor_of(request, user))
 
 
 @router.delete("/me/tokens/{token_id}", status_code=204)
-async def delete_my_token(session: DbDep, token_id: str, user: CurrentUserDep) -> None:
+async def delete_my_token(request: Request, session: DbDep, token_id: str, user: CurrentUserDep) -> None:
     """Revoke one of the current user's tokens. Takes effect on the next call made with it."""
-    await _delete_token(session, user.id, token_id, user)
+    await _delete_token(session, user.id, token_id, actor_of(request, user))
 
 
 @router.get("/me/identities", response_model=AuthIdentityListResponse)
@@ -244,9 +259,9 @@ async def list_my_identities(session: DbDep, user: CurrentUserDep) -> AuthIdenti
 
 
 @router.delete("/me/identities/{identity_id}", status_code=204)
-async def delete_my_identity(session: DbDep, identity_id: str, user: CurrentUserDep) -> None:
+async def delete_my_identity(request: Request, session: DbDep, identity_id: str, user: CurrentUserDep) -> None:
     """Unlink a provider account. Signing in with it again relinks it if the email still matches."""
-    await _delete_identity(session, user.id, identity_id, user)
+    await _delete_identity(session, user.id, identity_id, actor_of(request, user))
 
 
 @router.get("/{user_id}/tokens", response_model=ApiTokenListResponse)
@@ -258,18 +273,20 @@ async def list_user_tokens(session: DbDep, user_id: str, _admin: RequireAdminDep
 
 @router.post("/{user_id}/tokens", response_model=ApiTokenCreatedResponse, status_code=201)
 async def create_user_token(
-    session: DbDep, user_id: str, data: ApiTokenCreate, admin: RequireAdminDep
+    request: Request, session: DbDep, user_id: str, data: ApiTokenCreate, admin: RequireAdminDep
 ) -> ApiTokenCreatedResponse:
     """Mint a token on a user's behalf (admin only); how a service account gets one."""
     _require_session(admin, "create tokens")
     await _require_user(session, user_id)
-    return await _create_token(session, user_id, data, admin)
+    return await _create_token(session, user_id, data, actor_of(request, admin))
 
 
 @router.delete("/{user_id}/tokens/{token_id}", status_code=204)
-async def delete_user_token(session: DbDep, user_id: str, token_id: str, admin: RequireAdminDep) -> None:
+async def delete_user_token(
+    request: Request, session: DbDep, user_id: str, token_id: str, admin: RequireAdminDep
+) -> None:
     """Revoke a user's token (admin only)."""
-    await _delete_token(session, user_id, token_id, admin)
+    await _delete_token(session, user_id, token_id, actor_of(request, admin))
 
 
 @router.get("/{user_id}/identities", response_model=AuthIdentityListResponse)
@@ -280,9 +297,11 @@ async def list_user_identities(session: DbDep, user_id: str, _admin: RequireAdmi
 
 
 @router.delete("/{user_id}/identities/{identity_id}", status_code=204)
-async def delete_user_identity(session: DbDep, user_id: str, identity_id: str, admin: RequireAdminDep) -> None:
+async def delete_user_identity(
+    request: Request, session: DbDep, user_id: str, identity_id: str, admin: RequireAdminDep
+) -> None:
     """Unlink a user's provider account (admin only)."""
-    await _delete_identity(session, user_id, identity_id, admin)
+    await _delete_identity(session, user_id, identity_id, actor_of(request, admin))
 
 
 async def _providers_of(session: AsyncSession, user_id: str) -> list[str]:
@@ -309,7 +328,7 @@ async def list_users(session: DbDep, _admin: RequireAdminDep) -> UserListRespons
 
 @router.post("", response_model=UserResponse, status_code=201)
 async def create_user(
-    session: DbDep, data: UserCreate, _admin: RequireAdminDep
+    request: Request, session: DbDep, data: UserCreate, admin: RequireAdminDep
 ) -> UserResponse:
     """Create a new user (admin only)."""
     repo = UserRepository(session)
@@ -332,6 +351,7 @@ async def create_user(
         role=data.role,
     )
     await repo.create(user)
+    await actor_of(request, admin).created(session, user)
 
     logger.info("User created", username=user.username, role=user.role.value)
     return _to_response(user)
@@ -344,7 +364,7 @@ def _build_invite_url(request: Request, token: str) -> str:
 
 @router.post("/invite", response_model=InviteResponse, status_code=201)
 async def invite_user(
-    request: Request, session: DbDep, data: UserInviteCreate, _admin: RequireAdminDep
+    request: Request, session: DbDep, data: UserInviteCreate, admin: RequireAdminDep
 ) -> InviteResponse:
     """Create a new user with an invite link (admin only)."""
     repo = UserRepository(session)
@@ -372,6 +392,7 @@ async def invite_user(
         invite_token_expires_at=expires_at,
     )
     await repo.create(user)
+    await actor_of(request, admin).created(session, user, action=AuditAction.INVITED)
 
     logger.info("User invited", username=user.username, role=user.role.value)
     return InviteResponse(
@@ -395,10 +416,12 @@ async def reinvite_user(
             status_code=400, detail="User already has a password set"
         )
 
+    before = user.model_copy()
     token = secrets.token_urlsafe(48)
     user.invite_token = token
     user.invite_token_expires_at = utc_now() + timedelta(hours=settings.invite_token_expiry_hours)
     await repo.update(user)
+    await actor_of(request, admin).updated(session, before, user, action=AuditAction.INVITE_REISSUED)
 
     logger.info("User reinvited", user_id=user_id, username=user.username)
     return InviteResponse(
@@ -423,7 +446,7 @@ async def get_user(
 
 @router.patch("/{user_id}", response_model=UserResponse)
 async def update_user(
-    session: DbDep, user_id: str, data: UserUpdate, admin: RequireAdminDep
+    request: Request, session: DbDep, user_id: str, data: UserUpdate, admin: RequireAdminDep
 ) -> UserResponse:
     """Update a user (admin only). Setting a password needs a session, as for /me."""
     if data.password is not None:
@@ -432,6 +455,7 @@ async def update_user(
     user = await repo.get_by_id(user_id)
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
+    before = user.model_copy()
 
     if data.username is not None:
         if data.username != user.username:
@@ -459,6 +483,7 @@ async def update_user(
         user.theme_preference = data.theme_preference
 
     await repo.update(user)
+    await actor_of(request, admin).updated(session, before, user)
 
     logger.info("User updated", user_id=user_id)
     return _to_response(user, await _providers_of(session, user.id))
@@ -466,14 +491,16 @@ async def update_user(
 
 @router.delete("/{user_id}", status_code=204)
 async def delete_user(
-    session: DbDep, user_id: str, user: CurrentUserDep, _admin: RequireAdminDep
+    request: Request, session: DbDep, user_id: str, admin: RequireAdminDep
 ) -> None:
     """Delete a user (admin only). Cannot delete yourself."""
-    if user.id == user_id:
+    if admin.id == user_id:
         raise HTTPException(status_code=400, detail="Cannot delete your own account")
 
     repo = UserRepository(session)
-    if not await repo.delete(user_id):
+    user = await repo.get_by_id(user_id)
+    if user is None or not await repo.delete(user_id):
         raise HTTPException(status_code=404, detail="User not found")
+    await actor_of(request, admin).deleted(session, user)
 
     logger.info("User deleted", user_id=user_id)

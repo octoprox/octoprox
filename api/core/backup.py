@@ -21,7 +21,8 @@ import structlog
 from cryptography.fernet import Fernet, InvalidToken
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
-from sqlalchemy import DateTime, LargeBinary, delete, inspect, select, update
+from sqlalchemy import DateTime, LargeBinary, and_, delete, func, inspect, or_, select, update
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.types import TypeEngine
 
@@ -30,6 +31,7 @@ from api.db.base import Base
 from api.db.migrations import current_revision
 from api.db.models import (
     ApiTokenModel,
+    AuditLogModel,
     AuthIdentityModel,
     AuthProviderModel,
     ConnectorExitIpModel,
@@ -46,10 +48,10 @@ from api.db.models import (
     OpenVpnSettingsModel,
     ProjectMetricsModel,
     ProjectModel,
-    ProviderAuditModel,
     ProviderDescriptorModel,
     ProxyMetricsModel,
     ProxyModel,
+    SystemSettingsModel,
     TunnelPeerMetricsModel,
     UserModel,
     WireGuardPeerModel,
@@ -140,8 +142,12 @@ class _EntitySpec:
         return row
 
     def build(self, row: dict[str, Any]) -> Base:
-        """The model instance a dumped row describes; keys the model does not map are skipped."""
-        kwargs: dict[str, Any] = {}
+        """The model instance a dumped row describes."""
+        return self.model(**self.values(row))
+
+    def values(self, row: dict[str, Any]) -> dict[str, Any]:
+        """A dumped row's values by attribute name, as the columns take them; keys the model does not map are skipped."""
+        values: dict[str, Any] = {}
         for name, value in row.items():
             sql_type = self._columns.get(name)
             if sql_type is None or (name == "id" and not self.preserve_id):
@@ -150,13 +156,47 @@ class _EntitySpec:
                 value = datetime.fromisoformat(value)
             elif isinstance(value, str) and isinstance(sql_type, LargeBinary):
                 value = base64.b64decode(value)
-            kwargs[name] = value
-        return self.model(**kwargs)
+            values[name] = value
+        return values
+
+    async def restore(self, session: AsyncSession, rows: list[dict[str, Any]]) -> int:
+        """Add a backup's rows to the table the import emptied; how many."""
+        session.add_all(self.build(row) for row in rows)
+        return len(rows)
 
     @cached_property
     def _columns(self) -> dict[str, TypeEngine[Any]]:
         """Each column's SQL type by ORM attribute name (``metadata_``, not ``metadata``), in the mapper's order."""
         return {attr.key: attr.columns[0].type for attr in inspect(self.model).column_attrs}
+
+
+@dataclass(frozen=True)
+class _KeptEntitySpec(_EntitySpec):
+    """An entity of the install that an import keeps: its rows stay, and the backup's join them where their key is new.
+
+    ``filled`` names the columns a kept row takes from the backup's row of the same key while it has no value.
+    """
+
+    filled: tuple[str, ...] = ()
+
+    async def restore(self, session: AsyncSession, rows: list[dict[str, Any]]) -> int:
+        """Add the backup's rows the install lacks and fill the empty ``filled`` columns of those it has; how many rows
+        were added or filled."""
+        if not rows:
+            return 0
+        key = inspect(self.model).primary_key
+        insert = pg_insert(self.model)
+        if self.filled:
+            columns = {name: getattr(self.model, name) for name in self.filled}
+            statement = insert.on_conflict_do_update(
+                index_elements=key,
+                set_={name: func.coalesce(column, insert.excluded[name]) for name, column in columns.items()},
+                where=or_(*(and_(column.is_(None), insert.excluded[name].is_not(None)) for name, column in columns.items())),
+            )
+        else:
+            statement = insert.on_conflict_do_nothing(index_elements=key)
+        result = await session.execute(statement.returning(*key), [self.values(row) for row in rows])
+        return len(result.all())
 
 
 # FK-safe order: parents before children, metrics last.
@@ -178,7 +218,6 @@ _ENTITY_SPECS: tuple[_EntitySpec, ...] = (
     _EntitySpec("host_metrics", HostMetricsModel, is_metric=True, preserve_id=False),
     _EntitySpec("failure_metrics", FailureMetricsModel, is_metric=True, preserve_id=False),
     _EntitySpec("provider_descriptors", ProviderDescriptorModel),
-    _EntitySpec("provider_audit_log", ProviderAuditModel),
     # IP attribution. Settings and database rows are configuration and always
     # travel; the files are opt-in; the history rides the metrics flag. The
     # exit aggregate references connectors, so it comes after them.
@@ -196,6 +235,11 @@ _ENTITY_SPECS: tuple[_EntitySpec, ...] = (
     _EntitySpec("openvpn_peers", OpenVpnPeerModel),
     # Device history for every tunnel protocol: after the devices it describes.
     _EntitySpec("tunnel_peer_metrics", TunnelPeerMetricsModel, is_metric=True, preserve_id=False),
+    # The install's own, which an import keeps: its settings (the license key
+    # filled from the backup's while it has none) and its audit trail, which
+    # gains the backup's entries.
+    _KeptEntitySpec("system_settings", SystemSettingsModel, filled=("license_key",)),
+    _KeptEntitySpec("audit_log", AuditLogModel),
 )
 
 
@@ -473,10 +517,7 @@ class BackupRepository:
 
         counts: dict[str, int] = {}
         for spec in _ENTITY_SPECS:
-            rows = data.get(spec.key, [])
-            for row in rows:
-                self._session.add(spec.build(row))
-            counts[spec.key] = len(rows)
+            counts[spec.key] = await spec.restore(self._session, data.get(spec.key, []))
             # Flush per entity so FK targets exist before children are added.
             await self._session.flush()
 
@@ -576,16 +617,16 @@ class BackupRepository:
         return _KeptUser(id=user.id, username=user.username, email=user.email or "")
 
     async def _wipe(self, keep_user_id: str | None, spared_project_ids: list[str]) -> None:
-        """Delete every entity a backup carries, and every user but the kept one; the projects pending deletion that
-        ``_hand_to_deletion`` made stay."""
+        """Delete every entity a backup carries but the install's own (``_KeptEntitySpec``), and every user but the
+        kept one; the projects pending deletion that ``_hand_to_deletion`` made stay."""
         # Deleting projects cascades (DB-level ON DELETE CASCADE) to credentials,
         # connectors, proxies and both metrics tables. Users are independent.
         await self._session.execute(delete(ProjectModel).where(ProjectModel.id.not_in(spared_project_ids)))
-        # Provider descriptors are global (not project-scoped) and their audit log
-        # has no FK, so both are wiped explicitly. Likewise the attribution
-        # settings row, the database rows (their blobs cascade) and the raw
-        # observations; the exit aggregate cascades with connectors.
-        await self._session.execute(delete(ProviderAuditModel))
+        # Provider descriptors are global (not project-scoped), so they are
+        # wiped explicitly. Likewise the attribution settings row, the database
+        # rows (their blobs cascade) and the raw observations; the exit
+        # aggregate cascades with connectors. The audit log and the system
+        # settings are not wiped: an import keeps them.
         await self._session.execute(delete(ProviderDescriptorModel))
         await self._session.execute(delete(GeoSettingsModel))
         await self._session.execute(delete(GeoDatabaseModel))

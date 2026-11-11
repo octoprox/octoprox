@@ -17,9 +17,10 @@ import { Page } from '../components/layout/Page'
 import { ProxyStatusDot, ProxyStatusBadge, formatQuarantineRemaining } from '../components/ProxyStatus'
 import { ProviderLogo } from '../components/ProviderLogo'
 import { useProviders } from '../hooks/useProviders'
+import { EntityHistory } from '../components/audit/EntityHistory'
 import { RichSelect, RichSelectOption } from '../components/RichSelect'
 import { formatBytes, formatDate, formatDateTime } from '../utils/format'
-import { Button, Input, Select, Label, Alert, Inspector, InspectorSection, StatGrid, KeyValue, ConfirmDialog, CopyButton, QueryContent } from '../components/ui'
+import { Button, Input, Select, Label, Alert, Inspector, InspectorSection, StatGrid, KeyValue, ConfirmDialog, CopyButton, QueryContent, Tabs } from '../components/ui'
 
 type PanelState =
   | { kind: 'proxy'; id: string }
@@ -28,6 +29,9 @@ type PanelState =
   | null
 
 const PROTOCOLS = ['http', 'https', 'socks4', 'socks5']
+
+/** What an open proxy shows: its details, or its History in their place. */
+type ProxyView = 'details' | 'history'
 
 export default function ProxiesPage() {
   const queryClient = useQueryClient()
@@ -327,6 +331,7 @@ function ProxyPanel({ proxy, connectorType, canMutate, onClose, onRelease, onDel
   const pinnedState = proxy.state_source === 'manual' ? proxy.state_code || '' : ''
   const pinnedCity = proxy.city_source === 'manual' ? proxy.city || '' : ''
   const [form, setForm] = useState({ host: proxy.host, port: String(proxy.port), protocol: proxy.protocol, username: proxy.username || '', password: proxy.password || '', country: proxy.country || '', state: pinnedState, city: pinnedCity })
+  const [view, setView] = useState<ProxyView>('details')
   const dirty = form.host !== proxy.host || form.port !== String(proxy.port) || form.protocol !== proxy.protocol || form.username !== (proxy.username || '') || form.password !== (proxy.password || '') || form.country !== (proxy.country || '') || form.state !== pinnedState || form.city !== pinnedCity
 
   const updateMutation = useMutation({
@@ -352,7 +357,7 @@ function ProxyPanel({ proxy, connectorType, canMutate, onClose, onRelease, onDel
       title={<span className="font-mono text-[14px]">{proxy.display_host}:{proxy.port}</span>}
       subtitle={proxy.connector_name || 'No connector'}
       onClose={onClose}
-      footer={canMutate ? (
+      footer={canMutate && view === 'details' ? (
         <>
           <Button type="button" variant="danger-ghost" size="sm" onClick={onDelete}><Trash2 className="w-3.5 h-3.5" /> Delete</Button>
           <span className="flex-1" />
@@ -361,6 +366,14 @@ function ProxyPanel({ proxy, connectorType, canMutate, onClose, onRelease, onDel
         </>
       ) : undefined}
     >
+      <Tabs<ProxyView>
+        tabs={[{ id: 'details', label: 'Details' }, { id: 'history', label: 'History' }]}
+        active={view}
+        onChange={setView}
+        className="pointer-coarse:*:min-h-11"
+      />
+      {/* Hidden rather than unmounted while History shows, so an edit not saved yet is still there afterwards. */}
+      <div hidden={view === 'history'} className="space-y-4">
       <div className="flex items-center gap-2 flex-wrap">
         <ProxyStatusBadge proxy={proxy} />
         <span className="text-xs text-fg-muted">
@@ -503,6 +516,9 @@ function ProxyPanel({ proxy, connectorType, canMutate, onClose, onRelease, onDel
         <KeyValue label="Successes" value={proxy.success_count.toLocaleString()} />
         <KeyValue label="Added" value={formatDateTime(proxy.created_at)} />
       </InspectorSection>
+      </div>
+
+      {view === 'history' && <EntityHistory entityType="proxy" entityId={proxy.id} />}
     </Inspector>
   )
 }

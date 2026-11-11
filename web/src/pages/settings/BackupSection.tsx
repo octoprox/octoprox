@@ -6,6 +6,7 @@ import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { Download, Upload } from 'lucide-react'
 import { exportBackup, importBackup, ImportSummary, logout } from '../../api/client'
 import { Page } from '../../components/layout/Page'
+import { HistoryButton } from '../../components/audit/HistoryButton'
 import { Alert, Button, Card, Input, Label, ConfirmDialog } from '../../components/ui'
 
 const MIN_PASSPHRASE = 8
@@ -114,9 +115,11 @@ function ImportCard() {
       <div className="flex items-center gap-2 mb-1">
         <Upload className="w-4 h-4 text-fg-muted" />
         <h3 className="text-sm font-semibold text-fg">Restore</h3>
+        {/* Each restore is recorded, with who ran it and what the backup was. */}
+        <HistoryButton entityType="backup" entityId="1" name="Restores" className="ml-auto -my-1.5" />
       </div>
       <p className="text-xs text-fg-muted mb-4">
-        Restore a backup file. This <strong className="text-fg">replaces all existing data</strong> on this instance.
+        Restore a backup file. This <strong className="text-fg">replaces all existing data</strong> on this instance except its audit history, which gains the backup's entries, and its license key.
       </p>
       <div className="flex-1 flex flex-col gap-3">
         {error && <Alert variant="error">{error}</Alert>}
@@ -125,6 +128,7 @@ function ImportCard() {
             <p>
               Import complete: {summary.projects} projects, {summary.credentials} credentials, {summary.connectors} connectors, {summary.proxies} proxies, {summary.users} users, {summary.provider_descriptors ?? 0} custom providers, {summary.geo_databases ?? 0} IP databases ({summary.geo_database_blobs ?? 0} with files) restored.{' '}
               {(summary.ip_observations ?? 0) > 0 && `${summary.ip_observations.toLocaleString()} exit IP observations restored. `}
+              {(summary.audit_log ?? 0) > 0 && `${summary.audit_log.toLocaleString()} audit ${summary.audit_log === 1 ? 'entry' : 'entries'} added to the history. `}
               {summary.deleting_cloud_connectors > 0 && `${summary.deleting_cloud_connectors} cloud connector${summary.deleting_cloud_connectors === 1 ? '' : 's'} not in the backup ${summary.deleting_cloud_connectors === 1 ? 'is' : 'are'} being deleted: ${summary.deleting_cloud_connectors === 1 ? 'its' : 'their'} instances are terminated first, under projects marked Deleting. `}
               {summary.kept_current_user ? 'Your account was kept and you remain signed in.' : 'You will be signed out - please log in again.'}
             </p>

@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException, Request
 
-from api.geo.echo import EchoResponse, build_echo, client_ip, parse_trusted
+from api.geo.echo import EchoResponse, build_echo, client_ip, forwarded_for_of, parse_trusted
 from api.routes.common import geo_database_store_of, settings_of
 
 router = APIRouter()
@@ -30,7 +30,7 @@ async def echo(request: Request, nonce: str | None = None) -> EchoResponse:
     if not settings.geo_echo_enabled:
         raise HTTPException(status_code=404, detail="Echo endpoint is disabled")
     peer = request.client.host if request.client else None
-    ip = client_ip(peer, request.headers.get("x-forwarded-for"), parse_trusted(settings.geo_echo_trusted_proxies))
+    ip = client_ip(peer, forwarded_for_of(request.headers), parse_trusted(settings.geo_echo_trusted_proxies))
     if ip is None:
         raise HTTPException(status_code=400, detail="Could not determine the client address")
     return build_echo(ip, geo_database_store_of(request), nonce)

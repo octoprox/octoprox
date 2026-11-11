@@ -17,6 +17,7 @@ import { AccuracyRow, ProviderAccuracyPanel, accuracyDays, useAccuracyRange } fr
 import { AccuracyDetailsInspector } from '../../components/geo/AccuracyDetails'
 import { ObservationsPanel } from '../../components/geo/ObservationsPanel'
 import { ExitIpsPanel } from '../../components/geo/ExitIpsPanel'
+import { HistoryButton } from '../../components/audit/HistoryButton'
 import { formatBytes, formatDateTime, parseApiDate, plural, relativeTime, timeUntil } from '../../utils/format'
 import { isInUse } from '../../utils/geo'
 import { Alert, Badge, Button, Card, ConfirmDialog, Input, Label, QueryStatus, Select, Tabs } from '../../components/ui'
@@ -222,7 +223,7 @@ function DatabasesTab() {
     { accessorKey: 'size_bytes', header: 'Size', size: 92, meta: { align: 'right' as const }, cell: ({ getValue }) => formatBytes(getValue<number>()) },
     { id: 'state', header: 'Loaded on', size: 136, cell: ({ row }) => <LoadState db={row.original} /> },
     {
-      id: 'actions', header: '', size: 184,
+      id: 'actions', header: '', size: 240,
       cell: ({ row }) => {
         const db = row.original
         if (db.source === 'path') return null
@@ -231,6 +232,11 @@ function DatabasesTab() {
         const refreshing = refreshMutation.isPending && refreshMutation.variables === db.id
         return (
           <div className="flex items-center justify-end gap-0.5">
+            {/* An icon like the row's other actions: its label stays for screen readers, the hover title says it. On
+                touch it is a 44 px target clear of Download now and Enable, which act at once. */}
+            <span title="History">
+              <HistoryButton entityType="geo_database" entityId={db.id} name={db.name} className="px-2 gap-0 text-[0px] pointer-coarse:min-w-11 pointer-coarse:mr-1.5" />
+            </span>
             {db.update_url && (
               <Button variant="ghost" size="icon" title="Download now" onClick={() => refreshMutation.mutate(db.id)} disabled={refreshMutation.isPending}>
                 <RefreshCw className={cn('w-3.5 h-3.5', refreshing && 'animate-spin')} />
@@ -652,6 +658,7 @@ function PolicyTab() {
       <div className="flex items-center justify-between flex-wrap gap-3">
         <span className="text-xs text-fg-subtle">{data?.from_database ? 'Saved in the database; every process follows it.' : 'Using the defaults from the config file until saved.'}</span>
         <div className="flex gap-2 ml-auto">
+          <HistoryButton entityType="geo_settings" entityId="1" />
           {draft && <Button type="button" variant="outline" size="sm" onClick={() => setDraft(null)}>Discard</Button>}
           <Button type="submit" size="sm" disabled={!draft || mutation.isPending}>{mutation.isPending ? 'Saving…' : 'Save settings'}</Button>
         </div>

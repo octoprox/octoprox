@@ -49,7 +49,8 @@ export function TunnelGatewaysCard({ status, notRunning, details, children }: {
     <Card className="p-5 h-fit">
       <CardHeader title="Gateways" action={<TunnelStateBadge status={status} />} />
       {status.gateways.length === 0 ? (
-        <p className="text-sm text-fg-muted mt-2">{notRunning}</p>
+        // A long env var name breaks rather than widening the page's grid column on a phone; break-word would not.
+        <p className="text-sm text-fg-muted mt-2 wrap-anywhere">{notRunning}</p>
       ) : (
         <>
           <p className="text-xs text-fg-muted mt-1">

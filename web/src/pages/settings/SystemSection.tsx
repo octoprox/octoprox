@@ -18,6 +18,7 @@ import {
 } from '../../api/client'
 import { KIND_INFO } from '../../components/failures/FailureDetail'
 import { Page } from '../../components/layout/Page'
+import { LicenseCard } from '../../components/license/LicenseCard'
 import { useTheme } from '../../contexts/ThemeContext'
 import { useTimeRange } from '../../contexts/TimeRangeContext'
 import { bytesShort, elideMiddle, formatBytes, formatDateTime, parseApiDate, plural, relativeTime } from '../../utils/format'
@@ -113,6 +114,8 @@ export default function SystemSection() {
         />
       ) : null}
     >
+      {/* First in both views: what the install runs, and on Octoprox Enterprise its license. */}
+      <LicenseCard />
       {error && <Alert variant="error">{(error as Error).message || 'Failed to load system statistics'}</Alert>}
       {view === 'topology' && (
         <TopologyCard

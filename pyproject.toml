@@ -64,6 +64,11 @@ octoprox = "api.main:run"
 # a ``descriptor`` attribute. See docs/providers.md.
 [project.entry-points."octoprox.providers"]
 
+# An edition package (Octoprox Enterprise) registers its Extension subclass
+# here; api processes load it at start, and run the free edition without one.
+# See api/core/extension.py and docs/architecture.md.
+[project.entry-points."octoprox.extensions"]
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"

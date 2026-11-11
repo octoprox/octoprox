@@ -44,6 +44,7 @@ const PAGE_DOCS: Record<string, DocLink[]> = {
   providers: [{ title: 'Providers and the provider SDK', path: 'providers' }],
   geo: [{ title: 'IP attribution and exit verification', path: 'ip-attribution' }],
   backup: [{ title: 'Backup and migration', path: 'api#backup--migration' }],
+  activity: [{ title: 'Audit log', path: 'audit-log' }],
   system: [{ title: 'Deployment and scaling', path: 'deployment' }],
   wireguard: [{ title: 'WireGuard devices', path: 'wireguard' }],
   openvpn: [{ title: 'OpenVPN devices', path: 'openvpn' }],

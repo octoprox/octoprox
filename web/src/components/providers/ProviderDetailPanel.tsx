@@ -4,19 +4,21 @@
 import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { Copy, Download, ExternalLink } from 'lucide-react'
-import { exportProviderYaml, fetchProvider, fetchProviderAudit, ProviderSummary } from '../../api/client'
+import { exportProviderYaml, fetchProvider, ProviderSummary } from '../../api/client'
 import { useProviders } from '../../hooks/useProviders'
 import { Badge, Button, Inspector, InspectorSection, KeyValue, QueryContent, Tabs, INSPECTOR_WIDTH_WIDE } from '../ui'
 import { ProviderLogo } from '../ProviderLogo'
 import { TestPanel } from './TestPanel'
+import { EntityHistory } from '../audit/EntityHistory'
 import { formatDateTime } from '../../utils/format'
 
-type Tab = 'details' | 'test'
+type Tab = 'details' | 'test' | 'history'
 
 /**
  * Read-only view of any provider; built-ins can be exported or duplicated into a
  * custom one. Descriptor providers also get a Test tab, so a shipped vendor can be
- * tried with throwaway credentials before anything is created.
+ * tried with throwaway credentials before anything is created, and custom ones a
+ * History tab, since only they are changed here.
  */
 export function ProviderDetailPanel({ provider, onClose, onDuplicate, onEdit }: {
   provider: ProviderSummary
@@ -26,10 +28,15 @@ export function ProviderDetailPanel({ provider, onClose, onDuplicate, onEdit }: 
 }) {
   const detailQuery = useQuery({ queryKey: ['provider', provider.id], queryFn: () => fetchProvider(provider.id) })
   const { data: detail } = detailQuery
-  const { data: audit } = useQuery({ queryKey: ['provider-audit', provider.id], queryFn: () => fetchProviderAudit(provider.id), enabled: provider.source === 'custom' })
   const { presets } = useProviders()
   const [tab, setTab] = useState<Tab>('details')
   const testable = provider.kind === 'descriptor'
+  const custom = provider.source === 'custom'
+  const tabs: { id: Tab; label: string }[] = [
+    { id: 'details', label: 'Details' },
+    ...(testable ? [{ id: 'test' as const, label: 'Test' }] : []),
+    ...(custom ? [{ id: 'history' as const, label: 'History' }] : []),
+  ]
   const download = async () => {
     const yaml = await exportProviderYaml(provider.id)
     const blob = new Blob([yaml], { type: 'application/yaml' })
@@ -53,11 +60,13 @@ export function ProviderDetailPanel({ provider, onClose, onDuplicate, onEdit }: 
         </>
       )}
     >
-      {testable && <Tabs<Tab> tabs={[{ id: 'details', label: 'Details' }, { id: 'test', label: 'Test' }]} active={tab} onChange={setTab} size="sm" />}
+      {tabs.length > 1 && <Tabs<Tab> tabs={tabs} active={tab} onChange={setTab} size="sm" className={custom ? 'pointer-coarse:*:min-h-11' : undefined} />}
       {tab === 'test' && testable ? (
         <QueryContent query={detailQuery} what="the provider">
           {(loaded) => loaded.spec && <TestPanel key={provider.id} spec={loaded.spec} presets={presets} stored={provider} />}
         </QueryContent>
+      ) : tab === 'history' && custom ? (
+        <EntityHistory entityType="provider" entityId={provider.id} />
       ) : (<>
       <div className="flex items-center gap-3 p-3 border border-line rounded-[10px]">
         <ProviderLogo type={provider.id} name={provider.name} className="w-10 h-10 text-[40px]" />
@@ -91,13 +100,6 @@ export function ProviderDetailPanel({ provider, onClose, onDuplicate, onEdit }: 
         {provider.gateway_hosts.length > 0 && <KeyValue label="Proxy gateways" value={provider.gateway_hosts.join(', ')} mono />}
         <KeyValue label="Validates credentials" value={provider.has_validation ? 'yes' : 'no'} />
       </InspectorSection>
-      {audit && audit.entries.length > 0 && (
-        <InspectorSection title="History">
-          {audit.entries.slice(0, 10).map((e) => (
-            <KeyValue key={e.id} label={`${e.action} by ${e.actor}${e.hosts_changed ? ' · hosts changed' : ''}`} value={formatDateTime(e.created_at)} />
-          ))}
-        </InspectorSection>
-      )}
       </>)}
     </Inspector>
   )

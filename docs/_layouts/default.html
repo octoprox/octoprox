@@ -86,6 +86,20 @@
       .logo { height: 22px; width: 98px; }
       nav a { padding: 6px 8px; font-size: 13px; }
     }
+    /* The narrowest phones have no room for three links */
+    @media (max-width: 400px) {
+      .nav-github { display: none; }
+    }
+    /* Touch screens: 44 px targets */
+    @media (pointer: coarse) {
+      nav a { display: inline-flex; align-items: center; justify-content: center; min-width: 44px; min-height: 44px; }
+      header .theme-toggle { width: 44px; height: 44px; }
+    }
+    /* Narrow touch screens: tighter header gaps make room for the 44 px toggle */
+    @media (pointer: coarse) and (max-width: 400px) {
+      header .header-container { gap: 4px; }
+      .header-right { gap: 4px; }
+    }
     /* Theme toggle */
     .theme-toggle { display: inline-flex; align-items: center; justify-content: center; width: 34px; height: 34px; border-radius: 6px; border: 1px solid var(--line); background: var(--surface); color: var(--muted); cursor: pointer; flex: none; }
     .theme-toggle:hover { color: var(--fg); background: var(--raised); }
@@ -108,7 +122,8 @@
       <div class="header-right">
         <nav>
           <a href="{{ site.baseurl }}/getting-started">Docs</a>
-          <a href="https://github.com/octoprox/octoprox">GitHub</a>
+          <a href="{{ site.baseurl }}/enterprise">Enterprise</a>
+          <a href="https://github.com/octoprox/octoprox" class="nav-github">GitHub</a>
         </nav>
         <button class="theme-toggle" type="button" onclick="toggleTheme()" aria-label="Toggle dark mode" title="Toggle dark mode">
           <svg class="icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/></svg>

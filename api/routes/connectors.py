@@ -20,6 +20,7 @@ from api.models.connector import (
     ConnectorUpdate,
 )
 from api.routes.common import (
+    actor_of,
     connector_service_of,
     require_project,
     runtime_view_of,
@@ -90,14 +91,14 @@ async def create_connector(
     request: Request,
     connector_data: ConnectorCreate,
     project_id: str,
-    _guard: RequireEditorDep,
+    user: RequireEditorDep,
 ) -> ConnectorResponse:
     """Create a new connector on a credential of the project.
 
     A provider that syncs is asked for its first discovery, and a cloud
     connector for its first scale; the response does not wait for either.
     """
-    connector = await connector_service_of(request).create(project_id, connector_data)
+    connector = await connector_service_of(request).create(project_id, connector_data, actor_of(request, user))
     return await _describe(request, project_id, connector.id)
 
 
@@ -138,14 +139,14 @@ async def get_connector_metrics_history(
 
 @router.post("/{connector_id}/traffic/reset", response_model=ConnectorResponse)
 async def reset_connector_traffic(
-    request: Request, project_id: str, connector_id: str, _guard: RequireEditorDep
+    request: Request, project_id: str, connector_id: str, user: RequireEditorDep
 ) -> ConnectorResponse:
     """Start the connector's traffic usage over from now, for a vendor top-up or a plan change; history is untouched.
 
     The answer counts usage from now, but shows the block gateways still enforce, marked pending, until a worker stores
     the traffic decision the reset asks for.
     """
-    await connector_service_of(request).reset_traffic(project_id, connector_id)
+    await connector_service_of(request).reset_traffic(project_id, connector_id, actor_of(request, user))
     return await _describe(request, project_id, connector_id)
 
 
@@ -155,23 +156,23 @@ async def update_connector(
     project_id: str,
     connector_id: str,
     connector_data: ConnectorUpdate,
-    _guard: RequireEditorDep,
+    user: RequireEditorDep,
 ) -> ConnectorResponse:
     """Update a connector; a refused edit leaves the stored connector as it was."""
-    await connector_service_of(request).update(project_id, connector_id, connector_data)
+    await connector_service_of(request).update(project_id, connector_id, connector_data, actor_of(request, user))
     return await _describe(request, project_id, connector_id)
 
 
 @router.delete("/{connector_id}", status_code=204)
 async def delete_connector(
-    request: Request, project_id: str, connector_id: str, _guard: RequireEditorDep
+    request: Request, project_id: str, connector_id: str, user: RequireEditorDep
 ) -> None:
     """Delete a connector and all its proxies, at once unless it is a cloud connector (AWS, GCP, Azure).
 
     A cloud connector is disabled and marked for deletion with its proxies TERMINATING, and the scale job terminates
     the instances, then deletes it.
     """
-    await connector_service_of(request).remove(project_id, connector_id)
+    await connector_service_of(request).remove(project_id, connector_id, actor_of(request, user))
 
 
 # Separate router for non-project-specific endpoints

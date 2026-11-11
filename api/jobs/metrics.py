@@ -15,6 +15,7 @@ import structlog
 from api.core import utc_now
 from api.core.roles import JobKind
 from api.core.stats import MetricDelta
+from api.db.audit_repository import AuditRepository, SystemSettingsRepository
 from api.db.geo_repository import ObservationRepository
 from api.db.redis import PROJECT_WINDOWS, PROXY_WINDOWS, TUNNEL_PEER_WINDOWS
 from api.db.repository import MetricsRepository, ProjectRepository, ProxyRepository
@@ -172,7 +173,8 @@ class CompactionJob(Job):
         self._geo = geo_service
 
     async def run(self, batch: JobBatch) -> None:
-        """Compact and retain each project's metrics, then drop gone entities' totals and old observations and records."""
+        """Compact and retain each project's metrics, then drop gone entities' totals, old observations and records,
+        and the audit entries past the install's retention."""
         now = utc_now()
         async with self._session_factory() as session:
             projects = await ProjectRepository(session).get_all()
@@ -197,8 +199,9 @@ class CompactionJob(Job):
             )
             flushes = await metrics.delete_flushes_older_than(now - FLUSH_RECORD_AGE)
             await session.commit()
+        audit_entries = await self._retain_audit_log(now)
 
-        if compacted or retained or totals or observed or exits or flushes:
+        if compacted or retained or totals or observed or exits or flushes or audit_entries:
             logger.info(
                 "Metrics compaction complete",
                 projects=len(projects),
@@ -208,6 +211,7 @@ class CompactionJob(Job):
                 observations_deleted=observed,
                 exit_ips_deleted=exits,
                 flushes_deleted=flushes,
+                audit_entries_deleted=audit_entries,
             )
 
     async def _compact(self, project_id: str, now: datetime) -> int:
@@ -245,6 +249,17 @@ class CompactionJob(Job):
                 repo.delete_failure_metrics_older_than,
             ):
                 deleted += await delete(project.id, cutoff)
+            await session.commit()
+        return deleted
+
+    async def _retain_audit_log(self, now: datetime) -> int:
+        """Delete the audit entries past the retention an admin set (a year until one does), none at 0 days; the
+        entries deleted."""
+        async with self._session_factory() as session:
+            days = (await SystemSettingsRepository(session).get()).audit_retention_days
+            if days == 0:
+                return 0
+            deleted = await AuditRepository(session).delete_older_than(now - timedelta(days=days))
             await session.commit()
         return deleted
 

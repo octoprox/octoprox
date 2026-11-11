@@ -9,6 +9,7 @@ The catalog reads and the writes apply the stored rows to this registry first, s
 from __future__ import annotations
 
 import json
+from collections.abc import Iterable
 from typing import Annotated, Any
 
 import structlog
@@ -20,15 +21,13 @@ from api.core.auth import CurrentUser, RequireAdminDep, RequireEditorDep
 from api.core.logging import error_text
 from api.db.repository import (
     CredentialRepository,
-    ProviderAuditRepository,
     ProviderDescriptorRepository,
 )
 from api.db.session import get_db
 from api.db.streams import ChangeKind
+from api.models.audit import AuditAction
 from api.models.cloud_options import COUNTRIES
 from api.models.provider import (
-    ProviderAuditEntry,
-    ProviderAuditResponse,
     ProviderCreate,
     ProviderDetail,
     ProviderImportRequest,
@@ -57,7 +56,7 @@ from api.providers.sdk.loader import (
 )
 from api.providers.sdk.templating import TemplateRenderer
 from api.providers.store import ProviderStore
-from api.routes.common import change_log_of, provider_registry_of, provider_store_of
+from api.routes.common import actor_of, change_log_of, provider_registry_of, provider_store_of
 
 logger = structlog.get_logger()
 
@@ -284,24 +283,15 @@ def _editable_type(registry: ProviderRegistry, provider_id: str) -> ProviderType
     return ptype
 
 
-async def _audit(
-    session: AsyncSession,
-    provider_id: str,
-    action: str,
-    actor: CurrentUser,
-    descriptor: ProviderDescriptor | None,
-    hosts_changed: bool,
-) -> None:
-    await ProviderAuditRepository(session).add(
-        ProviderAuditEntry(
-            provider_id=provider_id,
-            action=action,  # type: ignore[arg-type]
-            actor=actor.username,
-            egress_hosts=descriptor.egress_hosts() if descriptor else [],
-            hosts_changed=hosts_changed,
-            spec=descriptor.model_dump(mode="json", by_alias=True) if descriptor else None,
-        )
-    )
+def _hosts_details(before: Iterable[str], after: Iterable[str]) -> dict[str, list[str]]:
+    """The egress hosts a write added and removed, for its audit entry: each list only when it is not empty."""
+    old, new = set(before), set(after)
+    details: dict[str, list[str]] = {}
+    if added := sorted(new - old):
+        details["hosts_added"] = added
+    if removed := sorted(old - new):
+        details["hosts_removed"] = removed
+    return details
 
 
 # --- catalog (all authenticated users) ------------------------------------------------
@@ -411,10 +401,10 @@ async def _create(
     descriptor: ProviderDescriptor,
     confirmed_hosts: list[str],
     enabled: bool,
-    actor: CurrentUser,
-    action: str,
+    admin: CurrentUser,
+    action: AuditAction,
 ) -> ProviderDetail:
-    """Store a new custom descriptor, audit it, and apply it to this process's registry."""
+    """Store a new custom descriptor, record it in the audit log, and apply it to this process's registry."""
     registry = provider_registry_of(request)
     repo = ProviderDescriptorRepository(session)
     if registry.get(descriptor.id) is not None or await repo.get_by_id(descriptor.id) is not None:
@@ -430,15 +420,17 @@ async def _create(
         spec=descriptor.model_dump(mode="json", by_alias=True),
         enabled=enabled,
         version=descriptor.version,
-        created_by=actor.username,
+        created_by=admin.username,
     )
     await repo.create(record)
-    await _audit(session, descriptor.id, action, actor, descriptor, hosts_changed=bool(descriptor.egress_hosts()))
+    await actor_of(request, admin).created(
+        session, record, action=action, details=_hosts_details((), descriptor.egress_hosts())
+    )
     await session.commit()
 
     await change_log_of(request).record(ChangeKind.DESCRIPTOR, descriptor.id)
     await _apply_stored(provider_store_of(request))
-    logger.info("Provider descriptor created", provider_id=descriptor.id, actor=actor.username,
+    logger.info("Provider descriptor created", provider_id=descriptor.id, actor=admin.username,
                 egress_hosts=descriptor.egress_hosts())
     ptype = registry.get(descriptor.id)
     if ptype is None:
@@ -452,7 +444,7 @@ async def create_provider(
 ) -> ProviderDetail:
     """Create a custom provider descriptor (admin)."""
     descriptor = _parse_spec(body.spec)
-    return await _create(request, session, descriptor, body.confirmed_hosts, body.enabled, admin, "created")
+    return await _create(request, session, descriptor, body.confirmed_hosts, body.enabled, admin, AuditAction.CREATED)
 
 
 @router.post("/import", response_model=ProviderDetail, status_code=201)
@@ -468,7 +460,7 @@ async def import_provider(
     existing = provider_registry_of(request).get(descriptor.id)
     if existing is not None and existing.editable and body.replace:
         return await _update(request, session, existing, descriptor, body.confirmed_hosts, None, admin)
-    return await _create(request, session, descriptor, body.confirmed_hosts, True, admin, "imported")
+    return await _create(request, session, descriptor, body.confirmed_hosts, True, admin, AuditAction.IMPORTED)
 
 
 async def _update(
@@ -478,16 +470,20 @@ async def _update(
     descriptor: ProviderDescriptor | None,
     confirmed_hosts: list[str],
     enabled: bool | None,
-    actor: CurrentUser,
+    admin: CurrentUser,
 ) -> ProviderDetail:
-    """Store a custom descriptor's new document or enabled flag, audit it, and apply it to this process's registry."""
+    """Store a custom descriptor's new document or enabled flag, record the change, and apply it to this process's
+    registry."""
     registry = provider_registry_of(request)
     repo = ProviderDescriptorRepository(session)
     record = await repo.get_by_id(ptype.id)
     if record is None:
         raise HTTPException(status_code=404, detail="Provider not found")
+    # The record is changed in place below; its audit entry compares with this copy.
+    before = record.model_copy(deep=True)
 
     hosts_changed = False
+    hosts: dict[str, list[str]] = {}
     if descriptor is not None:
         if descriptor.id != ptype.id:
             raise HTTPException(status_code=422, detail="A provider's id cannot be changed")
@@ -497,6 +493,7 @@ async def _update(
         old_hosts = set(ptype.egress_hosts())
         new_hosts = set(descriptor.egress_hosts())
         hosts_changed = new_hosts != old_hosts
+        hosts = _hosts_details(old_hosts, new_hosts)
         if new_hosts - old_hosts:
             _require_host_confirmation(descriptor, confirmed_hosts, already_confirmed=old_hosts)
         record.spec = descriptor.model_dump(mode="json", by_alias=True)
@@ -506,12 +503,12 @@ async def _update(
         record.enabled = enabled
     record.updated_at = utc_now()
     await repo.update(record)
-    await _audit(session, ptype.id, "updated", actor, descriptor or ptype.descriptor, hosts_changed)
+    await actor_of(request, admin).updated(session, before, record, details=hosts)
     await session.commit()
 
     await change_log_of(request).record(ChangeKind.DESCRIPTOR, ptype.id)
     await _apply_stored(provider_store_of(request))
-    logger.info("Provider descriptor updated", provider_id=ptype.id, actor=actor.username, hosts_changed=hosts_changed)
+    logger.info("Provider descriptor updated", provider_id=ptype.id, actor=admin.username, hosts_changed=hosts_changed)
     usage = await CredentialRepository(session).usage_by_type(ptype.id)
     refreshed = registry.get(ptype.id)
     if refreshed is None:
@@ -538,16 +535,20 @@ async def delete_provider(
     request: Request, session: DbDep, provider_id: str, admin: RequireAdminDep
 ) -> None:
     """Delete a custom provider descriptor (admin). Refused while credentials use it."""
-    await _read_through(request, session)
-    ptype = _editable_type(provider_registry_of(request), provider_id)
+    records = await _read_through(request, session)
+    _editable_type(provider_registry_of(request), provider_id)
     credential_count, _ = (await CredentialRepository(session).usage_by_type(provider_id)).get(provider_id, (0, 0))
     if credential_count:
         raise HTTPException(
             status_code=400,
             detail=f"Cannot delete provider: {credential_count} credential(s) use it",
         )
-    await ProviderDescriptorRepository(session).delete(provider_id)
-    await _audit(session, provider_id, "deleted", admin, ptype.descriptor, hosts_changed=False)
+    record = records.get(provider_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail="Provider not found")
+    # A delete that lost a race with another finds the row gone: that one records it.
+    if await ProviderDescriptorRepository(session).delete(provider_id):
+        await actor_of(request, admin).deleted(session, record)
     await session.commit()
     await change_log_of(request).record(ChangeKind.DESCRIPTOR, provider_id)
     await _apply_stored(provider_store_of(request))
@@ -566,14 +567,6 @@ async def export_provider(request: Request, provider_id: str, session: DbDep, _a
         media_type="application/yaml",
         headers={"Content-Disposition": f'attachment; filename="{provider_id}.yaml"'},
     )
-
-
-@router.get("/{provider_id}/audit", response_model=ProviderAuditResponse)
-async def provider_audit(
-    request: Request, session: DbDep, provider_id: str, _admin: RequireAdminDep
-) -> ProviderAuditResponse:
-    entries = await ProviderAuditRepository(session).get_for_provider(provider_id)
-    return ProviderAuditResponse(total=len(entries), entries=entries)
 
 
 @router.post("/{provider_id}/test", response_model=ProviderTestResponse)

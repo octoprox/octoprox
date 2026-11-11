@@ -151,7 +151,9 @@ class TestWriteToRouter:
         project = await services.project()
         connector = await services.connect(project, "ISP", STATIC)
         proxy = await services.proxies.create(
-            project.id, ProxyCreate(host="10.0.0.1", port=8080, connector_id=connector.id, username="u", password="p")
+            project.id,
+            ProxyCreate(host="10.0.0.1", port=8080, connector_id=connector.id, username="u", password="p"),
+            services.actor,
         )
         await caught_up(builder, redis_client)
         assert await gateway.follower.poll()
@@ -197,7 +199,7 @@ class TestWriteToRouter:
         await caught_up(builder, redis_client)
         assert await gateway.follower.poll()
 
-        await services.connectors.remove(project.id, first.id)
+        await services.connectors.remove(project.id, first.id, services.actor)
         await caught_up(builder, redis_client)
         assert await gateway.follower.poll()
         assert gateway.updates[-1].removed == {connector_section(first.id)}
@@ -440,7 +442,7 @@ class TestJobKeys:
             await caught_up(builder, redis_client)
             assert builder.job_keys is keys
 
-            await services.connectors.update(project.id, connector.id, ConnectorUpdate(enabled=False))
+            await services.connectors.update(project.id, connector.id, ConnectorUpdate(enabled=False), services.actor)
             await caught_up(builder, redis_client)
             assert builder.job_keys is not None and builder.job_keys.health == frozenset()
 
@@ -683,7 +685,7 @@ class TestFencing:
             project = await services.project()
             connector = await services.connect(project, "ISP", STATIC)
             proxy = await services.proxies.create(
-                project.id, ProxyCreate(host="10.0.0.1", port=8080, connector_id=connector.id)
+                project.id, ProxyCreate(host="10.0.0.1", port=8080, connector_id=connector.id), services.actor
             )
             async with running(builder):
                 await caught_up(builder, redis_client)

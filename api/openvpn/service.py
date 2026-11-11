@@ -20,6 +20,7 @@ from api.core.stats import TunnelPeerMetricDelta
 from api.db.openvpn_repository import OpenVpnPeerRepository, OpenVpnSettingsRepository
 from api.db.streams import ChangeKind
 from api.db.wireguard_repository import WireGuardSettingsRepository
+from api.models.audit import AuditAction
 from api.models.location import LOCATION_NEEDS_COUNTRY
 from api.models.openvpn import (
     OpenVpnPeer,
@@ -52,6 +53,7 @@ from api.openvpn.config import client_profile_filename, render_client_profile
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
 
+    from api.core.audit import Actor
     from api.db.redis import RedisClient
     from api.db.session import SessionFactory
     from api.db.streams import ChangeLog
@@ -138,6 +140,9 @@ def _conflict(exc: IntegrityError, name: str) -> Exception:
 class OpenVpnService:
     """OpenVPN settings, CA and devices for the admin API, over Postgres; gateways follow through the feed.
 
+    A write records its change in the audit log through the actor it is given, in the write's transaction; a settings
+    row seeded because none was there is not recorded.
+
     Args:
         defaults: ``openvpn.defaults``, for a settings row created when a read finds none.
     """
@@ -172,7 +177,7 @@ class OpenVpnService:
         await self._announce_seed(created)
         return server
 
-    async def save_settings(self, doc: OpenVpnServerSettingsDoc, updated_by: str | None) -> OpenVpnServerSettings:
+    async def save_settings(self, doc: OpenVpnServerSettingsDoc, actor: Actor) -> OpenVpnServerSettings:
         """Replace the editable settings; TunnelValidationError when the subnet would not hold the devices.
 
         The subnet must hold every device's address off its gateway and share no address with the WireGuard one;
@@ -182,13 +187,14 @@ class OpenVpnService:
             current, _ = await seed_openvpn_settings(session, self._defaults)
             updated = current.model_copy(update=doc.model_dump())
             await self._check_subnet(session, updated)
-            saved = await self._save(session, updated, updated_by)
+            saved = await self._save(session, updated, actor.name)
+            await actor.updated(session, current, saved)
             await session.commit()
-        logger.info("OpenVPN settings saved", updated_by=updated_by, endpoint=saved.endpoint_host)
+        logger.info("OpenVPN settings saved", updated_by=actor.name, endpoint=saved.endpoint_host)
         await self._changes.record(ChangeKind.OPENVPN)
         return saved
 
-    async def rotate_identity(self, updated_by: str | None) -> OpenVpnServerSettings:
+    async def rotate_identity(self, actor: Actor) -> OpenVpnServerSettings:
         """A new CA, server certificate and tls-crypt key, and every device reissued under them; every profile must be loaded again.
 
         The row and every device change in one transaction, so no gateway is ever handed a device whose certificate the
@@ -197,15 +203,18 @@ class OpenVpnService:
         async with self._session_factory() as session:
             current, _ = await seed_openvpn_settings(session, self._defaults)
             updated = current.model_copy(update=new_identity())
-            saved = await self._save(session, updated, updated_by)
+            saved = await self._save(session, updated, actor.name)
             repo = OpenVpnPeerRepository(session)
             # In id order, the order every batch writer of a feed table keeps.
             devices = sorted(await repo.get_all(), key=lambda device: device.id)
             for device in devices:
                 await repo.update(device.model_copy(update=_certificate(updated, device.id)))
+            await actor.updated(
+                session, current, saved, action=AuditAction.ROTATED, details={"devices_reissued": len(devices)}
+            )
             await session.commit()
         logger.warning(
-            "OpenVPN identity rotated; every device profile is now invalid", by=updated_by, devices=len(devices)
+            "OpenVPN identity rotated; every device profile is now invalid", by=actor.name, devices=len(devices)
         )
         await self._changes.record(ChangeKind.OPENVPN)
         return saved
@@ -251,7 +260,7 @@ class OpenVpnService:
         async with self._session_factory() as session:
             return await OpenVpnPeerRepository(session).get_in_project(project_id, peer_id)
 
-    async def add_peer(self, project_id: str, data: OpenVpnPeerCreate) -> OpenVpnPeer:
+    async def add_peer(self, project_id: str, data: OpenVpnPeerCreate, actor: Actor) -> OpenVpnPeer:
         """Register a device: a certificate from the install's CA and the lowest free tunnel address.
 
         Raises TunnelValidationError for a name in use and TunnelAddressError
@@ -276,6 +285,7 @@ class OpenVpnService:
             )
             try:
                 await repo.create(peer)
+                await actor.created(session, peer)
                 await session.commit()
             except IntegrityError as exc:
                 raise _conflict(exc, peer.name) from None
@@ -283,7 +293,9 @@ class OpenVpnService:
         await self._changes.record(ChangeKind.OPENVPN, peer.id)
         return peer
 
-    async def update_peer(self, project_id: str, peer_id: str, data: OpenVpnPeerUpdate) -> OpenVpnPeer | None:
+    async def update_peer(
+        self, project_id: str, peer_id: str, data: OpenVpnPeerUpdate, actor: Actor
+    ) -> OpenVpnPeer | None:
         """Apply a partial update, a disabled device's session ending on every gateway as the feed reaches it.
 
         None when the device is not the project's; TunnelValidationError for a name in use or a state or city without a
@@ -299,13 +311,14 @@ class OpenVpnService:
                 raise TunnelValidationError(LOCATION_NEEDS_COUNTRY)
             try:
                 await repo.update(updated)
+                await actor.updated(session, peer, updated)
                 await session.commit()
             except IntegrityError as exc:
                 raise _conflict(exc, updated.name) from None
         await self._changes.record(ChangeKind.OPENVPN, peer_id)
         return updated
 
-    async def rotate_certificate(self, project_id: str, peer_id: str) -> OpenVpnPeer | None:
+    async def rotate_certificate(self, project_id: str, peer_id: str, actor: Actor) -> OpenVpnPeer | None:
         """A new certificate and key for the device, its session ending on every gateway as the feed carries the serial.
 
         None when the device is not the project's; the profile it has stops working.
@@ -318,17 +331,21 @@ class OpenVpnService:
             server, _ = await seed_openvpn_settings(session, self._defaults)
             updated = peer.model_copy(update=_certificate(server, peer.id))
             await repo.update(updated)
+            await actor.updated(session, peer, updated, action=AuditAction.ROTATED)
             await session.commit()
         await self._changes.record(ChangeKind.OPENVPN, peer_id)
         return updated
 
-    async def remove_peer(self, project_id: str, peer_id: str) -> bool:
+    async def remove_peer(self, project_id: str, peer_id: str, actor: Actor) -> bool:
         """Delete the device with its metrics history; False when it is not the project's."""
         async with self._session_factory() as session:
             repo = OpenVpnPeerRepository(session)
-            if await repo.get_in_project(project_id, peer_id) is None:
+            peer = await repo.get_in_project(project_id, peer_id)
+            if peer is None:
                 return False
-            await repo.delete(peer_id)
+            # A removal that lost a race with another finds the row gone: that one records it.
+            if await repo.delete(peer_id):
+                await actor.deleted(session, peer)
             await session.commit()
         logger.info("OpenVPN peer removed", peer_id=peer_id, project_id=project_id)
         await self._changes.record(ChangeKind.OPENVPN, peer_id)

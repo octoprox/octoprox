@@ -136,6 +136,14 @@ class SsoFlow:
 
     # --- callback ----------------------------------------------------------------------
 
+    async def pending(self, state: str, kind: AuthProviderKind) -> bool:
+        """Whether ``state`` names a sign-in this install started with ``kind`` and has not finished, left unspent."""
+        raw = await self._redis.client.get(SSO_STATE_KEY.format(state=state))
+        if raw is None:
+            return False
+        provider: str | None = json.loads(raw).get("provider")
+        return provider == kind.value
+
     async def complete(
         self, config: AuthProviderConfig, redirect_uri: str, state: str, code: str
     ) -> Identity:

@@ -6,12 +6,14 @@
 import re
 from datetime import datetime
 from enum import StrEnum
+from typing import Any, ClassVar
 from uuid import uuid4
 
 from pydantic import BaseModel, Field, field_validator
 
 from api.core import utc_now
 from api.core.password import hash_password
+from api.models.audit import Audited, AuditEntityType
 
 
 class UserRole(StrEnum):
@@ -22,8 +24,12 @@ class UserRole(StrEnum):
     VIEWER = "viewer"
 
 
-class User(BaseModel):
-    """Domain model for a user."""
+class User(Audited):
+    """Domain model for a user; its history records the profile and the ways in, never the theme or the sign-in stamps."""
+
+    audit_type: ClassVar[AuditEntityType] = AuditEntityType.USER
+    # The password (its hash) and the invite link's token are written only as set, changed or cleared.
+    audit_masked: ClassVar[frozenset[str]] = frozenset({"password", "invite_token"})
 
     id: str = Field(default_factory=lambda: str(uuid4()))
     username: str
@@ -38,6 +44,18 @@ class User(BaseModel):
     last_seen_release: str | None = None
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
+
+    def audit_name(self) -> str:
+        return self.username
+
+    def audit_fields(self) -> dict[str, Any]:
+        """The profile and the ways in: username, email, role, active flag, password, and the invite link with its
+        expiry."""
+        return {
+            **self.model_dump(mode="json", include={"username", "email", "role", "is_active"}),
+            "password": self.password_hash,
+            **self.model_dump(mode="json", include={"invite_token", "invite_token_expires_at"}),
+        }
 
     def set_password(self, password: str) -> None:
         """Store a new password and consume any outstanding invite link.

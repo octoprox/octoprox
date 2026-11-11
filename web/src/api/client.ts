@@ -1,7 +1,7 @@
 // Copyright 2026 Octoprox Authors
 // SPDX-License-Identifier: Apache-2.0
 
-import axios from 'axios'
+import axios, { type AxiosError } from 'axios'
 import { noteServerVersion, VERSION_HEADER } from '../utils/appVersion'
 
 const api = axios.create({
@@ -80,6 +80,32 @@ api.interceptors.response.use(
   },
 )
 
+/** Puts the API's reason for a failed call (its `detail`) in the error's message, and a server failure's request ID. */
+function explain(error: AxiosError, detail: unknown): void {
+  if (detail) {
+    // Handle Pydantic validation errors (422) which return an array of error objects
+    if (Array.isArray(detail)) {
+      const messages = detail.map((err: { msg?: string; loc?: string[] }) => {
+        const field = err.loc?.slice(-1)[0] || 'field'
+        return err.msg || `Invalid ${field}`
+      })
+      error.message = messages.join('; ')
+    } else if (typeof detail === 'string') {
+      error.message = detail
+    } else {
+      error.message = JSON.stringify(detail)
+    }
+  }
+  // Server-side failures are the ones worth reporting: put the request ID
+  // in the message every error surface already shows, so the person can
+  // quote it and the server logs for that request can be found.
+  const status = error.response?.status
+  if (typeof status === 'number' && status >= 500) {
+    const requestId = requestIdOf(error)
+    if (requestId) error.message = `${error.message} (request ${requestId})`
+  }
+}
+
 // Handle API errors
 api.interceptors.response.use(
   (response) => response,
@@ -90,32 +116,27 @@ api.interceptors.response.use(
       window.dispatchEvent(new CustomEvent('auth:logout'))
     }
     // Extract error message from API response for better error display
-    const apiDetail = error.response?.data?.detail
-    if (apiDetail) {
-      // Handle Pydantic validation errors (422) which return an array of error objects
-      if (Array.isArray(apiDetail)) {
-        const messages = apiDetail.map((err: { msg?: string; loc?: string[] }) => {
-          const field = err.loc?.slice(-1)[0] || 'field'
-          return err.msg || `Invalid ${field}`
-        })
-        error.message = messages.join('; ')
-      } else if (typeof apiDetail === 'string') {
-        error.message = apiDetail
-      } else {
-        error.message = JSON.stringify(apiDetail)
-      }
-    }
-    // Server-side failures are the ones worth reporting: put the request ID
-    // in the message every error surface already shows, so the person can
-    // quote it and the server logs for that request can be found.
-    const status = error.response?.status
-    if (typeof status === 'number' && status >= 500) {
-      const requestId = requestIdOf(error)
-      if (requestId) error.message = `${error.message} (request ${requestId})`
-    }
+    explain(error, error.response?.data?.detail)
     return Promise.reject(error)
   }
 )
+
+/**
+ * A failed download's error with the API's reason in its message. Asked for as a blob, an error's JSON body is still
+ * a blob when the interceptor reads it, so the reason is read here.
+ */
+async function withReason(error: unknown): Promise<unknown> {
+  if (!axios.isAxiosError(error) || !(error.response?.data instanceof Blob)) return error
+  let detail: unknown
+  try {
+    detail = JSON.parse(await error.response.data.text()).detail
+  } catch {
+    // Not JSON, as a balancer's error page is not: axios's own message stays.
+    return error
+  }
+  if (detail) explain(error, detail)
+  return error
+}
 
 // Auth API types
 export type UserRole = 'admin' | 'editor' | 'viewer'
@@ -920,16 +941,6 @@ export interface ProviderTestResponse {
   traces: { method: string; url: string; status: number | null; elapsed_ms: number; error: string | null; page: number; headers: Record<string, string> }[]
 }
 
-export interface ProviderAuditEntry {
-  id: string
-  provider_id: string
-  action: 'created' | 'updated' | 'deleted' | 'imported'
-  actor: string
-  egress_hosts: string[]
-  hosts_changed: boolean
-  created_at: string
-}
-
 export interface ResolvedProviderOption {
   value: string
   label: string
@@ -1287,7 +1298,10 @@ export interface ImportSummary {
   proxy_metrics: number
   project_metrics: number
   provider_descriptors: number
-  provider_audit_log: number
+  /** Audit entries the backup added; a restore keeps the install's own. */
+  audit_log: number
+  /** 1 when the backup's settings row was taken, or filled in the install's missing license key. */
+  system_settings: number
   geo_settings: number
   geo_databases: number
   geo_database_blobs: number
@@ -1304,11 +1318,16 @@ export const exportBackup = async (
   includeMetrics: boolean,
   includeDatabaseFiles: boolean
 ): Promise<void> => {
-  const response = await api.post(
-    '/backup/export',
-    { passphrase, include_metrics: includeMetrics, include_database_files: includeDatabaseFiles },
-    { responseType: 'blob' }
-  )
+  let response
+  try {
+    response = await api.post(
+      '/backup/export',
+      { passphrase, include_metrics: includeMetrics, include_database_files: includeDatabaseFiles },
+      { responseType: 'blob' }
+    )
+  } catch (error) {
+    throw await withReason(error)
+  }
   // Derive the filename from the Content-Disposition header, falling back to a default.
   const disposition = response.headers['content-disposition'] || ''
   const match = disposition.match(/filename="?([^"]+)"?/)
@@ -1829,11 +1848,6 @@ export const importProviderYaml = async (yaml: string, confirmedHosts: string[],
 export const exportProviderYaml = async (providerId: string): Promise<string> => {
   const response = await api.get(`/providers/${providerId}/export`, { responseType: 'text', transformResponse: [(d) => d] })
   return response.data as string
-}
-
-export const fetchProviderAudit = async (providerId: string): Promise<{ total: number; entries: ProviderAuditEntry[] }> => {
-  const response = await api.get(`/providers/${providerId}/audit`)
-  return response.data
 }
 
 export type ProviderTestAction = 'validate' | 'options' | 'list_proxies' | 'proxy_request'
@@ -3013,4 +3027,140 @@ export const fetchAuthIdentities = async (userId?: string): Promise<AuthIdentity
   (await api.get(identitiesBase(userId))).data.identities
 export const deleteAuthIdentity = async (identityId: string, userId?: string): Promise<void> => {
   await api.delete(`${identitiesBase(userId)}/${identityId}`)
+}
+
+// ---------------------------------------------------------------------------
+// Audit log (docs/audit-log.md): each entity's History and the retention, the
+// edition the server runs, and the Enterprise license and install-wide Activity
+// ---------------------------------------------------------------------------
+
+/** What an entry is about: the project-scoped entities, then the install-wide ones whose History only admins read. */
+export type AuditEntityType =
+  | 'project' | 'connector' | 'credential' | 'proxy' | 'wireguard_device' | 'openvpn_device'
+  | 'provider' | 'user' | 'sign_in_provider' | 'geo_settings' | 'geo_database'
+  | 'wireguard_settings' | 'openvpn_settings' | 'system_settings' | 'backup'
+
+/** A recorded value: what the field held, as JSON. */
+export type AuditValue = string | number | boolean | null | AuditValue[] | { [key: string]: AuditValue }
+
+/** What a secret is recorded as, set or changed: its value never is. */
+export const AUDIT_MASK = '********'
+
+/** One change, or with Enterprise one sign-in or token event. Entries outlive their entity. */
+export interface AuditEntry {
+  id: string
+  created_at: string
+  /** created, updated, deleted, ...; Enterprise adds signed_in, token_issued and the like, so any name may come. */
+  action: string
+  entity_type: AuditEntityType
+  /** '1' for an install-wide singleton or action; empty for a sign-in under an unknown name. */
+  entity_id: string
+  /** The entity's name when the entry was made. */
+  entity_name: string
+  project_id: string | null
+  actor_id: string | null
+  /** The username when the entry was made; empty when nobody signed in (a failed sign-in). */
+  actor: string
+  request_id: string | null
+  /** The fields that changed, each as [before, after]; settings one level down as `routing_config.weight`. */
+  changes: Record<string, [AuditValue, AuditValue]>
+  /**
+   * What else the action carries: `via` (upload, invite), `hosts_added`, `auth_token` and `auth_token_id` for the
+   * personal access token the actor used, and on Enterprise `method`, `client_ip`, `user_agent`, `reason`.
+   */
+  details: Record<string, AuditValue>
+}
+
+/** One page of an entity's History, newest first; `more` while older entries remain. */
+export interface AuditHistoryPage {
+  entries: AuditEntry[]
+  more: boolean
+}
+
+/** A page of the install-wide Activity (Enterprise), newest first, with the exact total under its filters. */
+export interface AuditPage {
+  entries: AuditEntry[]
+  total: number
+}
+
+/** How long entries are kept: 0 keeps them forever. */
+export interface AuditRetention {
+  days: number
+}
+
+/** The edition the server runs: 'free' on the public image, 'enterprise' on the Enterprise one. Public. */
+export interface Edition {
+  name: string
+  /** The licensed organisation while a license is active or in its grace period. */
+  organisation: string | null
+}
+
+/** No key stored, a stored key refused, or a genuine license running, in its grace period or past it. */
+export type LicenseState = 'none' | 'invalid' | 'active' | 'grace' | 'expired'
+
+/** The Enterprise license as the License card shows it (admins). */
+export interface LicenseStatus {
+  state: LicenseState
+  organisation: string | null
+  license_id: string | null
+  /** The last day the license is active, and the last of its grace period after: days, `YYYY-MM-DD` in UTC. */
+  expires: string | null
+  grace_ends: string | null
+  /** Users the license allows; null without a license. */
+  seats: number | null
+  /** Active users now. More than `seats` blocks nobody: it shows here and in the banner. */
+  seats_used: number
+  features: string[]
+  /** What admins are told across every page (grace period, expired, refused key, seats exceeded); null when all is well. */
+  banner: string | null
+  /** Why the stored key is refused, when `state` is 'invalid'. */
+  refusal: string | null
+}
+
+/** The Activity page's filters; an absent one does not narrow. */
+export interface ActivityFilters {
+  entity_type?: AuditEntityType
+  action?: string
+  /** A username, matched without regard to case. */
+  actor?: string
+  project_id?: string
+  /** Entries up to this moment (ISO time) instead of up to now. */
+  until?: string
+}
+
+/** One page of an entity's History: `before` is the id of the oldest entry already shown, null for the newest page. */
+export const fetchEntityHistory = async (entityType: AuditEntityType, entityId: string, before: string | null, limit = 50): Promise<AuditHistoryPage> =>
+  (await api.get(`/audit/${entityType}/${encodeURIComponent(entityId)}`, { params: { limit, before } })).data
+export const fetchAuditRetention = async (): Promise<AuditRetention> => (await api.get('/audit/retention')).data
+export const updateAuditRetention = async (days: number): Promise<AuditRetention> => (await api.put('/audit/retention', { days })).data
+
+/** Public, so the login page can ask. Only an 'enterprise' answer makes the license and Activity endpoints worth calling. */
+export const fetchEdition = async (): Promise<Edition> => (await api.get('/edition')).data
+
+// Enterprise only: the public image has none of these routes and answers them with the web UI's page.
+export const fetchLicense = async (): Promise<LicenseStatus> => (await api.get('/license')).data
+/** A refused key is a 400 whose message says why. */
+export const saveLicense = async (key: string): Promise<LicenseStatus> => (await api.put('/license', { key })).data
+export const fetchActivity = async (filters: ActivityFilters, offset: number, limit: number): Promise<AuditPage> =>
+  (await api.get('/audit', { params: { ...filters, offset, limit } })).data
+
+/** Every entry under the filters as JSON lines, oldest first, saved as a file. */
+export const exportActivity = async (filters: ActivityFilters): Promise<void> => {
+  let response
+  try {
+    response = await api.get('/audit/export', { params: filters, responseType: 'blob' })
+  } catch (error) {
+    throw await withReason(error)
+  }
+  // Derive the filename from the Content-Disposition header, falling back to a default.
+  const disposition = response.headers['content-disposition'] || ''
+  const match = disposition.match(/filename="?([^"]+)"?/)
+  const filename = match ? match[1] : 'octoprox-audit.jsonl'
+
+  const url = URL.createObjectURL(response.data as Blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = filename
+  a.click()
+  URL.revokeObjectURL(url)
 }

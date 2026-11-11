@@ -10,6 +10,7 @@ import { useTheme } from '../contexts/ThemeContext'
 import { Button, Input, Label, Alert } from './ui'
 import { fetchSsoProviders, ssoStartUrl, PublicSsoProvider } from '../api/client'
 import { ProviderMark } from './SignInProviderMark'
+import { useEdition } from '../hooks/useEdition'
 
 interface LoginProps {
   onLogin: (username: string, password: string) => Promise<void>
@@ -35,6 +36,8 @@ export default function Login({ onLogin, error }: LoginProps) {
   const { data: providers = [] } = useQuery<PublicSsoProvider[]>({
     queryKey: ['sso-providers'], queryFn: fetchSsoProviders, staleTime: 60_000, retry: false,
   })
+  // Named while an Enterprise license is active or in its grace period.
+  const { data: edition } = useEdition()
 
   useEffect(() => { setSsoError(takeSsoError()) }, [])
   const shownError = error ?? ssoError
@@ -59,6 +62,7 @@ export default function Login({ onLogin, error }: LoginProps) {
               <img src={isDark ? octoproxLogoDark : octoproxLogo} alt="Octoprox" className="h-12" />
             </div>
             <p className="text-fg-muted">Sign in to your account</p>
+            {edition?.organisation && <p className="mt-1 text-sm font-medium text-fg wrap-break-word">{edition.organisation}</p>}
           </div>
 
           {/* Error message */}

@@ -11,12 +11,13 @@ from __future__ import annotations
 import ipaddress
 from collections.abc import Iterable, Mapping
 from datetime import datetime
-from typing import Any
+from typing import Any, ClassVar
 from uuid import uuid4
 
 from pydantic import BaseModel, Field, ValidationInfo, field_validator, model_validator
 
 from api.core import utc_now
+from api.models.audit import INSTALL_ENTITY_ID, Audited, AuditEntityType
 from api.models.location import LocationTarget, normalize_level
 from api.models.tunnel import (
     TunnelPeerMetrics,
@@ -35,8 +36,11 @@ DEFAULT_ENDPOINT_PORT = 51820
 # --- server ----------------------------------------------------------------------------------
 
 
-class WireGuardServerSettings(BaseModel):
+class WireGuardServerSettings(Audited):
     """The install-wide WireGuard identity and the defaults every device config carries."""
+
+    audit_type: ClassVar[AuditEntityType] = AuditEntityType.WIREGUARD_SETTINGS
+    audit_masked: ClassVar[frozenset[str]] = frozenset({"private_key"})
 
     private_key: str
     public_key: str
@@ -73,6 +77,12 @@ class WireGuardServerSettings(BaseModel):
     @property
     def configured(self) -> bool:
         return bool(self.endpoint_host)
+
+    def audit_id(self) -> str:
+        return INSTALL_ENTITY_ID
+
+    def audit_name(self) -> str:
+        return "WireGuard settings"
 
 
 def validate_subnet(value: str) -> str:
@@ -117,8 +127,13 @@ class WireGuardServerSettingsResponse(BaseModel):
 # --- peers -----------------------------------------------------------------------------------
 
 
-class WireGuardPeer(BaseModel):
+class WireGuardPeer(Audited):
     """A device that may connect, and how its traffic is routed."""
+
+    audit_type: ClassVar[AuditEntityType] = AuditEntityType.WIREGUARD_DEVICE
+    # Where the device was last seen is the gateways' sighting, not an edit.
+    audit_ignored: ClassVar[frozenset[str]] = Audited.audit_ignored | {"project_id", "last_handshake_at", "last_endpoint"}
+    audit_masked: ClassVar[frozenset[str]] = frozenset({"private_key", "preshared_key"})
 
     id: str = Field(default_factory=lambda: str(uuid4()))
     project_id: str

@@ -14,14 +14,18 @@ import base64
 from collections.abc import Callable, Iterator
 from typing import Any
 from urllib.parse import parse_qs, unquote, urlparse
+from uuid import uuid4
 
 import pytest
+from fastapi import FastAPI
+from sqlalchemy import text
 from starlette.testclient import TestClient
 
 from api.db.redis import SSO_LOGIN_CODE_KEY
 from api.models.auth import AuthProviderKind
 from api.sso import Identity, SsoError, SsoFlow
 from tests.conftest import api_runtime, on_app_loop
+from tests.routes.test_auth import HookRecorder, SessionWatch, history, recorded, stored_audit_text
 
 PROVIDERS = "/api/v1/sso/providers"
 PUBLIC = "/api/v1/auth/sso"
@@ -375,3 +379,182 @@ class TestLoginCode:
         (third_key,) = _parked(authenticated_client)
         on_app_loop(authenticated_client, redis.client.set, third_key, token)
         assert authenticated_client.post(f"{PUBLIC}/exchange", json={"code": third}).status_code == 400
+
+
+@pytest.fixture
+def hooks(app_with_lifespan: FastAPI, monkeypatch: pytest.MonkeyPatch) -> HookRecorder:
+    """The app's audit log, swapped for one that keeps each hook call."""
+    return HookRecorder.install(app_with_lifespan, monkeypatch)
+
+
+def _forget(client: TestClient, kind: str) -> None:
+    """No stored row for ``kind``, nor entries: the provider as a fresh install has it."""
+
+    async def forget() -> None:
+        async with api_runtime(client).session_factory() as session:
+            await session.execute(text("DELETE FROM auth_providers WHERE kind = :kind"), {"kind": kind})
+            await session.execute(
+                text("DELETE FROM audit_log WHERE entity_type = 'sign_in_provider' AND entity_id = :kind"), {"kind": kind}
+            )
+            await session.commit()
+
+    on_app_loop(client, forget)
+
+
+class TestProviderHistory:
+    """Each save of a provider's client is recorded, the secret only as set, changed or cleared."""
+
+    def test_saves_are_recorded_with_the_secret_masked(self, authenticated_client: TestClient) -> None:
+        client = authenticated_client
+        _forget(client, "github")
+        docs = [
+            {"enabled": False, "client_id": "gh-1", "client_secret": "gh-secret-1"},
+            # A null secret keeps the stored one: nothing changes, so nothing is recorded.
+            {"enabled": False, "client_id": "gh-1", "client_secret": None},
+            {"enabled": True, "client_id": "gh-2", "client_secret": "gh-secret-2"},
+            {"enabled": False, "client_id": "gh-2", "client_secret": ""},
+        ]
+        for doc in docs:
+            response = client.put(f"{PROVIDERS}/github", json=doc)
+            assert response.status_code == 200, response.text
+
+        entries = history(client, "sign_in_provider", "github")
+
+        assert [(e["action"], e["entity_name"], e["actor"]) for e in entries] == [
+            ("created", "GitHub", "testadmin"),
+            ("updated", "GitHub", "testadmin"),
+            ("updated", "GitHub", "testadmin"),
+        ]
+        assert [e["changes"] for e in entries] == [
+            {"enabled": [None, False], "client_id": [None, "gh-1"], "client_secret": [None, "********"]},
+            {"enabled": [False, True], "client_id": ["gh-1", "gh-2"], "client_secret": ["********", "********"]},
+            {"enabled": [True, False], "client_secret": ["********", None]},
+        ]
+        stored = stored_audit_text(client, "sign_in_provider", "github")
+        assert "gh-secret-1" not in stored and "gh-secret-2" not in stored
+        _disable_all(client)
+
+
+class TestSignInHooks:
+    """A sign-in through a provider is told to the audit log with whether it linked the account; a failure only when
+    the callback carries a state this install issued for that provider and has not used."""
+
+    def test_a_sign_in_is_told_with_whether_it_linked(
+        self, authenticated_client: TestClient, offline_metadata: None, monkeypatch: pytest.MonkeyPatch, hooks: HookRecorder
+    ) -> None:
+        client = authenticated_client
+        _enable_google(client)
+        name = f"hooked-{uuid4().hex[:8]}"
+        user = client.post("/api/v1/users/invite", json={"username": name, "email": f"{name}@example.com"}).json()["user"]
+        _identity_from(monkeypatch, Identity(AuthProviderKind.GOOGLE, f"g-{name}", f"{name}@example.com"))
+
+        for _ in range(2):
+            assert urlparse(_callback(client, _start(client))).path == "/sso/complete"
+        [identity] = client.get(f"/api/v1/users/{user['id']}/identities").json()["identities"]
+        assert client.delete(f"/api/v1/users/{user['id']}/identities/{identity['id']}").status_code == 204
+
+        assert hooks.calls == [
+            ("signed_in", {"user": name, "method": "sso", "provider": "google", "linked": True}),
+            ("signed_in", {"user": name, "method": "sso", "provider": "google", "linked": False}),
+            ("identity_unlinked", {"by": "testadmin", "provider": "google", "email": f"{name}@example.com", "stored": False}),
+        ]
+        client.request("DELETE", f"/api/v1/users/{user['id']}")
+        _disable_all(client)
+
+    def test_a_failure_is_told_only_when_the_callback_ends_a_sign_in_started_here(
+        self, authenticated_client: TestClient, offline_metadata: None, monkeypatch: pytest.MonkeyPatch, hooks: HookRecorder
+    ) -> None:
+        client = authenticated_client
+        _enable_google(client)
+        name = f"turned-away-{uuid4().hex[:8]}"
+        off = client.post("/api/v1/users/invite", json={"username": name, "email": f"{name}@example.com"}).json()["user"]
+        assert client.patch(f"/api/v1/users/{off['id']}", json={"is_active": False}).status_code == 200
+
+        def callback(kind: str = "google", **params: str) -> None:
+            response = client.get(f"{PUBLIC}/{kind}/callback", params=params, follow_redirects=False)
+            assert response.status_code == 303 and "sso_error" in response.headers["location"], response.text
+
+        # Crafted: no state, a state never issued (with an error, or with a code the real flow refuses), no code, and
+        # a state started for another provider.
+        callback(error="access_denied")
+        callback(error="access_denied", state="never-issued")
+        callback(code="c", state="never-issued")
+        callback(state=_start(client))
+        callback("github", error="access_denied", state=_start(client))
+        assert hooks.calls == []
+
+        # Each callback that ends a sign-in started here is told, with its reason; the provider's error only when it
+        # looks like an OAuth error code.
+        callback(error="access_denied", state=_start(client))
+        callback(error="server_error", state=_start(client))
+        callback(error="Your account was locked by the security team", state=_start(client))
+        _identity_from(monkeypatch, Identity(AuthProviderKind.GOOGLE, "g-stranger", "stranger@example.com"))
+        callback(code="c", state=_start(client))
+        _identity_from(monkeypatch, Identity(AuthProviderKind.GOOGLE, f"g-{name}", f"{name}@example.com"))
+        callback(code="c", state=_start(client))
+        state = _start(client)
+        client.cookies.clear()
+        callback(code="c", state=state)
+        _identity_from(monkeypatch, RuntimeError("the provider's answer broke something"))
+        callback(code="c", state=_start(client))
+        state = _start(client)
+        _disable_all(client)
+        callback(code="c", state=state)
+
+        assert [(call["method"], call["reason"], call["user"], call["provider"]) for _hook, call in hooks.calls] == [
+            ("sso", "cancelled", None, "google"),
+            ("sso", "refused by the provider: server_error", None, "google"),
+            ("sso", "refused by the provider", None, "google"),
+            ("sso", "google g-stranger (stranger@example.com) matches no user", None, "google"),
+            ("sso", f"inactive user {name} via google", name, "google"),
+            ("sso", "sso state cookie missing or for another login", None, "google"),
+            ("sso", "unexpected error", None, "google"),
+            ("sso", "provider not enabled", None, "google"),
+        ]
+        client.request("DELETE", f"/api/v1/users/{off['id']}")
+
+    def test_the_requests_session_holds_no_transaction_when_a_hook_runs(
+        self,
+        authenticated_client: TestClient,
+        app_with_lifespan: FastAPI,
+        offline_metadata: None,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        client = authenticated_client
+        _enable_google(client)
+        name = f"held-sso-{uuid4().hex[:8]}"
+        user = client.post("/api/v1/users/invite", json={"username": name, "email": f"{name}@example.com"}).json()["user"]
+        watch = SessionWatch.install(app_with_lifespan, monkeypatch)
+
+        _identity_from(monkeypatch, Identity(AuthProviderKind.GOOGLE, f"g-{name}", f"{name}@example.com"))
+        assert urlparse(_callback(client, _start(client))).path == "/sso/complete"
+        _identity_from(monkeypatch, Identity(AuthProviderKind.GOOGLE, "g-nobody", "nobody@example.com"))
+        assert "No Octoprox account" in _error_of(_callback(client, _start(client)))
+
+        assert watch.held == [("signed_in", False), ("google g-nobody (nobody@example.com) matches no user", False)]
+        client.request("DELETE", f"/api/v1/users/{user['id']}")
+        _disable_all(client)
+
+    def test_sign_ins_add_no_entries_on_the_free_edition(
+        self, authenticated_client: TestClient, offline_metadata: None, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        client = authenticated_client
+        _enable_google(client)
+        name = f"free-sso-{uuid4().hex[:8]}"
+        user = client.post("/api/v1/users/invite", json={"username": name, "email": f"{name}@example.com"}).json()["user"]
+
+        with recorded(client) as added:
+            _identity_from(monkeypatch, Identity(AuthProviderKind.GOOGLE, f"g-{name}", f"{name}@example.com"))
+            assert urlparse(_callback(client, _start(client))).path == "/sso/complete"
+            _identity_from(monkeypatch, Identity(AuthProviderKind.GOOGLE, "g-nobody", "nobody@example.com"))
+            assert "No Octoprox account" in _error_of(_callback(client, _start(client)))
+            cancelled = client.get(
+                f"{PUBLIC}/google/callback", params={"error": "access_denied", "state": _start(client)}, follow_redirects=False
+            )
+            assert cancelled.status_code == 303
+            [identity] = client.get(f"/api/v1/users/{user['id']}/identities").json()["identities"]
+            assert client.delete(f"/api/v1/users/{user['id']}/identities/{identity['id']}").status_code == 204
+
+        assert added == []
+        client.request("DELETE", f"/api/v1/users/{user['id']}")
+        _disable_all(client)

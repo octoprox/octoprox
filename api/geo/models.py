@@ -11,12 +11,13 @@ from __future__ import annotations
 
 from datetime import datetime
 from enum import StrEnum
-from typing import Any, Literal, NamedTuple
+from typing import Any, ClassVar, Literal, NamedTuple
 from uuid import uuid4
 
 from pydantic import BaseModel, Field, field_validator
 
 from api.core import utc_now
+from api.models.audit import INSTALL_ENTITY_ID, Audited, AuditEntityType
 from api.models.location import META_MANUAL_LOCATION, LocationTarget, slugify_place
 
 
@@ -302,12 +303,14 @@ class SourcePolicy(BaseModel):
     city_radius_km: float = DEFAULT_CITY_RADIUS_KM
 
 
-class GeoSettings(BaseModel):
+class GeoSettings(Audited):
     """Install-wide attribution settings, edited in the admin panel.
 
     One typed row (``geo_settings``), seeded on a fresh install from the config file's ``geo.defaults``, whose judgement
     of a contradicted vendor is only the default projects inherit.
     """
+
+    audit_type: ClassVar[AuditEntityType] = AuditEntityType.GEO_SETTINGS
 
     default_conflict_rule: ConflictRule = ConflictRule.CONSENSUS
     # How far from the claimed city an answer may be and still confirm it;
@@ -338,6 +341,12 @@ class GeoSettings(BaseModel):
     @property
     def default_policy(self) -> SourcePolicy:
         return SourcePolicy(conflict_rule=self.default_conflict_rule, city_radius_km=self.default_city_radius_km)
+
+    def audit_id(self) -> str:
+        return INSTALL_ENTITY_ID
+
+    def audit_name(self) -> str:
+        return "IP attribution settings"
 
 
 class GeoDatabaseInfo(BaseModel):
@@ -379,13 +388,39 @@ class GeoDatabaseInfo(BaseModel):
     updated_at: datetime = Field(default_factory=utc_now)
 
 
-class GeoDatabaseRecord(GeoDatabaseInfo):
+# What a database's history records: what an admin sets, and the file's vendor, kind and format; never the rest of its
+# metadata or the state of its downloads, which the system writes.
+_DATABASE_AUDIT_FIELDS = frozenset(
+    {
+        "name",
+        "source",
+        "enabled",
+        "priority",
+        "update_url",
+        "update_interval_hours",
+        "update_auth",
+        "update_paused",
+        "vendor",
+        "kind",
+        "format",
+    }
+)
+
+
+class GeoDatabaseRecord(GeoDatabaseInfo, Audited):
     """A database as stored in Postgres or named in the config, download credentials included."""
+
+    audit_type: ClassVar[AuditEntityType] = AuditEntityType.GEO_DATABASE
+    # A vendor takes its token in the download URL as often as in the credentials.
+    audit_masked: ClassVar[frozenset[str]] = frozenset({"update_url", "update_auth"})
 
     # What the scheduled download authenticates with at the vendor (a
     # username and password, or a token). Read by the downloads only: the API
     # answers with GeoDatabaseInfo and says whether these are set.
     update_auth: dict[str, Any] = Field(default_factory=dict)
+
+    def audit_fields(self) -> dict[str, Any]:
+        return self.model_dump(mode="json", include=set(_DATABASE_AUDIT_FIELDS))
 
 
 class IpObservation(BaseModel):

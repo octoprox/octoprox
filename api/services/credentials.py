@@ -28,6 +28,7 @@ from api.services.errors import (
 )
 
 if TYPE_CHECKING:
+    from api.core.audit import Actor
     from api.db.session import SessionFactory
     from api.db.streams import ChangeLog
     from api.providers.registry import ProviderRegistry, ProviderType
@@ -48,7 +49,7 @@ class CredentialService:
         self._registry = provider_registry
         self._changes = changes
 
-    async def create(self, project_id: str, data: CredentialCreate) -> Credential:
+    async def create(self, project_id: str, data: CredentialCreate, actor: Actor) -> Credential:
         """Validate and store a new credential of the project; the saved credential."""
         async with self._session_factory() as session:
             if await ProjectRepository(session).get_by_id(project_id) is None:
@@ -59,6 +60,8 @@ class CredentialService:
         try:
             async with self._session_factory() as session:
                 await CredentialRepository(session).create(credential)
+                masked = self._registry.audit_masked("credential", credential.type)
+                await actor.created(session, credential, masked=masked)
                 await session.commit()
         except IntegrityError as exc:
             raise _taken(exc, credential.name) from None
@@ -66,7 +69,7 @@ class CredentialService:
         await self._changes.record(ChangeKind.CREDENTIAL, credential.id)
         return credential
 
-    async def update(self, project_id: str, credential_id: str, data: CredentialUpdate) -> Credential:
+    async def update(self, project_id: str, credential_id: str, data: CredentialUpdate, actor: Actor) -> Credential:
         """Apply a new name or config to a credential of the project; the saved credential.
 
         The type never changes; a new config is validated for the credential's type, and checked with the vendor when a
@@ -83,8 +86,14 @@ class CredentialService:
             changes["config"] = await self._edited_config(current, data.config)
         edited = current.model_copy(update=changes)
         async with self._session_factory() as session:
+            credentials = CredentialRepository(session)
+            # The entry's before, read again: another write may land while the vendor is asked.
+            stored = await credentials.get_in_project(project_id, credential_id)
             try:
-                saved = await CredentialRepository(session).update(edited)
+                saved = await credentials.update(edited)
+                if stored is not None and saved is not None:
+                    masked = self._registry.audit_masked("credential", current.type)
+                    await actor.updated(session, stored, saved, masked=masked)
                 await session.commit()
             except IntegrityError as exc:
                 raise _taken(exc, edited.name) from None
@@ -95,18 +104,21 @@ class CredentialService:
         await self._changes.record(ChangeKind.CREDENTIAL, credential_id)
         return saved
 
-    async def delete(self, project_id: str, credential_id: str) -> None:
+    async def delete(self, project_id: str, credential_id: str, actor: Actor) -> None:
         """Delete a credential of the project; refused while a connector uses it."""
         async with self._session_factory() as session:
             credentials = CredentialRepository(session)
-            if await credentials.get_in_project(project_id, credential_id) is None:
+            credential = await credentials.get_in_project(project_id, credential_id)
+            if credential is None:
                 raise NotFoundError("Credential not found")
             connectors = await ConnectorRepository(session).get_by_project(project_id)
             users = sum(1 for connector in connectors if connector.credential_id == credential_id)
             if users:
                 raise WriteRejectedError(f"Cannot delete credential: {users} connector(s) are using it")
             try:
-                await credentials.delete(credential_id)
+                if await credentials.delete(credential_id):
+                    masked = self._registry.audit_masked("credential", credential.type)
+                    await actor.deleted(session, credential, masked=masked)
                 await session.commit()
             except IntegrityError:
                 # A connector took it up between the check and the delete

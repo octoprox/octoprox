@@ -25,7 +25,10 @@ from api.models.tunnel import TunnelAddressError, TunnelValidationError
 from api.services.errors import InvalidConfigError, NotFoundError, WriteRejectedError
 
 if TYPE_CHECKING:
+    from api.core.audit import Actor, AuditLog
+    from api.core.auth import CurrentUser
     from api.core.config import Settings
+    from api.core.extension import Extension
     from api.db.redis import RedisClient
     from api.db.session import SessionFactory
     from api.db.streams import ChangeLog
@@ -229,6 +232,30 @@ def provider_registry_of(request: Request) -> ProviderRegistry:
 def provider_store_of(request: Request) -> ProviderStore:
     """What applies the stored custom descriptors to the registry (``sync_all`` after a descriptor write)."""
     return api_runtime_of(request).provider_store
+
+
+# --- Edition and audit log --------------------------------------------------------------------
+
+
+def extension_of(request: Request) -> Extension:
+    """The edition this api process loaded at start (``Extension.installed``)."""
+    return cast("Extension", request.app.state.extension)
+
+
+def audit_log_of(request: Request) -> AuditLog:
+    """Where this api process records audit entries; its extension built it."""
+    return cast("AuditLog", request.app.state.audit_log)
+
+
+def actor_of(request: Request, user: CurrentUser) -> Actor:
+    """The signed-in user as the actor of this request's changes, with the request's id.
+
+    A caller with a personal access token acts through it, and each of its entries names it (``auth_token`` and
+    ``auth_token_id``).
+    """
+    details = {"auth_token": user.token_name, "auth_token_id": user.token_id} if user.auth_method == "token" else {}
+    request_id = getattr(request.state, "request_id", None)
+    return audit_log_of(request).actor(user.id, user.username, request_id, details=details)
 
 
 # --- Write services, read model, previews -----------------------------------------------------

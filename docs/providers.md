@@ -42,7 +42,7 @@ Admins open **Administration → Providers**. Shipped providers are read-only; a
 6. **Test** - try the descriptor with throwaway config before saving. The credential and connector forms behave as they will for users: dropdowns load from the vendor, selecting a zone fills the dependent fields, and dependent dropdowns wait for their inputs. *Request through a proxy* validates the credential, builds one proxy endpoint exactly as a connector would (session id, IP discovery or vendor list included) and fetches a URL through it, reporting the status, latency and exit IP. The other actions exercise the vendor API: credential validation, options sources and the proxy list. Requests are shown with secrets redacted and nothing is persisted; the draft stays invisible to other users until it is saved.
 7. **YAML** - preview the normalised document, paste one to import, or export it.
 
-Saving asks you to confirm the vendor hosts that will receive credential material. Changes take effect at once on the api that saved them and within moments everywhere else: the gateways receive the descriptor in the routing feed, and the other api and worker processes read it again as soon as its change reaches them on the change stream. They are versioned and written to an audit log with the actor and the host list. A connector whose provider is disabled, or removed from the providers directory, is left out of routing until the provider is back; the controller logs `Connector left out of the feed: its provider is gone` for it.
+Saving asks you to confirm the vendor hosts that will receive credential material. Changes take effect at once on the api that saved them and within moments everywhere else: the gateways receive the descriptor in the routing feed, and the other api and worker processes read it again as soon as its change reaches them on the change stream. Each create, import, edit (enabling and disabling included) and delete is recorded in the [audit log]({{ site.baseurl }}/audit-log) with who made it, the fields it changed and the vendor hosts it added or removed; a custom provider's **History** tab lists them. A connector whose provider is disabled, or removed from the providers directory, is left out of routing until the provider is back; the controller logs `Connector left out of the feed: its provider is gone` for it.
 
 ### Security model
 
@@ -52,14 +52,14 @@ A descriptor tells Octoprox to send credentials to a URL, so descriptors are tre
 - Vendor calls are **HTTPS only** and every hostname is resolved and checked against private, loopback, link-local and cloud-metadata ranges before connecting. The connection is pinned to the vetted address. Redirects are not followed and pagination may not leave the original host. The test request through a proxy applies the same checks to the gateway host and to the URL it fetches.
 - Templates are plain `{placeholder}` substitution; extraction is JMESPath. Neither can reach anything outside the values Octoprox explicitly provides.
 - Every egress host must be **confirmed** on save, and again whenever a new host is added. The credential form shows users where their secret is sent.
-- Every mutation is **audited** (`provider_audit_log`) with the actor, action and host list.
+- Every change is **recorded** in the [audit log]({{ site.baseurl }}/audit-log) with the admin who made it, the fields it changed and the hosts it added or removed. The provider's History tab shows it to admins; a logo is recorded only as set, changed or removed.
 - Python is never accepted from the UI. Providers that genuinely need code are installed by the operator (see below).
 
 Response size and time limits are operator settings (`provider_http_max_response_bytes`, default 50 MB, `0` disables; `provider_http_timeout_seconds`, default 60).
 
 ### Backups
 
-Admin-authored descriptors and their audit log are part of the **Backup & Migration** export and are restored by a replace-import, taking effect at once on the api that imported them and within moments on every other process. Shipped descriptors, mounted YAML files and Python plugins are part of the deployment, not the database, and are not included.
+Admin-authored descriptors are part of the **Backup & Migration** export and are restored by a replace-import, taking effect at once on the api that imported them and within moments on every other process. Their history travels in the backup's audit log, which a restore adds to the install's own (see [Audit Log]({{ site.baseurl }}/audit-log#backups)). Shipped descriptors, mounted YAML files and Python plugins are part of the deployment, not the database, and are not included.
 
 ## Operator-installed providers
 
@@ -231,4 +231,4 @@ The two egress overrides exist for development against local mocks; leave them o
 
 ## API
 
-See the [Providers section of the API reference]({{ site.baseurl }}/api#providers).
+See the [API reference]({{ site.baseurl }}/api).

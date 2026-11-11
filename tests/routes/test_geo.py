@@ -12,8 +12,10 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, patch
 
+import httpx
 import pytest
 from redis.exceptions import ConnectionError as RedisConnectionError
+from sqlalchemy import text
 from starlette.testclient import TestClient
 
 from api.core import utc_now
@@ -32,6 +34,7 @@ from api.geo.store import path_database_id
 from api.geo.updater import DownloadError
 from api.jobs.attribution import ReattributeJob
 from api.jobs.job import JobBatch
+from api.models.audit import MASK
 from api.models.proxy import Proxy, ProxyProtocol, ProxyStatus
 from tests.conftest import api_runtime, on_app_loop, queued_job_keys
 from tests.geo.test_places import write_geonames
@@ -113,6 +116,47 @@ def _serve_downloads(monkeypatch: pytest.MonkeyPatch, path: Path) -> None:
         return path.read_bytes()
 
     monkeypatch.setattr("api.geo.updater.download", download)
+
+
+def _forget_saved_settings(client: TestClient) -> None:
+    """Delete the settings row, as on an install where no admin has saved them: it runs on the config defaults."""
+
+    async def forget() -> None:
+        async with api_runtime(client).session_factory() as session:
+            await session.execute(text("DELETE FROM geo_settings"))
+            await session.commit()
+
+    on_app_loop(client, forget)
+
+
+def _entries(client: TestClient, entity_type: str, entity_id: str) -> list[dict[str, Any]]:
+    """The entity's audit entries, oldest first."""
+    response = client.get(f"/api/v1/audit/{entity_type}/{entity_id}", params={"limit": 200})
+    assert response.status_code == 200, response.text
+    return list(reversed(response.json()["entries"]))
+
+
+def _recorded_by(client: TestClient, response: httpx.Response, entity_type: str, entity_id: str) -> list[dict[str, Any]]:
+    """The entity's audit entries that the request answered by ``response`` recorded."""
+    request_id = response.headers["x-request-id"]
+    return [entry for entry in _entries(client, entity_type, entity_id) if entry["request_id"] == request_id]
+
+
+def _stored_audit_text(client: TestClient, entity_id: str) -> str:
+    """Every change and detail recorded for ``entity_id``, as Postgres holds them."""
+
+    async def read() -> str:
+        async with api_runtime(client).session_factory() as session:
+            stored = await session.execute(
+                text(
+                    "SELECT coalesce(string_agg(CAST(changes AS text) || CAST(details AS text), ''), '')"
+                    " FROM audit_log WHERE entity_id = :id"
+                ),
+                {"id": entity_id},
+            )
+            return str(stored.scalar_one())
+
+    return on_app_loop(client, read)
 
 
 @pytest.fixture
@@ -308,6 +352,177 @@ class TestChangeEntries:
 
         assert at_download == [[("geo_database", row["id"])]]
         _clear(authenticated_client)
+
+
+class TestAuditLog:
+    """An admin's writes of the settings and of each database are recorded with what they changed; downloads are not.
+
+    A download URL and credentials are recorded only as set, changed or cleared, since vendors take tokens in both.
+    """
+
+    def test_a_settings_save_records_what_it_changed_and_one_without_a_change_nothing(
+        self, authenticated_client: TestClient
+    ) -> None:
+        client = authenticated_client
+        _clear(client)
+        body = client.get("/api/v1/geo/settings").json()["settings"]
+        timeout = body["echo_timeout_seconds"]
+        edited = dict(body, default_conflict_rule="first", echo_timeout_seconds=timeout + 1)
+
+        saved = client.put("/api/v1/geo/settings", json=edited)
+        again = client.put("/api/v1/geo/settings", json=edited)
+
+        assert saved.status_code == again.status_code == 200
+        [entry] = _recorded_by(client, saved, "geo_settings", "1")
+        assert {key: entry[key] for key in ("action", "entity_name", "project_id", "actor_id", "actor", "changes")} == {
+            "action": "updated",
+            "entity_name": "IP attribution settings",
+            "project_id": None,
+            "actor_id": "test-admin-id",
+            "actor": "testadmin",
+            "changes": {"default_conflict_rule": ["consensus", "first"], "echo_timeout_seconds": [timeout, timeout + 1]},
+        }
+        assert _recorded_by(client, again, "geo_settings", "1") == []
+        _clear(client)
+
+    def test_each_database_write_records_what_it_changed(self, authenticated_client: TestClient, tmp_path: Path) -> None:
+        client = authenticated_client
+        _clear(client)
+        uploaded = _upload(client, _city_database(tmp_path), name="London", priority=5)
+        assert uploaded.status_code == 201, uploaded.text
+        database_id = uploaded.json()["id"]
+        url = f"/api/v1/geo/databases/{database_id}"
+
+        assert client.patch(url, json={"name": "London city", "priority": 6}).status_code == 200
+        unchanged = client.patch(url, json={"name": "London city"})
+        assert client.delete(url).status_code == 204
+
+        assert unchanged.status_code == 200 and _recorded_by(client, unchanged, "geo_database", database_id) == []
+        created, updated, deleted = _entries(client, "geo_database", database_id)
+        assert (created["action"], created["entity_name"], created["actor"], created["project_id"]) == (
+            "created", "London", "testadmin", None,
+        )
+        # What the admin set and what the file is; no download is scheduled, so no URL, credentials or file metadata.
+        assert created["changes"] == {
+            "name": [None, "London"],
+            "vendor": [None, "maxmind"],
+            "kind": [None, "city"],
+            "format": [None, "mmdb"],
+            "source": [None, "upload"],
+            "enabled": [None, True],
+            "priority": [None, 5],
+            "update_interval_hours": [None, 0],
+            "update_paused": [None, False],
+        }
+        assert (updated["action"], updated["changes"]) == (
+            "updated", {"name": ["London", "London city"], "priority": [5, 6]},
+        )
+        assert (deleted["action"], deleted["entity_name"]) == ("deleted", "London city")
+        assert deleted["changes"]["name"] == ["London city", None] and deleted["changes"]["priority"] == [6, None]
+
+    def test_pausing_and_resuming_a_schedule_are_recorded(self, authenticated_client: TestClient) -> None:
+        client = authenticated_client
+        _clear(client)
+        # The download fails, and the row stays with its schedule.
+        client.post(
+            "/api/v1/geo/databases/from-url",
+            json={"name": "blocked", "update_url": "http://127.0.0.1:1/db.mmdb", "update_interval_hours": 24},
+        )
+        (row,) = client.get("/api/v1/geo/databases").json()["databases"]
+        url = f"/api/v1/geo/databases/{row['id']}"
+
+        assert client.patch(url, json={"update_paused": True}).status_code == 200
+        assert client.patch(url, json={"update_paused": False}).status_code == 200
+
+        assert [entry["changes"] for entry in _entries(client, "geo_database", row["id"])[1:]] == [
+            {"update_paused": [False, True]},
+            {"update_paused": [True, False]},
+        ]
+        _clear(client)
+
+    def test_a_download_url_and_credentials_are_recorded_only_as_set_changed_or_cleared(
+        self, authenticated_client: TestClient, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Neither the URL's token and user part nor the password reaches an entry; the downloads record nothing."""
+        client = authenticated_client
+        _clear(client)
+        _serve_downloads(monkeypatch, _city_database(tmp_path))
+        added = client.post(
+            "/api/v1/geo/databases/from-url",
+            json={
+                "name": "vendor",
+                "update_url": "https://acct:url-key@vendor.example/city.mmdb?token=url-token",
+                "update_auth": {"username": "acct", "password": "vendor-secret"},
+            },
+        )
+        assert added.status_code == 201, added.text
+        row = added.json()
+        url = f"/api/v1/geo/databases/{row['id']}"
+
+        refreshed = client.post(f"{url}/refresh")
+        # Sent back as the answers show it: the stored URL stays, so nothing changed.
+        shown = client.patch(url, json={"update_url": row["update_url"]})
+        changed = client.patch(
+            url,
+            json={
+                "update_url": "https://vendor.example/city.mmdb?token=next-token",
+                "update_auth": {"username": "acct", "password": "next-secret"},
+            },
+        )
+        cleared = client.patch(url, json={"update_url": "", "update_auth": {}})
+
+        assert [response.status_code for response in (refreshed, shown, changed, cleared)] == [200] * 4
+        assert _recorded_by(client, refreshed, "geo_database", row["id"]) == []
+        assert _recorded_by(client, shown, "geo_database", row["id"]) == []
+        created, change, clear = _entries(client, "geo_database", row["id"])
+        assert (created["changes"]["update_url"], created["changes"]["update_auth"]) == ([None, MASK], [None, MASK])
+        assert change["changes"] == {"update_url": [MASK, MASK], "update_auth": [MASK, MASK]}
+        assert clear["changes"] == {"update_url": [MASK, None], "update_auth": [MASK, None]}
+        stored = _stored_audit_text(client, row["id"])
+        assert [secret for secret in ("url-key", "url-token", "vendor-secret", "next-token", "next-secret") if secret in stored] == []
+        _clear(client)
+
+    def test_a_delete_that_finds_the_row_gone_records_nothing(
+        self, authenticated_client: TestClient, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Two deletes at once both read the row, and the one whose delete comes second leaves the entry to the other."""
+        client = authenticated_client
+        _clear(client)
+        database_id = _upload(client, _city_database(tmp_path)).json()["id"]
+        delete_row = GeoDatabaseRepository.delete
+
+        async def deleted_first_elsewhere(repository: GeoDatabaseRepository, database_id: str) -> bool:
+            async with api_runtime(client).session_factory() as session:
+                await delete_row(GeoDatabaseRepository(session), database_id)
+                await session.commit()
+            return await delete_row(repository, database_id)
+
+        monkeypatch.setattr(GeoDatabaseRepository, "delete", deleted_first_elsewhere)
+
+        assert client.delete(f"/api/v1/geo/databases/{database_id}").status_code == 204
+        assert [entry["action"] for entry in _entries(client, "geo_database", database_id)] == ["created"]
+
+
+class TestTheFirstSettingsSave:
+    """Until an admin first saves the settings, the install runs on the config file's: the first save changes those."""
+
+    @pytest.fixture
+    def test_settings(self, test_settings: Settings) -> Settings:
+        test_settings.geo_policy_defaults = {"default_conflict_rule": "first"}
+        return test_settings
+
+    def test_is_recorded_against_the_config_defaults(self, authenticated_client: TestClient) -> None:
+        client = authenticated_client
+        _forget_saved_settings(client)
+        current = client.get("/api/v1/geo/settings").json()
+        assert current["from_database"] is False and current["settings"]["default_conflict_rule"] == "first"
+
+        saved = client.put("/api/v1/geo/settings", json=dict(current["settings"], preflight_max_attempts=5))
+
+        assert saved.status_code == 200, saved.text
+        [entry] = _recorded_by(client, saved, "geo_settings", "1")
+        assert entry["changes"] == {"preflight_max_attempts": [3, 5]}
+        _clear(client)
 
 
 class TestDatabases:

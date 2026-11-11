@@ -21,7 +21,7 @@ from api.models.credential import (
     CredentialResponse,
     CredentialUpdate,
 )
-from api.routes.common import credential_service_of, require_project, session_factory_of
+from api.routes.common import actor_of, credential_service_of, require_project, session_factory_of
 
 router = APIRouter(prefix="/projects/{project_id}/credentials")
 
@@ -78,10 +78,10 @@ async def create_credential(
     request: Request,
     credential_data: CredentialCreate,
     project_id: str,
-    _guard: RequireEditorDep,
+    user: RequireEditorDep,
 ) -> CredentialDetailResponse:
     """Create a new credential, checked with the vendor when its provider has a validation call."""
-    credential = await credential_service_of(request).create(project_id, credential_data)
+    credential = await credential_service_of(request).create(project_id, credential_data, actor_of(request, user))
     return _credential_to_detail_response(credential)
 
 
@@ -101,16 +101,18 @@ async def update_credential(
     project_id: str,
     credential_id: str,
     credential_data: CredentialUpdate,
-    _guard: RequireEditorDep,
+    user: RequireEditorDep,
 ) -> CredentialDetailResponse:
     """Update a credential's name or config; a refused edit leaves the stored credential as it was."""
-    credential = await credential_service_of(request).update(project_id, credential_id, credential_data)
+    credential = await credential_service_of(request).update(
+        project_id, credential_id, credential_data, actor_of(request, user)
+    )
     return _credential_to_detail_response(credential)
 
 
 @router.delete("/{credential_id}", status_code=204)
 async def delete_credential(
-    request: Request, project_id: str, credential_id: str, _guard: RequireEditorDep
+    request: Request, project_id: str, credential_id: str, user: RequireEditorDep
 ) -> None:
     """Delete a credential; refused while a connector uses it."""
-    await credential_service_of(request).delete(project_id, credential_id)
+    await credential_service_of(request).delete(project_id, credential_id, actor_of(request, user))

@@ -115,6 +115,23 @@ permalink: /
     .notice-card p { color: var(--muted); font-size: 14px; margin: 0; }
     .notice-card p a { font-weight: 500; }
 
+    /* Octoprox Enterprise */
+    .enterprise { padding: 0 0 64px; }
+    .enterprise-card {
+      display: grid; grid-template-columns: minmax(0, 5fr) minmax(0, 6fr); gap: 28px 48px; align-items: center;
+      background: var(--surface); border: 1px solid var(--line); border-top: 3px solid var(--primary); border-radius: 10px; padding: 32px;
+    }
+    .enterprise-card h2 { font-size: 22px; font-weight: 600; letter-spacing: -0.01em; margin-bottom: 8px; }
+    .enterprise-pitch p { color: var(--muted); margin-bottom: 24px; }
+    .enterprise-pitch .actions { justify-content: flex-start; }
+    .enterprise-list { list-style: none; display: grid; gap: 16px; }
+    .enterprise-list li { display: flex; gap: 12px; align-items: flex-start; }
+    .enterprise-list svg { width: 18px; height: 18px; color: var(--primary); flex: none; margin-top: 3px; }
+    .enterprise-list h3 { font-size: 15px; font-weight: 600; }
+    .enterprise-list p { color: var(--muted); font-size: 14px; }
+    /* The address Get in touch shows (assets/contact.js), on its own line under the buttons */
+    .contact-address { order: 1; flex-basis: 100%; font-size: 14px; color: var(--muted); overflow-wrap: anywhere; -webkit-user-select: all; user-select: all; }
+
     /* Docs index */
     .docs-index { padding: 0 0 72px; }
     .docs-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 16px; }
@@ -130,10 +147,28 @@ permalink: /
       .hero h1 { font-size: 30px; }
       .hero p { font-size: 15px; }
     }
+    @media (max-width: 760px) {
+      .enterprise-card { grid-template-columns: minmax(0, 1fr); padding: 24px 20px; }
+    }
     @media (max-width: 500px) {
       .container { padding: 0 16px; }
       .logo { height: 22px; width: 98px; }
       nav a { padding: 6px 8px; font-size: 13px; }
+    }
+    /* The narrowest phones have no room for three links; the hero links to GitHub */
+    @media (max-width: 400px) {
+      .nav-github { display: none; }
+    }
+    /* Touch screens: 44 px targets */
+    @media (pointer: coarse) {
+      nav a { display: inline-flex; align-items: center; justify-content: center; min-width: 44px; min-height: 44px; }
+      .btn { height: 44px; }
+      header .theme-toggle { width: 44px; height: 44px; }
+    }
+    /* Narrow touch screens: tighter header gaps make room for the 44 px toggle */
+    @media (pointer: coarse) and (max-width: 400px) {
+      header .container { gap: 4px; }
+      .header-right { gap: 4px; }
     }
     /* Theme toggle */
     .theme-toggle { display: inline-flex; align-items: center; justify-content: center; width: 34px; height: 34px; border-radius: 6px; border: 1px solid var(--line); background: var(--surface); color: var(--muted); cursor: pointer; flex: none; }
@@ -175,7 +210,8 @@ permalink: /
       <div class="header-right">
         <nav>
           <a href="getting-started">Docs</a>
-          <a href="https://github.com/octoprox/octoprox">GitHub</a>
+          <a href="enterprise">Enterprise</a>
+          <a href="https://github.com/octoprox/octoprox" class="nav-github">GitHub</a>
         </nav>
         <button class="theme-toggle" type="button" onclick="toggleTheme()" aria-label="Toggle dark mode" title="Toggle dark mode">
           <svg class="icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/></svg>
@@ -263,6 +299,41 @@ docker compose -f docker-compose.ghcr.yml up -d --remove-orphans</pre>
     </div>
   </section>
 
+  <section class="enterprise">
+    <div class="container">
+      <div class="enterprise-card">
+        <div class="enterprise-pitch">
+          <span class="eyebrow">Licensed edition</span>
+          <h2>Octoprox Enterprise</h2>
+          <p>Everything in Octoprox, plus a record of who got in: every sign-in and API token in the audit log, across the whole install, ready for your SIEM.</p>
+          <div class="actions">
+            <a href="enterprise#get-in-touch" class="btn" data-contact>Get in touch</a>
+            <noscript class="contact-address">enterprise at octoprox dot com</noscript>
+            <a href="enterprise" class="btn btn-outline">Learn more</a>
+          </div>
+        </div>
+        <ul class="enterprise-list">
+          <li>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m10 17 5-5-5-5"/><path d="M15 12H3"/><path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4"/></svg>
+            <div><h3>Sign-ins</h3><p>Every sign-in and failed attempt, with its method, address and browser.</p></div>
+          </li>
+          <li>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2.586 17.414A2 2 0 0 0 2 18.828V21a1 1 0 0 0 1 1h3a1 1 0 0 0 1-1v-1a1 1 0 0 1 1-1h1a1 1 0 0 0 1-1v-1a1 1 0 0 1 1-1h.172a2 2 0 0 0 1.414-.586l.814-.814a6.5 6.5 0 1 0-4-4z"/><circle cx="16.5" cy="7.5" r=".5" fill="currentColor"/></svg>
+            <div><h3>API tokens</h3><p>Each personal access token issued, first used and revoked.</p></div>
+          </li>
+          <li>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M12 7v5l4 2"/></svg>
+            <div><h3>Install-wide activity</h3><p>The whole install's audit log on one page, filtered by who, what, project and time.</p></div>
+          </li>
+          <li>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 15V3"/><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5"/></svg>
+            <div><h3>Export for your SIEM</h3><p>Every entry as JSON lines, and an audit line per entry in the server log.</p></div>
+          </li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
   <section class="docs-index">
     <div class="container">
       <h2>Documentation</h2>
@@ -274,6 +345,8 @@ docker compose -f docker-compose.ghcr.yml up -d --remove-orphans</pre>
           <a href="connecting">Connecting clients<span>Proxy URL, credentials, curl and code examples</span></a>
           <a href="configuration">Configuration<span>Environment variables and YAML</span></a>
           <a href="sso">Single sign-on &amp; API tokens<span>Google, Microsoft, GitHub; tokens for scripts</span></a>
+          <a href="audit-log">Audit log<span>Who changed what and when, secrets masked</span></a>
+          <a href="enterprise">Octoprox Enterprise<span>The licensed edition: sign-ins, API tokens, SIEM export</span></a>
           <a href="scrapoxy-migration">Migrating from Scrapoxy<span>Recreate projects and connectors, repoint clients</span></a>
         </div>
         <div class="docs-group">
@@ -327,5 +400,6 @@ docker compose -f docker-compose.ghcr.yml up -d --remove-orphans</pre>
       <p>Licensed under <a href="https://opensource.org/licenses/Apache-2.0">Apache 2.0</a>, except the built-in provider descriptors (all rights reserved).</p>
     </div>
   </footer>
+  <script src="assets/contact.js"></script>
 </body>
 </html>

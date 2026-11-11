@@ -14,6 +14,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
+import structlog
 import uvicorn
 from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -24,12 +25,15 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from api import __version__
 from api.core.config import Settings, get_settings
+from api.core.extension import Extension
 from api.core.logging import setup_logging
 from api.core.request_context import REQUEST_ID_HEADER, RequestContextMiddleware
 from api.core.roles import Role
 from api.roles import Node
 from api.roles.echo import Lifespan, create_echo_app
 from api.routes import health
+
+logger = structlog.get_logger()
 
 # The built web UI the api serves, when the image (or a local build) has it.
 WEB_DIST = Path(__file__).resolve().parent.parent / "web" / "dist"
@@ -69,12 +73,13 @@ class _HashedAssets(StaticFiles):
         return response
 
 
-def create_app(settings: Settings, *, web_dist: Path = WEB_DIST) -> FastAPI:
+def create_app(settings: Settings, *, web_dist: Path = WEB_DIST, extension: Extension | None = None) -> FastAPI:
     """The HTTP app of a process of ``settings.role``; its lifespan runs the process's node.
 
     An api or all process serves the built web UI from ``web_dist`` when it
-    exists, and logging is the caller's to set up, once per process (see the
-    bottom of this module).
+    exists and runs ``extension``, by default the one installed (the free
+    edition when there is none); logging is the caller's to set up, once per
+    process (see the bottom of this module).
     """
     lifespan = _lifespan(settings)
     if settings.role == Role.ECHO:
@@ -88,6 +93,11 @@ def create_app(settings: Settings, *, web_dist: Path = WEB_DIST) -> FastAPI:
         )
     app.state.settings = settings
     if settings.role in API_ROLES:
+        # Only api processes load the extension, so the other roles never import its routers.
+        extension = extension or Extension.installed()
+        app.state.extension = extension
+        app.state.audit_log = extension.audit_log(settings)
+        logger.info("Edition loaded", edition=extension.name)
         # Configure CORS. X-Request-ID is exposed so a cross-origin web UI (the
         # Vite dev server) can read the ID off error responses.
         app.add_middleware(
@@ -108,7 +118,7 @@ def create_app(settings: Settings, *, web_dist: Path = WEB_DIST) -> FastAPI:
     # The ops endpoints come first, so the web UI's catch-all never shadows them.
     app.include_router(health.router, tags=["Health"])
     if settings.role in API_ROLES:
-        _include_api(app)
+        _include_api(app, app.state.extension)
         _serve_web_ui(app, web_dist)
     return app
 
@@ -130,19 +140,21 @@ def _lifespan(settings: Settings) -> Lifespan:
     return lifespan
 
 
-def _include_api(app: FastAPI) -> None:
-    """The admin API, the public echo and the internal endpoints of an api or all process.
+def _include_api(app: FastAPI, extension: Extension) -> None:
+    """The admin API, the public echo and the internal endpoints of an api or all process, and the extension's routes.
 
     Imported here, so the other roles never load the route modules they do not serve.
     """
     from api.core.auth import require_auth
     from api.routes import (
+        audit,
         auth,
         backup,
         connectors,
         countries,
         credentials,
         echo,
+        edition,
         failures,
         geo,
         internal,
@@ -234,6 +246,14 @@ def _include_api(app: FastAPI) -> None:
     app.include_router(
         openvpn.router, prefix="/api/v1", tags=["OpenVPN"], dependencies=auth_dependency
     )
+    app.include_router(
+        audit.router, prefix="/api/v1", tags=["Audit log"], dependencies=auth_dependency
+    )
+    # Which edition runs: public, the login page asks before anyone signs in.
+    app.include_router(edition.router, prefix="/api/v1", tags=["Edition"])
+    # The extension's routes, each router with its own dependencies; before the web UI's catch-all.
+    for router in extension.routers():
+        app.include_router(router, prefix="/api/v1")
 
 
 def _serve_web_ui(app: FastAPI, web_dist: Path) -> None:

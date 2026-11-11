@@ -39,7 +39,7 @@ from api.models.wireguard import (
     WireGuardServerSettingsDoc,
     WireGuardServerSettingsResponse,
 )
-from api.routes.common import require_project, session_factory_of, wireguard_service_of
+from api.routes.common import actor_of, require_project, session_factory_of, wireguard_service_of
 from api.routes.metrics import RANGE_CONFIG
 
 server_router = APIRouter(prefix="/wireguard")
@@ -68,7 +68,7 @@ async def update_server_settings(
 ) -> WireGuardServerSettingsResponse:
     """Replace the editable settings. The subnet must still contain every device's address."""
     service = wireguard_service_of(request)
-    await service.save_settings(doc, admin.username)
+    await service.save_settings(doc, actor_of(request, admin))
     return await service.settings_response()
 
 
@@ -76,7 +76,7 @@ async def update_server_settings(
 async def rotate_server_key(request: Request, admin: RequireAdminDep) -> WireGuardServerSettingsResponse:
     """Give the install a new key pair. Every device must load a new config afterwards."""
     service = wireguard_service_of(request)
-    await service.rotate_key(admin.username)
+    await service.rotate_key(actor_of(request, admin))
     return await service.settings_response()
 
 
@@ -92,12 +92,12 @@ async def list_peers(request: Request, project_id: str) -> WireGuardPeerListResp
 
 @router.post("", response_model=WireGuardPeerResponse, status_code=201)
 async def create_peer(
-    request: Request, project_id: str, data: WireGuardPeerCreate, _guard: RequireEditorDep
+    request: Request, project_id: str, data: WireGuardPeerCreate, user: RequireEditorDep
 ) -> WireGuardPeerResponse:
     """Register a device. Without a public key Octoprox generates the pair and keeps it for the config."""
     await require_project(request, project_id)
     service = wireguard_service_of(request)
-    return await service.response(await service.add_peer(project_id, data))
+    return await service.response(await service.add_peer(project_id, data, actor_of(request, user)))
 
 
 @router.get("/{peer_id}", response_model=WireGuardPeerResponse)
@@ -109,29 +109,31 @@ async def get_peer(request: Request, project_id: str, peer_id: str) -> WireGuard
 
 @router.patch("/{peer_id}", response_model=WireGuardPeerResponse)
 async def update_peer(
-    request: Request, project_id: str, peer_id: str, data: WireGuardPeerUpdate, _guard: RequireEditorDep
+    request: Request, project_id: str, peer_id: str, data: WireGuardPeerUpdate, user: RequireEditorDep
 ) -> WireGuardPeerResponse:
     """Change a device: "" clears an optional field; a state or city needs a country."""
     await require_project(request, project_id)
     service = wireguard_service_of(request)
-    return await service.response(_found(await service.update_peer(project_id, peer_id, data)))
+    updated = await service.update_peer(project_id, peer_id, data, actor_of(request, user))
+    return await service.response(_found(updated))
 
 
 @router.delete("/{peer_id}", status_code=204)
-async def delete_peer(request: Request, project_id: str, peer_id: str, _guard: RequireEditorDep) -> None:
+async def delete_peer(request: Request, project_id: str, peer_id: str, user: RequireEditorDep) -> None:
     await require_project(request, project_id)
-    if not await wireguard_service_of(request).remove_peer(project_id, peer_id):
+    if not await wireguard_service_of(request).remove_peer(project_id, peer_id, actor_of(request, user)):
         raise HTTPException(status_code=404, detail="Peer not found")
 
 
 @router.post("/{peer_id}/rotate-keys", response_model=WireGuardPeerResponse)
 async def rotate_peer_keys(
-    request: Request, project_id: str, peer_id: str, _guard: RequireEditorDep
+    request: Request, project_id: str, peer_id: str, user: RequireEditorDep
 ) -> WireGuardPeerResponse:
     """New key pair (and preshared key, if it had one) for a device; the old config stops working."""
     await require_project(request, project_id)
     service = wireguard_service_of(request)
-    return await service.response(_found(await service.rotate_peer_keys(project_id, peer_id)))
+    rotated = await service.rotate_peer_keys(project_id, peer_id, actor_of(request, user))
+    return await service.response(_found(rotated))
 
 
 @router.get("/{peer_id}/metrics/history", response_model=TunnelPeerMetricsHistoryResponse)

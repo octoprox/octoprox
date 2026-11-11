@@ -1,7 +1,7 @@
 # Copyright 2026 Octoprox Authors
 # SPDX-License-Identifier: Apache-2.0
 
-"""Integration tests for the WireGuard API: server settings and per-project devices, on an api process.
+"""Integration tests for the WireGuard API: server settings and per-project devices and their history, on an api process.
 
 Settings and devices are Postgres rows the gateways follow through the routing feed, and how the tunnel stands comes from
 the gateways' heartbeats and device readings, which route tests, running no gateway, publish as one would.
@@ -18,6 +18,7 @@ from api.core.stats import TunnelPeerMetricDelta
 from api.db.redis import TUNNEL_PEER_METRICS_KEY, TUNNEL_PEER_WINDOWS
 from api.db.repository import MetricsRepository
 from api.db.wireguard_repository import WireGuardPeerRepository
+from api.models.audit import MASK
 from api.models.wireguard import WireGuardPeer, WireGuardPeerReading
 from tests.conftest import api_runtime, on_app_loop
 from tests.routes.gateway_heartbeats import advertise_gateway, withdraw_gateway
@@ -370,3 +371,59 @@ class TestPeers:
         assert authenticated_client.get(url).status_code == 404
         # The rows went with the project; the gateways drop the device as the feed carries that.
         assert _stored(authenticated_client, peer["id"]) is None
+
+
+class TestHistory:
+    """Each write is recorded as its user's: a device's history is open to every signed-in user, the settings' to admins."""
+
+    def test_a_devices_history_outlives_it_and_is_open_to_a_viewer(
+        self,
+        authenticated_client: TestClient,
+        created_project: dict[str, Any],
+        editor_auth_headers: dict[str, str],
+        viewer_auth_headers: dict[str, str],
+    ) -> None:
+        url = _peers_url(created_project)
+        created = authenticated_client.post(url, json={"name": "tv"}, headers=editor_auth_headers)
+        assert created.status_code == 201, created.text
+        peer = created.json()
+        device = f"{url}/{peer['id']}"
+        # Downloading the config changes nothing, so it adds no entry.
+        assert authenticated_client.get(f"{device}/config", headers=editor_auth_headers).status_code == 200
+        assert authenticated_client.patch(device, json={"enabled": False}, headers=editor_auth_headers).status_code == 200
+        assert authenticated_client.post(f"{device}/rotate-keys", headers=editor_auth_headers).status_code == 200
+        assert authenticated_client.delete(device, headers=editor_auth_headers).status_code == 204
+
+        history = authenticated_client.get(f"/api/v1/audit/wireguard_device/{peer['id']}", headers=viewer_auth_headers)
+        assert history.status_code == 200, history.text
+        entries = history.json()["entries"]
+        assert [(e["action"], e["entity_name"], e["project_id"], e["actor_id"], e["actor"]) for e in entries] == [
+            (action, "tv", created_project["id"], "test-editor-id", "testeditor")
+            for action in ("deleted", "rotated", "updated", "created")
+        ]
+        assert entries[-1]["request_id"] == created.headers["x-request-id"]
+        assert (entries[-1]["changes"]["private_key"], entries[-1]["changes"]["preshared_key"]) == ([None, MASK], [None, MASK])
+        assert entries[-2]["changes"] == {"enabled": [True, False]}
+
+    def test_the_settings_history_is_for_admins(
+        self, authenticated_client: TestClient, viewer_auth_headers: dict[str, str]
+    ) -> None:
+        _reset(authenticated_client)
+        saved = authenticated_client.put(SETTINGS, json={"endpoint_host": "vpn.example.net", "subnet": "10.66.0.0/16"})
+        rotated = authenticated_client.post(f"{SETTINGS}/rotate-key")
+        assert saved.status_code == rotated.status_code == 200
+
+        newest, previous = authenticated_client.get("/api/v1/audit/wireguard_settings/1").json()["entries"][:2]
+        assert (newest["action"], newest["request_id"], newest["changes"]) == (
+            "rotated",
+            rotated.headers["x-request-id"],
+            {"private_key": [MASK, MASK], "public_key": [saved.json()["public_key"], rotated.json()["public_key"]]},
+        )
+        assert (previous["action"], previous["request_id"], previous["changes"]) == (
+            "updated",
+            saved.headers["x-request-id"],
+            {"endpoint_host": ["", "vpn.example.net"]},
+        )
+        assert (previous["entity_name"], previous["project_id"], previous["actor"]) == ("WireGuard settings", None, "testadmin")
+        assert authenticated_client.get("/api/v1/audit/wireguard_settings/1", headers=viewer_auth_headers).status_code == 403
+        _reset(authenticated_client)

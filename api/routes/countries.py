@@ -13,7 +13,7 @@ from api.core.auth import RequireEditorDep
 from api.models.cloud_options import COUNTRIES
 from api.models.countries import CountriesOverview, CountryConnector, CountryRoutes, CountryUpdate
 from api.models.location import LocationTarget, normalize_country_code
-from api.routes.common import api_runtime_of, connector_service_of, require_project
+from api.routes.common import actor_of, api_runtime_of, connector_service_of, require_project
 
 router = APIRouter(prefix="/projects/{project_id}/countries")
 
@@ -59,7 +59,7 @@ async def get_countries(request: Request, project_id: str) -> CountriesOverview:
 
 @router.put("/{country}", response_model=CountriesOverview)
 async def set_country(
-    request: Request, project_id: str, country: str, update: CountryUpdate, _guard: RequireEditorDep
+    request: Request, project_id: str, country: str, update: CountryUpdate, user: RequireEditorDep
 ) -> CountriesOverview:
     """Set how connectors of the project stand to ``country`` (off, serves, reserved), all or none; the new overview.
 
@@ -73,5 +73,5 @@ async def set_country(
         raise HTTPException(status_code=422, detail=str(exc)) from None
     if code is None:
         raise HTTPException(status_code=422, detail="A country code is required")
-    await connector_service_of(request).set_country(project_id, code, update.connectors)
+    await connector_service_of(request).set_country(project_id, code, update.connectors, actor_of(request, user))
     return await get_countries(request, project_id)

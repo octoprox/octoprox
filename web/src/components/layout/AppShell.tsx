@@ -7,7 +7,7 @@ import { useQuery } from '@tanstack/react-query'
 import {
   BarChart3, Server, Link2, KeyRound, Eye, Settings as SettingsIcon, ChevronLeft, ChevronRight,
   ArrowLeft, User as UserIcon, Palette, Users as UsersIcon, DatabaseBackup, Puzzle,
-  Activity, Globe, Router, Shield, ShieldCheck, Target, LogIn, Plug, AlertTriangle, Flag,
+  Activity, Globe, Router, Shield, ShieldCheck, Target, LogIn, Plug, AlertTriangle, Flag, History,
 } from 'lucide-react'
 import octoproxLogo from '../../assets/logos/octoprox_horizontal.svg'
 import octoproxLogoDark from '../../assets/logos/octoprox_horizontal_dark.svg'
@@ -22,6 +22,7 @@ import { popSettingsOrigin, setSettingsOrigin } from '../../utils/settingsOrigin
 import { HelpMenu } from '../HelpMenu'
 import { ProjectPanel } from '../ProjectForm'
 import { NewVersionBanner } from '../NewVersion'
+import { LicenseBanner } from '../license/LicenseBanner'
 import { UserMenu } from '../UserMenu'
 import { LogoLoader } from '../ui'
 import { ProjectSwitcher } from './ProjectSwitcher'
@@ -56,6 +57,7 @@ const PAGE_TITLES: Record<string, string> = {
   users: 'Users',
   'sign-in': 'Sign-in',
   backup: 'Backup & Migration',
+  activity: 'Activity',
   providers: 'Providers',
   geo: 'IP attribution',
   system: 'System',
@@ -217,6 +219,7 @@ export default function AppShell({ onLogout, area }: { onLogout: () => void; are
               <NavItem to="/admin/providers" icon={<Puzzle />} label="Providers" collapsed={collapsed} />
               <NavItem to="/admin/geo" icon={<Globe />} label="IP attribution" collapsed={collapsed} />
               <NavItem to="/admin/backup" icon={<DatabaseBackup />} label="Backup & Migration" collapsed={collapsed} />
+              <NavItem to="/admin/activity" icon={<History />} label="Activity" collapsed={collapsed} />
               <NavItem to="/admin/system" icon={<Activity />} label="System" collapsed={collapsed} />
               <NavGroup label="Tunnels" collapsed={collapsed} />
               <NavItem to="/admin/wireguard" icon={<Router />} label="WireGuard" collapsed={collapsed} />
@@ -261,6 +264,7 @@ export default function AppShell({ onLogout, area }: { onLogout: () => void; are
 
       <main className="flex-1 min-w-0 flex flex-col">
         <NewVersionBanner />
+        <LicenseBanner />
         {/* The pool ticker drops to a second line when it does not fit beside the breadcrumb. */}
         <header className="min-h-11 flex-none flex flex-wrap items-center gap-x-4 gap-y-1 px-4 py-1.5 border-b border-line bg-surface">
           <div className="flex items-center gap-1.5 text-[13px] min-w-0">

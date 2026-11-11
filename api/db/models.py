@@ -521,22 +521,46 @@ class ProviderDescriptorModel(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now, onupdate=utc_now)
 
 
-class ProviderAuditModel(Base):
-    """SQLAlchemy model for the provider descriptor audit log.
+class AuditLogModel(Base):
+    """One user-driven change, or an extension's access event: who acted, on what, when, and the field diff.
 
-    No foreign key on purpose: history must survive deleting the descriptor.
+    No foreign keys: entries outlive what they describe, so a deleted entity's history stays readable by its id.
     """
 
-    __tablename__ = "provider_audit_log"
+    __tablename__ = "audit_log"
+    __table_args__ = (
+        # One entity's history, newest first by a backward scan.
+        Index("ix_audit_log_entity", "entity_type", "entity_id", "created_at"),
+        # The install-wide list and the retention delete.
+        Index("ix_audit_log_created_at", "created_at"),
+    )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
-    provider_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
-    action: Mapped[str] = mapped_column(String(20), nullable=False)
-    actor: Mapped[str] = mapped_column(String(255), nullable=False, default="")
-    egress_hosts: Mapped[list[str]] = mapped_column(JSON, default=list)
-    hosts_changed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
-    spec: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=utc_now)
+    action: Mapped[str] = mapped_column(String(32), nullable=False)
+    entity_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    entity_id: Mapped[str] = mapped_column(String(64), nullable=False, default="", server_default="")
+    # The entity's name at the time, so a deleted entity's entries stay readable.
+    entity_name: Mapped[str] = mapped_column(String(255), nullable=False, default="", server_default="")
+    project_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    actor_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    actor: Mapped[str] = mapped_column(String(255), nullable=False, default="", server_default="")
+    request_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    # {field: [before, after]}, secrets masked.
+    changes: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+    details: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+
+
+class SystemSettingsModel(Base):
+    """The install's admin-edited settings: exactly one row, id 1, written by the first save; no row means the defaults."""
+
+    __tablename__ = "system_settings"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
+    # Days the audit log keeps entries; 0 keeps them forever.
+    audit_retention_days: Mapped[int] = mapped_column(Integer, nullable=False, default=365, server_default="365")
+    # As pasted; only an extension reads it.
+    license_key: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 class WireGuardSettingsModel(Base):

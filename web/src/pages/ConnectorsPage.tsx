@@ -27,6 +27,7 @@ import { useProviders } from '../hooks/useProviders'
 import { DataTable, type DataTableFeatures } from '../components/DataTable'
 import { Page, EmptyState } from '../components/layout/Page'
 import { NewCredentialPanel, TypePicker, TypeCard } from '../components/CredentialForm'
+import { EntityHistory } from '../components/audit/EntityHistory'
 import { ProviderLogo } from '../components/ProviderLogo'
 import { SchemaForm, MultiCountryPicker, defaultValues, isCountryField, serializeValues, splitCountries } from '../components/SchemaForm'
 import { relativeTime, formatDateTime, formatDate, formatBytesDecimal, formatMoney, plural } from '../utils/format'
@@ -38,6 +39,8 @@ import { Button, Input, Label, Badge, Alert, ChipInput, Inspector, Tabs, Segment
 
 type DomainFilterMode = 'none' | 'whitelist' | 'blacklist'
 type ConfigTab = string
+/** What an open connector shows: its settings, or its History in their place. */
+type EditorView = 'settings' | 'history'
 
 interface ConnectorFormData {
   name: string
@@ -406,6 +409,7 @@ function ConnectorEditor({ connector, siblings, canMutate, onClose, onDelete, on
   })
   const [error, setError] = useState<string | null>(null)
   const [creatingCredential, setCreatingCredential] = useState(false)
+  const [view, setView] = useState<EditorView>('settings')
   // Declared here with the other state: every hook must run on every render, including the
   // type-picker render before `type` is chosen, or React sees more hooks once a type is picked.
   const [limitText, setLimitText] = useState<string>(() => (connector?.traffic_config?.limit_bytes ? String(connector.traffic_config.limit_bytes / BYTES_PER_GB) : ''))
@@ -1043,7 +1047,7 @@ function ConnectorEditor({ connector, siblings, canMutate, onClose, onDelete, on
       subtitle={isEdit ? connector!.name : 'Step 2 of 2 · Configure'}
       onClose={onClose}
       onBack={!isEdit ? () => setType(null) : undefined}
-      footer={canMutate ? (
+      footer={canMutate && view === 'settings' ? (
         <>
           {isEdit && onDelete && <Button type="button" variant="danger-ghost" size="sm" onClick={onDelete}><Trash2 className="w-3.5 h-3.5" /> Delete</Button>}
           <span className="flex-1" />
@@ -1052,6 +1056,16 @@ function ConnectorEditor({ connector, siblings, canMutate, onClose, onDelete, on
         </>
       ) : undefined}
     >
+      {isEdit && (
+        <Tabs<EditorView>
+          tabs={[{ id: 'settings', label: 'Settings' }, { id: 'history', label: 'History' }]}
+          active={view}
+          onChange={setView}
+          className="pointer-coarse:*:min-h-11"
+        />
+      )}
+      {/* Hidden rather than unmounted while History shows, so an edit not saved yet is still there afterwards. */}
+      <div hidden={view === 'history'} className="space-y-4">
       <form id="connector-form" onSubmit={handleSubmit} className="space-y-4">
         {error && <Alert>{error}</Alert>}
         {isEdit && connector?.last_error && (
@@ -1121,6 +1135,9 @@ function ConnectorEditor({ connector, siblings, canMutate, onClose, onDelete, on
           <KeyValue label="Updated" value={formatDateTime(connector.updated_at)} />
         </InspectorSection>
       )}
+      </div>
+
+      {view === 'history' && connector && <EntityHistory entityType="connector" entityId={connector.id} />}
     </Inspector>
   )
 }

@@ -3,7 +3,18 @@
 
 """Tests for the echo endpoint helpers: which address is the client's, and the answer without databases."""
 
-from api.geo.echo import build_echo, client_ip, parse_trusted
+from starlette.datastructures import Headers
+
+from api.geo.echo import build_echo, client_ip, forwarded_for_of, parse_trusted
+
+
+class TestForwardedForOf:
+    def test_every_line_in_order(self) -> None:
+        """A balancer's own line after the client's forged one, as HAProxy adds it, reads as an appended list."""
+        lines = Headers(raw=[(b"x-forwarded-for", b"203.0.113.66"), (b"x-forwarded-for", b"198.51.100.7")])
+        assert forwarded_for_of(lines) == "203.0.113.66, 198.51.100.7"
+        assert client_ip("10.1.2.3", forwarded_for_of(lines), parse_trusted(["10.0.0.0/8"])) == "198.51.100.7"
+        assert forwarded_for_of(Headers()) is None
 
 
 class TestClientIp:

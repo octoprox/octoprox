@@ -5,7 +5,7 @@
 
 from datetime import datetime
 from enum import StrEnum
-from typing import Annotated, Literal
+from typing import Annotated, ClassVar, Literal
 from uuid import uuid4
 
 from pydantic import BaseModel, Field, model_validator
@@ -20,6 +20,7 @@ from api.geo.models import (
     SourcePolicy,
     UnknownAction,
 )
+from api.models.audit import Audited, AuditEntityType
 
 
 class MitmMode(StrEnum):
@@ -80,8 +81,13 @@ JUDGEMENT_FIELDS = (
 )
 
 
-class Project(BaseModel):
+class Project(Audited):
     """Represents a project for multi-tenancy."""
+
+    audit_type: ClassVar[AuditEntityType] = AuditEntityType.PROJECT
+    # A delete is its own action, recorded when it marks the project.
+    audit_ignored: ClassVar[frozenset[str]] = Audited.audit_ignored | {"pending_deletion"}
+    audit_masked: ClassVar[frozenset[str]] = frozenset({"password"})
 
     id: str = Field(default_factory=lambda: str(uuid4()))
     name: str
@@ -137,6 +143,9 @@ class Project(BaseModel):
     # Metadata
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
+
+    def audit_project(self) -> str | None:
+        return self.id
 
     @property
     def location_rules(self) -> LocationRules:

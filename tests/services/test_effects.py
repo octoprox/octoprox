@@ -18,6 +18,7 @@ import pytest
 import structlog
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from api.core.audit import Actor
 from api.core.roles import JobKind
 from api.db.redis import TRAFFIC_PENDING_KEY, RedisClient
 from api.db.repository import ConnectorRepository, ProjectRepository, ProxyRepository
@@ -99,10 +100,11 @@ class TestCommittedWritesStand:
         static_connector: Connector,
         sessions: async_sessionmaker[AsyncSession],
         redis_down: list[str],
+        actor: Actor,
     ) -> None:
         with structlog.testing.capture_logs() as logs:
             proxy = await proxy_service.create(
-                project.id, ProxyCreate(host="10.0.0.1", port=8080, connector_id=static_connector.id)
+                project.id, ProxyCreate(host="10.0.0.1", port=8080, connector_id=static_connector.id), actor
             )
 
         async with sessions() as session:
@@ -128,10 +130,11 @@ class TestCommittedWritesStand:
         static_connector: Connector,
         redis_client: RedisClient,
         redis_down: list[str],
+        actor: Actor,
     ) -> None:
         """The decision's run-now entry and the pending mark go in one MULTI: one try, and neither lands."""
         with structlog.testing.capture_logs() as logs:
-            saved = await connector_service.reset_traffic(project.id, static_connector.id)
+            saved = await connector_service.reset_traffic(project.id, static_connector.id, actor)
 
         assert saved.traffic_reset_at is not None
         assert redis_down == ["MULTI"]
@@ -149,10 +152,11 @@ class TestCommittedWritesStand:
         static_connector: Connector,
         sessions: async_sessionmaker[AsyncSession],
         redis_down: list[str],
+        actor: Actor,
     ) -> None:
         with structlog.testing.capture_logs() as logs:
-            await connector_service.remove(project.id, static_connector.id)
-            await project_service.delete(project.id)
+            await connector_service.remove(project.id, static_connector.id, actor)
+            await project_service.delete(project.id, actor)
 
         async with sessions() as session:
             assert await ConnectorRepository(session).get_by_id(static_connector.id) is None
@@ -169,6 +173,7 @@ class TestCommittedWritesStand:
         registry: ProviderRegistry,
         project: Project,
         static_connector: Connector,
+        actor: Actor,
     ) -> None:
         """Each step after the commit waits its deadline, no more; the change entry waits for Redis, and lands."""
         log = ChangeLog(stalling)
@@ -179,7 +184,7 @@ class TestCommittedWritesStand:
             started = time.monotonic()
             with structlog.testing.capture_logs() as logs:
                 proxy = await service.create(
-                    project.id, ProxyCreate(host="10.0.0.1", port=8080, connector_id=static_connector.id)
+                    project.id, ProxyCreate(host="10.0.0.1", port=8080, connector_id=static_connector.id), actor
                 )
             # Three steps (the entry, the health and enrich requests), each cut at its deadline.
             assert time.monotonic() - started < DEADLINE * 3 + MARGIN

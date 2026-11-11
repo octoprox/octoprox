@@ -37,6 +37,7 @@ from api.models.project import (
     ProjectUpdate,
 )
 from api.routes.common import (
+    actor_of,
     api_runtime_of,
     project_service_of,
     require_project,
@@ -243,10 +244,10 @@ async def get_projects_load(
 
 @router.post("", response_model=ProjectResponse, status_code=201)
 async def create_project(
-    request: Request, project_data: ProjectCreate, _guard: RequireEditorDep
+    request: Request, project_data: ProjectCreate, user: RequireEditorDep
 ) -> ProjectResponse:
     """Create a new project; a name or username another project holds is a 400."""
-    project = await project_service_of(request).create(project_data)
+    project = await project_service_of(request).create(project_data, actor_of(request, user))
     return _project_to_response(project)
 
 
@@ -313,20 +314,20 @@ async def get_connect_info(
 
 @router.patch("/{project_id}", response_model=ProjectResponse)
 async def update_project(
-    request: Request, project_id: str, project_data: ProjectUpdate, _guard: RequireEditorDep
+    request: Request, project_id: str, project_data: ProjectUpdate, user: RequireEditorDep
 ) -> ProjectResponse:
     """Update a project.
 
     An edit to how locations are judged asks a worker to re-judge the
     project's proxies; the response does not wait for that.
     """
-    await project_service_of(request).update(project_id, project_data)
+    await project_service_of(request).update(project_id, project_data, actor_of(request, user))
     return _view_to_response(await _project_with_counts(request, project_id))
 
 
 @router.delete("/{project_id}", status_code=204, responses={202: {"description": "Deleting: its cloud instances go first"}})
 async def delete_project(
-    request: Request, project_id: str, body: DeleteConfirmation, _guard: RequireEditorDep
+    request: Request, project_id: str, body: DeleteConfirmation, user: RequireEditorDep
 ) -> Response:
     """Delete a project with everything it holds: 204 when it is gone, 202 while its cloud instances are terminated first.
 
@@ -338,5 +339,5 @@ async def delete_project(
             status_code=400,
             detail="Confirmation required. Please set confirmation to 'permanently delete'",
         )
-    gone = await project_service_of(request).delete(project_id)
+    gone = await project_service_of(request).delete(project_id, actor_of(request, user))
     return Response(status_code=204 if gone else 202)

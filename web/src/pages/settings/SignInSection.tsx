@@ -3,15 +3,25 @@
 
 import { useEffect, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Check, Copy, ExternalLink, Lock } from 'lucide-react'
+import { Check, Copy, ExternalLink } from 'lucide-react'
 import { fetchAuthProviders, updateAuthProvider, AuthProviderDoc, AuthProviderSettings } from '../../api/client'
 import { useToast } from '../../contexts/ToastContext'
 import { Page } from '../../components/layout/Page'
+import { EnterpriseCard, type EnterpriseFeature } from '../../components/EnterpriseCard'
+import { HistoryButton } from '../../components/audit/HistoryButton'
 import { ProviderMark } from '../../components/SignInProviderMark'
 import { formatDateTime } from '../../utils/format'
 import { Alert, Badge, Button, Card, CardHeader, InfoTip, Input, Label, QueryContent } from '../../components/ui'
 
-const DOCS_URL = 'https://octoprox.github.io/octoprox/sso'
+// Only the audit log has shipped; the directory features follow in later releases.
+const ENTERPRISE_FEATURES: EnterpriseFeature[] = [
+  { title: 'Domain rules', text: 'Everyone at @yourcompany.com signs in and gets an account on first login; no per-user step.', later: true },
+  { title: 'Your own IdP', text: 'Okta, Entra ID, Auth0, Keycloak, Ping or any OpenID Connect or SAML 2.0 provider.', later: true },
+  { title: 'Group sync', text: 'Admin, editor and viewer from directory groups, re-evaluated on every sign-in.', later: true },
+  { title: 'Enforcement', text: 'Require the IdP for everyone except break-glass admins; disable passwords.', later: true },
+  { title: 'Provisioning', text: 'SCIM 2.0: leavers lose access the moment the directory says so.', later: true },
+  { title: 'Audit log', text: 'Every sign-in and token, install-wide activity, exportable to your SIEM.' },
+]
 
 const PROVIDER_HELP: Record<AuthProviderSettings['kind'], { where: string; href: string }> = {
   google: { where: 'Google Cloud Console, APIs & Services, Credentials: an OAuth client of type Web application', href: 'https://console.cloud.google.com/apis/credentials' },
@@ -41,7 +51,11 @@ export default function SignInSection() {
               </Alert>
               {providers.map((p) => <ProviderCard key={p.kind} settings={p} />)}
             </div>
-            <EnterpriseCard />
+            <EnterpriseCard
+              title="Octoprox Enterprise"
+              intro="The sign-in above is for teams whose admin adds each person. Octoprox Enterprise records every sign-in and token today, and later releases hand access control to your directory. It runs from its own image, with a license key entered under System."
+              features={ENTERPRISE_FEATURES}
+            />
           </div>
         )}
       </QueryContent>
@@ -73,7 +87,12 @@ function ProviderCard({ settings }: { settings: AuthProviderSettings }) {
     <Card className="p-5">
       <CardHeader
         title={<span className="inline-flex items-center gap-2"><ProviderMark kind={settings.kind} className="w-4 h-4" /> {settings.label}</span>}
-        action={settings.enabled ? <Badge color="green">On</Badge> : settings.configured ? <Badge color="gray">Off</Badge> : <Badge color="gray">Not set up</Badge>}
+        action={
+          <div className="flex items-center gap-2">
+            {settings.enabled ? <Badge color="green">On</Badge> : settings.configured ? <Badge color="gray">Off</Badge> : <Badge color="gray">Not set up</Badge>}
+            <HistoryButton entityType="sign_in_provider" entityId={settings.kind} name={`${settings.label} sign-in`} />
+          </div>
+        }
       />
       <p className="text-xs text-fg-muted mt-1">
         Register an OAuth client in {help.where}
@@ -135,34 +154,5 @@ function CopyField({ value }: { value: string }) {
         {copied ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
       </Button>
     </div>
-  )
-}
-
-function EnterpriseCard() {
-  const items = [
-    ['Domain rules', 'Everyone at @yourcompany.com signs in and gets an account on first login; no per-user step.'],
-    ['Your own IdP', 'Okta, Entra ID, Auth0, Keycloak, Ping or any OpenID Connect or SAML 2.0 provider.'],
-    ['Group sync', 'Admin, editor and viewer from directory groups, re-evaluated on every sign-in.'],
-    ['Enforcement', 'Require the IdP for everyone except break-glass admins; disable passwords.'],
-    ['Provisioning', 'SCIM 2.0: leavers lose access the moment the directory says so.'],
-    ['Audit log', 'Every sign-in, token and provider change, exportable to your SIEM.'],
-  ]
-  return (
-    <Card className="p-5 h-fit">
-      <CardHeader title={<span className="inline-flex items-center gap-2"><Lock className="w-4 h-4 text-fg-subtle" /> Enterprise SSO</span>} action={<Badge color="blue">License</Badge>} />
-      <p className="text-xs text-fg-muted mt-1">
-        The sign-in above is for teams whose admin adds each person. Octoprox Enterprise hands access control to your directory instead. It is enabled by a license key under System.
-      </p>
-      <ul className="mt-3 space-y-2">
-        {items.map(([title, text]) => (
-          <li key={title} className="text-xs">
-            <span className="font-medium text-fg">{title}.</span> <span className="text-fg-muted">{text}</span>
-          </li>
-        ))}
-      </ul>
-      <a href={DOCS_URL} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 text-xs text-primary hover:underline mt-4">
-        How it works and how to get a license <ExternalLink className="w-3 h-3" />
-      </a>
-    </Card>
   )
 }

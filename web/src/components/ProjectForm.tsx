@@ -10,6 +10,7 @@ import { locationExamples, scenarioSteps, ROW_KIND_FACTS } from './locationExamp
 import type { RowKind, Ask } from './locationExamples'
 import { RichSelect, RichSelectOption } from './RichSelect'
 import { AdminLink } from './AdminLink'
+import { EntityHistory } from './audit/EntityHistory'
 import { Button, Input, Select, Textarea, Label, Alert, Inspector, Tabs, Segmented, InfoTip } from './ui'
 import { isInUse } from '../utils/geo'
 import { useToast } from '../contexts/ToastContext'
@@ -58,7 +59,7 @@ const mitmModeInfo: Record<string, { color: string; icon: typeof Info; text: str
   },
 }
 
-type SettingsTab = 'general' | 'tls' | 'location'
+type SettingsTab = 'general' | 'tls' | 'location' | 'history'
 
 const contradictedOptions: RichSelectOption[] = [
   { value: 'evidence', label: 'Route on the evidence', description: 'Route the proxy on where the databases or the echo put the exit; the vendor\'s claim is shown as contradicted' },
@@ -84,13 +85,15 @@ interface ProjectFormProps {
   error?: string
   /** id used by the footer submit button living outside the form */
   formId: string
+  /** Told whether the History tab is showing, so the panel can hide its Save and Delete meanwhile. */
+  onHistoryChange?: (showing: boolean) => void
 }
 
 /**
  * Project settings form body. Rendered inside the docked Inspector opened from
  * the project switcher and on the project selection page (create and edit).
  */
-export function ProjectForm({ project, onSave, error, formId }: ProjectFormProps) {
+export function ProjectForm({ project, onSave, error, formId, onHistoryChange }: ProjectFormProps) {
   const isEdit = !!project
   const toast = useToast()
   // The install default the Location tab inherits, for the worked example; the form works without it.
@@ -119,6 +122,10 @@ export function ProjectForm({ project, onSave, error, formId }: ProjectFormProps
   })
   const [showPassword, setShowPassword] = useState(false)
   const [activeTab, setActiveTab] = useState<SettingsTab>('general')
+  const changeTab = (tab: SettingsTab) => {
+    setActiveTab(tab)
+    onHistoryChange?.(tab === 'history')
+  }
   // The worked example: what the operator has and what a client asks for.
   const [exampleKind, setExampleKind] = useState<RowKind>('pooled')
   const [exampleAsk, setExampleAsk] = useState<Ask>('country')
@@ -149,12 +156,16 @@ export function ProjectForm({ project, onSave, error, formId }: ProjectFormProps
   return (
     <form id={formId} onSubmit={(e) => { e.preventDefault(); onSave(formData) }} className="space-y-4">
       <Tabs<SettingsTab>
-        tabs={[{ id: 'general', label: 'General' }, { id: 'tls', label: 'TLS Interception' }, { id: 'location', label: 'Location' }]}
+        tabs={[
+          { id: 'general', label: 'General' }, { id: 'tls', label: 'TLS' }, { id: 'location', label: 'Location' },
+          ...(isEdit ? [{ id: 'history' as const, label: 'History' }] : []),
+        ]}
         active={activeTab}
-        onChange={setActiveTab}
+        onChange={changeTab}
+        className="pointer-coarse:*:min-h-11"
       />
 
-      {error && <Alert>{error}</Alert>}
+      {error && activeTab !== 'history' && <Alert>{error}</Alert>}
 
       {activeTab === 'general' && (
         <div className="space-y-4">
@@ -442,6 +453,8 @@ export function ProjectForm({ project, onSave, error, formId }: ProjectFormProps
           </div>
         </div>
       )}
+
+      {activeTab === 'history' && project && <EntityHistory entityType="project" entityId={project.id} />}
     </form>
   )
 }
@@ -451,6 +464,8 @@ export function ProjectPanel({ project, onClose }: { project: ProjectSummary; on
   const queryClient = useQueryClient()
   const { refreshProject } = useProject()
   const toast = useToast()
+  // Which project's History is showing: the form starts on General again for another project.
+  const [historyOf, setHistoryOf] = useState<string | null>(null)
   const save = useMutation({
     mutationFn: (data: ProjectUpdate) => updateProject(project.id, data),
     onSuccess: async () => {
@@ -466,15 +481,15 @@ export function ProjectPanel({ project, onClose }: { project: ProjectSummary; on
       title="Project settings"
       subtitle={`${project.name} · only this project`}
       onClose={onClose}
-      footer={
+      footer={historyOf === project.id ? undefined : (
         <>
           <span className="flex-1" />
           <Button type="button" variant="outline" size="sm" onClick={onClose}>Cancel</Button>
           <Button type="submit" form="project-form" size="sm" disabled={save.isPending}>{save.isPending ? 'Saving…' : 'Save changes'}</Button>
         </>
-      }
+      )}
     >
-      <ProjectForm key={project.id} project={project} onSave={(data) => save.mutate(data)} error={save.error?.message} formId="project-form" />
+      <ProjectForm key={project.id} project={project} onSave={(data) => save.mutate(data)} error={save.error?.message} formId="project-form" onHistoryChange={(showing) => setHistoryOf(showing ? project.id : null)} />
     </Inspector>
   )
 }

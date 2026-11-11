@@ -27,6 +27,7 @@ from starlette.testclient import TestClient
 
 from api import __version__
 from api.core import system_stats, utc_now
+from api.core.audit import AuditLog
 from api.core.config import Settings
 from api.core.roles import JobKind, Role
 from api.core.system_stats import ClusterReader, ClusterReading, SystemReader
@@ -778,6 +779,7 @@ class TestStores:
                 proxies.create,
                 project["id"],
                 ProxyCreate(host=f"proxy-{n}.example.com", port=8080, connector_id=connector["id"]),
+                AuditLog().actor("test-admin-id", "testadmin"),
             )
             for n in range(3)
         ]

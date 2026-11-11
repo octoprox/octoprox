@@ -11,6 +11,7 @@ import {
 import { useToast } from '../../contexts/ToastContext'
 import { Page } from '../../components/layout/Page'
 import { TunnelGatewaysCard, TunnelStateBadge, relayedLabel } from '../../components/TunnelGateways'
+import { HistoryButton } from '../../components/audit/HistoryButton'
 import { formatDateTime, plural } from '../../utils/format'
 import { Alert, Button, Card, CardHeader, ConfirmDialog, InfoTip, Input, Label, QueryContent, Select } from '../../components/ui'
 
@@ -108,7 +109,7 @@ function EndpointForm({ settings }: { settings: OpenVpnServerSettings }) {
 
   return (
     <Card className="p-5">
-      <CardHeader title="Endpoint and addressing" />
+      <CardHeader title="Endpoint and addressing" action={<HistoryButton entityType="openvpn_settings" entityId="1" />} />
       {!settings.configured && (
         <Alert variant="warning" className="text-sm mt-2">Set the public endpoint before handing out device profiles; without it a profile has nowhere to connect.</Alert>
       )}

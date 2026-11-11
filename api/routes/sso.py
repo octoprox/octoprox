@@ -15,6 +15,7 @@ provider does not create a stranger.
 
 from __future__ import annotations
 
+import re
 from typing import Annotated
 from urllib.parse import quote
 
@@ -44,7 +45,12 @@ from api.models.auth import (
 )
 from api.models.user import User
 from api.routes.auth import LoginResponse, issue_session_token
-from api.routes.common import external_base_url, sso_flow_of
+from api.routes.common import (
+    actor_of,
+    audit_log_of,
+    external_base_url,
+    sso_flow_of,
+)
 from api.sso import Identity, SsoError
 
 logger = structlog.get_logger()
@@ -65,6 +71,8 @@ ERROR_PARAM = "sso_error"
 # (login CSRF). The Redis state alone cannot tell the two browsers apart.
 STATE_COOKIE = "octoprox_sso_state"
 STATE_COOKIE_PATH = "/api/v1/auth/sso"
+# What an OAuth error code looks like: a refusal's reason keeps the callback's error only when it is one.
+OAUTH_ERROR_CODE = re.compile(r"[A-Za-z0-9_.-]{1,64}")
 
 
 def redirect_uri_for(request: Request, kind: AuthProviderKind) -> str:
@@ -90,6 +98,35 @@ async def _enabled_provider(session: AsyncSession, kind: AuthProviderKind) -> Au
     if config is None or not config.enabled or not config.configured:
         return None
     return config
+
+
+class _UserRefusedError(SsoError):
+    """A sign-in refused to the user the identity matched: disabled, or linked to another account at the provider."""
+
+    def __init__(self, user: User, message: str, detail: str) -> None:
+        super().__init__(message, detail)
+        self.user = user
+
+
+async def _turn_away(
+    request: Request,
+    session: AsyncSession,
+    kind: AuthProviderKind,
+    started: bool,
+    message: str,
+    reason: str,
+    user: User | None = None,
+) -> RedirectResponse:
+    """The login page with ``message``, the audit log told ``reason`` first when ``started``.
+
+    A refusal is recorded only for a state this install issued for that provider and has not used, valid 10 minutes,
+    which anyone can obtain by starting a sign-in.
+    """
+    if started:
+        # The request's connection goes back to the pool first: the hook may open a session of its own.
+        await session.rollback()
+        await audit_log_of(request).sign_in_failed(request, "sso", reason, user=user, provider=kind.value)
+    return _to_login(request, message)
 
 
 # --- public: the login page and the round trip ---------------------------------------
@@ -145,16 +182,22 @@ async def finish_sign_in(
 ) -> RedirectResponse:
     """The provider's answer. Ends in the SPA with a one-time code, or on the login page with a reason."""
     label = PROVIDER_LABELS[kind]
+    # Read before anything below spends the state.
+    started = await sso_flow_of(request).pending(state, kind) if state else False
     if error:
         logger.warning("Sign-in refused by provider", provider=kind.value, error=error, description=error_description)
-        message = "You cancelled the sign-in" if error == "access_denied" else f"{label} refused the sign-in"
-        return _to_login(request, message)
+        if error == "access_denied":
+            return await _turn_away(request, session, kind, started, "You cancelled the sign-in", "cancelled")
+        reason = f"refused by the provider: {error}" if OAUTH_ERROR_CODE.fullmatch(error) else "refused by the provider"
+        return await _turn_away(request, session, kind, started, f"{label} refused the sign-in", reason)
     if not code or not state:
         return _to_login(request, f"{label} did not complete the sign-in")
 
     config = await _enabled_provider(session, kind)
     if config is None:
-        return _to_login(request, f"{label} sign-in is not enabled")
+        return await _turn_away(
+            request, session, kind, started, f"{label} sign-in is not enabled", "provider not enabled"
+        )
 
     try:
         identity = await sso_flow_of(request).complete(config, redirect_uri_for(request, kind), state, code)
@@ -164,26 +207,40 @@ async def finish_sign_in(
                 "This sign-in attempt did not start in this browser. Please try again.",
                 "sso state cookie missing or for another login",
             )
-        user = await _resolve_user(session, identity)
+        user, linked = await _resolve_user(session, identity)
     except SsoError as exc:
         logger.warning("Sign-in failed", provider=kind.value, reason=exc.detail)
-        return _to_login(request, exc.message)
+        refused = exc.user if isinstance(exc, _UserRefusedError) else None
+        return await _turn_away(request, session, kind, started, exc.message, exc.detail, refused)
     except Exception:
         # A top-level navigation: the person needs the login page, not a JSON 500.
         logger.exception("Sign-in failed unexpectedly", provider=kind.value)
-        return _to_login(request, f"{label} sign-in could not be completed. Please try again.")
+        return await _turn_away(
+            request,
+            session,
+            kind,
+            started,
+            f"{label} sign-in could not be completed. Please try again.",
+            "unexpected error",
+        )
 
     token = issue_session_token(user)
     await UserRepository(session).touch_last_login(user.id)
     login_code = await sso_flow_of(request).issue_login_code(token)
+    # Committed before the hook, which may open a session of its own.
+    await session.commit()
+    await audit_log_of(request).signed_in(request, user, "sso", provider=kind.value, linked=linked)
     logger.info("User signed in", username=user.username, role=user.role.value, provider=kind.value)
     response = RedirectResponse(f"{external_base_url(request)}{COMPLETE_PATH}?code={login_code}", status_code=303)
     response.delete_cookie(STATE_COOKIE, path=STATE_COOKIE_PATH)
     return response
 
 
-async def _resolve_user(session: AsyncSession, identity: Identity) -> User:
-    """The user this identity signs in as, linking on first sight. Raises SsoError otherwise."""
+async def _resolve_user(session: AsyncSession, identity: Identity) -> tuple[User, bool]:
+    """The user this identity signs in as, linking it on first sight, and whether this sign-in linked it.
+
+    Raises SsoError otherwise.
+    """
     identities = AuthIdentityRepository(session)
     users = UserRepository(session)
 
@@ -193,9 +250,11 @@ async def _resolve_user(session: AsyncSession, identity: Identity) -> User:
         if user is None:
             raise SsoError("Your account no longer exists", f"identity {linked.id} points at a missing user")
         if not user.is_active:
-            raise SsoError("Your account is disabled", f"inactive user {user.username} via {identity.provider.value}")
+            raise _UserRefusedError(
+                user, "Your account is disabled", f"inactive user {user.username} via {identity.provider.value}"
+            )
         await identities.touch_last_login(linked.id, identity.email)
-        return user
+        return user, False
 
     # Both sides are lowercase: the identity by api.sso.identity, the user
     # table by every write path and migration 038.
@@ -206,10 +265,13 @@ async def _resolve_user(session: AsyncSession, identity: Identity) -> User:
             f"{identity.provider.value} {identity.subject} ({identity.email}) matches no user",
         )
     if not user.is_active:
-        raise SsoError("Your account is disabled", f"inactive user {user.username} via {identity.provider.value}")
+        raise _UserRefusedError(
+            user, "Your account is disabled", f"inactive user {user.username} via {identity.provider.value}"
+        )
     other = await identities.get_for_user(user.id, identity.provider)
     if other is not None:
-        raise SsoError(
+        raise _UserRefusedError(
+            user,
             f"Your Octoprox account is already linked to a different {identity.label} account",
             f"user {user.username} has {identity.provider.value} subject {other.subject}, got {identity.subject}",
         )
@@ -223,7 +285,7 @@ async def _resolve_user(session: AsyncSession, identity: Identity) -> User:
         )
     )
     logger.info("Sign-in provider linked", username=user.username, provider=identity.provider.value)
-    return user
+    return user, True
 
 
 @public_router.post("/exchange", response_model=LoginResponse)
@@ -268,7 +330,8 @@ async def save_provider(
 ) -> AuthProviderResponse:
     """Replace a provider's client. A null secret keeps the stored one."""
     repo = AuthProviderRepository(session)
-    current = await repo.get(kind) or AuthProviderConfig(kind=kind)
+    stored = await repo.get(kind)
+    current = stored or AuthProviderConfig(kind=kind)
     secret = current.client_secret if doc.client_secret is None else doc.client_secret
     updated = AuthProviderConfig(
         kind=kind,
@@ -287,5 +350,10 @@ async def save_provider(
         missing = "a tenant ID" if updated.needs_tenant and not updated.tenant_id else "a client ID and secret"
         raise HTTPException(status_code=400, detail=f"{PROVIDER_LABELS[kind]} sign-in needs {missing} before it can be enabled")
     saved = await repo.save(updated)
+    actor = actor_of(request, admin)
+    if stored is None:
+        await actor.created(session, saved)
+    else:
+        await actor.updated(session, stored, saved)
     logger.info("Sign-in provider saved", provider=kind.value, enabled=saved.enabled, by=admin.username)
     return _to_response(request, saved)

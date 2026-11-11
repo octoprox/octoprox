@@ -58,7 +58,6 @@ from api.db.models import (
     OpenVpnPeerModel,
     ProjectMetricsModel,
     ProjectModel,
-    ProviderAuditModel,
     ProviderDescriptorModel,
     ProxyMetricsModel,
     ProxyModel,
@@ -73,7 +72,7 @@ from api.geo.models import META_LOCATION_CHECKED_AT, ConflictRule, ContradictedA
 from api.models.connector import Connector
 from api.models.credential import Credential
 from api.models.project import MitmBrowser, MitmEngine, MitmMode, Project
-from api.models.provider import ProviderAuditEntry, ProviderRecord
+from api.models.provider import ProviderRecord
 from api.models.proxy import Proxy, ProxyProtocol, ProxyStatus
 from api.models.user import User, UserRole
 
@@ -218,9 +217,14 @@ class ProjectRepository:
         return bool(result.rowcount and result.rowcount > 0)  # type: ignore[attr-defined]
 
     async def mark_pending_deletion(self, project_id: str) -> bool:
-        """Mark a project pending deletion; False when there is no such project."""
+        """Mark a project pending deletion; whether this marked it, False when it was marked already or is gone.
+
+        Of two deletes, one marks it and the other finds it marked, so only the first is recorded as the deletion.
+        """
         result = await self._session.execute(
-            update(ProjectModel).where(ProjectModel.id == project_id).values(pending_deletion=True)
+            update(ProjectModel)
+            .where(ProjectModel.id == project_id, ProjectModel.pending_deletion.is_(False))
+            .values(pending_deletion=True)
         )
         return bool(result.rowcount and result.rowcount > 0)  # type: ignore[attr-defined]
 
@@ -546,13 +550,14 @@ class ConnectorRepository:
         return await self.get_by_id(connector.id) if model else None
 
     async def mark_pending_deletion(self, connector_id: str) -> bool:
-        """Disable a connector and mark it pending deletion; False when there is no such connector.
+        """Disable a connector and mark it pending deletion; whether this marked it, False when it was marked already
+        (and so disabled) or is gone.
 
         A delete marks its proxies terminating first (``ProxyRepository.mark_terminating``).
         """
         result = await self._session.execute(
             update(ConnectorModel)
-            .where(ConnectorModel.id == connector_id)
+            .where(ConnectorModel.id == connector_id, ConnectorModel.pending_deletion.is_(False))
             .values(enabled=False, pending_deletion=True, updated_at=utc_now())
         )
         return bool(result.rowcount and result.rowcount > 0)  # type: ignore[attr-defined]
@@ -2392,48 +2397,4 @@ class ProviderDescriptorRepository:
             created_by=model.created_by,
             created_at=model.created_at,
             updated_at=model.updated_at,
-        )
-
-
-class ProviderAuditRepository:
-    """Repository for the provider descriptor audit log."""
-
-    def __init__(self, session: AsyncSession) -> None:
-        self._session = session
-
-    async def add(self, entry: ProviderAuditEntry) -> ProviderAuditEntry:
-        self._session.add(
-            ProviderAuditModel(
-                id=entry.id,
-                provider_id=entry.provider_id,
-                action=entry.action,
-                actor=entry.actor,
-                egress_hosts=entry.egress_hosts,
-                hosts_changed=entry.hosts_changed,
-                spec=entry.spec,
-                created_at=entry.created_at,
-            )
-        )
-        await self._session.flush()
-        return entry
-
-    async def get_for_provider(self, provider_id: str, limit: int = 100) -> list[ProviderAuditEntry]:
-        result = await self._session.execute(
-            select(ProviderAuditModel)
-            .where(ProviderAuditModel.provider_id == provider_id)
-            .order_by(ProviderAuditModel.created_at.desc())
-            .limit(limit)
-        )
-        return [self._to_domain(m) for m in result.scalars().all()]
-
-    def _to_domain(self, model: ProviderAuditModel) -> ProviderAuditEntry:
-        return ProviderAuditEntry(
-            id=model.id,
-            provider_id=model.provider_id,
-            action=model.action,  # type: ignore[arg-type]
-            actor=model.actor,
-            egress_hosts=list(model.egress_hosts or []),
-            hosts_changed=model.hosts_changed,
-            spec=model.spec,
-            created_at=model.created_at,
         )

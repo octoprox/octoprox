@@ -1,7 +1,7 @@
 # Copyright 2026 Octoprox Authors
 # SPDX-License-Identifier: Apache-2.0
 
-"""Integration tests for the OpenVPN API: server settings and per-project devices, on an api process.
+"""Integration tests for the OpenVPN API: server settings and per-project devices and their history, on an api process.
 
 The same shape as the WireGuard tests: Postgres rows the gateways running
 the endpoint follow through the feed, with each gateway's endpoint read from
@@ -19,6 +19,7 @@ from api.core.stats import TunnelPeerMetricDelta
 from api.db.openvpn_repository import OpenVpnPeerRepository
 from api.db.redis import TUNNEL_PEER_METRICS_KEY, TUNNEL_PEER_WINDOWS
 from api.db.repository import MetricsRepository
+from api.models.audit import MASK
 from api.models.openvpn import OpenVpnPeer, OpenVpnSessionReading
 from tests.conftest import api_runtime, on_app_loop
 from tests.routes.gateway_heartbeats import advertise_gateway, withdraw_gateway
@@ -333,3 +334,65 @@ class TestPeers:
         assert authenticated_client.get(url).status_code == 404
         # The rows went with the project; every gateway ends the device's session as the feed carries that.
         assert _stored(authenticated_client, peer["id"]) is None
+
+
+class TestHistory:
+    """Each write is recorded as its user's: a device's history is open to every signed-in user, the settings' to admins."""
+
+    def test_a_devices_history_outlives_it_and_is_open_to_a_viewer(
+        self,
+        authenticated_client: TestClient,
+        created_project: dict[str, Any],
+        editor_auth_headers: dict[str, str],
+        viewer_auth_headers: dict[str, str],
+    ) -> None:
+        url = _peers_url(created_project)
+        created = authenticated_client.post(url, json={"name": "tv"}, headers=editor_auth_headers)
+        assert created.status_code == 201, created.text
+        peer = created.json()
+        device = f"{url}/{peer['id']}"
+        # Downloading the profile changes nothing, so it adds no entry.
+        assert authenticated_client.get(f"{device}/config", headers=editor_auth_headers).status_code == 200
+        assert authenticated_client.patch(device, json={"enabled": False}, headers=editor_auth_headers).status_code == 200
+        rotated = authenticated_client.post(f"{device}/rotate-certificate", headers=editor_auth_headers)
+        assert rotated.status_code == 200
+        assert authenticated_client.delete(device, headers=editor_auth_headers).status_code == 204
+
+        history = authenticated_client.get(f"/api/v1/audit/openvpn_device/{peer['id']}", headers=viewer_auth_headers)
+        assert history.status_code == 200, history.text
+        entries = history.json()["entries"]
+        assert [(e["action"], e["entity_name"], e["project_id"], e["actor_id"], e["actor"]) for e in entries] == [
+            (action, "tv", created_project["id"], "test-editor-id", "testeditor")
+            for action in ("deleted", "rotated", "updated", "created")
+        ]
+        assert entries[-1]["request_id"] == created.headers["x-request-id"]
+        assert (entries[-1]["changes"]["private_key"], entries[-1]["changes"]["serial"]) == ([None, MASK], [None, peer["serial"]])
+        assert entries[-2]["changes"] == {"enabled": [True, False]}
+        assert entries[1]["changes"]["serial"] == [peer["serial"], rotated.json()["serial"]]
+
+    def test_the_settings_history_is_for_admins(
+        self, authenticated_client: TestClient, created_project: dict[str, Any], viewer_auth_headers: dict[str, str]
+    ) -> None:
+        _reset(authenticated_client)
+        assert authenticated_client.post(_peers_url(created_project), json={"name": "tv"}).status_code == 201
+        saved = authenticated_client.put(SETTINGS, json={"endpoint_host": "vpn.example.net", "subnet": "10.67.0.0/16"})
+        rotated = authenticated_client.post(f"{SETTINGS}/rotate-identity")
+        assert saved.status_code == rotated.status_code == 200
+
+        newest, previous = authenticated_client.get("/api/v1/audit/openvpn_settings/1").json()["entries"][:2]
+        # One entry for the rotation, whatever the number of devices it reissued.
+        assert (newest["action"], newest["request_id"], newest["details"]) == (
+            "rotated",
+            rotated.headers["x-request-id"],
+            {"devices_reissued": 1},
+        )
+        assert newest["changes"]["ca_fingerprint"] == [saved.json()["ca_fingerprint"], rotated.json()["ca_fingerprint"]]
+        assert [newest["changes"][key] for key in ("ca_key", "server_key", "tls_crypt_key")] == [[MASK, MASK]] * 3
+        assert (previous["action"], previous["request_id"], previous["changes"]) == (
+            "updated",
+            saved.headers["x-request-id"],
+            {"endpoint_host": ["", "vpn.example.net"]},
+        )
+        assert (previous["entity_name"], previous["project_id"], previous["actor"]) == ("OpenVPN settings", None, "testadmin")
+        assert authenticated_client.get("/api/v1/audit/openvpn_settings/1", headers=viewer_auth_headers).status_code == 403
+        _reset(authenticated_client)

@@ -16,12 +16,16 @@ import { DataTable, type DataTableFeatures } from '../components/DataTable'
 import { Page } from '../components/layout/Page'
 import { AdminLink } from '../components/AdminLink'
 import { CredentialForm, NewCredentialPanel, TypeCard } from '../components/CredentialForm'
+import { EntityHistory } from '../components/audit/EntityHistory'
 import { useProviders } from '../hooks/useProviders'
 import { ProviderLogo } from '../components/ProviderLogo'
 import { formatDate, formatDateTime } from '../utils/format'
-import { Button, Inspector, ConfirmDialog, KeyValue, InspectorSection, LogoLoader, QueryContent } from '../components/ui'
+import { Button, Inspector, ConfirmDialog, KeyValue, InspectorSection, LogoLoader, QueryContent, Tabs } from '../components/ui'
 
 type PanelState = { kind: 'edit'; id: string } | { kind: 'new' } | null
+
+/** What an open credential shows: its settings, or its History in their place. */
+type CredentialView = 'settings' | 'history'
 
 export default function CredentialsPage() {
   const queryClient = useQueryClient()
@@ -202,13 +206,14 @@ function EditCredentialPanel({ credentialId, usedBy, canMutate, onClose, onDelet
   const { data: detail } = credentialQuery
   const { labelFor } = useProviders()
   const typeLabel = detail ? labelFor(detail.type) : ''
+  const [view, setView] = useState<CredentialView>('settings')
 
   return (
     <Inspector
       title={detail ? detail.name : 'Credential'}
       subtitle={detail ? `${typeLabel} credential` : undefined}
       onClose={onClose}
-      footer={canMutate ? (
+      footer={canMutate && view === 'settings' ? (
         <>
           <Button type="button" variant="danger-ghost" size="sm" onClick={onDelete}><Trash2 className="w-3.5 h-3.5" /> Delete</Button>
           <span className="flex-1" />
@@ -220,13 +225,23 @@ function EditCredentialPanel({ credentialId, usedBy, canMutate, onClose, onDelet
       <QueryContent query={credentialQuery} what="the credential" loader={<LogoLoader className="py-6" />}>
         {(detail) => (
           <>
-            <TypeCard type={detail.type} />
-            <CredentialForm key={detail.id} type={detail.type} credential={detail} onSaved={onSaved} formId="credential-form" />
-            <InspectorSection title="Usage">
-              <KeyValue label="Used by" value={usedBy.length ? usedBy.join(', ') : 'no connectors yet'} />
-              <KeyValue label="Created" value={formatDateTime(detail.created_at)} />
-              <KeyValue label="Updated" value={formatDateTime(detail.updated_at)} />
-            </InspectorSection>
+            <Tabs<CredentialView>
+              tabs={[{ id: 'settings', label: 'Settings' }, { id: 'history', label: 'History' }]}
+              active={view}
+              onChange={setView}
+              className="pointer-coarse:*:min-h-11"
+            />
+            {/* Hidden rather than unmounted while History shows: the form holds the edits not saved yet. */}
+            <div hidden={view === 'history'} className="space-y-4">
+              <TypeCard type={detail.type} />
+              <CredentialForm key={detail.id} type={detail.type} credential={detail} onSaved={onSaved} formId="credential-form" />
+              <InspectorSection title="Usage">
+                <KeyValue label="Used by" value={usedBy.length ? usedBy.join(', ') : 'no connectors yet'} />
+                <KeyValue label="Created" value={formatDateTime(detail.created_at)} />
+                <KeyValue label="Updated" value={formatDateTime(detail.updated_at)} />
+              </InspectorSection>
+            </div>
+            {view === 'history' && <EntityHistory entityType="credential" entityId={detail.id} />}
           </>
         )}
       </QueryContent>

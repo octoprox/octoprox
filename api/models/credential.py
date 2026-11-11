@@ -13,12 +13,13 @@ import json
 import re
 from datetime import datetime
 from enum import StrEnum
-from typing import Any
+from typing import Any, ClassVar
 from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from api.core import utc_now
+from api.models.audit import Audited, AuditEntityType
 
 
 class CredentialType(StrEnum):
@@ -274,8 +275,16 @@ def validate_credential_config(credential_type: str, config: dict[str, Any]) -> 
     return model(**config).model_dump(exclude_none=True)
 
 
-class Credential(BaseModel):
-    """Represents authentication credentials for a provider."""
+class Credential(Audited):
+    """Represents authentication credentials for a provider.
+
+    Its entries compare the config one key at a time; the service masks the secret keys of its provider type.
+    """
+
+    audit_type: ClassVar[AuditEntityType] = AuditEntityType.CREDENTIAL
+    # Neither changes after creation.
+    audit_ignored: ClassVar[frozenset[str]] = Audited.audit_ignored | {"project_id", "type"}
+    audit_nested: ClassVar[frozenset[str]] = frozenset({"config"})
 
     id: str = Field(default_factory=lambda: str(uuid4()))
     name: str

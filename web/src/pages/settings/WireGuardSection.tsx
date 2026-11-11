@@ -11,6 +11,7 @@ import {
 import { useToast } from '../../contexts/ToastContext'
 import { Page } from '../../components/layout/Page'
 import { TunnelGatewaysCard, TunnelStateBadge, relayedLabel } from '../../components/TunnelGateways'
+import { HistoryButton } from '../../components/audit/HistoryButton'
 import { formatDateTime } from '../../utils/format'
 import { Alert, Button, Card, CardHeader, ConfirmDialog, InfoTip, Input, Label, QueryContent } from '../../components/ui'
 
@@ -102,7 +103,7 @@ function EndpointForm({ settings }: { settings: WireGuardServerSettings }) {
 
   return (
     <Card className="p-5">
-      <CardHeader title="Endpoint and addressing" />
+      <CardHeader title="Endpoint and addressing" action={<HistoryButton entityType="wireguard_settings" entityId="1" />} />
       {!settings.configured && (
         <Alert variant="warning" className="text-sm mt-2">Set the public endpoint before handing out device configs; without it a config has nowhere to connect.</Alert>
       )}

@@ -1,11 +1,16 @@
 # Copyright 2026 Octoprox Authors
 # SPDX-License-Identifier: Apache-2.0
 
-"""Tests for user management endpoints."""
+"""Tests for user management endpoints, and the audit entries of each change to a user."""
 
+from uuid import uuid4
+
+from sqlalchemy import text
 from starlette.testclient import TestClient
 
 from api.core.config import Settings
+from tests.conftest import api_runtime, on_app_loop
+from tests.routes.test_auth import history, recorded, stored_audit_text
 
 
 class TestUserCRUD:
@@ -736,3 +741,145 @@ class TestSetPasswordWithoutOne:
             "/api/v1/auth/login", json={"username": "invited-then-set", "password": "by-admin"}
         ).status_code == 200
         authenticated_client.request("DELETE", f"/api/v1/users/{user_id}")
+
+
+def _password_hash(client: TestClient, user_id: str) -> str:
+    """The user's stored password hash, read straight from the app's Postgres."""
+
+    async def read() -> str:
+        async with api_runtime(client).session_factory() as session:
+            result = await session.execute(text("SELECT password_hash FROM users WHERE id = :id"), {"id": user_id})
+            return str(result.scalar_one())
+
+    return on_app_loop(client, read)
+
+
+class TestHistory:
+    """Each change to a user is recorded, the password and the invite link only as set, changed or cleared."""
+
+    def test_a_users_life_is_recorded_field_by_field(self, authenticated_client: TestClient) -> None:
+        client = authenticated_client
+        name = f"audited-{uuid4().hex[:8]}"
+        created = client.post(
+            "/api/v1/users",
+            json={"username": name, "email": f"{name}@example.com", "password": "first-pass-1", "role": "viewer"},
+        )
+        user_id = created.json()["id"]
+        assert client.patch(f"/api/v1/users/{user_id}", json={"role": "editor", "theme_preference": "dark"}).status_code == 200
+        # Neither the theme nor a save without a change is recorded.
+        assert client.patch(f"/api/v1/users/{user_id}", json={"theme_preference": "nord", "role": "editor"}).status_code == 200
+        assert client.patch(f"/api/v1/users/{user_id}", json={"password": "second-pass-2"}).status_code == 200
+        assert client.delete(f"/api/v1/users/{user_id}").status_code == 204
+
+        entries = history(client, "user", user_id)
+
+        assert [(e["action"], e["entity_name"], e["actor_id"], e["actor"]) for e in entries] == [
+            (action, name, "test-admin-id", "testadmin") for action in ("created", "updated", "updated", "deleted")
+        ]
+        born, promoted, new_password, gone = (e["changes"] for e in entries)
+        assert born == {
+            "username": [None, name],
+            "email": [None, f"{name}@example.com"],
+            "role": [None, "viewer"],
+            "is_active": [None, True],
+            "password": [None, "********"],
+        }
+        assert promoted == {"role": ["viewer", "editor"]}
+        assert new_password == {"password": ["********", "********"]}
+        assert gone == {
+            "username": [name, None],
+            "email": [f"{name}@example.com", None],
+            "role": ["editor", None],
+            "is_active": [True, None],
+            "password": ["********", None],
+        }
+        assert entries[0]["request_id"] == created.headers["x-request-id"]
+        assert entries[0]["project_id"] is None
+
+    def test_an_invite_its_reissue_and_its_acceptance(self, authenticated_client: TestClient) -> None:
+        client = authenticated_client
+        name = f"invitee-{uuid4().hex[:8]}"
+        user_id = client.post("/api/v1/users/invite", json={"username": name}).json()["user"]["id"]
+        link = client.post(f"/api/v1/users/{user_id}/reinvite").json()["invite_url"].split("/set-password/")[1]
+        accepted = client.post("/api/v1/auth/set-password", json={"token": link, "password": "invitee-pass-1"})
+        assert accepted.status_code == 200, accepted.text
+
+        invited, reissued, accepting = history(client, "user", user_id)
+
+        assert invited["action"] == "invited"
+        assert invited["changes"]["invite_token"] == [None, "********"]
+        assert invited["changes"]["invite_token_expires_at"][0] is None
+        assert "password" not in invited["changes"]
+        assert (reissued["action"], reissued["actor"]) == ("invite_reissued", "testadmin")
+        assert reissued["changes"]["invite_token"] == ["********", "********"]
+        assert set(reissued["changes"]) <= {"invite_token", "invite_token_expires_at"}
+        # The person accepting the link is the actor of the change it makes.
+        assert (accepting["action"], accepting["actor_id"], accepting["actor"]) == ("updated", user_id, name)
+        assert accepting["details"] == {"via": "invite"}
+        assert accepting["request_id"] == accepted.headers["x-request-id"]
+        expires = accepting["changes"].pop("invite_token_expires_at")
+        assert expires[1] is None and expires[0] is not None
+        assert accepting["changes"] == {"password": [None, "********"], "invite_token": ["********", None]}
+
+    def test_a_users_own_edit_names_them(self, authenticated_client: TestClient, test_settings: Settings) -> None:
+        from api.routes.auth import create_jwt
+
+        client = authenticated_client
+        name = f"self-{uuid4().hex[:8]}"
+        user = client.post("/api/v1/users", json={"username": name, "password": "pass12345"}).json()
+        token = create_jwt(
+            payload={"sub": name, "user_id": user["id"], "role": "viewer"},
+            secret=test_settings.jwt_secret,
+            expiry_hours=test_settings.jwt_expiry_hours,
+        )
+        headers = {"Authorization": f"Bearer {token}"}
+        assert client.patch("/api/v1/users/me", json={"email": f"{name}@example.com"}, headers=headers).status_code == 200
+        # The theme alone changes nothing recorded.
+        assert client.patch("/api/v1/users/me", json={"theme_preference": "dracula"}, headers=headers).status_code == 200
+
+        [_created, edited] = history(client, "user", user["id"])
+
+        assert (edited["actor_id"], edited["actor"], edited["details"]) == (user["id"], name, {})
+        assert edited["changes"] == {"email": ["", f"{name}@example.com"]}
+
+    def test_no_password_or_invite_link_is_ever_stored(self, authenticated_client: TestClient) -> None:
+        client = authenticated_client
+        invite = client.post("/api/v1/users/invite", json={"username": f"secret-{uuid4().hex[:8]}"}).json()
+        user_id = invite["user"]["id"]
+        first_link = invite["invite_url"].split("/set-password/")[1]
+        second_link = client.post(f"/api/v1/users/{user_id}/reinvite").json()["invite_url"].split("/set-password/")[1]
+        assert client.post("/api/v1/auth/set-password", json={"token": second_link, "password": "accepted-pass-1"}).status_code == 200
+        first_hash = _password_hash(client, user_id)
+        assert client.patch(f"/api/v1/users/{user_id}", json={"password": "changed-pass-2"}).status_code == 200
+        second_hash = _password_hash(client, user_id)
+        assert client.delete(f"/api/v1/users/{user_id}").status_code == 204
+
+        stored = stored_audit_text(client, "user", user_id)
+
+        assert [e["action"] for e in history(client, "user", user_id)] == [
+            "invited", "invite_reissued", "updated", "updated", "deleted",
+        ]
+        for secret in (first_link, second_link, "accepted-pass-1", "changed-pass-2", first_hash, second_hash):
+            assert secret not in stored
+
+    def test_a_refused_change_records_nothing(self, authenticated_client: TestClient) -> None:
+        client = authenticated_client
+        taken = client.post("/api/v1/users", json={"username": f"taken-{uuid4().hex[:8]}", "password": "pass12345"}).json()
+        user = client.post("/api/v1/users", json={"username": f"refused-{uuid4().hex[:8]}", "password": "pass12345"}).json()
+
+        with recorded(client) as added:
+            assert client.patch(f"/api/v1/users/{user['id']}", json={"username": taken["username"]}).status_code == 400
+            assert client.post("/api/v1/users", json={"username": taken["username"], "password": "pass12345"}).status_code == 400
+            assert client.delete("/api/v1/users/no-such-user").status_code == 404
+            assert client.patch("/api/v1/users/no-such-user", json={"role": "admin"}).status_code == 404
+
+        assert added == []
+
+
+class TestLinkedSignIns:
+    def test_unlinking_an_unknown_one_is_404(self, authenticated_client: TestClient) -> None:
+        user = authenticated_client.post(
+            "/api/v1/users", json={"username": f"unlinked-{uuid4().hex[:8]}", "password": "pass12345"}
+        ).json()
+        assert authenticated_client.delete(f"/api/v1/users/{user['id']}/identities/nope").status_code == 404
+        assert authenticated_client.delete("/api/v1/users/me/identities/nope").status_code == 404

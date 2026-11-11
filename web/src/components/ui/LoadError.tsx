@@ -38,11 +38,12 @@ export function LoadError({ what, query, className }: { what: string; query: Loa
     await query.refetch()
     setRetrying(false)
   }
+  // A request ID wraps on a phone, and the retry is a 44 px target on touch.
   return (
     <Reloading active={retrying} size="sm">
       <Alert variant="error" role="alert" className={cn('flex items-center justify-between gap-x-3 gap-y-2 flex-wrap', className)}>
-        <span className="min-w-0">Could not load {what}{error?.message ? `: ${error.message}` : ''}.</span>
-        <Button type="button" size="sm" variant="outline" onClick={retry} className="flex-none">Try again</Button>
+        <span className="min-w-0 wrap-break-word">Could not load {what}{error?.message ? `: ${error.message}` : ''}.</span>
+        <Button type="button" size="sm" variant="outline" onClick={retry} className="flex-none pointer-coarse:h-11">Try again</Button>
       </Alert>
     </Reloading>
   )

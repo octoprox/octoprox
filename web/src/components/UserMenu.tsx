@@ -70,7 +70,7 @@ export function UserMenu({ placement, collapsed = false, onSignOut }: UserMenuPr
         className={cn(
           'flex items-center gap-2.5 rounded-md transition-colors hover:bg-surface-raised',
           menu.open && 'bg-surface-raised',
-          placement === 'header' ? 'p-1 pr-1.5' : collapsed ? 'justify-center w-10 h-10' : 'w-full px-1 py-1.5'
+          placement === 'header' ? 'p-1 pr-1.5 pointer-coarse:h-11' : collapsed ? 'justify-center w-10 h-10' : 'w-full px-1 py-1.5'
         )}
       >
         {avatar}

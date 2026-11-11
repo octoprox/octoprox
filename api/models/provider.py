@@ -6,20 +6,24 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any, Literal
-from uuid import uuid4
+from typing import Any, ClassVar, Literal
 
 from pydantic import BaseModel, Field
 
 from api.core import utc_now
+from api.models.audit import Audited, AuditEntityType
 from api.models.cloud_options import CountryOption
 from api.providers.sdk.descriptor import FieldSpec, OptionSpec, ProviderDescriptor
 
-ProviderAuditAction = Literal["created", "updated", "deleted", "imported"]
 
+class ProviderRecord(Audited):
+    """A custom descriptor row as stored in Postgres; its history compares the document one top-level key at a time."""
 
-class ProviderRecord(BaseModel):
-    """A custom descriptor row as stored in Postgres."""
+    audit_type: ClassVar[AuditEntityType] = AuditEntityType.PROVIDER
+    audit_ignored: ClassVar[frozenset[str]] = Audited.audit_ignored | {"version", "created_by"}
+    audit_nested: ClassVar[frozenset[str]] = frozenset({"spec"})
+    # Data URIs, too large to keep in every entry.
+    audit_masked: ClassVar[frozenset[str]] = frozenset({"spec.logo", "spec.logo_dark"})
 
     id: str
     name: str
@@ -29,19 +33,6 @@ class ProviderRecord(BaseModel):
     created_by: str | None = None
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
-
-
-class ProviderAuditEntry(BaseModel):
-    """One row of the provider audit log."""
-
-    id: str = Field(default_factory=lambda: str(uuid4()))
-    provider_id: str
-    action: ProviderAuditAction
-    actor: str
-    egress_hosts: list[str] = Field(default_factory=list)
-    hosts_changed: bool = False
-    spec: dict[str, Any] | None = None
-    created_at: datetime = Field(default_factory=utc_now)
 
 
 # --- API schemas ---------------------------------------------------------------------
@@ -165,8 +156,3 @@ class ProviderOptionsRequest(BaseModel):
 class ProviderOptionsResponse(BaseModel):
     options: list[dict[str, Any]]
     cached: bool = False
-
-
-class ProviderAuditResponse(BaseModel):
-    total: int
-    entries: list[ProviderAuditEntry]

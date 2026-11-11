@@ -25,6 +25,10 @@ A dynamic and flexible proxy manager that acts as an intelligent proxy aggregato
 - **Backup & Migration**: Export the entire setup as an encrypted file and restore it on another instance
 - **Scrapoxy Replacement**: Scrapoxy was discontinued in February 2026; a step-by-step guide recreates its projects, credentials, connectors and proxy lists in Octoprox, and any vendor it had that Octoprox lacks can be added as a YAML descriptor (see [docs/scrapoxy-migration.md](docs/scrapoxy-migration.md))
 
+## Octoprox Enterprise
+
+Octoprox Enterprise is the licensed edition, run from its own image in place of the public one, with the same settings and database. It adds every sign-in and API token to the [audit log](docs/audit-log.md), puts the whole install's activity on one page and exports it for a SIEM. See [docs/enterprise.md](docs/enterprise.md) for what it includes and how licensing works, and [get in touch](https://www.octoprox.com/enterprise#get-in-touch) to get a license.
+
 ## Quick Start
 
 > **Coming from Scrapoxy?** Start Octoprox as below, then follow the [migration guide](docs/scrapoxy-migration.md): it shows where each value lives in your `scrapoxy.json`, what it becomes in Octoprox, and how to repoint your clients.

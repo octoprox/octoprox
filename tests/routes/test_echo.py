@@ -33,6 +33,17 @@ class TestEcho:
             direct = client.get("/echo").json()
             assert direct["ip"] == "127.0.0.1" and "country" not in direct
 
+    def test_every_forwarded_for_line_is_read(self, build_app: Callable[..., FastAPI]) -> None:
+        """A balancer that adds its own line rather than append to the client's, as HAProxy does, is read right."""
+        app = build_app(Role.API, geo_echo_trusted_proxies=["127.0.0.0/8"])
+        with TestClient(app, client=("127.0.0.1", 50000)) as client:
+            # The client's forged line first, the balancer's own after it.
+            lines = [("X-Forwarded-For", "203.0.113.66"), ("X-Forwarded-For", "198.51.100.7")]
+            assert client.get("/echo", headers=lines).json()["ip"] == "198.51.100.7"
+            # One line the balancer appended to, as before.
+            appended = {"X-Forwarded-For": "203.0.113.66, 198.51.100.7"}
+            assert client.get("/echo", headers=appended).json()["ip"] == "198.51.100.7"
+
     def test_an_untrusted_forwarded_for_is_ignored(self, build_app: Callable[..., FastAPI]) -> None:
         app = build_app(Role.API, geo_echo_trusted_proxies=[])
         with TestClient(app, client=("127.0.0.1", 50000)) as client:

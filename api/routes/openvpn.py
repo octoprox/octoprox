@@ -38,7 +38,7 @@ from api.models.openvpn import (
     OpenVpnServerSettingsResponse,
 )
 from api.models.tunnel import TunnelPeerMetricsHistoryResponse, TunnelPeerMetricsSnapshot
-from api.routes.common import openvpn_service_of, require_project, session_factory_of
+from api.routes.common import actor_of, openvpn_service_of, require_project, session_factory_of
 from api.routes.metrics import RANGE_CONFIG
 
 server_router = APIRouter(prefix="/openvpn")
@@ -67,7 +67,7 @@ async def update_server_settings(
 ) -> OpenVpnServerSettingsResponse:
     """Replace the editable settings. The subnet must still contain every device's address."""
     service = openvpn_service_of(request)
-    await service.save_settings(doc, admin.username)
+    await service.save_settings(doc, actor_of(request, admin))
     return await service.settings_response()
 
 
@@ -75,7 +75,7 @@ async def update_server_settings(
 async def rotate_identity(request: Request, admin: RequireAdminDep) -> OpenVpnServerSettingsResponse:
     """A new CA, server certificate and tls-crypt key; every device is reissued and must load its profile again."""
     service = openvpn_service_of(request)
-    await service.rotate_identity(admin.username)
+    await service.rotate_identity(actor_of(request, admin))
     return await service.settings_response()
 
 
@@ -91,12 +91,12 @@ async def list_peers(request: Request, project_id: str) -> OpenVpnPeerListRespon
 
 @router.post("", response_model=OpenVpnPeerResponse, status_code=201)
 async def create_peer(
-    request: Request, project_id: str, data: OpenVpnPeerCreate, _guard: RequireEditorDep
+    request: Request, project_id: str, data: OpenVpnPeerCreate, user: RequireEditorDep
 ) -> OpenVpnPeerResponse:
     """Register a device: a certificate from the install's CA and the next free address."""
     await require_project(request, project_id)
     service = openvpn_service_of(request)
-    return await service.response(await service.add_peer(project_id, data))
+    return await service.response(await service.add_peer(project_id, data, actor_of(request, user)))
 
 
 @router.get("/{peer_id}", response_model=OpenVpnPeerResponse)
@@ -108,29 +108,31 @@ async def get_peer(request: Request, project_id: str, peer_id: str) -> OpenVpnPe
 
 @router.patch("/{peer_id}", response_model=OpenVpnPeerResponse)
 async def update_peer(
-    request: Request, project_id: str, peer_id: str, data: OpenVpnPeerUpdate, _guard: RequireEditorDep
+    request: Request, project_id: str, peer_id: str, data: OpenVpnPeerUpdate, user: RequireEditorDep
 ) -> OpenVpnPeerResponse:
     """Change a device: "" clears an optional field; a state or city needs a country."""
     await require_project(request, project_id)
     service = openvpn_service_of(request)
-    return await service.response(_found(await service.update_peer(project_id, peer_id, data)))
+    updated = await service.update_peer(project_id, peer_id, data, actor_of(request, user))
+    return await service.response(_found(updated))
 
 
 @router.delete("/{peer_id}", status_code=204)
-async def delete_peer(request: Request, project_id: str, peer_id: str, _guard: RequireEditorDep) -> None:
+async def delete_peer(request: Request, project_id: str, peer_id: str, user: RequireEditorDep) -> None:
     await require_project(request, project_id)
-    if not await openvpn_service_of(request).remove_peer(project_id, peer_id):
+    if not await openvpn_service_of(request).remove_peer(project_id, peer_id, actor_of(request, user)):
         raise HTTPException(status_code=404, detail="Peer not found")
 
 
 @router.post("/{peer_id}/rotate-certificate", response_model=OpenVpnPeerResponse)
 async def rotate_peer_certificate(
-    request: Request, project_id: str, peer_id: str, _guard: RequireEditorDep
+    request: Request, project_id: str, peer_id: str, user: RequireEditorDep
 ) -> OpenVpnPeerResponse:
     """A new certificate and key for a device; the profile it has stops working."""
     await require_project(request, project_id)
     service = openvpn_service_of(request)
-    return await service.response(_found(await service.rotate_certificate(project_id, peer_id)))
+    rotated = await service.rotate_certificate(project_id, peer_id, actor_of(request, user))
+    return await service.response(_found(rotated))
 
 
 @router.get("/{peer_id}/metrics/history", response_model=TunnelPeerMetricsHistoryResponse)

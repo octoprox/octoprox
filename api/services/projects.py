@@ -25,6 +25,7 @@ from api.services.errors import NameConflictError, NotFoundError, WriteRejectedE
 from api.strategies import strategy_name
 
 if TYPE_CHECKING:
+    from api.core.audit import Actor
     from api.db.redis import RedisClient
     from api.db.session import SessionFactory
     from api.db.streams import ChangeLog
@@ -62,13 +63,14 @@ class ProjectService:
         self._changes = changes
         self._connectors = connectors
 
-    async def create(self, data: ProjectCreate) -> Project:
+    async def create(self, data: ProjectCreate, actor: Actor) -> Project:
         """Store a new project; the saved project."""
         _require_strategy(data.routing_strategy)
         project = Project(**data.model_dump())
         try:
             async with self._session_factory() as session:
                 await ProjectRepository(session).create(project)
+                await actor.created(session, project)
                 await session.commit()
         except IntegrityError as exc:
             raise _taken(exc, project) from None
@@ -76,7 +78,7 @@ class ProjectService:
         await self._changes.record(ChangeKind.PROJECT, project.id)
         return project
 
-    async def update(self, project_id: str, data: ProjectUpdate) -> Project:
+    async def update(self, project_id: str, data: ProjectUpdate, actor: Actor) -> Project:
         """Apply the fields ``data`` sets to a project; the saved project.
 
         An empty string clears ``location_conflict_rule``, ``location_city_radius_km`` and ``observation_retention_days``,
@@ -95,6 +97,8 @@ class ProjectService:
                 _require_strategy(edited.routing_strategy)
             try:
                 saved = await projects.update(edited)
+                if saved is not None:
+                    await actor.updated(session, current, saved)
                 await session.commit()
             except IntegrityError as exc:
                 raise _taken(exc, edited) from None
@@ -108,7 +112,7 @@ class ProjectService:
             await self._jobs.request_now(JobKind.REATTRIBUTE, [ReattributeScope(project_id=project_id).key])
         return saved
 
-    async def delete(self, project_id: str) -> bool:
+    async def delete(self, project_id: str, actor: Actor) -> bool:
         """Delete a project and, by cascade, everything it holds, its cloud instances terminated first; whether it went now.
 
         The project is marked pending deletion, which turns its clients away and refuses new connectors, then each
@@ -116,15 +120,20 @@ class ProjectService:
         otherwise the scale run that deletes its last one deletes it (``delete_if_emptied``). Asked again, it carries on.
         """
         async with self._session_factory() as session:
-            if not await ProjectRepository(session).mark_pending_deletion(project_id):
+            projects = ProjectRepository(session)
+            marked = await projects.mark_pending_deletion(project_id)
+            project = await projects.get_by_id(project_id)
+            if project is None:
                 raise NotFoundError("Project not found")
             connectors = await ConnectorRepository(session).get_by_project(project_id)
+            if marked:
+                await actor.deleted(session, project)
             await session.commit()
         await self._changes.record(ChangeKind.PROJECT, project_id)
         for connector in connectors:
             # Gone already: the scale job deleted it, or another delete removed it.
             with contextlib.suppress(NotFoundError):
-                await self._connectors.remove(project_id, connector.id)
+                await self._connectors.remove(project_id, connector.id, actor)
         if await self.delete_if_emptied(project_id):
             return True
         logger.info("Marked project for deletion", project_id=project_id)

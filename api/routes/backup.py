@@ -3,8 +3,9 @@
 
 """Admin backup routes: export and import a full Octoprox setup as a passphrase-encrypted file.
 
-An import replaces every row in one transaction, appends one ``all`` change entry and deletes the keys only the removed
-projects used; the key derivation, compression and encryption run off the event loop.
+An import replaces every row but the install's settings and audit trail in one transaction, which also records the
+import, appends one ``all`` change entry and deletes the keys only the removed projects used; the key derivation,
+compression and encryption run off the event loop.
 """
 
 from __future__ import annotations
@@ -21,8 +22,10 @@ from api.core.backup import BackupError, BackupFile, BackupRepository, ImportRes
 from api.core.logging import error_text
 from api.core.roles import JobKind
 from api.db.streams import ChangeKind
+from api.models.audit import INSTALL_ENTITY_ID, AuditAction, AuditEntityType
 from api.models.backup import ExportRequest, ImportSummary
 from api.routes.common import (
+    actor_of,
     change_log_of,
     geo_service_of,
     jobs_of,
@@ -112,6 +115,20 @@ async def import_backup(
     except BackupError as exc:
         await session.rollback()
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    # In the import's transaction, so the trail it restored ends with who restored it.
+    await actor_of(request, admin).acted(
+        session,
+        AuditAction.IMPORTED,
+        AuditEntityType.BACKUP,
+        entity_id=INSTALL_ENTITY_ID,
+        name="Backup",
+        details={
+            "backup_created_at": backup.envelope.created_at,
+            "app_version": backup.envelope.app_version,
+            "includes_metrics": backup.envelope.includes_metrics,
+            "kept_current_user": result.summary.kept_current_user,
+        },
+    )
     # Committed here rather than after the response, so this process reads
     # the imported definitions back below.
     await session.commit()

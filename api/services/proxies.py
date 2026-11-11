@@ -37,6 +37,7 @@ from api.services.errors import NotFoundError, WriteRejectedError
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
 
+    from api.core.audit import Actor
     from api.db.redis import RedisClient
     from api.db.session import SessionFactory
     from api.db.streams import ChangeLog
@@ -145,7 +146,7 @@ class ProxyService:
 
     # --- The api's writes -------------------------------------------------------------------
 
-    async def create(self, project_id: str, data: ProxyCreate) -> Proxy:
+    async def create(self, project_id: str, data: ProxyCreate, actor: Actor) -> Proxy:
         """Add a proxy by hand to a static connector of the project; the saved proxy.
 
         An exit country given here is the routing country, verified rather
@@ -175,16 +176,17 @@ class ProxyService:
                 "Proxies can only be manually added to STATIC_PROXY_PROVIDER connectors",
             )
             await ProxyRepository(session).create(proxy)
+            await actor.created(session, proxy, project_id=project_id)
             await session.commit()
         await self._announce([proxy.id])
         await self._added([proxy], {connector.id: connector})
         return proxy
 
-    async def upload(self, project_id: str, connector_id: str, text: str) -> ProxyUpload:
+    async def upload(self, project_id: str, connector_id: str, text: str, actor: Actor) -> ProxyUpload:
         """Add the proxies a file lists, one URL per line, to a static connector of the project.
 
         Lines that do not parse are reported and skipped; the rest are added
-        in one transaction.
+        in one transaction, each with its own entry, all in one insert.
         """
         lines = text.strip().split("\n")
         proxies: list[Proxy] = []
@@ -211,13 +213,14 @@ class ProxyService:
             connector = await self._static_connector(
                 session, project_id, connector_id, "Proxies can only be uploaded to STATIC_PROXY_PROVIDER connectors"
             )
-            await ProxyRepository(session).bulk_create(proxies)
+            added = await ProxyRepository(session).bulk_create(proxies)
+            await actor.created(session, added, project_id=project_id, details={"via": "upload"})
             await session.commit()
         await self._announce([proxy.id for proxy in proxies])
         await self._added(proxies, {connector.id: connector})
         return ProxyUpload(total_lines=sum(1 for line in lines if line.strip()), added=proxies, errors=errors)
 
-    async def update(self, project_id: str, proxy_id: str, data: ProxyUpdate) -> Proxy:
+    async def update(self, project_id: str, proxy_id: str, data: ProxyUpdate, actor: Actor) -> Proxy:
         """Apply the fields ``data`` sets, never the status, to a proxy of the project; the saved proxy.
 
         A country, state or city set here is pinned for routing, and an empty string unpins it.
@@ -232,6 +235,8 @@ class ProxyService:
                 raise NotFoundError("Proxy not found")
             await proxies.update(self._edited(current, data))
             saved = await proxies.get_by_id(proxy_id)
+            if saved is not None:
+                await actor.updated(session, current, saved, project_id=project_id)
             await session.commit()
         if saved is None:
             # Deleted between the read and the write.
@@ -240,7 +245,7 @@ class ProxyService:
         await self._announce([proxy_id])
         return saved
 
-    async def remove(self, project_id: str, proxy_id: str) -> None:
+    async def remove(self, project_id: str, proxy_id: str, actor: Actor) -> None:
         """Delete a proxy of the project, as the api's delete does.
 
         Any proxy but a cloud one goes now (:meth:`delete_many`); a cloud one is marked terminating and a scale run
@@ -252,9 +257,9 @@ class ProxyService:
                 raise NotFoundError("Proxy not found")
             connector = await ConnectorRepository(session).get_by_id(proxy.connector_id)
         if connector is None or not self._registry.is_cloud(connector.credential_type):
-            await self.delete_many([proxy_id])
+            await self.delete_many([proxy_id], actor)
             return
-        await self.terminate(proxy_id)
+        await self.terminate(proxy_id, actor)
         # Asked for even when it was terminating already: a second delete is how an admin retries a stalled one.
         await self._jobs.request_now(JobKind.SCALE, [connector.id])
 
@@ -336,7 +341,7 @@ class ProxyService:
         """Delete a proxy now, as :meth:`delete_many` does; False when it was already gone."""
         return bool(await self.delete_many([proxy_id]))
 
-    async def delete_many(self, proxy_ids: Iterable[str]) -> list[str]:
+    async def delete_many(self, proxy_ids: Iterable[str], actor: Actor | None = None) -> list[str]:
         """Delete proxies now in one transaction, under one change entry; the IDs deleted, in id order.
 
         Each enabled connector that syncs and lost a row gets one sync run, which fills its slots again.
@@ -350,6 +355,8 @@ class ProxyService:
                 if not await proxies.delete(proxy.id):
                     continue
                 deleted.append(proxy.id)
+                if actor is not None:
+                    await actor.deleted(session, proxy, project_id=connector.project_id)
                 if connector.enabled and self._registry.is_syncable(connector.credential_type):
                     syncing.add(connector.id)
             await session.commit()
@@ -366,9 +373,12 @@ class ProxyService:
             logger.info("Started draining proxy", proxy_id=proxy_id)
         return drained
 
-    async def terminate(self, proxy_id: str) -> bool:
-        """Mark a proxy for termination; False when gone or terminating already."""
-        terminated = await self._set_status(proxy_id, ProxyStatus.TERMINATING)
+    async def terminate(self, proxy_id: str, actor: Actor | None = None) -> bool:
+        """Mark a proxy for termination; False when gone or terminating already.
+
+        An ``actor``, given by a person's delete and never by a job, records the mark as the proxy's deletion.
+        """
+        terminated = await self._set_status(proxy_id, ProxyStatus.TERMINATING, deleted_by=actor)
         if terminated:
             logger.info("Marked proxy as terminating", proxy_id=proxy_id)
         return terminated
@@ -437,10 +447,17 @@ class ProxyService:
         set_manual_location(metadata, state=data.state, city=data.city)
         return edited.model_copy(update={"metadata": metadata})
 
-    async def _set_status(self, proxy_id: str, status: ProxyStatus) -> bool:
-        """Move a proxy into a lifecycle status (``ProxyRepository.set_status``); whether it moved."""
+    async def _set_status(self, proxy_id: str, status: ProxyStatus, *, deleted_by: Actor | None = None) -> bool:
+        """Move a proxy into a lifecycle status (``ProxyRepository.set_status``); whether it moved.
+
+        ``deleted_by`` records the move, when it moved, as that actor's deletion of the proxy.
+        """
         async with self._session_factory() as session:
-            changed = await ProxyRepository(session).set_status(proxy_id, status)
+            proxies = ProxyRepository(session)
+            changed = await proxies.set_status(proxy_id, status)
+            if changed and deleted_by is not None:
+                for proxy, connector, _ in await proxies.get_many_with_connectors([proxy_id]):
+                    await deleted_by.deleted(session, proxy, project_id=connector.project_id)
             await session.commit()
         if changed:
             await self._announce([proxy_id])

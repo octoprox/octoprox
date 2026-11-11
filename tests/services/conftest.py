@@ -4,7 +4,8 @@
 """Shared pieces of the write service and read model tests, on the real test containers and the built-in providers.
 
 The services commit, announce each commit on the changes stream (``change_log``) and ask for their runs on the job
-streams (``jobs``), and a test reads back what Postgres and the streams hold.
+streams (``jobs``), and a test reads back what Postgres and the streams hold. A person's writes are made by ``actor``,
+whose audit entries a test reads back with ``audit_entries``.
 """
 
 from __future__ import annotations
@@ -14,11 +15,15 @@ from dataclasses import dataclass
 from typing import Any
 
 import pytest
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from api.core.audit import Actor, AuditLog
+from api.db.models import AuditLogModel
 from api.db.redis import CHANGES_STREAM_KEY, RUNTIME_STREAM_KEY, RedisClient
 from api.db.streams import ChangeKind, ChangeLog, ref_of
 from api.jobs.queue import JobQueue
+from api.models.audit import AuditEntry
 from api.models.connector import Connector, ConnectorCreate
 from api.models.credential import Credential, CredentialCreate
 from api.models.project import Project, ProjectCreate
@@ -65,6 +70,9 @@ AWS = Provider(
 # Adds a connector named ``name`` to a project, on a credential of its own.
 Connect = Callable[..., Awaitable[Connector]]
 
+# Who the tests' writes are made by: a user's id and username, and the request they act in.
+ACTOR_ID, ACTOR_NAME, REQUEST_ID = "user-1", "alice", "req-1"
+
 
 @pytest.fixture
 def registry() -> ProviderRegistry:
@@ -82,6 +90,12 @@ def sessions(
 @pytest.fixture
 def jobs(redis_client: RedisClient) -> JobQueue:
     return JobQueue(redis_client)
+
+
+@pytest.fixture
+def actor() -> Actor:
+    """The user every write of a test is made by, recording into the free edition's audit log as an api process does."""
+    return AuditLog().actor(ACTOR_ID, ACTOR_NAME, REQUEST_ID)
 
 
 @pytest.fixture
@@ -125,38 +139,42 @@ def proxy_service(
 
 
 @pytest.fixture
-def connect(credential_service: CredentialService, connector_service: ConnectorService) -> Connect:
+def connect(credential_service: CredentialService, connector_service: ConnectorService, actor: Actor) -> Connect:
     async def connect(project: Project, name: str, provider: Provider, **fields: Any) -> Connector:
         credential = await credential_service.create(
-            project.id, CredentialCreate(name=name, type=provider.type, config=provider.credential)
+            project.id, CredentialCreate(name=name, type=provider.type, config=provider.credential), actor
         )
         return await connector_service.create(
-            project.id, ConnectorCreate(name=name, credential_id=credential.id, config=provider.connector, **fields)
+            project.id,
+            ConnectorCreate(name=name, credential_id=credential.id, config=provider.connector, **fields),
+            actor,
         )
 
     return connect
 
 
 @pytest.fixture
-async def project(project_service: ProjectService) -> Project:
-    return await project_service.create(ProjectCreate(name="Acme", username="acme", password="pw"))
+async def project(project_service: ProjectService, actor: Actor) -> Project:
+    return await project_service.create(ProjectCreate(name="Acme", username="acme", password="pw"), actor)
 
 
 @pytest.fixture
-async def other_project(project_service: ProjectService) -> Project:
-    return await project_service.create(ProjectCreate(name="Other", username="other", password="pw"))
+async def other_project(project_service: ProjectService, actor: Actor) -> Project:
+    return await project_service.create(ProjectCreate(name="Other", username="other", password="pw"), actor)
 
 
 @pytest.fixture
-async def static_credential(credential_service: CredentialService, project: Project) -> Credential:
-    return await credential_service.create(project.id, CredentialCreate(name="Static", type=STATIC.type))
+async def static_credential(credential_service: CredentialService, project: Project, actor: Actor) -> Credential:
+    return await credential_service.create(project.id, CredentialCreate(name="Static", type=STATIC.type), actor)
 
 
 @pytest.fixture
 async def static_connector(
-    connector_service: ConnectorService, project: Project, static_credential: Credential
+    connector_service: ConnectorService, project: Project, static_credential: Credential, actor: Actor
 ) -> Connector:
-    return await connector_service.create(project.id, ConnectorCreate(name="ISP", credential_id=static_credential.id))
+    return await connector_service.create(
+        project.id, ConnectorCreate(name="ISP", credential_id=static_credential.id), actor
+    )
 
 
 @pytest.fixture
@@ -167,6 +185,25 @@ async def pool(connect: Connect, project: Project) -> Connector:
 @pytest.fixture
 async def cloud(connect: Connect, project: Project) -> Connector:
     return await connect(project, "AWS", AWS)
+
+
+async def audit_entries(sessions: async_sessionmaker[AsyncSession], entity_id: str | None = None) -> list[AuditEntry]:
+    """The audit log's entries, oldest first: every one, or those of the entity ``entity_id``."""
+    query = select(AuditLogModel).order_by(AuditLogModel.created_at, AuditLogModel.id)
+    if entity_id is not None:
+        query = query.where(AuditLogModel.entity_id == entity_id)
+    async with sessions() as session:
+        rows = (await session.execute(query)).scalars()
+        return [AuditEntry.model_validate(row, from_attributes=True) for row in rows]
+
+
+async def audit_text(sessions: async_sessionmaker[AsyncSession]) -> str:
+    """Every entry's changes and details as Postgres holds them, as text: where a leaked secret would show."""
+    async with sessions() as session:
+        stored = await session.execute(
+            text("SELECT coalesce(string_agg(CAST(changes AS text) || CAST(details AS text), ''), '') FROM audit_log")
+        )
+        return str(stored.scalar_one())
 
 
 async def announced(redis_client: RedisClient, stream: str = CHANGES_STREAM_KEY) -> list[tuple[str, str]]:
