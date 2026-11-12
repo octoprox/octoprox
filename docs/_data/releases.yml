@@ -10,6 +10,19 @@
 #   changes  what changed, for the people who use Octoprox; `docs` is a page
 #            on octoprox.com that explains it, such as connecting#exit-headers
 
+- version: 6.7.1
+  date: 2026-11-12
+  title: Safer cloud rotation and unhealthy instance replacement
+  changes:
+    - text: "Cloud instances that stay unhealthy for 10 minutes are drained and replaced automatically, so a broken instance no longer holds a place in the pool. With the default check interval, an instance whose start-up fails is replaced about 15 minutes after launch."
+      docs: architecture#cloud-scaling
+    - text: "A cloud instance due for rotation keeps serving until its replacement passes its health checks. Scaling waits while a rotation is under way."
+      docs: architecture#cloud-scaling
+    - text: "A replacement that turns unhealthy before it serves is drained, and the old instance keeps serving. The connector shows the error and backs off, and each failed replacement in a row doubles the wait, up to 30 minutes."
+      docs: architecture#cloud-scaling
+    - text: "If a connector's own `healthcheck_url` stops answering, all its cloud instances count as unhealthy and are replaced about every 15 minutes until it answers again."
+      docs: architecture#cloud-scaling
+
 - version: 6.7.0
   date: 2026-11-11
   title: Audit log, History tabs and Octoprox Enterprise
