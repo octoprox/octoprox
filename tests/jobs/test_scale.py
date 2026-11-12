@@ -47,7 +47,10 @@ from api.jobs.scale import (
     CREATE_TIMEOUT_SECONDS,
     LISTING_ERROR_PREFIX,
     LISTING_INTERVAL_SECONDS,
+    META_REPLACES,
+    REPLACEMENT_ERROR_PREFIX,
     SCALING_COOLDOWN_SECONDS,
+    UNHEALTHY_RETIRE_SECONDS,
     AutoscaleJob,
     AutoscalerState,
     Creation,
@@ -370,12 +373,28 @@ async def _statuses(rows: Rows, connector: Connector) -> list[ProxyStatus]:
     return [proxy.status for proxy in await rows.of(connector)]
 
 
+async def _set_status(sessions: async_sessionmaker[AsyncSession], proxy_id: str, status: ProxyStatus) -> None:
+    """Put a stored proxy in ``status``, as a health check's verdict does."""
+    async with sessions() as session:
+        assert await ProxyRepository(session).set_status(proxy_id, status)
+        await session.commit()
+
+
+async def _replacement(rows: Rows, connector: Connector, replaced: Proxy, status: ProxyStatus) -> Proxy:
+    """The row of a rotation's replacement of ``replaced``, as its create saved it, now in ``status``."""
+    return await rows.proxy(connector, host="10.2.0.1", port=3128, status=status, metadata={META_REPLACES: replaced.id})
+
+
 async def _with_error(
-    sessions: async_sessionmaker[AsyncSession], connector: Connector, errors: int, minutes_ago: float
+    sessions: async_sessionmaker[AsyncSession],
+    connector: Connector,
+    errors: int,
+    minutes_ago: float,
+    text: str = "Cloud provider error",
 ) -> None:
     async with sessions() as session:
         await ConnectorRepository(session).update(connector.model_copy(update={
-            "last_error": "Cloud provider error",
+            "last_error": text,
             "last_error_at": utc_now() - timedelta(minutes=minutes_ago),
             "consecutive_errors": errors,
         }))
@@ -560,6 +579,16 @@ class TestScaling:
     ) -> None:
         await _instances(rows, aws, 1)
         await _instances(rows, aws, 1, ProxyStatus.INITIALIZING)
+        harness.demand.level = DemandLevel.HIGH
+        await harness.run(aws)
+        assert harness.account.created == []
+
+    async def test_scaling_waits_while_a_rotation_is_under_way(
+        self, harness: Harness, rows: Rows, aws: Connector
+    ) -> None:
+        """Its two instances hold one place: a degraded replacement turns healthy, or unhealthy, within checks."""
+        [old] = await _instances(rows, aws, 1)
+        await _replacement(rows, aws, old, ProxyStatus.DEGRADED)
         harness.demand.level = DemandLevel.HIGH
         await harness.run(aws)
         assert harness.account.created == []
@@ -836,7 +865,7 @@ class TestRunsTogether:
 
         [name] = harness.account.created
         statuses = {p.id: p.status for p in await rows.of(aws)}
-        assert statuses == {old.id: ProxyStatus.DRAINING, f"fake-{name}": ProxyStatus.INITIALIZING}
+        assert statuses == {old.id: ProxyStatus.HEALTHY, f"fake-{name}": ProxyStatus.INITIALIZING}
         assert await _creating(redis_client, aws) == {}
 
     async def test_only_a_fresh_entry_holds_a_step_off(
@@ -884,7 +913,7 @@ class TestRunsTogether:
         await harness.run(aws)
 
         assert len(harness.account.created) == 1
-        assert {p.id: p.status for p in await rows.of(aws)}[old.id] == ProxyStatus.DRAINING
+        assert {p.id: p.status for p in await rows.of(aws)}[old.id] == ProxyStatus.HEALTHY
         assert await _creating(redis_client, aws) == {}
 
     async def test_a_run_beside_a_step_longer_than_the_create_timeout_finds_its_entries_fresh(
@@ -1245,8 +1274,8 @@ class TestCreatesCutShort:
 
         entries = await _creating(redis_client, emptiable)
         assert entries == {name: {"purpose": f"rotate:{old.id}", "at": pytest.approx(time.time(), abs=5)}}
-        # The due proxy drains, replaced or not; its replacement runs with no row.
-        assert {p.id: p.status for p in await rows.of(emptiable)} == {old.id: ProxyStatus.DRAINING}
+        # The due proxy goes on serving; its replacement runs with no row.
+        assert {p.id: p.status for p in await rows.of(emptiable)} == {old.id: ProxyStatus.HEALTHY}
         assert not harness.account.instances[name].gone
 
         await harness.run(emptiable)
@@ -1622,8 +1651,13 @@ class TestTermination:
 
 
 class TestRotation:
-    async def test_a_due_instance_is_replaced_under_an_entry_then_drained(
-        self, harness: Harness, rows: Rows, aws: Connector, redis_client: RedisClient
+    async def test_a_due_instance_is_replaced_under_an_entry_and_drains_once_its_replacement_is_healthy(
+        self,
+        harness: Harness,
+        rows: Rows,
+        aws: Connector,
+        redis_client: RedisClient,
+        sessions: async_sessionmaker[AsyncSession],
     ) -> None:
         [old] = await _instances(rows, aws, 1)
         await _seed(redis_client, aws, AutoscalerState(since=time.time(), rotations={old.id: time.time() - 60}))
@@ -1636,22 +1670,199 @@ class TestRotation:
         held.set()
         await rotating
 
-        statuses = {p.id: p.status for p in await rows.of(aws)}
-        assert statuses == {old.id: ProxyStatus.DRAINING, f"fake-{name}": ProxyStatus.INITIALIZING}
-        assert (await _state(redis_client, aws)).rotations[f"fake-{name}"] > time.time()
+        new = await rows.get(f"fake-{name}")
+        assert new is not None and new.metadata[META_REPLACES] == old.id
+        assert {p.id: p.status for p in await rows.of(aws)} == {
+            old.id: ProxyStatus.HEALTHY,
+            new.id: ProxyStatus.INITIALIZING,
+        }
+        assert (await _state(redis_client, aws)).rotations[new.id] > time.time()
         assert await _creating(redis_client, aws) == {}
 
-    async def test_a_failed_replacement_is_recorded_and_the_instance_drains_anyway(
+        # While the replacement initializes the due instance serves, and is not rotated again.
+        await harness.run(aws)
+        assert harness.account.created == [name]
+        assert {p.id: p.status for p in await rows.of(aws)}[old.id] == ProxyStatus.HEALTHY
+
+        await _set_status(sessions, new.id, ProxyStatus.HEALTHY)
+        await harness.run(aws)
+        assert {p.id: p.status for p in await rows.of(aws)} == {
+            old.id: ProxyStatus.DRAINING,
+            new.id: ProxyStatus.HEALTHY,
+        }
+        assert harness.account.created == [name]
+
+    async def test_a_replacement_unhealthy_first_drains_records_its_error_and_the_instance_is_rotated_again_after_the_backoff(
+        self,
+        harness: Harness,
+        rows: Rows,
+        aws: Connector,
+        redis_client: RedisClient,
+        sessions: async_sessionmaker[AsyncSession],
+    ) -> None:
+        """A replacement that never answers (its start-up failed) leaves the instance it was to replace serving, and the connector backs off, so a start-up that always fails is not launched again every few minutes."""
+        [old] = await _instances(rows, aws, 1)
+        failed = await _replacement(rows, aws, old, ProxyStatus.UNHEALTHY)
+        await _seed(
+            redis_client,
+            aws,
+            AutoscalerState(since=time.time(), rotations={old.id: time.time() - 60, failed.id: time.time() + 3600}),
+        )
+        with structlog.testing.capture_logs() as logs:
+            await harness.run(aws)
+
+        assert harness.account.created == []
+        assert {p.id: p.status for p in await rows.of(aws)} == {
+            old.id: ProxyStatus.HEALTHY,
+            failed.id: ProxyStatus.DRAINING,
+        }
+        stored = await rows.connector_as_stored(aws.id)
+        assert stored is not None and stored.consecutive_errors == 1
+        assert stored.last_error == REPLACEMENT_ERROR_PREFIX + failed.id
+        assert [
+            (log["log_level"], log["new_proxy_id"]) for log in logs if log["event"].startswith("Replacement proxy unhealthy")
+        ] == [("warning", failed.id)]
+
+        await _backoff_over(sessions, aws)
+        await harness.run(aws)
+        [name] = harness.account.created
+        again = await rows.get(f"fake-{name}")
+        assert again is not None and again.metadata[META_REPLACES] == old.id
+        assert {p.id: p.status for p in await rows.of(aws)}[old.id] == ProxyStatus.HEALTHY
+
+    async def test_only_a_healthy_replacement_clears_a_failed_replacements_error(
+        self,
+        harness: Harness,
+        rows: Rows,
+        aws: Connector,
+        redis_client: RedisClient,
+        sessions: async_sessionmaker[AsyncSession],
+    ) -> None:
+        """A successful create leaves it, so each replacement that fails too backs the connector off for longer."""
+        [old] = await _instances(rows, aws, 1)
+        await _seed(redis_client, aws, AutoscalerState(since=time.time(), rotations={old.id: time.time() - 60}))
+        error = REPLACEMENT_ERROR_PREFIX + "fake-gone"
+        await _with_error(sessions, aws, errors=2, minutes_ago=MAX_ERROR_BACKOFF_MINUTES + 1, text=error)
+
+        await harness.run(aws)
+        [name] = harness.account.created
+        stored = await rows.connector_as_stored(aws.id)
+        assert stored is not None and (stored.last_error, stored.consecutive_errors) == (error, 2)
+
+        await _set_status(sessions, f"fake-{name}", ProxyStatus.HEALTHY)
+        await harness.run(aws)
+        assert await _no_error(rows, aws)
+        assert {p.id: p.status for p in await rows.of(aws)}[old.id] == ProxyStatus.DRAINING
+
+    async def test_a_healthy_replacement_leaves_another_cloud_error_to_count_its_backoff(
+        self, harness: Harness, rows: Rows, aws: Connector, sessions: async_sessionmaker[AsyncSession]
+    ) -> None:
+        [old] = await _instances(rows, aws, 1)
+        await _replacement(rows, aws, old, ProxyStatus.HEALTHY)
+        await _with_error(sessions, aws, errors=1, minutes_ago=1)
+        await harness.run(aws)
+
+        stored = await rows.connector_as_stored(aws.id)
+        assert stored is not None and (stored.last_error, stored.consecutive_errors) == ("Cloud provider error", 1)
+        assert {p.id: p.status for p in await rows.of(aws)}[old.id] == ProxyStatus.DRAINING
+
+    async def test_an_instance_whose_replacement_initializes_is_not_rotated_again(
         self, harness: Harness, rows: Rows, aws: Connector, redis_client: RedisClient
+    ) -> None:
+        [old] = await _instances(rows, aws, 1)
+        replacement = await _replacement(rows, aws, old, ProxyStatus.INITIALIZING)
+        await _seed(redis_client, aws, AutoscalerState(since=time.time(), rotations={old.id: time.time() - 60}))
+        await harness.run(aws)
+
+        assert harness.account.created == []
+        assert {p.id: p.status for p in await rows.of(aws)} == {
+            old.id: ProxyStatus.HEALTHY,
+            replacement.id: ProxyStatus.INITIALIZING,
+        }
+
+    async def test_a_replacement_due_before_its_rotation_settles_is_not_rotated(
+        self, harness: Harness, rows: Rows, aws: Connector, redis_client: RedisClient
+    ) -> None:
+        """A degraded replacement turns healthy, or unhealthy, within checks: rotating it would chain a third instance onto one place."""
+        [old] = await _instances(rows, aws, 1)
+        replacement = await _replacement(rows, aws, old, ProxyStatus.DEGRADED)
+        await _seed(
+            redis_client,
+            aws,
+            AutoscalerState(since=time.time(), rotations={old.id: time.time() + 3600, replacement.id: time.time() - 60}),
+        )
+        await harness.run(aws)
+
+        assert harness.account.created == []
+        assert {p.id: p.status for p in await rows.of(aws)} == {
+            old.id: ProxyStatus.HEALTHY,
+            replacement.id: ProxyStatus.DEGRADED,
+        }
+
+    async def test_a_row_naming_itself_replaces_nothing(self, harness: Harness, rows: Rows, aws: Connector) -> None:
+        """A hand edit of its metadata, say: healthy, it does not drain itself."""
+        await rows.proxy(aws, id="fake-self", status=ProxyStatus.HEALTHY, metadata={META_REPLACES: "fake-self"})
+        await harness.run(aws)
+
+        assert await _statuses(rows, aws) == [ProxyStatus.HEALTHY]
+
+    async def test_a_rotation_whose_proxy_drained_after_the_runs_read_creates_nothing(
+        self,
+        harness: Harness,
+        rows: Rows,
+        aws: Connector,
+        redis_client: RedisClient,
+        sessions: async_sessionmaker[AsyncSession],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Another run's rotation turning healthy, or a scale-down, as this run writes its entry."""
+        [old] = await _instances(rows, aws, 1)
+        await _seed(redis_client, aws, AutoscalerState(since=time.time(), rotations={old.id: time.time() - 60}))
+
+        async def drained() -> None:
+            await _set_status(sessions, old.id, ProxyStatus.DRAINING)
+
+        _on_writing_entries(monkeypatch, redis_client, aws, drained)
+        await harness.run(aws)
+
+        assert harness.account.created == [] and await _creating(redis_client, aws) == {}
+        assert await _statuses(rows, aws) == [ProxyStatus.DRAINING]
+
+    async def test_a_replacement_of_an_instance_gone_meanwhile_is_an_ordinary_instance(
+        self, harness: Harness, rows: Rows, aws: Connector, sessions: async_sessionmaker[AsyncSession]
+    ) -> None:
+        """Its instance drained meanwhile, by a scale-down say: once healthy, the replacement drains nothing."""
+        [old] = await _instances(rows, aws, 1)
+        replacement = await _replacement(rows, aws, old, ProxyStatus.HEALTHY)
+        await _set_status(sessions, old.id, ProxyStatus.DRAINING)
+        await harness.run(aws)
+
+        assert {p.id: p.status for p in await rows.of(aws)}[replacement.id] == ProxyStatus.HEALTHY
+        assert harness.account.created == []
+
+    async def test_a_failed_create_is_recorded_and_the_instance_goes_on_serving_until_a_later_rotation_replaces_it(
+        self,
+        harness: Harness,
+        rows: Rows,
+        aws: Connector,
+        redis_client: RedisClient,
+        sessions: async_sessionmaker[AsyncSession],
     ) -> None:
         [old] = await _instances(rows, aws, 1)
         await _seed(redis_client, aws, AutoscalerState(since=time.time(), rotations={old.id: time.time() - 60}))
         harness.account.create_error = RuntimeError("quota")
         await harness.run(aws)
-        assert await _statuses(rows, aws) == [ProxyStatus.DRAINING]
+        assert await _statuses(rows, aws) == [ProxyStatus.HEALTHY]
         stored = await rows.connector_as_stored(aws.id)
         assert stored is not None and stored.last_error == "quota"
         assert await _creating(redis_client, aws) == {}
+
+        # Once the backoff is over, the instance, still due, is rotated again.
+        harness.account.create_error = None
+        await _backoff_over(sessions, aws)
+        await harness.run(aws)
+        assert len(harness.account.created) == 2
+        assert await _statuses(rows, aws) == [ProxyStatus.HEALTHY, ProxyStatus.INITIALIZING]
 
     async def test_no_rotation_while_backing_off(
         self,
@@ -1700,8 +1911,59 @@ class TestRotation:
         held.set()
         await slow
 
+        # The first finds the second's replacement once its entry is written, the proxy still serving.
         assert len(harness.account.created) == 2
-        assert {p.id: p.status for p in await rows.of(pool)}[old.id] == ProxyStatus.DRAINING
+        stored = await rows.of(pool)
+        assert {p.id: p.status for p in stored}[old.id] == ProxyStatus.HEALTHY
+        assert [p.metadata.get(META_REPLACES) for p in stored].count(old.id) == 1
+
+
+class TestUnhealthyInstances:
+    """An instance unhealthy for ``UNHEALTHY_RETIRE_SECONDS`` drains, so it no longer holds a place in the pool."""
+
+    RETIRING = "Retiring an unhealthy proxy instance"
+
+    async def test_one_unhealthy_for_that_long_drains_and_the_step_fills_its_place(
+        self, harness: Harness, rows: Rows, aws: Connector
+    ) -> None:
+        unhealthy = await rows.proxy(
+            aws,
+            status=ProxyStatus.UNHEALTHY,
+            status_changed_at=utc_now() - timedelta(seconds=UNHEALTHY_RETIRE_SECONDS + 5),
+        )
+        with structlog.testing.capture_logs() as logs:
+            await harness.run(aws)
+
+        # Below the minimum of one once it drains, so the step creates one.
+        [name] = harness.account.created
+        assert {p.id: p.status for p in await rows.of(aws)} == {
+            unhealthy.id: ProxyStatus.DRAINING,
+            f"fake-{name}": ProxyStatus.INITIALIZING,
+        }
+        assert [(log["log_level"], log["proxy_id"]) for log in logs if log["event"] == self.RETIRING] == [
+            ("warning", unhealthy.id)
+        ]
+
+    async def test_one_unhealthy_for_less_keeps_its_place(self, harness: Harness, rows: Rows, aws: Connector) -> None:
+        """A passing check before then makes it healthy again."""
+        await rows.proxy(
+            aws,
+            status=ProxyStatus.UNHEALTHY,
+            status_changed_at=utc_now() - timedelta(seconds=UNHEALTHY_RETIRE_SECONDS - 60),
+        )
+        await harness.run(aws)
+        assert harness.account.created == [] and await _statuses(rows, aws) == [ProxyStatus.UNHEALTHY]
+
+    async def test_one_stored_unhealthy_counts_from_its_creation(
+        self, harness: Harness, rows: Rows, emptiable: Connector
+    ) -> None:
+        await rows.proxy(
+            emptiable,
+            status=ProxyStatus.UNHEALTHY,
+            created_at=utc_now() - timedelta(seconds=UNHEALTHY_RETIRE_SECONDS + 5),
+        )
+        await harness.run(emptiable)
+        assert await _statuses(rows, emptiable) == [ProxyStatus.DRAINING]
 
 
 class TestDisabledConnectors:

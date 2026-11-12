@@ -14,6 +14,7 @@ import random
 import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
+from datetime import UTC
 from typing import TYPE_CHECKING, NamedTuple, cast
 
 import structlog
@@ -69,10 +70,24 @@ LISTING_INTERVAL_SECONDS = 3600
 # create's or a termination's to count its backoff up.
 LISTING_FAILED = "Failed to list the connector's instances"
 LISTING_ERROR_PREFIX = f"{LISTING_FAILED}: "
+# How a failed replacement's error starts, as recorded on the connector: its
+# create succeeded and the instance never served (a broken image or start-up
+# script, say), so it backs the connector off until a replacement turns
+# healthy, which alone clears it; a successful create proves nothing.
+REPLACEMENT_FAILED = "A replacement instance turned unhealthy before serving"
+REPLACEMENT_ERROR_PREFIX = f"{REPLACEMENT_FAILED}: "
 # Checks in a row that must find a draining instance's counters unchanged
 # before it is terminated: one can miss the counts a metrics flush holds for
 # a few seconds between taking them and committing them.
 QUIET_CHECKS = 2
+# Seconds an instance stays unhealthy before it is drained, so it leaves the
+# pool and the scaling step fills its place: an instance that never answers is
+# unhealthy from the end of the health job's grace for a new one, and a passing
+# check before then keeps it.
+UNHEALTHY_RETIRE_SECONDS = 600
+# The metadata key of a rotation's replacement naming the instance it replaces,
+# which serves until the replacement does.
+META_REPLACES = "replaces"
 # Statuses of instances that serve, or may again, and so are rotated when due.
 _ROTATABLE = frozenset({ProxyStatus.HEALTHY, ProxyStatus.DEGRADED, ProxyStatus.UNKNOWN})
 
@@ -256,6 +271,25 @@ class Creation:
         return now - self.at > CREATE_TIMEOUT_SECONDS
 
 
+def _replacements(proxies: Sequence[Proxy]) -> dict[str, Proxy]:
+    """The rotations under way among ``proxies``: each instance being replaced, by ID, and its replacement, a row naming it under ``META_REPLACES``; neither is retiring, and a row naming itself replaces nothing."""
+    serving = {proxy.id for proxy in proxies if not proxy.status.retiring}
+    return {
+        replaced: proxy
+        for proxy in proxies
+        if not proxy.status.retiring
+        and isinstance(replaced := proxy.metadata.get(META_REPLACES), str)
+        and replaced != proxy.id
+        and replaced in serving
+    }
+
+
+def _rotating(proxies: Sequence[Proxy]) -> set[str]:
+    """The IDs of both instances of each rotation under way among ``proxies`` (``_replacements``): neither is rotated until the rotation settles."""
+    pairs = _replacements(proxies)
+    return set(pairs) | {replacement.id for replacement in pairs.values()}
+
+
 @dataclass
 class _Run:
     """One run over one connector: what it read, and what it changed so far."""
@@ -283,6 +317,10 @@ class _Run:
     def holds(self, proxy_id: str) -> bool:
         """Whether the run has the instance among its rows."""
         return any(proxy.id == proxy_id for proxy in self.proxies)
+
+    def replacements(self) -> dict[str, Proxy]:
+        """The rotations under way among the run's instances (``_replacements``)."""
+        return _replacements(self.proxies)
 
 
 class AutoscaleJob(Job):
@@ -341,6 +379,9 @@ class AutoscaleJob(Job):
         run = await self._read(connector, cloud)
         await self._terminate_unrecorded(run)
         if connector.enabled and not connector.pending_deletion:
+            # Before the step, so it counts what they leave in the pool.
+            await self._settle_rotations(run)
+            await self._retire_unhealthy(run)
             await self._check_scaling(run)
             await self._check_instances(run)
         elif await self._retire_all(run):
@@ -519,6 +560,10 @@ class AutoscaleJob(Job):
         if any(proxy.status == ProxyStatus.INITIALIZING for proxy in active):
             logger.debug("Skipping scaling: an instance is still initializing", connector_id=connector.id)
             return
+        # A rotation under way holds one place with two instances.
+        if run.replacements():
+            logger.debug("Skipping scaling: a rotation is under way", connector_id=connector.id)
+            return
         healthy = sum(1 for proxy in active if proxy.status == ProxyStatus.HEALTHY)
         level = await self._demand.get_demand_level(connector.project_id, healthy, state.level)
         state.level = level
@@ -605,9 +650,50 @@ class AutoscaleJob(Job):
 
     # --- each instance -----------------------------------------------------------------
 
+    async def _settle_rotations(self, run: _Run) -> None:
+        """Finish the rotations under way: once a replacement is healthy the instance it replaces drains and a failed replacement's error clears; a replacement unhealthy first drains instead and records its error, so the instance, serving and still due, is rotated again once the connector's backoff is over."""
+        for replaced, replacement in run.replacements().items():
+            if replacement.status == ProxyStatus.HEALTHY:
+                logger.info(
+                    "Replacement proxy healthy: draining the proxy it replaces",
+                    proxy_id=replaced,
+                    new_proxy_id=replacement.id,
+                    connector_id=run.connector.id,
+                )
+                await self._drain(run, replaced)
+                if self._replacement_failed(run):
+                    run.connector = await self._connectors.record_error(run.connector.id, None) or run.connector
+            elif replacement.status == ProxyStatus.UNHEALTHY:
+                logger.warning(
+                    "Replacement proxy unhealthy: draining it, the proxy it was to replace goes on serving",
+                    proxy_id=replaced,
+                    new_proxy_id=replacement.id,
+                    connector_id=run.connector.id,
+                )
+                await self._drain(run, replacement.id)
+                await self._record_error(run, REPLACEMENT_ERROR_PREFIX + replacement.id)
+
+    async def _retire_unhealthy(self, run: _Run) -> None:
+        """Drain each instance unhealthy for ``UNHEALTHY_RETIRE_SECONDS``, so it leaves the pool and the scaling step fills its place."""
+        for proxy in run.active():
+            if proxy.status != ProxyStatus.UNHEALTHY:
+                continue
+            # A row stored unhealthy has no change time: it has been unhealthy since it was created.
+            since = (proxy.status_changed_at or proxy.created_at).replace(tzinfo=UTC).timestamp()
+            if run.now - since < UNHEALTHY_RETIRE_SECONDS:
+                continue
+            logger.warning(
+                "Retiring an unhealthy proxy instance",
+                proxy_id=proxy.id,
+                connector_id=run.connector.id,
+                unhealthy_seconds=int(run.now - since),
+            )
+            await self._drain(run, proxy.id)
+
     async def _check_instances(self, run: _Run) -> None:
-        """Rotate the instances that are due, terminate the drained ones and delete the terminated ones."""
+        """Rotate the instances that are due and in no rotation under way, terminate the drained ones and delete the terminated ones."""
         counters = await self._counters([p for p in run.proxies if p.status == ProxyStatus.DRAINING])
+        rotating = _rotating(run.proxies)
         for proxy in list(run.proxies):
             if proxy.id not in run.state.rotations:
                 self._schedule_rotation(run, proxy)
@@ -619,15 +705,17 @@ class AutoscaleJob(Job):
                     await self._terminate(run, proxy)
             elif (
                 proxy.status in _ROTATABLE
+                and proxy.id not in rotating
                 and run.now >= run.state.rotations[proxy.id]
                 and not run.connector.in_error_backoff
             ):
                 await self._rotate(run, proxy)
 
     async def _rotate(self, run: _Run, proxy: Proxy) -> None:
-        """Replace an instance whose time has come, unless another run is replacing it or has, or the connector was disabled meanwhile: its replacement first, then it drains, replaced or not.
+        """Start replacing an instance whose time has come, unless another run is replacing it or has, or the connector was disabled meanwhile.
 
-        A rotation a stop cuts short keeps its entry, as a crash does.
+        It serves until its replacement does (``_settle_rotations``). A rotation a stop cuts short keeps its entry, as a
+        crash does.
         """
         if any(creation.replaces == proxy.id for creation in run.creating.values()):
             return
@@ -637,27 +725,28 @@ class AutoscaleJob(Job):
             return
         # Not a finally: a cancelled create may have launched the replacement, which keeps the entry until it is stale.
         try:
-            if await self._rotatable(proxy) and await self._wanted(run):
+            if await self._rotatable(run, proxy) and await self._wanted(run):
                 await self._replace(run, proxy, name)
         except Exception:
             await self._end(run, name)
             raise
         await self._end(run, name)
 
-    async def _rotatable(self, proxy: Proxy) -> bool:
-        """Whether a due instance's row, read again once the run's entry is written, has not moved on: a run replacing it drains the row before it clears its entry."""
+    async def _rotatable(self, run: _Run, proxy: Proxy) -> bool:
+        """Whether a due instance, its rows read again once the run's entry is written, has not moved on and is in no rotation under way: a run replacing it saves the replacement's row, which names it, before it clears its entry."""
         async with self._session_factory() as session:
-            current = await ProxyRepository(session).get_by_id(proxy.id)
-        return current is not None and current.status in _ROTATABLE
+            repository = ProxyRepository(session)
+            current = await repository.get_by_id(proxy.id)
+            if current is None or current.status not in _ROTATABLE:
+                return False
+            rows = await repository.get_by_connector(run.connector.id)
+        return proxy.id not in _rotating(rows)
 
     async def _replace(self, run: _Run, proxy: Proxy, name: str) -> None:
-        """Create the instance ``name`` in place of a due one, then drain the due one, replaced or not."""
+        """Create the instance ``name`` in place of a due one, which goes on serving: until the replacement is healthy, or, when the create fails or the replacement turns unhealthy (both recorded), until a later rotation's is."""
         logger.info("Starting proxy rotation", proxy_id=proxy.id, connector_id=run.connector.id)
         try:
-            replacement = await self._create(run, name)
-            if replacement is not None:
-                logger.info("Created replacement proxy", old_proxy_id=proxy.id, new_proxy_id=replacement.id)
-                await self._clear_error(run)
+            replacement = await self._create(run, name, replaces=proxy.id)
         except Exception as exc:
             logger.error(
                 "Failed to create replacement proxy",
@@ -666,8 +755,10 @@ class AutoscaleJob(Job):
                 error=error_text(exc),
             )
             await self._record_error(run, exc)
-        finally:
-            await self._drain(run, proxy.id)
+            return
+        if replacement is not None:
+            logger.info("Created replacement proxy", old_proxy_id=proxy.id, new_proxy_id=replacement.id)
+            await self._clear_error(run)
 
     async def _check_drained(self, run: _Run, proxy: Proxy, counters: Mapping[str, tuple[int, int]]) -> None:
         """Terminate a draining instance once its counters stayed the same over ``QUIET_CHECKS`` checks in a row; else note this check."""
@@ -704,13 +795,15 @@ class AutoscaleJob(Job):
 
     # --- shared steps ------------------------------------------------------------------
 
-    async def _create(self, run: _Run, name: str) -> Proxy | None:
-        """Create the instance ``name`` and save its row, its rotation time drawn; None when its entry went meanwhile.
+    async def _create(self, run: _Run, name: str, *, replaces: str | None = None) -> Proxy | None:
+        """Create the instance ``name`` and save its row, its rotation time drawn and, for a rotation, the instance it ``replaces`` named in it; None when its entry went meanwhile.
 
         An entry gone (Redis lost it, or a run found it stale) means a run may have terminated the instance, or may yet,
         so it gets no row.
         """
         proxy = await run.cloud.create_instance(name)
+        if replaces is not None:
+            proxy.metadata[META_REPLACES] = replaces
         key = SCALE_CREATING_KEY.format(connector_id=run.connector.id)
         if not await self._redis.client.hexists(key, name):
             logger.warning(
@@ -755,12 +848,21 @@ class AutoscaleJob(Job):
             counters[proxy_id] = (delta.bytes_sent, delta.bytes_received)
         return counters
 
-    async def _record_error(self, run: _Run, error: Exception) -> None:
-        """Record a cloud error on the connector by its text, or its type's name when it has none; the connector then backs off, and this run goes on with the updated connector."""
-        run.connector = await self._connectors.record_error(run.connector.id, error_text(error)) or run.connector
+    async def _record_error(self, run: _Run, error: Exception | str) -> None:
+        """Record a cloud error on the connector: the text given, or an exception's text, or its type's name when it has none; the connector then backs off, and this run goes on with the updated connector."""
+        text = error if isinstance(error, str) else error_text(error)
+        run.connector = await self._connectors.record_error(run.connector.id, text) or run.connector
 
     async def _clear_error(self, run: _Run) -> None:
-        """Clear the connector's cloud error after a success; nothing is written when it has none."""
+        """Clear the connector's cloud error after a successful create; nothing is written when it has none, or when it is a failed replacement's, which only a healthy replacement clears."""
         if run.connector.last_error is None and run.connector.consecutive_errors == 0:
             return
+        if self._replacement_failed(run):
+            return
         run.connector = await self._connectors.record_error(run.connector.id, None) or run.connector
+
+    @staticmethod
+    def _replacement_failed(run: _Run) -> bool:
+        """Whether the connector's cloud error is a failed replacement's."""
+        error = run.connector.last_error
+        return error is not None and error.startswith(REPLACEMENT_ERROR_PREFIX)
