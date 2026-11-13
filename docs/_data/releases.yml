@@ -10,6 +10,25 @@
 #   changes  what changed, for the people who use Octoprox; `docs` is a page
 #            on octoprox.com that explains it, such as connecting#exit-headers
 
+- version: 6.7.2
+  date: 2026-11-13
+  title: New website, decimal sizes and clearer charts
+  changes:
+    - text: "The octoprox.com website and docs have a new look, with one menu and footer on every page. Docs pages are easier to read on phones: wide tables and diagrams scroll in their own box, and the page list opens as a drawer."
+      docs: getting-started
+    - text: "The web UI now shows data sizes in decimal units everywhere, so 1 KB is 1,000 bytes. Traffic on every page now matches what billing and traffic limits count."
+      docs: traffic-limits
+    - text: "Time labels on history charts fall on round local times. They show every 10 minutes for 1h, every hour for 6h, every 3 hours for 24h and at midnight for longer ranges. The System trends charts under Administration now label times the same way."
+    - text: "Requests per minute show one decimal below 10. Very light traffic shows as <0.1 instead of 0."
+    - text: "On the Failures page, the vendor's own message has its own line under the Octoprox message, so it is no longer cut off. On wide screens, the counts by connector under the chart fill several columns."
+    - text: "On the Overview map, the country list wraps onto several rows instead of scrolling sideways. Alaska and the far east of Russia are no longer cut off at the edges."
+    - text: "Connector colours in the traffic split are easier to tell apart, also for colour-blind readers. They no longer use the warning colour."
+    - text: "The sidebar now scrolls in a short window instead of squeezing its entries. The Countries page fits a phone screen without sideways scrolling. Device cities show as names, such as New York. On the Hosts chart, hosts outside the top few show in the grey used for other hosts."
+    - text: "The curl examples in the docs now use the correct `--proxy-user` flag."
+      docs: connecting
+    - text: "The docs used to say that HTTP/3 passes through a `CONNECT` tunnel. It does not, because HTTP/3 runs over UDP. Clients use HTTP/2 or HTTP/1.1 through Octoprox instead."
+      docs: tls-interception
+
 - version: 6.7.1
   date: 2026-11-12
   title: Safer cloud rotation and unhealthy instance replacement
