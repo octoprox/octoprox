@@ -1,0 +1,26 @@
+{%- comment -%}
+  The shared <head> of every page, after the charset, viewport and <title> the layout writes. Keep the seo lines as
+  they are: link previews (Slack unfurls) read these tags, and twitter tags must use name=, not property=.
+{%- endcomment -%}
+  {% capture seo_tags %}{% seo title=false %}{% endcapture %}
+  {{ seo_tags | replace: 'property="twitter:', 'name="twitter:' }}
+  <link rel="icon" type="image/svg+xml" href="{{ site.baseurl }}/assets/favicon/favicon.svg">
+  <link rel="icon" type="image/png" sizes="96x96" href="{{ site.baseurl }}/assets/favicon/favicon-96x96.png">
+  <link rel="apple-touch-icon" sizes="180x180" href="{{ site.baseurl }}/assets/favicon/apple-touch-icon.png">
+  {% include analytics.html %}
+  <script>
+    // Light by default; the toggle (assets/site.js) stores a preference. Applied before paint to avoid a flash. The js
+    // class shows the buttons that need scripts (site.css).
+    document.documentElement.classList.add('js');
+    try { if (localStorage.getItem('octoprox_docs_theme') === 'dark') document.documentElement.setAttribute('data-theme', 'dark'); } catch (e) {}
+    {%- if page.hero %}
+    // A product page's hero has a screenshot per theme (data-hero), both lazy so that the hidden one never loads (without
+    // scripts lazy loading is off and the light one shows). The one on show turns eager as soon as the parser adds it, so
+    // it is fetched as early as an eager image and at its priority.
+    new MutationObserver(function (changes, observer) {
+      var img = document.querySelector('img[data-hero="' + (document.documentElement.getAttribute('data-theme') || 'light') + '"]');
+      if (img) { observer.disconnect(); img.fetchPriority = 'high'; img.loading = 'eager'; }
+    }).observe(document.documentElement, { childList: true, subtree: true });
+    {%- endif %}
+  </script>
+  <link rel="stylesheet" href="{{ site.baseurl }}/assets/site.css">

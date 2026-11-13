@@ -30,6 +30,7 @@ import { DeletingBadge } from '../DeletingBadge'
 import { PageScopeContext, ShellPanelContext } from './Page'
 import { navItemBase, navItemCollapsed, navItemExpanded, navItemIdle } from './navStyles'
 import { cn } from '../../utils/cn'
+import { formatRpm } from '../../utils/format'
 
 const COLLAPSED_KEY = 'octoprox_sidebar_collapsed'
 /** Below Tailwind's lg breakpoint the sidebar is a rail and opens over the page. In rem, as Tailwind writes it, so the two agree at any font size. */
@@ -201,8 +202,8 @@ export default function AppShell({ onLogout, area }: { onLogout: () => void; are
           />
         )}
 
-        {/* Navigation */}
-        <nav className={cn('flex-1 min-h-0 overflow-y-auto flex flex-col gap-0.5', collapsed ? 'px-2 py-1' : 'px-3 py-1')}>
+        {/* Navigation. Its entries keep their height (flex-none) so a short window scrolls the list instead of squashing it. */}
+        <nav className={cn('flex-1 min-h-0 overflow-y-auto flex flex-col gap-0.5 [&>*]:flex-none', collapsed ? 'px-2 py-1' : 'px-3 py-1')}>
           {area === 'account' ? (
             <>
               <NavButton icon={<ArrowLeft />} label="Back" collapsed={collapsed} onClick={leaveArea} />
@@ -410,7 +411,7 @@ function PoolTicker({ projectId }: { projectId: string }) {
       {scaling && (
         <>
           <span className="text-line-strong max-sm:hidden">|</span>
-          <span title="Requests per minute">{scaling.requests_per_minute.toFixed(0)} req/min</span>
+          <span title="Requests per minute">{formatRpm(scaling.requests_per_minute)} req/min</span>
         </>
       )}
       <span

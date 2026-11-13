@@ -10,7 +10,7 @@
 import { useMemo } from 'react'
 import { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts'
 import { HISTORY_GAP_MS, HistoryRange, LatencyStep, MetricsSnapshot } from '../../api/client'
-import { formatRangeTick } from '../../contexts/TimeRangeContext'
+import { formatRangeTick, rangeTicks } from '../../contexts/TimeRangeContext'
 import { useTheme } from '../../contexts/ThemeContext'
 import { formatMs, parseApiDate } from '../../utils/format'
 import { LogoLoader } from '../ui'
@@ -98,6 +98,8 @@ export function LatencyChart({ snapshots, range, height, domain, compact, loadin
   const tick = { fontSize: compact ? 10 : 11, fill: '#9ca3af' }
   // Only the steps the range has, so a project without preflight lists none.
   const legend = averages.filter((step) => step.ms > 0)
+  // Ticks on round local times, across the given axis or the data's own extent.
+  const ticks = useMemo(() => (points.length > 0 ? rangeTicks(range, domain ?? [points[0].time, points[points.length - 1].time]) : []), [points, range, domain])
 
   if (loading) {
     return <div className="flex items-center justify-center" style={{ height }}><LogoLoader size="sm" /></div>
@@ -110,7 +112,7 @@ export function LatencyChart({ snapshots, range, height, domain, compact, loadin
       <ResponsiveContainer width="100%" height={height}>
         <AreaChart data={points} margin={{ top: 6, right: 4, left: -20, bottom: 0 }} aria-label="Latency over time, by step">
           <CartesianGrid strokeDasharray="2 4" stroke={gridColor} vertical={false} />
-          <XAxis dataKey="time" type="number" scale="time" domain={domain ?? ['dataMin', 'dataMax']} tickFormatter={(v: number) => formatRangeTick(v, range)} tick={tick} axisLine={false} tickLine={false} minTickGap={48} />
+          <XAxis dataKey="time" type="number" scale="time" domain={domain ?? ['dataMin', 'dataMax']} ticks={ticks} tickFormatter={(v: number) => formatRangeTick(v, range)} tick={tick} axisLine={false} tickLine={false} minTickGap={48} />
           <YAxis tick={tick} axisLine={false} tickLine={false} tickFormatter={(v: number) => `${Math.round(v)}`} />
           <Tooltip content={({ active, payload }) => <LatencyTooltip active={active} point={payload?.[0]?.payload as Point | undefined} color={color} />} />
           {/* A surface-coloured edge on each band keeps a gap between neighbours. */}

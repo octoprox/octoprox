@@ -164,7 +164,7 @@ The Scrapoxy document tells you what the vendor needs: `fields` in the overview 
 1. **Endpoint.** Replace Scrapoxy's host and port (`localhost:8888` by default) with Octoprox's proxy port (`8080` by default). The username and password are the ones you decoded in step 2.
 2. **CA certificate.** If the project uses TLS interception, install Octoprox's CA certificate where Scrapoxy's was.
 3. **Sticky sessions.** Where you relied on cookie sessions, add `-sessid-<id>` to the proxy username per session. One project can also target a country per request with `-cc-<code>`.
-4. **Integrations.** Scrapoxy's Scrapy middleware, Puppeteer plugin and similar talked to its own API to wait for scaling or to inspect proxies. Octoprox needs none of them: configure the proxy URL as you would for any HTTP or SOCKS proxy. Pool status, metrics and the request inspector are in the web UI and the [REST API](api).
+4. **Integrations.** Scrapoxy's Scrapy middleware, Puppeteer plugin and similar talked to its own API to wait for scaling or to inspect proxies. Octoprox needs none of them: configure the proxy URL as you would for any HTTP proxy. Pool status, metrics and the request inspector are in the web UI and the [REST API](api).
 5. **Metrics.** Scrapoxy's counters do not carry over. Octoprox records latency, success rate, traffic and exit locations from the first request through it.
 
 ## What you gain

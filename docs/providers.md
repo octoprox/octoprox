@@ -119,6 +119,11 @@ connector_fields:
     options_from: regions       # dynamic, see options below
     fill: { region_password: password }   # copy option extras into other fields
     show_when: { field: credential.api_key }
+  - key: region_password
+    label: Region password
+    type: password
+    secret: true
+    readonly: true                # set by the region's fill, not typed
 
 proxy_types:
   - key: residential

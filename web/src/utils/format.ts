@@ -15,25 +15,18 @@ export function elideMiddle(text: string, max: number): string {
   return `${text.slice(0, max - 1 - tail)}…${text.slice(-tail)}`
 }
 
-/**
- * Format bytes as human-readable string (e.g., "1.5 MB")
- */
+/** Bytes as a readable size ("1.5 MB") in decimal units like formatBytesDecimal, so every page agrees with billing. */
 export function formatBytes(bytes: number): string {
-  if (bytes === 0) return '0 B'
-  const k = 1024
-  const sizes = ['B', 'KB', 'MB', 'GB', 'TB']
-  const i = Math.floor(Math.log(bytes) / Math.log(k))
-  return `${parseFloat((bytes / Math.pow(k, i)).toFixed(2))} ${sizes[i]}`
+  return formatBytesDecimal(bytes)
 }
 
-/** Short byte format for tight tiles and axis ticks: 1 decimal, no trailing zero. */
+/** Short byte format for tight tiles and axis ticks: 1 decimal, no trailing zero, decimal units. */
 export function bytesShort(bytes: number): string {
-  if (bytes === 0) return '0 B'
-  const k = 1024
-  const sizes = ['B', 'KB', 'MB', 'GB', 'TB']
-  const i = Math.min(sizes.length - 1, Math.floor(Math.log(bytes) / Math.log(k)))
-  return `${parseFloat((bytes / Math.pow(k, i)).toFixed(1))} ${sizes[i]}`
+  return formatBytesDecimal(bytes, 1)
 }
+
+/** bytesShort for a chart axis: a no-break space keeps "600 KB" on one line, where Recharts wraps tick labels at spaces. */
+export const bytesTick = (bytes: number): string => bytesShort(bytes).replace(' ', '\u00a0')
 
 /** A latency: "<1 ms", "412 ms", and seconds from 10 s ("12.3 s"). */
 export function formatMs(value: number): string {
@@ -46,6 +39,13 @@ export function compact(n: number): string {
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(n >= 10_000_000 ? 0 : 2)}M`
   if (n >= 10_000) return `${(n / 1000).toFixed(1)}K`
   return n.toLocaleString()
+}
+
+/** Requests per minute: one decimal under ten, whole and compact above; a trickle reads <0.1, not 0. */
+export function formatRpm(rpm: number): string {
+  if (rpm <= 0) return '0'
+  if (rpm < 0.1) return '<0.1'
+  return rpm < 10 ? rpm.toFixed(1).replace(/\.0$/, '') : compact(Math.round(rpm))
 }
 
 /**

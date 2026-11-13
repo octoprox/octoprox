@@ -55,7 +55,7 @@ The examples fetch [ipinfo.io](https://ipinfo.io/json), which answers with the e
 
 ```bash
 curl --proxy 'http://proxy.example.com:8080' \
-  --prxy-user 'myuser-cc-us-st-ny:mypassword' \
+  --proxy-user 'myuser-cc-us-st-ny:mypassword' \
   'https://ipinfo.io/json'
 ```
 
@@ -107,7 +107,7 @@ export http_proxy="$https_proxy"
 curl 'https://ipinfo.io/json'
 ```
 
-In the URL form the username and password are percent-encoded: a password containing `@`, `:` or `/` would otherwise end the credentials early. The Connect page does this for you; curl's `--prxy-user` and Playwright's separate fields need no encoding. Many scraping tools also import the `host:port:username:password` line the page offers.
+In the URL form the username and password are percent-encoded: a password containing `@`, `:` or `/` would otherwise end the credentials early. The Connect page does this for you; curl's `--proxy-user` and Playwright's separate fields need no encoding. Many scraping tools also import the `host:port:username:password` line the page offers.
 
 ### With TLS interception
 
@@ -151,7 +151,7 @@ Most HTTP libraries do not pass the headers of a successful `CONNECT` on to the 
 
 ```bash
 curl --proxy 'http://proxy.example.com:8080' \
-  --prxy-user 'myuser-cc-us-sessid-a1:mypassword' \
+  --proxy-user 'myuser-cc-us-sessid-a1:mypassword' \
   -s -o /dev/null -D - 'https://ipinfo.io/json' | grep -i '^x-octoprox-'
 ```
 

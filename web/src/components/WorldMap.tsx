@@ -32,8 +32,12 @@ interface Location {
 
 const LOCATIONS = worldMap.locations as Location[]
 const NAMES: Record<string, string> = Object.fromEntries(LOCATIONS.map((l) => [l.id, l.name]))
-// 1010x666; the dataset has no Antarctica, so nothing needs cropping.
-const VIEW_BOX = worldMap.viewBox
+// 1010x666; the dataset has no Antarctica, so nothing needs cropping. A few units of margin all round keep the
+// westernmost and easternmost countries (Alaska, Chukotka) off the frame.
+const VIEW_BOX = (() => {
+  const [x, y, w, h] = worldMap.viewBox.split(' ').map(Number)
+  return `${x - 8} ${y - 8} ${w + 16} ${h + 16}`
+})()
 // Countries reachable only through dynamic sessions are tinted, not counted: there is no
 // pool there to size, so they sit below the lightest choropleth step (0.35).
 const DYNAMIC_OPACITY = 0.15
@@ -48,8 +52,8 @@ export const countryName = (code: string) => NAMES[code.toUpperCase()] ?? code
  * primary colour, darker the more proxies they hold; hovering shows the count.
  * Countries that dynamic-sessions connectors can exit from (their allow-list, or the
  * whole world when they have none) get a faint tint instead, since nothing is
- * provisioned there until a request asks. A single scrollable row of pills below
- * the map lists every country, busiest first. Used on the Overview page.
+ * provisioned there until a request asks. Pills below the map list every country,
+ * busiest first, wrapping onto as many rows as fit (a long tail scrolls). Used on the Overview page.
  */
 export function WorldMap({ stats, dynamic, unknown = 0, className }: {
   stats: Record<string, CountryStat>
@@ -133,8 +137,8 @@ export function WorldMap({ stats, dynamic, unknown = 0, className }: {
         )}
       </div>
       {hasPills && (
-        // One row regardless of how many countries: scroll sideways for the long tail.
-        <ul className="flex flex-nowrap gap-1.5 overflow-x-auto pb-1 text-xs scrollbar-thin">
+        // Rows of pills take the room the map leaves when it letterboxes; past about five rows the tail scrolls.
+        <ul className="flex flex-wrap gap-1.5 max-h-[150px] overflow-y-auto text-xs scrollbar-thin">
           {ranked.map(([code, stat]) => (
             <li key={code} className="inline-flex flex-none items-center gap-1.5 rounded-full border border-line bg-surface-raised pl-2 pr-2.5 py-0.5" title={countryName(code)}>
               <span className="font-mono font-medium">{code}</span>

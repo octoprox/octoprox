@@ -1,0 +1,685 @@
+---
+layout: product
+title: "Octoprox Enterprise"
+nav_id: enterprise
+hero: true
+description: "The licensed edition of Octoprox: every sign-in and API token in the audit log, the whole install's activity on one page and an export for your SIEM, under a license that never locks anyone out."
+---
+<style>
+/* Enterprise page: its sections under the shared chrome and components (assets/site.css). */
+
+/* Shared bits of this page */
+.e-frame { position: relative; overflow: hidden; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); }
+.shot-bezel .e-frame img { border: 0; border-radius: 0; }
+/* A crop shows one region of a screenshot: the box keeps the region's ratio, the image is scaled and shifted inside it */
+.e-crop { position: relative; overflow: hidden; }
+.e-crop > img { display: block; width: 100%; max-width: none; height: auto; }
+.e-caption { text-align: left; }
+.e-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 36px;
+  height: 36px;
+  border-radius: 9px;
+  background: var(--primary-soft);
+  color: var(--primary-soft-fg);
+}
+.e-icon svg { width: 18px; height: 18px; }
+.e-label { font-family: var(--font-mono); font-size: 12px; font-weight: 600; line-height: 1.3; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }
+.e-nowrap { white-space: nowrap; }
+.e-terms dd, .e-assure-text, .e-cta-text, .e-keycard-note, .e-plan-today { text-wrap: pretty; }
+/* The address contact.js shows after a Get in touch button goes below the other buttons too; in the table, under it */
+.actions .contact-address { order: 1; }
+.e-ed .contact-address { display: block; margin-top: 8px; }
+/* Stacked buttons are a wrapping column: a 100% basis would start a column of its own, off the screen */
+@media (max-width: 499.98px) {
+  .actions-stack .contact-address { flex-basis: auto; }
+}
+
+/* ---------- Hero ---------- */
+.e-hero { padding: clamp(3.5rem, 2rem + 5vw, 6.5rem) 0 var(--section-y); }
+.e-hero-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 22.5rem); gap: 40px 88px; align-items: start; }
+.e-hero-copy { display: grid; justify-items: start; gap: 20px; }
+.e-hero-copy .lead { max-width: 37rem; }
+.e-hero-copy .actions { margin-top: 8px; }
+/* What is planned, labelled, from the first screen */
+.e-hero-plan { display: block; color: var(--muted); font-size: 15px; font-weight: 500; line-height: 1.6; text-wrap: pretty; }
+.e-hero-plan:hover { color: var(--fg); }
+.e-hero-plan .badge { margin-right: 8px; vertical-align: 1px; }
+.e-hero-plan .arrow { display: inline-block; width: 16px; height: 16px; margin-left: 6px; vertical-align: -3px; transition: transform 0.15s; }
+.e-hero-plan:hover .arrow { transform: translateX(2px); }
+.e-assure li { display: grid; grid-template-columns: 36px minmax(0, 1fr); gap: 14px; align-items: start; padding: 16px 0; border-top: 1px solid var(--line); }
+.e-assure li:first-child { border-top: 0; padding-top: 0; }
+.e-assure li:last-child { padding-bottom: 4px; }
+.e-assure-title { display: block; color: var(--fg); font-size: 15px; font-weight: 600; line-height: 1.4; }
+.e-assure-text { display: block; margin-top: 2px; color: var(--muted); font-size: 15px; line-height: 1.5; }
+.e-hero-shot { margin-top: clamp(3rem, 2rem + 3vw, 4.5rem); }
+
+/* ---------- Available today ---------- */
+.e-today { display: grid; grid-template-columns: minmax(0, 5fr) minmax(0, 6fr); gap: 48px 72px; align-items: start; }
+.e-today .section-head { margin-bottom: 32px; }
+.e-feats { border-top: 1px solid var(--line); }
+.e-feat { display: grid; grid-template-columns: 28px minmax(0, 1fr); grid-template-areas: "num title" "num text"; gap: 4px 16px; padding: 20px 0; border-bottom: 1px solid var(--line); }
+.e-feat .e-num { grid-area: num; }
+.e-feat-title { grid-area: title; align-self: center; font-size: 17px; font-weight: 600; line-height: 1.5; letter-spacing: -0.01em; }
+.e-feat-text { grid-area: text; color: var(--muted); font-size: 16px; line-height: 1.6; }
+.e-num,
+.e-pin {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  background: var(--primary);
+  color: var(--on-primary);
+  font-family: var(--font-mono);
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1;
+}
+.e-more { margin-top: 24px; }
+.e-today-shot { margin: 0; }
+.e-today-shot .shot-caption { margin-top: 0; padding: 12px 16px; border-top: 1px solid var(--line); text-align: left; }
+/* The Activity page's main column (x 470-1675, y 225-1730 of the 2880 x 1730 shot), a pin beside each of the four */
+.e-crop-today { aspect-ratio: 1205 / 1505; }
+.e-crop-today > img { width: calc(100% * 2880 / 1205); margin-left: calc(-100% * 470 / 1205); margin-top: calc(-100% * 225 / 1205); }
+.e-pin { position: absolute; z-index: 1; margin: -14px 0 0 -14px; box-shadow: 0 0 0 3px var(--surface), 0 6px 16px -2px rgb(17 24 39 / 0.35); }
+.e-pin-1 { left: calc(100% * 712 / 1205); top: calc(100% * 892 / 1505); }
+.e-pin-2 { left: calc(100% * 756 / 1205); top: calc(100% * 1108 / 1505); }
+.e-pin-3 { left: calc(100% * 812 / 1205); top: calc(100% * 442 / 1505); }
+.e-pin-4 { left: calc(100% * 369 / 1205); top: calc(100% * 52 / 1505); }
+
+/* ---------- Same Octoprox, one image swap ---------- */
+.e-swap { display: grid; grid-template-columns: minmax(0, 5fr) minmax(0, 6fr); gap: 40px 80px; align-items: center; }
+.e-swap .section-head { margin-bottom: 0; }
+.e-diff-file { text-transform: none; letter-spacing: 0; font-size: 13px; color: #d1d5db; }
+.e-diff-stat { padding-right: 10px; color: var(--t-muted); font-family: var(--font-mono); font-size: 12px; white-space: nowrap; }
+.e-diff .terminal-bar { min-height: 45px; }
+/* A long line wraps after the registry, under the image name, instead of scrolling */
+.e-diff pre { padding: 18px 0 20px; font-size: 0.9375rem; white-space: pre-wrap; }
+.e-diff .line { padding: 0 20px 0 calc(20px + 13ch); text-indent: -13ch; }
+.e-diff .d { display: inline-block; width: 2ch; text-indent: 0; color: var(--t-muted); -webkit-user-select: none; user-select: none; }
+/* An image name never breaks at its hyphen: lines break only after the registry path or before the tag */
+.e-diff .nb { white-space: nowrap; }
+.e-diff .del { background: rgb(248 113 113 / 0.13); color: #fecaca; }
+.e-diff .del .d { color: #fca5a5; }
+.e-diff .add { background: rgb(52 211 153 / 0.13); color: #bbf7d0; }
+.e-diff .add .d { color: #6ee7b7; }
+ol.e-steps { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 32px 40px; margin-top: clamp(3rem, 2rem + 3vw, 4.5rem); padding-top: clamp(2rem, 1.5rem + 1.5vw, 2.75rem); border-top: 1px solid var(--line); }
+.e-step { position: relative; display: grid; grid-template-columns: minmax(0, 1fr); grid-template-areas: "icon" "title" "text"; align-content: start; justify-items: start; gap: 4px; }
+.e-step .e-icon { grid-area: icon; margin-bottom: 14px; }
+/* A rule from each icon to the next step */
+.e-step::after { content: ""; position: absolute; top: 18px; left: 52px; right: -24px; height: 1px; background: var(--line-strong); }
+.e-step:last-child::after { display: none; }
+.e-step-title { grid-area: title; font-size: 17px; font-weight: 600; line-height: 1.5; letter-spacing: -0.01em; }
+.e-step-text { grid-area: text; color: var(--muted); font-size: 16px; line-height: 1.6; }
+
+/* ---------- Licensing, plainly ---------- */
+.e-lic { display: grid; grid-template-columns: minmax(0, 6fr) minmax(0, 5fr); gap: 48px 80px; align-items: center; }
+.e-lic .section-head { margin-bottom: 32px; }
+.e-terms { display: grid; gap: 22px; max-width: 38rem; }
+.e-terms dt { color: var(--fg); font-size: 16px; font-weight: 600; line-height: 1.5; }
+.e-terms dd { margin: 4px 0 0; color: var(--muted); font-size: 16px; line-height: 1.6; }
+.e-keycard { padding: 28px; border: 1px solid var(--line); border-radius: 14px; background: var(--bg); box-shadow: var(--shadow-md); }
+.e-keycard-head { display: flex; align-items: center; gap: 12px; margin-bottom: 16px; }
+.e-keyline {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  height: 56px;
+  padding: 0 18px;
+  overflow: hidden;
+  border: 1px solid var(--line-strong);
+  border-radius: 10px;
+  background: var(--surface);
+  font-family: var(--font-mono);
+  font-size: 19px;
+  line-height: 1;
+}
+.e-key-prefix { flex: none; color: var(--fg); font-weight: 600; letter-spacing: 0.02em; }
+.e-key-mask {
+  flex: 1;
+  height: 8px;
+  background: radial-gradient(circle at 4px 4px, var(--line-strong) 3px, transparent 3.5px) 0 0 / 15px 8px repeat-x;
+  -webkit-mask-image: linear-gradient(90deg, #000 55%, transparent);
+  mask-image: linear-gradient(90deg, #000 55%, transparent);
+}
+.e-keycard-sub { margin: 22px 0 6px; }
+.e-keyfields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.e-keyfields li { display: flex; align-items: center; gap: 12px; min-height: 50px; border-bottom: 1px solid var(--line); color: var(--fg); font-size: 15px; font-weight: 500; }
+.e-keyfields li:nth-child(odd) { padding-right: 12px; }
+.e-keyfields li:nth-child(even) { padding-left: 16px; border-left: 1px solid var(--line); }
+.e-keyfields svg { flex: none; width: 18px; height: 18px; color: var(--accent); }
+.e-keycard-note { display: flex; align-items: flex-start; gap: 10px; margin-top: 20px; color: var(--muted); font-size: 15px; line-height: 1.5; }
+.e-keycard-note svg { flex: none; width: 18px; height: 18px; margin-top: 2px; color: var(--success); }
+
+/* Expiry, grace and after: a table drawn as lanes */
+.e-life { margin-top: clamp(3.5rem, 2.5rem + 3vw, 5rem); }
+.e-life-head { display: grid; gap: 6px; max-width: 46rem; margin-bottom: 20px; }
+.e-life-head p { color: var(--muted); font-size: 16px; line-height: 1.6; }
+.e-life-table { width: 100%; border-collapse: separate; border-spacing: 0 8px; table-layout: fixed; }
+.e-life-table .c-what { width: 28%; }
+.e-life-table thead th { padding: 0 14px 6px; text-align: left; vertical-align: bottom; font-weight: 400; }
+.e-phase { display: flex; align-items: flex-start; gap: 8px; color: var(--fg); font-size: 15px; font-weight: 600; line-height: 1.4; }
+.e-phase::before { content: ""; flex: none; width: 8px; height: 8px; margin-top: calc(0.7em - 4px); border-radius: 50%; background: var(--success); }
+.e-phase-grace::before { background: var(--warning); }
+.e-phase-after::before { background: var(--subtle); }
+.e-phase-sub { display: block; margin-top: 2px; color: var(--muted); font-size: 14px; line-height: 1.45; }
+.e-life-table tbody th { padding: 0 24px 0 0; text-align: left; vertical-align: middle; color: var(--fg); font-size: 15px; font-weight: 500; line-height: 1.45; }
+.e-life-table td { height: 1px; padding: 0; vertical-align: middle; }
+.e-life-table td + td { padding-left: 6px; }
+.e-bar { display: flex; align-items: center; gap: 10px; height: 100%; min-height: 48px; padding: 8px 14px; border-radius: 9px; font-size: 14px; font-weight: 500; line-height: 1.4; }
+.e-bar svg { flex: none; width: 16px; height: 16px; }
+.e-bar-on { background: var(--success-soft); color: var(--success-fg); }
+/* The app's dark success-soft is a solid green; as a wide bar it reads quieter as a tint */
+:root[data-theme="dark"] .e-bar-on { background: rgb(16 185 129 / 0.13); }
+.e-bar-off { border: 1px dashed var(--line-strong); color: var(--muted); }
+
+/* ---------- Planned ---------- */
+.e-planned { display: grid; grid-template-columns: minmax(0, 5fr) minmax(0, 7fr); gap: 40px 80px; align-items: start; }
+.e-planned .section-head { margin-bottom: 0; }
+@media (min-width: 900px) {
+  .e-planned .section-head { position: sticky; top: calc(var(--header-h) + 32px); }
+}
+.e-plan-list { border: 1px dashed var(--line-strong); border-radius: 12px; }
+.e-plan-item { padding: 18px 22px; border-top: 1px solid var(--line); }
+.e-plan-item:first-child { border-top: 0; }
+.e-plan-item p { color: var(--muted); font-size: 16px; line-height: 1.6; }
+.e-plan-item strong { color: var(--fg); font-weight: 600; }
+.e-plan-item .badge { float: right; margin: 0 0 6px 16px; }
+.e-plan-today { margin-top: 16px; padding: 16px 22px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); color: var(--muted); font-size: 16px; line-height: 1.6; }
+.e-plan-today .badge { margin-right: 6px; vertical-align: 1px; }
+
+/* ---------- Free and Enterprise ---------- */
+.e-ed-wrap { overflow: hidden; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); box-shadow: var(--shadow-sm); }
+.e-ed { width: 100%; border-collapse: collapse; table-layout: fixed; }
+.e-ed .c-feat { width: 54%; }
+.e-ed .c-free { width: 20%; }
+.e-ed th, .e-ed td { padding: 16px 24px; border-top: 1px solid var(--line); text-align: left; vertical-align: middle; font-size: 15px; line-height: 1.5; }
+.e-ed thead th { border-top: 0; padding-block: 18px 16px; color: var(--muted); font-family: var(--font-mono); font-size: 12px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; }
+.e-ed tbody th { color: var(--fg); font-weight: 500; }
+.e-ed .e-ed-ent { background: rgb(37 99 235 / 0.035); }
+.e-ed thead .e-ed-ent { position: relative; color: var(--accent); }
+.e-ed thead .e-ed-ent::before { content: ""; position: absolute; top: 0; left: 0; right: 0; height: 2px; background: var(--brand-grad); }
+.e-ed tfoot td { padding-block: 20px; }
+.e-yes, .e-no { display: inline-flex; align-items: center; gap: 8px; }
+.e-yes { color: var(--fg); font-weight: 500; }
+.e-yes svg { flex: none; width: 18px; height: 18px; color: var(--success); }
+.e-no { color: var(--muted); }
+.e-no svg { flex: none; width: 18px; height: 18px; color: var(--subtle); }
+:root[data-theme="dark"] .e-ed .e-ed-ent { background: rgb(124 58 237 / 0.08); }
+
+/* ---------- Get in touch ---------- */
+.e-cta { position: relative; overflow: hidden; }
+.e-cta-mark { position: absolute; right: -150px; top: -70px; width: 640px; max-width: none; height: auto; opacity: 0.05; pointer-events: none; }
+.e-cta-grid { position: relative; display: grid; grid-template-columns: minmax(0, 6fr) minmax(0, 5fr); gap: 48px 80px; align-items: center; }
+.e-cta-copy { display: grid; justify-items: start; gap: 18px; }
+.e-cta-copy .lead { max-width: 32rem; }
+.e-cta-copy .actions { margin-top: 10px; }
+.e-cta-panel { padding: 26px 28px 10px; border: 1px solid var(--line); border-radius: 14px; background: var(--surface); }
+.e-cta-panel .e-label { display: block; margin-bottom: 14px; }
+.e-cta-list li { display: grid; grid-template-columns: 36px minmax(0, 1fr); gap: 14px; align-items: start; padding: 16px 0; border-top: 1px solid var(--line); }
+.e-cta-list li:first-child { border-top: 0; padding-top: 0; }
+.e-cta-list strong { display: block; color: var(--fg); font-size: 16px; font-weight: 600; line-height: 1.45; }
+.e-cta-list span.e-cta-text { display: block; margin-top: 2px; color: var(--muted); font-size: 15px; line-height: 1.55; }
+
+/* ---------- Narrower screens ---------- */
+@media (max-width: 1023.98px) {
+  .e-hero-grid { grid-template-columns: minmax(0, 1fr) minmax(0, 20rem); gap: 40px 56px; }
+  .e-today, .e-swap, .e-lic, .e-planned, .e-cta-grid { gap: 48px 56px; }
+}
+@media (max-width: 899.98px) {
+  .e-hero-grid, .e-today, .e-swap, .e-lic, .e-planned, .e-cta-grid { grid-template-columns: minmax(0, 1fr); }
+  .e-swap { gap: 32px; }
+  .e-assure { max-width: 37rem; }
+  .e-keycard { max-width: 34rem; }
+  /* One column: the pinned crop comes before the list it numbers */
+  .e-today { gap: 0; }
+  .e-today-copy { display: contents; }
+  .e-today .section-head { order: 1; }
+  .e-today-shot { order: 2; max-width: 34rem; margin-bottom: 12px; }
+  .e-feats { order: 3; }
+  .e-more { order: 4; justify-self: start; }
+  /* Steps stack, joined by a rule down the icons */
+  ol.e-steps { grid-template-columns: minmax(0, 1fr); gap: 0; }
+  .e-step { grid-template-columns: 36px minmax(0, 1fr); grid-template-areas: "icon title" "icon text"; gap: 2px 16px; padding-bottom: 24px; }
+  .e-step:last-child { padding-bottom: 0; }
+  .e-step .e-icon { margin-bottom: 0; }
+  .e-step-title { align-self: center; }
+  .e-step::after { top: 44px; bottom: 6px; left: 17.5px; right: auto; width: 1px; height: auto; }
+  /* One column: the mark would sit behind the text, so the band goes without it */
+  .e-cta-mark { display: none; }
+}
+/* Landscape phones and small tablets: the editions table keeps its columns, with room for the buttons */
+@media (min-width: 640px) and (max-width: 899.98px) {
+  .e-ed .c-feat { width: 48%; }
+  .e-ed .c-free { width: 22%; }
+  .e-ed th, .e-ed td { padding-inline: 16px; }
+  .e-ed tfoot .btn { max-width: 100%; padding-inline: 10px; }
+}
+/* The one link inside running text gets a 44 px tall target on touch screens, without moving the lines */
+@media (pointer: coarse) {
+  .e-planned .lead a { padding-block: 12px; }
+  .e-hero-plan { margin-block: -10px; padding-block: 10px; }
+}
+
+/* ---------- Phones ---------- */
+@media (max-width: 639.98px) {
+  .e-hero { padding-top: 40px; }
+  .e-hero-grid { gap: 32px; }
+  .e-hero-copy { gap: 16px; }
+  .section-head { gap: 12px; }
+  /* The three promises keep their titles; each is told in full further down */
+  .e-assure li { grid-template-columns: 32px minmax(0, 1fr); align-items: center; gap: 12px; padding: 8px 0; }
+  .e-assure li:last-child { padding-bottom: 0; }
+  .e-assure .e-icon { width: 32px; height: 32px; border-radius: 8px; }
+  .e-assure-text { display: none; }
+  .e-assure-title, .e-feat-text, .e-step-text, .e-cta-list span.e-cta-text, .e-keyfields li, .e-keycard-note, .e-life-table tbody th, .e-hero-plan { font-size: 16px; }
+  .e-hero-shot { margin-top: 36px; }
+  /* The hero shows the log itself: time, actor and action at a size a phone can read */
+  .e-crop-hero { aspect-ratio: 820 / 435; }
+  .e-crop-hero > img { width: calc(100% * 2880 / 820); margin-left: calc(-100% * 478 / 820); margin-top: calc(-100% * 1015 / 820); }
+  .e-hero-shot.shot-bezel { padding: 4px; border-radius: 14px; }
+  .e-hero-shot .e-frame { border-radius: 10px; }
+  .e-caption { margin-top: 12px; }
+  /* The list carries the four on a phone; the pinned crop is for wider screens */
+  .e-today-shot { display: none; }
+  .e-today .section-head { margin-bottom: 20px; }
+  .e-feat { grid-template-areas: "num title" "text text"; gap: 6px 12px; padding: 12px 0; }
+  .e-feat-text { line-height: 1.55; }
+  .e-feat-title { font-size: 18px; }
+  .e-swap-head .lead { font-size: 17px; }
+  .e-diff pre { padding: 14px 0 16px; font-size: 13px; }
+  .e-diff .line { padding: 0 14px 0 calc(14px + 13ch); }
+  .e-diff .terminal-bar { padding-left: 14px; }
+  .e-diff-file { font-size: 12px; }
+  ol.e-steps { margin-top: 28px; padding-top: 24px; }
+  .e-step { padding-bottom: 20px; }
+  .e-step-title { font-size: 17px; }
+  .e-lic .section-head { margin-bottom: 16px; }
+  .e-terms { gap: 16px; }
+  .e-keycard { padding: 18px; }
+  .e-keycard-head { display: none; }
+  .e-keyline { height: 48px; padding: 0 14px; font-size: 18px; }
+  .e-keycard-sub { margin-top: 18px; }
+  .e-keyfields li { gap: 10px; min-height: 46px; }
+  .e-keyfields li:nth-child(even) { padding-left: 14px; }
+  .e-keycard-note { margin-top: 16px; }
+  /* Lanes: what on its own line, the three states side by side under it */
+  .e-life { margin-top: 44px; }
+  .e-life-head { margin-bottom: 16px; }
+  .e-life-table, .e-life-table thead, .e-life-table tbody { display: block; }
+  .e-life-table colgroup { display: none; }
+  .e-life-table tr { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0 4px; }
+  .e-life-table thead tr { padding-bottom: 10px; border-bottom: 1px solid var(--line); }
+  .e-life-table thead td { display: none; }
+  .e-life-table thead th { padding: 0 2px; }
+  .e-phase { gap: 6px; font-size: 14px; }
+  .e-phase-sub { font-size: 13px; }
+  .e-life-table tbody tr { padding-top: 12px; }
+  .e-life-table tbody th { grid-column: 1 / -1; padding: 0 0 8px; }
+  .e-life-table td { height: auto; }
+  .e-life-table td + td { padding-left: 0; }
+  .e-life-table td[colspan="3"] { grid-column: span 3; }
+  .e-life-table td[colspan="2"] { grid-column: span 2; }
+  .e-bar { min-height: 42px; padding: 8px 12px; font-size: 16px; }
+  .e-planned { gap: 28px; }
+  .e-plan-item { padding: 12px 16px; }
+  /* On a phone the note sits under the list without a box of its own */
+  .e-plan-today { margin-top: 14px; padding: 0 2px; border: 0; background: none; }
+  /* The editions table on a phone: the features grouped by what each edition has */
+  .e-ed, .e-ed thead, .e-ed tbody, .e-ed tfoot, .e-ed tr { display: block; }
+  .e-ed colgroup { display: none; }
+  .e-ed thead, .e-ed tbody td { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
+  .e-ed tbody { padding: 0 18px 6px; }
+  .e-ed tbody tr { position: relative; }
+  .e-ed tbody th { position: relative; display: block; padding: 6px 0 6px 28px; border: 0; font-size: 16px; line-height: 1.45; }
+  .e-ed tbody th::before { content: ""; position: absolute; left: 4px; top: 11px; width: 6px; height: 11px; border: solid var(--success); border-width: 0 2px 2px 0; transform: rotate(45deg); }
+  .e-ed tbody tr:nth-child(n+4) th::before { border-color: var(--accent); }
+  .e-ed tbody tr:nth-child(8) th::before { top: 12px; left: 1px; width: 12px; height: 12px; border: 2px dashed var(--warning-fg); border-radius: 50%; transform: none; }
+  .e-ed tbody tr:nth-child(1)::before,
+  .e-ed tbody tr:nth-child(4)::before,
+  .e-ed tbody tr:nth-child(8)::before { display: block; padding: 18px 0 6px; color: var(--muted); font-family: var(--font-mono); font-size: 12px; font-weight: 600; letter-spacing: 0.08em; line-height: 1.3; text-transform: uppercase; }
+  .e-ed tbody tr:nth-child(1)::before { content: "Both editions, the same release"; }
+  .e-ed tbody tr:nth-child(4)::before { content: "Enterprise only"; margin-top: 10px; border-top: 1px solid var(--line); color: var(--accent); }
+  .e-ed tbody tr:nth-child(8)::before { content: "Planned for Enterprise"; margin-top: 10px; border-top: 1px solid var(--line); color: var(--warning-fg); }
+  .e-ed tfoot tr { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; padding: 16px 18px 18px; border-top: 1px solid var(--line); }
+  .e-ed tfoot td { padding: 0; border: 0; background: none; }
+  .e-ed tfoot td:first-child { display: none; }
+  .e-ed tfoot .btn { width: 100%; padding: 0 12px; }
+  /* The address shown after Get in touch runs under both buttons: half a row would break it inside the name */
+  .e-ed tfoot .contact-address { width: calc(200% + 10px); margin-left: calc(-100% - 10px); }
+  .e-ed .e-ed-ent, :root[data-theme="dark"] .e-ed .e-ed-ent { background: none; }
+  .e-cta-grid { gap: 32px; }
+  .e-cta-panel { padding: 18px 18px 4px; }
+  .e-cta-list li { grid-template-columns: 32px minmax(0, 1fr); gap: 12px; padding: 14px 0; }
+  .e-cta-list .e-icon { width: 32px; height: 32px; border-radius: 8px; }
+}
+@media (max-width: 359.98px) {
+  .e-diff-stat { display: none; }
+}
+</style>
+<!-- /head -->
+{%- assign ent_release = site.data.releases | first %}
+<section class="e-hero" id="octoprox-enterprise">
+  <div class="container">
+    <div class="e-hero-grid">
+      <div class="e-hero-copy">
+        <span class="eyebrow">Licensed edition</span>
+        <h1>Octoprox Enterprise</h1>
+        <p class="lead">Everything in Octoprox, plus a record of who got in: every sign-in and API token in the audit log, across the whole install, ready for your SIEM.</p>
+        <div class="actions actions-stack">
+          <a class="btn btn-primary btn-lg" href="{{ site.baseurl }}/enterprise#get-in-touch" data-contact><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect width="20" height="16" x="2" y="4" rx="2"></rect><path d="m22 7-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7"></path></svg>Get in touch</a>
+          <noscript class="contact-address">enterprise at octoprox dot com</noscript>
+          <a class="btn btn-outline btn-lg" href="{{ site.baseurl }}/audit-log#octoprox-enterprise">Read the audit log docs</a>
+        </div>
+        <a class="e-hero-plan" href="#planned"><span class="badge badge-planned">Planned</span> Your own identity provider, group sync and SCIM provisioning<svg class="arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14"></path><path d="m12 5 7 7-7 7"></path></svg></a>
+      </div>
+      <ul class="e-assure" aria-label="At a glance">
+        <li>
+          <span class="e-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12.83 2.18a2 2 0 0 0-1.66 0L2.6 6.08a1 1 0 0 0 0 1.83l8.58 3.91a2 2 0 0 0 1.66 0l8.58-3.9a1 1 0 0 0 0-1.83z"></path><path d="M2 12a1 1 0 0 0 .58.91l8.6 3.91a2 2 0 0 0 1.65 0l8.58-3.9A1 1 0 0 0 22 12"></path><path d="M2 17a1 1 0 0 0 .58.91l8.6 3.91a2 2 0 0 0 1.65 0l8.58-3.9A1 1 0 0 0 22 17"></path></svg></span>
+          <span><span class="e-assure-title">Built on the public release</span> <span class="e-assure-text">Its own image, self-hosted in place of the public one, on the same database.</span></span>
+        </li>
+        <li>
+          <span class="e-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"></path><circle cx="9" cy="7" r="4"></circle><path d="M22 21v-2a4 4 0 0 0-3-3.87"></path><path d="M16 3.13a4 4 0 0 1 0 7.75"></path></svg></span>
+          <span><span class="e-assure-title">Seats and 30 days' grace</span> <span class="e-assure-text">Seats count active users. A grace period of 30 days follows the expiry date.</span></span>
+        </li>
+        <li>
+          <span class="e-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect width="18" height="11" x="3" y="11" rx="2" ry="2"></rect><path d="M7 11V7a5 5 0 0 1 9.9-1"></path></svg></span>
+          <span><span class="e-assure-title">Nobody is ever locked out</span> <span class="e-assure-text">The license decides only what the audit log records and whether the Activity page can be read.</span></span>
+        </li>
+      </ul>
+    </div>
+    <figure class="shot shot-bezel e-hero-shot">
+      <div class="e-frame e-crop e-crop-hero">
+        <img class="only-light" src="{{ site.baseurl }}/assets/screens/activity-light.webp" alt="The Activity page under Administration: sign-ins, API token events and changes across every project, newest first, with one change open beside the list" width="2880" height="1730" loading="lazy" fetchpriority="high" data-hero="light">
+        <img class="only-dark" src="{{ site.baseurl }}/assets/screens/activity-dark.webp" alt="The Activity page under Administration: sign-ins, API token events and changes across every project, newest first, with one change open beside the list" width="2880" height="1730" loading="lazy" data-hero="dark">
+      </div>
+    </figure>
+    <p class="shot-caption e-caption">Administration → Activity, with demo data.</p>
+  </div>
+</section>
+
+<section class="section section-alt" id="available-today">
+  <div class="container">
+    <div class="e-today">
+      <div class="e-today-copy">
+        <div class="section-head">
+          <span class="eyebrow">Available today</span>
+          <h2>Who got in, as well as what changed</h2>
+          <p class="lead">Every edition records each change a person makes, with who made it, when and the fields it changed. Enterprise adds four things.</p>
+        </div>
+        <ol class="e-feats">
+          <li class="e-feat">
+            <span class="e-num" aria-hidden="true">1</span>
+            <h3 class="e-feat-title">Sign-ins</h3>
+            <p class="e-feat-text">Every sign-in by password, invite link or sign-in provider, failed ones included, with its method, the address it came from and the browser. A failed sign-in records why it was refused.</p>
+          </li>
+          <li class="e-feat">
+            <span class="e-num" aria-hidden="true">2</span>
+            <h3 class="e-feat-title">API tokens</h3>
+            <p class="e-feat-text">Each personal access token issued, used for the first time and revoked, and each sign-in provider account unlinked from a user.</p>
+          </li>
+          <li class="e-feat">
+            <span class="e-num" aria-hidden="true">3</span>
+            <h3 class="e-feat-title">The Activity page</h3>
+            <p class="e-feat-text">Every entry of the install on one page under Administration → Activity, the changes recorded before the license included, filtered by entity type, action, the user who acted, project and time.</p>
+          </li>
+          <li class="e-feat">
+            <span class="e-num" aria-hidden="true">4</span>
+            <h3 class="e-feat-title">Export for a SIEM</h3>
+            <p class="e-feat-text">Every entry under the page's filters as JSON lines, and an <code>audit</code> line per entry in the server log for a log pipeline to collect.</p>
+          </li>
+        </ol>
+        <a class="link e-more" href="{{ site.baseurl }}/audit-log#octoprox-enterprise">Details in the audit log docs<svg class="arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14"></path><path d="m12 5 7 7-7 7"></path></svg></a>
+      </div>
+      <figure class="shot e-today-shot">
+        <div class="e-crop e-crop-today">
+          <img class="only-light" src="{{ site.baseurl }}/assets/screens/activity-light.webp" alt="The Activity page: the Export JSON lines button, the retention setting, filters by entity, action, actor, project and time, and the list of entries with Signed in, Token first used, Token issued and Sign-in failed among the changes" width="2880" height="1730" loading="lazy">
+          <img class="only-dark" src="{{ site.baseurl }}/assets/screens/activity-dark.webp" alt="The Activity page: the Export JSON lines button, the retention setting, filters by entity, action, actor, project and time, and the list of entries with Signed in, Token first used, Token issued and Sign-in failed among the changes" width="2880" height="1730" loading="lazy">
+          <span class="e-pin e-pin-1" aria-hidden="true">1</span>
+          <span class="e-pin e-pin-2" aria-hidden="true">2</span>
+          <span class="e-pin e-pin-3" aria-hidden="true">3</span>
+          <span class="e-pin e-pin-4" aria-hidden="true">4</span>
+        </div>
+        <figcaption class="shot-caption">The Activity page, with demo data. The numbers match the list.</figcaption>
+      </figure>
+    </div>
+  </div>
+</section>
+
+<section class="section" id="what-it-is">
+  <div class="container">
+    <div class="e-swap">
+      <div class="section-head e-swap-head">
+        <span class="eyebrow">Deployment</span>
+        <h2>Same Octoprox, one image swap</h2>
+        <p class="lead">Octoprox Enterprise is the public release with the Enterprise package added, published as its own image. Everything else works as it does on the free edition.</p>
+      </div>
+      <div class="terminal e-diff">
+        <div class="terminal-bar">
+          <span class="terminal-title e-diff-file"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"></path><path d="M14 2v4a2 2 0 0 0 2 2h4"></path></svg>docker-compose.ghcr.yml</span>
+          <span class="e-diff-stat">1 line changed</span>
+        </div>
+        <pre><code><span class="line"><span class="d"> </span>services:</span><span class="line"><span class="d"> </span>  octoprox:</span><span class="line del"><span class="d">-</span>    image: ghcr.io/octoprox/<wbr><span class="nb">octoprox:latest</span></span><span class="line add"><span class="d">+</span>    image: ghcr.io/octoprox/<wbr><span class="nb">octoprox-enterprise</span><wbr>:{{ ent_release.version }}</span></code></pre>
+      </div>
+    </div>
+    <ol class="e-steps">
+      <li class="e-step">
+        <span class="e-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16Z"></path><path d="m3.3 7 8.7 5 8.7-5"></path><path d="M12 22V12"></path></svg></span>
+        <h3 class="e-step-title">Run the Enterprise image</h3>
+        <p class="e-step-text">In place of the public one. Each Enterprise release follows the public release of the same version.</p>
+      </li>
+      <li class="e-step">
+        <span class="e-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><ellipse cx="12" cy="5" rx="9" ry="3"></ellipse><path d="M3 5V19A9 3 0 0 0 21 19V5"></path><path d="M3 12A9 3 0 0 0 21 12"></path></svg></span>
+        <h3 class="e-step-title">Keep your settings and database</h3>
+        <p class="e-step-text">The same settings and roles, on the same database.</p>
+      </li>
+      <li class="e-step">
+        <span class="e-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.586 17.414A2 2 0 0 0 2 18.828V21a1 1 0 0 0 1 1h3a1 1 0 0 0 1-1v-1a1 1 0 0 1 1-1h1a1 1 0 0 0 1-1v-1a1 1 0 0 1 1-1h.172a2 2 0 0 0 1.414-.586l.814-.814a6.5 6.5 0 1 0-4-4z"></path><circle cx="16.5" cy="7.5" r=".5" fill="currentColor"></circle></svg></span>
+        <h3 class="e-step-title">Paste the license key</h3>
+        <p class="e-step-text">On the License card under Administration → System, to turn on what Enterprise adds.</p>
+      </li>
+    </ol>
+  </div>
+</section>
+
+<section class="section section-alt" id="how-licensing-works">
+  <div class="container">
+    <div class="e-lic">
+      <div class="e-lic-copy">
+        <div class="section-head">
+          <span class="eyebrow">How licensing works</span>
+          <h2>Licensing, plainly</h2>
+          <p class="lead">One key turns on what Enterprise adds. Renewing, or adding seats, is a new key pasted over the old one.</p>
+        </div>
+        <dl class="e-terms">
+          <div>
+            <dt>Seats</dt>
+            <dd>Seats count active users. More active users than seats blocks nobody: admins see a banner.</dd>
+          </div>
+        </dl>
+      </div>
+      <div class="e-keycard">
+        <div class="e-keycard-head">
+          <span class="e-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.586 17.414A2 2 0 0 0 2 18.828V21a1 1 0 0 0 1 1h3a1 1 0 0 0 1-1v-1a1 1 0 0 1 1-1h1a1 1 0 0 0 1-1v-1a1 1 0 0 1 1-1h.172a2 2 0 0 0 1.414-.586l.814-.814a6.5 6.5 0 1 0-4-4z"></path><circle cx="16.5" cy="7.5" r=".5" fill="currentColor"></circle></svg></span>
+          <span class="e-label">A license key</span>
+        </div>
+        <div class="e-keyline"><span class="e-key-prefix">oxl1.</span><span class="e-key-mask" aria-hidden="true"></span></div>
+        <p class="e-label e-keycard-sub">It names</p>
+        <ul class="e-keyfields">
+          <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 22V4a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v18Z"></path><path d="M6 12H4a2 2 0 0 0-2 2v6a2 2 0 0 0 2 2h2"></path><path d="M18 9h2a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2h-2"></path><path d="M10 6h4"></path><path d="M10 10h4"></path><path d="M10 14h4"></path><path d="M10 18h4"></path></svg>Organisation</li>
+          <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"></path><circle cx="9" cy="7" r="4"></circle><path d="M22 21v-2a4 4 0 0 0-3-3.87"></path><path d="M16 3.13a4 4 0 0 1 0 7.75"></path></svg>Seats</li>
+          <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 2v4"></path><path d="M16 2v4"></path><rect width="18" height="18" x="3" y="4" rx="2"></rect><path d="M3 10h18"></path></svg>Expiry date</li>
+          <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m3 17 2 2 4-4"></path><path d="m3 7 2 2 4-4"></path><path d="M13 6h8"></path><path d="M13 12h8"></path><path d="M13 18h8"></path></svg>Features</li>
+        </ul>
+        <p class="e-keycard-note"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"></circle><path d="m9 12 2 2 4-4"></path></svg>The License card under Administration → System shows them, with the seats in use.</p>
+      </div>
+    </div>
+
+    <div class="e-life">
+      <div class="e-life-head">
+        <h3>Expiry, grace and after</h3>
+        <p>Active up to and including the expiry date, then 30 days' grace. In every state, the license decides only what the audit log records and whether the Activity page can be read.</p>
+      </div>
+      <table class="e-life-table" role="table">
+        <caption class="visually-hidden">What is recorded and readable in each state of a license</caption>
+        <colgroup><col class="c-what"><col><col><col></colgroup>
+        <thead role="rowgroup">
+          <tr role="row">
+            <td role="cell"></td>
+            <th scope="col" role="columnheader"><span class="e-phase">Active</span> <span class="e-phase-sub">Until expiry</span></th>
+            <th scope="col" role="columnheader"><span class="e-phase e-phase-grace">Grace period</span> <span class="e-phase-sub">30 days</span></th>
+            <th scope="col" role="columnheader"><span class="e-phase e-phase-after">After grace</span> <span class="e-phase-sub">Until a new key</span></th>
+          </tr>
+        </thead>
+        <tbody role="rowgroup">
+          <tr role="row">
+            <th scope="row" role="rowheader">Sign-in, passwords and tokens</th>
+            <td colspan="3" role="cell" aria-colspan="3"><span class="e-bar e-bar-on"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect width="18" height="11" x="3" y="11" rx="2" ry="2"></rect><path d="M7 11V7a5 5 0 0 1 9.9-1"></path></svg>Work the same in every state: nobody is ever locked out</span></td>
+          </tr>
+          <tr role="row">
+            <th scope="row" role="rowheader">Changes, with who, when and the fields</th>
+            <td colspan="3" role="cell" aria-colspan="3"><span class="e-bar e-bar-on"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"></path></svg>Recorded, as on every edition</span></td>
+          </tr>
+          <tr role="row">
+            <th scope="row" role="rowheader">Sign-ins, token events and audit lines in the server log</th>
+            <td colspan="2" role="cell" aria-colspan="2"><span class="e-bar e-bar-on"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"></path></svg>Recorded</span></td>
+            <td role="cell"><span class="e-bar e-bar-off">Not recorded</span></td>
+          </tr>
+          <tr role="row">
+            <th scope="row" role="rowheader">The Activity page and its export</th>
+            <td colspan="3" role="cell" aria-colspan="3"><span class="e-bar e-bar-on"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"></path></svg>Readable, so an install can still answer an auditor</span></td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</section>
+
+<section class="section" id="planned">
+  <div class="container">
+    <div class="e-planned">
+      <div class="section-head">
+        <span class="eyebrow">Planned</span>
+        <h2>Access from your directory</h2>
+        <p class="lead">Later releases are planned to hand access control to your directory. None of these is available yet; <a href="{{ site.baseurl }}/sso#octoprox-enterprise">Single Sign-On</a> describes each as designed.</p>
+      </div>
+      <div>
+        <ul class="e-plan-list">
+          <li class="e-plan-item"><p><span class="badge badge-planned">Planned</span> <strong>Domain rules:</strong> everyone whose verified email is at your domain signs in and gets a user on first login, with a default role.</p></li>
+          <li class="e-plan-item"><p><span class="badge badge-planned">Planned</span> <strong>Your own identity provider:</strong> any OpenID Connect or SAML 2.0 provider, such as Okta, Entra ID, Auth0, Keycloak or Ping.</p></li>
+          <li class="e-plan-item"><p><span class="badge badge-planned">Planned</span> <strong>Group sync:</strong> roles from directory groups, re-evaluated on every sign-in.</p></li>
+          <li class="e-plan-item"><p><span class="badge badge-planned">Planned</span> <strong>Enforcement:</strong> the identity provider required for everyone except <span class="e-nowrap">break-glass</span> admins.</p></li>
+          <li class="e-plan-item"><p><span class="badge badge-planned">Planned</span> <strong>Provisioning:</strong> SCIM 2.0, so a leaver loses access the moment the directory says so.</p></li>
+        </ul>
+        <p class="e-plan-today"><span class="badge badge-available badge-dot">Available today</span> On every edition: sign-in with a password or a Google, Microsoft (one Entra tenant) or GitHub account, and personal access tokens.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="section section-alt" id="free-and-enterprise">
+  <div class="container">
+    <div class="section-head">
+      <span class="eyebrow">Editions</span>
+      <h2>Free and Enterprise</h2>
+      <p class="lead">The same release on both. Enterprise adds a record of who got in, across the whole install.</p>
+    </div>
+    <div class="e-ed-wrap">
+      <table class="e-ed" role="table">
+        <caption class="visually-hidden">Free and Enterprise compared</caption>
+        <colgroup><col class="c-feat"><col class="c-free"><col class="c-ent"></colgroup>
+        <thead role="rowgroup">
+          <tr role="row"><th scope="col" role="columnheader">Feature</th><th scope="col" role="columnheader">Free</th><th scope="col" role="columnheader" class="e-ed-ent">Enterprise</th></tr>
+        </thead>
+        <tbody role="rowgroup">
+          <tr role="row">
+            <th scope="row" role="rowheader">Proxy routing, providers, IP attribution, tunnel devices, metrics and the dashboard</th>
+            <td role="cell"><span class="e-yes"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.25" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"></path></svg>Yes</span></td>
+            <td role="cell" class="e-ed-ent"><span class="e-yes"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.25" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"></path></svg>Yes, the same release</span></td>
+          </tr>
+          <tr role="row">
+            <th scope="row" role="rowheader">Sign-in with a password or a Google, Microsoft or GitHub account, and personal access tokens</th>
+            <td role="cell"><span class="e-yes"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.25" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"></path></svg>Yes</span></td>
+            <td role="cell" class="e-ed-ent"><span class="e-yes"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.25" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"></path></svg>Yes</span></td>
+          </tr>
+          <tr role="row">
+            <th scope="row" role="rowheader">Every change a person makes, with who, when and the fields it changed</th>
+            <td role="cell"><span class="e-yes"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.25" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"></path></svg>Yes</span></td>
+            <td role="cell" class="e-ed-ent"><span class="e-yes"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.25" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"></path></svg>Yes</span></td>
+          </tr>
+          <tr role="row">
+            <th scope="row" role="rowheader">Sign-ins, failed ones included, with method, address and browser</th>
+            <td role="cell"><span class="e-no"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.25" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14"></path></svg>No</span></td>
+            <td role="cell" class="e-ed-ent"><span class="e-yes"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.25" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"></path></svg>Yes</span></td>
+          </tr>
+          <tr role="row">
+            <th scope="row" role="rowheader">API tokens issued, first used and revoked</th>
+            <td role="cell"><span class="e-no"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.25" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14"></path></svg>No</span></td>
+            <td role="cell" class="e-ed-ent"><span class="e-yes"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.25" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"></path></svg>Yes</span></td>
+          </tr>
+          <tr role="row">
+            <th scope="row" role="rowheader">The whole install's audit log on the Activity page, with filters</th>
+            <td role="cell"><span class="e-no"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.25" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14"></path></svg>No</span></td>
+            <td role="cell" class="e-ed-ent"><span class="e-yes"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.25" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"></path></svg>Yes</span></td>
+          </tr>
+          <tr role="row">
+            <th scope="row" role="rowheader">Export as JSON lines, and an audit line per entry in the server log</th>
+            <td role="cell"><span class="e-no"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.25" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14"></path></svg>No</span></td>
+            <td role="cell" class="e-ed-ent"><span class="e-yes"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.25" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"></path></svg>Yes</span></td>
+          </tr>
+          <tr role="row">
+            <th scope="row" role="rowheader">Domain rules, your own identity provider, group sync, enforcement and provisioning</th>
+            <td role="cell"><span class="e-no"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.25" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14"></path></svg>No</span></td>
+            <td role="cell" class="e-ed-ent"><span class="badge badge-planned">Planned</span></td>
+          </tr>
+        </tbody>
+        <tfoot role="rowgroup">
+          <tr role="row">
+            <td role="cell"></td>
+            <td role="cell"><a class="btn btn-outline" href="{{ site.baseurl }}/getting-started">Get started</a></td>
+            <td role="cell" class="e-ed-ent"><a class="btn btn-primary" href="{{ site.baseurl }}/enterprise#get-in-touch" data-contact>Get in touch</a></td>
+          </tr>
+        </tfoot>
+      </table>
+    </div>
+  </div>
+</section>
+
+<section class="section invert e-cta" id="get-in-touch">
+  <img class="e-cta-mark" src="{{ site.baseurl }}/assets/logos/octoprox_logo_only_dark.svg" alt="" width="131" height="139" loading="lazy" aria-hidden="true">
+  <div class="container">
+    <div class="e-cta-grid">
+      <div class="e-cta-copy">
+        <span class="eyebrow">Talk to us</span>
+        <h2>Get Octoprox Enterprise</h2>
+        <p class="lead">Licenses are arranged by email: write to us for one, or with any question.</p>
+        <div class="actions actions-stack">
+          <a class="btn btn-primary btn-lg" href="{{ site.baseurl }}/enterprise#get-in-touch" data-contact><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect width="20" height="16" x="2" y="4" rx="2"></rect><path d="m22 7-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7"></path></svg>Get in touch</a>
+          <noscript class="contact-address">enterprise at octoprox dot com</noscript>
+        </div>
+      </div>
+      <div class="e-cta-panel">
+        <span class="e-label">A license comes with</span>
+        <ul class="e-cta-list">
+          <li>
+            <span class="e-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.586 17.414A2 2 0 0 0 2 18.828V21a1 1 0 0 0 1 1h3a1 1 0 0 0 1-1v-1a1 1 0 0 1 1-1h1a1 1 0 0 0 1-1v-1a1 1 0 0 1 1-1h.172a2 2 0 0 0 1.414-.586l.814-.814a6.5 6.5 0 1 0-4-4z"></path><circle cx="16.5" cy="7.5" r=".5" fill="currentColor"></circle></svg></span>
+            <span><strong>The license key</strong> <span class="e-cta-text">It names your organisation, seats, expiry date and features.</span></span>
+          </li>
+          <li>
+            <span class="e-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16Z"></path><path d="m3.3 7 8.7 5 8.7-5"></path><path d="M12 22V12"></path></svg></span>
+            <span><strong>Access to the image</strong> <span class="e-cta-text">For the GitHub accounts you name, from GitHub's container registry.</span></span>
+          </li>
+          <li>
+            <span class="e-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m3 17 2 2 4-4"></path><path d="m3 7 2 2 4-4"></path><path d="M13 6h8"></path><path d="M13 12h8"></path><path d="M13 18h8"></path></svg></span>
+            <span><strong>What it turns on</strong> <span class="e-cta-text">Sign-ins, API tokens, the Activity page and export for a SIEM.</span></span>
+          </li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</section>

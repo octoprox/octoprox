@@ -1,0 +1,65 @@
+{%- comment -%}
+  The site footer: what Octoprox is, the link columns and the latest release from _data/releases.yml (newest first).
+{%- endcomment -%}
+{%- assign latest = site.data.releases | first -%}
+<footer class="site-footer">
+  <div class="container">
+    <div class="footer-grid">
+      <div class="footer-brand">
+        <a class="brand" href="{{ site.baseurl }}/" aria-label="Octoprox home">
+          <img class="logo only-light" src="{{ site.baseurl }}/assets/logo/octoprox_horizontal.svg" alt="Octoprox" width="125" height="28">
+          <img class="logo only-dark" src="{{ site.baseurl }}/assets/logo/octoprox_horizontal_dark.svg" alt="Octoprox" width="125" height="28">
+        </a>
+        <p class="footer-tagline">A self-hosted proxy manager: one endpoint that routes your clients' requests through the proxy pools you manage.</p>
+        <p class="footer-license"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m16 16 3-8 3 8c-.87.65-1.92 1-3 1s-2.13-.35-3-1Z"></path><path d="m2 16 3-8 3 8c-.87.65-1.92 1-3 1s-2.13-.35-3-1Z"></path><path d="M7 21h10"></path><path d="M12 3v18"></path><path d="M3 7h2c2 0 5-1 7-2 2 1 5 2 7 2h2"></path></svg>Open source core under Apache 2.0</p>
+        <a class="footer-github" href="https://github.com/octoprox/octoprox"><svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 0c4.42 0 8 3.58 8 8a8.013 8.013 0 0 1-5.45 7.59c-.4.08-.55-.17-.55-.38 0-.27.01-1.13.01-2.2 0-.75-.25-1.23-.54-1.48 1.78-.2 3.65-.88 3.65-3.95 0-.88-.31-1.59-.82-2.15.08-.2.36-1.02-.08-2.12 0 0-.67-.22-2.2.82-.64-.18-1.32-.27-2-.27-.68 0-1.36.09-2 .27-1.53-1.03-2.2-.82-2.2-.82-.44 1.1-.16 1.92-.08 2.12-.51.56-.82 1.28-.82 2.15 0 3.06 1.86 3.75 3.64 3.95-.23.2-.44.55-.51 1.07-.46.21-1.61.55-2.33-.66-.15-.24-.6-.83-1.23-.82-.67.01-.27.38.01.53.34.19.73.9.82 1.13.16.45.68 1.31 2.69.94 0 .67.01 1.3.01 1.49 0 .21-.15.45-.55.38A7.995 7.995 0 0 1 0 8c0-4.42 3.58-8 8-8Z"></path></svg>octoprox/octoprox</a>
+      </div>
+      <div class="footer-col">
+        <h2 class="footer-heading">Product</h2>
+        <ul class="footer-links">
+          <li><a href="{{ site.baseurl }}/routing-strategies">Routing</a></li>
+          <li><a href="{{ site.baseurl }}/ip-attribution">IP attribution</a></li>
+          <li><a href="{{ site.baseurl }}/traffic-limits">Traffic limits and billing</a></li>
+          <li><a href="{{ site.baseurl }}/metrics">Metrics</a></li>
+          <li><a href="{{ site.baseurl }}/wireguard">Tunnel devices</a></li>
+          <li><a href="{{ site.baseurl }}/providers">Proxy providers</a></li>
+        </ul>
+      </div>
+      <div class="footer-col">
+        <h2 class="footer-heading">Docs</h2>
+        <ul class="footer-links">
+          <li><a href="{{ site.baseurl }}/getting-started">Quick start</a></li>
+          <li><a href="{{ site.baseurl }}/connecting">Connecting clients</a></li>
+          <li><a href="{{ site.baseurl }}/configuration">Configuration</a></li>
+          <li><a href="{{ site.baseurl }}/deployment">Deployment and scaling</a></li>
+          <li><a href="{{ site.baseurl }}/kubernetes">Running on Kubernetes</a></li>
+          <li><a href="{{ site.baseurl }}/api">API reference</a></li>
+        </ul>
+      </div>
+      <div class="footer-col">
+        <h2 class="footer-heading">Enterprise</h2>
+        <ul class="footer-links">
+          <li><a href="{{ site.baseurl }}/enterprise">Octoprox Enterprise</a></li>
+          <li><a href="{{ site.baseurl }}/audit-log">Audit log</a></li>
+          <li><a href="{{ site.baseurl }}/sso">Sign-in and API tokens</a></li>
+          <li><a href="{{ site.baseurl }}/enterprise#get-in-touch">Talk to us</a></li>
+        </ul>
+      </div>
+      <div class="footer-col">
+        <h2 class="footer-heading">Resources</h2>
+        <ul class="footer-links">
+          <li><a href="https://github.com/octoprox/octoprox">GitHub</a></li>
+          <li><a href="{{ site.baseurl }}/changelog">Changelog</a></li>
+          <li><a href="{{ site.baseurl }}/scrapoxy-migration">Migrating from Scrapoxy</a></li>
+          <li><a href="https://github.com/octoprox/octoprox/issues">Report an issue</a></li>
+        </ul>
+      </div>
+    </div>
+    <div class="footer-bottom">
+      <p class="footer-legal">Licensed under <a href="https://opensource.org/licenses/Apache-2.0">Apache 2.0</a>, except the built-in provider descriptors (all rights reserved).</p>
+      {%- if latest %}
+      <a class="footer-version" href="{{ site.baseurl }}/changelog#v{{ latest.version | replace: '.', '-' }}">Latest release {{ latest.version }}</a>
+      {%- endif %}
+    </div>
+  </div>
+</footer>

@@ -56,7 +56,7 @@ The engines open their own tunnels through the upstream proxy. A request that ca
 
 ## Protocol Support
 
-When MITM is **disabled**, Octoprox creates a raw TCP tunnel (`CONNECT`) and is completely protocol-agnostic - HTTP/2, HTTP/3 (QUIC), WebSocket, and any other protocol work transparently.
+When MITM is **disabled**, Octoprox creates a raw TCP tunnel (`CONNECT`) and is completely protocol-agnostic - HTTP/2, WebSocket, and any other TCP protocol work transparently. HTTP/3 (QUIC) runs over UDP, which a `CONNECT` tunnel does not carry, so clients use HTTP/2 or HTTP/1.1 through it instead.
 
 When MITM is **enabled**, the proxy terminates TLS and parses traffic itself. The current implementation uses [h11](https://h11.readthedocs.io/) on the client-facing side, which limits interception to **HTTP/1.1** only. On the relay side, the impersonation engines (`curl_cffi`, `rnet`) negotiate HTTP/2 with the target server automatically.
 

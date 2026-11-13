@@ -190,6 +190,9 @@ export const COUNTRY_CODES = (
   'TT TV TW TZ UA UG UM US UY UZ VA VC VE VG VI VN VU WF WS XK YE YT ZA ZM ZW'
 ).split(' ')
 
+/** A city slug as words, for prose and labels: `new_york` reads New York. */
+export const cityWords = (slug: string) => slug.split('_').map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(' ')
+
 let regionNames: Intl.DisplayNames | null | undefined
 /** English name for a country code, falling back to the code itself. */
 export function countryLabel(code: string): string {

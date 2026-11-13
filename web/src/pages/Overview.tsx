@@ -12,11 +12,11 @@ import {
   HISTORY_RANGES, HISTORY_GAP_MS, HistoryRange,
 } from '../api/client'
 import { useProject } from '../contexts/ProjectContext'
-import { formatRangeTick, rangeDomain, useTimeRange } from '../contexts/TimeRangeContext'
+import { formatRangeTick, rangeDomain, rangeTicks, useTimeRange } from '../contexts/TimeRangeContext'
 import { useAuth } from '../contexts/AuthContext'
 import { useTheme } from '../contexts/ThemeContext'
 import { useToast } from '../contexts/ToastContext'
-import { bytesShort, compact, formatBytes, formatMoney, parseApiDate, plural } from '../utils/format'
+import { bytesShort, bytesTick, compact, formatBytes, formatMoney, formatRpm, parseApiDate, plural } from '../utils/format'
 import { targetTotal, describeTarget, isDynamic } from '../utils/connectors'
 import { ProviderLogo } from '../components/ProviderLogo'
 import { Page } from '../components/layout/Page'
@@ -158,6 +158,7 @@ export default function Overview() {
   const chartData = useMemo(() => buildChartData(snapshots, range), [snapshots, range])
   // Anchored to when the data arrived, so every refetch moves the axis with the window.
   const timeDomain = useMemo(() => rangeDomain(range, historyUpdatedAt), [range, historyUpdatedAt])
+  const timeTicks = useMemo(() => rangeTicks(range, timeDomain), [range, timeDomain])
   const sparks = useMemo(() => ({
     requests: sample(snapshots.map((s) => s.request_count)),
     successes: sample(snapshots.map((s) => s.success_count)),
@@ -208,8 +209,8 @@ export default function Overview() {
           <div className="flex items-center justify-between gap-3 flex-wrap">
             <div className="text-sm font-semibold">Pool health</div>
             <div className="text-xs text-fg-muted tabular-nums min-w-0">
-              <b className="text-fg font-semibold">{total}</b> proxies · avg latency <b className="text-fg font-semibold">{avgLatency}</b>
-              {scaling && <> · <b className="text-fg font-semibold">{scaling.requests_per_minute.toFixed(0)}</b> req/min</>}
+              <span className="whitespace-nowrap"><b className="text-fg font-semibold">{total}</b> proxies</span> · <span className="whitespace-nowrap">avg latency <b className="text-fg font-semibold">{avgLatency}</b></span>
+              {scaling && <> · <span className="whitespace-nowrap"><b className="text-fg font-semibold">{formatRpm(scaling.requests_per_minute)}</b> req/min</span></>}
             </div>
           </div>
           <div className="flex h-2.5 rounded-md overflow-hidden gap-0.5 bg-surface-raised">
@@ -227,7 +228,8 @@ export default function Overview() {
             <Legend dot="bg-orange-500" n={quarantined} label="quarantined" />
             <Legend dot="bg-danger" n={unhealthy} label="unhealthy" />
             {leaving > 0 && <Legend dot="bg-fg-subtle/40" n={leaving} label="draining / terminating" />}
-            <span className="flex-1" />
+            {/* Pushes the instance counts right where the legend is one line; wrapped, they stay left like the rest. */}
+            <span className="hidden @xl:block flex-1" />
             {scaling && scaling.draining_instances > 0 && (
               <span className="inline-flex items-center gap-1.5"><Loader className="w-3 h-3 text-orange-500 animate-spin" /> {scaling.draining_instances} draining</span>
             )}
@@ -246,8 +248,9 @@ export default function Overview() {
         <Kpi label="Failures" value={compact(totals.failures)} spark={sparks.failures} color={C.failures} sub={totals.failures > 0 ? 'See why →' : undefined} onClick={() => navigate(`${base}/failures`)} />
         <Kpi label="Bytes sent" value={bytesShort(totals.bytesSent)} spark={sparks.sent} color={C.sent} />
         <Kpi label="Bytes received" value={bytesShort(totals.bytesReceived)} spark={sparks.received} color={C.received} />
-        <Kpi label="Requests / min" value={scaling ? scaling.requests_per_minute.toFixed(1) : '-'} sub={scaling ? `${scaling.rate_per_proxy.toFixed(1)} per proxy` : undefined} />
-        {spend && <Kpi label={`Spend ${spend.label}`} value={formatMoney(spend.amount, spend.currency)} sub={spend.overLimit > 0 ? `${spend.overLimit} ${plural(spend.overLimit, 'connector', 'connectors')} over limit` : 'at current rates'} />}
+        <Kpi label="Requests / min" value={scaling ? formatRpm(scaling.requests_per_minute) : '-'} sub={scaling ? `${scaling.rate_per_proxy.toFixed(1)} per proxy` : undefined} />
+        {/* The seventh tile is alone on the last row of two or three columns: it takes the whole row rather than leave a gap. */}
+        {spend && <Kpi label={`Spend ${spend.label}`} value={formatMoney(spend.amount, spend.currency)} sub={spend.overLimit > 0 ? `${spend.overLimit} ${plural(spend.overLimit, 'connector', 'connectors')} over limit` : 'at current rates'} className="col-span-2 @lg:col-span-3 @5xl:col-span-1" />}
       </Card>
 
       <div className="grid grid-cols-1 @4xl:grid-cols-[minmax(0,2fr)_minmax(0,1fr)] gap-4 items-stretch">
@@ -267,7 +270,7 @@ export default function Overview() {
               <ResponsiveContainer width="100%" height={240}>
                 <AreaChart data={chartData} margin={{ top: 8, right: 8, left: -12, bottom: 0 }} aria-label="Requests over time">
                   <CartesianGrid strokeDasharray="2 4" stroke={gridColor} vertical={false} />
-                  <XAxis dataKey="time" type="number" scale="time" domain={timeDomain} tickFormatter={(v: number) => formatRangeTick(v, range)} tick={{ fontSize: 11, fill: tickColor }} axisLine={false} tickLine={false} minTickGap={48} />
+                  <XAxis dataKey="time" type="number" scale="time" domain={timeDomain} ticks={timeTicks} tickFormatter={(v: number) => formatRangeTick(v, range)} tick={{ fontSize: 11, fill: tickColor }} axisLine={false} tickLine={false} minTickGap={48} />
                   <YAxis allowDecimals={false} tick={{ fontSize: 11, fill: tickColor }} axisLine={false} tickLine={false} />
                   <Tooltip labelFormatter={(v) => new Date(Number(v)).toLocaleString()} contentStyle={tooltipStyle} itemSorter={(item) => REQUEST_SERIES.indexOf(String(item.dataKey))} />
                   <Area connectNulls={false} type="monotone" dataKey="request_count" name="Requests" stroke={C.requests} strokeWidth={2} fill={C.requests} fillOpacity={0.08} />
@@ -291,10 +294,10 @@ export default function Overview() {
                 <p className="text-fg-subtle text-xs text-center h-[110px] flex items-center justify-center">No data</p>
               ) : (
                 <ResponsiveContainer width="100%" height={110}>
-                  <AreaChart data={chartData} margin={{ top: 6, right: 4, left: -8, bottom: 0 }} aria-label="Traffic over time">
+                  <AreaChart data={chartData} margin={{ top: 12, right: 4, left: 0, bottom: 0 }} aria-label="Traffic over time">
                     <CartesianGrid strokeDasharray="2 4" stroke={gridColor} vertical={false} />
-                    <XAxis dataKey="time" type="number" scale="time" domain={timeDomain} tickFormatter={(v: number) => formatRangeTick(v, range)} tick={{ fontSize: 10, fill: tickColor }} axisLine={false} tickLine={false} minTickGap={48} />
-                    <YAxis tick={{ fontSize: 10, fill: tickColor }} axisLine={false} tickLine={false} tickFormatter={(v: number) => bytesShort(v)} width={56} />
+                    <XAxis dataKey="time" type="number" scale="time" domain={timeDomain} ticks={timeTicks} tickFormatter={(v: number) => formatRangeTick(v, range)} tick={{ fontSize: 10, fill: tickColor }} axisLine={false} tickLine={false} minTickGap={48} />
+                    <YAxis tick={{ fontSize: 10, fill: tickColor }} axisLine={false} tickLine={false} tickFormatter={bytesTick} width={56} />
                     <Tooltip labelFormatter={(v) => new Date(Number(v)).toLocaleString()} formatter={(v) => formatBytes(Number(v))} contentStyle={tooltipStyle} itemSorter={(item) => TRAFFIC_SERIES.indexOf(String(item.dataKey))} />
                     <Area connectNulls={false} type="monotone" dataKey="bytes_sent" name="Sent" stroke={C.sent} strokeWidth={2} fill={C.sent} fillOpacity={0.08} />
                     <Area connectNulls={false} type="monotone" dataKey="bytes_received" name="Received" stroke={C.received} strokeWidth={2} fill={C.received} fillOpacity={0.08} />
@@ -407,7 +410,7 @@ export default function Overview() {
             <div className="h-1.5 rounded-full bg-primary-soft overflow-hidden my-2">
               <div className="h-full bg-primary rounded-full" style={{ width: `${scaling.max_instances > 0 ? Math.min(100, (scaling.current_instances / scaling.max_instances) * 100) : 0}%` }} />
             </div>
-            <KeyValue label="Requests/min" value={scaling.requests_per_minute.toFixed(1)} />
+            <KeyValue label="Requests/min" value={formatRpm(scaling.requests_per_minute)} />
             <KeyValue label="Rate per proxy" value={scaling.rate_per_proxy.toFixed(1)} />
             <KeyValue label="Draining" value={scaling.draining_instances} />
             <KeyValue label="Terminating" value={scaling.terminating_instances} />
@@ -444,12 +447,12 @@ function ChartLegend({ items, small }: { items: [string, string][]; small?: bool
   )
 }
 
-function Kpi({ label, value, sub, spark, color, onClick }: { label: string; value: string; sub?: string; spark?: number[]; color?: string; onClick?: () => void }) {
+function Kpi({ label, value, sub, spark, color, onClick, className }: { label: string; value: string; sub?: string; spark?: number[]; color?: string; onClick?: () => void; className?: string }) {
   const Tile = onClick ? 'button' : 'div'
   return (
     <Tile
       {...(onClick ? { type: 'button' as const, onClick } : {})}
-      className={cn('px-3 py-2.5 @lg:px-4 @lg:py-3 flex flex-col gap-1 min-w-0 text-left', onClick && 'hover:bg-surface-raised! transition-colors')}
+      className={cn('px-3 py-2.5 @lg:px-4 @lg:py-3 flex flex-col gap-1 min-w-0 text-left', onClick && 'hover:bg-surface-raised! transition-colors', className)}
     >
       <div className="text-xs text-fg-muted truncate">{label}</div>
       {/* Wrapping drops the sparkline under the value when both do not fit, so a tight tile never truncates the number */}
@@ -458,7 +461,7 @@ function Kpi({ label, value, sub, spark, color, onClick }: { label: string; valu
           <div className="text-[17px] leading-6 @lg:text-[21px] @lg:leading-7 font-semibold tabular-nums truncate" title={value}>{value}</div>
           {sub && <div className="text-[11px] text-fg-subtle truncate">{sub}</div>}
         </div>
-        {spark && spark.length > 1 && color && <Sparkline values={spark} color={color} width={48} height={24} />}
+        {spark && spark.length > 1 && color && <Sparkline values={spark} color={color} width={40} height={24} />}
       </div>
     </Tile>
   )

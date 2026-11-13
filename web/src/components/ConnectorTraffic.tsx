@@ -15,9 +15,9 @@ import {
   fetchConnectorMetricsHistory, resetConnectorTraffic,
   HISTORY_RANGES,
 } from '../api/client'
-import { formatBytesDecimal, formatDateTime, formatMoney, parseApiDate, timeUntil } from '../utils/format'
+import { bytesTick, formatBytesDecimal, formatDateTime, formatMoney, parseApiDate, timeUntil } from '../utils/format'
 import { useTheme } from '../contexts/ThemeContext'
-import { formatRangeTick, useTimeRange } from '../contexts/TimeRangeContext'
+import { formatRangeTick, rangeTicks, useTimeRange } from '../contexts/TimeRangeContext'
 import { useToast } from '../contexts/ToastContext'
 import { Badge, ConfirmDialog, InspectorSection, KeyValue, LogoLoader, Segmented } from './ui'
 import { cn } from '../utils/cn'
@@ -122,6 +122,8 @@ export function ConnectorTrafficSection({ connector, projectId, canMutate }: { c
   const { data: history, isLoading } = useConnectorHistory(projectId, connector.id, range)
   const points = useMemo(() => toPoints(history?.snapshots ?? []), [history])
   const rangeBytes = useMemo(() => points.reduce((a, p) => a + p.bytes, 0), [points])
+  // Ticks on round local times across the data's extent.
+  const ticks = useMemo(() => (points.length > 0 ? rangeTicks(range, [points[0].time, points[points.length - 1].time]) : []), [points, range])
 
   const resetMutation = useMutation({
     mutationFn: () => resetConnectorTraffic(projectId, connector.id),
@@ -179,10 +181,10 @@ export function ConnectorTrafficSection({ connector, projectId, canMutate }: { c
           <p className="text-fg-subtle text-xs text-center h-[90px] flex items-center justify-center">No traffic in this range</p>
         ) : (
           <ResponsiveContainer width="100%" height={90}>
-            <AreaChart data={points} margin={{ top: 4, right: 4, left: -8, bottom: 0 }} aria-label="Traffic over time">
+            <AreaChart data={points} margin={{ top: 10, right: 4, left: -8, bottom: 0 }} aria-label="Traffic over time">
               <CartesianGrid strokeDasharray="2 4" stroke={gridColor} vertical={false} />
-              <XAxis dataKey="time" type="number" scale="time" domain={['dataMin', 'dataMax']} tickFormatter={(v: number) => formatRangeTick(v, range)} tick={{ fontSize: 10, fill: tickColor }} axisLine={false} tickLine={false} minTickGap={40} />
-              <YAxis tick={{ fontSize: 10, fill: tickColor }} axisLine={false} tickLine={false} tickFormatter={(v: number) => formatBytesDecimal(v, 0)} width={52} />
+              <XAxis dataKey="time" type="number" scale="time" domain={['dataMin', 'dataMax']} ticks={ticks} tickFormatter={(v: number) => formatRangeTick(v, range)} tick={{ fontSize: 10, fill: tickColor }} axisLine={false} tickLine={false} minTickGap={40} />
+              <YAxis tick={{ fontSize: 10, fill: tickColor }} axisLine={false} tickLine={false} tickFormatter={bytesTick} width={52} />
               <Tooltip labelFormatter={(v) => new Date(Number(v)).toLocaleString()} formatter={(v) => [formatBytesDecimal(Number(v)), 'Traffic']} contentStyle={tooltipStyle} />
               <Area type="monotone" dataKey="bytes" name="Traffic" stroke={lineColor} strokeWidth={2} fill={lineColor} fillOpacity={0.08} />
             </AreaChart>

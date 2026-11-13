@@ -1,0 +1,47 @@
+{%- comment -%}
+  The site header: logo, nav, theme toggle, Talk to us and Get started; below 900 px the toggle and a menu button.
+  section: the nav item to mark current, such as section="docs" from the docs layout. A page with nav_id enterprise or
+  changelog marks that item itself.
+  menu: the id of the panel the menu button opens instead of the header's own phone menu (the docs drawer).
+{%- endcomment -%}
+{%- assign site_section = include.section -%}
+{%- if page.nav_id == 'enterprise' or page.nav_id == 'changelog' -%}{%- assign site_section = page.nav_id -%}{%- endif -%}
+<header class="site-header">
+  <a class="skip-link" href="#main">Skip to content</a>
+  <div class="brand-bar" aria-hidden="true"></div>
+  <div class="container header-inner">
+    <a class="brand" href="{{ site.baseurl }}/" aria-label="Octoprox home">
+      <img class="logo only-light" src="{{ site.baseurl }}/assets/logo/octoprox_horizontal.svg" alt="Octoprox" width="125" height="28">
+      <img class="logo only-dark" src="{{ site.baseurl }}/assets/logo/octoprox_horizontal_dark.svg" alt="Octoprox" width="125" height="28">
+    </a>
+    <nav class="nav" aria-label="Main">
+      <a href="{{ site.baseurl }}/#features">Features</a>
+      <a href="{{ site.baseurl }}/getting-started"{% if site_section == 'docs' %} aria-current="page"{% endif %}>Docs</a>
+      <a href="{{ site.baseurl }}/enterprise"{% if site_section == 'enterprise' %} aria-current="page"{% endif %}>Enterprise</a>
+      <a class="nav-changelog" href="{{ site.baseurl }}/changelog"{% if site_section == 'changelog' %} aria-current="page"{% endif %}>Changelog</a>
+      <a class="nav-github" href="https://github.com/octoprox/octoprox" aria-label="GitHub">
+        <svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 0c4.42 0 8 3.58 8 8a8.013 8.013 0 0 1-5.45 7.59c-.4.08-.55-.17-.55-.38 0-.27.01-1.13.01-2.2 0-.75-.25-1.23-.54-1.48 1.78-.2 3.65-.88 3.65-3.95 0-.88-.31-1.59-.82-2.15.08-.2.36-1.02-.08-2.12 0 0-.67-.22-2.2.82-.64-.18-1.32-.27-2-.27-.68 0-1.36.09-2 .27-1.53-1.03-2.2-.82-2.2-.82-.44 1.1-.16 1.92-.08 2.12-.51.56-.82 1.28-.82 2.15 0 3.06 1.86 3.75 3.64 3.95-.23.2-.44.55-.51 1.07-.46.21-1.61.55-2.33-.66-.15-.24-.6-.83-1.23-.82-.67.01-.27.38.01.53.34.19.73.9.82 1.13.16.45.68 1.31 2.69.94 0 .67.01 1.3.01 1.49 0 .21-.15.45-.55.38A7.995 7.995 0 0 1 0 8c0-4.42 3.58-8 8-8Z"></path></svg>
+        <span class="nav-github-label">GitHub</span>
+      </a>
+    </nav>
+    <div class="header-actions">
+      <button type="button" class="icon-btn theme-toggle" aria-label="Toggle dark mode" aria-pressed="false" title="Toggle dark mode">
+        <svg class="icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"></path></svg>
+        <svg class="icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="4"></circle><path d="M12 2v2"></path><path d="M12 20v2"></path><path d="m4.93 4.93 1.41 1.41"></path><path d="m17.66 17.66 1.41 1.41"></path><path d="M2 12h2"></path><path d="M20 12h2"></path><path d="m6.34 17.66-1.41 1.41"></path><path d="m19.07 4.93-1.41 1.41"></path></svg>
+      </button>
+      <a class="btn btn-outline header-cta" href="{{ site.baseurl }}/enterprise#get-in-touch">Talk to us</a>
+      <a class="btn btn-primary header-cta" href="{{ site.baseurl }}/getting-started">Get started</a>
+      <button type="button" class="icon-btn menu-btn" aria-label="Menu" aria-expanded="false" aria-controls="{{ include.menu | default: 'mobile-menu' }}">
+        <svg class="icon-menu" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 6h16"></path><path d="M4 12h16"></path><path d="M4 18h16"></path></svg>
+        <svg class="icon-close" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18"></path><path d="m6 6 12 12"></path></svg>
+      </button>
+    </div>
+  </div>
+  {%- unless include.menu %}
+  <nav class="mobile-menu" id="mobile-menu" aria-label="Menu" hidden>
+    <div class="container">
+      {% include site-menu.html section=site_section %}
+    </div>
+  </nav>
+  {%- endunless %}
+</header>

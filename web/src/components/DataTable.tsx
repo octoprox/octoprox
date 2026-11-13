@@ -44,6 +44,8 @@ interface DataTableColumnMeta {
   filterOptions?: { value: string; label: string }[]
   /** Right-align numeric columns. */
   align?: 'left' | 'right'
+  /** For a column with no size: the room it keeps before the table scrolls sideways, when not the usual 170 px. */
+  minWidth?: number
 }
 
 // What every table here can do. 'auto' filtering and sorting only pick from the
@@ -244,7 +246,7 @@ export function DataTable<TData extends RowData>({
   // sized columns would eat all the room on a narrow screen and the unsized ones
   // (host, connector name) would collapse to nothing. Below this width the
   // wrapper scrolls sideways instead, with the identifying column still first.
-  const minTableWidth = visibleColumns.reduce((sum, col) => sum + (col.getSize() !== 150 ? col.getSize() : UNSIZED_COLUMN_MIN_WIDTH), 0)
+  const minTableWidth = visibleColumns.reduce((sum, col) => sum + (col.getSize() !== 150 ? col.getSize() : (col.columnDef.meta?.minWidth ?? UNSIZED_COLUMN_MIN_WIDTH)), 0)
 
   // The loader floats over the rows rather than taking a row of its own, so the page does not move; the header
   // and its filters stay usable. It keeps to the middle of the rows in view, while the reader scrolls as well, so

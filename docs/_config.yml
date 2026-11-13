@@ -1,5 +1,5 @@
 title: Octoprox
-description: Open source proxy manager - one endpoint over cloud instances, provider sessions, static lists and tunnelled devices, with IP attribution, traffic limits and billing. A self-hosted replacement for Scrapoxy.
+description: Open source proxy manager - one endpoint for clients and tunnelled devices over cloud instances, provider sessions and static lists, with IP attribution, traffic limits and billing. A self-hosted replacement for Scrapoxy.
 lang: en_US
 logo: /assets/favicon/web-app-manifest-512x512.png
 url: "https://www.octoprox.com"

@@ -130,7 +130,8 @@ export default function CountriesPage() {
               {reservedBy.length > 0 && <Badge color="blue" className="py-0 text-[11px]" title={`Reserved for ${reservedBy.map((c) => c.name).join(', ')}`}>Reserved</Badge>}
               {excludedBy.length > 0 && <Badge color="gray" className="py-0 text-[11px]" title={`Excluded by ${excludedBy.map((c) => c.name).join(', ')}`}>Excluded{excludedBy.length > 1 ? ` ×${excludedBy.length}` : ''}</Badge>}
             </div>
-            <div className="truncate text-[13px] text-fg-muted">{countryLabel(code)}</div>
+            {/* The name wraps rather than truncates: a wider column would push the routes off a phone's screen. */}
+            <div className="whitespace-normal text-[13px] text-fg-muted">{countryLabel(code)}</div>
           </div>
         )
       },
@@ -139,6 +140,8 @@ export default function CountriesPage() {
       id: 'routes',
       header: 'Requests go to',
       enableSorting: false,
+      // Chips wrap, so less room than other columns keeps both columns on a 360 px phone without sideways scrolling.
+      meta: { minWidth: 130 },
       cell: ({ row }) => row.original.routes.length
         ? <RouteChips routes={row.original.routes} />
         : <span className="inline-flex items-center gap-1.5 text-xs text-danger" title={failureText(row.original.code, overview?.connectors ?? [])}><AlertTriangle className="w-3.5 h-3.5 flex-none" /> Requests fail</span>,

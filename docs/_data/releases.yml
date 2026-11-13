@@ -66,7 +66,7 @@
       docs: location-routing#moving-a-refused-session
     - text: "Deleting a project with cloud connectors now terminates their instances first. Until they are gone, the project shows as deleting, its clients get 407 and it takes no new connectors. The API answers 202 and sets `pending_deletion` on the project during this time."
       docs: api#delete-project
-    - text: "Restoring a backup now terminates the instances of cloud connectors that the backup does not hold. Those connectors move to a project named '<project> (deleting)', which goes away once their instances are terminated."
+    - text: "Restoring a backup now terminates the instances of cloud connectors that the backup does not hold. Those connectors move to a project named `<project> (deleting)`, which goes away once their instances are terminated."
       docs: api
     - text: "Provider syncs that run at the same time no longer add the same proxy twice. A list sync also removes duplicate entries left behind by earlier versions."
       docs: providers

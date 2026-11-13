@@ -12,7 +12,7 @@ import { Page } from '../components/layout/Page'
 import { RouteList } from '../components/RouteList'
 import { Alert, Button, Card, CardHeader, CopyButton, InfoTip, Input, Label, Segmented, Select, Tabs } from '../components/ui'
 import {
-  COUNTRY_CODES, SNIPPETS, US_STATES, countryLabel, effectivePort, formatEndpoint, needsEncoding, omitsPort, parseEndpoint,
+  COUNTRY_CODES, SNIPPETS, US_STATES, cityWords, countryLabel, effectivePort, formatEndpoint, needsEncoding, omitsPort, parseEndpoint,
   proxyLine, proxyUrl, randomSessionId, snippet, type ProxyAccess, type ProxyEndpoint, type SnippetKind,
 } from '../utils/connect'
 
@@ -44,9 +44,6 @@ function Field({ label, value, copy, extra, note }: { label: ReactNode; value: s
     </div>
   )
 }
-
-/** A city slug as words, for prose: `new_york` reads New York. */
-const cityWords = (slug: string) => slug.split('_').map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(' ')
 
 function placeText(location: ConnectInfo['location']): string {
   if (!location?.country) return 'this request'

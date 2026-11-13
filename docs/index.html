@@ -1,187 +1,458 @@
 ---
-layout: null
-title: "Octoprox - Dynamic Proxy Manager"
+layout: product
+title: "Octoprox - Open-Source Self-Hosted Proxy Manager"
 permalink: /
+hero: true
 ---
-<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Octoprox - Dynamic Proxy Manager</title>
-  {% capture seo_tags %}{% seo title=false %}{% endcapture %}
-  {{ seo_tags | replace: 'property="twitter:', 'name="twitter:' }}
-  <link rel="icon" type="image/svg+xml" href="assets/favicon/favicon.svg">
-  <link rel="icon" type="image/png" sizes="96x96" href="assets/favicon/favicon-96x96.png">
-  <link rel="apple-touch-icon" sizes="180x180" href="assets/favicon/apple-touch-icon.png">
-  {% include analytics.html %}
-    <script>
-    // Light by default; the toggle stores a preference. Applied before paint to avoid a flash.
-    (function () {
-      try { if (localStorage.getItem('octoprox_docs_theme') === 'dark') document.documentElement.setAttribute('data-theme', 'dark'); } catch (e) {}
-    })();
-    function toggleTheme() {
-      var root = document.documentElement, dark = root.getAttribute('data-theme') === 'dark';
-      if (dark) root.removeAttribute('data-theme'); else root.setAttribute('data-theme', 'dark');
-      try { localStorage.setItem('octoprox_docs_theme', dark ? 'light' : 'dark'); } catch (e) {}
-    }
-  </script>
-  <style>
-    /* Tokens mirror the app's light and dark themes (web/src/index.css). */
-    :root {
-      color-scheme: light;
-      --bg: #f9fafb; --surface: #ffffff; --raised: #f3f4f6;
-      --fg: #111827; --muted: #6b7280; --subtle: #9ca3af;
-      --line: #e5e7eb; --line-strong: #d1d5db;
-      --primary: #2563eb; --primary-hover: #1d4ed8; --primary-soft: #eff6ff; --primary-soft-fg: #1d4ed8;
-      --success: #16a34a; --success-soft: #f0fdf4;
-    }
-    :root[data-theme="dark"] {
-      color-scheme: dark;
-        --bg: #111827; --surface: #1f2937; --raised: #374151;
-        --fg: #f3f4f6; --muted: #9ca3af; --subtle: #6b7280;
-        --line: #374151; --line-strong: #4b5563;
-        --primary: #7c3aed; --primary-hover: #6d28d9; --primary-soft: #1e3a8a; --primary-soft-fg: #93c5fd;
-        --success: #10b981; --success-soft: #14532d;
-      }
-    * { margin: 0; padding: 0; box-sizing: border-box; }
-    html, body { overflow-x: hidden; }
-    body {
-      font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif;
-      background: var(--bg); color: var(--fg); font-size: 15px; line-height: 1.65; -webkit-font-smoothing: antialiased;
-    }
-    a { color: var(--primary); text-decoration: none; }
-    .container { max-width: 1100px; margin: 0 auto; padding: 0 24px; }
-    header { height: 56px; background: var(--surface); border-bottom: 1px solid var(--line); }
-    header .container { height: 100%; display: flex; justify-content: space-between; align-items: center; gap: 12px; }
-    .logo { height: 28px; width: 125px; display: block; }
-    .logo-dark { display: none; }
-    :root[data-theme="dark"] .logo-light { display: none; }
-    :root[data-theme="dark"] .logo-dark { display: block; }
-    .header-right { display: flex; align-items: center; gap: 8px; flex: none; }
-    nav { display: flex; gap: 4px; }
-    nav a { color: var(--muted); font-size: 13.5px; font-weight: 500; padding: 6px 10px; border-radius: 6px; }
-    nav a:hover { color: var(--fg); background: var(--raised); }
+<style>
+  /* Homepage: the product tour, the two editions, the pools, the quick start and the docs. Tokens, type, buttons,
+     chips, cards, shots, the terminal, the quote and the chrome come from assets/site.css. */
 
-    /* Hero */
-    .hero { padding: 88px 0 56px; }
-    .hero .container { max-width: 760px; text-align: center; }
-    .eyebrow {
-      display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px; border-radius: 9999px;
-      background: var(--primary-soft); color: var(--primary-soft-fg); font-size: 12px; font-weight: 600; letter-spacing: 0.02em; margin-bottom: 18px;
-    }
-    .eyebrow::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--success); }
-    .hero h1 { font-size: 40px; font-weight: 600; letter-spacing: -0.02em; line-height: 1.15; margin-bottom: 14px; }
-    .hero p { font-size: 17px; color: var(--muted); max-width: 600px; margin: 0 auto 28px; }
-    .actions { display: flex; justify-content: center; gap: 10px; flex-wrap: wrap; }
-    .btn {
-      display: inline-flex; align-items: center; height: 40px; padding: 0 18px; border-radius: 8px;
-      font-size: 14px; font-weight: 500; color: #fff; background: var(--primary); transition: background 0.15s;
-    }
-    .btn:hover { background: var(--primary-hover); }
-    .btn-outline { background: var(--surface); color: var(--fg); border: 1px solid var(--line-strong); }
-    .btn-outline:hover { background: var(--raised); }
+  /* A crop shows one region of a capture, in the capture's CSS px: --cx, --cy (top left), --cw, --ch (size) and --iw
+     (the capture's CSS width: 1440 desktop, 390 phone). The box keeps the region's shape at any width. */
+  .crop { position: relative; overflow: hidden; aspect-ratio: var(--cw) / var(--ch); background: var(--bg); }
+  .crop img {
+    position: absolute;
+    display: block;
+    max-width: none;
+    height: auto;
+    width: calc(var(--iw, 1440) / var(--cw) * 100%);
+    left: calc(var(--cx) / var(--cw) * -100%);
+    top: calc(var(--cy) / var(--ch) * -100%);
+  }
+  .on-narrow { display: none !important; }
+  @media (max-width: 639.98px) {
+    .on-wide { display: none !important; }
+    .on-narrow { display: block !important; }
+  }
+  /* Inline code such as -sessid- or Proxy-Status never breaks at its hyphens */
+  main :not(pre) > code { white-space: nowrap; }
+  /* Small mono caps label shared by the tour, the pools and the quick start */
+  .label {
+    font-family: var(--font-mono);
+    font-size: 12px;
+    font-weight: 600;
+    line-height: 1.4;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--muted);
+  }
 
-    /* Quick start */
-    .quick { padding: 0 0 56px; }
-    .quick .container { max-width: 760px; }
-    .quick pre {
-      background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 16px 18px;
-      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 13px; line-height: 1.6; overflow-x: auto;
-    }
-    :root[data-theme="dark"] .quick pre { background: #0b1220; }
-    .quick pre .c { color: var(--subtle); }
-    .quick .hint { text-align: center; color: var(--muted); font-size: 13px; margin-top: 10px; }
+  /* ---------- Hero ---------- */
+  .hero { padding: clamp(2.75rem, 1.5rem + 4.5vw, 5.5rem) 0 clamp(4rem, 2.6rem + 5vw, 7rem); }
+  .hero-intro {
+    display: grid;
+    grid-template-columns: minmax(0, 7fr) minmax(0, 5fr);
+    align-items: center;
+    gap: 28px 64px;
+  }
+  .hero-title { display: grid; justify-items: start; gap: 22px; }
+  .hero-eyebrow { display: inline-flex; align-items: center; gap: 10px; }
+  .hero-eyebrow .brand-rule { width: 28px; }
+  .hero h1 span { display: block; }
+  .hero-side { display: grid; gap: 24px; }
+  .hero-side .lead { max-width: 30rem; }
+  .hero-note { color: var(--muted); font-size: 14px; line-height: 1.6; }
+  .hero-note .badge { margin-right: 4px; vertical-align: 1px; }
+  /* On touch the inline link gets a tap area at least 44 px tall at both note sizes (14 and 16 px); padding on an
+     inline box moves nothing */
+  @media (pointer: coarse) {
+    .hero-note a { padding-block: 14px; }
+  }
+  .hero-figure { margin: clamp(2.5rem, 1.5rem + 3vw, 4rem) 0 0; }
+  .hero-frame { position: relative; }
+  .hero-frame picture, .hero-frame img { display: block; width: 100%; height: auto; }
+  .hotspot {
+    position: absolute;
+    z-index: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 28px;
+    height: 28px;
+    margin: -14px 0 0 -14px;
+    border-radius: 50%;
+    background: var(--primary);
+    color: #ffffff;
+    font-size: 13px;
+    font-weight: 650;
+    line-height: 1;
+    box-shadow: 0 0 0 4px var(--hotspot-ring), 0 4px 10px -2px rgb(17 24 39 / 0.35);
+  }
+  :root { --hotspot-ring: rgb(37 99 235 / 0.2); }
+  :root[data-theme="dark"] { --hotspot-ring: rgb(167 139 250 / 0.28); }
+  .hs-1 { left: 34.6%; top: 14.8%; }
+  .hs-2 { left: 71.9%; top: 40.8%; }
+  .hs-3 { left: 86.8%; top: 29.2%; }
+  .hs-4 { left: 17.9%; top: 75.9%; }
+  .hero-caption { margin-top: 18px; color: var(--muted); font-size: 14px; line-height: 1.5; }
+  .tour-index {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    margin-top: 14px;
+    border-top: 1px solid var(--line);
+  }
+  .tour-index li { display: flex; }
+  .tour-index a {
+    display: grid;
+    grid-template-columns: 24px minmax(0, 1fr);
+    align-content: start;
+    gap: 4px 12px;
+    width: 100%;
+    padding: 18px 20px 4px 0;
+    color: var(--fg);
+    text-decoration: none;
+  }
+  .tour-index li + li a { padding-left: 20px; border-left: 1px solid var(--line); }
+  .ti-num {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 24px;
+    height: 24px;
+    border-radius: 50%;
+    background: var(--primary);
+    color: #ffffff;
+    font-size: 12px;
+    font-weight: 650;
+    line-height: 1;
+  }
+  .ti-title { align-self: center; font-size: 15px; font-weight: 600; line-height: 1.35; }
+  .ti-text { grid-column: 2; color: var(--muted); font-size: 14px; line-height: 1.5; }
+  .ti-go { color: var(--accent); white-space: nowrap; }
+  .ti-go svg { width: 14px; height: 14px; margin-left: 2px; transition: transform 0.15s; }
+  .tour-index a:hover .ti-title { color: var(--accent); }
+  .tour-index a:hover .ti-go svg { transform: translateX(2px); }
+  @media (max-width: 1099.98px) {
+    .hotspot { width: 22px; height: 22px; margin: -11px 0 0 -11px; font-size: 12px; box-shadow: 0 0 0 3px var(--hotspot-ring), 0 3px 8px -2px rgb(17 24 39 / 0.35); }
+    .hero-intro { grid-template-columns: minmax(0, 1fr); gap: 20px; }
+    .hero-side { gap: 26px; }
+    .hero-side .lead { max-width: 40rem; }
+  }
+  @media (max-width: 899.98px) {
+    .tour-index { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .tour-index li:nth-child(3) a { padding-left: 0; border-left: 0; }
+    .tour-index li:nth-child(n + 3) a { border-top: 1px solid var(--line); margin-top: 14px; }
+  }
+  /* Each sentence keeps a line of its own: under 400 px the size follows the width, so "One proxy endpoint." still fits */
+  @media (max-width: 399.98px) {
+    .hero-eyebrow .brand-rule { display: none; }
+    .hero h1 { font-size: min(clamp(2.125rem, 1.6rem + 2.8vw, 3.75rem), 10.1vw); }
+  }
+  @media (max-width: 639.98px) {
+    .hero-note { font-size: 16px; }
+    .hero-caption { text-align: center; }
+    .tour-index { display: none; }
+    /* Phones get the phone capture (the picture's source), cut just past the Pool health card and the rail icon
+       beside it, so no text or icon is sliced; no bezel and no hotspots */
+    .hero-shot { padding: 0; border-radius: 16px; }
+    .hero-frame { aspect-ratio: 390 / 566; overflow: hidden; }
+    .hero-frame img { border: 0; border-radius: 0; }
+    .hotspot { display: none; }
+  }
 
-    /* Features */
-    .features { padding: 24px 0 64px; }
-    .features h2, .docs-index h2 { font-size: 22px; font-weight: 600; letter-spacing: -0.01em; text-align: center; margin-bottom: 8px; }
-    .lead { text-align: center; color: var(--muted); margin-bottom: 32px; }
-    .feature-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 16px; }
-    .feature-card { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 20px; }
-    .feature-card h3 { font-size: 15px; font-weight: 600; margin-bottom: 6px; display: flex; align-items: center; gap: 10px; }
-    .feature-card h3 svg { width: 18px; height: 18px; color: var(--primary); flex: none; }
-    .feature-card p { color: var(--muted); font-size: 14px; }
+  /* ---------- Testimonial ---------- */
+  .quote-band { padding-block: clamp(4rem, 2.8rem + 4.5vw, 7rem); }
+  .quote-a { max-width: 980px; }
+  .quote-a .quote-text { text-indent: -0.42em; }
+  .quote-a figcaption { margin-top: 32px; }
 
-    /* Notice (Scrapoxy) */
-    .notice { padding: 0 0 48px; }
-    .notice .container { max-width: 760px; }
-    .notice-card {
-      display: flex; gap: 14px; align-items: flex-start; padding: 16px 18px; border-radius: 10px;
-      background: var(--surface); border: 1px solid var(--line); border-left: 3px solid var(--primary);
+  /* ---------- Tour ---------- */
+  .tour-head { display: grid; gap: 14px; max-width: 760px; margin-bottom: clamp(2.75rem, 1.8rem + 3vw, 4.5rem); }
+  .chapter { padding-block: clamp(3.5rem, 2.2rem + 4.4vw, 6.5rem); }
+  .chapter-grid {
+    display: grid;
+    grid-template-columns: minmax(0, 5fr) minmax(0, 7fr);
+    grid-template-areas: "head facts" "shot shot";
+    gap: 44px 72px;
+  }
+  /* The text sits centred against a tall screenshot: the empty first and last rows share the slack */
+  .chapter-split .chapter-grid {
+    grid-template-columns: minmax(0, 5fr) minmax(0, 6fr);
+    grid-template-rows: 1fr auto auto 1fr;
+    grid-template-areas: ". shot" "head shot" "facts shot" ". shot";
+    gap: 0 72px;
+  }
+  .chapter-split .chapter-body { margin-top: 36px; }
+  .chapter-head { grid-area: head; }
+  .chapter-body { grid-area: facts; }
+  .chapter-shot { grid-area: shot; margin: 0; }
+  .chapter-split .chapter-shot { align-self: center; }
+  .chapter-tag {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 20px;
+    font-family: var(--font-mono);
+    font-size: 13px;
+    font-weight: 500;
+    line-height: 1.3;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--muted);
+  }
+  .chapter-icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex: none;
+    width: 36px;
+    height: 36px;
+    border-radius: 10px;
+    background: var(--primary-soft);
+    color: var(--primary-soft-fg);
+  }
+  .chapter-icon svg { width: 18px; height: 18px; }
+  .chapter-num { color: var(--accent); }
+  .chapter-num::after { content: "/"; margin-left: 10px; color: var(--line-strong); }
+  .chapter-title {
+    font-size: clamp(1.5rem, 1.05rem + 1.25vw, 2.125rem);
+    line-height: 1.18;
+    letter-spacing: -0.024em;
+    font-weight: 650;
+    text-wrap: balance;
+  }
+  .chapter-text { margin-top: 16px; color: var(--muted); font-size: clamp(1rem, 0.96rem + 0.18vw, 1.125rem); line-height: 1.65; }
+  .facts { border-top: 1px solid var(--line); }
+  .fact {
+    display: grid;
+    grid-template-columns: 9.5rem minmax(0, 1fr);
+    gap: 4px 24px;
+    padding: 15px 0;
+    border-bottom: 1px solid var(--line);
+  }
+  .fact dt { padding-top: 3px; }
+  .fact dd { margin: 0; color: var(--fg); font-size: 15.5px; line-height: 1.6; }
+  .fact code { font-size: 0.84em; }
+  .chapter-more { margin-top: 22px; }
+  .shot-note { margin-top: 14px; color: var(--muted); font-size: 14px; line-height: 1.5; }
+  .crop-route { --cx: 233; --cy: 0; --cw: 1207; --ch: 772; }
+  .crop-verify { --cx: 233; --cy: 0; --cw: 1207; --ch: 626; }
+  .crop-meter { --cx: 842; --cy: 0; --cw: 598; --ch: 788; }
+  .crop-diagnose { --cx: 233; --cy: 0; --cw: 1207; --ch: 575; }
+  .crop-route-phone { --iw: 390; --cx: 56; --cy: 176; --cw: 334; --ch: 330; }
+  @media (max-width: 899.98px) {
+    .chapter-grid, .chapter-split .chapter-grid {
+      grid-template-columns: minmax(0, 1fr);
+      grid-template-rows: none;
+      grid-template-areas: "head" "shot" "body";
+      gap: 28px;
     }
-    .notice-card svg { width: 20px; height: 20px; color: var(--primary); flex: none; margin-top: 2px; }
-    .notice-card h3 { font-size: 15px; font-weight: 600; margin-bottom: 4px; }
-    .notice-card p { color: var(--muted); font-size: 14px; margin: 0; }
-    .notice-card p a { font-weight: 500; }
+    .chapter-body { grid-area: body; }
+    .chapter-split .chapter-body { margin-top: 0; }
+  }
+  @media (max-width: 639.98px) {
+    .chapter-grid, .chapter-split .chapter-grid { gap: 24px; }
+    .chapter-tag { margin-bottom: 14px; }
+    .chapter-text { margin-top: 10px; }
+    .chapter-shot .shot-note { display: none; }
+    .fact { grid-template-columns: minmax(0, 1fr); gap: 2px; padding: 12px 0; }
+    .fact dt { padding-top: 0; }
+    .fact dd { font-size: 16px; }
+    .chapter-more { margin-top: 14px; }
+    .crop-verify { --cx: 250; --cy: 355; --cw: 430; --ch: 257; }
+    /* Phones get the part each chapter's facts describe, near full size: the actions at the limit and the
+       status for clients, and every failure kind with its count */
+    .crop-meter { --cx: 845; --cy: 244; --cw: 395; --ch: 192; }
+    .crop-diagnose { --cx: 262; --cy: 146; --cw: 456; --ch: 394; }
+  }
 
-    /* Octoprox Enterprise */
-    .enterprise { padding: 0 0 64px; }
-    .enterprise-card {
-      display: grid; grid-template-columns: minmax(0, 5fr) minmax(0, 6fr); gap: 28px 48px; align-items: center;
-      background: var(--surface); border: 1px solid var(--line); border-top: 3px solid var(--primary); border-radius: 10px; padding: 32px;
-    }
-    .enterprise-card h2 { font-size: 22px; font-weight: 600; letter-spacing: -0.01em; margin-bottom: 8px; }
-    .enterprise-pitch p { color: var(--muted); margin-bottom: 24px; }
-    .enterprise-pitch .actions { justify-content: flex-start; }
-    .enterprise-list { list-style: none; display: grid; gap: 16px; }
-    .enterprise-list li { display: flex; gap: 12px; align-items: flex-start; }
-    .enterprise-list svg { width: 18px; height: 18px; color: var(--primary); flex: none; margin-top: 3px; }
-    .enterprise-list h3 { font-size: 15px; font-weight: 600; }
-    .enterprise-list p { color: var(--muted); font-size: 14px; }
-    /* The address Get in touch shows (assets/contact.js), on its own line under the buttons */
-    .contact-address { order: 1; flex-basis: 100%; font-size: 14px; color: var(--muted); overflow-wrap: anywhere; -webkit-user-select: all; user-select: all; }
+  /* ---------- Section heads: the heading on the left, the lead on the right ---------- */
+  .split-head { display: grid; grid-template-columns: minmax(0, 6fr) minmax(0, 5fr); align-items: end; gap: 16px 72px; margin-bottom: clamp(2.25rem, 1.5rem + 2.5vw, 3.5rem); }
+  .split-head .section-head { margin-bottom: 0; }
+  .split-head .lead { padding-bottom: 4px; }
+  @media (max-width: 899.98px) {
+    .split-head { grid-template-columns: minmax(0, 1fr); }
+  }
 
-    /* Docs index */
-    .docs-index { padding: 0 0 72px; }
-    .docs-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 16px; }
-    .docs-group { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 16px 18px; }
-    .docs-group h3 { font-size: 11px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: var(--subtle); margin-bottom: 8px; }
-    .docs-group a { display: block; padding: 5px 0; font-size: 14px; color: var(--fg); border-radius: 4px; }
-    .docs-group a:hover { color: var(--primary); }
-    .docs-group a span { color: var(--muted); font-size: 12.5px; display: block; }
+  /* ---------- Editions: one card per edition, each with a real screen ---------- */
+  .editions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 24px; }
+  .ed {
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    border: 1px solid var(--line);
+    border-radius: 16px;
+    background: var(--surface);
+    box-shadow: var(--shadow-md);
+  }
+  /* Enterprise wears the brand gradient as a thin ring, nothing more */
+  .ed-ent { border: 1.5px solid transparent; background: linear-gradient(var(--surface), var(--surface)) padding-box, var(--brand-grad) border-box; }
+  .ed-body { display: flex; flex: 1; flex-direction: column; align-items: flex-start; gap: 12px; padding: clamp(20px, 0.8rem + 1.4vw, 32px); }
+  .ed-tags { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; }
+  .ed-meta { font-family: var(--font-mono); font-size: 12px; font-weight: 500; line-height: 1.3; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }
+  .ed-title { margin-top: 4px; font-size: clamp(1.5rem, 1.3rem + 0.6vw, 1.75rem); line-height: 1.2; letter-spacing: -0.022em; font-weight: 650; }
+  .ed-text { flex: 1; max-width: 34rem; color: var(--muted); font-size: 16px; line-height: 1.6; }
+  .ed .actions { margin-top: 8px; gap: 10px 14px; }
+  .ed .actions .link { white-space: nowrap; }
+  .ed-shot { margin: 0; border-top: 1px solid var(--line); }
+  /* The traffic split and the Activity table share one region size, so the two screens line up */
+  .crop-split { --cx: 230; --cy: 108; --cw: 611; --ch: 290; }
+  .crop-acttable { --cx: 230; --cy: 500; --cw: 611; --ch: 290; }
+  /* Phones: the Overview's counters, below the part the hero shows, between the rail's icons */
+  .crop-stats-phone { --iw: 390; --cx: 0; --cy: 549; --cw: 390; --ch: 248; }
+  /* Planned items sit under the Enterprise card, the demo-data note under the free one */
+  .editions-foot { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px 24px; margin-top: 20px; color: var(--muted); font-size: 14px; line-height: 1.6; }
+  .editions-planned { grid-column: 2; grid-row: 1; }
+  .editions-planned .badge { margin-right: 6px; vertical-align: 1px; }
+  .editions-note { grid-column: 1; grid-row: 1; }
+  @media (max-width: 859.98px) {
+    .editions { grid-template-columns: minmax(0, 1fr); gap: 16px; }
+    .editions-foot { grid-template-columns: minmax(0, 1fr); }
+    .editions-planned, .editions-note { grid-column: 1; grid-row: auto; }
+  }
+  @media (max-width: 639.98px) {
+    .ed-body { gap: 10px; }
+    .ed .actions { align-self: stretch; margin-top: 6px; }
+    .ed .actions .btn { flex: 1 1 auto; padding: 0 14px; }
+    .editions-planned { font-size: 16px; }
+    /* The Action and Entity columns with their header, the table's right edge on the card's */
+    .crop-acttable { --cx: 479; --cy: 503; --cw: 346; --ch: 287; }
+  }
 
-    footer { padding: 32px 0; border-top: 1px solid var(--line); text-align: center; color: var(--muted); font-size: 13px; }
-    @media (max-width: 640px) {
-      .hero { padding: 56px 0 40px; }
-      .hero h1 { font-size: 30px; }
-      .hero p { font-size: 15px; }
-    }
-    @media (max-width: 760px) {
-      .enterprise-card { grid-template-columns: minmax(0, 1fr); padding: 24px 20px; }
-    }
-    @media (max-width: 500px) {
-      .container { padding: 0 16px; }
-      .logo { height: 22px; width: 98px; }
-      nav a { padding: 6px 8px; font-size: 13px; }
-    }
-    /* The narrowest phones have no room for three links; the hero links to GitHub */
-    @media (max-width: 400px) {
-      .nav-github { display: none; }
-    }
-    /* Touch screens: 44 px targets */
-    @media (pointer: coarse) {
-      nav a { display: inline-flex; align-items: center; justify-content: center; min-width: 44px; min-height: 44px; }
-      .btn { height: 44px; }
-      header .theme-toggle { width: 44px; height: 44px; }
-    }
-    /* Narrow touch screens: tighter header gaps make room for the 44 px toggle */
-    @media (pointer: coarse) and (max-width: 400px) {
-      header .container { gap: 4px; }
-      .header-right { gap: 4px; }
-    }
-    /* Theme toggle */
-    .theme-toggle { display: inline-flex; align-items: center; justify-content: center; width: 34px; height: 34px; border-radius: 6px; border: 1px solid var(--line); background: var(--surface); color: var(--muted); cursor: pointer; flex: none; }
-    .theme-toggle:hover { color: var(--fg); background: var(--raised); }
-    .theme-toggle svg { width: 16px; height: 16px; }
-    .theme-toggle .icon-sun { display: none; }
-    :root[data-theme="dark"] .theme-toggle .icon-sun { display: block; }
-    :root[data-theme="dark"] .theme-toggle .icon-moon { display: none; }
-    /* Header items never shrink; the logo keeps its intrinsic width */
-    .brand { display: inline-flex; align-items: center; flex: none; }
-    .logo { max-width: none; flex: none; }
-  </style>
-  <script type="application/ld+json">
+  /* ---------- Every kind of pool ---------- */
+  /* It follows the editions on the same background, so a rule marks the new section */
+  .pools { border-top: 1px solid var(--line); }
+  .pool-table { border: 1px solid var(--line); border-radius: 12px; background: var(--surface); box-shadow: var(--shadow-sm); }
+  .pool-row {
+    display: grid;
+    grid-template-columns: minmax(0, 15rem) minmax(0, 1fr) minmax(0, 1.15fr);
+    align-items: center;
+    gap: 16px 40px;
+    padding: 26px 28px;
+  }
+  .pool-row + .pool-row { border-top: 1px solid var(--line); }
+  .pool-name { display: flex; align-items: center; gap: 14px; }
+  .pool-name h3 { font-size: 17px; font-weight: 600; line-height: 1.35; letter-spacing: -0.01em; }
+  .pool-text { color: var(--muted); font-size: 15px; line-height: 1.6; }
+  .pool-row .chips { gap: 8px; }
+  .chip-text { padding: 0 14px; }
+  /* Custom providers: a card of its own under the table, with the custom row of the provider catalog */
+  .pool-custom {
+    display: grid;
+    grid-template-columns: minmax(0, 5fr) minmax(0, 7fr);
+    align-items: center;
+    gap: 24px 48px;
+    margin-top: 20px;
+    padding: 26px 28px;
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    background: var(--surface);
+    box-shadow: var(--shadow-sm);
+  }
+  .pool-custom-copy { display: grid; justify-items: start; gap: 12px; }
+  .pool-custom-shot { margin: 0; }
+  .pool-custom .shot { border-radius: 10px; box-shadow: var(--shadow-sm); }
+  /* The table head and seven rows, Acme Proxies among them; phones get the provider and source columns only */
+  .crop-providers { --cx: 257; --cy: 199; --cw: 703; --ch: 284; }
+  .devices {
+    display: grid;
+    grid-template-columns: minmax(0, 4fr) minmax(0, 8fr);
+    align-items: center;
+    gap: 32px 64px;
+    margin-top: clamp(3rem, 2rem + 3vw, 4.5rem);
+  }
+  .devices-copy { display: grid; justify-items: start; gap: 14px; }
+  .devices-copy h3 { font-size: clamp(1.25rem, 1.1rem + 0.5vw, 1.5rem); font-weight: 650; line-height: 1.25; letter-spacing: -0.018em; }
+  .devices-text { color: var(--muted); font-size: 16px; line-height: 1.65; }
+  .devices-copy .chips { margin-top: 6px; }
+  .crop-devices { --cx: 250; --cy: 128; --cw: 930; --ch: 258; }
+  @media (max-width: 1023.98px) {
+    .pool-row { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+    .pool-row .chips { grid-column: 1 / -1; }
+  }
+  @media (max-width: 899.98px) {
+    .pool-custom, .devices { grid-template-columns: minmax(0, 1fr); }
+  }
+  @media (max-width: 639.98px) {
+    .pool-row { grid-template-columns: minmax(0, 1fr); gap: 12px; padding: 22px 18px; }
+    .pool-custom { gap: 18px; padding: 22px 18px; }
+    .crop-providers { --cw: 411; --ch: 248; }
+    .pool-text { font-size: 16px; }
+    .devices-shot { display: none; }
+  }
+
+  /* ---------- Quick start and Scrapoxy ---------- */
+  /* The terminal column is wide enough for the whole compose command from 1280; below that the terminal takes the full width */
+  .start-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 20rem); align-items: start; gap: 40px 56px; }
+  .start-run .terminal-note { text-align: left; }
+  .start-next { display: grid; gap: 12px; padding-top: 6px; }
+  .start-next h3 { font-size: clamp(1.25rem, 1.1rem + 0.5vw, 1.5rem); font-weight: 650; line-height: 1.25; letter-spacing: -0.018em; }
+  .start-text { color: var(--muted); font-size: 16px; line-height: 1.65; }
+  .start-next .actions { margin-top: 10px; gap: 14px 22px; }
+  .scrapoxy {
+    display: grid;
+    grid-template-columns: minmax(0, 7fr) minmax(0, 5fr);
+    align-items: center;
+    gap: 28px 64px;
+    margin-top: clamp(3.5rem, 2.5rem + 3vw, 5rem);
+    padding: clamp(24px, 1rem + 2vw, 40px);
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    background: var(--bg);
+  }
+  .scrapoxy-copy { display: grid; justify-items: start; gap: 12px; }
+  .scrapoxy-copy h3 { font-size: clamp(1.25rem, 1.1rem + 0.5vw, 1.5rem); font-weight: 650; line-height: 1.25; letter-spacing: -0.018em; }
+  .scrapoxy-text { color: var(--muted); font-size: 16px; line-height: 1.65; }
+  .scrapoxy-copy .link { margin-top: 4px; }
+  .mapping { overflow: hidden; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); }
+  .mapping table { width: 100%; border-collapse: collapse; table-layout: fixed; }
+  .mapping th, .mapping td { padding: 12px 16px; text-align: left; vertical-align: top; }
+  .mapping th { padding-block: 10px; border-bottom: 1px solid var(--line); }
+  .mapping tbody tr + tr td { border-top: 1px solid var(--line); }
+  .mapping td { color: var(--muted); font-size: 15px; line-height: 1.45; }
+  .mapping td + td { position: relative; padding-left: 36px; color: var(--fg); font-weight: 500; }
+  .mapping td svg { position: absolute; left: 10px; top: 14px; width: 16px; height: 16px; color: var(--subtle); }
+  @media (max-width: 1279.98px) {
+    .start-grid { grid-template-columns: minmax(0, 1fr); }
+    .start-next { max-width: 40rem; }
+  }
+  @media (max-width: 899.98px) {
+    .scrapoxy { grid-template-columns: minmax(0, 1fr); }
+  }
+  @media (max-width: 639.98px) {
+    /* Ports and the default login are instructions, so they get body size on a phone */
+    .start-run .terminal-note { font-size: 16px; line-height: 1.6; }
+    .mapping td { font-size: 16px; }
+    .mapping th, .mapping td { padding-inline: 14px; }
+    .mapping td + td { padding-left: 32px; }
+    .mapping td svg { left: 8px; }
+  }
+
+  /* ---------- Explore the docs ---------- */
+  .docs { padding-block: clamp(4rem, 2.6rem + 4vw, 6.5rem); }
+  .docs-grid { display: grid; grid-template-columns: minmax(0, 4fr) minmax(0, 8fr); gap: 32px 72px; }
+  .docs-intro { display: grid; align-content: start; gap: 12px; }
+  .docs-intro h2 { font-size: clamp(1.5rem, 1.2rem + 1vw, 2rem); }
+  .docs-text { color: var(--muted); font-size: 16px; line-height: 1.6; }
+  .docs-links { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); column-gap: 40px; border-top: 1px solid var(--line); }
+  .docs-links a {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 16px;
+    align-items: center;
+    gap: 2px 12px;
+    min-height: 64px;
+    padding: 12px 0;
+    border-bottom: 1px solid var(--line);
+    color: var(--fg);
+    text-decoration: none;
+  }
+  .docs-links .dl-title { font-size: 15.5px; font-weight: 600; line-height: 1.35; }
+  .docs-links .dl-text { grid-column: 1; color: var(--muted); font-size: 14px; line-height: 1.45; }
+  .docs-links svg { grid-column: 2; grid-row: 1 / span 2; width: 16px; height: 16px; color: var(--subtle); transition: transform 0.15s, color 0.15s; }
+  .docs-links a:hover .dl-title { color: var(--accent); }
+  .docs-links a:hover svg { color: var(--accent); transform: translateX(2px); }
+  @media (max-width: 899.98px) {
+    .docs-grid { grid-template-columns: minmax(0, 1fr); }
+  }
+  @media (max-width: 639.98px) {
+    .docs-links { column-gap: 16px; }
+    .docs-links a { min-height: 56px; }
+    .docs-links .dl-text { display: none; }
+    .docs-links .dl-title { font-size: 16px; }
+  }
+</style>
+<script type="application/ld+json">
   {
     "@context": "https://schema.org",
     "@type": "SoftwareApplication",
@@ -198,208 +469,423 @@ permalink: /
     "softwareHelp": { "@type": "CreativeWork", "url": "https://www.octoprox.com/getting-started" },
     "image": "https://www.octoprox.com/assets/og-image-v3.png"
   }
-  </script>
-</head>
-<body>
-  <header>
-    <div class="container">
-      <a href="./" class="brand" aria-label="Octoprox home">
-        <img src="assets/logo/octoprox_horizontal.svg" alt="Octoprox" class="logo logo-light">
-        <img src="assets/logo/octoprox_horizontal_dark.svg" alt="Octoprox" class="logo logo-dark">
-      </a>
-      <div class="header-right">
-        <nav>
-          <a href="getting-started">Docs</a>
-          <a href="enterprise">Enterprise</a>
-          <a href="https://github.com/octoprox/octoprox" class="nav-github">GitHub</a>
-        </nav>
-        <button class="theme-toggle" type="button" onclick="toggleTheme()" aria-label="Toggle dark mode" title="Toggle dark mode">
-          <svg class="icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/></svg>
-          <svg class="icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2"/><path d="M12 20v2"/><path d="m4.93 4.93 1.41 1.41"/><path d="m17.66 17.66 1.41 1.41"/><path d="M2 12h2"/><path d="M20 12h2"/><path d="m6.34 17.66-1.41 1.41"/><path d="m19.07 4.93-1.41 1.41"/></svg>
-        </button>
+</script>
+<!-- /head -->
+<section class="hero" aria-labelledby="hero-title">
+  <div class="container">
+    <div class="hero-intro">
+      <div class="hero-title">
+        <p class="eyebrow hero-eyebrow"><span class="brand-rule" aria-hidden="true"></span>Open source core · Apache 2.0</p>
+        <h1 id="hero-title"><span>One proxy endpoint.</span> <span>Any pool behind it.</span></h1>
+      </div>
+      <div class="hero-side">
+        <p class="lead">A self-hosted proxy manager: Octoprox routes your clients' requests through the pools you manage, checks where the exits really are and meters what every pool costs.</p>
+        <div class="actions actions-stack">
+          <a class="btn btn-primary btn-lg" href="{{ site.baseurl }}/getting-started">Get started<svg class="arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14"></path><path d="m12 5 7 7-7 7"></path></svg></a>
+          <a class="btn btn-outline btn-lg" href="{{ site.baseurl }}/enterprise#get-in-touch">Talk to us about Enterprise</a>
+        </div>
+        <p class="hero-note"><span class="badge badge-primary">Enterprise</span> Every sign-in and API token in the audit log, ready for your SIEM. <a href="#editions">See what it adds</a></p>
       </div>
     </div>
-  </header>
-
-  <section class="hero">
-    <div class="container">
-      <span class="eyebrow">Open source core · Apache 2.0</span>
-      <h1>One proxy endpoint. Any pool behind it.</h1>
-      <p>Octoprox accepts your client's requests and routes them through proxy pools you manage: cloud instances it provisions for you, provider sessions, your own static list, or devices on a WireGuard or OpenVPN tunnel. It verifies where each exit really is and meters what every pool costs you.</p>
-      <div class="actions">
-        <a href="getting-started" class="btn">Get started</a>
-        <a href="https://github.com/octoprox/octoprox" class="btn btn-outline">View on GitHub</a>
-      </div>
-    </div>
-  </section>
-
-  <section class="quick">
-    <div class="container">
-<pre><span class="c"># Run a single instance with the pre-built image</span>
-curl -O https://raw.githubusercontent.com/octoprox/octoprox/main/docker-compose.ghcr.yml
-docker compose -f docker-compose.ghcr.yml up -d --remove-orphans</pre>
-      <p class="hint">Web UI on <code>localhost:8000</code>, proxy on <code>localhost:8080</code>. Default login <code>admin</code> / <code>admin</code>.</p>
-    </div>
-  </section>
-
-  <section class="notice">
-    <div class="container">
-      <div class="notice-card">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 3h5v5"/><path d="M8 3H3v5"/><path d="M21 3 3 21"/><path d="M15 15l6 6"/></svg>
-        <div>
-          <h3>Coming from Scrapoxy?</h3>
-          <p>Scrapoxy was discontinued in February 2026: no images, no docs, no backend for GeoIP and health checks. Octoprox does the same job, self-hosted and Apache 2.0. The migration guide maps every Scrapoxy project, credential and connector to its Octoprox equivalent, and any vendor Octoprox lacks can be added as a YAML provider descriptor. <a href="scrapoxy-migration">Read the migration guide</a>.</p>
+    <figure class="hero-figure">
+      <div class="shot shot-bezel hero-shot">
+        <div class="hero-frame">
+          <picture class="only-light">
+            <source media="(max-width: 639.98px)" srcset="{{ site.baseurl }}/assets/screens/overview-phone-light.webp" width="780" height="1688">
+            <img src="{{ site.baseurl }}/assets/screens/overview-light.webp" width="2880" height="1814" loading="lazy" fetchpriority="high" data-hero="light" alt="The Overview of the Price monitoring project: a 97.5% success rate over 24 hours, pool health for 161 proxies, requests, latency by step, traffic, spend this month and the countries the pool exits in">
+          </picture>
+          <picture class="only-dark">
+            <source media="(max-width: 639.98px)" srcset="{{ site.baseurl }}/assets/screens/overview-phone-dark.webp" width="780" height="1688">
+            <img src="{{ site.baseurl }}/assets/screens/overview-dark.webp" width="2880" height="1814" loading="lazy" data-hero="dark" alt="The Overview of the Price monitoring project: a 97.5% success rate over 24 hours, pool health for 161 proxies, requests, latency by step, traffic, spend this month and the countries the pool exits in">
+          </picture>
+          <span class="hotspot hs-1" aria-hidden="true">1</span>
+          <span class="hotspot hs-2" aria-hidden="true">2</span>
+          <span class="hotspot hs-3" aria-hidden="true">3</span>
+          <span class="hotspot hs-4" aria-hidden="true">4</span>
         </div>
       </div>
-    </div>
-  </section>
+      <figcaption class="hero-caption">A project's Overview, with demo data.</figcaption>
+    </figure>
+    <ol class="tour-index" aria-label="What the Overview shows">
+      <li><a href="#route"><span class="ti-num" aria-hidden="true">1</span><span class="ti-title">Pool health</span> <span class="ti-text">Failing proxies leave rotation until they pass again. <span class="ti-go">Route<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14"></path><path d="m12 5 7 7-7 7"></path></svg></span></span></a></li>
+      <li><a href="#verify"><span class="ti-num" aria-hidden="true">2</span><span class="ti-title">Locations</span> <span class="ti-text">Healthy proxies per exit country, and the countries dynamic sessions reach. <span class="ti-go">Verify<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14"></path><path d="m12 5 7 7-7 7"></path></svg></span></span></a></li>
+      <li><a href="#meter"><span class="ti-num" aria-hidden="true">3</span><span class="ti-title">Spend this month</span> <span class="ti-text">Bytes per connector, priced per GB. <span class="ti-go">Meter<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14"></path><path d="m12 5 7 7-7 7"></path></svg></span></span></a></li>
+      <li><a href="#diagnose"><span class="ti-num" aria-hidden="true">4</span><span class="ti-title">Latency</span> <span class="ti-text">Routing, preflight, connect, handshake and response, timed apart. <span class="ti-go">Diagnose<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14"></path><path d="m12 5 7 7-7 7"></path></svg></span></span></a></li>
+    </ol>
+  </div>
+</section>
 
-  <section class="features">
-    <div class="container">
-      <h2>What it does</h2>
-      <p class="lead">Everything you need to run a proxy pool as a service for your own scrapers and clients.</p>
-      <div class="feature-grid">
-        <div class="feature-card">
-          <h3><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17.5 19H9a7 7 0 1 1 6.71-9h1.79a4.5 4.5 0 1 1 0 9Z"/></svg>Cloud integrations</h3>
-          <p>Provision proxy instances on AWS, GCP and Azure on demand, with auto-scaling driven by request rate and automatic rotation.</p>
-        </div>
-        <div class="feature-card">
-          <h3><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v18h18"/><path d="m19 9-5 5-4-4-3 3"/></svg>Smart routing</h3>
-          <p>Round-robin, least-used, random, sticky session and health-based strategies, weighted connectors, per-connector domain filters and rate limits. Pick a session or an exit country per request from the proxy username.</p>
-        </div>
-        <div class="feature-card">
-          <h3><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>Health monitoring</h3>
-          <p>Automatic health checks with configurable intervals and timeouts; failing proxies leave rotation and come back on their own once they pass again.</p>
-        </div>
-        <div class="feature-card">
-          <h3><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/></svg>TLS interception</h3>
-          <p>Optional MITM mode with browser-grade TLS fingerprints, and an inspector for every intercepted request and response.</p>
-        </div>
-        <div class="feature-card">
-          <h3><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v18h18"/><path d="M18 17V9"/><path d="M13 17V5"/><path d="M8 17v-3"/></svg>Metrics</h3>
-          <p>Latency, success rate, request counts and traffic per proxy and per project, with history you can chart over hours or weeks.</p>
-        </div>
-        <div class="feature-card">
-          <h3><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 10c0 6-8 12-8 12s-8-6-8-12a8 8 0 0 1 16 0Z"/><circle cx="12" cy="10" r="3"/></svg>IP attribution</h3>
-          <p>Resolve every exit's country, state and city from MaxMind, DB-IP, IPinfo or IP2Location databases you host, verify what vendors claim, track each provider's accuracy, and reject sessions that exit in the wrong place.</p>
-        </div>
-        <div class="feature-card">
-          <h3><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="5" width="20" height="14" rx="2"/><path d="M2 10h20"/></svg>Traffic limits and billing</h3>
-          <p>Cap the bytes each connector carries per billing period, alert, block or cut transfers at the cap, and see what every pool costs from the price you pay per GB.</p>
-        </div>
-        <div class="feature-card">
-          <h3><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="14" width="20" height="6" rx="2"/><path d="M6 17h.01"/><path d="M10 17h.01"/><path d="M12 14V8"/><path d="M8 8h8"/><path d="M12 4v4"/></svg>Tunnel devices</h3>
-          <p>Routers, TVs, consoles and phones with no proxy settings join a project's pool through a WireGuard or OpenVPN tunnel Octoprox terminates. One config, QR code or profile per device.</p>
-        </div>
-        <div class="feature-card">
-          <h3><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 17H7A5 5 0 0 1 7 7h2"/><path d="M15 7h2a5 5 0 1 1 0 10h-2"/><line x1="8" x2="16" y1="12" y2="12"/></svg>REST API and dashboard</h3>
-          <p>Full CRUD over projects, credentials, connectors and proxies, and a web dashboard for monitoring and configuration.</p>
-        </div>
-      </div>
-    </div>
-  </section>
+<section class="section-alt quote-band" aria-label="What a user says">
+  <div class="container">
+    <figure class="quote quote-a">
+      <blockquote>
+        <p class="quote-text">“Before using octoprox, we had to manage every proxy change in the codebase, and tracking the proxy usage from the spiders. Now we can make any change in a few clicks, and we have detailed data about all our proxy providers performance in one service”</p>
+      </blockquote>
+      <figcaption>
+        <span class="quote-avatar" aria-hidden="true"><span>A</span></span>
+        <span><span class="quote-name">Albert</span><span class="visually-hidden">, </span><span class="quote-role">Senior Indexing Engineer</span></span>
+      </figcaption>
+    </figure>
+  </div>
+</section>
 
-  <section class="enterprise">
-    <div class="container">
-      <div class="enterprise-card">
-        <div class="enterprise-pitch">
-          <span class="eyebrow">Licensed edition</span>
-          <h2>Octoprox Enterprise</h2>
-          <p>Everything in Octoprox, plus a record of who got in: every sign-in and API token in the audit log, across the whole install, ready for your SIEM.</p>
-          <div class="actions">
-            <a href="enterprise#get-in-touch" class="btn" data-contact>Get in touch</a>
-            <noscript class="contact-address">enterprise at octoprox dot com</noscript>
-            <a href="enterprise" class="btn btn-outline">Learn more</a>
+<section class="chapter tour-start" id="features" aria-labelledby="tour-title">
+  <div class="container">
+    <div class="tour-head">
+      <p class="eyebrow">Product tour</p>
+      <h2 id="tour-title">Where traffic goes, where it exits, what it costs and why it fails</h2>
+      <p class="lead">Four screens from every project, shown with demo data.</p>
+    </div>
+    <article class="chapter-grid" id="route" aria-labelledby="route-title">
+      <header class="chapter-head">
+        <p class="chapter-tag"><span class="chapter-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="6" cy="19" r="3"></circle><path d="M9 19h8.5a3.5 3.5 0 0 0 0-7h-11a3.5 3.5 0 0 1 0-7H15"></path><circle cx="18" cy="5" r="3"></circle></svg></span><span class="chapter-num">01</span> <span>Route</span></p>
+        <h3 class="chapter-title" id="route-title">One endpoint in front of every pool</h3>
+        <p class="chapter-text">Clients send every request to one address. Octoprox picks a connector by weight, then a proxy inside it with one of five strategies.</p>
+      </header>
+      <figure class="chapter-shot">
+        <div class="shot on-wide">
+          <div class="crop crop-route">
+            <img class="only-light" src="{{ site.baseurl }}/assets/screens/connectors-light.webp" width="2880" height="1564" loading="lazy" alt="The Connectors page: AWS us-east-1, GCP Frankfurt, Bright Data, an Oxylabs pool and a Webshare list, each with its weight, expected and observed share of traffic, spend and usage against its limit">
+            <img class="only-dark" src="{{ site.baseurl }}/assets/screens/connectors-dark.webp" width="2880" height="1564" loading="lazy" alt="The Connectors page: AWS us-east-1, GCP Frankfurt, Bright Data, an Oxylabs pool and a Webshare list, each with its weight, expected and observed share of traffic, spend and usage against its limit">
           </div>
         </div>
-        <ul class="enterprise-list">
-          <li>
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m10 17 5-5-5-5"/><path d="M15 12H3"/><path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4"/></svg>
-            <div><h3>Sign-ins</h3><p>Every sign-in and failed attempt, with its method, address and browser.</p></div>
-          </li>
-          <li>
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2.586 17.414A2 2 0 0 0 2 18.828V21a1 1 0 0 0 1 1h3a1 1 0 0 0 1-1v-1a1 1 0 0 1 1-1h1a1 1 0 0 0 1-1v-1a1 1 0 0 1 1-1h.172a2 2 0 0 0 1.414-.586l.814-.814a6.5 6.5 0 1 0-4-4z"/><circle cx="16.5" cy="7.5" r=".5" fill="currentColor"/></svg>
-            <div><h3>API tokens</h3><p>Each personal access token issued, first used and revoked.</p></div>
-          </li>
-          <li>
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M12 7v5l4 2"/></svg>
-            <div><h3>Install-wide activity</h3><p>The whole install's audit log on one page, filtered by who, what, project and time.</p></div>
-          </li>
-          <li>
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 15V3"/><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5"/></svg>
-            <div><h3>Export for your SIEM</h3><p>Every entry as JSON lines, and an audit line per entry in the server log.</p></div>
-          </li>
-        </ul>
+        <div class="shot on-narrow">
+          <div class="crop crop-route-phone">
+            <img class="only-light" src="{{ site.baseurl }}/assets/screens/connect-phone-light.webp" width="780" height="1688" loading="lazy" alt="The Connect page on a phone: country, state and city pickers and the session choice for the proxy username">
+            <img class="only-dark" src="{{ site.baseurl }}/assets/screens/connect-phone-dark.webp" width="780" height="1688" loading="lazy" alt="The Connect page on a phone: country, state and city pickers and the session choice for the proxy username">
+          </div>
+        </div>
+        <figcaption class="shot-note">Connectors: weights, the expected and observed split, spend and usage against each limit.</figcaption>
+      </figure>
+      <div class="chapter-body">
+        <dl class="facts">
+          <div class="fact"><dt class="label">Per request</dt><dd>A country, state, city or sticky session, named in the proxy username. Octoprox never silently falls back to another country.</dd></div>
+          <div class="fact"><dt class="label">Health checks</dt><dd>Once a minute by default. Failing proxies leave rotation and come back on their own once they pass again.</dd></div>
+          <div class="fact"><dt class="label">Per connector</dt><dd>Reserved and excluded countries, domain allow or block lists, and per-proxy rate limits.</dd></div>
+        </dl>
+        <p class="chapter-more"><a class="link" href="{{ site.baseurl }}/routing-strategies">Learn more about routing<svg class="arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14"></path><path d="m12 5 7 7-7 7"></path></svg></a></p>
       </div>
-    </div>
-  </section>
+    </article>
+  </div>
+</section>
 
-  <section class="docs-index">
-    <div class="container">
-      <h2>Documentation</h2>
-      <p class="lead">Everything in the docs, in one place.</p>
-      <div class="docs-grid">
-        <div class="docs-group">
-          <h3>Getting started</h3>
-          <a href="getting-started">Quick start<span>Docker, single instance or cluster</span></a>
-          <a href="connecting">Connecting clients<span>Proxy URL, credentials, curl and code examples</span></a>
-          <a href="configuration">Configuration<span>Environment variables and YAML</span></a>
-          <a href="sso">Single sign-on &amp; API tokens<span>Google, Microsoft, GitHub; tokens for scripts</span></a>
-          <a href="audit-log">Audit log<span>Who changed what and when, secrets masked</span></a>
-          <a href="enterprise">Octoprox Enterprise<span>The licensed edition: sign-ins, API tokens, SIEM export</span></a>
-          <a href="scrapoxy-migration">Migrating from Scrapoxy<span>Recreate projects and connectors, repoint clients</span></a>
-        </div>
-        <div class="docs-group">
-          <h3>Operations</h3>
-          <a href="architecture">Architecture<span>Roles, the routing feed, jobs and Redis loss</span></a>
-          <a href="deployment">Deployment &amp; scaling<span>One process, or roles scaled on their own</span></a>
-          <a href="kubernetes">Running on Kubernetes<span>A Deployment per role, probes, secrets, autoscaling</span></a>
-          <a href="migrating-to-6">Migrating to 6.0<span>A short downtime; what changes</span></a>
-        </div>
-        <div class="docs-group">
-          <h3>Routing</h3>
-          <a href="routing-strategies">Routing strategies<span>Round-robin to sticky, -sessid- and -cc-</span></a>
-          <a href="location-routing">Location routing<span>Policy, preflight and sessions, with examples</span></a>
-          <a href="domain-filtering">Domain filtering<span>Allow or block targets per connector</span></a>
-          <a href="rate-limiting">Rate limiting<span>Per-proxy windows and quarantine</span></a>
-          <a href="tls-interception">TLS interception<span>MITM with browser fingerprints</span></a>
-        </div>
-        <div class="docs-group">
-          <h3>Attribution &amp; billing</h3>
-          <a href="ip-attribution">IP attribution<span>Where exits really are, vendor accuracy</span></a>
-          <a href="traffic-limits">Traffic limits &amp; billing<span>Byte caps per period, spend per GB</span></a>
-          <a href="metrics">Metrics<span>Latency, success rate, traffic, history</span></a>
-        </div>
-        <div class="docs-group">
-          <h3>Tunnel devices</h3>
-          <a href="wireguard">WireGuard devices<span>Configs and QR codes per device</span></a>
-          <a href="openvpn">OpenVPN devices<span>One profile per device</span></a>
-        </div>
-        <div class="docs-group">
-          <h3>Cloud providers</h3>
-          <a href="aws-setup">AWS</a>
-          <a href="gcp-setup">Google Cloud</a>
-          <a href="azure-setup">Azure</a>
-        </div>
-        <div class="docs-group">
-          <h3>Proxy providers</h3>
-          <a href="providers">Providers &amp; SDK<span>Oxylabs, Bright Data, Decodo, Webshare, IPRoyal, NetNut, or any vendor as a descriptor</span></a>
-          <a href="brightdata-setup">Bright Data setup</a>
-          <a href="oxylabs-setup">Oxylabs setup</a>
-        </div>
-        <div class="docs-group">
-          <h3>Reference</h3>
-          <a href="api">API reference<span>REST endpoints for everything in the UI</span></a>
+<section class="chapter section-alt" id="verify" aria-labelledby="verify-title">
+  <div class="container chapter-grid">
+    <header class="chapter-head">
+      <p class="chapter-tag"><span class="chapter-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 10c0 4.993-5.539 10.193-7.399 11.799a1 1 0 0 1-1.202 0C9.539 20.193 4 14.993 4 10a8 8 0 0 1 16 0"></path><circle cx="12" cy="10" r="3"></circle></svg></span><span class="chapter-num">02</span> <span>Verify</span></p>
+      <h3 class="chapter-title" id="verify-title">Check where the exits really are</h3>
+      <p class="chapter-text">An exit's location comes from IP databases you host (MaxMind, DB-IP, IPinfo or IP2Location) before the vendor's claim. Each claim is confirmed, contradicted or left open, at country, state and city.</p>
+    </header>
+    <figure class="chapter-shot">
+      <div class="shot">
+        <div class="crop crop-verify">
+          <img class="only-light" src="{{ site.baseurl }}/assets/screens/locations-light.webp" width="2880" height="1288" loading="lazy" alt="The Exit locations page: each provider's accuracy at country, state and city, its unique and reused exit IPs, and where its claims were wrong, such as US claimed and CA found">
+          <img class="only-dark" src="{{ site.baseurl }}/assets/screens/locations-dark.webp" width="2880" height="1288" loading="lazy" alt="The Exit locations page: each provider's accuracy at country, state and city, its unique and reused exit IPs, and where its claims were wrong, such as US claimed and CA found">
         </div>
       </div>
+      <figcaption class="shot-note">Exit locations: how often each provider's exits are where the vendor claims.</figcaption>
+    </figure>
+    <div class="chapter-body">
+      <dl class="facts">
+        <div class="fact"><dt class="label">Your policy</dt><dd>Per project: route on the evidence, trust the vendor, or refuse.</dd></div>
+        <div class="fact"><dt class="label">Preflight</dt><dd>Optionally checks a session's exit before its first request.</dd></div>
+        <div class="fact"><dt class="label">Per provider</dt><dd>Accuracy, unique exits and IP sharing between connectors.</dd></div>
+      </dl>
+      <p class="chapter-more"><a class="link" href="{{ site.baseurl }}/ip-attribution">Learn more about IP attribution<svg class="arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14"></path><path d="m12 5 7 7-7 7"></path></svg></a></p>
     </div>
-  </section>
+  </div>
+</section>
 
-  <footer>
-    <div class="container">
-      <p>Licensed under <a href="https://opensource.org/licenses/Apache-2.0">Apache 2.0</a>, except the built-in provider descriptors (all rights reserved).</p>
+<section class="chapter chapter-split" id="meter" aria-labelledby="meter-title">
+  <div class="container chapter-grid">
+    <header class="chapter-head">
+      <p class="chapter-tag"><span class="chapter-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m12 14 4-4"></path><path d="M3.34 19a10 10 0 1 1 17.32 0"></path></svg></span><span class="chapter-num">03</span> <span>Meter</span></p>
+      <h3 class="chapter-title" id="meter-title">See what every pool costs, and choose what happens at a cap</h3>
+      <p class="chapter-text">Bytes are metered while transfers run, per connector, per day, week or month. A price per GB shows usage as spend.</p>
+    </header>
+    <figure class="chapter-shot">
+      <div class="shot">
+        <div class="crop crop-meter">
+          <img class="only-light" src="{{ site.baseurl }}/assets/screens/connector-detail-light.webp" width="2880" height="2000" loading="lazy" alt="A Bright Data connector's traffic limit of 160 GB a month, set to block new requests at the limit, with a price of 5.88 USD per GB and 141.68 GB used so far">
+          <img class="only-dark" src="{{ site.baseurl }}/assets/screens/connector-detail-dark.webp" width="2880" height="2000" loading="lazy" alt="A Bright Data connector's traffic limit of 160 GB a month, set to block new requests at the limit, with a price of 5.88 USD per GB and 141.68 GB used so far">
+        </div>
+      </div>
+      <figcaption class="shot-note">A connector's traffic limit, the action at the limit and its price per GB.</figcaption>
+    </figure>
+    <div class="chapter-body">
+      <dl class="facts">
+        <div class="fact"><dt class="label">At the cap</dt><dd>Alert and keep routing (the default), block new requests, or also interrupt running transfers.</dd></div>
+        <div class="fact"><dt class="label">Your clients</dt><dd>When every connector that could serve a request is blocked, the client gets 509, or 429 if you set it, with an RFC 9209 <code>Proxy-Status</code> header.</dd></div>
+        <div class="fact"><dt class="label">Traffic split</dt><dd>Each connector's expected and observed share of requests.</dd></div>
+      </dl>
+      <p class="chapter-more"><a class="link" href="{{ site.baseurl }}/traffic-limits">Learn more about traffic limits<svg class="arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14"></path><path d="m12 5 7 7-7 7"></path></svg></a></p>
     </div>
-  </footer>
-  <script src="assets/contact.js"></script>
-</body>
-</html>
+  </div>
+</section>
+
+<section class="chapter section-alt" id="diagnose" aria-labelledby="diagnose-title">
+  <div class="container chapter-grid">
+    <header class="chapter-head">
+      <p class="chapter-tag"><span class="chapter-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M22 12h-2.48a2 2 0 0 0-1.93 1.46l-2.35 8.36a.25.25 0 0 1-.48 0L9.24 2.18a.25.25 0 0 0-.48 0l-2.35 8.36A2 2 0 0 1 4.49 12H2"></path></svg></span><span class="chapter-num">04</span> <span>Diagnose</span></p>
+      <h3 class="chapter-title" id="diagnose-title">Know what failed, and where the time went</h3>
+      <p class="chapter-text">Requests, success rate, latency and bytes per proxy, project, connector, tunnel device and destination host, under one time range from 1h to 90d.</p>
+    </header>
+    <figure class="chapter-shot">
+      <div class="shot">
+        <div class="crop crop-diagnose">
+          <img class="only-light" src="{{ site.baseurl }}/assets/screens/failures-light.webp" width="2880" height="1734" loading="lazy" alt="The Failures page: 89,102 failures in 24 hours by kind, such as upstream timeouts and vendor refusals with their status codes, over time and by connector">
+          <img class="only-dark" src="{{ site.baseurl }}/assets/screens/failures-dark.webp" width="2880" height="1734" loading="lazy" alt="The Failures page: 89,102 failures in 24 hours by kind, such as upstream timeouts and vendor refusals with their status codes, over time and by connector">
+        </div>
+      </div>
+      <figcaption class="shot-note">Failures: why requests failed over 24 hours, by kind, vendor status and connector.</figcaption>
+    </figure>
+    <div class="chapter-body">
+      <dl class="facts">
+        <div class="fact"><dt class="label">Failures</dt><dd>By kind, vendor status and connector, with the vendor's own answer.</dd></div>
+        <div class="fact"><dt class="label">Latency</dt><dd>Split into routing, preflight, connect, handshake and response: Octoprox's time apart from the vendor's.</dd></div>
+        <div class="fact"><dt class="label">Prometheus</dt><dd>Metrics per project and per process. Every API request carries an <code>X-Request-ID</code> that each of its log lines names.</dd></div>
+      </dl>
+      <p class="chapter-more"><a class="link" href="{{ site.baseurl }}/metrics">Learn more about metrics<svg class="arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14"></path><path d="m12 5 7 7-7 7"></path></svg></a></p>
+    </div>
+  </div>
+</section>
+
+<section class="section" id="editions" aria-labelledby="editions-title">
+  <div class="container">
+    <div class="split-head">
+      <div class="section-head">
+        <p class="eyebrow">Editions</p>
+        <h2 id="editions-title">Two editions, one release</h2>
+      </div>
+      <p class="lead">Both run the same proxy layer and record who changed what. Octoprox Enterprise adds who got in, under a license that never locks anyone out.</p>
+    </div>
+    <div class="editions">
+      <article class="ed ed-free" aria-labelledby="ed-free-title">
+        <div class="ed-body">
+          <div class="ed-tags"><span class="badge">Free</span> <span class="ed-meta">Apache 2.0 core</span></div>
+          <h3 class="ed-title" id="ed-free-title">Octoprox</h3>
+          <p class="ed-text">Proxy routing, providers, IP attribution, tunnel devices, metrics and the dashboard, with sign-in, API tokens and a record of every change.</p>
+          <div class="actions">
+            <a class="btn btn-primary" href="{{ site.baseurl }}/getting-started">Get started<svg class="arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14"></path><path d="m12 5 7 7-7 7"></path></svg></a>
+            <a class="btn btn-outline" href="https://github.com/octoprox/octoprox"><svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 0c4.42 0 8 3.58 8 8a8.013 8.013 0 0 1-5.45 7.59c-.4.08-.55-.17-.55-.38 0-.27.01-1.13.01-2.2 0-.75-.25-1.23-.54-1.48 1.78-.2 3.65-.88 3.65-3.95 0-.88-.31-1.59-.82-2.15.08-.2.36-1.02-.08-2.12 0 0-.67-.22-2.2.82-.64-.18-1.32-.27-2-.27-.68 0-1.36.09-2 .27-1.53-1.03-2.2-.82-2.2-.82-.44 1.1-.16 1.92-.08 2.12-.51.56-.82 1.28-.82 2.15 0 3.06 1.86 3.75 3.64 3.95-.23.2-.44.55-.51 1.07-.46.21-1.61.55-2.33-.66-.15-.24-.6-.83-1.23-.82-.67.01-.27.38.01.53.34.19.73.9.82 1.13.16.45.68 1.31 2.69.94 0 .67.01 1.3.01 1.49 0 .21-.15.45-.55.38A7.995 7.995 0 0 1 0 8c0-4.42 3.58-8 8-8Z"></path></svg>View on GitHub</a>
+          </div>
+        </div>
+        <figure class="ed-shot">
+          <div class="crop crop-split on-wide">
+            <img class="only-light" src="{{ site.baseurl }}/assets/screens/connector-detail-light.webp" width="2880" height="2000" loading="lazy" alt="Traffic split of a project's five connectors on AWS, Google Cloud, Bright Data, Oxylabs and Webshare, with each one's weight, expected and observed share, and spend">
+            <img class="only-dark" src="{{ site.baseurl }}/assets/screens/connector-detail-dark.webp" width="2880" height="2000" loading="lazy" alt="Traffic split of a project's five connectors on AWS, Google Cloud, Bright Data, Oxylabs and Webshare, with each one's weight, expected and observed share, and spend">
+          </div>
+          <div class="crop crop-stats-phone on-narrow">
+            <img class="only-light" src="{{ site.baseurl }}/assets/screens/overview-phone-light.webp" width="780" height="1688" loading="lazy" alt="A project's Overview on a phone: 3.48M requests, 3.40M successes and 87.5K failures, 6.9 GB sent, 63.2 GB received and 3,566 requests a minute">
+            <img class="only-dark" src="{{ site.baseurl }}/assets/screens/overview-phone-dark.webp" width="780" height="1688" loading="lazy" alt="A project's Overview on a phone: 3.48M requests, 3.40M successes and 87.5K failures, 6.9 GB sent, 63.2 GB received and 3,566 requests a minute">
+          </div>
+        </figure>
+      </article>
+      <article class="ed ed-ent" aria-labelledby="ed-ent-title">
+        <div class="ed-body">
+          <div class="ed-tags"><span class="badge badge-primary">Licensed</span> <span class="ed-meta">Same release, its own image</span></div>
+          <h3 class="ed-title" id="ed-ent-title">Octoprox Enterprise</h3>
+          <p class="ed-text">Everything in Octoprox, plus a record of who got in: every sign-in and API token in the audit log, across the whole install, ready for your SIEM.</p>
+          <div class="actions">
+            <a class="btn btn-outline" href="{{ site.baseurl }}/enterprise#get-in-touch">Talk to us</a>
+            <a class="link" href="{{ site.baseurl }}/enterprise">How Enterprise works<svg class="arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14"></path><path d="m12 5 7 7-7 7"></path></svg></a>
+          </div>
+        </div>
+        <figure class="ed-shot">
+          <div class="crop crop-acttable">
+            <img class="only-light" src="{{ site.baseurl }}/assets/screens/activity-light.webp" width="2880" height="1730" loading="lazy" alt="The Activity page of Octoprox Enterprise: sign-ins, a failed sign-in, an API token issued and first used, and changes to connectors">
+            <img class="only-dark" src="{{ site.baseurl }}/assets/screens/activity-dark.webp" width="2880" height="1730" loading="lazy" alt="The Activity page of Octoprox Enterprise: sign-ins, a failed sign-in, an API token issued and first used, and changes to connectors">
+          </div>
+        </figure>
+      </article>
+    </div>
+    <div class="editions-foot">
+      <p class="editions-planned"><span class="badge badge-planned">Planned</span> For Enterprise: domain rules, your own identity provider, group sync, enforcement and provisioning.</p>
+      <p class="editions-note">Screens from the product, with demo data.</p>
+    </div>
+  </div>
+</section>
+
+<section class="section pools" id="pools" aria-labelledby="pools-title">
+  <div class="container">
+    <div class="split-head">
+      <div class="section-head">
+        <p class="eyebrow">Works with</p>
+        <h2 id="pools-title">Every kind of pool behind one endpoint</h2>
+      </div>
+      <p class="lead">You bring the cloud and vendor accounts. Octoprox provisions the instances, checks the proxies and meters every pool.</p>
+    </div>
+    <div class="pool-table">
+      <div class="pool-row">
+        <div class="pool-name"><span class="card-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17.5 19H9a7 7 0 1 1 6.71-9h1.79a4.5 4.5 0 1 1 0 9Z"></path></svg></span><h3>Cloud instances</h3></div>
+        <p class="pool-text">Provisioned on demand, scaled on request rate and rotated. Run on that cloud, Octoprox can use the host's identity and store no key.</p>
+        <div class="chips">
+          <span class="chip"><img class="only-light" src="{{ site.baseurl }}/assets/logos/aws.svg" width="33" height="20" loading="lazy" alt=""><img class="only-dark" src="{{ site.baseurl }}/assets/logos/aws_dark.svg" width="33" height="20" loading="lazy" alt="">AWS</span>
+          <span class="chip"><img class="only-light" src="{{ site.baseurl }}/assets/logos/gcp.svg" width="20" height="20" loading="lazy" alt=""><img class="only-dark" src="{{ site.baseurl }}/assets/logos/gcp_dark.svg" width="20" height="20" loading="lazy" alt="">Google Cloud</span>
+          <span class="chip"><img class="only-light" src="{{ site.baseurl }}/assets/logos/azure.svg" width="20" height="20" loading="lazy" alt=""><img class="only-dark" src="{{ site.baseurl }}/assets/logos/azure_dark.svg" width="20" height="20" loading="lazy" alt="">Azure</span>
+        </div>
+      </div>
+      <div class="pool-row">
+        <div class="pool-name"><span class="card-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="16" y="16" width="6" height="6" rx="1"></rect><rect x="2" y="16" width="6" height="6" rx="1"></rect><rect x="9" y="2" width="6" height="6" rx="1"></rect><path d="M5 16v-3a1 1 0 0 1 1-1h12a1 1 0 0 1 1 1v3"></path><path d="M12 12V8"></path></svg></span><h3>Provider sessions</h3></div>
+        <p class="pool-text">A fixed pool, or dynamic: a vendor session per request.</p>
+        <div class="chips">
+          <span class="chip"><img src="{{ site.baseurl }}/assets/logos/brightdata.svg" width="20" height="20" loading="lazy" alt="">Bright Data</span>
+          <span class="chip"><img src="{{ site.baseurl }}/assets/logos/oxylabs.svg" width="20" height="20" loading="lazy" alt="">Oxylabs</span>
+          <span class="chip"><img class="only-light" src="{{ site.baseurl }}/assets/logos/decodo.svg" width="20" height="20" loading="lazy" alt=""><img class="only-dark" src="{{ site.baseurl }}/assets/logos/decodo_dark.svg" width="20" height="20" loading="lazy" alt="">Decodo <span class="chip-tag">Beta</span></span>
+          <span class="chip"><img src="{{ site.baseurl }}/assets/logos/webshare.svg" width="20" height="20" loading="lazy" alt="">Webshare <span class="chip-tag">Beta</span></span>
+          <span class="chip"><img src="{{ site.baseurl }}/assets/logos/iproyal.svg" width="20" height="20" loading="lazy" alt="">IPRoyal <span class="chip-tag">Beta</span></span>
+          <span class="chip"><img class="only-light" src="{{ site.baseurl }}/assets/logos/netnut.svg" width="20" height="20" loading="lazy" alt=""><img class="only-dark" src="{{ site.baseurl }}/assets/logos/netnut_dark.svg" width="20" height="20" loading="lazy" alt="">NetNut <span class="chip-tag">Beta</span></span>
+        </div>
+      </div>
+      <div class="pool-row">
+        <div class="pool-name"><span class="card-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12h.01"></path><path d="M3 18h.01"></path><path d="M3 6h.01"></path><path d="M8 12h13"></path><path d="M8 18h13"></path><path d="M8 6h13"></path></svg></span><h3>Static lists</h3></div>
+        <p class="pool-text">Your own proxies over http, https, socks4 or socks5, health-checked and routed like the rest.</p>
+        <div class="chips">
+          <span class="chip"><img src="{{ site.baseurl }}/assets/logos/static-proxy.svg" width="20" height="20" loading="lazy" alt="">Static list</span>
+        </div>
+      </div>
+    </div>
+    <article class="pool-custom" aria-labelledby="custom-title">
+      <div class="pool-custom-copy">
+        <div class="pool-name"><span class="card-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10 12.5 8 15l2 2.5"></path><path d="m14 12.5 2 2.5-2 2.5"></path><path d="M14 2v4a2 2 0 0 0 2 2h4"></path><path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7z"></path></svg></span><h3 id="custom-title">Custom providers</h3></div>
+        <p class="pool-text">Any other vendor, added as a YAML descriptor from the admin UI, with no code or redeploy. A vendor that needs code can come as a Python plugin.</p>
+        <a class="link" href="{{ site.baseurl }}/providers">Learn more about providers<svg class="arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14"></path><path d="m12 5 7 7-7 7"></path></svg></a>
+      </div>
+      <figure class="pool-custom-shot">
+        <div class="shot">
+          <div class="crop crop-providers">
+            <img class="only-light" src="{{ site.baseurl }}/assets/screens/providers-light.webp" width="2880" height="1388" loading="lazy" alt="The Providers page: Acme Proxies, added from the admin UI, marked custom among built-in providers such as Amazon Web Services and Bright Data">
+            <img class="only-dark" src="{{ site.baseurl }}/assets/screens/providers-dark.webp" width="2880" height="1388" loading="lazy" alt="The Providers page: Acme Proxies, added from the admin UI, marked custom among built-in providers such as Amazon Web Services and Bright Data">
+          </div>
+        </div>
+      </figure>
+    </article>
+    <div class="devices">
+      <div class="devices-copy">
+        <p class="label">And for devices</p>
+        <h3>No proxy settings? Join through a tunnel</h3>
+        <p class="devices-text">Phones, TVs, consoles and routers join a project through a WireGuard or OpenVPN tunnel, and their connections go out through the pool.</p>
+        <div class="chips">
+          <span class="chip chip-text">WireGuard <span class="chip-tag">51820/udp</span></span>
+          <span class="chip chip-text">OpenVPN <span class="chip-tag">1194, UDP or TCP</span></span>
+        </div>
+      </div>
+      <figure class="devices-shot">
+        <div class="shot">
+          <div class="crop crop-devices">
+            <img class="only-light" src="{{ site.baseurl }}/assets/screens/devices-light.webp" width="2880" height="922" loading="lazy" alt="The Devices page: phones, a TV rig and routers on WireGuard and OpenVPN tunnels, each with its tunnel address, status and routing, such as US, NY, New York">
+            <img class="only-dark" src="{{ site.baseurl }}/assets/screens/devices-dark.webp" width="2880" height="922" loading="lazy" alt="The Devices page: phones, a TV rig and routers on WireGuard and OpenVPN tunnels, each with its tunnel address, status and routing, such as US, NY, New York">
+          </div>
+        </div>
+      </figure>
+    </div>
+  </div>
+</section>
+
+<section class="section section-alt" id="quick-start" aria-labelledby="start-title">
+  <div class="container">
+    <div class="split-head">
+      <div class="section-head">
+        <p class="eyebrow">Quick start</p>
+        <h2 id="start-title">Running in two commands</h2>
+      </div>
+      <p class="lead">One process from the pre-built image, with Postgres and Redis beside it, for development, demos and small production installs.</p>
+    </div>
+    <div class="start-grid">
+      <div class="start-run">
+        <div class="terminal">
+          <div class="terminal-bar">
+            <span class="terminal-title"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m4 17 6-6-6-6"></path><path d="M12 19h8"></path></svg>Single instance</span>
+            <button type="button" class="copy-btn"><svg class="icon-copy" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect width="14" height="14" x="8" y="8" rx="2" ry="2"></rect><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"></path></svg><svg class="icon-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"></path></svg><span class="copy-label" aria-live="polite">Copy</span></button>
+          </div>
+          <pre tabindex="0"><code><span class="line c"># Run a single instance with the pre-built image</span><span class="line"><span class="p">$</span>curl -O https://raw.githubusercontent.com/octoprox/octoprox/main/docker-compose.ghcr.yml</span><span class="line"><span class="p">$</span>docker compose -f docker-compose.ghcr.yml up -d --remove-orphans</span></code></pre>
+        </div>
+        <p class="terminal-note">Web UI on <code>localhost:8000</code>, proxy on <code>localhost:8080</code>. Default login <code>admin</code> / <code>admin</code>.</p>
+      </div>
+      <div class="start-next">
+        <p class="label">Then</p>
+        <h3>Point a client at it</h3>
+        <p class="start-text">Each project's Connect page builds the username for any place and session, the proxy URL, and code to copy for curl, Python, Node.js, Playwright and environment variables.</p>
+        <div class="actions actions-stack">
+          <a class="btn btn-primary btn-lg" href="{{ site.baseurl }}/getting-started">Get started<svg class="arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14"></path><path d="m12 5 7 7-7 7"></path></svg></a>
+          <a class="link" href="{{ site.baseurl }}/kubernetes">Running on Kubernetes<svg class="arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14"></path><path d="m12 5 7 7-7 7"></path></svg></a>
+        </div>
+      </div>
+    </div>
+    <div class="scrapoxy">
+      <div class="scrapoxy-copy">
+        <p class="label">Migrating</p>
+        <h3>Coming from Scrapoxy?</h3>
+        <p class="scrapoxy-text">The migration guide maps every Scrapoxy setting to Octoprox, and a typical setup takes well under an hour. Any vendor Octoprox does not ship can be added as a YAML descriptor, with no code or redeploy. Scrapoxy itself was discontinued in February 2026 after eleven years: images removed, docs offline, the shared GeoIP and health-check backend switched off.</p>
+        <a class="link" href="{{ site.baseurl }}/scrapoxy-migration">Read the migration guide<svg class="arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14"></path><path d="m12 5 7 7-7 7"></path></svg></a>
+      </div>
+      <div class="mapping">
+        <table>
+          <caption class="visually-hidden">What a Scrapoxy setting becomes in Octoprox</caption>
+          <thead><tr><th scope="col" class="label">Scrapoxy</th><th scope="col" class="label">Octoprox</th></tr></thead>
+          <tbody>
+            <tr><td>Project token</td><td><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14"></path><path d="m12 5 7 7-7 7"></path></svg>Username and password</td></tr>
+            <tr><td>Cookie sessions</td><td><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14"></path><path d="m12 5 7 7-7 7"></path></svg><code>-sessid-</code> in the username</td></tr>
+            <tr><td>Port 8888</td><td><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14"></path><path d="m12 5 7 7-7 7"></path></svg>Port 8080</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="docs" id="docs" aria-labelledby="docs-title">
+  <div class="container docs-grid">
+    <div class="docs-intro">
+      <h2 id="docs-title">Explore the docs</h2>
+      <p class="docs-text">Guides for every feature, and a REST API for everything in the UI.</p>
+    </div>
+    <nav class="docs-links" aria-label="Docs">
+      <a href="{{ site.baseurl }}/getting-started"><span class="dl-title">Quick start</span> <span class="dl-text">Docker, single instance or cluster</span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m9 18 6-6-6-6"></path></svg></a>
+      <a href="{{ site.baseurl }}/connecting"><span class="dl-title">Connecting clients</span> <span class="dl-text">Proxy URL, credentials and code examples</span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m9 18 6-6-6-6"></path></svg></a>
+      <a href="{{ site.baseurl }}/routing-strategies"><span class="dl-title">Routing strategies</span> <span class="dl-text">Five strategies, weights per connector</span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m9 18 6-6-6-6"></path></svg></a>
+      <a href="{{ site.baseurl }}/location-routing"><span class="dl-title">Location routing</span> <span class="dl-text">Policy, preflight and sessions</span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m9 18 6-6-6-6"></path></svg></a>
+      <a href="{{ site.baseurl }}/ip-attribution"><span class="dl-title">IP attribution</span> <span class="dl-text">Where exits really are, vendor accuracy</span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m9 18 6-6-6-6"></path></svg></a>
+      <a href="{{ site.baseurl }}/traffic-limits"><span class="dl-title">Traffic limits and billing</span> <span class="dl-text">Byte caps per period, spend per GB</span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m9 18 6-6-6-6"></path></svg></a>
+      <a href="{{ site.baseurl }}/deployment"><span class="dl-title">Deployment and scaling</span> <span class="dl-text">One process, or roles scaled on their own</span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m9 18 6-6-6-6"></path></svg></a>
+      <a href="{{ site.baseurl }}/api"><span class="dl-title">API reference</span> <span class="dl-text">REST endpoints for everything in the UI</span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m9 18 6-6-6-6"></path></svg></a>
+    </nav>
+  </div>
+</section>
+
+<script>
+  // The quick start's copy button: the commands only, without the comment line or the prompts
+  (function () {
+    function copy(btn) {
+      var pre = btn.closest('.terminal') && btn.closest('.terminal').querySelector('pre');
+      if (!pre) return;
+      var text = Array.prototype.map.call(pre.querySelectorAll('.line:not(.c)'), function (line) {
+        var clone = line.cloneNode(true);
+        clone.querySelectorAll('.p').forEach(function (p) { p.remove(); });
+        return clone.textContent;
+      }).join('\n');
+      function done() {
+        var label = btn.querySelector('.copy-label');
+        btn.classList.add('is-copied');
+        if (label) label.textContent = 'Copied';
+        setTimeout(function () { btn.classList.remove('is-copied'); if (label) label.textContent = 'Copy'; }, 1600);
+      }
+      function fallback() {
+        var area = document.createElement('textarea');
+        area.value = text;
+        area.setAttribute('readonly', '');
+        area.style.cssText = 'position: fixed; opacity: 0;';
+        document.body.appendChild(area);
+        area.select();
+        try { if (document.execCommand('copy')) done(); } catch (e) {}
+        area.remove();
+      }
+      if (navigator.clipboard && window.isSecureContext) navigator.clipboard.writeText(text).then(done, fallback);
+      else fallback();
+    }
+    document.addEventListener('click', function (e) {
+      var btn = e.target instanceof Element && e.target.closest('.copy-btn');
+      if (btn) copy(btn);
+    });
+  })();
+</script>

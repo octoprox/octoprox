@@ -16,7 +16,7 @@ import { useTheme } from '../contexts/ThemeContext'
 import { useAuth } from '../contexts/AuthContext'
 import { useToast } from '../contexts/ToastContext'
 import { setSettingsOrigin } from '../utils/settingsOrigin'
-import { bytesShort, compact } from '../utils/format'
+import { bytesShort, compact, formatRpm } from '../utils/format'
 import { ProjectForm } from './ProjectForm'
 import { DeletingBadge } from './DeletingBadge'
 import { DataTable, type DataTableFeatures } from './DataTable'
@@ -62,13 +62,6 @@ function healthDotClass(project: ProjectSummary): string {
 
 // The Overview's requests colour, literal so the trend reads the same on every theme.
 const REQUESTS_COLOR = '#2563eb'
-
-/** Requests per minute: one decimal under ten, whole and compact above; a trickle reads <0.1, not 0. */
-function formatRpm(rpm: number): string {
-  if (rpm <= 0) return '0'
-  if (rpm < 0.1) return '<0.1'
-  return rpm < 10 ? rpm.toFixed(1).replace(/\.0$/, '') : compact(Math.round(rpm))
-}
 
 /** The share of the range's requests that succeeded, 0-100; null when there were none. */
 function successRate(load: ProjectLoad): number | null {

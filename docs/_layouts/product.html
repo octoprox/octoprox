@@ -1,0 +1,35 @@
+{%- comment -%}
+  Product pages (the homepage, Enterprise): the shared head, header and footer around the page's own sections.
+  - title is the whole <title>: the page names itself, as in "Octoprox - Open-Source Self-Hosted Proxy Manager".
+  - Whatever the page puts above a "<!-- /head -->" line goes into <head>: its <style> and, on the homepage, the
+    JSON-LD. Everything below it goes into <main>, and a page script can sit at its end.
+  - nav_id: enterprise marks the Enterprise nav item as current.
+  - hero: true when the hero has a screenshot per theme, as <img data-hero="light"> and <img data-hero="dark">, both
+    loading="lazy": site-head.html then loads only the one on show.
+{%- endcomment -%}
+{%- assign head_marker = '<!-- /head -->' -%}
+{%- assign page_head = '' -%}
+{%- assign page_body = content -%}
+{%- if content contains head_marker -%}
+  {%- assign page_head = content | split: head_marker | first -%}
+  {%- assign page_body = content | remove_first: page_head | remove_first: head_marker -%}
+{%- endif -%}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{{ page.title }}</title>
+{% include site-head.html %}
+{{ page_head }}
+</head>
+<body class="site">
+  {% include site-header.html %}
+  <main id="main">
+{{ page_body }}
+  </main>
+  {% include site-footer.html %}
+  <script src="{{ site.baseurl }}/assets/site.js"></script>
+  <script src="{{ site.baseurl }}/assets/contact.js"></script>
+</body>
+</html>

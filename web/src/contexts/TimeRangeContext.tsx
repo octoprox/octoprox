@@ -28,6 +28,35 @@ export function rangeDomain(range: TimeRange, dataUpdatedAt: number): [number, n
   return [end - TIME_RANGE_MS[range], end]
 }
 
+/** How far apart a range's axis ticks are: minutes of the local day inside a day, local midnights beyond it. */
+const TICK_EVERY: Record<TimeRange, { minutes: number } | { days: number }> = {
+  '1h': { minutes: 10 }, '6h': { minutes: 60 }, '24h': { minutes: 180 }, '7d': { days: 1 }, '30d': { days: 5 }, '90d': { days: 15 },
+}
+
+/**
+ * Axis ticks for a history chart on round local times inside `[start, end]`: every 10 minutes for 1h, on the hour
+ * for 6h, every 3 hours from midnight for 24h, then midnights (daily for 7d, every 5 days for 30d, 15 for 90d).
+ */
+export function rangeTicks(range: TimeRange, [start, end]: [number, number]): number[] {
+  const every = TICK_EVERY[range]
+  const t = new Date(start)
+  if ('minutes' in every) {
+    // The first multiple of the step since local midnight at or after the start.
+    const into = t.getHours() * 60 + t.getMinutes() + (t.getSeconds() || t.getMilliseconds() ? 1 : 0)
+    t.setHours(0, Math.ceil(into / every.minutes) * every.minutes, 0, 0)
+  } else {
+    t.setHours(0, 0, 0, 0)
+    if (t.getTime() < start) t.setDate(t.getDate() + 1)
+  }
+  const ticks: number[] = []
+  while (t.getTime() <= end) {
+    ticks.push(t.getTime())
+    if ('minutes' in every) t.setMinutes(t.getMinutes() + every.minutes)
+    else t.setDate(t.getDate() + every.days)
+  }
+  return ticks
+}
+
 /** Axis tick for a history chart: the time of day inside a day, the date beyond it. */
 export function formatRangeTick(epoch: number, range: TimeRange): string {
   const d = new Date(epoch)

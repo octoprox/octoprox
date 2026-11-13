@@ -39,6 +39,8 @@
       }
     * { margin: 0; padding: 0; box-sizing: border-box; }
     html, body { overflow-x: hidden; }
+    /* iOS Safari keeps the text size after rotating to landscape */
+    html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
     body {
       font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif;
       background: var(--bg); color: var(--fg); font-size: 15px; line-height: 1.65; -webkit-font-smoothing: antialiased;

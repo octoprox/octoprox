@@ -16,9 +16,9 @@ import {
 } from '../api/client'
 import { useProject } from '../contexts/ProjectContext'
 import { useDebounced } from '../hooks/useDebounced'
-import { formatRangeTick, rangeDomain, useTimeRange } from '../contexts/TimeRangeContext'
+import { formatRangeTick, rangeDomain, rangeTicks, useTimeRange } from '../contexts/TimeRangeContext'
 import { useTheme } from '../contexts/ThemeContext'
-import { bytesShort, compact, formatBytes, parseApiDate, plural } from '../utils/format'
+import { bytesShort, bytesTick, compact, formatBytes, parseApiDate, plural } from '../utils/format'
 import { DataTable, type DataTableFeatures } from '../components/DataTable'
 import { Page, EmptyState } from '../components/layout/Page'
 import { ProviderLogo } from '../components/ProviderLogo'
@@ -114,6 +114,7 @@ export default function HostsPage() {
   const seriesHosts = useMemo(() => history?.series.map((s) => s.host) ?? [], [history])
   // Anchored to when the data arrived, so every refetch moves the axis with the window.
   const timeDomain = useMemo(() => rangeDomain(range, historyUpdatedAt), [range, historyUpdatedAt])
+  const timeTicks = useMemo(() => rangeTicks(range, timeDomain), [range, timeDomain])
 
   // The busiest hosts as bars, from the same (search-narrowed) list as the table and
   // the totals, so the three agree; the header names the search when one is on.
@@ -275,7 +276,8 @@ export default function HostsPage() {
         <Kpi label="Requests" value={totals ? compact(totals.request_count) : '-'} sub={totals && totals.request_count > 0 ? `${compact(totals.success_count)} ok` : undefined} />
         <Kpi label="Failure rate" value={failureRate == null ? '-' : `${failureRate.toFixed(1)}%`} sub={totals && totals.failure_count > 0 ? `${compact(totals.failure_count)} failed` : undefined} tone={failureRate != null && failureRate >= 10 ? 'danger' : undefined} />
         <Kpi label="Data transferred" value={totals ? bytesShort(transferred) : '-'} sub={totals ? `${bytesShort(totals.bytes_sent)} sent · ${bytesShort(totals.bytes_received)} received` : undefined} />
-        <Kpi label="Avg latency" value={totals && totals.success_count > 0 ? `${Math.round(totals.avg_latency_ms)} ms` : '-'} sub="to the upstream proxy" />
+        {/* At two or three columns the fifth tile takes the rest of the last row, so no empty cell shows. */}
+        <Kpi label="Avg latency" value={totals && totals.success_count > 0 ? `${Math.round(totals.avg_latency_ms)} ms` : '-'} sub="to the upstream proxy" className="col-span-2 @4xl:col-span-1" />
       </Card>
 
       {firstLoad ? (
@@ -305,8 +307,8 @@ export default function HostsPage() {
                   <ResponsiveContainer width="100%" height={260}>
                     <AreaChart data={chartData} margin={{ top: 8, right: 8, left: metric === 'bytes' ? 4 : -12, bottom: 0 }} aria-label={`${metric === 'requests' ? 'Requests' : 'Data'} over time`}>
                       <CartesianGrid strokeDasharray="2 4" stroke={gridColor} vertical={false} />
-                      <XAxis dataKey="time" type="number" scale="time" domain={timeDomain} tickFormatter={(v: number) => formatRangeTick(v, range)} tick={{ fontSize: 11, fill: tickColor }} axisLine={false} tickLine={false} minTickGap={48} />
-                      <YAxis allowDecimals={false} tick={{ fontSize: 11, fill: tickColor }} axisLine={false} tickLine={false} tickFormatter={(v: number) => (metric === 'requests' ? compact(v) : bytesShort(v))} width={metric === 'bytes' ? 64 : undefined} />
+                      <XAxis dataKey="time" type="number" scale="time" domain={timeDomain} ticks={timeTicks} tickFormatter={(v: number) => formatRangeTick(v, range)} tick={{ fontSize: 11, fill: tickColor }} axisLine={false} tickLine={false} minTickGap={48} />
+                      <YAxis allowDecimals={false} tick={{ fontSize: 11, fill: tickColor }} axisLine={false} tickLine={false} tickFormatter={(v: number) => (metric === 'requests' ? compact(v) : bytesTick(v))} width={metric === 'bytes' ? 64 : undefined} />
                       <Tooltip
                         labelFormatter={(v) => new Date(Number(v)).toLocaleString()}
                         formatter={(v, name) => [formatMetric(Number(v)), name === overflow ? 'other hosts' : name]}
@@ -366,7 +368,8 @@ export default function HostsPage() {
                         dataKey="value"
                         radius={[0, 4, 4, 0]}
                         label={{ position: 'right', fontSize: 10, fill: tickColor, formatter: (v) => (metric === 'requests' ? compact(Number(v)) : bytesShort(Number(v))) }}
-                        shape={(props: BarShapeProps) => <Rectangle {...props} fill={colorOf(props.payload.host) ?? '#2563eb'} />}
+                        // A host outside the charted top few is part of "other hosts" there, so it takes that grey.
+                        shape={(props: BarShapeProps) => <Rectangle {...props} fill={colorOf(props.payload.host) ?? OVERFLOW_COLOR} />}
                       />
                     </BarChart>
                   </ResponsiveContainer>
@@ -469,9 +472,9 @@ function ConnectorBreakdown({ host, nameOf, onOpenConnector }: {
   )
 }
 
-function Kpi({ label, value, sub, tone }: { label: string; value: string; sub?: string; tone?: 'danger' }) {
+function Kpi({ label, value, sub, tone, className }: { label: string; value: string; sub?: string; tone?: 'danger'; className?: string }) {
   return (
-    <div className="px-3 py-2.5 @lg:px-4 @lg:py-3 flex flex-col gap-1 min-w-0">
+    <div className={cn('px-3 py-2.5 @lg:px-4 @lg:py-3 flex flex-col gap-1 min-w-0', className)}>
       <div className="text-xs text-fg-muted truncate">{label}</div>
       <div className={`text-[17px] leading-6 @lg:text-[21px] @lg:leading-7 font-semibold tabular-nums truncate ${tone === 'danger' ? 'text-danger' : ''}`} title={value}>{value}</div>
       {sub && <div className="text-[11px] text-fg-subtle truncate">{sub}</div>}

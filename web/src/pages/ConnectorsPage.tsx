@@ -183,7 +183,8 @@ export default function ConnectorsPage() {
     {
       accessorKey: 'proxy_count',
       header: 'Proxies',
-      size: 150,
+      // Not 150: that is TanStack's default size, which DataTable reads as unsized and floors at 170.
+      size: 160,
       cell: ({ row }) => {
         const max = targetTotal(row.original)
         const n = row.original.proxy_count
@@ -243,7 +244,7 @@ export default function ConnectorsPage() {
       id: 'status',
       accessorFn: (row: Connector) => (row.last_error ? 'Error' : row.traffic_usage?.pending ? 'Pending' : row.traffic_usage?.blocked ? 'Over limit' : row.enabled ? 'Enabled' : 'Disabled'),
       header: 'Status',
-      size: 190,
+      size: 170,
       meta: { filterVariant: 'select' as const },
       cell: ({ row }) => (
         <span className="inline-flex items-center gap-1.5 flex-wrap">
@@ -260,7 +261,7 @@ export default function ConnectorsPage() {
     {
       accessorKey: 'updated_at',
       header: 'Updated',
-      size: 120,
+      size: 100,
       cell: ({ getValue }) => <span className="text-fg-muted text-xs" title={formatDateTime(getValue<string>())}>{relativeTime(getValue<string>())}</span>,
     },
     ...(canMutate ? [{

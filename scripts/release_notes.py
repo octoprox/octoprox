@@ -90,7 +90,7 @@ Reply with only this YAML, no code fence and no other text:
     - text: "<one or two sentences, double-quoted>"
       docs: <optional: a docs page below, without .md, optionally #anchor of one of its headings>
 
-Docs pages: {", ".join(sorted(p.stem for p in (ROOT / "docs").glob("*.md")))}
+Docs pages: {", ".join(sorted({p.stem for pattern in ("*.md", "*.html") for p in (ROOT / "docs").glob(pattern)} - {"404", "index"}))}
 
 Commits since {since}:
 {chr(10).join("- " + s for s in commit_subjects(since))}

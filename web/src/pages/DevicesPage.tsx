@@ -18,13 +18,14 @@ import {
 import { useProject } from '../contexts/ProjectContext'
 import { useAuth } from '../contexts/AuthContext'
 import { useTheme } from '../contexts/ThemeContext'
-import { formatRangeTick, useTimeRange } from '../contexts/TimeRangeContext'
+import { formatRangeTick, rangeTicks, useTimeRange } from '../contexts/TimeRangeContext'
 import { useToast } from '../contexts/ToastContext'
 import { AdminLink } from '../components/AdminLink'
 import { EntityHistory } from '../components/audit/EntityHistory'
 import { DataTable, type DataTableFeatures } from '../components/DataTable'
 import { Page, EmptyState } from '../components/layout/Page'
-import { formatBytes, formatDateTime, parseApiDate, plural } from '../utils/format'
+import { bytesTick, formatBytes, formatDateTime, parseApiDate, plural } from '../utils/format'
+import { cityWords } from '../utils/connect'
 import {
   Alert, Badge, Button, ConfirmDialog, InfoTip, Input, Inspector, InspectorSection, KeyValue, Label, QueryContent, Segmented, Tabs,
 } from '../components/ui'
@@ -244,7 +245,8 @@ export default function DevicesPage() {
     {
       id: 'status',
       header: 'Status',
-      size: 150,
+      // Not 150: DataTable reads TanStack's default size as no size, which pushed the table past a docked inspector.
+      size: 140,
       accessorFn: (row: Device) => statusLabel(row),
       meta: { filterVariant: 'select' as const },
       cell: ({ row }) => <StatusBadge device={row.original} />,
@@ -265,7 +267,12 @@ export default function DevicesPage() {
         const m = row.original.metrics
         const total = m.bytes_sent + m.bytes_received
         return total > 0 || m.request_count > 0
-          ? <span className="text-fg-muted tabular-nums text-xs" title="What the pool relayed for this device, all time">{formatBytes(total)} · {m.request_count} {plural(m.request_count, 'connection', 'connections')}</span>
+          ? (
+            <span className="block text-fg-muted tabular-nums text-xs leading-4" title="What the pool relayed for this device, all time">
+              {formatBytes(total)}
+              <span className="block text-fg-subtle">{m.request_count.toLocaleString()} {plural(m.request_count, 'connection', 'connections')}</span>
+            </span>
+          )
           : <span className="text-fg-subtle">-</span>
       },
     },
@@ -381,7 +388,7 @@ function StatusBadge({ device }: { device: Device }) {
 
 function routingLabel(device: Device): string {
   const parts: string[] = []
-  if (device.country) parts.push([device.country, device.state, device.city?.replace(/_/g, ' ')].filter(Boolean).join(' / '))
+  if (device.country) parts.push([device.country, device.state, device.city && cityWords(device.city)].filter(Boolean).join(' / '))
   if (device.session_id) parts.push(`session ${device.session_id}`)
   return parts.join(', ')
 }
@@ -724,6 +731,8 @@ function DeviceTrafficSection({ device, adapter, projectId }: { device: Device; 
     refetchInterval: 60_000,
   })
   const points = useMemo(() => toPoints(history?.snapshots ?? []), [history])
+  // Ticks on round local times across the data's extent.
+  const ticks = useMemo(() => (points.length > 0 ? rangeTicks(range, [points[0].time, points[points.length - 1].time]) : []), [points, range])
   const rangeTotal = useMemo(() => points.reduce((a, p) => a + p[series], 0), [points, series])
 
   const m = device.metrics
@@ -745,7 +754,7 @@ function DeviceTrafficSection({ device, adapter, projectId }: { device: Device; 
       <KeyValue label="Relayed" value={<>{formatBytes(m.bytes_sent + m.bytes_received)} <span className="text-fg-subtle font-normal">· {formatBytes(m.bytes_sent)} up, {formatBytes(m.bytes_received)} down</span></>} />
       <KeyValue
         label="Connections"
-        value={<>{m.request_count}{successRate != null && <span className="text-fg-subtle font-normal"> · {successRate}% reached the exit{m.success_count > 0 && <>, {Math.round(m.avg_latency_ms)} ms to connect</>}</span>}</>}
+        value={<>{m.request_count.toLocaleString()}{successRate != null && <span className="text-fg-subtle font-normal"> · {successRate}% reached the exit{m.success_count > 0 && <>, {Math.round(m.avg_latency_ms)} ms to connect</>}</span>}</>}
       />
       <div className="pt-1">
         <div className="mb-1 space-y-1.5">
@@ -759,10 +768,10 @@ function DeviceTrafficSection({ device, adapter, projectId }: { device: Device; 
           <p className="text-fg-subtle text-xs text-center h-[90px] flex items-center justify-center">No traffic in this range</p>
         ) : (
           <ResponsiveContainer width="100%" height={90}>
-            <AreaChart data={points} margin={{ top: 4, right: 4, left: -8, bottom: 0 }} aria-label={`${seriesLabel} over time`}>
+            <AreaChart data={points} margin={{ top: 10, right: 4, left: -8, bottom: 0 }} aria-label={`${seriesLabel} over time`}>
               <CartesianGrid strokeDasharray="2 4" stroke={gridColor} vertical={false} />
-              <XAxis dataKey="time" type="number" scale="time" domain={['dataMin', 'dataMax']} tickFormatter={(v: number) => formatRangeTick(v, range)} tick={{ fontSize: 10, fill: tickColor }} axisLine={false} tickLine={false} minTickGap={40} />
-              <YAxis tick={{ fontSize: 10, fill: tickColor }} axisLine={false} tickLine={false} tickFormatter={(v: number) => (series === 'bytes' ? formatBytes(v) : String(v))} width={52} allowDecimals={false} />
+              <XAxis dataKey="time" type="number" scale="time" domain={['dataMin', 'dataMax']} ticks={ticks} tickFormatter={(v: number) => formatRangeTick(v, range)} tick={{ fontSize: 10, fill: tickColor }} axisLine={false} tickLine={false} minTickGap={40} />
+              <YAxis tick={{ fontSize: 10, fill: tickColor }} axisLine={false} tickLine={false} tickFormatter={(v: number) => (series === 'bytes' ? bytesTick(v) : String(v))} width={52} allowDecimals={false} />
               <Tooltip labelFormatter={(v) => new Date(Number(v)).toLocaleString()} formatter={(v) => [formatValue(Number(v)), seriesLabel]} contentStyle={tooltipStyle} />
               <Area type="monotone" dataKey={series} name={seriesLabel} stroke={lineColor} strokeWidth={2} fill={lineColor} fillOpacity={0.08} />
             </AreaChart>

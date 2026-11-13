@@ -25,7 +25,7 @@ import { useProject } from '../contexts/ProjectContext'
 import { useAuth } from '../contexts/AuthContext'
 import { useToast } from '../contexts/ToastContext'
 import { useTheme } from '../contexts/ThemeContext'
-import { formatRangeTick, rangeDomain, useTimeRange } from '../contexts/TimeRangeContext'
+import { formatRangeTick, rangeDomain, rangeTicks, useTimeRange } from '../contexts/TimeRangeContext'
 import { DataTable, type DataTableFeatures } from '../components/DataTable'
 import { Page, EmptyState } from '../components/layout/Page'
 import { StatusCodeBadge } from '../components/mitm/RequestDetail'
@@ -199,11 +199,19 @@ export default function FailuresPage() {
       // The vendor's own words follow ours, so the filter finds either.
       accessorFn: (row) => (row.upstream_message ? `${row.message} · ${row.upstream_message}` : row.message),
       meta: { filterVariant: 'text' as const },
+      // Two lines, as tall as the connector beside it: ours over the vendor's own words when it sent some, so they
+      // are never cut off behind ours; otherwise ours wraps onto both.
       cell: ({ row, getValue }) => (
-        <span className="text-xs text-fg-muted truncate block" title={getValue<string>()}>
-          {row.original.message}
-          {row.original.upstream_message && <span className="text-fg"> · {row.original.upstream_message}</span>}
-        </span>
+        <div className="text-xs text-fg-muted min-w-0" title={getValue<string>()}>
+          {row.original.upstream_message ? (
+            <>
+              <span className="block truncate">{row.original.message}</span>
+              <span className="block truncate text-fg">{row.original.upstream_message}</span>
+            </>
+          ) : (
+            <span className="whitespace-normal break-words line-clamp-2">{row.original.message}</span>
+          )}
+        </div>
       ),
     },
     {
@@ -366,6 +374,7 @@ function WhatFailed({ summary, updatedAt, loading, reloading, failed, range, onR
   const data = useMemo(() => chartData(summary), [summary])
   // Anchored to when the data arrived, so every refetch moves the axis with the window.
   const timeDomain = useMemo(() => rangeDomain(range, updatedAt), [range, updatedAt])
+  const timeTicks = useMemo(() => rangeTicks(range, timeDomain), [range, timeDomain])
   const largest = summary && summary.kinds.length > 0 ? summary.kinds[0].count : 0
   const groups = useMemo(() => {
     const byGroup = new Map<FailureGroup, FailureSummary['kinds']>()
@@ -383,9 +392,11 @@ function WhatFailed({ summary, updatedAt, loading, reloading, failed, range, onR
 
   // From @md up nothing in this card wraps or grows with its content: a docked
   // example narrows the page, and a card that grew taller then would push the
-  // examples down under the reader's pointer. The body has a fixed height
-  // and the kind list scrolls if it ever outgrows it. Below @md the card is
-  // one column anyway, so the range picker may wrap under the title there.
+  // examples down under the reader's pointer. The body has a fixed height, tall
+  // enough for both groups of kinds; the kind list scrolls if it ever outgrows
+  // it, and the counts by connector under the chart take their room from the
+  // chart. Below @md the card is one column anyway, so the range picker may wrap
+  // under the title there.
   return (
     <Card className="p-4">
       <div className="flex flex-wrap @md:flex-nowrap items-center justify-between gap-x-3 gap-y-2 mb-3">
@@ -398,13 +409,13 @@ function WhatFailed({ summary, updatedAt, loading, reloading, failed, range, onR
         <Segmented options={HISTORY_RANGES.map((r) => ({ value: r, label: r }))} value={range} onChange={onRange} size="sm" className="flex-none" />
       </div>
       {loading && !summary ? (
-        <LogoLoader className="h-[260px] items-center" />
+        <LogoLoader className="h-[350px] items-center" />
       ) : !summary && failed ? (
-        <div className="h-[260px] text-sm text-fg-subtle flex items-center justify-center">The counts could not be loaded.</div>
+        <div className="h-[350px] text-sm text-fg-subtle flex items-center justify-center">The counts could not be loaded.</div>
       ) : !summary || summary.total === 0 ? (
-        <Reloading active={reloading}><div className="h-[260px] text-sm text-fg-subtle flex items-center justify-center">No failures counted in the last {range}.</div></Reloading>
+        <Reloading active={reloading}><div className="h-[350px] text-sm text-fg-subtle flex items-center justify-center">No failures counted in the last {range}.</div></Reloading>
       ) : (
-        <Reloading active={reloading} className="grid grid-cols-1 @md:grid-cols-[minmax(240px,2fr)_minmax(0,3fr)] gap-x-6 gap-y-4 @md:h-[260px]">
+        <Reloading active={reloading} className="grid grid-cols-1 @md:grid-cols-[minmax(240px,2fr)_minmax(0,3fr)] gap-x-6 gap-y-4 @md:h-[350px]">
           <div className="flex flex-col gap-3 min-w-0 @md:overflow-y-auto @md:pr-1">
             <div className="text-[12.5px] text-fg-muted truncate flex-none">
               <span className="font-semibold text-fg tabular-nums">{summary.total.toLocaleString()}</span> {plural(summary.total, 'failure', 'failures')} in the last {range}
@@ -451,47 +462,51 @@ function WhatFailed({ summary, updatedAt, loading, reloading, failed, range, onR
                 })}
               </div>
             ))}
-            {summary.connectors.length > 0 && (
-              <div className="min-w-0 pt-2 border-t border-line">
-                <h3 className="text-[11px] font-semibold uppercase tracking-wider text-fg-subtle mb-0.5">By connector</h3>
-                {summary.connectors.map((c) => (
-                  <div key={c.connector_id ?? 'none'} className="flex items-center justify-between gap-3 py-0.5 text-[12.5px]">
-                    <span className={cn('truncate', c.connector_id ? 'text-fg' : 'text-fg-muted italic')}>
-                      {c.connector_id ? (c.name || 'deleted connector') : 'no proxy chosen'}
-                    </span>
-                    <span className="tabular-nums text-fg-muted flex-none">{compact(c.count)}</span>
-                  </div>
-                ))}
-              </div>
-            )}
           </div>
 
-          <div className="min-w-0 h-[220px] @md:h-full">
-            <ResponsiveContainer width="100%" height="100%">
-              <BarChart data={data} margin={{ top: 4, right: 4, left: -12, bottom: 0 }} barCategoryGap={1} aria-label="Failures over time">
-                <CartesianGrid strokeDasharray="2 4" stroke={gridColor} vertical={false} />
-                <XAxis dataKey="time" type="number" scale="time" domain={timeDomain} tickFormatter={(v: number) => formatRangeTick(v, range)} tick={{ fontSize: 11, fill: tickColor }} axisLine={false} tickLine={false} minTickGap={48} />
-                <YAxis allowDecimals={false} tick={{ fontSize: 11, fill: tickColor }} axisLine={false} tickLine={false} tickFormatter={(v: number) => compact(v)} />
-                <Tooltip
-                  labelFormatter={(v) => new Date(Number(v)).toLocaleString()}
-                  formatter={(v, kind) => [Number(v).toLocaleString(), kindInfo(String(kind)).label]}
-                  contentStyle={tooltipStyle}
-                  cursor={{ fill: isDark ? 'rgba(255,255,255,0.04)' : 'rgba(0,0,0,0.04)' }}
-                  itemSorter={(item) => -(item.value as number)}
-                />
-                {[...summary.series].reverse().map((s) => (
-                  <Bar
-                    key={s.kind}
-                    dataKey={s.kind}
-                    name={s.kind}
-                    stackId="kinds"
-                    fill={kindInfo(s.kind).color}
-                    fillOpacity={kindFilter && kindFilter !== s.kind ? 0.25 : 0.9}
-                    isAnimationActive={false}
+          <div className="min-w-0 flex flex-col gap-3">
+            <div className="min-w-0 h-[220px] @md:h-auto @md:flex-1 @md:min-h-0">
+              <ResponsiveContainer width="100%" height="100%">
+                <BarChart data={data} margin={{ top: 4, right: 4, left: -12, bottom: 0 }} barCategoryGap={1} aria-label="Failures over time">
+                  <CartesianGrid strokeDasharray="2 4" stroke={gridColor} vertical={false} />
+                  <XAxis dataKey="time" type="number" scale="time" domain={timeDomain} ticks={timeTicks} tickFormatter={(v: number) => formatRangeTick(v, range)} tick={{ fontSize: 11, fill: tickColor }} axisLine={false} tickLine={false} minTickGap={48} />
+                  <YAxis allowDecimals={false} tick={{ fontSize: 11, fill: tickColor }} axisLine={false} tickLine={false} tickFormatter={(v: number) => compact(v)} />
+                  <Tooltip
+                    labelFormatter={(v) => new Date(Number(v)).toLocaleString()}
+                    formatter={(v, kind) => [Number(v).toLocaleString(), kindInfo(String(kind)).label]}
+                    contentStyle={tooltipStyle}
+                    cursor={{ fill: isDark ? 'rgba(255,255,255,0.04)' : 'rgba(0,0,0,0.04)' }}
+                    itemSorter={(item) => -(item.value as number)}
                   />
-                ))}
-              </BarChart>
-            </ResponsiveContainer>
+                  {[...summary.series].reverse().map((s) => (
+                    <Bar
+                      key={s.kind}
+                      dataKey={s.kind}
+                      name={s.kind}
+                      stackId="kinds"
+                      fill={kindInfo(s.kind).color}
+                      fillOpacity={kindFilter && kindFilter !== s.kind ? 0.25 : 0.9}
+                      isAnimationActive={false}
+                    />
+                  ))}
+                </BarChart>
+              </ResponsiveContainer>
+            </div>
+            {summary.connectors.length > 0 && (
+              <div className="min-w-0 flex-none pt-2 border-t border-line">
+                <h3 className="text-[11px] font-semibold uppercase tracking-wider text-fg-subtle mb-0.5">By connector</h3>
+                <div className="grid grid-cols-1 @lg:grid-cols-2 @2xl:grid-cols-3 gap-x-6">
+                  {summary.connectors.map((c) => (
+                    <div key={c.connector_id ?? 'none'} className="flex items-center justify-between gap-3 py-0.5 text-[12.5px] min-w-0">
+                      <span className={cn('truncate', c.connector_id ? 'text-fg' : 'text-fg-muted italic')}>
+                        {c.connector_id ? (c.name || 'deleted connector') : 'no proxy chosen'}
+                      </span>
+                      <span className="tabular-nums text-fg-muted flex-none">{compact(c.count)}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
           </div>
         </Reloading>
       )}

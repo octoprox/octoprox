@@ -20,8 +20,8 @@ import { KIND_INFO } from '../../components/failures/FailureDetail'
 import { Page } from '../../components/layout/Page'
 import { LicenseCard } from '../../components/license/LicenseCard'
 import { useTheme } from '../../contexts/ThemeContext'
-import { useTimeRange } from '../../contexts/TimeRangeContext'
-import { bytesShort, elideMiddle, formatBytes, formatDateTime, parseApiDate, plural, relativeTime } from '../../utils/format'
+import { formatRangeTick, rangeTicks, useTimeRange } from '../../contexts/TimeRangeContext'
+import { bytesShort, bytesTick, elideMiddle, formatBytes, formatDateTime, parseApiDate, plural, relativeTime } from '../../utils/format'
 import {
   Alert, Badge, Button, Card, CardHeader, FlowDiagram, FlowNode, Inspector, InspectorSection, KeyValue, LogoLoader, Reloading, Segmented,
   type FlowAnchor, type FlowEdge, type FlowTone,
@@ -2568,26 +2568,29 @@ function TrendsSection() {
           {/* Separate charts, so Redis memory - far smaller than the database - keeps its own scale. */}
           <div className="grid grid-cols-1 @3xl:grid-cols-2 gap-4">
             <TrendChart
+              range={range}
               title="Database"
               points={points}
               height={200}
               series={[{ key: 'database_size_bytes', name: 'Database', color: SERIES.db }]}
               formatValue={formatBytes}
-              formatTick={bytesShort}
+              formatTick={bytesTick}
               tickWidth={56}
             />
             <TrendChart
+              range={range}
               title="Redis memory"
               points={points}
               height={200}
               series={[{ key: 'redis_memory_bytes', name: 'Redis memory', color: SERIES.redis }]}
               formatValue={formatBytes}
-              formatTick={bytesShort}
+              formatTick={bytesTick}
               tickWidth={56}
             />
           </div>
           <div className="grid grid-cols-1 @3xl:grid-cols-2 gap-4">
             <TrendChart
+              range={range}
               title="Proxy pool"
               points={points}
               height={150}
@@ -2599,6 +2602,7 @@ function TrendsSection() {
               ]}
             />
             <TrendChart
+              range={range}
               title="Inventory"
               points={points}
               height={150}
@@ -2740,8 +2744,9 @@ interface TrendSeries {
 }
 
 function TrendChart({
-  title, points, series, height, stacked, formatValue, formatTick, tickWidth,
+  range, title, points, series, height, stacked, formatValue, formatTick, tickWidth,
 }: {
+  range: SystemHistoryRange
   title: string
   points: TrendPoint[]
   series: TrendSeries[]
@@ -2757,6 +2762,8 @@ function TrendChart({
   const tooltipStyle = isDark
     ? { backgroundColor: '#1f2937', border: '1px solid #374151', color: '#f3f4f6', borderRadius: 8, fontSize: 12 }
     : { borderRadius: 8, fontSize: 12, border: '1px solid #e5e7eb' }
+  // Ticks on round local times across the data's extent, labelled like every other history chart.
+  const ticks = useMemo(() => (points.length > 0 ? rangeTicks(range, [points[0].time, points[points.length - 1].time]) : []), [points, range])
 
   return (
     <div className="min-w-0">
@@ -2773,7 +2780,8 @@ function TrendChart({
             type="number"
             scale="time"
             domain={['dataMin', 'dataMax']}
-            tickFormatter={formatTrendTick}
+            ticks={ticks}
+            tickFormatter={(v: number) => formatRangeTick(v, range)}
             tick={{ fontSize: 10, fill: tickColor }}
             axisLine={false}
             tickLine={false}
@@ -2863,14 +2871,6 @@ function TableGrowthList({ history, range }: { history: SystemMetricsHistory; ra
       ))}
     </div>
   )
-}
-
-function formatTrendTick(epoch: number): string {
-  const d = new Date(epoch)
-  const sameDay = new Date().toDateString() === d.toDateString()
-  return sameDay
-    ? d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })
-    : d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
 }
 
 // --- shared bits ---------------------------------------------------------------------

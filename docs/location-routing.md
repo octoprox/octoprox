@@ -40,7 +40,7 @@ The decisions change whether a proxy is routed to, not what it is routed on, wit
 
 Everything below depends on what kind of row the request lands on, because the three kinds learn their exit differently and only some can be verified or flagged.
 
-| | Fixed exit | Pooled session slot | Dynamic-sessions gateway |
+| Aspect | Fixed exit | Pooled session slot | Dynamic-sessions gateway |
 |---|---|---|---|
 | Examples | Static proxies, ISP and datacenter ports (Oxylabs, Decodo, Bright Data), proxy lists (Webshare), cloud instances | Residential and mobile connectors with **Sessions: Fixed pool**: `num_proxies` rows per country, each holding one vendor session | Residential and mobile connectors with **Sessions: Dynamic**: one row, a vendor session rendered per request |
 | Where the exit comes from | Discovery when the row is created, re-read on every IP refresh and health check | The vendor, behind the session; seen only by the health check (every minute, when the check URL echoes the caller) and by preflight | The vendor, per request; seen only by preflight |

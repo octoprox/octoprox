@@ -8,8 +8,13 @@ import { formatBytesDecimal, formatMoney } from '../utils/format'
 import { ProviderLogo } from './ProviderLogo'
 import { Card, CardHeader, InfoTip, LogoLoader, Reloading, Segmented } from './ui'
 
-// One hue per connector position, cycling. Fixed palette so the bar and the rows agree.
-const SWATCHES = ['bg-primary', 'bg-success', 'bg-warning', 'bg-purple-500', 'bg-orange-500', 'bg-sky-500', 'bg-pink-500', 'bg-teal-500']
+// One hue per connector position, cycling, so the bar and the rows agree: the chart palette the latency chart
+// uses (blue, orange, aqua, yellow, magenta, green, violet, red), stepped for each theme. Neighbours stay apart
+// for colour-blind readers too, and none is a theme token (primary, warning) that would repeat a status colour.
+const SWATCHES = [
+  'bg-[#2a78d6] dark:bg-[#3987e5]', 'bg-[#eb6834] dark:bg-[#d95926]', 'bg-[#1baf7a] dark:bg-[#199e70]', 'bg-[#eda100] dark:bg-[#c98500]',
+  'bg-[#e87ba4] dark:bg-[#d55181]', 'bg-[#008300]', 'bg-[#4a3aa7] dark:bg-[#9085e9]', 'bg-[#e34948] dark:bg-[#e66767]',
+]
 const swatch = (i: number) => SWATCHES[i % SWATCHES.length]
 
 export const formatShare = (v: number | null | undefined): string => {

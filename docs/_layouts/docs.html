@@ -4,81 +4,48 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>{{ page.title }} - Octoprox Docs</title>
-  {% capture seo_tags %}{% seo title=false %}{% endcapture %}
-  {{ seo_tags | replace: 'property="twitter:', 'name="twitter:' }}
-  <link rel="icon" type="image/svg+xml" href="{{ site.baseurl }}/assets/favicon/favicon.svg">
-  <link rel="icon" type="image/png" sizes="96x96" href="{{ site.baseurl }}/assets/favicon/favicon-96x96.png">
-  <link rel="apple-touch-icon" sizes="180x180" href="{{ site.baseurl }}/assets/favicon/apple-touch-icon.png">
-  {% include analytics.html %}
-    <script>
-    // Light by default; the toggle stores a preference. Applied before paint to avoid a flash.
-    (function () {
-      try { if (localStorage.getItem('octoprox_docs_theme') === 'dark') document.documentElement.setAttribute('data-theme', 'dark'); } catch (e) {}
-    })();
-    function toggleTheme() {
-      var root = document.documentElement, dark = root.getAttribute('data-theme') === 'dark';
-      if (dark) root.removeAttribute('data-theme'); else root.setAttribute('data-theme', 'dark');
-      try { localStorage.setItem('octoprox_docs_theme', dark ? 'light' : 'dark'); } catch (e) {}
-    }
-  </script>
+{% include site-head.html %}
   <style>
-    /* Tokens mirror the app's light and dark themes (web/src/index.css). */
+    /* Colours, the scrim and the header height come from assets/site.css (the app's light and dark themes); these are the docs' own */
     :root {
-      color-scheme: light;
-      --bg: #f9fafb; --surface: #ffffff; --raised: #f3f4f6;
-      --fg: #111827; --muted: #6b7280; --subtle: #9ca3af;
-      --line: #e5e7eb; --line-strong: #d1d5db;
-      --primary: #2563eb; --primary-hover: #1d4ed8; --primary-soft: #eff6ff; --primary-soft-fg: #1d4ed8;
-      --warning: #d97706; --warning-soft: #fffbeb;
       --sidebar-width: 232px;
+      /* Small labels (table headers, sidebar groups): 4.5:1 on a table header's raised fill, in both themes */
+      --label: #4b5563;
+      --drawer-shadow: 4px 0 24px rgb(17 24 39 / 0.18);
     }
     :root[data-theme="dark"] {
-      color-scheme: dark;
-        --bg: #111827; --surface: #1f2937; --raised: #374151;
-        --fg: #f3f4f6; --muted: #9ca3af; --subtle: #6b7280;
-        --line: #374151; --line-strong: #4b5563;
-        --primary: #7c3aed; --primary-hover: #6d28d9; --primary-soft: #1e3a8a; --primary-soft-fg: #93c5fd;
-        --warning: #fbbf24; --warning-soft: #78350f;
-      }
+      --label: #b0b7c1;
+      --drawer-shadow: 4px 0 24px rgb(0 0 0 / 0.5);
+    }
     * { margin: 0; padding: 0; box-sizing: border-box; }
-    html, body { overflow-x: hidden; height: 100%; }
+    /* No sideways page scroll. Clip, as hidden makes body a scroll container that the sticky header would scroll away in */
+    html, body { overflow-x: clip; }
+    /* iOS Safari keeps the text size after rotating to landscape */
+    html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
     body {
       font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif;
       background: var(--bg); color: var(--fg); font-size: 15px; line-height: 1.65;
       -webkit-font-smoothing: antialiased;
     }
-    a { color: var(--primary); text-decoration: none; }
-    a:hover { color: var(--primary-hover); }
+    /* Links take the site's text-safe accent. On the lighter fill of a callout or of inline code, dark mode uses the lighter
+       hover shade, to keep 4.5:1 */
+    a { color: var(--accent); text-decoration: none; }
+    a:hover { color: var(--accent-hover); }
+    :root[data-theme="dark"] .content blockquote a, :root[data-theme="dark"] .content a code { color: var(--accent-hover); }
+    :root[data-theme="dark"] .content blockquote a:hover, :root[data-theme="dark"] .content a:hover code { color: var(--fg); }
 
-    /* Header - same height and feel as the app's top bar */
-    header {
-      position: fixed; top: 0; left: 0; right: 0; height: 56px; padding: 0 20px;
-      background: var(--surface); border-bottom: 1px solid var(--line);
-      display: flex; justify-content: space-between; align-items: center; z-index: 100;
-    }
-    .logo { height: 28px; width: 125px; display: block; }
-    .logo-dark { display: none; }
-    :root[data-theme="dark"] .logo-light { display: none; }
-    .mermaid { margin: 1.25rem 0; overflow-x: auto; }
-    .mermaid svg { max-width: 100%; height: auto; }
-    :root[data-theme="dark"] .logo-dark { display: block; }
-    header nav { display: flex; align-items: center; gap: 4px; }
-    header nav a {
-      color: var(--muted); font-size: 13.5px; font-weight: 500; padding: 6px 10px; border-radius: 6px;
-    }
-    header nav a:hover { color: var(--fg); background: var(--raised); }
-    header nav a.active { color: var(--primary-soft-fg); background: var(--primary-soft); }
-    .header-right { display: flex; align-items: center; gap: 8px; flex: none; }
-    .menu-toggle { display: none; background: none; border: 1px solid var(--line-strong); border-radius: 6px; color: var(--fg); font-size: 18px; width: 34px; height: 34px; cursor: pointer; }
+    /* The site header (site-header.html) spans the window; from 900 px its logo lines up with the sidebar's labels, 12 + 10 px in */
+    .site-header .container { max-width: none; }
+    @media (min-width: 900px) { .site-header .container { padding-inline: 22px; } }
 
     /* Layout */
-    .docs-layout { display: flex; margin-top: 56px; min-height: calc(100vh - 56px); }
+    .docs-layout { display: flex; min-height: calc(100vh - var(--header-h)); }
     .sidebar {
-      position: fixed; top: 56px; bottom: 0; left: 0; width: var(--sidebar-width);
+      position: fixed; top: var(--header-h); bottom: 0; left: 0; width: var(--sidebar-width);
       background: var(--surface); border-right: 1px solid var(--line); overflow-y: auto; -webkit-overflow-scrolling: touch; padding: 8px 12px 96px;
     }
     .sidebar-section h4 {
-      padding: 14px 10px 6px; font-size: 11px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: var(--subtle);
+      padding: 14px 10px 6px; font-size: 11px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: var(--label);
     }
     .sidebar-section a {
       display: flex; align-items: center; height: 34px; padding: 0 10px; margin-bottom: 2px; border-radius: 6px;
@@ -118,75 +85,105 @@
     :root[data-theme="dark"] .content pre { background: #0b1220; }
     .content pre code { background: none; padding: 0; font-size: inherit; }
     .content blockquote {
-      border-left: 3px solid var(--primary); background: var(--primary-soft); color: var(--fg);
+      border-left: 3px solid var(--accent); background: var(--primary-soft); color: var(--fg);
       padding: 10px 14px; margin: 16px 0; border-radius: 0 8px 8px 0; font-size: 14px;
     }
     .content blockquote p:last-child { margin-bottom: 0; }
     .content table { width: 100%; border-collapse: collapse; margin-bottom: 16px; font-size: 13.5px; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
     .content th, .content td { border-bottom: 1px solid var(--line); padding: 8px 12px; text-align: left; vertical-align: top; }
-    .content th { background: var(--raised); color: var(--muted); font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; }
+    .content th { background: var(--raised); color: var(--label); font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; }
     .content tr:last-child td { border-bottom: none; }
     .content td code { white-space: nowrap; }
+    /* A table wider than the column scrolls sideways in its own box (the script at the end wraps each one) */
+    .content .table-scroll { overflow-x: auto; overflow-y: hidden; }
+    .content .table-scroll > table { margin-bottom: 0; }
+    /* So does a diagram, which is its own box (the Mermaid script at the end puts each one in a frame) */
+    .mermaid { overflow-x: auto; overflow-y: hidden; }
+    .mermaid svg { max-width: 100%; height: auto; }
+    /* The box sits in a frame that shades a side with more of the table or diagram, as touch screens draw no scrollbar until
+       the box moves. Only a frame with a shade is positioned: positioning one moves the table's text by a fraction of a pixel */
+    .content .scroll-frame { margin-bottom: 16px; --shade: rgba(17, 24, 39, 0.14); }
+    .content .diagram-frame { margin: 1.25rem 0; }
+    :root[data-theme="dark"] .content .scroll-frame { --shade: rgba(0, 0, 0, 0.6); }
+    .content .scroll-frame.more-left, .content .scroll-frame.more-right { position: relative; }
+    .content .scroll-frame.more-left::before, .content .scroll-frame.more-right::after { content: ""; position: absolute; top: 0; bottom: 0; width: 20px; pointer-events: none; }
+    .content .scroll-frame.more-left::before { left: 0; background: linear-gradient(to right, var(--shade), transparent); }
+    .content .scroll-frame.more-right::after { right: 0; background: linear-gradient(to left, var(--shade), transparent); }
+    /* On wide screens such a table fits instead (the script marks it). Up to 48 px too wide, it runs into the page padding as tables
+       did before the boxes; wider, its code wraps at spaces and hyphens, then also between the parts of a name, and anywhere last */
+    @media (min-width: 900px) {
+      .content .scroll-frame.spill { margin-right: -48px; }
+      .content .scroll-frame.spill > .table-scroll > table { width: calc(100% - 48px); }
+      .content .table-scroll.wrap td code { white-space: normal; }
+      .content .table-scroll.wrap-anywhere td code { overflow-wrap: anywhere; }
+    }
     .content strong { color: var(--fg); font-weight: 600; }
     .content hr { border: none; border-top: 1px solid var(--line); margin: 32px 0; }
     .content img { max-width: 100%; border-radius: 8px; border: 1px solid var(--line); }
+    /* A word or inline code too long for a line breaks instead of running past the screen edge (below 900 px such code
+       breaks first after _ . : / = , and before <, as the script adds those) */
+    .content { overflow-wrap: break-word; }
+    /* A flag such as --proxy-user never breaks right after its leading dashes (the script marks them) */
+    .content code .nobreak { white-space: nowrap; }
+    /* A # link, the skip link and keyboard focus stop below the sticky header. Margins, not scroll padding on html as on
+       product pages: with that, Chrome puts the reading position back lines off on Back and reload */
+    #main, #main :is([id], a, button, [tabindex]) { scroll-margin-top: calc(var(--header-h) + 16px); }
+
+    /* Below 900 px only: the site's own links at the head of the drawer (site-menu.html), and the backdrop behind it */
+    .sidebar-site, .sidebar-backdrop { display: none; }
+    /* The footer sits right of the fixed sidebar. Its link columns need the width a product page's footer has at 1024 px,
+       so until 1280 px it keeps the brand above them */
+    @media (min-width: 900px) { .site-footer { margin-left: var(--sidebar-width); } }
+    @media (min-width: 900px) and (max-width: 1279.98px) {
+      .footer-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+      .footer-brand { grid-column: 1 / -1; max-width: 560px; }
+    }
 
     /* Responsive */
-    @media (max-width: 900px) {
-      .sidebar { transform: translateX(-100%); transition: transform 0.25s ease; z-index: 90; }
-      .sidebar.open { transform: translateX(0); }
+    @media (max-width: 899.98px) {
+      /* The closed drawer is hidden once it has slid out, so Tab skips its links; scrolling it never scrolls the page. It and
+         its backdrop stay under the header (z-index 50) */
+      .sidebar { transform: translateX(-100%); visibility: hidden; transition: transform 0.25s ease, visibility 0s 0.25s; z-index: 40; overscroll-behavior: contain; box-shadow: var(--drawer-shadow); }
+      .sidebar.open { transform: translateX(0); visibility: visible; transition: transform 0.25s ease; }
+      /* The open drawer dims the page beside it, and a tap there only closes the drawer. The backdrop looks clickable, as iOS
+         Safari only turns a tap into a click on something that does */
+      .sidebar-backdrop { display: block; position: fixed; top: var(--header-h); right: 0; bottom: 0; left: 0; z-index: 39; background: var(--scrim); cursor: pointer; opacity: 0; visibility: hidden; transition: opacity 0.25s ease, visibility 0s 0.25s; }
+      .sidebar.open ~ .sidebar-backdrop { opacity: 1; visibility: visible; transition: opacity 0.25s ease; }
       .docs-main { margin-left: 0; padding: 28px 20px 48px; max-width: none; }
-      .menu-toggle { display: inline-flex; align-items: center; justify-content: center; }
-      .header-nav { display: none; }
+      .sidebar-site { display: block; padding: 0 10px; margin-bottom: 6px; border-bottom: 1px solid var(--line); }
+      .sidebar-site .mobile-menu-links { padding-top: 0; }
+      .sidebar-site .mobile-menu-links a:last-child { border-bottom: 0; }
+      .sidebar-site .mobile-menu-actions { padding: 12px 0 16px; }
+      /* Code in a table also wraps here: at spaces and hyphens, and after _ . : / = , (the script adds those), so a table is
+         seldom wider than the screen; its box scrolls what still does not fit */
+      .content td code { white-space: normal; }
+      /* A diagram is drawn no smaller than with its smallest label at 12 px (the Mermaid script works out the width), and
+         scrolls in its box when that is wider than the column */
+      .mermaid svg { min-width: var(--readable-width); }
+    }
+    /* No text under 12 px on phones and tablets */
+    @media (max-width: 899.98px), (pointer: coarse) {
+      .sidebar-section h4, .content th, .content td code, .content th code { font-size: 12px; }
     }
     @media (max-width: 600px) {
-      header { padding: 0 12px; }
-      .logo { height: 22px; width: 98px; }
       .content h1 { font-size: 22px; }
       .content h2 { font-size: 17px; }
       .docs-main { padding: 20px 16px 40px; }
     }
     /* Touch screens: 44 px targets */
     @media (pointer: coarse) {
-      header nav a { display: inline-flex; align-items: center; min-height: 44px; }
-      header .theme-toggle, header .menu-toggle { width: 44px; height: 44px; }
       .sidebar-section a { height: 44px; }
       .content .cta a { height: 44px; }
+      .content .link-list a { display: inline-flex; align-items: center; min-width: 44px; min-height: 44px; }
     }
-    /* Theme toggle */
-    .theme-toggle { display: inline-flex; align-items: center; justify-content: center; width: 34px; height: 34px; border-radius: 6px; border: 1px solid var(--line); background: var(--surface); color: var(--muted); cursor: pointer; flex: none; }
-    .theme-toggle:hover { color: var(--fg); background: var(--raised); }
-    .theme-toggle svg { width: 16px; height: 16px; }
-    .theme-toggle .icon-sun { display: none; }
-    :root[data-theme="dark"] .theme-toggle .icon-sun { display: block; }
-    :root[data-theme="dark"] .theme-toggle .icon-moon { display: none; }
-    /* Header items never shrink; the logo keeps its intrinsic width */
-    .brand { display: inline-flex; align-items: center; flex: none; }
-    .logo { max-width: none; flex: none; }
   </style>
 </head>
 <body>
-  <header>
-    <a href="{{ site.baseurl }}/" class="brand" aria-label="Octoprox home">
-      <img src="{{ site.baseurl }}/assets/logo/octoprox_horizontal.svg" alt="Octoprox" class="logo logo-light">
-      <img src="{{ site.baseurl }}/assets/logo/octoprox_horizontal_dark.svg" alt="Octoprox" class="logo logo-dark">
-    </a>
-    <div class="header-right">
-      <nav class="header-nav">
-        <a href="{{ site.baseurl }}/getting-started" {% if page.nav_id != 'enterprise' %}class="active"{% endif %}>Docs</a>
-        <a href="{{ site.baseurl }}/enterprise" {% if page.nav_id == 'enterprise' %}class="active"{% endif %}>Enterprise</a>
-        <a href="https://github.com/octoprox/octoprox">GitHub</a>
-      </nav>
-      <button class="theme-toggle" type="button" onclick="toggleTheme()" aria-label="Toggle dark mode" title="Toggle dark mode">
-        <svg class="icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/></svg>
-        <svg class="icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2"/><path d="M12 20v2"/><path d="m4.93 4.93 1.41 1.41"/><path d="m17.66 17.66 1.41 1.41"/><path d="M2 12h2"/><path d="M20 12h2"/><path d="m6.34 17.66-1.41 1.41"/><path d="m19.07 4.93-1.41 1.41"/></svg>
-      </button>
-      <button class="menu-toggle" onclick="toggleSidebar()" aria-label="Toggle navigation">☰</button>
-    </div>
-  </header>
+  {% include site-header.html section="docs" menu="sidebar" %}
 
   <div class="docs-layout">
-    <aside class="sidebar" id="sidebar">
+    <aside class="sidebar" id="sidebar" aria-label="Docs">
+      <div class="sidebar-site">{% include site-menu.html except="docs" section=page.nav_id %}</div>
       <div class="sidebar-section">
         <h4>Getting Started</h4>
         <a href="{{ site.baseurl }}/getting-started" {% if page.nav_id == 'getting-started' %}class="active"{% endif %}>Quick Start</a>
@@ -241,19 +238,178 @@
         <a href="{{ site.baseurl }}/changelog" {% if page.nav_id == 'changelog' %}class="active"{% endif %}>Changelog</a>
       </div>
     </aside>
+    <div class="sidebar-backdrop"></div>
 
-    <main class="docs-main">
+    <main class="docs-main" id="main">
       <div class="content">
         {{ content }}
       </div>
     </main>
   </div>
+  {% include site-footer.html %}
 
   <script>
-    function toggleSidebar() {
-      document.getElementById('sidebar').classList.toggle('open');
+    // Each table goes in a box of its own that scrolls sideways when the table is wider than the column, in a frame that
+    // shades a side with more of the table
+    var tableBoxes = [].map.call(document.querySelectorAll('.content table'), function (table) {
+      var frame = document.createElement('div'), box = document.createElement('div');
+      frame.className = 'scroll-frame';
+      box.className = 'table-scroll';
+      table.before(frame);
+      frame.appendChild(box);
+      box.appendChild(table);
+      box.addEventListener('scroll', function () { shade(box); }, { passive: true });
+      return box;
+    });
+    // A side is shaded while more of the table than its edge (13 px of cell padding and border) is out of view there
+    function shade(box) {
+      box.parentElement.classList.toggle('more-left', box.scrollLeft > 13);
+      box.parentElement.classList.toggle('more-right', box.scrollWidth - box.clientWidth - box.scrollLeft > 13);
     }
+    // A flag such as --proxy-user keeps its leading dashes on the line of the word after them
+    document.querySelectorAll('.content :not(pre) > code').forEach(function (code) {
+      var s = code.textContent, flags = /(^|\s)(-+[^-\s]+)/g, m, at = 0;
+      if (code.children.length || !/(^|\s)-+[^-\s]/.test(s)) return;
+      code.textContent = '';
+      while ((m = flags.exec(s))) {
+        var start = m.index + m[1].length, flag = document.createElement('span');
+        flag.className = 'nobreak';
+        flag.textContent = m[2];
+        code.append(s.slice(at, start), flag);
+        at = start + m[2].length;
+      }
+      code.append(s.slice(at));
+    });
+    // A table too wide for the column is marked step by step until it fits (the CSS does it on wide screens only): to run
+    // into the page padding if that is all it needs, or else to wrap its code at spaces and hyphens, then to break it also
+    // between the parts of a name, and last to wrap it anywhere. Below 900 px its code wraps anyway, and only the break
+    // points apply. Whatever still scrolls takes keyboard focus, which Safari does not give it, so arrow keys scroll it; a
+    // table is named after its section for screen readers. Done again when the width changes.
+    var fittedWidth;
+    function overflows(el) { return el.scrollWidth > el.clientWidth; }
+    function sectionName(el) {
+      for (; el; el = el.parentElement)
+        for (var h = el.previousElementSibling; h; h = h.previousElementSibling)
+          if (/^H[1-6]$/.test(h.tagName)) return h.textContent.trim();
+      return 'Table';
+    }
+    // Numbered when a section has more than one table, as each named region must have a name of its own
+    var tableCount = {}, tableNames = tableBoxes.map(function (box) {
+      var name = sectionName(box);
+      tableCount[name] = (tableCount[name] || 0) + 1;
+      return tableCount[name] > 1 ? name + ' (table ' + tableCount[name] + ')' : name;
+    });
+    function focusable(el, on, name) {
+      if (on) el.setAttribute('tabindex', '0'); else el.removeAttribute('tabindex');
+      if (on && name) { el.setAttribute('role', 'region'); el.setAttribute('aria-label', name); }
+      else { el.removeAttribute('role'); el.removeAttribute('aria-label'); }
+    }
+    // Break points after _ . : / = , and before <, so a name such as OCTOPROX_REDIS_URL breaks between its parts. Only in
+    // code that wraps (below 900 px, or a wide screen's table that needs it), as Chrome breaks at them even in code kept
+    // on one line. A flag's dashes and word (.nobreak) get none.
+    function breakCode(code) {
+      [].slice.call(code.childNodes).forEach(function (text) {
+        if (text.nodeType !== 3) return;
+        var parts = [];
+        text.data.split(/([_.:\/=,<])/).forEach(function (part) {
+          if (part === '<' && parts.length) parts.push(document.createElement('wbr'));
+          if (part) parts.push(part);
+          if (/^[_.:\/=,]$/.test(part)) parts.push(document.createElement('wbr'));
+        });
+        text.replaceWith.apply(text, parts);
+      });
+    }
+    function addBreaks(box) {
+      var codes = box.querySelectorAll('td code');
+      if (!codes.length || getComputedStyle(codes[0]).whiteSpace === 'nowrap') return;
+      codes.forEach(breakCode);
+    }
+    // Below 900 px inline code outside tables gets them too, but only code with a part wider than its line, such as
+    // octoprox_worker_observations_dropped_total on a phone, which would otherwise break at any letter; code that fits
+    // stays whole. Such code spans lines. Its widest part is its width in a box as narrow as its text allows, and its line
+    // is the content width of the block it sits in.
+    var inlineCodes = [].filter.call(document.querySelectorAll('.content :not(pre) > code'), function (code) { return !code.closest('table'); });
+    function breakLongCode() {
+      inlineCodes.forEach(function (code) {
+        var breaks = code.querySelectorAll('wbr');
+        if (!breaks.length) return;
+        breaks.forEach(function (wbr) { wbr.remove(); });
+        code.normalize();
+      });
+      if (!matchMedia('(max-width: 899.98px)').matches) return;
+      var spanning = inlineCodes.filter(function (code) { return code.getClientRects().length > 1; });
+      var lines = spanning.map(function (code) {
+        var block = code.parentElement;
+        while (/^inline/.test(getComputedStyle(block).display)) block = block.parentElement;
+        var style = getComputedStyle(block);
+        return block.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight);
+      });
+      spanning.forEach(function (code) { code.style.display = 'inline-block'; code.style.width = 'min-content'; });
+      var tooLong = spanning.filter(function (code, i) { return code.getBoundingClientRect().width > lines[i]; });
+      spanning.forEach(function (code) { code.removeAttribute('style'); });
+      tooLong.forEach(breakCode);
+    }
+    function fitToWidth() {
+      if (fittedWidth === document.documentElement.clientWidth) return;
+      fittedWidth = document.documentElement.clientWidth;
+      breakLongCode();
+      tableBoxes.forEach(function (box) {
+        box.parentElement.classList.remove('spill');
+        box.classList.remove('wrap', 'wrap-anywhere');
+        box.querySelectorAll('wbr').forEach(function (wbr) { wbr.remove(); });
+        box.normalize();
+      });
+      [function (box) { box.parentElement.classList.add('spill'); },
+       function (box) { box.parentElement.classList.remove('spill'); box.classList.add('wrap'); },
+       addBreaks,
+       function (box) { box.classList.add('wrap-anywhere'); }
+      ].reduce(function (tooWide, step) {
+        tooWide = tooWide.filter(overflows);
+        tooWide.forEach(step);
+        return tooWide;
+      }, tableBoxes);
+      tableBoxes.forEach(function (box, i) { focusable(box, overflows(box), tableNames[i]); shade(box); });
+      document.querySelectorAll('.content pre').forEach(function (pre) { focusable(pre, overflows(pre)); });
+    }
+    // On Back or reload the browser can put the reading position back before the tables are fitted. Scroll anchoring
+    // would then move it by the height the tables gain, so it is off until the next frame.
+    document.documentElement.style.overflowAnchor = 'none';
+    fitToWidth();
+    requestAnimationFrame(function () { document.documentElement.style.overflowAnchor = ''; });
+    addEventListener('resize', fitToWidth);
+    // Below 900 px the sidebar is a drawer, opened by the header's menu button and opening with the current page's link in
+    // view, under the site's own links. While it is open, a tap outside it only closes it (a tap in the header, such as on
+    // the theme toggle, does not), Escape closes it and the page behind does not scroll. A link in it closes it as it is
+    // followed, so a page that Back brings back from the browser's cache never shows it open.
+    var sidebar = document.getElementById('sidebar'), menuButton = document.querySelector('.site-header .menu-btn');
+    function holdPage(e) { if (!sidebar.contains(e.target)) e.preventDefault(); }
+    function setSidebar(open) {
+      sidebar.classList.toggle('open', open);
+      menuButton.setAttribute('aria-expanded', open ? 'true' : 'false');
+      if (open) document.addEventListener('touchmove', holdPage, { passive: false });
+      else document.removeEventListener('touchmove', holdPage);
+      var current = open && sidebar.querySelector('.sidebar-section a.active');
+      if (current && (current.offsetTop < sidebar.scrollTop || current.offsetTop + current.offsetHeight > sidebar.scrollTop + sidebar.clientHeight))
+        sidebar.scrollTop = current.offsetTop - (sidebar.clientHeight - current.offsetHeight) / 2;
+    }
+    menuButton.addEventListener('click', function () { setSidebar(!sidebar.classList.contains('open')); });
+    document.addEventListener('click', function (e) {
+      if (!sidebar.classList.contains('open')) return;
+      if (e.target.closest('#sidebar a')) { setSidebar(false); return; }
+      if (sidebar.contains(e.target) || e.target.closest('.site-header')) return;
+      e.preventDefault();
+      e.stopPropagation();
+      setSidebar(false);
+    }, true);
+    document.addEventListener('keydown', function (e) {
+      if (e.key !== 'Escape' || !sidebar.classList.contains('open')) return;
+      if (sidebar.contains(document.activeElement)) menuButton.focus();
+      setSidebar(false);
+    });
+    // Crossing 900 px, as when a tablet is turned, closes the drawer, so it never holds a wider page
+    matchMedia('(max-width: 899.98px)').addEventListener('change', function () { setSidebar(false); });
   </script>
+  <script src="{{ site.baseurl }}/assets/site.js"></script>
   <script src="{{ site.baseurl }}/assets/contact.js"></script>
   <!-- Mermaid diagrams. A ```mermaid fence reaches the page in one of two shapes:
        plain kramdown gives <pre><code class="language-mermaid">, and GitHub Pages
@@ -264,16 +420,82 @@
     import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
     var blocks = document.querySelectorAll('pre > code.language-mermaid, .language-mermaid pre > code');
     if (blocks.length) {
+      // Each diagram is a box that scrolls sideways, in a frame that shades a side with more of it, as a table is (the
+      // script above). It is named after its section for screen readers, numbered when a section has more than one.
+      var diagramCount = {};
       blocks.forEach(function (code) {
-        var holder = document.createElement('div');
+        var frame = document.createElement('div'), holder = document.createElement('div');
+        frame.className = 'scroll-frame diagram-frame';
         holder.className = 'mermaid';
         holder.textContent = code.textContent;
+        holder.dataset.source = code.textContent;
         var container = code.closest('div.language-mermaid') || code.parentElement;
-        container.replaceWith(holder);
+        container.replaceWith(frame);
+        frame.appendChild(holder);
+        var name = sectionName(frame);
+        diagramCount[name] = (diagramCount[name] || 0) + 1;
+        holder.dataset.name = name + (diagramCount[name] > 1 ? ' (diagram ' + diagramCount[name] + ')' : ' (diagram)');
+        holder.addEventListener('scroll', function () { shade(holder); }, { passive: true });
       });
-      var dark = document.documentElement.getAttribute('data-theme') === 'dark';
-      mermaid.initialize({ startOnLoad: false, theme: dark ? 'dark' : 'neutral', securityLevel: 'loose', flowchart: { htmlLabels: true, curve: 'basis' } });
-      mermaid.run({ querySelector: '.mermaid' });
+      // Below 900 px a diagram is drawn no smaller than with its smallest label at 12 px (the CSS reads the width set here),
+      // unless that is at most 2 px wider than its box: it then fits the box, with labels a hair smaller, rather than
+      // scroll by a pixel. One that scrolls takes keyboard focus, as a table does.
+      function fitDiagram(box) {
+        var svg = box.querySelector(':scope > svg'), view = svg && svg.viewBox && svg.viewBox.baseVal;
+        if (view && view.width && !svg.dataset.readableWidth) {
+          var smallest = Math.min.apply(null, [].map.call(svg.querySelectorAll('text, foreignObject div, foreignObject span, foreignObject p'), function (label) {
+            return parseFloat(getComputedStyle(label).fontSize) || 16;
+          }).concat(16));
+          svg.dataset.readableWidth = Math.min(view.width, view.width * 12 / smallest);
+        }
+        if (svg && svg.dataset.readableWidth)
+          svg.style.setProperty('--readable-width', (svg.dataset.readableWidth - box.clientWidth > 2 ? svg.dataset.readableWidth : 0) + 'px');
+        focusable(box, overflows(box), box.dataset.name);
+        shade(box);
+      }
+      function fitDiagrams() { document.querySelectorAll('.mermaid').forEach(fitDiagram); }
+      function useTheme() {
+        var dark = document.documentElement.getAttribute('data-theme') === 'dark';
+        mermaid.initialize({ startOnLoad: false, theme: dark ? 'dark' : 'neutral', securityLevel: 'loose', flowchart: { htmlLabels: true, curve: 'basis' } });
+      }
+      useTheme();
+      var drawing = mermaid.run({ querySelector: '.mermaid' }).then(fitDiagrams);
+      addEventListener('resize', function () { drawing.then(fitDiagrams); });
+      // Back or reload: the browser puts the reading position back before the diagrams are drawn, and a diagram at the
+      // top of the screen can throw it off. The position saved on leaving (per history entry, in this tab only) is put
+      // back once they are drawn, unless the reader has moved meanwhile or the window is a different width.
+      var entry = window.navigation && navigation.currentEntry && 'octoprox_docs_position_' + navigation.currentEntry.id;
+      if (entry) {
+        var moved = false;
+        ['wheel', 'touchstart', 'keydown', 'mousedown'].forEach(function (type) { addEventListener(type, function () { moved = true; }, { passive: true }); });
+        addEventListener('pagehide', function () { try { sessionStorage.setItem(entry, JSON.stringify({ y: scrollY, w: innerWidth })); } catch (e) {} });
+        drawing.then(function () {
+          var saved = null, nav = performance.getEntriesByType('navigation')[0];
+          try { saved = JSON.parse(sessionStorage.getItem(entry)); } catch (e) {}
+          if (!moved && saved && saved.w === innerWidth && nav && nav.type !== 'navigate') scrollTo(0, saved.y);
+        });
+      }
+      // The theme toggle redraws each diagram in the new theme, once any drawing under way is done (Mermaid reads each
+      // diagram's text as it reaches it). The new drawing is made out of sight beside the old one and then takes its
+      // place, so the page never shows the source or jumps meanwhile.
+      var redraws = 0;
+      function redrawAll() {
+        useTheme();
+        redraws++;
+        return Promise.all([].map.call(document.querySelectorAll('.mermaid'), function (diagram, i) {
+          var scratch = document.createElement('div');
+          scratch.style.cssText = 'position: absolute; visibility: hidden;';
+          diagram.after(scratch);
+          return mermaid.render('mermaid-redraw-' + redraws + '-' + i, diagram.dataset.source.trim(), scratch).then(function (drawn) {
+            diagram.innerHTML = drawn.svg;
+            if (drawn.bindFunctions) drawn.bindFunctions(diagram);
+            fitDiagram(diagram);
+          }).finally(function () { scratch.remove(); });
+        }));
+      }
+      new MutationObserver(function () {
+        drawing = drawing.catch(function () {}).then(redrawAll);
+      }).observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
     }
   </script>
 </body>

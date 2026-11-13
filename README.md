@@ -2,7 +2,9 @@
 
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 
-A dynamic and flexible proxy manager that acts as an intelligent proxy aggregator, accepting client requests and routing them through managed proxy pools.
+Octoprox is an open-source, self-hosted proxy manager: one endpoint that routes your clients' requests through the proxy pools you manage, checks where the exits really are and meters what every pool costs. The pools can be cloud instances it provisions on AWS, GCP or Azure, proxy provider sessions or your own static list, and devices with no proxy settings join through a WireGuard or OpenVPN tunnel.
+
+It is an alternative to Scrapoxy, which was discontinued in February 2026, and a [migration guide](docs/scrapoxy-migration.md) maps every Scrapoxy setting to Octoprox. Documentation, guides and Octoprox Enterprise: [www.octoprox.com](https://www.octoprox.com).
 
 ## Features
 
@@ -27,7 +29,7 @@ A dynamic and flexible proxy manager that acts as an intelligent proxy aggregato
 
 ## Octoprox Enterprise
 
-Octoprox Enterprise is the licensed edition, run from its own image in place of the public one, with the same settings and database. It adds every sign-in and API token to the [audit log](docs/audit-log.md), puts the whole install's activity on one page and exports it for a SIEM. See [docs/enterprise.md](docs/enterprise.md) for what it includes and how licensing works, and [get in touch](https://www.octoprox.com/enterprise#get-in-touch) to get a license.
+Octoprox Enterprise is the licensed edition, run from its own image in place of the public one, with the same settings and database. It adds every sign-in and API token to the [audit log](docs/audit-log.md), puts the whole install's activity on one page and exports it for a SIEM. See [Octoprox Enterprise](https://www.octoprox.com/enterprise) for what it includes and how licensing works, and [get in touch](https://www.octoprox.com/enterprise#get-in-touch) to get a license.
 
 ## Quick Start
 
