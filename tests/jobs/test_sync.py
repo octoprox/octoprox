@@ -16,6 +16,7 @@ from typing import Any
 
 import pytest
 import structlog
+from sqlalchemy import event
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from api.core.roles import JobKind
@@ -365,9 +366,10 @@ class TestRefresh:
         # The run's write, then attribution's judgement of the exits it found: one entry each.
         assert await announced(redis_client) == [("proxy", ""), ("proxy", "")]
 
-    async def test_a_vendor_error_writes_nothing_and_fails_the_run(
+    async def test_a_vendor_error_writes_no_proxy_fails_the_run_and_is_written_on_the_connector(
         self, job: ProviderSyncJob, rows: Rows, scripted: Connector, vendor: Vendor
     ) -> None:
+        """The stream delivers the run again; the connector says why, counted only once the sync is given up."""
         proxy = await rows.proxy(scripted)
 
         async def refuse(proxies: list[Proxy]) -> tuple[list[Proxy], list[str]]:
@@ -377,3 +379,79 @@ class TestRefresh:
         with pytest.raises(RuntimeError, match="vendor API unavailable"):
             await job.run(batch_of(scripted.id))
         assert [p.id for p in await rows.of(scripted)] == [proxy.id]
+        stored = await rows.connector_as_stored(scripted.id)
+        assert stored is not None
+        assert (stored.last_error, stored.consecutive_errors) == ("vendor API unavailable", 0)
+        assert stored.last_error_at is not None
+        assert stored.updated_at == scripted.updated_at
+
+
+class TestSyncErrors:
+    """A vendor failing the sync: written on each failed delivery, counted once per sync given up, cleared by a good one."""
+
+    @staticmethod
+    def _refuse(vendor: Vendor, message: str = "407 Proxy Authentication Required") -> None:
+        async def refuse(existing: list[Proxy]) -> tuple[list[Proxy], list[str]]:
+            raise RuntimeError(message)
+
+        vendor.sync = refuse
+
+    async def test_each_sync_given_up_counts_once_however_often_it_was_delivered(
+        self, job: ProviderSyncJob, rows: Rows, scripted: Connector, vendor: Vendor
+    ) -> None:
+        self._refuse(vendor)
+        for _delivery in range(5):
+            with pytest.raises(RuntimeError):
+                await job.run(batch_of(scripted.id))
+        await job.give_up(batch_of(scripted.id))
+        stored = await rows.connector_as_stored(scripted.id)
+        assert stored is not None
+        assert (stored.last_error, stored.consecutive_errors) == ("407 Proxy Authentication Required", 1)
+
+        for _delivery in range(5):
+            with pytest.raises(RuntimeError):
+                await job.run(batch_of(scripted.id))
+        await job.give_up(batch_of(scripted.id))
+        stored = await rows.connector_as_stored(scripted.id)
+        assert stored is not None and stored.consecutive_errors == 2
+
+    async def test_a_good_sync_clears_the_error_and_a_sync_given_up_with_none_held_counts_nothing(
+        self, job: ProviderSyncJob, rows: Rows, scripted: Connector, vendor: Vendor
+    ) -> None:
+        self._refuse(vendor)
+        with pytest.raises(RuntimeError):
+            await job.run(batch_of(scripted.id))
+        await job.give_up(batch_of(scripted.id))
+
+        vendor.sync = None
+        await job.run(batch_of(scripted.id))
+
+        stored = await rows.connector_as_stored(scripted.id)
+        assert stored is not None
+        assert (stored.last_error, stored.last_error_at, stored.consecutive_errors) == (None, None, 0)
+        # Given up after a delivery that worked: no error is held, so none is counted.
+        await job.give_up(batch_of(scripted.id))
+        stored = await rows.connector_as_stored(scripted.id)
+        assert stored is not None and stored.consecutive_errors == 0
+
+    async def test_a_good_sync_on_a_clear_connector_writes_nothing(
+        self, job: ProviderSyncJob, rows: Rows, scripted: Connector, vendor: Vendor,
+        sessions: async_sessionmaker[AsyncSession],
+    ) -> None:
+        statements: list[str] = []
+
+        def record(conn: object, cursor: object, statement: str, *args: object) -> None:
+            if statement.lstrip().upper().startswith("UPDATE CONNECTORS"):
+                statements.append(statement)
+
+        engine = sessions.kw["bind"].sync_engine
+        event.listen(engine, "before_cursor_execute", record)
+        try:
+            await job.run(batch_of(scripted.id))
+        finally:
+            event.remove(engine, "before_cursor_execute", record)
+
+        stored = await rows.connector_as_stored(scripted.id)
+        assert stored is not None and stored.updated_at == scripted.updated_at
+        # The guarded clear runs, and its WHERE matches no row: nothing is rewritten.
+        assert len(statements) == 1 and "consecutive_errors != " in statements[0]

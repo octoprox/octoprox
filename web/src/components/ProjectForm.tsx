@@ -17,6 +17,7 @@ import { DOCS_URL } from '../utils/docs'
 import { plural } from '../utils/format'
 import { useToast } from '../contexts/ToastContext'
 import { useProject } from '../contexts/ProjectContext'
+import { invalidateAttention } from '../hooks/useProjectAttention'
 
 const engineOptions: RichSelectOption[] = [
   { value: 'curl_cffi', label: 'curl_cffi', description: 'C/libcurl - mature, Chrome-grade fingerprinting' },
@@ -643,6 +644,7 @@ export function ProjectPanel({ project, onClose, tabRequest }: { project: Projec
     onSuccess: async () => {
       queryClient.invalidateQueries({ queryKey: ['metrics', project.id] })
       queryClient.invalidateQueries({ queryKey: ['projects'] })
+      invalidateAttention(queryClient, project.id)
       await refreshProject()
       onClose()
       toast.show('Project settings saved')

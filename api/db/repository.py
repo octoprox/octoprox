@@ -111,6 +111,36 @@ class ProxyPlacement:
     status: ProxyStatus
 
 
+@dataclass(frozen=True)
+class FailureWindowRow:
+    """A project's failures of one kind and vendor status on one connector (None: before a proxy) in a window."""
+
+    project_id: str
+    connector_id: str | None
+    kind: str
+    upstream_status: int | None
+    count: int
+    # The newest row's time.
+    last_at: datetime
+
+
+# Drops the until-clear mutes (no ``until``) among the keys, a guarded update: a row holding none is not written, and a
+# timed mute set on one of the keys meanwhile stays. A text statement, so the column's onupdate leaves updated_at alone.
+_CLEAR_ATTENTION_MUTES = text(
+    "UPDATE projects "
+    "SET attention_mutes = ("
+    "SELECT coalesce(jsonb_object_agg(e.key, e.value), '{}'::jsonb) "
+    "FROM jsonb_each(attention_mutes) AS e "
+    "WHERE NOT (e.key = ANY(:keys) AND e.value->>'until' IS NULL)"
+    ") "
+    "WHERE id = :id "
+    "AND EXISTS ("
+    "SELECT 1 FROM jsonb_each(attention_mutes) AS e "
+    "WHERE e.key = ANY(:keys) AND e.value->>'until' IS NULL"
+    ")"
+).bindparams(bindparam("keys", type_=ARRAY(Text)), bindparam("id", type_=String()))
+
+
 class ProjectRepository:
     """Repository for project database operations."""
 
@@ -283,6 +313,43 @@ class ProjectRepository:
             else:
                 entry.connectors = count
         return counts
+
+    # Needs attention mutes: their own column, never in the domain project, written without stamping updated_at.
+
+    async def attention_mutes(self, project_ids: Iterable[str] | None = None) -> dict[str, dict[str, Any]]:
+        """Each project's stored mutes by project id, every project's for None; one statement."""
+        query = select(ProjectModel.id, ProjectModel.attention_mutes)
+        if project_ids is not None:
+            query = query.where(any_of(ProjectModel.id, sorted(set(project_ids))))
+        result = await self._session.execute(query)
+        return {project_id: dict(mutes or {}) for project_id, mutes in result.all()}
+
+    async def lock_attention_mutes(self, project_id: str) -> dict[str, Any] | None:
+        """The project's stored mutes, its row held until the transaction ends; None when it is gone."""
+        result = await self._session.execute(
+            select(ProjectModel.attention_mutes).where(ProjectModel.id == project_id).with_for_update()
+        )
+        row = result.one_or_none()
+        return None if row is None else dict(row[0] or {})
+
+    async def write_attention_mutes(self, project_id: str, mutes: Mapping[str, Any]) -> bool:
+        """Store the project's mutes as given, ``updated_at`` as it was: a mute is not an edit."""
+        result = await self._session.execute(
+            update(ProjectModel)
+            .where(ProjectModel.id == project_id)
+            .values(attention_mutes=dict(mutes), updated_at=ProjectModel.updated_at)
+            .execution_options(synchronize_session=False)
+        )
+        return bool(result.rowcount)  # type: ignore[attr-defined]
+
+    async def clear_attention_mutes(self, project_id: str, keys: Collection[str]) -> bool:
+        """Remove the until-clear mutes among ``keys``; writes nothing when none is stored, so any number of readers may."""
+        if not keys:
+            return False
+        result = await self._session.execute(
+            _CLEAR_ATTENTION_MUTES, {"id": project_id, "keys": sorted(set(keys))}
+        )
+        return bool(result.rowcount)  # type: ignore[attr-defined]
 
     def _to_domain(self, model: ProjectModel) -> Project:
         """Convert database model to domain model."""
@@ -588,8 +655,13 @@ class ConnectorRepository:
         )
         return result.scalar_one_or_none()
 
-    async def record_error(self, connector_id: str, error: str | None) -> bool:
-        """Record a cloud error, ``consecutive_errors`` counted in SQL, or clear the error state for None; False when nothing was written."""
+    async def record_error(self, connector_id: str, error: str | None, *, counted: bool = True) -> bool:
+        """Record a cloud or vendor error, ``consecutive_errors`` counted in SQL unless ``counted`` is False, or clear the
+        error state for None; False when nothing was written.
+
+        A vendor sync records its error uncounted on each failed delivery and counts it once the sync is given up
+        (:meth:`count_errors`).
+        """
         values: dict[str, Any]
         statement = update(ConnectorModel).where(ConnectorModel.id == connector_id)
         if error is None:
@@ -606,8 +678,9 @@ class ConnectorRepository:
                 # Cut to the column, since a cloud SDK's error can run longer.
                 "last_error": error[:LAST_ERROR_CHARS],
                 "last_error_at": utc_now(),
-                "consecutive_errors": ConnectorModel.consecutive_errors + 1,
             }
+            if counted:
+                values["consecutive_errors"] = ConnectorModel.consecutive_errors + 1
         # The error columns alone, updated_at as it was: an error is not an edit.
         result = await self._session.execute(
             statement.values(**values, updated_at=ConnectorModel.updated_at).execution_options(
@@ -615,6 +688,18 @@ class ConnectorRepository:
             )
         )
         return bool(result.rowcount)  # type: ignore[attr-defined]
+
+    async def count_errors(self, connector_ids: Collection[str]) -> int:
+        """Count one more failure on each connector holding an error, ``updated_at`` as it was; how many were counted."""
+        if not connector_ids:
+            return 0
+        result = await self._session.execute(
+            update(ConnectorModel)
+            .where(any_of(ConnectorModel.id, sorted(set(connector_ids))), ConnectorModel.last_error.is_not(None))
+            .values(consecutive_errors=ConnectorModel.consecutive_errors + 1, updated_at=ConnectorModel.updated_at)
+            .execution_options(synchronize_session=False)
+        )
+        return int(result.rowcount or 0)  # type: ignore[attr-defined]
 
     @staticmethod
     def to_domain(model: ConnectorModel) -> Connector:
@@ -1993,6 +2078,62 @@ class MetricsRepository:
             {"timestamp": _strip_tz(row.bucket_ts), "kind": row.kind, "failure_count": int(row.failure_count or 0)}
             for row in result.all()
         ]
+
+    async def failure_window(self, project_ids: Collection[str], since: datetime) -> list[FailureWindowRow]:
+        """Each project's failures since ``since`` by connector, kind and vendor status, with the newest row's time; one statement."""
+        if not project_ids:
+            return []
+        model = FailureMetricsModel
+        query = (
+            select(
+                model.project_id,
+                model.connector_id,
+                model.kind,
+                model.upstream_status,
+                func.sum(model.failure_count),
+                func.max(model.timestamp),
+            )
+            .where(any_of(model.project_id, sorted(set(project_ids))), model.timestamp >= since)
+            .group_by(model.project_id, model.connector_id, model.kind, model.upstream_status)
+        )
+        result = await self._session.execute(query)
+        return [
+            FailureWindowRow(
+                project_id=project_id,
+                connector_id=connector_id,
+                kind=kind,
+                upstream_status=upstream_status,
+                count=int(count or 0),
+                last_at=last_at,
+            )
+            for project_id, connector_id, kind, upstream_status, count, last_at in result.all()
+        ]
+
+    async def project_requests_since(self, project_ids: Collection[str], since: datetime) -> dict[str, int]:
+        """Each project's flushed requests since ``since``; a project with none is absent. One statement."""
+        if not project_ids:
+            return {}
+        model = ProjectMetricsModel
+        result = await self._session.execute(
+            select(model.project_id, func.sum(model.request_count))
+            .where(any_of(model.project_id, sorted(set(project_ids))), model.granularity == 60, model.timestamp >= since)
+            .group_by(model.project_id)
+        )
+        return {project_id: int(count or 0) for project_id, count in result.all()}
+
+    async def connector_requests_since(self, connector_ids: Collection[str], since: datetime) -> dict[str, int]:
+        """Each connector's flushed requests since ``since``; a connector with none is absent. One statement."""
+        if not connector_ids:
+            return {}
+        model = ConnectorMetricsModel
+        result = await self._session.execute(
+            select(model.connector_id, func.sum(model.request_count))
+            .where(
+                any_of(model.connector_id, sorted(set(connector_ids))), model.granularity == 60, model.timestamp >= since
+            )
+            .group_by(model.connector_id)
+        )
+        return {connector_id: int(count or 0) for connector_id, count in result.all()}
 
     async def compact_failure_metrics(
         self,

@@ -97,6 +97,20 @@ export function formatTime(value: string | null | undefined): string {
   return d ? d.toLocaleTimeString() : '-'
 }
 
+/** A local clock time, "14:32", with the short date before it ("15 Nov 14:32") when it is not today. */
+export function formatClock(value: string | null | undefined): string {
+  const d = parseApiDate(value)
+  if (!d) return '-'
+  const time = d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })
+  return d.toDateString() === new Date().toDateString() ? time : `${formatDay(value)} ${time}`
+}
+
+/** A local day, "1 Dec". */
+export function formatDay(value: string | null | undefined): string {
+  const d = parseApiDate(value)
+  return d ? d.toLocaleDateString(undefined, { day: 'numeric', month: 'short' }) : '-'
+}
+
 /** "just now", "5 min ago", "3 h ago", "2 d ago" - relative to the viewer's clock. */
 export function relativeTime(value: string | null | undefined): string {
   const d = parseApiDate(value)

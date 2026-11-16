@@ -14,7 +14,7 @@ from datetime import timedelta
 from urllib.parse import parse_qs
 
 from . import analytics, series
-from .common import NOW, VERSION, ago, iso, key_for, short_id, uuid_for
+from .common import GB, NOW, VERSION, ago, iso, key_for, short_id, uuid_for
 from .world import (
     CONN_BY_ID,
     CREDENTIAL_CONFIG,
@@ -73,6 +73,66 @@ def connector_json(c: ConnSpec) -> dict:
         "target": c.target, "last_error": None, "last_error_at": None, "consecutive_errors": 0,
         "created_at": ago(days=c.created_days_ago), "updated_at": ago(minutes=c.updated_minutes_ago),
     }
+
+
+TRAFFIC_PERIODS = {"day": "today", "week": "this week", "month": "this month"}
+# The api's order of the lines of one severity, for the kinds the demo world can show.
+ATTENTION_ORDER = ["vendor_login", "vendor_rate_limited", "vendor_forbidden", "vendor_cannot_serve",
+                   "connector_traffic_blocked", "connector_traffic_near", "connector_traffic_over_alert"]
+# Vendor refusals in the last 15 minutes: the statuses of each kind, its warning and problem shares, and its words.
+VENDOR_LINES = [
+    ("vendor_login", {407}, None, 0.20, ": the vendor is rejecting its login ({pct}% of requests in the last 15 minutes)."),
+    ("vendor_rate_limited", {429}, 0.05, 0.50,
+     ": the vendor says the account sends too many requests ({pct}% refused in the last 15 minutes)."),
+    ("vendor_forbidden", {403}, 0.05, 0.50,
+     ": the vendor does not let the account reach some sites or ports ({pct}% refused in the last 15 minutes)."),
+    ("vendor_cannot_serve", {400, 502, 503}, 0.30, None,
+     ": the vendor could not serve {pct}% of its requests in the last 15 minutes, for example a place it has no exit in."),
+]
+
+
+def attention_json(pid: str) -> dict:
+    """The project's Needs attention lines from the demo data, worded, cut off and ordered as the api does them.
+
+    Only the vendor and traffic lines can show: the unhealthy share and the refusals stay under their cut-offs.
+    """
+    lines = []
+    for c in connectors_of(pid):
+        if not c.enabled:
+            continue
+        requests, statuses, last = series.vendor_refusals(c)
+        for kind, codes, warning, problem, words in VENDOR_LINES:
+            n = sum(count for status, count in statuses.items() if status in codes)
+            share = n / max(requests, n) if n else 0.0
+            severity = ("problem" if problem is not None and share >= problem
+                        else "warning" if warning is not None and share >= warning else None)
+            if n >= 10 and severity:
+                lines.append(_attention_line(c, kind, severity, words.format(pct=round(share * 100)),
+                                             {"kind": "last_at", "at": iso(last)}))
+        usage = series.traffic_usage(c)
+        if usage["limit_bytes"] is None:
+            continue
+        limit, period = f"{usage['limit_bytes'] / GB:g} GB", TRAFFIC_PERIODS[usage["period"]]
+        pct = round(usage["total_bytes"] / usage["limit_bytes"] * 100)
+        if usage["status"] == "warning" and usage["action"] in ("block", "interrupt"):
+            kind, text = "connector_traffic_near", f" has used {pct}% of its {limit} limit {period}. New requests stop at the limit."
+        elif usage["status"] == "exceeded" and usage["action"] == "alert":
+            kind = "connector_traffic_over_alert"
+            text = (f" is at {pct}% of its {limit} limit {period}. The limit is set to alert only, so it keeps taking "
+                    "requests.")
+        else:
+            continue
+        lines.append(_attention_line(c, kind, "warning", text, {"kind": "resets", "at": usage["period_end"]}))
+    lines.sort(key=lambda line: (line["severity"] != "problem", ATTENTION_ORDER.index(line["kind"]),
+                                 line["subject"].casefold()))
+    problems = sum(1 for line in lines if line["severity"] == "problem")
+    return {"generated_at": iso(NOW), "lines": lines, "problems": problems, "warnings": len(lines) - problems,
+            "muted": 0}
+
+
+def _attention_line(c: ConnSpec, kind: str, severity: str, text: str, when: dict) -> dict:
+    return {"key": f"{kind}:{c.id}", "kind": kind, "severity": severity, "lead": "", "subject": c.name, "text": text,
+            "detail": None, "when": when, "link": f"connectors?open={c.id}", "action": "Open connector", "mute": None}
 
 
 def pool_json(pid: str) -> dict:
@@ -254,6 +314,11 @@ def _route(method: str, path: str, q: dict[str, str]) -> object:
             days = int(q.get("days", 30))
             return {"since": ago(days=days),
                     "connectors": analytics.exits_rows(q.get("project_id"), q.get("connector_id"), days)}
+        if path == "/attention/projects":
+            # Warnings only in the demo world: no project has a problem to count.
+            return {"projects": [{"project_id": pid, "problems": 0} for pid in PROJECTS]}
+        if path == "/attention/install":
+            return {"generated_at": iso(NOW), "lines": []}
         if path == "/audit/retention":
             return {"days": 365}
         if path == "/audit":
@@ -284,6 +349,8 @@ def _project_get(pid: str, sub: str, q: dict[str, str]) -> object:
         return project_json(pid)
     if sub == "/metrics":
         return pool_json(pid)
+    if sub == "/attention":
+        return attention_json(pid)
     if sub == "/metrics/scaling":
         return scaling_json(pid)
     if sub == "/metrics/history":

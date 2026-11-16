@@ -197,3 +197,71 @@ class TestProjectRepository:
         await db_session.commit()
         stored = await project_repo.get_by_id(project.id)
         assert stored is not None and stored.location_city_radius_km == 0
+
+
+class TestAttentionMutes:
+    """The Needs attention mutes: their own column, written without stamping the project as edited."""
+
+    @staticmethod
+    async def _projects(project_repo: ProjectRepository, db_session: AsyncSession) -> list[Project]:
+        projects = [Project(name=f"Muting {i}", username=f"muting{i}", password="pass") for i in range(2)]
+        for project in projects:
+            await project_repo.create(project)
+        await db_session.commit()
+        return projects
+
+    async def test_mutes_are_written_as_given_and_read_for_one_project_or_every_one(
+        self, project_repo: ProjectRepository, db_session: AsyncSession
+    ) -> None:
+        one, two = await self._projects(project_repo, db_session)
+        stamped = (await project_repo.get_by_id(one.id)).updated_at  # type: ignore[union-attr]
+        mutes = {"connectors_off": {"severity": "problem", "until": None}}
+
+        assert await project_repo.write_attention_mutes(one.id, mutes)
+        assert not await project_repo.write_attention_mutes("unknown", mutes)
+        await db_session.commit()
+        db_session.expire_all()
+
+        assert await project_repo.attention_mutes([one.id]) == {one.id: mutes}
+        assert await project_repo.attention_mutes(None) == {one.id: mutes, two.id: {}}
+        assert await project_repo.lock_attention_mutes(one.id) == mutes
+        assert await project_repo.lock_attention_mutes("unknown") is None
+        # A mute is not an edit.
+        assert (await project_repo.get_by_id(one.id)).updated_at == stamped  # type: ignore[union-attr]
+
+    async def test_a_clear_removes_only_the_until_clear_mutes_among_the_keys_and_writes_nothing_without_one(
+        self, project_repo: ProjectRepository, db_session: AsyncSession
+    ) -> None:
+        one, _two = await self._projects(project_repo, db_session)
+        stamped = (await project_repo.get_by_id(one.id)).updated_at  # type: ignore[union-attr]
+        timed = {"severity": "warning", "until": "2026-11-23T14:02:00"}
+        await project_repo.write_attention_mutes(
+            one.id, {"a": {"severity": "warning", "until": None}, "b": timed, "c": {"severity": "problem", "until": None}}
+        )
+        await db_session.commit()
+
+        assert await project_repo.clear_attention_mutes(one.id, ["a", "b", "gone"])
+        await db_session.commit()
+        db_session.expire_all()
+        assert await project_repo.attention_mutes([one.id]) == {
+            one.id: {"b": timed, "c": {"severity": "problem", "until": None}}
+        }
+        # Nothing until-clear among the keys: nothing written, however many readers ask.
+        assert not await project_repo.clear_attention_mutes(one.id, ["a", "b"])
+        assert not await project_repo.clear_attention_mutes(one.id, [])
+        assert (await project_repo.get_by_id(one.id)).updated_at == stamped  # type: ignore[union-attr]
+
+    async def test_a_project_edit_leaves_the_mutes_alone(
+        self, project_repo: ProjectRepository, db_session: AsyncSession
+    ) -> None:
+        one, _two = await self._projects(project_repo, db_session)
+        mutes = {"connectors_off": {"severity": "problem", "until": None}}
+        await project_repo.write_attention_mutes(one.id, mutes)
+        await db_session.commit()
+        db_session.expire_all()
+
+        edited = (await project_repo.get_by_id(one.id)).model_copy(update={"description": "edited"})  # type: ignore[union-attr]
+        await project_repo.update(edited)
+        await db_session.commit()
+
+        assert await project_repo.attention_mutes([one.id]) == {one.id: mutes}

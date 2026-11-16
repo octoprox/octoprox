@@ -28,6 +28,8 @@ from api.models.tunnel import TunnelAddressError, TunnelValidationError
 from api.services.errors import InvalidConfigError, NotFoundError, WriteRejectedError
 
 if TYPE_CHECKING:
+    from api.attention.install import InstallAttentionReader
+    from api.attention.service import AttentionService
     from api.core.audit import Actor, AuditLog
     from api.core.auth import CurrentUser
     from api.core.config import Settings
@@ -302,6 +304,16 @@ def proxy_service_of(request: Request) -> ProxyService:
 def runtime_view_of(request: Request) -> RuntimeView:
     """The read model: definitions joined with the soft state other roles keep in Redis."""
     return api_runtime_of(request).runtime_view
+
+
+def attention_of(request: Request) -> AttentionService:
+    """Needs attention: a project's lines, every project's problem count, and the mutes editors set."""
+    return api_runtime_of(request).attention
+
+
+def install_attention_of(request: Request) -> InstallAttentionReader:
+    """The install-wide Needs attention lines of the Projects page, from the heartbeats in Redis."""
+    return api_runtime_of(request).install_attention
 
 
 async def require_project(request: Request, project_id: str) -> Project:

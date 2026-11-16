@@ -434,6 +434,8 @@ class WorkStream(BaseModel):
     consumers: int = 0
     # Age of the oldest entry in seconds, by Redis's clock; None when the stream is empty.
     oldest_seconds: float | None = None
+    # How long ago the workers' group took its newest entry, on Redis's clock; None before it took one.
+    last_delivered_seconds: float | None = None
 
     @computed_field  # type: ignore[prop-decorator]
     @property

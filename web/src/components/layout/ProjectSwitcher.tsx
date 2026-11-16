@@ -12,6 +12,8 @@ import { Check, ChevronsUpDown, FolderOpen, LayoutGrid, Search, Settings } from 
 import { fetchProjects, type ProjectSummary } from '../../api/client'
 import { cn } from '../../utils/cn'
 import { DeletingBadge } from '../DeletingBadge'
+import { ProblemCount } from '../attention/ProblemCount'
+import { useProjectsAttention } from '../../hooks/useProjectAttention'
 import { MENU_GUTTER, PopoverMenu, usePopoverMenu } from '../ui/PopoverMenu'
 
 const MENU_WIDTH = 272
@@ -59,6 +61,9 @@ export function ProjectSwitcher({ collapsed, projectId, label, onSwitch, onAllPr
 
   // Loaded when the menu opens; the project list page shares the cache.
   const { data, isLoading, error } = useQuery({ queryKey: ['projects'], queryFn: fetchProjects, enabled: open, staleTime: 30_000 })
+  // Each project's unmuted problems, by the checks its Overview card runs.
+  const { data: attention } = useProjectsAttention({ enabled: open })
+  const problems = new Map(attention?.projects.map((p) => [p.project_id, p.problems]))
   const projects = data?.projects ?? []
   const showFilter = projects.length > FILTER_ABOVE
   const needle = filter.trim().toLowerCase()
@@ -117,7 +122,7 @@ export function ProjectSwitcher({ collapsed, projectId, label, onSwitch, onAllPr
           ) : shown.length === 0 ? (
             <div className="px-3 py-2 text-fg-muted">{needle ? 'No project matches' : 'No projects yet'}</div>
           ) : shown.map((p) => (
-            <ProjectItem key={p.id} project={p} current={p.id === projectId} onPick={() => pick(p)} />
+            <ProjectItem key={p.id} project={p} problems={problems.get(p.id)} current={p.id === projectId} onPick={() => pick(p)} />
           ))}
         </div>
 
@@ -134,7 +139,7 @@ export function ProjectSwitcher({ collapsed, projectId, label, onSwitch, onAllPr
 
 const itemClasses = 'w-full flex items-center gap-2.5 px-3 h-8 pointer-coarse:h-11 text-left outline-none transition-colors hover:bg-surface-raised focus-visible:bg-surface-raised'
 
-function ProjectItem({ project, current, onPick }: { project: ProjectSummary; current: boolean; onPick: () => void }) {
+function ProjectItem({ project, problems, current, onPick }: { project: ProjectSummary; problems: number | undefined; current: boolean; onPick: () => void }) {
   const healthy = project.healthy_proxy_count
   const total = project.proxy_count
   return (
@@ -148,10 +153,13 @@ function ProjectItem({ project, current, onPick }: { project: ProjectSummary; cu
       <Check className={cn('w-3.5 h-3.5 flex-none text-primary', !current && 'invisible')} />
       <span className="truncate flex-1" title={project.name}>{project.name}</span>
       {project.pending_deletion ? <DeletingBadge className="py-0.5" /> : (
-        <span className="flex-none inline-flex items-center gap-1.5 text-xs text-fg-subtle tabular-nums" title={`${healthy} of ${total} proxies healthy`}>
-          <span className={cn('w-2 h-2 rounded-full', total === 0 ? 'bg-fg-subtle/50' : healthy === total ? 'bg-success' : healthy === 0 ? 'bg-danger' : 'bg-warning')} />
-          {healthy}/{total}
-        </span>
+        <>
+          <ProblemCount count={problems} />
+          <span className="flex-none inline-flex items-center gap-1.5 text-xs text-fg-subtle tabular-nums" title={`${healthy} of ${total} proxies healthy`}>
+            <span className={cn('w-2 h-2 rounded-full', total === 0 ? 'bg-fg-subtle/50' : healthy === total ? 'bg-success' : healthy === 0 ? 'bg-danger' : 'bg-warning')} />
+            {healthy}/{total}
+          </span>
+        </>
       )}
     </button>
   )

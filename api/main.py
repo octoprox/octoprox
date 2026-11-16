@@ -147,6 +147,7 @@ def _include_api(app: FastAPI, extension: Extension) -> None:
     """
     from api.core.auth import require_auth
     from api.routes import (
+        attention,
         audit,
         auth,
         backup,
@@ -207,6 +208,9 @@ def _include_api(app: FastAPI, extension: Extension) -> None:
     )
     app.include_router(
         countries.router, prefix="/api/v1", tags=["Countries"], dependencies=auth_dependency
+    )
+    app.include_router(
+        attention.router, prefix="/api/v1", tags=["Needs attention"], dependencies=auth_dependency
     )
     app.include_router(
         proxies.router, prefix="/api/v1", tags=["Proxies"], dependencies=auth_dependency

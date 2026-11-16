@@ -12,7 +12,7 @@ import re
 from datetime import timedelta
 
 from .common import GB, NOW, ago, iso, short_id, unit, uuid_for
-from .series import RANGE_MINUTES, conn_totals
+from .series import RANGE_MINUTES, conn_totals, vendor_refusals
 from .world import (
     BRD_GATEWAY,
     OXY_GATEWAY,
@@ -185,6 +185,13 @@ def failure_records(project_id: str) -> list[dict]:
             msg = f"[Errno 111] Connect call failed ('{ip}', {port})"
         add(kind, status, ck, f"{host}:443", msg, error_type=error_type, proxy=proxy, step=step, step_ms=ms,
             count=max(1, int(60 * (0.93 ** i) * (0.5 + unit("tc", i)))), last_min=25 + i * 19, span_min=60 + i * 7)
+    # The vendor rate limiting under way (series.INCIDENTS), the Overview's vendor line; added last so the other
+    # examples keep their times. Its count is the burst's refusals so far.
+    add("upstream_rejected", 502, "oxylabs", "marketplace.example.net:443",
+        "Upstream proxy refused the tunnel: 429 Too Many Requests", error_type="ProxyError", proxy=oxy,
+        upstream_status=429, upstream_message="Too many requests: the account's concurrent session limit is reached",
+        step="connect", step_ms=164, count=vendor_refusals(by_key["oxylabs"], 30)[1][429], last_min=0, span_min=25,
+        location="DE")
     recs.sort(key=lambda r: r["last_at"], reverse=True)
     return recs
 

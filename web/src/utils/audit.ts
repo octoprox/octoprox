@@ -30,6 +30,8 @@ export const ACTION_LABELS: Record<string, string> = {
   deleted: 'Deleted',
   imported: 'Imported',
   traffic_reset: 'Traffic reset',
+  muted: 'Muted',
+  unmuted: 'Unmuted',
   invited: 'Invited',
   invite_reissued: 'Invite reissued',
   rotated: 'Rotated',
@@ -45,8 +47,9 @@ export type ActionTone = 'green' | 'blue' | 'red' | 'gray'
 
 const ACTION_TONES: Record<string, ActionTone> = {
   created: 'green', imported: 'green', invited: 'green', signed_in: 'green', token_issued: 'green',
-  updated: 'blue', traffic_reset: 'blue', invite_reissued: 'blue', rotated: 'blue',
+  updated: 'blue', traffic_reset: 'blue', invite_reissued: 'blue', rotated: 'blue', unmuted: 'blue',
   deleted: 'red', sign_in_failed: 'red', token_revoked: 'red', identity_unlinked: 'red',
+  muted: 'gray',
 }
 
 // Words that read as letters, wherever they appear in a field name.

@@ -21,6 +21,7 @@ from sqlalchemy import (
     Text,
     text,
 )
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from api.core import utc_now
@@ -173,6 +174,11 @@ class ProjectModel(Base):
     exit_reputation_bad_share: Mapped[int] = mapped_column(Integer, nullable=False, default=50, server_default="50")
     # Set by a delete; the project goes once no connector holds it (its cloud instances terminated).
     pending_deletion: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    # Needs attention lines muted by the project's editors, by line key (api.attention.mutes); never read into the
+    # Project model, so the routing feed never carries it.
+    attention_mutes: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb")
+    )
 
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now, onupdate=utc_now)

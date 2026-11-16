@@ -19,6 +19,9 @@ import { setSettingsOrigin } from '../utils/settingsOrigin'
 import { bytesShort, compact, formatRpm } from '../utils/format'
 import { ProjectForm } from './ProjectForm'
 import { DeletingBadge } from './DeletingBadge'
+import { InstallAttention } from './attention/InstallAttention'
+import { ProblemCount } from './attention/ProblemCount'
+import { invalidateAttention, useProjectsAttention } from '../hooks/useProjectAttention'
 import { DataTable, type DataTableFeatures } from './DataTable'
 import { Page } from './layout/Page'
 import { NewVersionBanner } from './NewVersion'
@@ -31,8 +34,8 @@ import { Button, Input, Card, Badge, Inspector, ConfirmDialog, Segmented, LogoLo
 
 type PanelState = { kind: 'new' } | { kind: 'edit'; id: string } | null
 
-/** A project with its load over the chosen range, once that has loaded. */
-type ProjectRow = ProjectSummary & { load?: ProjectLoad }
+/** A project with its load over the chosen range, once that has loaded, and its unmuted problems. */
+type ProjectRow = ProjectSummary & { load?: ProjectLoad; problems?: number }
 
 type ProjectsView = 'tiles' | 'table'
 
@@ -101,27 +104,31 @@ export default function ProjectSelection() {
     // The last range's numbers stay up while a new range loads, labelled with the range they are for.
     placeholderData: (previous) => previous,
   })
+  const { data: attention } = useProjectsAttention()
 
   const createMutation = useMutation({
     mutationFn: createProject,
     onSuccess: (p) => {
       queryClient.invalidateQueries({ queryKey: ['projects'] })
+      invalidateAttention(queryClient, p.id)
       setPanel(null)
       toast.show(`Project "${p.name}" created`)
     },
   })
   const updateMutation = useMutation({
     mutationFn: ({ id, data }: { id: string; data: ProjectUpdate }) => updateProject(id, data),
-    onSuccess: () => {
+    onSuccess: (p) => {
       queryClient.invalidateQueries({ queryKey: ['projects'] })
+      invalidateAttention(queryClient, p.id)
       setPanel(null)
       toast.show('Project saved')
     },
   })
   const deleteMutation = useMutation({
     mutationFn: ({ id, confirmation }: { id: string; confirmation: string }) => deleteProject(id, confirmation),
-    onSuccess: (gone) => {
+    onSuccess: (gone, { id }) => {
       queryClient.invalidateQueries({ queryKey: ['projects'] })
+      invalidateAttention(queryClient, id)
       setPendingDelete(null)
       setDeleteConfirmation('')
       toast.show(gone ? 'Project deleted' : 'Deleting project: its cloud instances are terminated first')
@@ -152,8 +159,9 @@ export default function ProjectSelection() {
   const projects = data?.projects
   const rows: ProjectRow[] = useMemo(() => {
     const loads = new Map(loadData?.projects.map((load) => [load.project_id, load]))
-    return (projects ?? []).map((project) => ({ ...project, load: loads.get(project.id) }))
-  }, [projects, loadData])
+    const problems = new Map(attention?.projects.map((p) => [p.project_id, p.problems]))
+    return (projects ?? []).map((project) => ({ ...project, load: loads.get(project.id), problems: problems.get(project.id) }))
+  }, [projects, loadData, attention])
   const editing = panel?.kind === 'edit' ? rows.find((p) => p.id === panel.id) : undefined
 
   let panelNode: React.ReactNode = null
@@ -223,6 +231,7 @@ export default function ProjectSelection() {
           actions={canMutate ? <Button size="sm" onClick={newProject}><Plus className="w-3.5 h-3.5" /> New project</Button> : undefined}
           panel={panelNode}
         >
+          <InstallAttention />
           {isLoading ? (
             <LogoLoader className="py-10" label="Loading projects…" />
           ) : error ? (
@@ -301,6 +310,7 @@ function ProjectTable({ projects, activeId, panelOpen, canMutate, onOpen, onEdit
       cell: ({ row }) => (
         <span className="flex items-center gap-2 min-w-0">
           <span className="font-medium truncate" title={row.original.name}>{row.original.name}</span>
+          <ProblemCount count={row.original.problems} />
           {row.original.pending_deletion && <DeletingBadge />}
         </span>
       ),
@@ -467,6 +477,7 @@ function ProjectCard({ project, range, active, canMutate, onOpen, onEdit, onDele
         <div className="min-w-0">
           <div className="flex items-center gap-2 min-w-0">
             <h3 className="text-[15px] font-semibold text-fg truncate" title={project.name}>{project.name}</h3>
+            <ProblemCount count={project.problems} />
             {project.pending_deletion && <DeletingBadge />}
           </div>
           <p className="text-xs text-fg-muted mt-0.5 line-clamp-2 h-8 leading-4" title={project.description || undefined}>

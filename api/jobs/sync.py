@@ -4,7 +4,8 @@
 """Provider syncs: a worker matches a provider connector's proxies to what its vendor reports, a connector a run.
 
 A run refreshes the exits of a port or list pool, reconciles the pool with its configuration, writes the result
-through ``ProxyService`` and hands the exits discovery found to attribution.
+through ``ProxyService`` and hands the exits discovery found to attribution. A vendor that fails the sync fails the run,
+so the stream delivers it again; its error is written on the connector, and counted once the sync is given up.
 """
 
 from __future__ import annotations
@@ -13,6 +14,7 @@ from typing import TYPE_CHECKING
 
 import structlog
 
+from api.core.logging import error_text
 from api.core.roles import JobKind
 from api.db.repository import ConnectorRepository, ProxyRepository
 from api.jobs.attribution import Sighting
@@ -92,10 +94,14 @@ class ProviderSyncJob(Job):
         before = {proxy.id: proxy.model_copy(deep=True) for proxy in stored}
         refreshed: list[Proxy] = []
         removed: list[str] = []
-        if not provider.is_session_based() and (stored or provider.needs_periodic_sync()):
-            refreshed, removed = await provider.refresh_ips(stored)
-        gone = set(removed)
-        added, surplus = await provider.sync_proxies([proxy for proxy in stored if proxy.id not in gone])
+        try:
+            if not provider.is_session_based() and (stored or provider.needs_periodic_sync()):
+                refreshed, removed = await provider.refresh_ips(stored)
+            gone = set(removed)
+            added, surplus = await provider.sync_proxies([proxy for proxy in stored if proxy.id not in gone])
+        except Exception as exc:
+            await self._record_error(connector_id, credential.type, exc)
+            raise
         removed = [*removed, *(proxy_id for proxy_id in surplus if proxy_id not in gone)]
         gone.update(surplus)
 
@@ -115,3 +121,27 @@ class ProviderSyncJob(Job):
                 added=len(added),
                 removed=len(removed),
             )
+        async with self._session_factory() as session:
+            # Writes nothing while the connector holds no error.
+            cleared = await ConnectorRepository(session).record_error(connector_id, None)
+            await session.commit()
+        if cleared:
+            logger.info("Connector sync error cleared", connector_id=connector_id)
+
+    async def give_up(self, batch: JobBatch) -> None:
+        """Count one more failed sync on the batch's connectors, whose error each failed delivery wrote; raises while
+        Postgres cannot be written, so the batch stays pending."""
+        async with self._session_factory() as session:
+            counted = await ConnectorRepository(session).count_errors(batch.keys)
+            await session.commit()
+        logger.warning("Connector sync given up", connector_ids=list(batch.keys), counted=counted)
+
+    async def _record_error(self, connector_id: str, credential_type: str, exc: Exception) -> None:
+        """Write the vendor's error on the connector, uncounted: the stream delivers the sync again, and only a sync
+        given up counts (:meth:`give_up`)."""
+        async with self._session_factory() as session:
+            await ConnectorRepository(session).record_error(connector_id, error_text(exc), counted=False)
+            await session.commit()
+        logger.warning(
+            "Connector sync failed", connector_id=connector_id, credential_type=credential_type, error=error_text(exc)
+        )

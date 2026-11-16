@@ -19,7 +19,7 @@ Every change a person makes, in the web UI or through the API:
 
 | What | Recorded when a person |
 |---|---|
-| Project | creates, edits or deletes it |
+| Project | creates, edits or deletes it, or mutes or unmutes a line of its [Needs attention]({{ site.baseurl }}/metrics#needs-attention) card (with the line, and until when for a mute) |
 | Connector | creates, edits or deletes it, changes its countries on the Countries page (one entry per connector changed, with the country), or resets its traffic usage |
 | Credential | creates, edits or deletes it |
 | Proxy | adds it by hand or in an upload (one entry per proxy), edits or removes it |
@@ -32,7 +32,7 @@ Every change a person makes, in the web UI or through the API:
 | System settings | changes the audit log's retention, or on Octoprox Enterprise the license key |
 | Backup | restores one |
 
-Each entry's action is one of **Created**, **Updated**, **Deleted**, **Imported** (a provider imported, a backup restored), **Traffic reset**, **Invited**, **Invite reissued** and **Rotated**; Octoprox Enterprise adds the [sign-in and token events](#sign-ins).
+Each entry's action is one of **Created**, **Updated**, **Deleted**, **Imported** (a provider imported, a backup restored), **Traffic reset**, **Invited**, **Invite reissued**, **Rotated**, **Muted** and **Unmuted**; Octoprox Enterprise adds the [sign-in and token events](#sign-ins).
 
 A delete is recorded when the person asks for it, even when instances are terminated afterwards, as for a cloud connector or proxy, or a project that holds one. Asking again records nothing new.
 
@@ -43,7 +43,7 @@ A delete is recorded when the person asks for it, even when instances are termin
 - **The request**: its `X-Request-ID`, which every server log line written while handling it carries (see [Request IDs]({{ site.baseurl }}/configuration#request-ids)).
 - **What**: the entity's type, ID and name at the time, and its project. The entries of something deleted stay readable.
 - **The changes**: each changed field with its value before and after.
-- **Details**: what else the action carries: proxies added by an upload (`via: upload`), a password set through an invite link (`via: invite`), the hosts a provider change added or removed, the country set from the Countries page, how many devices an OpenVPN CA rotation reissued, and for a restore the backup's date and release.
+- **Details**: what else the action carries: proxies added by an upload (`via: upload`), a password set through an invite link (`via: invite`), the hosts a provider change added or removed, the country set from the Countries page, the Needs attention line muted or unmuted and until when, how many devices an OpenVPN CA rotation reissued, and for a restore the backup's date and release.
 
 ### How changes are written
 

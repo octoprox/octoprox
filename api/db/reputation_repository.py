@@ -524,6 +524,44 @@ class ExitReputationRepository:
         )
         return [(site, int(count)) for site, count in result]
 
+    async def recent_sites(self, project_id: str, since: datetime, *, limit: int) -> list[str]:
+        """The sites with a connector record seen since ``since``, the most reported first; at most ``limit``. One
+        statement.
+
+        Counted at the coarsest level alone, as :meth:`busiest_sites` counts them.
+        """
+        c = _CONNECTORS.table.c
+        reports = func.sum(c.blocked_reports + c.good_reports)
+        result = await self._session.execute(
+            select(c.site)
+            .where(c.project_id == project_id, c.place.not_like("%/%"), c.last_seen_at >= since)
+            .group_by(c.site)
+            .order_by(reports.desc(), c.site)
+            .limit(limit)
+        )
+        return list(result.scalars().all())
+
+    async def coarse_records(
+        self, project_id: str, sites: Collection[str], since: datetime
+    ) -> list[ConnectorSiteReputation]:
+        """The project's connector records for ``sites`` at a country or no place, seen since ``since``. One statement."""
+        if not sites:
+            return []
+        await self._plan_for_the_values()
+        table = _CONNECTORS.table
+        c = table.c
+        result = await self._session.execute(
+            select(table)
+            .where(
+                c.project_id == project_id,
+                any_of(c.site, sorted(set(sites))),
+                c.place.not_like("%/%"),
+                c.last_seen_at >= since,
+            )
+            .order_by(*_CONNECTORS.lock_order())
+        )
+        return [_CONNECTORS.to_record(row) for row in result]
+
     async def busiest_places(self, project_id: str, site: str | None, *, limit: int) -> list[tuple[str, int]]:
         """The requested places the project's connector records are kept at, for ``site`` or for any, each with the
         reports made there, the most reported first; at most ``limit``, and never "" (no place)."""

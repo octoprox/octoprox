@@ -19,6 +19,7 @@ import { bytesTick, formatBytesDecimal, formatDateTime, formatMoney, parseApiDat
 import { useTheme } from '../contexts/ThemeContext'
 import { formatRangeTick, rangeTicks, useTimeRange } from '../contexts/TimeRangeContext'
 import { useToast } from '../contexts/ToastContext'
+import { invalidateAttention } from '../hooks/useProjectAttention'
 import { Badge, ConfirmDialog, InspectorSection, KeyValue, LogoLoader, Segmented } from './ui'
 import { cn } from '../utils/cn'
 
@@ -130,6 +131,7 @@ export function ConnectorTrafficSection({ connector, projectId, canMutate }: { c
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['connectors', projectId] })
       queryClient.invalidateQueries({ queryKey: ['traffic-split', projectId] })
+      invalidateAttention(queryClient, projectId)
       setConfirmReset(false)
       toast.show('Traffic usage reset')
     },

@@ -52,6 +52,28 @@ Requests are counted by the [gateway]({{ site.baseurl }}/architecture) that carr
 
 Proxy history goes with its proxy; the running totals of a removed proxy, project or device are dropped by the next hourly compaction job.
 
+## Needs attention
+
+A project's **Overview** opens with a **Needs attention** card: what in the project needs someone now, one line each, with a link to the page that fixes it. A **problem** (a red mark) means requests fail now, such as every connector turned off, no proxy that can take requests, a country nothing can serve, or a vendor rejecting a connector's login. A **warning** (an amber dot) means requests are degraded or about to be, such as a vendor refusing part of a connector's requests, a vendor proxy list that keeps failing to sync, a connector near its traffic limit, or many proxies failing their health checks.
+
+The card always shows something and never changes size on its own: the first two lines, problems first, with the number of problems and warnings beside its title; **Checking for problems...** while it loads; **Nothing needs attention right now.** when all is well; and **Could not check for problems right now.** with a way to try again. **Show all** opens the full list beside the page. The card checks again every 30 seconds, and at once after a change to a connector, the countries or the project's settings. Lines about requests cover the last 15 minutes, a minute or so behind live traffic since they read the recorded history, and go five minutes after the last failure they count.
+
+Problems also show in the sidebar, as a red count beside **Overview**, and on the **Projects** page and in the project switcher, as a red mark with the count beside each project's name. Warnings show on the card only.
+
+### Muting a line
+
+Editors and admins can mute a line from its row or from the full list: for **1 day**, **1 week**, **1 month**, or **until it clears**. A mute is shared by everyone in the project: a muted line leaves the card's rows and counts, the sidebar and the project list, and the full list shows it under **Muted** with who muted it and until when. Viewers see mutes and cannot change them.
+
+- A line that gets worse comes back: a warning muted that becomes a problem shows again while it is a problem, and is hidden again if it falls back to a warning before the mute ends.
+- **Until it clears** ends once the line is gone, so the next time it happens it shows again.
+- Each mute and unmute is recorded in the project's [History]({{ site.baseurl }}/audit-log), with the line and until when. A mute that ends because its line cleared or its time ran out records nothing, since no one ended it.
+
+### The Projects page
+
+Above the projects, everyone signed in sees what needs attention in the install itself, in plain words: no gateway accepting proxy connections, changes that have not taken effect yet, background work that is behind (proxy health checks, vendor proxy lists, cloud scaling, new countries, traffic limits, charts, location checks, exit reports), IP databases that could not be loaded or updated, and the database or the live data store out of reach. A line shows once two checks in a row have found it, so a passing moment never flashes up. Admins get a link to **System** or **IP attribution** for the details; everyone else is told that an admin can see more there. These lines cannot be muted.
+
+The API serves all of it; see [Needs attention]({{ site.baseurl }}/api#needs-attention).
+
 ## Latency: Where the Time Goes
 
 A request's latency runs from Octoprox taking it up until its tunnel through the upstream proxy is up (for plain HTTP, until the response's status line arrives). It is split into the steps the request went through, so time spent in Octoprox can be told from time spent at the vendor:

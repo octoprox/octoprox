@@ -373,11 +373,16 @@ class ClusterReader:
         group = next((info for info in cls._checked(groups) if info["name"] == WORKER_GROUP), None)
         entries = cls._checked(first)
         oldest = max(0.0, (now_ms - StreamId.of(str(entries[0][0])).ms) / 1000) if entries else None
+        # The group's last-delivered-id; 0-0 before it took any entry.
+        delivered = StreamId.of(str(group["last-delivered-id"])) if group is not None else None
         return WorkStream(
             length=int(cls._checked(length)),
             pending=int(group["pending"]) if group is not None else 0,
             consumers=int(group["consumers"]) if group is not None else 0,
             oldest_seconds=oldest,
+            last_delivered_seconds=(
+                max(0.0, (now_ms - delivered.ms) / 1000) if delivered is not None and delivered.ms > 0 else None
+            ),
         )
 
     @staticmethod

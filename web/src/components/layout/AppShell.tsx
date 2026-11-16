@@ -18,6 +18,7 @@ import { useAuth } from '../../contexts/AuthContext'
 import { useTheme } from '../../contexts/ThemeContext'
 import { useNavigationGuardContext } from '../../contexts/NavigationGuardContext'
 import { useScrollEdges } from '../../hooks/useScrollEdges'
+import { useProjectAttention } from '../../hooks/useProjectAttention'
 import { fetchProjectMetrics, fetchProjectScalingMetrics, poolBreakdown } from '../../api/client'
 import { popSettingsOrigin, setSettingsOrigin } from '../../utils/settingsOrigin'
 import { HelpMenu } from '../HelpMenu'
@@ -31,7 +32,7 @@ import { DeletingBadge } from '../DeletingBadge'
 import { PageScopeContext, ProjectSettingsContext, ShellPanelContext } from './Page'
 import { navItemBase, navItemCollapsed, navItemExpanded, navItemIdle } from './navStyles'
 import { cn } from '../../utils/cn'
-import { formatRpm } from '../../utils/format'
+import { formatRpm, plural } from '../../utils/format'
 
 const COLLAPSED_KEY = 'octoprox_sidebar_collapsed'
 /** Below Tailwind's lg breakpoint the sidebar is a rail and opens over the page. In rem, as Tailwind writes it, so the two agree at any font size. */
@@ -89,6 +90,9 @@ export default function AppShell({ onLogout, area }: { onLogout: () => void; are
   const { isAdmin, canMutate } = useAuth()
   const { isDark } = useTheme()
   const [navRef, navEdges] = useScrollEdges<HTMLElement>()
+  // The Overview card's query: its unmuted problems light the Overview entry. Warnings never do.
+  const { data: attention } = useProjectAttention(area ? undefined : projectId)
+  const problems = attention?.problems ?? 0
   // Project settings belong to the page they were opened on: leaving it closes them.
   const [projectSettingsOn, setProjectSettingsOn] = useState<string | null>(null)
   // The tab a page's link asked the settings to open on, a new object each time so an open panel switches again.
@@ -235,7 +239,7 @@ export default function AppShell({ onLogout, area }: { onLogout: () => void; are
             ) : projectId ? (
               <>
                 <NavGroup label="Overview" collapsed={collapsed} first />
-                <NavItem to={`${base}/overview`} icon={<BarChart3 />} label="Overview" collapsed={collapsed} />
+                <NavItem to={`${base}/overview`} icon={<BarChart3 />} label="Overview" collapsed={collapsed} badge={problems > 0 ? { count: problems, label: `${problems} ${plural(problems, 'problem', 'problems')}` } : undefined} />
                 <NavItem to={`${base}/hosts`} icon={<Target />} label="Hosts" collapsed={collapsed} />
                 <NavItem to={`${base}/failures`} icon={<AlertTriangle />} label="Failures" collapsed={collapsed} />
                 <NavGroup label="Pool" collapsed={collapsed} />
@@ -348,9 +352,11 @@ function NavDivider() {
   return <div className="h-px bg-line my-2 mx-1.5" aria-hidden />
 }
 
-function NavItem({ to, end, icon, label, collapsed }: { to: string; end?: boolean; icon: ReactNode; label: string; collapsed: boolean }) {
+/** `badge` counts what needs attention behind the entry: a red count in the open sidebar, a red dot on the rail. */
+function NavItem({ to, end, icon, label, collapsed, badge }: { to: string; end?: boolean; icon: ReactNode; label: string; collapsed: boolean; badge?: { count: number; label: string } }) {
   const guard = useNavigationGuardContext()
   const routerNavigate = useNavigate()
+  const named = badge ? `${label}, ${badge.label}` : label
   return (
     <RouterNavLink
       to={to}
@@ -360,9 +366,11 @@ function NavItem({ to, end, icon, label, collapsed }: { to: string; end?: boolea
         e.preventDefault()
         guard.request(() => routerNavigate(to))
       }}
-      title={collapsed ? label : undefined}
+      title={collapsed ? named : undefined}
+      aria-label={badge ? named : undefined}
       className={({ isActive }) =>
         cn(
+          'relative',
           navItemBase,
           collapsed ? navItemCollapsed : navItemExpanded,
           isActive
@@ -372,7 +380,12 @@ function NavItem({ to, end, icon, label, collapsed }: { to: string; end?: boolea
       }
     >
       {icon}
-      {!collapsed && <span className="truncate">{label}</span>}
+      {!collapsed && <span className="truncate flex-1">{label}</span>}
+      {badge && (
+        collapsed
+          ? <span className="absolute top-2 right-2 w-2 h-2 rounded-full bg-danger ring-2 ring-surface" aria-hidden />
+          : <span className="flex-none text-[10.5px] font-semibold leading-none px-1.5 py-1 rounded-full bg-danger-soft text-danger tabular-nums" aria-hidden>{badge.count}</span>
+      )}
     </RouterNavLink>
   )
 }

@@ -34,13 +34,15 @@ NOW_MIN = minute_index(NOW)
 LAST = NOW_MIN - 1
 STEP_KEYS = ["route", "preflight", "connect", "handshake", "response"]
 
-# (connector key, start, end, extra failure ratio, kind) of the main project's incidents today.
+# (connector key, start, end, extra failure ratio, kind, vendor status) of the main project's incidents today. The
+# vendor rate limiting still under way gives the Overview's Needs attention card its vendor line.
 TODAY = NOW.replace(hour=0, minute=0, second=0, microsecond=0)
 INCIDENTS = [
     ("oxylabs", TODAY + timedelta(hours=9, minutes=41), TODAY + timedelta(hours=10, minutes=14), 0.36,
-     "upstream_rejected"),
+     "upstream_rejected", 502),
     ("brightdata", TODAY + timedelta(hours=2, minutes=4), TODAY + timedelta(hours=2, minutes=22), 0.10,
-     "upstream_timeout"),
+     "upstream_timeout", None),
+    ("oxylabs", NOW - timedelta(minutes=25), NOW + timedelta(minutes=30), 0.08, "upstream_rejected", 429),
 ]
 
 
@@ -80,17 +82,17 @@ def load_factor(project_id: str, m: int) -> float:
     return shape(dt.hour + dt.minute / 60, PROJECTS[project_id].trough)
 
 
-def incident_extra(c: ConnSpec, m: int) -> tuple[float, str | None]:
-    """The extra failure ratio and its kind when an incident hits the connector in minute ``m``."""
+def incident_extra(c: ConnSpec, m: int) -> tuple[float, str | None, int | None]:
+    """The extra failure ratio, its kind and vendor status when an incident hits the connector in minute ``m``."""
     dt = from_minute(m)
-    for key, start, end, extra, kind in INCIDENTS:
+    for key, start, end, extra, kind, status in INCIDENTS:
         if c.project == P1 and c.key == key and start <= dt < end:
             # Ramps in and out over a few minutes.
             span = (end - start).total_seconds() / 60
             pos = (dt - start).total_seconds() / 60
             ramp = min(1.0, pos / 4, (span - pos) / 4)
-            return extra * max(0.2, ramp), kind
-    return 0.0, None
+            return extra * max(0.2, ramp), kind, status
+    return 0.0, None, None
 
 
 @cache
@@ -102,7 +104,7 @@ def conn_minute(cid: str, m: int) -> dict:
     share *= 1 + 0.05 * smooth(f"share:{cid}", m, 37) + 0.02 * signed(f"sharew:{cid}", m)
     lf = load_factor(c.project, m)
     fail = c.fail * (1 + 0.25 * smooth(f"fail:{cid}", m, 17) + 0.35 * lf) * (1 + 0.25 * signed(f"failw:{cid}", m))
-    extra, extra_kind = incident_extra(c, m)
+    extra, extra_kind, extra_status = incident_extra(c, m)
     requests = max(0, round(project_rate(c.project, m) * share))
     base_failures = requests * fail
     extra_failures = requests * extra
@@ -118,6 +120,7 @@ def conn_minute(cid: str, m: int) -> dict:
         "base_failures": base_failures,
         "extra_failures": extra_failures,
         "extra_kind": extra_kind,
+        "extra_status": extra_status,
         "steps": {k: v * lat_scale for k, v in STEPS[c.profile].items()},
         "bytes_sent": int(requests * c.kb_sent * 1024 * (1 + 0.02 * signed(f"ks:{cid}", m))),
         "bytes_received": int(requests * kb_recv * 1024),
@@ -259,6 +262,20 @@ REFUSED = {"no_proxy_available": 0.00031, "all_proxies_quarantined": 0.00012, "i
 FAILURE_BUCKETS = {"1h": 60, "6h": 300, "24h": 900, "7d": 3600, "30d": 21600}
 
 
+def vendor_refusals(c: ConnSpec, minutes: int = 15) -> tuple[int, dict[int, int], datetime]:
+    """The connector's requests over the last ``minutes``, its vendor refusals by status, and the last minute."""
+    requests, statuses = 0, {}
+    for m in range(LAST - minutes + 1, LAST + 1):
+        x = conn_minute(c.id, m)
+        requests += x["requests"]
+        rejected = x["base_failures"] * KIND_MIX[c.profile].get("upstream_rejected", 0.0)
+        for st, sf in VENDOR_STATUSES.get(c.ctype, [(502, 1.0)]):
+            statuses[st] = statuses.get(st, 0) + rejected * sf
+        if x["extra_kind"] == "upstream_rejected":
+            statuses[x["extra_status"]] = statuses.get(x["extra_status"], 0) + x["extra_failures"]
+    return requests, {st: round(v) for st, v in statuses.items()}, from_minute(LAST)
+
+
 def failure_summary(project_id: str, rng: str) -> dict:
     """Failures over the range by kind, vendor status and connector, and by kind over time."""
     minutes = RANGE_MINUTES.get(rng, 1440)
@@ -287,7 +304,7 @@ def failure_summary(project_id: str, rng: str) -> dict:
                     v = x["extra_failures"] * stride
                     kinds.setdefault(x["extra_kind"], [0.0] * len(buckets))[bi] += v
                     if x["extra_kind"] == "upstream_rejected":
-                        statuses[502] = statuses.get(502, 0) + v
+                        statuses[x["extra_status"]] = statuses.get(x["extra_status"], 0) + v
                 by_conn[c.id] = by_conn.get(c.id, 0) + x["failures"] * stride
             for kind, frac in REFUSED.items():
                 v = proj_requests * frac * (1 + 0.8 * smooth(f"refused:{kind}", m, 31)) * stride

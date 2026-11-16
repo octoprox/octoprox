@@ -1,7 +1,8 @@
 # Copyright 2026 Octoprox Authors
 # SPDX-License-Identifier: Apache-2.0
 
-"""The api role's runtime: the admin API's services, read model, previews, attribution, tunnels and sign-in.
+"""The api role's runtime: the admin API's services, read model, previews, Needs attention, attribution, tunnels and
+sign-in.
 
 Its one loop keeps the project map the exit reports route takes its project from; the node runs the process's
 definitions refresher and observation recorder. At start it creates the tunnel settings rows a fresh install lacks.
@@ -16,6 +17,8 @@ from typing import TYPE_CHECKING
 import structlog
 from sqlalchemy.pool import QueuePool
 
+from api.attention.install import InstallAttentionReader
+from api.attention.service import AttentionService
 from api.core.demand_tracker import DemandTracker
 from api.core.roles import Role
 from api.core.system_stats import ClusterReader
@@ -109,6 +112,17 @@ class ApiRuntime(RoleRuntime):
             geo_defaults=defaults_from_config(settings),
             default_strategy=settings.default_strategy,
         )
+        # Needs attention: each project's lines over the previews, and the install's over the heartbeats.
+        self.attention = AttentionService(
+            session_factory,
+            self.runtime_view,
+            self.provider_registry,
+            preview=self.preview_router,
+            preview_all=self.preview_all,
+        )
+        self.install_attention = InstallAttentionReader(
+            redis_client, session_factory, self._cluster, geo_updater_interval=settings.geo_updater_interval
+        )
         self.attributor = ProxyAttributor(geo.geo_service, lookup_enabled=settings.geo_lookup_enabled)
         # Detect: a store per request (``attribution.store()``), written in one transaction.
         self.attribution = Attribution(
@@ -180,6 +194,15 @@ class ApiRuntime(RoleRuntime):
         """
         quarantined, blocked = await asyncio.gather(self.runtime_view.quarantined(), self.runtime_view.blocked())
         sections = await self._compiler.compile_project(project_id, quarantined=quarantined, blocked_until=blocked)
+        return Router(
+            RoutingSnapshot.from_sections(sections, registry=self.provider_registry),
+            default_strategy=self._settings.default_strategy,
+        )
+
+    async def preview_all(self) -> Router:
+        """A router over every project's routing, as :meth:`preview_router` builds one project's; built per request."""
+        quarantined, blocked = await asyncio.gather(self.runtime_view.quarantined(), self.runtime_view.blocked())
+        sections = await self._compiler.compile_projects(quarantined=quarantined, blocked_until=blocked)
         return Router(
             RoutingSnapshot.from_sections(sections, registry=self.provider_registry),
             default_strategy=self._settings.default_strategy,

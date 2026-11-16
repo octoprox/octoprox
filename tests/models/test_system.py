@@ -270,6 +270,7 @@ class TestWorkStreams:
             "pending": 4,
             "consumers": 2,
             "oldest_seconds": 3.5,
+            "last_delivered_seconds": None,
             "queued": 8,
         }
 
@@ -279,7 +280,8 @@ class TestWorkStreams:
 
     def test_an_empty_stream_has_no_oldest_entry(self) -> None:
         assert WorkStream().model_dump(mode="json") == {
-            "length": 0, "pending": 0, "consumers": 0, "oldest_seconds": None, "queued": 0,
+            "length": 0, "pending": 0, "consumers": 0, "oldest_seconds": None, "last_delivered_seconds": None,
+            "queued": 0,
         }
 
     def test_the_system_view_carries_them_by_name_and_says_why_when_they_could_not_be_read(self) -> None:

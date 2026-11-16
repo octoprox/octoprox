@@ -14,6 +14,7 @@ import { useProject } from '../contexts/ProjectContext'
 import { useAuth } from '../contexts/AuthContext'
 import { useToast } from '../contexts/ToastContext'
 import { useNavigationGuard } from '../contexts/NavigationGuardContext'
+import { invalidateAttention } from '../hooks/useProjectAttention'
 import { DataTable, type DataTableFeatures } from '../components/DataTable'
 import { Page, EmptyState } from '../components/layout/Page'
 import { RichSelect } from '../components/RichSelect'
@@ -152,6 +153,7 @@ export default function CountriesPage() {
     queryClient.setQueryData(['countries', selectedProjectId], next)
     queryClient.invalidateQueries({ queryKey: ['connectors', selectedProjectId] })
     queryClient.invalidateQueries({ queryKey: ['traffic-split', selectedProjectId] })
+    invalidateAttention(queryClient, selectedProjectId)
   }
 
   const panelNode = overview && panel ? (

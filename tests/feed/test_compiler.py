@@ -1194,3 +1194,24 @@ class TestProjectCompile:
 
         assert list(sections) == [GLOBAL_SECTION, RUNTIME_SECTION]
         assert global_of(sections).projects == []
+
+    async def test_every_project_at_once_holds_what_each_project_compile_builds(
+        self, harness: Harness, two_projects: None
+    ) -> None:
+        """The previews of every project, as Needs attention's project list reads them: six statements in all."""
+        until = datetime(2026, 10, 17, 12, 30)
+        quarantined = {"proxy-project-1": until, "proxy-gone": until}
+        blocked = {"connector-project-2": until, "connector-gone": until}
+
+        everything = await harness.preview.compile_projects(quarantined=quarantined, blocked_until=blocked)
+
+        assert [project.id for project in global_of(everything).projects] == ["project-1", "project-2"]
+        assert list(connectors_of(everything)) == ["connector-project-1", "connector-project-2"]
+        for project_id in ("project-1", "project-2"):
+            one = await project_feed(harness, project_id, quarantined, blocked)
+            name = connector_section(f"connector-{project_id}")
+            assert everything[name].model_dump_json() == one[name].model_dump_json()
+            assert global_of(one).projects[0] in global_of(everything).projects
+        assert everything[RUNTIME_SECTION] == RuntimeSection(
+            quarantined={"proxy-project-1": until}, traffic_blocked_until={"connector-project-2": until}
+        )

@@ -1658,6 +1658,95 @@ export const fetchCountries = async (projectId: string): Promise<CountriesOvervi
 export const setCountryRoles = async (projectId: string, country: string, connectors: Record<string, CountryRole>): Promise<CountriesOverview> =>
   (await api.put(`/projects/${projectId}/countries/${country}`, { connectors })).data
 
+// --- Needs attention (docs/api.md) ----------------------------------------------------
+
+/** A problem: requests fail now. A warning: degraded, or about to be. */
+export type AttentionSeverity = 'problem' | 'warning'
+export type MuteDuration = 'day' | 'week' | 'month' | 'until_clear'
+
+/** The one time a line shows on a wide row: never when it started. */
+export interface AttentionWhen {
+  kind: 'last_at' | 'last_failed' | 'resets'
+  at: string
+}
+
+/** A mute an editor set on a line, shared by everyone in the project. */
+export interface AttentionMute {
+  /** The line's severity when it was muted. */
+  severity: AttentionSeverity
+  duration: MuteDuration
+  /** End of a timed mute; null until the line clears. */
+  until: string | null
+  muted_by: string
+  muted_at: string
+  /** Whether it hides the line now: false while the line is worse than when it was muted. */
+  active: boolean
+}
+
+/** One thing in a project that needs attention; the sentence is lead + subject + text. */
+export interface AttentionLine {
+  /** `<kind>` or `<kind>:<subject id>`, stable while the cause lasts. */
+  key: string
+  kind: string
+  severity: AttentionSeverity
+  lead: string
+  subject: string
+  text: string
+  /** Plain extra words for the row's hover title and the side panel. */
+  detail: string | null
+  when: AttentionWhen | null
+  /** Relative to the project's pages: `connectors?open=<id>`, `countries`, `failures`. */
+  link: string
+  action: string
+  mute: AttentionMute | null
+}
+
+/** A project's lines in display order, muted ones included, with the unmuted counts. */
+export interface ProjectAttention {
+  generated_at: string
+  lines: AttentionLine[]
+  problems: number
+  warnings: number
+  muted: number
+}
+
+export interface ProjectProblems {
+  project_id: string
+  problems: number
+}
+
+export interface ProjectsAttention {
+  projects: ProjectProblems[]
+}
+
+/** An install-wide line for the Projects page, the same for every role. */
+export interface InstallAttentionLine {
+  key: string
+  severity: AttentionSeverity
+  /** May hold `{time}`, which reads as the local time of `at`. */
+  text: string
+  at: string | null
+  /** Where an admin sees more: System or IP attribution. */
+  admin_page: 'system' | 'geo'
+}
+
+export interface InstallAttention {
+  generated_at: string
+  lines: InstallAttentionLine[]
+}
+
+export const fetchProjectAttention = async (projectId: string): Promise<ProjectAttention> =>
+  (await api.get(`/projects/${projectId}/attention`)).data
+export const muteAttention = async (projectId: string, key: string, duration: MuteDuration): Promise<void> => {
+  await api.put(`/projects/${projectId}/attention/mutes`, { key, duration })
+}
+export const unmuteAttention = async (projectId: string, key: string): Promise<void> => {
+  await api.delete(`/projects/${projectId}/attention/mutes/${encodeURIComponent(key)}`)
+}
+/** Every project's unmuted problems, by the same checks as its own lines. */
+export const fetchProjectsAttention = async (): Promise<ProjectsAttention> => (await api.get('/attention/projects')).data
+export const fetchInstallAttention = async (): Promise<InstallAttention> => (await api.get('/attention/install')).data
+
 // Project-scoped Proxy API functions
 export const fetchProjectProxies = async (projectId: string): Promise<ProxyListResponse> => {
   const response = await api.get(`/projects/${projectId}/proxies`)

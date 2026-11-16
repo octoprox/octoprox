@@ -656,8 +656,10 @@ class TestWorkStreams:
         ]
         provision = streams["by_name"]["jobs.provision"]
         oldest = provision.pop("oldest_seconds")
+        delivered = provision.pop("last_delivered_seconds")
         assert provision == {"length": 5, "pending": 2, "queued": 3, "consumers": 1}
         assert 0 <= oldest < 10
+        assert delivered is not None and 0 <= delivered < 10
 
     async def test_queued_and_running_entries_and_a_stream_no_worker_joined(self, redis_client: RedisClient) -> None:
         client = redis_client.client

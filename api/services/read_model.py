@@ -187,8 +187,8 @@ class ProxyListView:
 
 
 @dataclass(frozen=True)
-class _PoolRows:
-    """What Postgres holds for a read's pool counts, read in the caller's session; ``RuntimeView._pools`` adds Redis."""
+class PoolRows:
+    """What Postgres holds for a read's pool counts, read in the caller's session; ``RuntimeView.pools`` adds Redis."""
 
     # The project read (None: every one).
     project_id: str | None
@@ -198,7 +198,7 @@ class _PoolRows:
 
 
 @dataclass(frozen=True)
-class _Pools:
+class Pools:
     """The inputs every pool count of a read is computed from, read once."""
 
     counts: list[ConnectorStatusCount]
@@ -252,8 +252,8 @@ class RuntimeView:
             projects = await ProjectRepository(session).get_all()
             counts = await ProjectRepository(session).get_counts()
             connectors = await ConnectorRepository(session).get_all()
-            held = await self._pool_rows(session, connectors, None)
-        pools = await self._pools(held)
+            held = await self.pool_rows(session, connectors, None)
+        pools = await self.pools(held)
         by_project: dict[str, set[str]] = {}
         for connector in connectors:
             by_project.setdefault(connector.project_id, set()).add(connector.id)
@@ -271,8 +271,8 @@ class RuntimeView:
                 return None
             counts = await projects.get_counts(project_id)
             connectors = await ConnectorRepository(session).get_by_project(project_id)
-            held = await self._pool_rows(session, connectors, project_id)
-        pools = await self._pools(held)
+            held = await self.pool_rows(session, connectors, project_id)
+        pools = await self.pools(held)
         return ProjectView.of(project, counts.get(project_id), pools.pool({c.id for c in connectors}))
 
     async def load(self, buckets: int, bucket_seconds: int) -> list[ProjectLoad]:
@@ -316,8 +316,8 @@ class RuntimeView:
             if await ProjectRepository(session).get_by_id(project_id) is None:
                 return None
             connectors = await ConnectorRepository(session).get_by_project(project_id)
-            held = await self._pool_rows(session, connectors, project_id)
-        pools = await self._pools(held)
+            held = await self.pool_rows(session, connectors, project_id)
+        pools = await self.pools(held)
         clouds: dict[str, CloudConnectorConfig] = {}
         for connector in connectors:
             config = connector.cloud_config if connector.enabled else None
@@ -377,7 +377,7 @@ class RuntimeView:
             sizes = _sizes(await ProxyRepository(session).count_by_connector(project_id))
             targets = await self._targets(session, connectors, credentials)
             traffic = await TrafficHistory.load(session, connectors, now)
-        usage = await self._usage(traffic)
+        usage = await self.usage(traffic)
         return [
             ConnectorRow.of(c, credentials.get(c.credential_id), sizes[c.id], targets[c.id], usage[c.id])
             for c in sorted(connectors, key=lambda c: (c.created_at, c.id))
@@ -394,7 +394,7 @@ class RuntimeView:
             sizes = _sizes(await ProxyRepository(session).count_by_connector(connector_id=connector_id))
             targets = await self._targets(session, [connector], {credential.id: credential})
             traffic = await TrafficHistory.load(session, [connector], now)
-        usage = await self._usage(traffic)
+        usage = await self.usage(traffic)
         return ConnectorRow.of(connector, credential, sizes[connector_id], targets[connector_id], usage[connector_id])
 
     async def quarantined(self) -> dict[str, datetime]:
@@ -456,17 +456,17 @@ class RuntimeView:
 
     # --- Shared reads -----------------------------------------------------------------------
 
-    async def _pool_rows(
+    async def pool_rows(
         self, session: AsyncSession, connectors: Sequence[Connector], project_id: str | None
-    ) -> _PoolRows:
+    ) -> PoolRows:
         """What Postgres holds for the pool counts of ``connectors`` (a project's, or every one)."""
-        return _PoolRows(
+        return PoolRows(
             project_id=project_id,
             enabled=[connector for connector in connectors if connector.enabled],
             counts=await ProxyRepository(session).count_by_connector(project_id),
         )
 
-    async def _pools(self, rows: _PoolRows) -> _Pools:
+    async def pools(self, rows: PoolRows) -> Pools:
         """The pool counts' inputs: ``rows`` with the quarantines and traffic blocks read from Redis.
 
         Called once the caller's session is closed; where the quarantined proxies sit is read after Redis, in a session
@@ -478,9 +478,9 @@ class RuntimeView:
             async with self._session_factory() as session:
                 placements = await ProxyRepository(session).placements(quarantined, rows.project_id)
         counted = {connector.id for connector in rows.enabled if connector.id not in blocked}
-        return _Pools(counts=rows.counts, quarantined=placements, counted=counted)
+        return Pools(counts=rows.counts, quarantined=placements, counted=counted)
 
-    async def _usage(self, traffic: TrafficHistory) -> dict[str, TrafficUsage]:
+    async def usage(self, traffic: TrafficHistory) -> dict[str, TrafficUsage]:
         """Each connector's traffic in its current window against its limit, with the block the traffic job stored and whether one is pending.
 
         Redis is read once the caller's session is closed; without it the history alone is shown, with no block and nothing pending.

@@ -9,10 +9,11 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.core import utc_now
-from api.db.models import FailureMetricsModel
+from api.db.models import ConnectorMetricsModel, FailureMetricsModel, ProjectMetricsModel
 from api.db.repository import (
     ConnectorRepository,
     CredentialRepository,
+    FailureWindowRow,
     MetricsRepository,
     ProjectRepository,
 )
@@ -113,6 +114,76 @@ class TestFailureMetrics:
         history = await metrics_repo.get_failure_history(project.id, now - timedelta(hours=1), 3600)
         assert sum(p["failure_count"] for p in history if p["kind"] == "upstream_rejected") == 6
         assert {p["kind"] for p in history} == {"upstream_rejected", "no_proxy_available"}
+
+    async def test_the_window_groups_each_project_s_failures_with_its_newest_row(
+        self,
+        metrics_repo: MetricsRepository,
+        project_repo: ProjectRepository,
+        credential_repo: CredentialRepository,
+        connector_repo: ConnectorRepository,
+        db_session: AsyncSession,
+    ) -> None:
+        """What Needs attention reads: each project's last 15 minutes by connector, kind and vendor status."""
+        project, connector = await _project_with_connector(project_repo, credential_repo, connector_repo, db_session)
+        other, other_connector = await _project_with_connector(
+            project_repo, credential_repo, connector_repo, db_session, suffix="-2"
+        )
+        third, _third_connector = await _project_with_connector(
+            project_repo, credential_repo, connector_repo, db_session, suffix="-3"
+        )
+        now = utc_now().replace(microsecond=0)
+        since = now - timedelta(minutes=15)
+        await _insert(db_session, project.id, connector.id, "upstream_rejected", now - timedelta(minutes=1), count=4,
+                      upstream_status=407)
+        await _insert(db_session, project.id, connector.id, "upstream_rejected", now - timedelta(minutes=9), count=2,
+                      upstream_status=407)
+        await _insert(db_session, project.id, connector.id, "upstream_rejected", now - timedelta(minutes=2), count=5,
+                      upstream_status=429)
+        await _insert(db_session, project.id, None, "no_proxy_available", since, count=3)
+        # Just outside the window, and another project's: left out, or answered for that project.
+        await _insert(db_session, project.id, connector.id, "upstream_timeout", since - timedelta(seconds=1), count=50)
+        await _insert(db_session, other.id, other_connector.id, "upstream_timeout", now, count=7)
+        await _insert(db_session, third.id, None, "no_proxy_available", now, count=9)
+        await db_session.commit()
+
+        rows = await metrics_repo.failure_window([project.id, other.id], since)
+
+        assert sorted(rows, key=lambda r: (r.project_id == other.id, r.kind, r.upstream_status or 0)) == [
+            FailureWindowRow(project.id, None, "no_proxy_available", None, 3, since),
+            FailureWindowRow(project.id, connector.id, "upstream_rejected", 407, 6, now - timedelta(minutes=1)),
+            FailureWindowRow(project.id, connector.id, "upstream_rejected", 429, 5, now - timedelta(minutes=2)),
+            FailureWindowRow(other.id, other_connector.id, "upstream_timeout", None, 7, now),
+        ]
+        assert await metrics_repo.failure_window([], since) == []
+
+    async def test_requests_since_by_project_and_by_connector(
+        self,
+        metrics_repo: MetricsRepository,
+        project_repo: ProjectRepository,
+        credential_repo: CredentialRepository,
+        connector_repo: ConnectorRepository,
+        db_session: AsyncSession,
+    ) -> None:
+        """Flushed minutes only, since the window began; an entity with none is absent."""
+        project, connector = await _project_with_connector(project_repo, credential_repo, connector_repo, db_session)
+        other, other_connector = await _project_with_connector(
+            project_repo, credential_repo, connector_repo, db_session, suffix="-2"
+        )
+        now = utc_now()
+        since = now - timedelta(minutes=15)
+        for model, owner in ((ProjectMetricsModel, "project_id"), (ConnectorMetricsModel, "connector_id")):
+            entity = project.id if owner == "project_id" else connector.id
+            db_session.add(model(**{owner: entity}, timestamp=now - timedelta(minutes=1), request_count=40, granularity=60))
+            db_session.add(model(**{owner: entity}, timestamp=since, request_count=2, granularity=60))
+            db_session.add(model(**{owner: entity}, timestamp=since - timedelta(seconds=1), request_count=900, granularity=60))
+            # A compacted hour is never part of a quarter of an hour.
+            db_session.add(model(**{owner: entity}, timestamp=now, request_count=5000, granularity=3600))
+        await db_session.commit()
+
+        assert await metrics_repo.project_requests_since([project.id, other.id], since) == {project.id: 42}
+        assert await metrics_repo.connector_requests_since([connector.id, other_connector.id], since) == {connector.id: 42}
+        assert await metrics_repo.project_requests_since([], since) == {}
+        assert await metrics_repo.connector_requests_since([], since) == {}
 
     async def test_compaction_keeps_the_sums(
         self,

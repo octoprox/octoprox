@@ -17,7 +17,7 @@ import { useAuth } from '../contexts/AuthContext'
 import { useTheme } from '../contexts/ThemeContext'
 import { useToast } from '../contexts/ToastContext'
 import { bytesShort, bytesTick, compact, formatBytes, formatMoney, formatRpm, parseApiDate, plural } from '../utils/format'
-import { targetTotal, describeTarget, isDynamic } from '../utils/connectors'
+import { targetTotal, describeTarget, isDynamic, hasError } from '../utils/connectors'
 import { ProviderLogo } from '../components/ProviderLogo'
 import { Page } from '../components/layout/Page'
 import { LatencyChart } from '../components/charts/LatencyChart'
@@ -25,7 +25,10 @@ import { Sparkline } from '../components/charts/Sparkline'
 import { ProjectLocations, LocationSummary } from '../components/ProjectLocations'
 import { TrafficSplitPanel, totalSpend } from '../components/TrafficSplit'
 import { PERIOD_LABEL, TrafficUsageBar, describeUsage } from '../components/ConnectorTraffic'
-import { Badge, Card, CardHeader, KeyValue, LogoLoader, Segmented } from '../components/ui'
+import { Badge, Card, CardHeader, KeyValue, Legend, LogoLoader, Segmented } from '../components/ui'
+import { AttentionCard } from '../components/attention/AttentionCard'
+import { AttentionPanel } from '../components/attention/AttentionPanel'
+import { invalidateAttention, useProjectAttention } from '../hooks/useProjectAttention'
 import { cn } from '../utils/cn'
 
 type ChartPoint = {
@@ -111,6 +114,7 @@ export default function Overview() {
   const [range, setRange] = useTimeRange(HISTORY_RANGES)
   const [routingOpen, setRoutingOpen] = useState(false)
   const [locations, setLocations] = useState<LocationSummary | null>(null)
+  const [attentionOpen, setAttentionOpen] = useState(false)
 
   const { data: metrics } = useQuery({
     queryKey: ['metrics', selectedProjectId],
@@ -136,12 +140,15 @@ export default function Overview() {
     enabled: !!selectedProjectId,
     refetchInterval: 15000,
   })
+  // The card's own query: the side panel lists the same answer.
+  const { data: attention } = useProjectAttention(selectedProjectId ?? undefined)
 
   const strategyMutation = useMutation({
     mutationFn: (strategy: string) => updateProject(selectedProjectId!, { routing_strategy: strategy }),
     onSuccess: async (_d, strategy) => {
       queryClient.invalidateQueries({ queryKey: ['metrics', selectedProjectId] })
       queryClient.invalidateQueries({ queryKey: ['projects'] })
+      invalidateAttention(queryClient, selectedProjectId)
       await refreshProject()
       setRoutingOpen(false)
       toast.show(`Routing strategy set to ${formatStrategy(strategy)}`)
@@ -193,7 +200,12 @@ export default function Overview() {
       title="Overview"
       subtitle={selectedProject ? `Pool health and traffic for ${selectedProject.name}` : undefined}
       actions={<Segmented options={HISTORY_RANGES.map((r) => ({ value: r, label: r }))} value={range} onChange={setRange} />}
+      panel={attentionOpen && selectedProjectId ? (
+        <AttentionPanel projectId={selectedProjectId} projectName={selectedProject?.name ?? ''} attention={attention} canMutate={canMutate} onClose={() => setAttentionOpen(false)} />
+      ) : null}
     >
+      {selectedProjectId && <AttentionCard projectId={selectedProjectId} onShowAll={() => setAttentionOpen(true)} />}
+
       {/* Hero: success rate + pool health */}
       <Card className="grid grid-cols-1 @xl:grid-cols-[240px_minmax(0,1fr)] overflow-hidden">
         <div className="px-5 py-4 border-b @xl:border-b-0 @xl:border-r border-line flex flex-col justify-center gap-0.5 min-w-0">
@@ -355,10 +367,10 @@ export default function Overview() {
                   >
                     <ProviderLogo type={c.credential_type} className="w-4 h-4 text-[16px] flex-none" />
                     <span className={cnTrunc(!c.enabled)}>{c.name}</span>
-                    {c.last_error && <AlertTriangle className="w-3.5 h-3.5 text-danger flex-none" />}
+                    {hasError(c) && <AlertTriangle className="w-3.5 h-3.5 text-danger flex-none" />}
                     {c.traffic_usage && c.traffic_usage.limit_bytes != null && <TrafficUsageBar usage={c.traffic_usage} compact className="text-xs text-fg-muted flex-none" />}
                     <span className="text-fg-muted tabular-nums flex-none" title={describeTarget(c)}>{c.proxy_count}{isDynamic(c) ? <span className="text-fg-subtle"> dyn</span> : max != null && <span className="text-fg-subtle">/{max}</span>}</span>
-                    <span className={`w-2 h-2 rounded-full flex-none ${!c.enabled ? 'bg-fg-subtle' : c.last_error ? 'bg-danger' : c.traffic_usage?.blocked ? 'bg-orange-500' : 'bg-success'}`} title={c.traffic_usage?.blocked ? describeUsage(c.traffic_usage) : undefined} />
+                    <span className={`w-2 h-2 rounded-full flex-none ${!c.enabled ? 'bg-fg-subtle' : hasError(c) ? 'bg-danger' : c.traffic_usage?.blocked ? 'bg-orange-500' : 'bg-success'}`} title={c.traffic_usage?.blocked ? describeUsage(c.traffic_usage) : undefined} />
                   </button>
                 )
               })}
@@ -423,15 +435,6 @@ export default function Overview() {
 
 function cnTrunc(off: boolean) {
   return `flex-1 min-w-0 truncate ${off ? 'text-fg-subtle' : ''}`
-}
-
-function Legend({ dot, n, label }: { dot: string; n: number; label: string }) {
-  return (
-    <span className="inline-flex items-center gap-1.5 whitespace-nowrap">
-      <span className={`w-2 h-2 rounded-full ${dot}`} />
-      <b className="text-fg font-semibold">{n}</b> {label}
-    </span>
-  )
 }
 
 function ChartLegend({ items, small }: { items: [string, string][]; small?: boolean }) {

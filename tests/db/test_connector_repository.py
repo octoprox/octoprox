@@ -454,3 +454,46 @@ class TestConnectorRepository:
         assert [(c.id, cred.id) for c, cred in pairs] == [(cid, credential.id) for cid in sorted(wanted[::2])]
         assert [c.id for c in await connector_repo.get_many(wanted)] == sorted(wanted[::2])
         assert await connector_repo.get_many([]) == []
+
+    async def test_an_uncounted_error_keeps_the_count_and_a_count_adds_one_where_an_error_is_held(
+        self,
+        connector_repo: ConnectorRepository,
+        credential_repo: CredentialRepository,
+        project_repo: ProjectRepository,
+        db_session: AsyncSession,
+    ) -> None:
+        """A vendor sync writes its error on every failed delivery, and counts it once when it is given up."""
+        project, credential = await self._create_project_and_credential(project_repo, credential_repo, db_session)
+        failing, clear = (
+            Connector(
+                name=name,
+                credential_id=credential.id,
+                credential_type=CredentialType.STATIC_PROXY_PROVIDER,
+                project_id=project.id,
+                config={},
+            )
+            for name in ("Failing", "Clear")
+        )
+        for connector in (failing, clear):
+            await connector_repo.create(connector)
+        await db_session.commit()
+        stamped = (await connector_repo.get_by_id(failing.id)).updated_at  # type: ignore[union-attr]
+
+        assert await connector_repo.record_error(failing.id, "vendor said no", counted=False)
+        assert await connector_repo.record_error(failing.id, "vendor said no again", counted=False)
+        await db_session.commit()
+        db_session.expire_all()
+        written = await connector_repo.get_by_id(failing.id)
+        assert written is not None
+        assert (written.last_error, written.consecutive_errors) == ("vendor said no again", 0)
+        assert written.last_error_at is not None
+
+        assert await connector_repo.count_errors([failing.id, clear.id, "unknown"]) == 1
+        assert await connector_repo.count_errors([failing.id]) == 1
+        assert await connector_repo.count_errors([]) == 0
+        await db_session.commit()
+        db_session.expire_all()
+        counted, untouched = await connector_repo.get_by_id(failing.id), await connector_repo.get_by_id(clear.id)
+        assert counted is not None and untouched is not None
+        assert (counted.consecutive_errors, counted.updated_at) == (2, stamped)
+        assert (untouched.last_error, untouched.consecutive_errors) == (None, 0)

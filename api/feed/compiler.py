@@ -3,7 +3,8 @@
 
 """The feed compiler: the definitions in Postgres, cut into the sections gateways route on.
 
-The controller compiles the whole feed, the api one project for its previews; the caller passes the runtime state in.
+The controller compiles the whole feed, the api one project or every one for its previews; the caller passes the runtime
+state in.
 The controller's compile also carries the exit reputation section, read from Postgres apart from the compiles
 (:mod:`api.feed.reputation`); the previews carry none.
 """
@@ -128,7 +129,8 @@ class CompiledFeed:
 
 
 class FeedCompiler:
-    """Compiles one project's routing feed from Postgres for the api's previews; it holds no store and keeps nothing.
+    """Compiles one project's routing feed, or every project's, from Postgres for the api's previews; it holds no store
+    and keeps nothing.
 
     Args:
         geo_defaults: what the install runs with, and the feed carries, while no geo settings row is saved.
@@ -166,14 +168,62 @@ class FeedCompiler:
             proxies = await ProxyRepository(session).get_by_project(project_id)
             descriptors = await ProviderDescriptorRepository(session).get_all()
             stored_settings = await GeoSettingsRepository(session).get()
+        return self._preview(
+            [project] if project is not None else [],
+            credentials,
+            connectors,
+            proxies,
+            descriptors,
+            stored_settings,
+            quarantined=quarantined,
+            blocked_until=blocked_until,
+        )
+
+    async def compile_projects(
+        self, *, quarantined: Mapping[str, datetime], blocked_until: Mapping[str, datetime]
+    ) -> dict[str, Section]:
+        """Every project's feed for the api's previews at once, built as :meth:`compile_project` builds each, in a session
+        of its own: six statements however many projects there are.
+
+        It applies, keeps and logs nothing, and carries no database list, no tunnels and no exit reputation.
+        """
+        async with self._session_factory() as session:
+            projects = await ProjectRepository(session).get_all()
+            credentials = await CredentialRepository(session).get_all()
+            connectors = await ConnectorRepository(session).get_all()
+            proxies = await ProxyRepository(session).get_all()
+            descriptors = await ProviderDescriptorRepository(session).get_all()
+            stored_settings = await GeoSettingsRepository(session).get()
+        return self._preview(
+            projects,
+            credentials,
+            connectors,
+            proxies,
+            descriptors,
+            stored_settings,
+            quarantined=quarantined,
+            blocked_until=blocked_until,
+        )
+
+    def _preview(
+        self,
+        projects: Iterable[Project],
+        credentials: Iterable[Credential],
+        connectors: Collection[Connector],
+        proxies: Iterable[Proxy],
+        descriptors: Iterable[ProviderRecord],
+        stored_settings: GeoSettings | None,
+        *,
+        quarantined: Mapping[str, datetime],
+        blocked_until: Mapping[str, datetime],
+    ) -> dict[str, Section]:
+        """The previews' sections from the rows read: the full compile's build, with nothing applied, kept or logged."""
         # Not logged: a preview compiles per request, and the controller logs these once.
         workarounds: _Workarounds = {}
-        global_section = self._global_section(
-            [project] if project is not None else [], _enabled_specs(descriptors), stored_settings, workarounds
-        )
+        global_section = self._global_section(projects, _enabled_specs(descriptors), stored_settings, workarounds)
         connector_sections = self._connector_sections(connectors, credentials, proxies, workarounds)
         held = {proxy.id for section in connector_sections.values() for proxy in section.proxies}
-        # Every connector of the project keeps its block, those left out of the sections too: the traffic split asks.
+        # Every connector keeps its block, those left out of the sections too: the traffic split asks.
         owned = {connector.id for connector in connectors}
         runtime = self._runtime_section(quarantined, blocked_until, held, owned)
         return self._sections(global_section, connector_sections, runtime)

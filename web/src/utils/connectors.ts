@@ -28,3 +28,6 @@ export function describeTarget(c: Connector): string | undefined {
   else parts.push(t.countries.join(', '))
   return parts.join(' · ')
 }
+
+/** A connector failing to provision or sync: a vendor sync's error is written on each failed try but counted only once it is given up. */
+export const hasError = (c: Connector): boolean => !!c.last_error && c.consecutive_errors > 0

@@ -24,6 +24,7 @@ import { useTimeRange } from '../contexts/TimeRangeContext'
 import { useAuth } from '../contexts/AuthContext'
 import { useToast } from '../contexts/ToastContext'
 import { useProviders } from '../hooks/useProviders'
+import { invalidateAttention } from '../hooks/useProjectAttention'
 import { DataTable, type DataTableFeatures } from '../components/DataTable'
 import { Page, EmptyState } from '../components/layout/Page'
 import { NewCredentialPanel, TypePicker, TypeCard } from '../components/CredentialForm'
@@ -31,7 +32,7 @@ import { EntityHistory } from '../components/audit/EntityHistory'
 import { ProviderLogo } from '../components/ProviderLogo'
 import { SchemaForm, MultiCountryPicker, defaultValues, isCountryField, serializeValues, splitCountries } from '../components/SchemaForm'
 import { relativeTime, formatDateTime, formatDate, formatBytesDecimal, formatMoney, plural } from '../utils/format'
-import { targetTotal, describeTarget, isDynamic } from '../utils/connectors'
+import { targetTotal, describeTarget, isDynamic, hasError } from '../utils/connectors'
 import { coverageLabel } from '../components/geo/coverage'
 import { MismatchSummary, rateClass, ratePercent } from '../components/geo/AccuracyDetails'
 import { RichSelect, RichSelectOption } from '../components/RichSelect'
@@ -135,6 +136,7 @@ export default function ConnectorsPage() {
       queryClient.invalidateQueries({ queryKey: ['traffic-split', selectedProjectId] })
       queryClient.invalidateQueries({ queryKey: ['proxies', selectedProjectId] })
       queryClient.invalidateQueries({ queryKey: ['project', selectedProjectId] })
+      invalidateAttention(queryClient, selectedProjectId)
       if (panel?.kind === 'edit' && panel.id === id) setPanel(null)
       setPendingDelete(null)
       toast.show('Connector deleted')
@@ -242,14 +244,14 @@ export default function ConnectorsPage() {
     },
     {
       id: 'status',
-      accessorFn: (row: Connector) => (row.last_error ? 'Error' : row.traffic_usage?.pending ? 'Pending' : row.traffic_usage?.blocked ? 'Over limit' : row.enabled ? 'Enabled' : 'Disabled'),
+      accessorFn: (row: Connector) => (hasError(row) ? 'Error' : row.traffic_usage?.pending ? 'Pending' : row.traffic_usage?.blocked ? 'Over limit' : row.enabled ? 'Enabled' : 'Disabled'),
       header: 'Status',
       size: 170,
       meta: { filterVariant: 'select' as const },
       cell: ({ row }) => (
         <span className="inline-flex items-center gap-1.5 flex-wrap">
-          {row.original.last_error && (
-            <Badge color="red" className="inline-flex items-center gap-1" title={row.original.last_error}>
+          {hasError(row.original) && (
+            <Badge color="red" className="inline-flex items-center gap-1" title={row.original.last_error ?? undefined}>
               <AlertTriangle className="w-3 h-3" /> Error
             </Badge>
           )}
@@ -304,7 +306,7 @@ export default function ConnectorsPage() {
     )
   }
 
-  const errored = connectors.filter((c) => c.last_error)
+  const errored = connectors.filter(hasError)
 
   return (
     <Page
@@ -339,7 +341,7 @@ export default function ConnectorsPage() {
               <Alert key={c.id} className="flex items-start gap-2.5 text-[12.5px]">
                 <AlertTriangle className="w-4 h-4 flex-none mt-0.5" />
                 <span>
-                  <b className="font-semibold">{c.name}</b> failed {c.consecutive_errors} consecutive provisioning attempt{c.consecutive_errors === 1 ? '' : 's'}:{' '}
+                  <b className="font-semibold">{c.name}</b> failed {c.consecutive_errors} {plural(c.consecutive_errors, 'time', 'times')} in a row:{' '}
                   <span className="font-mono text-xs">{c.last_error}</span>{' '}
                   <button onClick={() => setPanel({ kind: 'edit', id: c.id })} className="underline font-medium">Open connector</button>
                 </span>
@@ -446,6 +448,7 @@ function ConnectorEditor({ connector, siblings, canMutate, onClose, onDelete, on
     queryClient.invalidateQueries({ queryKey: ['connectors', selectedProjectId] })
     queryClient.invalidateQueries({ queryKey: ['traffic-split', selectedProjectId] })
     queryClient.invalidateQueries({ queryKey: ['project', selectedProjectId] })
+    invalidateAttention(queryClient, selectedProjectId)
   }
   const createMutation = useMutation({
     mutationFn: (data: ConnectorCreate) => createProjectConnector(selectedProjectId!, data),
@@ -1069,7 +1072,7 @@ function ConnectorEditor({ connector, siblings, canMutate, onClose, onDelete, on
       <div hidden={view === 'history'} className="space-y-4">
       <form id="connector-form" onSubmit={handleSubmit} className="space-y-4">
         {error && <Alert>{error}</Alert>}
-        {isEdit && connector?.last_error && (
+        {isEdit && connector && hasError(connector) && (
           <Alert className="flex items-start gap-2 text-xs">
             <AlertTriangle className="w-3.5 h-3.5 flex-none mt-0.5" />
             <span>{connector.last_error}{connector.last_error_at && <span className="text-fg-subtle"> · {relativeTime(connector.last_error_at)}</span>}</span>

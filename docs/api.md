@@ -1237,6 +1237,120 @@ Any signed-in user reads them; clearing them needs an editor (`403` for viewers)
 
 ---
 
+## Needs attention
+
+What needs someone now, as the [Needs attention]({{ site.baseurl }}/metrics#needs-attention) card on a project's Overview and the Projects page show it. Every line is read from what Octoprox already stores, on each request; nothing is cached. Times are UTC without an offset, as everywhere in the API.
+
+| Method | Path | Who | Description |
+|---|---|---|---|
+| GET | `/projects/{project_id}/attention` | anyone signed in | The project's lines, muted or not, and their counts |
+| PUT | `/projects/{project_id}/attention/mutes` | editor or admin | Mute one line for everyone in the project |
+| DELETE | `/projects/{project_id}/attention/mutes/{key}` | editor or admin | Unmute a line |
+| GET | `/attention/projects` | anyone signed in | Every project's problem count |
+| GET | `/attention/install` | anyone signed in | The install-wide lines of the Projects page |
+
+### A project's lines
+
+```bash
+GET /api/v1/projects/{project_id}/attention
+```
+
+**Response:**
+```json
+{
+  "generated_at": "2026-11-16T14:32:10.123456",
+  "lines": [
+    {
+      "key": "vendor_login:3f2c9a1e-0000-4000-8000-000000000001",
+      "kind": "vendor_login",
+      "severity": "problem",
+      "lead": "",
+      "subject": "Webshare UK",
+      "text": ": the vendor is rejecting its login (41% of requests in the last 15 minutes).",
+      "detail": "The vendor answered 407 to 123 of 300 requests.",
+      "when": {"kind": "last_at", "at": "2026-11-16T14:32:00"},
+      "link": "connectors?open=3f2c9a1e-0000-4000-8000-000000000001",
+      "action": "Open connector",
+      "mute": null
+    }
+  ],
+  "problems": 1,
+  "warnings": 0,
+  "muted": 0
+}
+```
+
+A `problem` means requests fail now; a `warning` that they are degraded or about to be. `lines` are in display order: problems first, then warnings, each by kind and then by name, so a refresh changes words in place rather than moving rows. `problems` and `warnings` count the lines whose mute does not hide them, and `muted` those it does. A project being deleted answers no lines, and an unknown one `404`.
+
+| Field | Meaning |
+|---|---|
+| `key` | Stable: the kind alone for a line about the project, or `<kind>:<id>` for one about a connector, a kind of refused request or a site |
+| `kind` | What the line is about, such as `connectors_off`, `pool_no_routable`, `countries_unserved`, `vendor_login`, `connector_failing`, `refusals`, `connector_traffic_blocked` or `reputation_site_blocked` |
+| `lead`, `subject`, `text` | The sentence is `lead + subject + text`; the subject, such as a connector's name, is the part to show in bold |
+| `detail` | Extra plain words, such as the vendor's status and the counts behind the line, or `null` |
+| `when` | The one time the line shows, or `null`: `last_at` (its newest failure), `last_failed` (a connector's last failed vendor sync or cloud call) or `resets` (when a traffic period starts over) |
+| `link`, `action` | The page that fixes it, relative to `/projects/{project_id}/`, and the link's label |
+| `mute` | The line's mute, or `null` when it has none or a timed one has ended |
+
+A `mute` holds the `severity` the line had when it was muted, the `duration`, `until` (its end, `null` until the line clears), `muted_by` (a username), `muted_at`, and `active`: whether it hides the line now. A line muted as a warning that has become a problem shows again, with `active` false, until it is a warning again or the mute ends.
+
+Lines about requests cover the last 15 minutes of the flushed history, about a minute behind live traffic, and go five minutes after their last failure.
+
+### Muting a line
+
+```bash
+PUT /api/v1/projects/{project_id}/attention/mutes
+```
+
+```json
+{"key": "vendor_login:3f2c9a1e-0000-4000-8000-000000000001", "duration": "week"}
+```
+
+`duration` is `day` (24 hours), `week` (7 days), `month` (30 days) or `until_clear`, which ends when the line is no longer there. The mute is shared by everyone in the project and replaces the line's earlier mute, if any. Answers `204`; `403` for a viewer; `404` for an unknown project, or `{"detail": "Nothing with that key needs attention now"}` for a key that is not one of the project's lines now; `422` for a bad body. The project's [History]({{ site.baseurl }}/audit-log) records a `muted` entry with the line's sentence (`line`) and the mute's end (`muted_until`, or `it clears`).
+
+```bash
+DELETE /api/v1/projects/{project_id}/attention/mutes/{key}
+```
+
+URL-encode the key. Answers `204` whether or not the line was muted, and History records an `unmuted` entry with the line only when a mute was removed; `403` for a viewer, `404` for an unknown project. A mute until the line clears ends on its own the first time the project's lines are read without it, with no History entry, since no one ended it.
+
+### Every project's problems
+
+```bash
+GET /api/v1/attention/projects
+```
+
+```json
+{"projects": [{"project_id": "3c49da3c-a997-45a0-9a26-dc3b3ae6c920", "problems": 2}]}
+```
+
+Every project not being deleted, oldest first, with the problem lines its card counts: the same checks, with muted lines left out. Warnings are not counted here.
+
+### Install-wide lines
+
+```bash
+GET /api/v1/attention/install
+```
+
+```json
+{
+  "generated_at": "2026-11-16T14:32:10.123456",
+  "lines": [
+    {
+      "key": "changes_not_applied",
+      "severity": "warning",
+      "text": "Changes since {time} have not taken effect yet. Requests still follow the earlier setup.",
+      "at": "2026-11-16T14:02:11.402000",
+      "admin_page": "system"
+    }
+  ]
+}
+```
+
+Problems with the install itself, in plain words, the same for every role and without deployment detail: no process names, hosts, releases, sizes or error text. Always `200`: a store that cannot be reached is itself a line. `key` is one of `no_gateway_serving` (a problem), `changes_not_applied`, `background_behind`, `ip_databases`, `store_unreachable:database` and `store_unreachable:live_data`. A `text` holding `{time}` has `at` set; show it in the reader's time. `admin_page` names where an admin sees more: `system` (Administration, System) or `geo` (IP attribution). These lines cannot be muted.
+
+---
+
 ## Backup & Migration
 
 Admin-only endpoints for exporting the entire Octoprox setup to a single
@@ -1444,7 +1558,7 @@ curl -X PUT -H "Authorization: Bearer <admin token>" -H "Content-Type: applicati
 
 - `id`: the entry's ID, kept by backups.
 - `created_at`: when, in UTC.
-- `action`: `created`, `updated`, `deleted`, `imported`, `traffic_reset`, `invited`, `invite_reissued` or `rotated`; on Octoprox Enterprise also `signed_in`, `sign_in_failed`, `token_issued`, `token_first_used`, `token_revoked` and `identity_unlinked`.
+- `action`: `created`, `updated`, `deleted`, `imported`, `traffic_reset`, `invited`, `invite_reissued`, `rotated`, `muted` or `unmuted`; on Octoprox Enterprise also `signed_in`, `sign_in_failed`, `token_issued`, `token_first_used`, `token_revoked` and `identity_unlinked`.
 - `entity_type`, `entity_id`: what the entry is about. `entity_id` is empty for a sign-in under a name no user has.
 - `entity_name`: its name at the time.
 - `project_id`: the project, for a project's entities; null otherwise.

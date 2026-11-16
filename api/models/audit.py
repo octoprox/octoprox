@@ -87,6 +87,9 @@ class AuditAction(StrEnum):
     INVITED = "invited"
     INVITE_REISSUED = "invite_reissued"
     ROTATED = "rotated"
+    # A line of the project's Needs attention card muted or unmuted.
+    MUTED = "muted"
+    UNMUTED = "unmuted"
 
 
 class Audited(BaseModel):
