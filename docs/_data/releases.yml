@@ -10,6 +10,22 @@
 #   changes  what changed, for the people who use Octoprox; `docs` is a page
 #            on octoprox.com that explains it, such as connecting#exit-headers
 
+- version: 6.8.2
+  date: 2026-11-16
+  title: Needs attention card, line muting and sidebar fade
+  changes:
+    - text: "A project's Overview opens with a Needs attention card. It lists what needs someone now, such as a vendor rejecting a connector's login or a country nothing can serve, and links each line to the page that fixes it."
+      docs: metrics#needs-attention
+    - text: "Problems show as a red count beside Overview in the sidebar. They also show beside each project's name on the Projects page and in the project switcher."
+      docs: metrics#needs-attention
+    - text: "Editors and admins can mute a line for 1 day, 1 week, 1 month or until it clears. A mute applies to everyone in the project, a muted warning that becomes a problem shows again, and the project's History records each mute and unmute."
+      docs: metrics#muting-a-line
+    - text: "The Projects page shows problems with the install itself, such as no gateway accepting proxy connections, changes that have not taken effect yet, or background work that is behind. Admins get a link to the details."
+      docs: metrics#the-projects-page
+    - text: "The API serves a project's Needs attention lines and their mutes, every project's problem count, and the install-wide lines."
+      docs: api#needs-attention
+    - text: "The sidebar fades at its top and bottom edges when there is more to scroll."
+
 - version: 6.8.1
   date: 2026-11-16
   title: Faster exit reports and dropped report counts
