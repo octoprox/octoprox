@@ -294,7 +294,19 @@ select:-webkit-autofill:focus {
 /* Shows after a moment, so a quick load does not flash the logo. */
 .animate-logo-loader-in { animation: logo-loader-in 0.3s ease-out 0.2s both; }
 
+/* A scroll box that fades out at an edge with more content beyond it, so a list
+   the window cuts off shows that it scrolls. useScrollEdges says which edges. */
+@property --scroll-fade-above { syntax: '<length>'; inherits: false; initial-value: 0px; }
+@property --scroll-fade-below { syntax: '<length>'; inherits: false; initial-value: 0px; }
+.scroll-fade {
+  mask-image: linear-gradient(to bottom, transparent, #000 var(--scroll-fade-above), #000 calc(100% - var(--scroll-fade-below)), transparent);
+  transition: --scroll-fade-above 0.15s ease-out, --scroll-fade-below 0.15s ease-out;
+}
+.scroll-fade[data-more-above] { --scroll-fade-above: 3rem; }
+.scroll-fade[data-more-below] { --scroll-fade-below: 3rem; }
+
 @media (prefers-reduced-motion: reduce) {
   .animate-panel-in, .animate-toast-in, .animate-pulse-soft, .animate-edge-flow { animation: none; }
   .animate-logo-loader-flow { animation: none; mask-image: none; }
+  .scroll-fade { transition: none; }
 }

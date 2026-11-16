@@ -17,6 +17,7 @@ import { useProject } from '../../contexts/ProjectContext'
 import { useAuth } from '../../contexts/AuthContext'
 import { useTheme } from '../../contexts/ThemeContext'
 import { useNavigationGuardContext } from '../../contexts/NavigationGuardContext'
+import { useScrollEdges } from '../../hooks/useScrollEdges'
 import { fetchProjectMetrics, fetchProjectScalingMetrics, poolBreakdown } from '../../api/client'
 import { popSettingsOrigin, setSettingsOrigin } from '../../utils/settingsOrigin'
 import { HelpMenu } from '../HelpMenu'
@@ -87,6 +88,7 @@ export default function AppShell({ onLogout, area }: { onLogout: () => void; are
   const { selectedProjectId, selectedProject, setSelectedProjectId } = useProject()
   const { isAdmin, canMutate } = useAuth()
   const { isDark } = useTheme()
+  const [navRef, navEdges] = useScrollEdges<HTMLElement>()
   // Project settings belong to the page they were opened on: leaving it closes them.
   const [projectSettingsOn, setProjectSettingsOn] = useState<string | null>(null)
   // The tab a page's link asked the settings to open on, a new object each time so an open panel switches again.
@@ -205,55 +207,57 @@ export default function AppShell({ onLogout, area }: { onLogout: () => void; are
           />
         )}
 
-        {/* Navigation. Its entries keep their height (flex-none) so a short window scrolls the list instead of squashing it. */}
-        <nav className={cn('flex-1 min-h-0 overflow-y-auto flex flex-col gap-0.5 [&>*]:flex-none', collapsed ? 'px-2 py-1' : 'px-3 py-1')}>
-          {area === 'account' ? (
-            <>
-              <NavButton icon={<ArrowLeft />} label="Back" collapsed={collapsed} onClick={leaveArea} />
-              <NavDivider />
-              <NavItem to="/account" end icon={<UserIcon />} label="Account" collapsed={collapsed} />
-              <NavItem to="/account/appearance" icon={<Palette />} label="Appearance" collapsed={collapsed} />
-            </>
-          ) : area === 'admin' ? (
-            <>
-              <NavButton icon={<ArrowLeft />} label="Back" collapsed={collapsed} onClick={leaveArea} />
-              <NavDivider />
-              <NavItem to="/admin/users" icon={<UsersIcon />} label="Users" collapsed={collapsed} />
-              <NavItem to="/admin/sign-in" icon={<LogIn />} label="Sign-in" collapsed={collapsed} />
-              <NavItem to="/admin/providers" icon={<Puzzle />} label="Providers" collapsed={collapsed} />
-              <NavItem to="/admin/geo" icon={<Globe />} label="IP attribution" collapsed={collapsed} />
-              <NavItem to="/admin/backup" icon={<DatabaseBackup />} label="Backup & Migration" collapsed={collapsed} />
-              <NavItem to="/admin/activity" icon={<History />} label="Activity" collapsed={collapsed} />
-              <NavItem to="/admin/system" icon={<Activity />} label="System" collapsed={collapsed} />
-              <NavGroup label="Tunnels" collapsed={collapsed} />
-              <NavItem to="/admin/wireguard" icon={<Router />} label="WireGuard" collapsed={collapsed} />
-              <NavItem to="/admin/openvpn" icon={<ShieldCheck />} label="OpenVPN" collapsed={collapsed} />
-            </>
-          ) : projectId ? (
-            <>
-              <NavGroup label="Overview" collapsed={collapsed} first />
-              <NavItem to={`${base}/overview`} icon={<BarChart3 />} label="Overview" collapsed={collapsed} />
-              <NavItem to={`${base}/hosts`} icon={<Target />} label="Hosts" collapsed={collapsed} />
-              <NavItem to={`${base}/failures`} icon={<AlertTriangle />} label="Failures" collapsed={collapsed} />
-              <NavGroup label="Pool" collapsed={collapsed} />
-              <NavItem to={`${base}/proxies`} icon={<Server />} label="Proxies" collapsed={collapsed} />
-              <NavItem to={`${base}/connectors`} icon={<Link2 />} label="Connectors" collapsed={collapsed} />
-              <NavItem to={`${base}/countries`} icon={<Flag />} label="Countries" collapsed={collapsed} />
-              <NavItem to={`${base}/credentials`} icon={<KeyRound />} label="Credentials" collapsed={collapsed} />
-              <NavGroup label="Tools" collapsed={collapsed} />
-              <NavItem to={`${base}/connect`} icon={<Plug />} label="Connect" collapsed={collapsed} />
-              <NavItem to={`${base}/locations`} icon={<Globe />} label="Exit locations" collapsed={collapsed} />
-              <NavItem to={`${base}/mitm-inspector`} icon={<Eye />} label="MITM Inspector" collapsed={collapsed} />
-              <NavGroup label="Tunnels" collapsed={collapsed} />
-              <NavItem to={`${base}/devices`} icon={<Router />} label="Devices" collapsed={collapsed} />
-              {canMutate && selectedProject && (
-                <>
-                  <NavGroup label="Project" collapsed={collapsed} />
-                  <NavButton icon={<SettingsIcon />} label="Project settings" collapsed={collapsed} onClick={projectSettingsOn === location.pathname ? () => setProjectSettingsOn(null) : () => openProjectSettings()} active={projectSettingsOn === location.pathname} />
-                </>
-              )}
-            </>
-          ) : null}
+        {/* Navigation. A window too short for it scrolls the list and fades the edge with entries beyond it. */}
+        <nav ref={navRef} className="flex-1 min-h-0 overflow-y-auto scroll-fade" data-more-above={navEdges.above || undefined} data-more-below={navEdges.below || undefined}>
+          <div className={cn('flex flex-col gap-0.5', collapsed ? 'px-2 py-1' : 'px-3 py-1')}>
+            {area === 'account' ? (
+              <>
+                <NavButton icon={<ArrowLeft />} label="Back" collapsed={collapsed} onClick={leaveArea} />
+                <NavDivider />
+                <NavItem to="/account" end icon={<UserIcon />} label="Account" collapsed={collapsed} />
+                <NavItem to="/account/appearance" icon={<Palette />} label="Appearance" collapsed={collapsed} />
+              </>
+            ) : area === 'admin' ? (
+              <>
+                <NavButton icon={<ArrowLeft />} label="Back" collapsed={collapsed} onClick={leaveArea} />
+                <NavDivider />
+                <NavItem to="/admin/users" icon={<UsersIcon />} label="Users" collapsed={collapsed} />
+                <NavItem to="/admin/sign-in" icon={<LogIn />} label="Sign-in" collapsed={collapsed} />
+                <NavItem to="/admin/providers" icon={<Puzzle />} label="Providers" collapsed={collapsed} />
+                <NavItem to="/admin/geo" icon={<Globe />} label="IP attribution" collapsed={collapsed} />
+                <NavItem to="/admin/backup" icon={<DatabaseBackup />} label="Backup & Migration" collapsed={collapsed} />
+                <NavItem to="/admin/activity" icon={<History />} label="Activity" collapsed={collapsed} />
+                <NavItem to="/admin/system" icon={<Activity />} label="System" collapsed={collapsed} />
+                <NavGroup label="Tunnels" collapsed={collapsed} />
+                <NavItem to="/admin/wireguard" icon={<Router />} label="WireGuard" collapsed={collapsed} />
+                <NavItem to="/admin/openvpn" icon={<ShieldCheck />} label="OpenVPN" collapsed={collapsed} />
+              </>
+            ) : projectId ? (
+              <>
+                <NavGroup label="Overview" collapsed={collapsed} first />
+                <NavItem to={`${base}/overview`} icon={<BarChart3 />} label="Overview" collapsed={collapsed} />
+                <NavItem to={`${base}/hosts`} icon={<Target />} label="Hosts" collapsed={collapsed} />
+                <NavItem to={`${base}/failures`} icon={<AlertTriangle />} label="Failures" collapsed={collapsed} />
+                <NavGroup label="Pool" collapsed={collapsed} />
+                <NavItem to={`${base}/proxies`} icon={<Server />} label="Proxies" collapsed={collapsed} />
+                <NavItem to={`${base}/connectors`} icon={<Link2 />} label="Connectors" collapsed={collapsed} />
+                <NavItem to={`${base}/countries`} icon={<Flag />} label="Countries" collapsed={collapsed} />
+                <NavItem to={`${base}/credentials`} icon={<KeyRound />} label="Credentials" collapsed={collapsed} />
+                <NavGroup label="Tools" collapsed={collapsed} />
+                <NavItem to={`${base}/connect`} icon={<Plug />} label="Connect" collapsed={collapsed} />
+                <NavItem to={`${base}/locations`} icon={<Globe />} label="Exit locations" collapsed={collapsed} />
+                <NavItem to={`${base}/mitm-inspector`} icon={<Eye />} label="MITM Inspector" collapsed={collapsed} />
+                <NavGroup label="Tunnels" collapsed={collapsed} />
+                <NavItem to={`${base}/devices`} icon={<Router />} label="Devices" collapsed={collapsed} />
+                {canMutate && selectedProject && (
+                  <>
+                    <NavGroup label="Project" collapsed={collapsed} />
+                    <NavButton icon={<SettingsIcon />} label="Project settings" collapsed={collapsed} onClick={projectSettingsOn === location.pathname ? () => setProjectSettingsOn(null) : () => openProjectSettings()} active={projectSettingsOn === location.pathname} />
+                  </>
+                )}
+              </>
+            ) : null}
+          </div>
         </nav>
 
         {/* Bottom: administration, help and the user's own menu */}
