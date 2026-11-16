@@ -10,6 +10,25 @@
 #   changes  what changed, for the people who use Octoprox; `docs` is a page
 #            on octoprox.com that explains it, such as connecting#exit-headers
 
+- version: 6.8.1
+  date: 2026-11-16
+  title: Faster exit reports and dropped report counts
+  changes:
+    - text: "Upgrade note: the API now accepts a report's exit headers as sent, and the workers check them against the project's proxies afterwards. A report with wrong headers is no longer refused in the response. The workers count it where its `-tag-` points, or drop it."
+      docs: exit-reputation#reporting-exits
+    - text: "Upgrade note: `octoprox_worker_exit_reports_dropped_total` now has a `reason` label and also counts the reports the workers drop. To alert only on failed batches, filter it on `reason=\"given_up\"`."
+      docs: metrics#prometheus
+    - text: "On the System page, each worker's Exit reports row now lists the reports it dropped and why. For example, the project was turned off, or the connector was never seen exiting from that IP."
+      docs: exit-reputation#reporting-exits
+    - text: "When exit headers name a report's exit, the response now shows the `connector_id` and `ip` you sent, with the place from the username. A `connector_id` over 36 characters or an `ip` over 45 gets a 422."
+      docs: api#exit-reports
+    - text: "A gateway now saves a tagged request's exit within about 0.1 seconds, and the request does not wait for it. Send the report after the request's response, not alongside the request."
+      docs: exit-reputation#reporting-exits
+    - text: "Sending exit reports is faster because the API keeps its projects in memory. Just after you create a project or change its exit reputation mode, the API can answer 404 or 409 for a few milliseconds."
+      docs: api#exit-reports
+    - text: "Requests wait less on Redis. Gateways save location checks and sticky sessions in the background, and look up a sticky session once per request, even while Redis is failing."
+    - text: "API calls signed in with an API token make fewer database reads. When no project uses exit reputation, workers skip its work in each minute's metrics flush."
+
 - version: 6.8.0
   date: 2026-11-16
   title: Exit reputation, exit reports and service accounts
