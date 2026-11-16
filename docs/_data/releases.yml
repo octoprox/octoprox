@@ -10,6 +10,53 @@
 #   changes  what changed, for the people who use Octoprox; `docs` is a page
 #            on octoprox.com that explains it, such as connecting#exit-headers
 
+- version: 6.8.0
+  date: 2026-11-16
+  title: Exit reputation, exit reports and service accounts
+  changes:
+    - text: "Upgrade note: `-tag-` is now reserved in the proxy username. Change any project username or session ID that contains it before you upgrade, because such a project username gets a 407 on every request."
+      docs: deployment#restarts-and-upgrades
+    - text: "Upgrade note: in a cluster, upgrade the controllers first and replace old gateways only once new ones are ready. On Kubernetes, roll the gateways with `maxUnavailable: 0`, because new gateways wait for a new controller and old ones keep routing without later changes."
+      docs: deployment#restarts-and-upgrades
+    - text: "Upgrade note: do not let a deploy tool roll this upgrade back on its own, for example Helm with `--atomic`. Version 6.7 does not start on the upgraded database, so to go back you first set the schema version to 058 by hand."
+      docs: deployment#restarts-and-upgrades
+    - text: "New exit reputation: tell Octoprox which requests a site blocked, and it sends that site's requests around the exit IPs and vendors that site blocks. Each project picks a mode under Project settings, Exit reputation: `off`, `record` to see the effect first, or `avoid`."
+      docs: exit-reputation
+    - text: "An exit IP reported blocked is avoided for that one site, for an hour by default, and each repeat doubles the time up to 7 days. Other sites keep using it."
+      docs: exit-reputation#when-an-exit-ip-is-avoided
+    - text: "Each connector's weight for a site now follows its record there. A dynamic connector is weighed by its block rate for the requested country, state or city, and a connector with IPs by the share of its IPs the site does not avoid."
+      docs: exit-reputation#a-connectors-reputation-for-a-site
+    - text: "Clients send exit reports through the API, up to 1,000 at a time. A report names its exit with the `X-Octoprox-Connector-Id` and `X-Octoprox-Exit-Ip` response headers, or with a `-tag-<id>` added to the proxy username."
+      docs: exit-reputation#reporting-exits
+    - text: "Five project settings tune exit reputation: how long an avoid lasts, how fast evidence fades for IPs and for dynamic connectors, and how many bad reports, and what share of them, it takes to avoid an IP."
+      docs: exit-reputation#settings
+    - text: "In the traffic split, you can pick a site and a place to see each connector's reputation there and its share of that site's requests. A new Reputation tab on Exit locations shows connectors by site and each exit IP's record for each site."
+      docs: exit-reputation#views
+    - text: "The Exit IPs tab shows each IP's good and bad reports and how many sites avoid it. On the Proxies page, the inspector lists the sites that avoid the proxy's exit IP."
+      docs: exit-reputation#views
+    - text: "When every exit that could serve a request is avoided for its site, the request gets a 502 that names the site, with a `Proxy-Status` header. The Failures page counts these requests as Exits avoided."
+      docs: exit-reputation#when-every-exit-is-avoided
+    - text: "If a sticky session's exit is avoided for a site, the session moves to another proxy when the project moves refused sessions. Otherwise its requests to that site get a 502 until the avoid ends."
+      docs: exit-reputation#sessions
+    - text: "With round robin, a request whose weights exit reputation lowered picks its connector by a weighted random draw, so each site keeps its own split."
+      docs: routing-strategies#exit-reputation-and-effective-weights
+    - text: "The API can read exit reputation records by IP and site, a summary per IP, and connectors by site. The traffic split API also takes a site and a place, and each proxy now shows the exit IP its reputation is kept under."
+      docs: api#exit-reputation-records
+    - text: "Exit reputation records are kept for 30 days after they were last seen. To change this, set `OCTOPROX_EXIT_REPUTATION_RETENTION_DAYS` on the workers, where 0 keeps them forever."
+      docs: configuration#exit-reputation
+    - text: "Backups that include history now also include exit reputation records."
+      docs: api#export-backup
+    - text: "Exit reports have their own work stream on the System page, and workers export Prometheus counts for them. On Kubernetes, add a KEDA trigger for `o6:stream:exit_reports` with a threshold of 500, and give the KEDA Redis user read access to it."
+      docs: kubernetes
+    - text: "Admins can add service accounts for scrapers, CI jobs and scripts under Administration, Users. A service account has a name, a role and the API tokens an admin issues it, with no password, email or sign-in."
+      docs: sso#service-accounts
+    - text: "Viewers can now send exit reports to any project. A viewer service account can report blocks and change nothing else."
+      docs: exit-reputation#reporting-exits
+    - text: "Each user now shows how many API tokens they have and when one was last used."
+      docs: sso#personal-access-tokens
+    - text: "The audit log records adding a service account. A password sign-in tried with a service account's name is logged as refused, with the reason that it is a service account."
+      docs: audit-log
+
 - version: 6.7.2
   date: 2026-11-13
   title: New website, decimal sizes and clearer charts
