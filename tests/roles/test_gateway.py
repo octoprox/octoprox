@@ -43,11 +43,12 @@ from api.geo.runtime import GeoStack
 from api.geo.store import BlobMissingError, BlobSource, DatabaseRetry, HttpBlobSource
 from api.models.connector import Connector
 from api.models.credential import Credential, CredentialType
-from api.models.project import Project
+from api.models.project import ExitReputationMode, Project
 from api.models.proxy import Proxy, ProxyProtocol
 from api.models.tunnel import TunnelEndpointState
 from api.providers.registry import ProviderRegistry, build_registry
 from api.providers.store import ProviderStore
+from api.reputation.tag_note import TagNote
 from api.roles import gateway as gateway_module
 from api.roles.gateway import GatewayRuntime
 from api.strategies.health_based import HEALTH_MIN_SAMPLES
@@ -249,6 +250,39 @@ class TestServing:
         await gateway.stop()
         window = (await RuntimeStateReader(redis_client).windows(PROXY_WINDOWS, ["px-1"]))["px-1"]
         assert (window.request_count, window.success_count, window.bytes_sent, window.bytes_received) == (1, 1, 4, 4)
+
+    async def test_a_tagged_requests_exit_is_noted_in_redis_within_a_write_interval(
+        self, gateways: Gateways, feed: FeedBuilder, publish: Any, redis_client: RedisClient
+    ) -> None:
+        """The exit reports naming the tag find its note about 0.1 s after the request."""
+        feed.projects["project-1"].exit_reputation = ExitReputationMode.RECORD
+        gateway = gateways.build()
+        await publish(feed, changes="1-0")
+        await gateway.start()
+        await until(lambda: gateway.readiness() is None)
+
+        assert (await _connect(gateway, "example.com:443", b"ping", username="client-tag-job-1")).endswith(b"ping")
+
+        key = TagNote.key("project-1", "job-1")
+        assert await until(lambda: redis_client.client.get(key)) < 1.0
+        note = TagNote.model_validate_json(await redis_client.client.get(key))
+        assert (note.connector_id, note.proxy_id) == ("conn-1", "px-1")
+
+    async def test_a_tag_note_due_when_the_gateway_stops_is_written_by_the_stop(
+        self, gateways: Gateways, feed: FeedBuilder, publish: Any, redis_client: RedisClient
+    ) -> None:
+        feed.projects["project-1"].exit_reputation = ExitReputationMode.RECORD
+        gateway = gateways.build()
+        gateway.tag_notes.interval = 3600
+        await publish(feed, changes="1-0")
+        await gateway.start()
+        await until(lambda: gateway.readiness() is None)
+        assert (await _connect(gateway, "example.com:443", b"ping", username="client-tag-job-1")).endswith(b"ping")
+        assert gateway.tag_notes.pending == 1
+
+        await gateway.stop()
+
+        assert await redis_client.client.get(TagNote.key("project-1", "job-1")) is not None
 
     async def test_a_change_published_reaches_the_router(
         self, gateways: Gateways, feed: FeedBuilder, publish: Any, upstream: _ConnectProxy
@@ -734,20 +768,30 @@ class TestStop:
             recorded(loop.name, loop)
         recorded("tunnel endpoint", gateway.wireguard)
         recorded("tunnel data plane", gateway.tunnel)
+        for step, writes in (("sticky bindings", gateway.router), ("preflight verdicts", gateway.preflight)):
+            settle = writes.settle
+
+            async def settle_recorded(step: str = step, settle: Any = settle) -> None:
+                steps.append(step)
+                await settle()
+
+            monkeypatch.setattr(writes, "settle", settle_recorded)
 
         await gateway.stop()
 
         assert steps[:2] == ["proxy listener", "tunnel listener"]
-        assert sorted(steps[2:7]) == sorted(
+        assert sorted(steps[2:8]) == sorted(
             [
                 WorkerName.GEO_DATABASE_SYNC,
                 WorkerName.FEED_FOLLOWER,
                 WorkerName.REQUEST_METERING,
                 WorkerName.FAILURE_LOG_PUBLISHER,
                 WorkerName.SIGHTING_PUBLISHER,
+                WorkerName.TAG_NOTE_PUBLISHER,
             ]
         )
-        assert steps[7:] == ["tunnel endpoint", "tunnel data plane"]
+        # The writes the requests set off land before the tunnels go.
+        assert steps[8:] == ["sticky bindings", "preflight verdicts", "tunnel endpoint", "tunnel data plane"]
         # Every loop and task has ended, the reconciler included.
         assert gateway.tasks.tasks == []
 
@@ -765,6 +809,7 @@ class TestStop:
             WorkerName.REQUEST_METERING,
             WorkerName.FAILURE_LOG_PUBLISHER,
             WorkerName.SIGHTING_PUBLISHER,
+            WorkerName.TAG_NOTE_PUBLISHER,
         ]
 
 
@@ -811,6 +856,28 @@ class TestListeners:
 
 
 class TestOneRedisClient:
+    async def test_a_sticky_request_reads_its_new_sessions_binding_once(
+        self, gateways: Gateways, feed: FeedBuilder, publish: Any, redis_client: RedisClient
+    ) -> None:
+        """The quarantine hold and the strategy both ask for it: one GET and PTTL in one round trip, then local."""
+        feed.projects["project-1"].routing_strategy = "sticky"
+        feed.connectors["conn-1"].rate_limit_config = {
+            "max_requests": 1000, "window_seconds": 60, "quarantine_seconds_min": 60, "quarantine_seconds_max": 60,
+            "sticky_quarantine": True,
+        }
+        gateway = gateways.build()
+        await publish(feed, changes="1-0")
+        await gateway.start()
+        await until(lambda: gateway.readiness() is None)
+        await redis_client.client.config_resetstat()
+
+        for _ in range(2):
+            received = await _connect(gateway, "example.com:443", b"ping", username="client-sessid-s1")
+            assert received.endswith(b"ping")
+
+        stats = await redis_client.client.info("commandstats")
+        assert stats["cmdstat_pttl"]["calls"] == 1
+
     async def test_a_paused_redis_costs_a_request_its_deadline_and_the_counts_land_once_it_answers(
         self, gateways: Gateways, feed: FeedBuilder, publish: Any, redis_client: RedisClient, test_redis_url: str
     ) -> None:

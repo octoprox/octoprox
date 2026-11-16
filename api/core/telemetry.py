@@ -11,6 +11,7 @@ never Redis or Postgres.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections import Counter
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from enum import StrEnum
 from typing import TYPE_CHECKING
@@ -27,7 +28,7 @@ from prometheus_client.registry import Collector, CollectorRegistry
 from api.core.stats import FailureKind
 from api.db.streams import FullRead
 from api.gateway.latency import LATENCY_BUCKETS
-from api.models.exit_reports import ExitVerdict
+from api.models.exit_reports import DropReason, ExitVerdict
 from api.models.system import ApiSnapshot, ControllerSnapshot, GatewaySnapshot, WorkerSnapshot
 
 if TYPE_CHECKING:
@@ -456,7 +457,7 @@ class ControllerFamilies(RoleFamilies[ControllerSnapshot]):
 
 class WorkerFamilies(RoleFamilies[WorkerSnapshot]):
     """A worker's batches, failures, time and entries in hand per job kind, and the sightings, observations and exit
-    reports it ingested."""
+    reports it ingested; the exit reports it dropped render by reason with :class:`ExitReportFamilies`."""
 
     def _section(self, snapshot: InstanceSnapshot) -> WorkerSnapshot | None:
         return snapshot.worker
@@ -508,20 +509,15 @@ class WorkerFamilies(RoleFamilies[WorkerSnapshot]):
                 worker.exit_reports_consumed,
                 "Exit reports this worker ingested",
             ),
-            (
-                "worker_exit_reports_dropped_total",
-                worker.exit_reports_dropped,
-                "Exit reports this worker gave up after repeated deliveries, never applied",
-            ),
         ):
             yield _sample(_counter(name, documentation), role, value)
 
 
 class ExitReportFamilies(SectionFamilies):
-    """The exit reports a worker applied to the records, by connector and verdict.
+    """The exit reports a worker applied to the records, by connector and verdict, and those it dropped, by reason.
 
-    Read from the worker's ingest on each scrape, since they grow with every connector and the heartbeat, which
-    publishes the snapshot, has no use for them.
+    Read from the worker's ingest on each scrape, since those taken grow with every connector and the heartbeat, which
+    publishes the snapshot, has no use for them; the reports given up after repeated deliveries are the snapshot's.
     """
 
     def __init__(self, reports: Callable[[], Sequence[ExitReportCount]]) -> None:
@@ -529,9 +525,16 @@ class ExitReportFamilies(SectionFamilies):
 
     def families(self, snapshot: InstanceSnapshot) -> Iterator[Metric]:
         counts = self._reports()
-        if not counts:
-            return
         role = snapshot.runtime.role.value
+        taken = [count for count in counts if not count.dropped]
+        if taken:
+            yield self._taken(role, taken)
+        if snapshot.worker is not None:
+            yield self._dropped(role, snapshot.worker, counts)
+
+    @staticmethod
+    def _taken(role: str, counts: Sequence[ExitReportCount]) -> CounterMetricFamily:
+        """The reports taken, by connector and verdict; every verdict of a connector seen counts from zero."""
         reports = _counter(
             "worker_exit_reports_total",
             "Exit reports this worker took for the exit reputation records (an exit IP's applied at once, a connector's at "
@@ -546,7 +549,27 @@ class ExitReportFamilies(SectionFamilies):
         for (connector_id, name), by_verdict in sorted(by_connector.items()):
             for verdict, value in _counted_from_zero(ExitVerdict, by_verdict).items():
                 reports.add_metric([role, connector_id, name, verdict], value)
-        yield reports
+        return reports
+
+    @staticmethod
+    def _dropped(role: str, worker: WorkerSnapshot, counts: Sequence[ExitReportCount]) -> CounterMetricFamily:
+        """The reports dropped, by reason, each counted from zero: the ingest's, and those given up after repeated
+        deliveries."""
+        dropped = _counter(
+            "worker_exit_reports_dropped_total",
+            "Exit reports this worker dropped without applying them, by reason: project (gone, or its exit reputation "
+            "off), connector (gone, or not the project's), ip_needed (exit headers naming a connector with IPs without "
+            "the exit IP), ip_not_seen (exit headers naming an exit IP no row of the connector was last seen exiting "
+            "from), given_up (delivered too many times)",
+            "reason",
+        )
+        by_reason: Counter[str] = Counter({DropReason.GIVEN_UP.value: worker.exit_reports_dropped})
+        for count in counts:
+            if count.dropped:
+                by_reason[count.dropped] += count.count
+        for reason, value in _counted_from_zero(DropReason, by_reason).items():
+            dropped.add_metric([role, reason], value)
+        return dropped
 
 
 class SnapshotCollector(Collector):

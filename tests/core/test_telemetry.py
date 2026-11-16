@@ -22,7 +22,7 @@ from api.core.telemetry import Telemetry
 from api.core.timing import Step
 from api.db.streams import FullRead
 from api.gateway.latency import RequestLatencies
-from api.models.exit_reports import ExitVerdict
+from api.models.exit_reports import DropReason, ExitVerdict
 from api.models.system import (
     ApiSnapshot,
     ControllerSnapshot,
@@ -432,7 +432,8 @@ class TestWorker:
         assert value(samples, "octoprox_worker_observations_consumed_total") == 5000
         assert value(samples, "octoprox_worker_observations_dropped_total") == 7
         assert value(samples, "octoprox_worker_exit_reports_consumed_total") == 40
-        assert value(samples, "octoprox_worker_exit_reports_dropped_total") == 3
+        # Those given up after repeated deliveries, one reason among the ingest's.
+        assert value(samples, "octoprox_worker_exit_reports_dropped_total", reason="given_up") == 3
         assert types["octoprox_worker_job_duration_seconds"] == "counter"
         assert types["octoprox_worker_observations_consumed"] == "counter"
         assert types["octoprox_worker_observations_dropped"] == "counter"
@@ -447,9 +448,10 @@ class TestWorker:
             "octoprox_worker_observations_consumed_total",
             "octoprox_worker_observations_dropped_total",
             "octoprox_worker_exit_reports_consumed_total",
-            "octoprox_worker_exit_reports_dropped_total",
         ):
             assert value(samples, counter) == 0, counter
+        for reason in DropReason:
+            assert value(samples, "octoprox_worker_exit_reports_dropped_total", reason=reason.value) == 0, reason
 
     def test_the_exit_reports_applied_by_connector_and_verdict(self) -> None:
         """Read from the ingest on each scrape; every verdict of a connector seen counts from zero."""
@@ -478,6 +480,27 @@ class TestWorker:
 
     def test_no_exit_report_applied_yet_exports_no_series(self) -> None:
         samples, _ = scrape(snapshot_of(Role.WORKER, worker=WorkerSnapshot(jobs={})), exit_reports=ExitReportCounts())
+        assert "octoprox_worker_exit_reports_total" not in names(samples)
+
+    def test_the_exit_reports_dropped_by_reason(self) -> None:
+        """The ingest's by reason, whatever their verdict, beside those given up after repeated deliveries; a report
+        dropped is not one taken for a connector."""
+        counts = ExitReportCounts()
+        counts.drop(DropReason.CONNECTOR, ExitVerdict.BAD)
+        counts.drop(DropReason.CONNECTOR, ExitVerdict.GOOD)
+        counts.drop(DropReason.IP_NOT_SEEN, ExitVerdict.BAD)
+
+        samples, types = scrape(
+            snapshot_of(Role.WORKER, worker=WorkerSnapshot(jobs={}, exit_reports_dropped=4)), exit_reports=counts
+        )
+
+        dropped = {
+            dict(labels)["reason"]: count
+            for (name, labels), count in samples.items()
+            if name == "octoprox_worker_exit_reports_dropped_total"
+        }
+        assert dropped == {"project": 0, "connector": 2, "ip_needed": 0, "ip_not_seen": 1, "given_up": 4}
+        assert types["octoprox_worker_exit_reports_dropped"] == "counter"
         assert "octoprox_worker_exit_reports_total" not in names(samples)
 
 

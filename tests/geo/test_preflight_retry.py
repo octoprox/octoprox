@@ -375,6 +375,7 @@ class TestMovingSessions:
         verifier = ExitVerifier(cached_checker, router)
         await verifier.verify(_project(move=True), _session_gateway(0, "us"), session_id="s", location=self.GB, target_host="x")
         assert cached_checker.checks == 2
+        await cached_checker.settle()
         # The next request, on this gateway or another, and with the setting turned off since.
         for project in (_project(move=True), _project()):
             decision = await verifier.verify(project, _session_gateway(0, "us"), session_id="s", location=self.GB, target_host="x")
@@ -387,6 +388,7 @@ class TestMovingSessions:
         verifier = ExitVerifier(cached_checker, router)
         first = await verifier.verify(_project(move=True), _session_gateway(0, "us"), session_id="s", location=self.GB, target_host="x")
         assert first.rejected and cached_checker.checks == 3
+        await cached_checker.settle()
         second = await verifier.verify(_project(move=True), _session_gateway(0, "us"), session_id="s", location=self.GB, target_host="x")
         assert not second.rejected and second.proxy is not None and second.proxy.metadata["session_generation"] == 3
         # Generation 2's cached refusal answered without an echo; only generation 3 was echoed.

@@ -40,12 +40,15 @@ class WorkerName(StrEnum):
     FAILURE_LOG_PUBLISHER = "failure_log_publisher"
     GEO_OBSERVATION_PUBLISHER = "geo_observation_publisher"
     SIGHTING_PUBLISHER = "sighting_publisher"
+    TAG_NOTE_PUBLISHER = "tag_note_publisher"
     WIREGUARD_STATUS_PUBLISHER = "wireguard_status_publisher"
     OPENVPN_STATUS_PUBLISHER = "openvpn_status_publisher"
     OPENVPN_SUPERVISOR = "openvpn_supervisor"
     TUNNEL_RECONCILER = "tunnel_reconciler"
     GEO_DATABASE_SYNC = "geo_database_sync"
     GEO_DATABASE_RETRY = "geo_database_retry"
+    # The api.
+    PROJECT_MAP = "project_map"
     # The api and workers.
     DEFINITIONS_REFRESHER = "definitions_refresher"
     # Workers.
@@ -226,6 +229,12 @@ WORKERS: dict[WorkerName, WorkerInfo] = {
         "again and lands once",
         roles=frozenset({Role.GATEWAY}),
     ),
+    WorkerName.TAG_NOTE_PUBLISHER: WorkerInfo(
+        "Writes the exit of each request a client tagged to Redis every 100 ms, the notes due in one "
+        "pipelined write: a tag whose exit changed, or whose note was written half its TTL ago - for "
+        "the exit reports that name a request by its tag",
+        roles=frozenset({Role.GATEWAY}),
+    ),
     WorkerName.WIREGUARD_STATUS_PUBLISHER: WorkerInfo(
         "Every 10 seconds publishes each WireGuard device's handshake and transfer counters from the "
         "tunnel interface this gateway carries, for the device views and the workers' last-seen "
@@ -262,6 +271,13 @@ WORKERS: dict[WorkerName, WorkerInfo] = {
         # Every role with IP databases: gateways fetch the feed's files from the api, the api and
         # workers copy them from Postgres or open the configured ones.
         roles=frozenset({Role.GATEWAY, Role.API, Role.WORKER}),
+    ),
+    # The api.
+    WorkerName.PROJECT_MAP: WorkerInfo(
+        "Keeps this instance's copy of every project, which the exit reports route takes its project "
+        "from instead of reading Postgres per call: reads a project again when the change stream "
+        "names it, and every project at start, after a gap in the stream and every hour",
+        roles=frozenset({Role.API}),
     ),
     # The api and workers.
     WorkerName.DEFINITIONS_REFRESHER: WorkerInfo(
@@ -365,7 +381,8 @@ WORKERS: dict[WorkerName, WorkerInfo] = {
         "Applies the exit reports clients send through the api to each project's exit IP records, "
         "a batch at a time in one transaction, and adds the connectors' reports to the Redis site "
         "windows the metrics flush applies to their records, then tells the controller when an "
-        "avoid that routing uses moved",
+        "avoid that routing uses moved; a report whose project records nothing, or whose exit "
+        "headers name no exit of the project's rows, is dropped and counted by reason",
         roles=_WORKER,
     ),
 }

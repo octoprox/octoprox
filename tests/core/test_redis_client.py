@@ -85,6 +85,7 @@ from api.db.redis import (
     BatchSender,
     MetricWindows,
     RedisClient,
+    StickyBinding,
     StreamId,
     StreamInfo,
     classify_key,
@@ -106,9 +107,34 @@ class TestRedisClient:
     async def test_a_sticky_binding_lives_for_its_ttl(self, redis_client: RedisClient) -> None:
         await redis_client.set_sticky_binding("proj", "sess", "p1", ttl_seconds=60)
 
-        assert await redis_client.get_sticky_binding("proj", "sess") == "p1"
-        assert 0 < await redis_client.client.ttl(STICKY_BINDING_KEY.format(project_id="proj", session_id="sess")) <= 60
+        stored = await redis_client.get_sticky_binding("proj", "sess")
+        assert stored is not None and stored.proxy_id == "p1"
+        assert stored.seconds_left is not None and 50 < stored.seconds_left <= 60
         assert await redis_client.get_sticky_binding("proj", "other") is None
+
+    async def test_a_sticky_binding_is_read_with_its_ttl_in_one_round_trip(
+        self, redis_client: RedisClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """GET and PTTL in one pipeline, outside a transaction; a key without an expiry has no seconds left to go by."""
+        sent: list[tuple[bool, list[str]]] = []
+        pipeline = redis_client.client.pipeline
+
+        def recording(*args: Any, **kwargs: Any) -> Any:
+            pipe = pipeline(*args, **kwargs)
+            execute = pipe.execute
+
+            async def recorded(*e_args: Any, **e_kwargs: Any) -> Any:
+                sent.append((pipe.is_transaction, [str(command[0]) for command, _options in pipe.command_stack]))
+                return await execute(*e_args, **e_kwargs)
+
+            pipe.execute = recorded
+            return pipe
+
+        await redis_client.client.set(STICKY_BINDING_KEY.format(project_id="proj", session_id="sess"), "p1")
+        monkeypatch.setattr(redis_client.client, "pipeline", recording)
+
+        assert await redis_client.get_sticky_binding("proj", "sess") == StickyBinding("p1", None)
+        assert sent == [(False, ["GET", "PTTL"])]
 
     async def test_hashes_are_read_whole_in_order_and_a_missing_one_is_empty(self, redis_client: RedisClient) -> None:
         keys = [f"hash-{i}" for i in range(1200)]

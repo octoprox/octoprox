@@ -2666,9 +2666,11 @@ export interface SystemWorkerSnapshot {
   /** IP observations and exit judgements ingested, and lost the same way, since start. */
   observations_consumed: number
   observations_dropped: number
-  /** Exit reports applied to the exit reputation records, and lost the same way, since start. */
+  /** Exit reports taken off the stream, applied or not, and lost the same way, since start. */
   exit_reports_consumed: number
   exit_reports_dropped: number
+  /** Exit reports the checks dropped since start, by reason (project, connector, ip_needed, ip_not_seen); {} from a worker of an earlier release, absent when an api of an earlier release answers. */
+  exit_reports_dropped_by_reason?: Record<string, number>
 }
 
 /** Why a follower read a stream in full rather than on from its position. */

@@ -8,6 +8,7 @@ The domain errors answer with their status, and a store that does not answer wit
 
 from __future__ import annotations
 
+import json
 import socket
 from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, cast
@@ -17,6 +18,8 @@ import redis.exceptions
 import sqlalchemy.exc
 import structlog
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.encoders import jsonable_encoder
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, Response
 
 from api.core.logging import error_label, error_text
@@ -115,6 +118,21 @@ def install_error_handlers(app: FastAPI) -> None:
     for error, store in UNAVAILABLE_ERRORS.items():
         app.add_exception_handler(error, _answer_unavailable(store))
     app.add_exception_handler(sqlalchemy.exc.DBAPIError, _answer_lost_connection)
+    app.add_exception_handler(RequestValidationError, _answer_invalid)
+
+
+class _AsciiJSONResponse(JSONResponse):
+    """JSON escaped to ASCII: a lone surrogate a client sent, which no UTF-8 can carry, comes back as its escape."""
+
+    def render(self, content: object) -> bytes:
+        return json.dumps(content, ensure_ascii=True, allow_nan=False, separators=(",", ":")).encode("ascii")
+
+
+async def _answer_invalid(request: Request, exc: Exception) -> Response:
+    """FastAPI's 422 for a request that breaks its model, its errors echoing what was sent, written so whatever was sent
+    can be: FastAPI's own answer fails with a 500 on a lone surrogate."""
+    errors = exc.errors() if isinstance(exc, RequestValidationError) else []
+    return _AsciiJSONResponse(status_code=422, content={"detail": jsonable_encoder(errors)})
 
 
 def _answer_with(status: int) -> Callable[[Request, Exception], Awaitable[Response]]:

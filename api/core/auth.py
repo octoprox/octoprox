@@ -16,7 +16,6 @@ from api.core import utc_now
 from api.core.api_tokens import hash_token, looks_like_token
 from api.core.config import settings
 from api.db.auth_repository import ApiTokenRepository
-from api.db.repository import UserRepository
 from api.db.session import get_db
 from api.models.user import UserRole
 from api.routes.auth import verify_jwt
@@ -51,37 +50,38 @@ DbDep = Annotated[AsyncSession, Depends(get_db)]
 
 
 async def user_from_api_token(request: Request, session: AsyncSession, bearer: str) -> CurrentUser:
-    """Resolve a personal access token to its user, as the user is right now.
+    """Resolve a personal access token to its user as the user is right now, read with the token in one statement.
 
-    Unlike a JWT, nothing is baked in: the role and the active flag come
-    from the user row on every call, so revoking the token, disabling the
-    user or changing their role takes effect at once.
+    Nothing is cached, so revoking the token, disabling the user or changing their role applies on the next call.
     """
     tokens = ApiTokenRepository(session)
-    token = await tokens.get_by_hash(hash_token(bearer))
-    if token is None or token.expired:
+    found = await tokens.get_with_user(hash_token(bearer))
+    if found is None or found[0].expired:
         raise HTTPException(
             status_code=401,
             detail="Invalid or expired token",
             headers={"WWW-Authenticate": "Bearer"},
         )
-    user = await UserRepository(session).get_by_id(token.user_id)
-    if user is None or not user.is_active:
+    token, user = found
+    if not user.is_active:
         raise HTTPException(
             status_code=401,
             detail="Account is disabled",
             headers={"WWW-Authenticate": "Bearer"},
         )
     now = utc_now()
+    first = False
     if token.last_used_at is None:
         first = await tokens.touch_first_use(token.id, now)
-        # Committed now: the hook records in a transaction of its own, so a
-        # call refused further on must not take back the stamp it was told of.
-        await session.commit()
-        if first:
-            await audit_log_of(request).token_first_used(request, token, user)
     elif now - token.last_used_at >= _LAST_USED_GRANULARITY:
-        await tokens.touch_last_used(token.id, now)
+        await tokens.touch_last_used(token.id, now, _LAST_USED_GRANULARITY)
+    # Committed before the endpoint runs: the request's connection goes back
+    # to the pool, a stamp holds the token's row this briefly, and a call
+    # refused further on keeps its stamp. The first use's hook records in a
+    # transaction of its own, so it comes after.
+    await session.commit()
+    if first:
+        await audit_log_of(request).token_first_used(request, token, user)
     return CurrentUser(
         id=user.id,
         username=user.username,

@@ -1,11 +1,12 @@
 # Copyright 2026 Octoprox Authors
 # SPDX-License-Identifier: Apache-2.0
 
-"""The workers' exit report ingest: a batch's exit IP reports folded to one count per record and applied in one
-transaction, its connector reports added to the site windows the metrics flush applies, and a runtime signal after the
-commit when an avoid moved; on the test Postgres and Redis.
+"""The workers' exit report ingest: a batch's reports checked against the project's rows, its exit IP reports folded
+to one count per record and applied in one transaction, its connector reports added to the site windows the metrics
+flush applies, and a runtime signal after the commit when an avoid moved; on the test Postgres and Redis.
 
-A malformed entry is skipped with its batch, and a project that is gone or off records nothing and counts nothing.
+A malformed entry is skipped with its batch. A report whose project is gone or off, or whose exit headers name no exit
+of the project's rows, records nothing and is counted dropped, by reason.
 """
 
 from collections.abc import Iterator
@@ -13,20 +14,24 @@ from datetime import datetime, timedelta
 from typing import Any
 
 import pytest
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+import structlog
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from api.core import utc_now
 from api.core.job_stats import job_stats
 from api.core.stats import RequestCount, SitePlaceKey
 from api.db.redis import EXIT_REPORT_STREAM_KEY, RUNTIME_STREAM_KEY, RedisClient
+from api.db.repository import ProxyRepository
 from api.db.reputation_repository import ExitReputationRepository
 from api.db.streams import RuntimeSignal, StreamEntry
-from api.jobs.messages import ExitReportMessage
+from api.jobs.messages import ExitReportMessage, NotedExit
 from api.models.connector import Connector
-from api.models.exit_reports import ExitVerdict
+from api.models.exit_reports import DropReason, ExitVerdict
 from api.models.project import ExitReputationMode, Project
-from api.reputation.ingest import ExitReportCount, ExitReportIngest
+from api.models.proxy import Proxy, ProxyProtocol
+from api.reputation.ingest import ExitReportCount, ExitReportCounts, ExitReportIngest
 from api.reputation.record import ConnectorSiteKey, ExitIpKey, ReportCounts
+from tests.jobs.conftest import counted_selects
 from tests.reputation.world import make_connector, make_project
 from tests.waits import running, until
 
@@ -41,15 +46,37 @@ def _clean_job_stats() -> Iterator[None]:
 
 
 def _report(project: Project, verdict: ExitVerdict = ExitVerdict.BAD, **fields: Any) -> ExitReportMessage:
+    """A report as the api appends it, named by a tag's note unless ``proxy_id=None``: by its exit headers."""
     values: dict[str, Any] = {
         "project_id": project.id,
         "ip": "203.0.113.7",
         "site": "google.com",
         "verdict": verdict,
+        "proxy_id": "row-1",
         "reported_at": T0,
     }
     values.update(fields)
     return ExitReportMessage(**values)
+
+
+def _by_headers(
+    project: Project, connector_id: str, verdict: ExitVerdict = ExitVerdict.BAD, **fields: Any
+) -> ExitReportMessage:
+    """A report named by its exit headers, as sent: no IP unless one is given, at the place the username names."""
+    return _report(project, verdict, connector_id=connector_id, proxy_id=None, **{"ip": None, **fields})
+
+
+def _dropped(**reasons: int) -> list[ExitReportCount]:
+    """The bad reports counted dropped, by reason, as a snapshot lists them."""
+    return [ExitReportCount("", "", "bad", count, dropped=reason) for reason, count in sorted(reasons.items())]
+
+
+async def _row(session: AsyncSession, connector: Connector, **metadata: str) -> None:
+    """A proxy row of the connector, with ``metadata`` such as where it was last seen exiting, committed."""
+    await ProxyRepository(session).create(
+        Proxy(host="203.0.113.250", port=8080, protocol=ProxyProtocol.HTTP, connector_id=connector.id, metadata=metadata)
+    )
+    await session.commit()
 
 
 def _entries(*items: ExitReportMessage | str) -> list[StreamEntry]:
@@ -107,6 +134,8 @@ class TestMessage:
         # A dynamic connector's report names no IP; one naming no connector counts for the IP alone.
         assert _report(project, ip=None, connector_id="c").ip_key is None
         assert _report(project).connector_key is None
+        # No proxy row named: its exit headers named it, for the workers to check.
+        assert _by_headers(project, "c").by_headers and not message.by_headers
 
 
 class TestApply:
@@ -198,7 +227,10 @@ class TestApply:
         )
 
         assert await _windows(redis_client) == {(project.id, connector.id, "google.com", ""): RequestCount(blocked=1)}
-        assert ingest.counts.snapshot() == [ExitReportCount(connector.id, "Residential", "bad", 1)]
+        assert ingest.counts.snapshot() == [
+            ExitReportCount(connector.id, "Residential", "bad", 1),
+            *_dropped(connector=2, project=1),
+        ]
 
     async def test_the_windows_follow_the_commit_and_the_signal_follows_them(
         self,
@@ -315,7 +347,7 @@ class TestApply:
         record = await _ip(db_session_factory, ExitIpKey(project.id, "203.0.113.7", "google.com"))
         assert record.bad_reports == 1
 
-    async def test_a_project_off_or_gone_records_and_counts_nothing(
+    async def test_a_project_off_or_gone_records_nothing_and_its_reports_are_dropped(
         self,
         ingest: ExitReportIngest,
         db_session: AsyncSession,
@@ -332,8 +364,213 @@ class TestApply:
 
         assert await _ip(db_session_factory, ExitIpKey(off.id, "203.0.113.7", "google.com")) is None
         assert await _windows(redis_client) == {}
-        assert ingest.counts.snapshot() == []
+        assert ingest.counts.snapshot() == _dropped(project=2)
         assert await _runtime(redis_client) == []
+
+
+class TestExitHeaders:
+    """A report its exit headers named is checked against the project's rows in the batch's transaction: a dynamic
+    connector counts it alone, at the place asked for, and a connector with IPs for the exit IP one of its rows was last
+    seen exiting from, and at no place; anything else is dropped, counted and logged by reason."""
+
+    async def test_a_dynamic_connector_counts_it_at_the_place_asked_for_whatever_ip_was_sent(
+        self,
+        ingest: ExitReportIngest,
+        project: Project,
+        connector: Connector,
+        db_session: AsyncSession,
+        db_session_factory: async_sessionmaker[AsyncSession],
+        redis_client: RedisClient,
+    ) -> None:
+        await _row(db_session, connector, dynamic_sessions="true", discovered_ip="203.0.113.50")
+
+        await ingest._handle(_entries(_by_headers(project, connector.id, ip="203.0.113.50", place="US/NY")))
+
+        # Its exits are per request: the IP it went out through is no record of its own.
+        assert await _ip(db_session_factory, ExitIpKey(project.id, "203.0.113.50", "google.com")) is None
+        assert await _windows(redis_client) == {
+            (project.id, connector.id, "google.com", "US/NY"): RequestCount(blocked=1)
+        }
+        assert ingest.counts.snapshot() == [ExitReportCount(connector.id, "Residential", "bad", 1)]
+
+    async def test_a_connector_with_ips_counts_it_for_the_exit_ip_its_rows_were_seen_at_and_at_no_place(
+        self,
+        ingest: ExitReportIngest,
+        project: Project,
+        connector: Connector,
+        db_session: AsyncSession,
+        db_session_factory: async_sessionmaker[AsyncSession],
+        redis_client: RedisClient,
+    ) -> None:
+        await _row(db_session, connector, discovered_ip="203.0.113.7")
+        # A row's exit as an echo answered it, in its IPv4-mapped form.
+        await _row(db_session, connector, discovered_ip="::ffff:203.0.113.8")
+        await _row(db_session, connector)
+
+        await ingest._handle(
+            _entries(
+                _by_headers(project, connector.id, ip="203.0.113.7", place="US"),
+                _by_headers(project, connector.id, ExitVerdict.GOOD, ip="203.0.113.8", place="US/NY"),
+            )
+        )
+
+        assert (await _ip(db_session_factory, ExitIpKey(project.id, "203.0.113.7", "google.com"))).bad_reports == 1
+        assert (await _ip(db_session_factory, ExitIpKey(project.id, "203.0.113.8", "google.com"))).good_reports == 1
+        # Its rows already depend on the place asked for.
+        assert await _windows(redis_client) == {
+            (project.id, connector.id, "google.com", ""): RequestCount(blocked=1, good=1)
+        }
+
+    async def test_exit_headers_that_name_no_exit_of_the_project_are_dropped_counted_and_logged_once(
+        self,
+        ingest: ExitReportIngest,
+        project: Project,
+        connector: Connector,
+        db_session: AsyncSession,
+        db_session_factory: async_sessionmaker[AsyncSession],
+        redis_client: RedisClient,
+    ) -> None:
+        await _row(db_session, connector, discovered_ip="203.0.113.7")
+        off = await make_project(db_session, "switched-off", ExitReputationMode.OFF)
+        off_connector = await make_connector(db_session, off, "Off")
+        other = await make_project(db_session, "other")
+        theirs = await make_connector(db_session, other, "Theirs")
+        await _row(db_session, theirs, discovered_ip="203.0.113.7")
+
+        with structlog.testing.capture_logs() as logs:
+            await ingest._handle(
+                _entries(
+                    _by_headers(off, off_connector.id, ip="203.0.113.7"),
+                    _by_headers(project, theirs.id, ip="203.0.113.7"),
+                    _by_headers(project, "no-such-connector"),
+                    _by_headers(project, connector.id),
+                    _by_headers(project, connector.id, ip="198.51.100.99"),
+                    _by_headers(project, connector.id, ExitVerdict.GOOD, ip="203.0.113.7"),
+                )
+            )
+
+        assert await _ip(db_session_factory, ExitIpKey(project.id, "198.51.100.99", "google.com")) is None
+        assert await _windows(redis_client) == {
+            (project.id, connector.id, "google.com", ""): RequestCount(good=1)
+        }
+        assert ingest.counts.snapshot() == [
+            ExitReportCount(connector.id, "Residential", "good", 1),
+            *_dropped(connector=2, ip_needed=1, ip_not_seen=1, project=1),
+        ]
+        dropped = [log for log in logs if log["event"] == "Exit reports dropped"]
+        assert [(log["log_level"], log["count"], log["reasons"]) for log in dropped] == [
+            ("warning", 5, {"connector": 2, "ip_needed": 1, "ip_not_seen": 1, "project": 1})
+        ]
+        assert set(DropReason) - {DropReason.GIVEN_UP} == {DropReason(reason) for reason in dropped[0]["reasons"]}
+
+    async def test_exit_headers_that_name_no_exit_fall_back_on_the_tags_note(
+        self,
+        ingest: ExitReportIngest,
+        project: Project,
+        connector: Connector,
+        db_session: AsyncSession,
+        db_session_factory: async_sessionmaker[AsyncSession],
+        redis_client: RedisClient,
+    ) -> None:
+        """A connector with IPs named without its IP or with one none of its rows was seen at, a connector that is not
+        the project's: the note that came with the report names its exit, as for a report without exit headers."""
+        await _row(db_session, connector, discovered_ip="203.0.113.7")
+        dynamic = await make_connector(db_session, project, "Dynamic")
+        await _row(db_session, dynamic, dynamic_sessions="true")
+        noted = NotedExit(connector_id=connector.id, proxy_id="row-1", ip="198.51.100.5")
+
+        await ingest._handle(
+            _entries(
+                _by_headers(project, connector.id, place="US", noted=noted),
+                _by_headers(project, connector.id, ip="198.51.100.99", noted=noted),
+                _by_headers(project, "no-such-connector", noted=noted),
+                # A dynamic gateway's note counts for its connector at the place asked for.
+                _by_headers(project, connector.id, place="US/NY", noted=NotedExit(connector_id=dynamic.id, proxy_id="gw")),
+            )
+        )
+
+        assert (await _ip(db_session_factory, ExitIpKey(project.id, "198.51.100.5", "google.com"))).bad_reports == 3
+        assert await _ip(db_session_factory, ExitIpKey(project.id, "198.51.100.99", "google.com")) is None
+        assert await _windows(redis_client) == {
+            (project.id, connector.id, "google.com", ""): RequestCount(blocked=3),
+            (project.id, dynamic.id, "google.com", "US/NY"): RequestCount(blocked=1),
+        }
+        assert set(ingest.counts.snapshot()) == {
+            ExitReportCount(connector.id, "Residential", "bad", 3),
+            ExitReportCount(dynamic.id, "Dynamic", "bad", 1),
+        }
+
+    async def test_exit_headers_that_name_an_exit_win_over_the_tags_note(
+        self,
+        ingest: ExitReportIngest,
+        project: Project,
+        connector: Connector,
+        db_session: AsyncSession,
+        db_session_factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        await _row(db_session, connector, discovered_ip="203.0.113.7")
+        noted = NotedExit(connector_id=connector.id, proxy_id="row-1", ip="198.51.100.5")
+
+        await ingest._handle(_entries(_by_headers(project, connector.id, ip="203.0.113.7", noted=noted)))
+
+        assert (await _ip(db_session_factory, ExitIpKey(project.id, "203.0.113.7", "google.com"))).bad_reports == 1
+        assert await _ip(db_session_factory, ExitIpKey(project.id, "198.51.100.5", "google.com")) is None
+
+    async def test_a_report_neither_its_headers_nor_its_note_name_is_dropped_for_the_headers_reason(
+        self, ingest: ExitReportIngest, project: Project, connector: Connector, db_session: AsyncSession
+    ) -> None:
+        await _row(db_session, connector, discovered_ip="203.0.113.7")
+        gone = NotedExit(connector_id="gone", proxy_id="gw")
+
+        await ingest._handle(
+            _entries(
+                _by_headers(project, connector.id, ip="198.51.100.99", noted=gone),
+                _by_headers(project, "no-such-connector", noted=gone),
+            )
+        )
+
+        assert ingest.counts.snapshot() == _dropped(connector=1, ip_not_seen=1)
+
+    async def test_a_tags_note_is_not_checked_against_the_rows(
+        self,
+        ingest: ExitReportIngest,
+        project: Project,
+        connector: Connector,
+        db_session_factory: async_sessionmaker[AsyncSession],
+        redis_client: RedisClient,
+    ) -> None:
+        """A gateway noted the exit it routed: no row need hold its IP now."""
+        await ingest._handle(_entries(_report(project, connector_id=connector.id, ip="198.51.100.99")))
+
+        assert (await _ip(db_session_factory, ExitIpKey(project.id, "198.51.100.99", "google.com"))).bad_reports == 1
+        assert await _windows(redis_client) == {(project.id, connector.id, "google.com", ""): RequestCount(blocked=1)}
+
+    async def test_the_rows_are_read_in_two_statements_whatever_the_batch(
+        self,
+        ingest: ExitReportIngest,
+        project: Project,
+        db_session: AsyncSession,
+        db_engine: AsyncEngine,
+    ) -> None:
+        """One for which connectors are dynamic and one for the exit IPs named, for every report of the batch; none
+        without a report its exit headers named."""
+        connectors = [await make_connector(db_session, project, f"pool-{n}") for n in range(3)]
+        for n, connector in enumerate(connectors):
+            await _row(db_session, connector, discovered_ip=f"203.0.113.{n}")
+
+        async def proxy_reads(*reports: ExitReportMessage) -> int:
+            with counted_selects(db_engine) as selects:
+                await ingest._handle(_entries(*reports))
+            return sum("proxies" in statement for statement in selects)
+
+        assert await proxy_reads(_by_headers(project, connectors[0].id, ip="203.0.113.0")) == 2
+        many = [
+            _by_headers(project, connector.id, ip=f"203.0.113.{n}", site=f"site-{m}.example.com")
+            for n, connector in enumerate(connectors)
+            for m in range(10)
+        ]
+        assert await proxy_reads(*many) == 2
+        assert await proxy_reads(_report(project), _report(project, connector_id=connectors[0].id)) == 0
 
 
 class TestCounts:
@@ -353,16 +590,32 @@ class TestCounts:
             )
         )
 
-        # By connector id, then verdict; the connector's id is random, so it may sort either side of "deleted".
-        assert ingest.counts.snapshot() == sorted(
-            [
-                ExitReportCount("", "", "bad", 1),
-                ExitReportCount(connector.id, "Residential", "bad", 1),
-                ExitReportCount(connector.id, "Residential", "good", 2),
-                ExitReportCount("deleted", "", "bad", 1),
-            ],
-            key=lambda count: (count.connector_id, count.verdict),
-        )
+        # By connector id, then verdict; the connector's id is random, so it may sort either side of "deleted". Then the
+        # dropped ones, by reason.
+        assert ingest.counts.snapshot() == [
+            *sorted(
+                [
+                    ExitReportCount("", "", "bad", 1),
+                    ExitReportCount(connector.id, "Residential", "bad", 1),
+                    ExitReportCount(connector.id, "Residential", "good", 2),
+                    ExitReportCount("deleted", "", "bad", 1),
+                ],
+                key=lambda count: (count.connector_id, count.verdict),
+            ),
+            *_dropped(connector=1),
+        ]
+
+    def test_the_drops_by_reason_add_up_their_verdicts(self) -> None:
+        """What the heartbeat carries for the System page: one number per reason, the reports taken left out."""
+        counts = ExitReportCounts()
+        assert counts.dropped_by_reason() == {}
+
+        counts.drop(DropReason.IP_NOT_SEEN, ExitVerdict.BAD)
+        counts.drop(DropReason.IP_NOT_SEEN, ExitVerdict.GOOD)
+        counts.drop(DropReason.PROJECT, ExitVerdict.BAD)
+        counts.add("c-1", "Residential", ExitVerdict.BAD)
+
+        assert counts.dropped_by_reason() == {"ip_not_seen": 2, "project": 1}
 
 
 class TestStream:

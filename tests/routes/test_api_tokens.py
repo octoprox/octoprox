@@ -4,22 +4,33 @@
 """Personal access tokens: minted once, hashed at rest, honoured until revoked, and told to the audit log."""
 
 import asyncio
-from datetime import timedelta
+from collections import defaultdict
+from collections.abc import Iterable, Iterator
+from contextlib import contextmanager
+from datetime import datetime, timedelta
 from typing import Any
 from uuid import uuid4
 
 import httpx
 import pytest
 from fastapi import FastAPI
+from sqlalchemy import event
+from sqlalchemy.orm import ORMExecuteState, Session
 from starlette.testclient import TestClient
 
+import api.core.auth
 import api.models.auth
 from api.core import utc_now
 from api.core.api_tokens import TOKEN_PREFIX
 from api.db.auth_repository import ApiTokenRepository
-from api.models.auth import ApiToken
+from api.db.repository import UserRepository
+from api.models.auth import ApiToken, TokenUsage
+from api.models.user import User
 from tests.conftest import on_app_loop
 from tests.routes.test_auth import HookRecorder, history, recorded
+
+# An ORM statement as its verb and the tables of its entities, such as ("SELECT", ("api_tokens", "users")).
+Statement = tuple[str, tuple[str, ...]]
 
 
 def _login(client: TestClient, settings: Any) -> dict[str, str]:
@@ -29,6 +40,22 @@ def _login(client: TestClient, settings: Any) -> dict[str, str]:
     )
     assert response.status_code == 200, response.text
     return {"Authorization": f"Bearer {response.json()['access_token']}"}
+
+
+@contextmanager
+def statements_by_session() -> Iterator[defaultdict[Session, list[Statement]]]:
+    """Each ORM statement any session runs while the block runs, by the session that ran it."""
+    seen: defaultdict[Session, list[Statement]] = defaultdict(list)
+
+    def record(state: ORMExecuteState) -> None:
+        tables = tuple(sorted(mapper.class_.__tablename__ for mapper in state.all_mappers))
+        seen[state.session].append((str(state.statement).split(None, 1)[0], tables))
+
+    event.listen(Session, "do_orm_execute", record)
+    try:
+        yield seen
+    finally:
+        event.remove(Session, "do_orm_execute", record)
 
 
 class TestOwnTokens:
@@ -112,7 +139,8 @@ class TestAdminTokens:
 
         # Disabling the user ends the token at once.
         assert authenticated_client.patch(f"/api/v1/users/{user['id']}", json={"is_active": False}).status_code == 200
-        assert authenticated_client.get("/api/v1/users/me", headers=token_headers).status_code == 401
+        disabled = authenticated_client.get("/api/v1/users/me", headers=token_headers)
+        assert (disabled.status_code, disabled.json()["detail"]) == (401, "Account is disabled")
         assert authenticated_client.patch(f"/api/v1/users/{user['id']}", json={"is_active": True}).status_code == 200
         assert authenticated_client.get("/api/v1/users/me", headers=token_headers).status_code == 200
 
@@ -215,14 +243,14 @@ class TestHooks:
     ) -> None:
         headers = _login(async_client, test_settings)
         secret = async_client.post("/api/v1/users/me/tokens", json={"name": "racing"}, headers=headers).json()["token"]
-        read = ApiTokenRepository.get_by_hash
+        read = ApiTokenRepository.get_with_user
         both_read = asyncio.Barrier(2)
 
-        async def read_together(self: ApiTokenRepository, token_hash: str) -> ApiToken | None:
+        async def read_together(self: ApiTokenRepository, token_hash: str) -> tuple[ApiToken, User] | None:
             """Each call reads the token before either stamps it."""
-            token = await read(self, token_hash)
+            found = await read(self, token_hash)
             await asyncio.wait_for(both_read.wait(), timeout=10)
-            return token
+            return found
 
         async def two_calls() -> list[int]:
             transport = httpx.ASGITransport(app=async_client.app)
@@ -231,7 +259,7 @@ class TestHooks:
                 return [response.status_code for response in await asyncio.gather(*calls)]
 
         with monkeypatch.context() as patched:
-            patched.setattr(ApiTokenRepository, "get_by_hash", read_together)
+            patched.setattr(ApiTokenRepository, "get_with_user", read_together)
             statuses = on_app_loop(async_client, two_calls)
 
         assert statuses == [200, 200]
@@ -265,6 +293,98 @@ class TestHooks:
         assert authenticated_client.delete(f"/api/v1/users/{user['id']}/tokens/nope").status_code == 404
         assert authenticated_client.delete("/api/v1/users/me/tokens/nope").status_code == 404
         authenticated_client.request("DELETE", f"/api/v1/users/{user['id']}")
+
+
+class TestTheRequestsSession:
+    """Token auth reads the token with its user in one statement and commits before the endpoint runs, so the endpoint
+    finds the request's session holding no connection and a stamp never waits for another call's endpoint."""
+
+    def test_auth_reads_once_and_leaves_no_transaction_to_the_endpoint(
+        self, async_client: TestClient, test_settings: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        headers = _login(async_client, test_settings)
+        created = async_client.post("/api/v1/users/me/tokens", json={"name": "lean"}, headers=headers).json()
+        token_headers = {"Authorization": f"Bearer {created['token']}"}
+        read = UserRepository.get_by_id
+        at_endpoint: list[tuple[list[Statement], bool]] = []
+
+        with statements_by_session() as statements, monkeypatch.context() as patched:
+
+            async def profile_read(self: UserRepository, user_id: str) -> User | None:
+                """The first statement of /users/me: notes what auth ran on the session and whether it holds a
+                transaction."""
+                session = self._session
+                at_endpoint.append((list(statements[session.sync_session]), session.in_transaction()))
+                return await read(self, user_id)
+
+            patched.setattr(UserRepository, "get_by_id", profile_read)
+            # The first use, a call within the minute, and a call once the stamp is due.
+            assert async_client.get("/api/v1/users/me", headers=token_headers).status_code == 200
+            assert async_client.get("/api/v1/users/me", headers=token_headers).status_code == 200
+            patched.setattr(api.core.auth, "utc_now", lambda: utc_now() + timedelta(minutes=2))
+            assert async_client.get("/api/v1/users/me", headers=token_headers).status_code == 200
+
+        token_with_user, stamp = ("SELECT", ("api_tokens", "users")), ("UPDATE", ("api_tokens",))
+        assert at_endpoint == [
+            ([token_with_user, stamp], False),
+            ([token_with_user], False),
+            ([token_with_user, stamp], False),
+        ]
+        async_client.delete(f"/api/v1/users/me/tokens/{created['api_token']['id']}", headers=headers)
+
+    def test_a_due_stamp_waits_for_no_other_call_of_the_token(
+        self, async_client: TestClient, test_settings: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        headers = _login(async_client, test_settings)
+        created = async_client.post("/api/v1/users/me/tokens", json={"name": "busy"}, headers=headers).json()
+        token_headers = {"Authorization": f"Bearer {created['token']}"}
+        assert async_client.get("/api/v1/users/me", headers=token_headers).status_code == 200
+        usage = ApiTokenRepository.usage_by_user
+        endpoint_entered, second_answered = asyncio.Event(), asyncio.Event()
+
+        async def first_held(self: ApiTokenRepository, user_ids: Iterable[str] | None = None) -> dict[str, TokenUsage]:
+            """The first call waits in its endpoint, past its auth, until the second call has its answer."""
+            if not endpoint_entered.is_set():
+                endpoint_entered.set()
+                await asyncio.wait_for(second_answered.wait(), timeout=10)
+            return await usage(self, user_ids)
+
+        async def two_calls() -> list[int]:
+            transport = httpx.ASGITransport(app=async_client.app)
+            async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+                first = asyncio.create_task(client.get("/api/v1/users/me", headers=token_headers))
+                await asyncio.wait_for(endpoint_entered.wait(), timeout=10)
+                try:
+                    second = await asyncio.wait_for(client.get("/api/v1/users/me", headers=token_headers), timeout=5)
+                finally:
+                    second_answered.set()
+                return [(await first).status_code, second.status_code]
+
+        with monkeypatch.context() as patched:
+            # Two minutes on, the first call stamps; the second finds that stamp, never a row the first still holds.
+            patched.setattr(api.core.auth, "utc_now", lambda: utc_now() + timedelta(minutes=2))
+            patched.setattr(ApiTokenRepository, "usage_by_user", first_held)
+            assert on_app_loop(async_client, two_calls) == [200, 200]
+        async_client.delete(f"/api/v1/users/me/tokens/{created['api_token']['id']}", headers=headers)
+
+    def test_a_call_refused_after_its_auth_keeps_its_stamp(
+        self, async_client: TestClient, test_settings: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        headers = _login(async_client, test_settings)
+        created = async_client.post("/api/v1/users/me/tokens", json={"name": "refused"}, headers=headers).json()
+        token_headers = {"Authorization": f"Bearer {created['token']}"}
+        assert async_client.get("/api/v1/users/me", headers=token_headers).status_code == 200
+        later = utc_now() + timedelta(minutes=2)
+
+        with monkeypatch.context() as patched:
+            patched.setattr(api.core.auth, "utc_now", lambda: later)
+            # Authenticated, then refused: the request rolls back, the stamp its auth committed does not.
+            assert async_client.get(f"/api/v1/projects/{uuid4()}", headers=token_headers).status_code == 404
+
+        tokens = async_client.get("/api/v1/users/me/tokens", headers=headers).json()["tokens"]
+        [token] = [t for t in tokens if t["id"] == created["api_token"]["id"]]
+        assert datetime.fromisoformat(token["last_used_at"]) == later
+        async_client.delete(f"/api/v1/users/me/tokens/{token['id']}", headers=headers)
 
 
 class TestAuditTrail:

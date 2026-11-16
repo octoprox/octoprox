@@ -279,10 +279,13 @@ class WorkerSnapshot(BaseModel):
     # given up after repeated deliveries, since start.
     observations_consumed: int = 0
     observations_dropped: int = 0
-    # Exit reports applied, and lost with a batch given up after repeated
-    # deliveries, since start.
+    # Exit reports taken off the stream, applied or not, and lost with a batch
+    # given up after repeated deliveries, since start.
     exit_reports_consumed: int = 0
     exit_reports_dropped: int = 0
+    # The reports the checks dropped since start, by DropReason value. Batches
+    # given up stay in exit_reports_dropped.
+    exit_reports_dropped_by_reason: dict[str, int] = Field(default_factory=dict)
 
 
 class StreamState(BaseModel):

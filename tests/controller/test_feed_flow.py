@@ -449,6 +449,9 @@ class TestRuntimeSection:
         await reported_bad(sessions, redis_client, project, "203.0.113.2", "google.com")
         await caught_up(builder, redis_client)
         await until(lambda: avoids_of(builder, project.id) != {})
+        # The read the last compile owed may already carry the report, and the reputation entry, read after that read
+        # began, still owes one of its own at the next interval: the window opens once that one is done and published.
+        await until(lambda: not (builder._reputation_owed or builder._unpublished))
         reputation = builder.sections[REPUTATION_SECTION]
         published = builder.publishes
 
@@ -462,6 +465,8 @@ class TestRuntimeSection:
         assert builder.publishes > published
         assert statements == []
         assert builder.sections[REPUTATION_SECTION] is reputation
+        # Nor does either owe one: a read paced to after the window would leave the two checks above unseen.
+        assert not builder._reputation_owed
 
 
 class TestReputation:

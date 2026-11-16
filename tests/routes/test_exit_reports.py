@@ -2,33 +2,36 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """``POST /projects/{id}/exit-reports``: each report names a request by the proxy username it used, and its exit by the
-exit headers of its response when they are complete, else by the username's ``-tag-``, from the note a gateway made of
-that request. Each is resolved on its own, and the ones resolved are appended to the reports stream in one pipeline.
+exit headers of its response when it carries ``connector_id``, as sent, with the tag's note to fall back on, else by the
+username's ``-tag-``, from the note a gateway made of that request. Each is named on its own, and the ones named are
+appended to the reports stream in one pipeline; the workers check the exit headers against the project's rows.
 
-A row with IPs counts the report for its exit IP and connector; a dynamic connector alone, at the place the username
-names. Any signed-in role may report, a viewer and a viewer service account's token included; the project's mode must
-record.
+The api reads no Postgres for it: its project comes from the process's project map. A row with IPs counts the report
+for its exit IP and connector; a dynamic connector alone, at the place the username names. Any signed-in role may
+report, a viewer and a viewer service account's token included; the project's mode must record.
 """
 
 import uuid
+from collections.abc import Callable
 from typing import Any
 
 import pytest
 import redis.asyncio as redis_lib
 from fastapi.testclient import TestClient
+from sqlalchemy import event
 
 from api.db.redis import EXIT_REPORT_STREAM_KEY
-from api.jobs.messages import ExitReportMessage
+from api.jobs.messages import ExitReportMessage, NotedExit
 from api.models.exit_reports import ExitVerdict
-from api.models.proxy import Proxy, ProxyProtocol, ProxyStatus
-from api.reputation.reports import NO_EXIT, NO_NOTE
+from api.models.project import ExitReputationMode, Project
+from api.reputation.reports import IP_NEEDS_CONNECTOR, NO_EXIT, NO_NOTE, NOT_A_CONNECTOR
 from api.reputation.tag_note import TagNote
 from tests.conftest import api_runtime, on_app_loop
+from tests.waits import until
 
 
 class Install:
-    """A project whose exit reputation records, its connectors and rows, and the notes gateways made of its tagged
-    requests."""
+    """A project whose exit reputation records, its connectors, and the notes gateways made of its tagged requests."""
 
     def __init__(self, client: TestClient, mode: str = "record") -> None:
         self.client = client
@@ -41,6 +44,13 @@ class Install:
         assert project.status_code == 201, project.text
         self.project_id: str = project.json()["id"]
         self._credential_id: str | None = None
+        # The api takes the project from its project map, which reads it once the change entry of its create arrives.
+        self.mapped(lambda project: project is not None and project.exit_reputation == mode)
+
+    def mapped(self, holds: Callable[[Project | None], bool]) -> None:
+        """Wait until what the api's project map holds for the project ``holds``."""
+        projects = api_runtime(self.client).project_map
+        on_app_loop(self.client, until, lambda: holds(projects.get(self.project_id)))
 
     def connector(self, name: str) -> str:
         """A connector of the project, by id."""
@@ -58,18 +68,6 @@ class Install:
         assert connector.status_code == 201, connector.text
         connector_id: str = connector.json()["id"]
         return connector_id
-
-    def row(self, connector_id: str, **metadata: str) -> None:
-        """A proxy row of the connector, with ``metadata`` such as where it was last seen exiting."""
-        proxy = Proxy(
-            host=f"{uuid.uuid4().hex[:8]}.example.com",
-            port=8080,
-            protocol=ProxyProtocol.HTTP,
-            connector_id=connector_id,
-            status=ProxyStatus.HEALTHY,
-            metadata=metadata,
-        )
-        on_app_loop(self.client, api_runtime(self.client).proxy_service.add, proxy)
 
     def note(self, tag: str, *, connector_id: str = "pool", proxy_id: str = "row-1", ip: str | None = None) -> None:
         """Note what the request tagged ``tag`` went through, as a gateway forwarding it does."""
@@ -186,63 +184,108 @@ class TestByTag:
 
 
 class TestByExitHeaders:
-    """The exit headers name the exit when complete: a dynamic connector's id alone, or a connector with IPs and the
-    exit IP one of its rows was last seen exiting from. They win over the tag, whose note is then not read."""
+    """A report that carries connector_id is named by its exit headers, as sent, and its tag's note goes with it: the
+    workers check the exit against the project's rows, keeping a dynamic connector at the place asked for and a
+    connector with IPs at none, and fall back on the note when the headers name no exit of them."""
 
-    def test_a_dynamic_connectors_id_alone_counts_for_it_at_the_place_asked_for(self, install: Install) -> None:
-        dynamic = install.connector("dynamic")
-        install.row(dynamic, dynamic_sessions="true", discovered_ip="203.0.113.50")
-        # The tag's note names another exit: complete headers win.
+    def test_the_exit_headers_are_taken_as_sent_with_the_tags_note_to_fall_back_on(self, install: Install) -> None:
+        # The tag's note names another exit: the exit headers win, unchecked here.
         install.note("t1", connector_id="elsewhere", ip="198.51.100.1")
 
-        (result,) = install.results(
-            _bad(f"{install.username}-cc-us-st-ny-tag-t1", connector_id=dynamic, ip="203.0.113.50")
-        )
-
-        # A dynamic connector's exits are per request: the IP it went out through is no record of its own.
-        assert (result["status"], result["ip"], result["connector_id"], result["place"]) == (
-            "accepted",
-            None,
-            dynamic,
-            "US/NY",
-        )
-        (message,) = install.appended()
-        assert (message.ip, message.proxy_id) == (None, None)
-        assert message.connector_key is not None
-        assert [key.place for key in message.connector_key.levels()] == ["US/NY", "US"]
-
-    def test_a_connector_with_ips_and_where_one_of_its_rows_was_last_seen_exiting(self, install: Install) -> None:
-        pool = install.connector("pool")
-        install.row(pool, discovered_ip="203.0.113.7")
-        install.row(pool, discovered_ip="::ffff:203.0.113.8")
-        install.row(pool)
-
         results = install.results(
-            # No tag: the headers alone name the exit.
-            _bad(f"{install.username}-cc-us", connector_id=pool, ip=" 203.0.113.7 "),
-            # A row's exit as an echo answered it, in its IPv4-mapped form, named in either spelling.
-            _bad(install.username, connector_id=pool, ip="203.0.113.8"),
-            _bad(install.username, connector_id=pool, ip="::ffff:203.0.113.8"),
+            _bad(f"{install.username}-cc-us-st-ny-tag-t1", connector_id="dynamic", ip=" ::ffff:203.0.113.50 "),
+            _bad(f"{install.username}-cc-us", connector_id=" pool "),
         )
 
         assert [(r["status"], r["ip"], r["connector_id"], r["place"]) for r in results] == [
-            ("accepted", "203.0.113.7", pool, ""),
-            ("accepted", "203.0.113.8", pool, ""),
-            ("accepted", "203.0.113.8", pool, ""),
+            ("accepted", "203.0.113.50", "dynamic", "US/NY"),
+            ("accepted", None, "pool", "US"),
         ]
-        assert [(m.ip, m.connector_id, m.place) for m in install.appended()] == [
-            ("203.0.113.7", pool, ""),
-            ("203.0.113.8", pool, ""),
-            ("203.0.113.8", pool, ""),
+        first, second = install.appended()
+        # No proxy row: what tells the workers to check the exit.
+        assert (first.ip, first.connector_id, first.place, first.proxy_id) == ("203.0.113.50", "dynamic", "US/NY", None)
+        assert (second.ip, second.connector_id, second.place, second.proxy_id) == (None, "pool", "US", None)
+        assert first.by_headers and second.by_headers
+        # The note of the first one's tag, for the workers to fall back on; the second carries no tag.
+        assert first.noted == NotedExit(connector_id="elsewhere", proxy_id="row-1", ip="198.51.100.1")
+        assert second.noted is None
+
+    def test_what_only_the_projects_rows_can_tell_is_left_to_the_workers(
+        self, install: Install, authenticated_client: TestClient
+    ) -> None:
+        """Another project's connector, one that does not exist, a connector with IPs without its exit IP or with one
+        none of its rows was seen at: the workers drop those, and count them."""
+        theirs = Install(authenticated_client).connector("theirs")
+        pool = install.connector("pool")
+
+        results = install.results(
+            _bad(install.username, connector_id=theirs, ip="203.0.113.7"),
+            _bad(install.username, connector_id="no-such-connector"),
+            _bad(install.username, connector_id=pool),
+            _bad(install.username, connector_id=pool, ip="198.51.100.99"),
+        )
+
+        assert [r["status"] for r in results] == ["accepted"] * 4
+        assert [(m.connector_id, m.ip) for m in install.appended()] == [
+            (theirs, "203.0.113.7"),
+            ("no-such-connector", None),
+            (pool, None),
+            (pool, "198.51.100.99"),
         ]
 
-    def test_complete_headers_read_no_note(self, install: Install, monkeypatch: pytest.MonkeyPatch) -> None:
-        """The note is read only for a report the headers did not name: with notes unreadable, complete headers still
-        count, and a tag alone cannot."""
-        dynamic = install.connector("dynamic")
-        install.row(dynamic, dynamic_sessions="true")
-        pool = install.connector("pool")
-        install.row(pool, discovered_ip="203.0.113.7")
+    # Exit headers that can name no exit, whatever the project's rows say, and why.
+    _UNNAMING = [
+        ({"ip": "203.0.113.7"}, IP_NEEDS_CONNECTOR),
+        ({"connector_id": "pool", "ip": "nope"}, "not an IP: nope"),
+        # Only printable ASCII reaches the stream: Postgres refuses a NUL in text, which would fail the workers' batch.
+        ({"connector_id": "a\u0000b"}, NOT_A_CONNECTOR),
+        ({"connector_id": "a\tb", "ip": "203.0.113.7"}, NOT_A_CONNECTOR),
+        ({"connector_id": "café"}, NOT_A_CONNECTOR),
+    ]
+
+    def test_exit_headers_that_name_no_exit_fall_back_on_the_tags_note(self, install: Install) -> None:
+        install.note("t1", connector_id="pool", proxy_id="row-1", ip="198.51.100.23")
+
+        results = install.results(*(_bad(f"{install.username}-tag-t1", **headers) for headers, _why in self._UNNAMING))
+
+        assert [(r["status"], r["connector_id"], r["ip"], r["place"]) for r in results] == [
+            ("accepted", "pool", "198.51.100.23", "")
+        ] * len(self._UNNAMING)
+        assert all(message.proxy_id == "row-1" and message.noted is None for message in install.appended())
+
+    def test_exit_headers_that_name_no_exit_and_no_note_are_refused_with_both_reasons(self, install: Install) -> None:
+        for username, reason in ((f"{install.username}-tag-nobody", NO_NOTE), (install.username, NO_EXIT)):
+            results = install.results(*(_bad(username, **headers) for headers, _why in self._UNNAMING))
+            assert [r["error"] for r in results] == [f"{reason}; exit headers: {why}" for _headers, why in self._UNNAMING]
+        assert install.appended() == []
+
+    def test_the_api_reads_no_postgres(self, install: Install) -> None:
+        """Neither the project, which its project map holds, nor the connector and rows the exit headers name."""
+        install.note("t1", connector_id="pool", ip="198.51.100.23")
+        engine = install.client.app.state.node.engine  # type: ignore[attr-defined]
+        reads: list[str] = []
+
+        def record(_conn: object, _cursor: object, statement: str, *_args: object) -> None:
+            if any(table in statement for table in ("projects", "connectors", "proxies")):
+                reads.append(statement)
+
+        event.listen(engine.sync_engine, "before_cursor_execute", record)
+        try:
+            results = install.results(
+                _bad(f"{install.username}-tag-t1"),
+                _bad(install.username, connector_id="pool", ip="203.0.113.7"),
+            )
+        finally:
+            event.remove(engine.sync_engine, "before_cursor_execute", record)
+
+        assert [r["status"] for r in results] == ["accepted", "accepted"]
+        assert reads == []
+
+    def test_notes_that_cannot_be_read_fail_only_a_report_with_nothing_else_to_name_its_exit(
+        self, install: Install, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """With notes unreadable, reports their exit headers named still count, without the note to fall back on, and a
+        tag alone cannot."""
         redis = api_runtime(install.client).redis_client
 
         async def unreadable(*_args: Any, **_kwargs: Any) -> Any:
@@ -250,51 +293,16 @@ class TestByExitHeaders:
 
         monkeypatch.setattr(redis.client, "mget", unreadable)
         results = install.results(
-            _bad(f"{install.username}-cc-gb-tag-t1", connector_id=dynamic),
-            _bad(f"{install.username}-tag-t2", connector_id=pool, ip="203.0.113.7"),
+            _bad(f"{install.username}-cc-gb-tag-t1", connector_id="dynamic"),
+            _bad(f"{install.username}-tag-t2", connector_id="pool", ip="203.0.113.7"),
         )
 
         assert [(r["status"], r["connector_id"], r["ip"], r["place"]) for r in results] == [
-            ("accepted", dynamic, None, "GB"),
-            ("accepted", pool, "203.0.113.7", ""),
+            ("accepted", "dynamic", None, "GB"),
+            ("accepted", "pool", "203.0.113.7", ""),
         ]
+        assert [message.noted for message in install.appended()] == [None, None]
         assert install.report(_bad(f"{install.username}-tag-t1")).status_code == 503
-
-    def test_headers_that_name_no_exit_leave_it_to_the_tag(self, install: Install) -> None:
-        pool = install.connector("pool")
-        install.row(pool, discovered_ip="203.0.113.7")
-        install.note("t1", connector_id=pool, proxy_id="row-9", ip="203.0.113.9")
-
-        (result,) = install.results(_bad(f"{install.username}-tag-t1", connector_id=pool, ip="198.51.100.99"))
-
-        assert (result["status"], result["ip"], result["connector_id"]) == ("accepted", "203.0.113.9", pool)
-        (message,) = install.appended()
-        assert message.proxy_id == "row-9"
-
-    def test_without_a_tag_the_refusal_says_why_the_headers_name_no_exit(
-        self, install: Install, authenticated_client: TestClient
-    ) -> None:
-        pool = install.connector("pool")
-        install.row(pool, discovered_ip="203.0.113.7")
-        theirs = Install(authenticated_client).connector("theirs")
-        cases = [
-            ({"connector_id": pool}, f"connector {pool} has IPs, so ip is needed too"),
-            ({"connector_id": pool, "ip": "198.51.100.99"}, f"no proxy of connector {pool} was last seen exiting from 198.51.100.99"),
-            ({"connector_id": pool, "ip": "nope"}, "not an IP: nope"),
-            ({"ip": "203.0.113.7"}, "ip needs connector_id"),
-            ({"connector_id": theirs, "ip": "203.0.113.7"}, f"connector {theirs} is not in this project"),
-            # Never looked up: Postgres refuses a NUL in text.
-            ({"connector_id": "a\u0000b"}, "connector a\u0000b is not in this project"),
-        ]
-
-        results = install.results(*(_bad(install.username, **headers) for headers, _why in cases))
-
-        assert [r["error"] for r in results] == [f"{NO_EXIT}; exit headers: {why}" for _headers, why in cases]
-        assert install.appended() == []
-        # With a tag no gateway noted lately, the note is missed for the same reason.
-        assert install.error(_bad(f"{install.username}-tag-gone", connector_id=pool)) == (
-            f"{NO_NOTE}; exit headers: connector {pool} has IPs, so ip is needed too"
-        )
 
 
 class TestSites:
@@ -355,10 +363,29 @@ class TestTheBatch:
             # A NUL would fail the workers' whole batch of reports, every project's in it.
             {"site": "google.com", "verdict": "bad", "username": "x-tag-t1", "reason": "cap\u0000tcha"},
             {"site": "google.com", "verdict": "bad", "username": "x-tag-t1", "reason": "cap\ttcha"},
+            # Longer than a connector id or an IP's text: neither can reach the stream.
+            {"site": "google.com", "verdict": "bad", "username": "x-tag-t1", "connector_id": "c" * 37},
+            {"site": "google.com", "verdict": "bad", "username": "x-tag-t1", "connector_id": "c", "ip": "1" * 46},
         ],
     )
     def test_a_report_that_breaks_the_format_is_a_422(self, install: Install, report: dict[str, Any]) -> None:
         assert install.report(report).status_code == 422
+        assert install.appended() == []
+
+    @pytest.mark.parametrize("field", ["connector_id", "ip"])
+    def test_exit_headers_that_are_no_unicode_are_a_422(self, install: Install, field: str) -> None:
+        """A lone surrogate, which JSON can carry and no stream entry can: it would fail the whole call's append."""
+        report = (
+            f'"username":"{install.username}-tag-t1","site":"google.com","verdict":"bad","connector_id":"c",'
+            f'"{field}":"a\\ud800b"'
+        )
+        body = '{"reports":[{' + report + "}]}"
+        response = install.client.post(
+            f"/api/v1/projects/{install.project_id}/exit-reports",
+            content=body.encode(),
+            headers={"Content-Type": "application/json"},
+        )
+        assert response.status_code == 422
         assert install.appended() == []
 
     def test_a_project_whose_exit_reputation_is_off(self, authenticated_client: TestClient) -> None:
@@ -373,6 +400,28 @@ class TestTheBatch:
             "/api/v1/projects/no-such-project/exit-reports", json={"reports": [_bad("x-tag-t1")]}
         )
         assert response.status_code == 404
+
+    def test_the_project_map_follows_the_projects_writes(self, install: Install) -> None:
+        """The api answers from its project map, which reads a project again once its change entry arrives."""
+        install.note("t1", ip="198.51.100.23")
+        report = _bad(f"{install.username}-tag-t1")
+
+        switched = install.client.patch(f"/api/v1/projects/{install.project_id}", json={"exit_reputation": "off"})
+        assert switched.status_code == 200, switched.text
+        install.mapped(lambda project: project is not None and project.exit_reputation is ExitReputationMode.OFF)
+        assert install.report(report).status_code == 409
+
+        install.client.patch(f"/api/v1/projects/{install.project_id}", json={"exit_reputation": "avoid"})
+        install.mapped(lambda project: project is not None and project.exit_reputation is ExitReputationMode.AVOID)
+        assert install.report(report).status_code == 202
+
+        deleted = install.client.request(
+            "DELETE", f"/api/v1/projects/{install.project_id}", json={"confirmation": "permanently delete"}
+        )
+        assert deleted.status_code == 204, deleted.text
+        install.mapped(lambda project: project is None)
+        assert install.report(report).status_code == 404
+        assert len(install.appended()) == 1
 
     def test_a_redis_that_cannot_be_reached_is_a_503(self, install: Install, monkeypatch: pytest.MonkeyPatch) -> None:
         runtime = api_runtime(install.client)

@@ -3,8 +3,8 @@
 
 """The api role's runtime: the admin API's services, read model, previews, attribution, tunnels and sign-in.
 
-It runs no loop of its own, since the node runs the process's definitions refresher and observation recorder, and at
-start it creates the tunnel settings rows a fresh install lacks.
+Its one loop keeps the project map the exit reports route takes its project from; the node runs the process's
+definitions refresher and observation recorder. At start it creates the tunnel settings rows a fresh install lacks.
 """
 
 from __future__ import annotations
@@ -27,6 +27,7 @@ from api.geo.settings import defaults_from_config
 from api.jobs.attribution import Attribution
 from api.models.system import ApiSnapshot, InstanceSnapshot
 from api.openvpn.service import OpenVpnService
+from api.roles.refresh import ProjectMap
 from api.roles.runtime import RoleRuntime
 from api.routing.router import Router
 from api.routing.snapshot import RoutingSnapshot
@@ -132,20 +133,27 @@ class ApiRuntime(RoleRuntime):
             changes=changes,
         )
         self.sso_flow = SsoFlow(redis_client)
+        # Every project, kept current from the changes stream: the exit reports route reads no project per call.
+        self.project_map = ProjectMap(
+            session_factory, redis_client=redis_client, reconcile_interval=settings.reconcile_interval
+        )
+        self._loops: tuple[Loop, ...] = (self.project_map,)
 
     # --- Lifecycle ----------------------------------------------------------------------
 
     def loops(self) -> Sequence[Loop]:
-        """None: the node runs the process's definitions refresher and observation recorder."""
-        return ()
+        """The project map; the node runs the process's definitions refresher and observation recorder."""
+        return self._loops
 
     async def start(self) -> None:
-        """Create the tunnel settings rows a fresh install lacks and announce each, so its first feed carries both protocols.
+        """Create the tunnel settings rows a fresh install lacks and announce each, so its first feed carries both protocols,
+        then read the project map before its loop follows the changes stream.
 
-        Raises when Postgres cannot be written, which the node has just migrated.
+        Raises when Postgres cannot be written or read, which the node has just migrated.
         """
         await seed_tunnel_settings(self.session_factory, self._settings, changes=self.changes)
         self._note_default_proxy_endpoint()
+        await self.project_map.start()
         await super().start()
         logger.info("API started", instance=self._settings.instance_id)
 

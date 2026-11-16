@@ -188,4 +188,5 @@ class WorkerRuntime(RoleRuntime):
             observations_dropped=self.observation_ingest.dropped,
             exit_reports_consumed=self.exit_report_ingest.consumed,
             exit_reports_dropped=self.exit_report_ingest.dropped,
+            exit_reports_dropped_by_reason=self.exit_report_ingest.counts.dropped_by_reason(),
         )

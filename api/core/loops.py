@@ -268,7 +268,7 @@ class PeriodicLoop(Loop):
         """Seconds until the next cycle is due."""
         return max(0.0, self._due_at - time.monotonic())
 
-    def _cadence(self) -> float:
+    def _cadence(self) -> float | None:
         """The interval: a cycle longer than it stretched the period."""
         return self.interval
 

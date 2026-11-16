@@ -6,15 +6,17 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.core import utc_now
 from api.db.filters import any_of
-from api.db.models import ApiTokenModel, AuthIdentityModel, AuthProviderModel
+from api.db.models import ApiTokenModel, AuthIdentityModel, AuthProviderModel, UserModel
+from api.db.repository import UserRepository
 from api.models.auth import ApiToken, AuthIdentity, AuthProviderConfig, AuthProviderKind, TokenUsage
+from api.models.user import User
 
 
 class AuthProviderRepository:
@@ -153,12 +155,18 @@ class ApiTokenRepository:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
 
-    async def get_by_hash(self, token_hash: str) -> ApiToken | None:
+    async def get_with_user(self, token_hash: str) -> tuple[ApiToken, User] | None:
+        """The token with this hash and its user, joined in one statement; None when no token has it."""
         result = await self._session.execute(
-            select(ApiTokenModel).where(ApiTokenModel.token_hash == token_hash)
+            select(ApiTokenModel, UserModel)
+            .join(UserModel, UserModel.id == ApiTokenModel.user_id)
+            .where(ApiTokenModel.token_hash == token_hash)
         )
-        model = result.scalar_one_or_none()
-        return self._to_domain(model) if model else None
+        row = result.one_or_none()
+        if row is None:
+            return None
+        token, user = row
+        return self._to_domain(token), UserRepository(self._session)._to_domain(user)
 
     async def list_for_user(self, user_id: str) -> list[ApiToken]:
         result = await self._session.execute(
@@ -196,9 +204,15 @@ class ApiTokenRepository:
         await self._session.flush()
         return token
 
-    async def touch_last_used(self, token_id: str, when: datetime) -> None:
+    async def touch_last_used(self, token_id: str, when: datetime, granularity: timedelta) -> None:
+        """Stamp a token's use at ``when`` if its stamp is ``granularity`` old or older by then.
+
+        Of concurrent calls that all found the stamp due, the first stamps and the others change nothing.
+        """
         await self._session.execute(
-            update(ApiTokenModel).where(ApiTokenModel.id == token_id).values(last_used_at=when)
+            update(ApiTokenModel)
+            .where(ApiTokenModel.id == token_id, ApiTokenModel.last_used_at <= when - granularity)
+            .values(last_used_at=when)
         )
 
     async def touch_first_use(self, token_id: str, when: datetime) -> bool:

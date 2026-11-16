@@ -255,8 +255,9 @@ class TestWork:
         project = await rows.project(exit_reputation=ExitReputationMode.RECORD)
         runtime = await build(worker_jobs=[])
         await start(runtime)
+        # Named by a tag's note, so no exit headers to check against the rows.
         message = ExitReportMessage(
-            project_id=project.id, ip=LONDON_IP, site="google.com", verdict=ExitVerdict.BAD,
+            project_id=project.id, ip=LONDON_IP, site="google.com", verdict=ExitVerdict.BAD, proxy_id="row-1",
             reported_at=datetime(2026, 11, 14, 12, 0),
         )
 
@@ -265,6 +266,28 @@ class TestWork:
         await until(lambda: runtime.snapshot().exit_reports_consumed == 1)
         # Counted only once applied to the project's record.
         assert runtime.exit_report_ingest.counts.snapshot() == [ExitReportCount("", "", "bad", 1)]
+
+    async def test_exit_reports_the_checks_drop_reach_the_snapshot_by_reason(
+        self, build: Build, rows: Rows, redis_client: RedisClient
+    ) -> None:
+        """The System page lists them under the worker's exit reports, whose count takes them in."""
+        project = await rows.project(exit_reputation=ExitReputationMode.RECORD)
+        runtime = await build(worker_jobs=[])
+        await start(runtime)
+        # Its exit headers name a connector the project does not have.
+        message = ExitReportMessage(
+            project_id=project.id, connector_id="no-such-connector", site="google.com", verdict=ExitVerdict.BAD,
+            reported_at=datetime(2026, 11, 14, 12, 0),
+        )
+
+        await redis_client.client.xadd(EXIT_REPORT_STREAM_KEY, {"item": message.model_dump_json()})
+
+        await until(lambda: runtime.snapshot().exit_reports_consumed == 1)
+        snapshot = runtime.snapshot()
+        # Dropped by the checks, not lost with a batch given up.
+        assert (snapshot.exit_reports_dropped_by_reason, snapshot.exit_reports_dropped) == ({"connector": 1}, 0)
+        # The snapshot travels as JSON in the heartbeat.
+        assert WorkerSnapshot.model_validate_json(snapshot.model_dump_json()) == snapshot
 
     async def test_a_new_ip_database_file_asks_for_every_proxy_to_be_re_attributed(
         self, build: Build, redis_client: RedisClient, monkeypatch: pytest.MonkeyPatch

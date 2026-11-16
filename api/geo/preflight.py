@@ -8,17 +8,20 @@ Only session-bound rows are checked, pooled slots and dynamic gateways, whose ex
 
 from __future__ import annotations
 
+import asyncio
 import json
 import random
 import time
 from collections.abc import Sequence
 from datetime import datetime, timedelta
+from functools import partial
 from typing import TYPE_CHECKING, NamedTuple
 
 import structlog
 
 from api.core import utc_now
 from api.core.logging import error_text
+from api.core.tasks import HeldTasks
 from api.db.redis import GEO_PREFLIGHT_KEY, RedisClient
 from api.geo.attributor import ProxyAttributor
 from api.geo.models import (
@@ -229,7 +232,8 @@ SKIP = PreflightVerdict(ok=True, expected=None, observed=None, ip=None, reason="
 
 
 class PreflightChecker:
-    """Runs and caches per-proxy exit verification on a gateway.
+    """Runs and caches per-proxy exit verification on a gateway; a verdict is read from the cache before the echo and
+    written to it in the background after.
 
     Args:
         redis_client: the verdict cache; None runs without one.
@@ -249,15 +253,27 @@ class PreflightChecker:
         self._exclusions = exclusions
         self.checks = 0
         self.rejections = 0
+        # Verdict writes on their way to Redis, held so none is collected before it runs, and the last one of each key,
+        # which the next write of that key and a drop of it wait for.
+        self._writes = HeldTasks()
+        self._writing: dict[str, asyncio.Task[None]] = {}
+
+    async def settle(self) -> None:
+        """Wait for the verdict writes under way; the gateway calls it once its listeners are closed."""
+        await self._writes.settle()
 
     async def invalidate(self, project_id: str, proxy_id: str) -> None:
         """Drop the cached verdict for a proxy, on every gateway; the next request through it is verified again.
 
-        A worker that learns of an exit move from anything but preflight drops the same key.
+        A write of that verdict under way lands first, so it cannot bring the verdict back. A worker that learns of an
+        exit move from anything but preflight drops the same key.
         """
         if self._redis is None:
             return
         key = GEO_PREFLIGHT_KEY.format(project_id=project_id, proxy_id=proxy_id)
+        writing = self._writing.get(key)
+        if writing is not None:
+            await asyncio.wait([writing])
         try:
             async with self._redis.request_deadline():
                 await self._redis.client.delete(key)
@@ -403,7 +419,7 @@ class PreflightChecker:
             )
             # Short cache so a broken echo endpoint does not add a timeout to every request.
             if key:
-                await self._store(key, verdict, ttl=30)
+                self._store_later(key, verdict, ttl=30, project_id=project.id)
             return verdict
 
         # The expected place is the claim under judgement; the answer comes
@@ -489,7 +505,8 @@ class PreflightChecker:
                 unknown=project.location_unknown.value,
             )
         if key:
-            await self._store(key, verdict, ttl=self._verdict_ttl(proxy, elapsed=time.monotonic() - started))
+            ttl = self._verdict_ttl(proxy, elapsed=time.monotonic() - started)
+            self._store_later(key, verdict, ttl=ttl, project_id=project.id)
         return verdict
 
     def _verdict_ttl(self, proxy: Proxy, *, elapsed: float) -> int:
@@ -559,6 +576,30 @@ class PreflightChecker:
             return None
         verdict = PreflightVerdict.from_json(raw) if raw else None
         return verdict._replace(cached=True) if verdict else None
+
+    def _store_later(self, key: str, verdict: PreflightVerdict, *, ttl: int, project_id: str) -> None:
+        """Cache ``verdict`` under ``key`` in the background, so the request goes on without waiting for Redis."""
+        writing = self._writes.spawn(
+            self._store_after(self._writing.get(key), key, verdict, ttl=ttl),
+            name="preflight_verdict_write",
+            project_id=project_id,
+        )
+        self._writing[key] = writing
+        writing.add_done_callback(partial(self._written, key))
+
+    async def _store_after(
+        self, previous: asyncio.Task[None] | None, key: str, verdict: PreflightVerdict, *, ttl: int
+    ) -> None:
+        """Cache ``verdict`` (:meth:`_store`) once ``previous``, the write of its key before, has ended: writes go out
+        on several connections, and a key's verdicts land in the order they were checked."""
+        if previous is not None:
+            await asyncio.wait([previous])
+        await self._store(key, verdict, ttl=ttl)
+
+    def _written(self, key: str, writing: asyncio.Task[None]) -> None:
+        """A verdict write ended: its key has none under way unless a later one began meanwhile."""
+        if self._writing.get(key) is writing:
+            del self._writing[key]
 
     async def _store(self, key: str, verdict: PreflightVerdict, *, ttl: int) -> None:
         """Cache ``verdict`` under ``key``, trusted for ``ttl`` seconds; a Redis that does not answer in time keeps none.

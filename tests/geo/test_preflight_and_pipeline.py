@@ -31,6 +31,7 @@ from api.models.proxy import Proxy
 from api.providers.sdk.sources import IpDiscoverer
 from tests.geo.doubles import Retired, Sightings
 from tests.geo.test_readers import MAXMIND_RECORD, write_mmdb
+from tests.waits import until
 
 GB_IP = "81.2.69.160"
 
@@ -279,6 +280,9 @@ class TestPreflight:
         rendered = _proxy(dynamic_sessions="true", session_id="abc123", geo="GB")
         verdict = await checker.check(VERIFIED, rendered, session_id="order-1", requested=LocationTarget(country="GB"))
         assert verdict.ok and verdict.reason == "match" and checker.checks == 1
+        # Written in the background: the request does not wait for it.
+        assert stored == {}
+        await checker.settle()
         # Keyed by the client session, which every generation of its vendor session shares.
         assert list(stored) == [GEO_PREFLIGHT_KEY.format(project_id="proj", proxy_id=rendered.id) + ":order-1:GB"]
         assert geo_service.observation_recorder._buffer[-1].session_id == "abc123"
@@ -290,6 +294,7 @@ class TestPreflight:
         moved.id = rendered.id
         mismatch = await checker.check(VERIFIED, moved, session_id="order-1", requested=LocationTarget(country="US"))
         assert not mismatch.ok and mismatch.expected == LocationTarget(country="US") and checker.checks == 2
+        await checker.settle()
         assert GEO_PREFLIGHT_KEY.format(project_id="proj", proxy_id=rendered.id) + ":order-1:US" in stored
         # Another session on the same gateway row is its own verification.
         other = _proxy(dynamic_sessions="true", session_id="zzz999", geo="US")
@@ -313,6 +318,7 @@ class TestPreflight:
         for session_seconds in (180, 7200, None):
             rendered = _proxy(dynamic_sessions="true", session_id="abc123", geo="GB", session_seconds=session_seconds)
             await checker.check(VERIFIED, rendered, session_id="order-1", requested=requested)
+        await checker.settle()
         # A 3-minute session, a 2-hour one (the preflight TTL is shorter), and one whose length the connector leaves to the vendor.
         assert ttls == [180, 600, 600]
         # The vendor's clock started with the echo, so a slow echo leaves the verdict that much less.
@@ -336,12 +342,14 @@ class TestPreflight:
         # A client asked for US: one echo, cached under the slot's key and reused for the same ask.
         asked = await checker.check(VERIFIED, slot, session_id="order-1", requested=LocationTarget(country="US"))
         assert asked.required_by == "request" and not asked.ok and checker.checks == 1
+        await checker.settle()
         assert list(stored) == [GEO_PREFLIGHT_KEY.format(project_id="proj", proxy_id=slot.id)]
         again = await checker.check(VERIFIED, slot, session_id="order-2", requested=LocationTarget(country="US"))
         assert again.expected == LocationTarget(country="US") and checker.checks == 1
         # A different ask through the same slot is judged afresh, not served the cached verdict for another place.
         other = await checker.check(VERIFIED, slot, session_id="order-3", requested=LocationTarget(country="GB"))
         assert other.expected == LocationTarget(country="GB") and other.ok and checker.checks == 2
+        await checker.settle()
         assert (await checker.check(VERIFIED, slot, session_id="order-3", requested=LocationTarget(country="GB"))).ok
         assert checker.checks == 2
 
@@ -451,6 +459,91 @@ class TestPreflight:
 
 
 class TestPreflightCache:
+    async def test_a_verdict_is_written_without_holding_the_request(
+        self, geo_service: GeoService, redis_client: RedisClient
+    ) -> None:
+        """The read before the echo is awaited; the write after it is not, and the gateway's stop settles it."""
+        checker = _checker(geo_service, {"ip": GB_IP, "country": "GB"})
+        checker._redis = redis_client
+        released = asyncio.Event()
+        store = checker._store
+
+        async def held(key: str, verdict: PreflightVerdict, *, ttl: int) -> None:
+            await released.wait()
+            await store(key, verdict, ttl=ttl)
+
+        checker._store = held  # type: ignore[method-assign]
+        slot = _proxy(session_id="slot-1")
+        key = GEO_PREFLIGHT_KEY.format(project_id="proj", proxy_id=slot.id)
+
+        verdict = await asyncio.wait_for(checker.check(VERIFIED, slot, session_id=None, requested=LocationTarget(country="GB")), 1.0)
+
+        assert verdict.ok and checker.checks == 1 and await checker._cached(key) is None
+        settled = asyncio.create_task(checker.settle())
+        await asyncio.sleep(0.05)
+        assert not settled.done()
+        released.set()
+        await settled
+        assert await checker._cached(key) == verdict._replace(cached=True)
+
+    async def test_a_keys_verdicts_land_in_the_order_they_were_checked(self, redis_client: RedisClient) -> None:
+        """Writes go out on several connections: a key's next verdict waits for the write before it, another key's not."""
+        checker = PreflightChecker(MagicMock(spec=GeoService), redis_client, sightings=Sightings(), exclusions=Retired())
+        released = asyncio.Event()
+        landed: list[tuple[str, int]] = []
+        store = checker._store
+
+        async def held(key: str, verdict: PreflightVerdict, *, ttl: int) -> None:
+            if key.endswith(":s:GB") and verdict.generation == 0:
+                await released.wait()
+            await store(key, verdict, ttl=ttl)
+            landed.append((key[-4:], verdict.generation))
+
+        checker._store = held  # type: ignore[method-assign]
+        gb = LocationTarget(country="GB")
+        refused = PreflightVerdict(ok=False, expected=gb, observed=LocationTarget(country="US"), ip="203.0.113.9", reason="mismatch")
+        moved = PreflightVerdict(ok=True, expected=gb, observed=gb, ip=GB_IP, reason="match", generation=1)
+        key = GEO_PREFLIGHT_KEY.format(project_id="p", proxy_id="gw") + ":s:GB"
+
+        checker._store_later(key, refused, ttl=600, project_id="p")
+        checker._store_later(key, moved, ttl=600, project_id="p")
+        checker._store_later(key.replace(":s:", ":t:"), moved, ttl=600, project_id="p")
+        await until(lambda: len(landed) == 1)
+        await asyncio.sleep(0.05)
+        assert landed == [("t:GB", 1)]
+        released.set()
+        await checker.settle()
+
+        assert landed == [("t:GB", 1), ("s:GB", 0), ("s:GB", 1)]
+        cached = await checker._cached(key)
+        assert cached is not None and cached.generation == 1
+
+    async def test_a_drop_waits_for_the_write_under_way_of_its_verdict(
+        self, geo_service: GeoService, redis_client: RedisClient
+    ) -> None:
+        """What the verifier does right after a check whose slot left the pool: the verdict written meanwhile stays dropped."""
+        checker = _checker(geo_service, {"ip": GB_IP, "country": "GB"})
+        checker._redis = redis_client
+        released = asyncio.Event()
+        store = checker._store
+
+        async def held(key: str, verdict: PreflightVerdict, *, ttl: int) -> None:
+            await released.wait()
+            await store(key, verdict, ttl=ttl)
+
+        checker._store = held  # type: ignore[method-assign]
+        slot = _proxy(session_id="slot-1")
+        await checker.check(VERIFIED, slot, session_id=None, requested=LocationTarget(country="GB"))
+
+        dropping = asyncio.create_task(checker.invalidate("proj", slot.id))
+        await asyncio.sleep(0.05)
+        assert not dropping.done()
+        released.set()
+        await dropping
+        await checker.settle()
+        assert await checker._cached(GEO_PREFLIGHT_KEY.format(project_id="proj", proxy_id=slot.id)) is None
+        assert checker._writing == {}
+
     async def test_invalidate_drops_only_that_proxys_verdict(self, redis_client: RedisClient) -> None:
         """What the verifier does for a slot replaced while checked; a worker drops the same key when an exit moves."""
         checker = PreflightChecker(MagicMock(spec=GeoService), redis_client, sightings=Sightings(), exclusions=Retired())
@@ -510,6 +603,7 @@ class TestPreflightCache:
         verdict = await checker.check(VERIFIED, gateway(2), session_id="s", requested=gb)
         assert verdict.generation == 2 and not verdict.cached and checker.checks == 1
         assert geo_service.observation_recorder._buffer[-1].session_id == "vendor-2"
+        await checker.settle()
         held = await checker._cached(key)
         assert held is not None and held.generation == 2 and held.is_fresh(utc_now())
 

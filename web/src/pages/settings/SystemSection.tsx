@@ -796,23 +796,60 @@ function WorkerSection({ worker }: { worker: SystemWorkerSnapshot }) {
       <div>
         <IngestRow label="Preflight sightings" done="attributed" consumed={worker.sightings_consumed} dropped={worker.sightings_dropped} />
         <IngestRow label="IP observations" done="ingested" consumed={worker.observations_consumed} dropped={worker.observations_dropped} />
-        <IngestRow label="Exit reports" done="applied" consumed={worker.exit_reports_consumed} dropped={worker.exit_reports_dropped} />
+        <IngestRow
+          label="Exit reports"
+          done="taken"
+          consumed={worker.exit_reports_consumed}
+          dropped={worker.exit_reports_dropped}
+          note={exitReportDrops(worker.exit_reports_dropped_by_reason)}
+        />
       </div>
     </InspectorSection>
   )
 }
 
-/** What a worker took off a work stream since it started, and lost with batches given up after five deliveries. */
-function IngestRow({ label, done, consumed, dropped }: { label: string; done: string; consumed: number; dropped: number }) {
+/**
+ * What a worker took off a work stream since it started, and lost with
+ * batches given up after five deliveries. A note goes on a line of its own
+ * under the row, wrapped, so a phone shows it whole.
+ */
+function IngestRow({ label, done, consumed, dropped, note }: {
+  label: string
+  done: string
+  consumed: number
+  dropped: number
+  note?: string | null
+}) {
   return (
-    <KeyValue
-      label={label}
-      value={<>
-        {formatCount(consumed)} {done}
-        {dropped > 0 && <span className="text-warning" title="Lost with batches given up after five deliveries"> · {formatCount(dropped)} lost</span>}
-      </>}
-    />
+    <div className="py-1.5 border-b border-line last:border-b-0 text-[13px]">
+      <div className="flex items-center justify-between gap-3">
+        <span className="text-fg-muted flex-none">{label}</span>
+        <span className="min-w-0 font-medium text-fg text-right truncate tabular-nums">
+          {formatCount(consumed)} {done}
+          {dropped > 0 && <span className="text-warning" title="Lost with batches given up after five deliveries"> · {formatCount(dropped)} lost</span>}
+        </span>
+      </div>
+      {note && <div className="text-xs text-warning wrap-break-word mt-1">{note}</div>}
+    </div>
   )
+}
+
+// Why the workers' checks drop an exit report, by the reason's code; a code the page does not know shows as itself.
+const DROP_REASONS: Record<string, string> = {
+  project: 'project off or gone',
+  connector: "connector gone or not the project's",
+  ip_needed: 'IP missing from the exit headers',
+  ip_not_seen: 'IP not seen on the connector',
+}
+
+/** The exit reports the checks dropped, most first ("Dropped: 10 IP not seen on the connector, 2 project off or gone"); null for none. */
+function exitReportDrops(byReason: Record<string, number> | undefined): string | null {
+  const drops = Object.entries(byReason ?? {})
+    .filter(([, n]) => n > 0)
+    .sort((a, b) => b[1] - a[1])
+    // A no-break space: a count never ends a line apart from its reason.
+    .map(([reason, n]) => `${formatCount(n)} ${DROP_REASONS[reason] ?? reason}`)
+  return drops.length > 0 ? `Dropped: ${drops.join(', ')}` : null
 }
 
 function ApiSection({ api }: { api: SystemApiSnapshot }) {

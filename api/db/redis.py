@@ -806,6 +806,14 @@ class StreamInfo(NamedTuple):
         )
 
 
+class StickyBinding(NamedTuple):
+    """The proxy a sticky session is bound to in Redis, and the seconds its key has left: None for a key without an
+    expiry, or one gone between the two reads."""
+
+    proxy_id: str
+    seconds_left: float | None
+
+
 def _decode(value: str | bytes) -> str:
     return value if isinstance(value, str) else value.decode()
 
@@ -1472,11 +1480,19 @@ class RedisClient:
     # Sticky-session bindings (project-scoped): the sticky strategy keeps a
     # session on its proxy across gateways. On the request path, so each
     # call takes the request deadline and its caller fails open.
-    async def get_sticky_binding(self, project_id: str, session_id: str) -> str | None:
+    async def get_sticky_binding(self, project_id: str, session_id: str) -> StickyBinding | None:
+        """The binding any gateway left for the session, with its key's TTL, in one round trip (GET and PTTL); None when
+        unbound."""
         key = STICKY_BINDING_KEY.format(project_id=project_id, session_id=session_id)
         async with self.request_deadline():
-            result = await self.client.get(key)
-        return None if result is None else _decode(result)
+            pipe = self.client.pipeline(transaction=False)
+            pipe.get(key)
+            pipe.pttl(key)
+            proxy_id, pttl = await pipe.execute()
+        if proxy_id is None:
+            return None
+        # PTTL is -1 for a key without an expiry and -2 for one gone since the GET: neither has seconds left.
+        return StickyBinding(_decode(proxy_id), pttl / 1000 if pttl >= 0 else None)
 
     async def set_sticky_binding(
         self, project_id: str, session_id: str, proxy_id: str, ttl_seconds: int = 300

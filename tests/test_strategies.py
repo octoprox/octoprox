@@ -16,7 +16,7 @@ from unittest.mock import AsyncMock, call, patch
 
 import pytest
 
-from api.db.redis import RedisClient
+from api.db.redis import RedisClient, StickyBinding
 from api.models.proxy import Proxy, ProxyStatus
 from api.routing.inflight import InFlight
 from api.routing.outcomes import LocalOutcomes
@@ -38,6 +38,14 @@ def sample_proxies() -> list[Proxy]:
         Proxy(id="proxy-2", host="proxy2.example.com", port=8080, connector_id="conn-1", status=ProxyStatus.HEALTHY),
         Proxy(id="proxy-3", host="proxy3.example.com", port=8080, connector_id="conn-1", status=ProxyStatus.DEGRADED),
     ]
+
+
+def _sticky_redis(binding: str | None = None, *, seconds_left: float | None = 300.0) -> AsyncMock:
+    """A Redis holding ``binding`` with ``seconds_left`` on its key, each read counted on ``get_sticky_binding``; its
+    writes are recorded on ``set_sticky_binding``."""
+    redis = AsyncMock(spec=RedisClient)
+    redis.get_sticky_binding.return_value = None if binding is None else StickyBinding(binding, seconds_left)
+    return redis
 
 
 class TestRoundRobinStrategy:
@@ -214,14 +222,11 @@ class TestStickySessionStrategy:
         assert set(strategy._session_map) == {"new"}
 
     async def test_entries_warmed_from_redis_count_toward_the_sweep(self, sample_proxies: list[Proxy]):
-        from unittest.mock import AsyncMock
-
         from api.strategies import sticky as sticky_module
 
         now = [0.0]
         strategy = StickySessionStrategy(ttl_seconds=10, clock=lambda: now[0])
-        redis = AsyncMock(spec=RedisClient)
-        redis.get_sticky_binding.return_value = sample_proxies[0].id
+        redis = _sticky_redis(sample_proxies[0].id, seconds_left=10.0)
         # This instance never binds anything itself: every session arrives already bound by a peer.
         for i in range(sticky_module._SWEEP_EVERY - 1):
             await strategy.select(sample_proxies, session_id=f"old-{i}", redis_client=redis, project_id="p")
@@ -230,12 +235,9 @@ class TestStickySessionStrategy:
         assert set(strategy._session_map) == {"new"}
 
     async def test_active_session_refreshes_its_redis_binding_every_half_ttl(self, sample_proxies: list[Proxy]):
-        from unittest.mock import AsyncMock
-
         now = [0.0]
         strategy = StickySessionStrategy(ttl_seconds=300, clock=lambda: now[0])
-        redis = AsyncMock(spec=RedisClient)
-        redis.get_sticky_binding.return_value = None
+        redis = _sticky_redis()
         first = await strategy.select(sample_proxies, session_id="s", redis_client=redis, project_id="p")
         await strategy.settle()
         assert redis.set_sticky_binding.await_count == 1
@@ -392,7 +394,7 @@ class TestStickySessionStrategy:
         assert "c" not in strategy._rings
 
     async def test_an_unreadable_binding_places_the_session_by_hashing(self, sample_proxies: list[Proxy]) -> None:
-        redis = AsyncMock(spec=RedisClient)
+        redis = _sticky_redis()
         redis.get_sticky_binding.side_effect = ConnectionError("Redis is down")
         strategy = StickySessionStrategy()
         selected = await strategy.select(sample_proxies, session_id="s", redis_client=redis, project_id="p")
@@ -401,8 +403,7 @@ class TestStickySessionStrategy:
 
     async def test_an_unwritable_binding_stays_local(self, sample_proxies: list[Proxy]) -> None:
         now = [0.0]
-        redis = AsyncMock(spec=RedisClient)
-        redis.get_sticky_binding.return_value = None
+        redis = _sticky_redis()
         redis.set_sticky_binding.side_effect = ConnectionError("Redis is down")
         strategy = StickySessionStrategy(ttl_seconds=300, clock=lambda: now[0])
         first = await strategy.select(sample_proxies, session_id="s", redis_client=redis, project_id="p")
@@ -414,16 +415,16 @@ class TestStickySessionStrategy:
         assert redis.set_sticky_binding.await_count == 1
 
     async def test_stored_binding_reads_redis_and_fails_open(self) -> None:
-        redis = AsyncMock(spec=RedisClient)
-        redis.get_sticky_binding.return_value = "proxy-2"
+        redis = _sticky_redis("proxy-2", seconds_left=250.0)
         strategy = StickySessionStrategy()
-        assert await strategy.stored_binding(cast(RedisClient, redis), "p", "s") == "proxy-2"
+        assert await strategy.stored_binding(cast(RedisClient, redis), "p", "s") == ("proxy-2", 250.0)
+        redis.get_sticky_binding.assert_awaited_once_with("p", "s")
         redis.get_sticky_binding.side_effect = ConnectionError("Redis is down")
         assert await strategy.stored_binding(cast(RedisClient, redis), "p", "s") is None
 
     async def test_a_binding_cut_by_the_deadline_is_logged_by_its_type(self, sample_proxies: list[Proxy]) -> None:
         """A Redis call cut by the request deadline raises a bare TimeoutError; the read's and the write's logs name it."""
-        redis = AsyncMock(spec=RedisClient)
+        redis = _sticky_redis()
         redis.get_sticky_binding.side_effect = TimeoutError
         redis.set_sticky_binding.side_effect = TimeoutError
         strategy = StickySessionStrategy()
@@ -456,8 +457,7 @@ class TestHeldProxy:
         redis.get_sticky_binding.assert_not_called()
 
     async def test_sticky_reads_a_binding_made_elsewhere_once_and_remembers_it(self) -> None:
-        redis = AsyncMock(spec=RedisClient)
-        redis.get_sticky_binding.return_value = "proxy-2"
+        redis = _sticky_redis("proxy-2")
         strategy = StickySessionStrategy()
         for _ in range(2):
             assert await strategy.held_proxy("s", redis_client=cast(RedisClient, redis), project_id="p") == "proxy-2"
@@ -465,8 +465,7 @@ class TestHeldProxy:
         assert strategy.bound_proxy_id("s") == "proxy-2"
 
     async def test_sticky_holds_none_for_a_session_bound_nowhere_or_unreadable(self) -> None:
-        redis = AsyncMock(spec=RedisClient)
-        redis.get_sticky_binding.return_value = None
+        redis = _sticky_redis()
         strategy = StickySessionStrategy()
         assert await strategy.held_proxy("s", redis_client=cast(RedisClient, redis), project_id="p") is None
         redis.get_sticky_binding.side_effect = ConnectionError("Redis is down")
@@ -478,8 +477,7 @@ class TestHeldProxy:
     async def test_a_hold_keeps_a_sticky_binding_in_use_as_a_request_would(self, sample_proxies: list[Proxy]) -> None:
         """What the router does for a session it refuses on its proxy (exit reputation's avoid): the binding stays live."""
         now = [0.0]
-        redis = AsyncMock(spec=RedisClient)
-        redis.get_sticky_binding.return_value = None
+        redis = _sticky_redis()
         strategy = StickySessionStrategy(ttl_seconds=300, clock=lambda: now[0])
         first = await strategy.select(sample_proxies, session_id="s", redis_client=cast(RedisClient, redis), project_id="p")
         assert first is not None
@@ -490,6 +488,84 @@ class TestHeldProxy:
         # A thousand seconds on the binding is live, and Redis was rewritten every half TTL, not on each hold.
         assert strategy.bound_proxy_id("s") == first.id
         assert redis.set_sticky_binding.await_count == 6
+
+
+class TestStickyBindingReads:
+    """A binding read from Redis comes with its key's age, which says when it is written back; one Redis lacks is read
+    once per request."""
+
+    async def test_a_binding_read_is_written_back_once_its_key_is_half_its_ttl_old(
+        self, sample_proxies: list[Proxy]
+    ) -> None:
+        """Another gateway wrote it 50 s ago: its key is due again 100 s from now, not at once."""
+        now = [0.0]
+        redis = _sticky_redis("proxy-2", seconds_left=250.0)
+        strategy = StickySessionStrategy(ttl_seconds=300, clock=lambda: now[0])
+        for step in (0, 99):
+            now[0] += step
+            selected = await strategy.select(sample_proxies, session_id="s", redis_client=cast(RedisClient, redis), project_id="p")
+            assert selected is not None and selected.id == "proxy-2"
+            await strategy.settle()
+            assert redis.set_sticky_binding.await_count == 0
+        now[0] += 2
+        await strategy.select(sample_proxies, session_id="s", redis_client=cast(RedisClient, redis), project_id="p")
+        await strategy.settle()
+        redis.set_sticky_binding.assert_awaited_once_with("p", "s", "proxy-2", ttl_seconds=300)
+        assert redis.get_sticky_binding.await_count == 1
+
+    @pytest.mark.parametrize("seconds_left", [150.0, 10.0, None], ids=["half", "nearly-gone", "no-expiry"])
+    async def test_a_binding_read_with_half_its_ttl_gone_is_written_back_at_once(
+        self, sample_proxies: list[Proxy], seconds_left: float | None
+    ) -> None:
+        redis = _sticky_redis("proxy-2", seconds_left=seconds_left)
+        strategy = StickySessionStrategy(ttl_seconds=300, clock=lambda: 0.0)
+        await strategy.select(sample_proxies, session_id="s", redis_client=cast(RedisClient, redis), project_id="p")
+        await strategy.settle()
+        redis.set_sticky_binding.assert_awaited_once_with("p", "s", "proxy-2", ttl_seconds=300)
+
+    async def test_a_missing_binding_is_not_read_again_for_a_moment(self) -> None:
+        """One selection asks for a session's binding up to three times: Redis is read for it once a second at most,
+        each session on its own."""
+        redis = _sticky_redis()
+        now = [0.0]
+        strategy = StickySessionStrategy(clock=lambda: now[0])
+
+        async def held(session_id: str) -> str | None:
+            return await strategy.held_proxy(session_id, redis_client=cast(RedisClient, redis), project_id="p")
+
+        for _ in range(3):
+            assert await held("s") is None
+        assert await held("s2") is None
+        assert redis.get_sticky_binding.await_count == 2
+        now[0] = 0.99
+        assert await held("s") is None
+        assert redis.get_sticky_binding.await_count == 2
+        now[0] = 1.0
+        assert await held("s") is None
+        assert redis.get_sticky_binding.await_count == 3
+
+    async def test_a_session_bound_here_after_a_miss_is_read_from_memory(self, sample_proxies: list[Proxy]) -> None:
+        redis = _sticky_redis()
+        now = [0.0]
+        strategy = StickySessionStrategy(clock=lambda: now[0])
+
+        selected = await strategy.select(
+            sample_proxies, session_id="s", redis_client=cast(RedisClient, redis), project_id="p"
+        )
+
+        assert selected is not None
+        now[0] = 5.0
+        assert await strategy.held_proxy("s", redis_client=cast(RedisClient, redis), project_id="p") == selected.id
+        assert redis.get_sticky_binding.await_count == 1
+
+    async def test_a_binding_that_could_not_be_read_is_not_waited_for_again_for_a_moment(self) -> None:
+        redis = _sticky_redis()
+        redis.get_sticky_binding.side_effect = TimeoutError
+        strategy = StickySessionStrategy(clock=lambda: 0.0)
+
+        for _ in range(3):
+            assert await strategy.held_proxy("s", redis_client=cast(RedisClient, redis), project_id="p") is None
+        assert redis.get_sticky_binding.await_count == 1
 
 
 def _measured(**outcomes: tuple[int, int, float]) -> LocalOutcomes:

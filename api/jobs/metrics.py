@@ -22,7 +22,7 @@ from api.db.redis import PROJECT_WINDOWS, PROXY_WINDOWS, TUNNEL_PEER_WINDOWS
 from api.db.repository import MetricsRepository, ProjectRepository, ProxyRepository
 from api.db.reputation_repository import ExitReputationRepository
 from api.jobs.job import Job, JobBatch
-from api.reputation.record import ConnectorSiteKey
+from api.reputation.record import ConnectorSiteKey, ReputationChanges
 from api.reputation.signal import ReputationSignal
 from api.reputation.site import counted_site
 
@@ -118,7 +118,7 @@ class MetricsFlushJob(Job):
         records, in one transaction that records the flush; False when it was recorded.
 
         A window whose entity is gone is dropped, and logged. The records go last, so they stay locked no longer than the
-        commit takes; the runtime signal follows the commit.
+        commit takes, and only while a project records them; the runtime signal follows the commit.
         """
         statuses = await self._statuses(windows.proxies)
         async with self._session_factory() as session:
@@ -163,18 +163,27 @@ class MetricsFlushJob(Job):
                     row_count=len(dropped_failures),
                 )
 
-            evidence, dynamic = await self._reputation_evidence(session, windows)
-            changes = await ExitReputationRepository(session).apply_evidence(evidence, dynamic, utc_now())
+            changes = await self._apply_reputation(session, windows)
             await session.commit()
         await self._signal.send(changes)
         return True
 
+    async def _apply_reputation(self, session: AsyncSession, windows: MetricWindows) -> ReputationChanges:
+        """Apply the windows' requests and reports to the connector records of the projects whose exit reputation records:
+        one small read of which those are, and nothing more while none does."""
+        repository = ExitReputationRepository(session)
+        recording = await repository.recording_projects()
+        if not recording:
+            return ReputationChanges()
+        evidence, dynamic = await self._reputation_evidence(session, windows, recording)
+        return await repository.apply_evidence(evidence, dynamic, utc_now())
+
     @staticmethod
     async def _reputation_evidence(
-        session: AsyncSession, windows: MetricWindows
+        session: AsyncSession, windows: MetricWindows, recording: Collection[str]
     ) -> tuple[dict[ConnectorSiteKey, RequestCount], set[str]]:
-        """What the windows carried for the connectors' exit reputation records, keyed as the records, and which of the
-        connectors are dynamic.
+        """What the windows carried for the connectors' exit reputation records of the ``recording`` projects, keyed as
+        the records, and which of the connectors are dynamic.
 
         The site windows give every connector's blocked and good reports and a dynamic connector's requests, at every
         level of the requested place; the host windows give a connector's with IPs requests, at no place. A dynamic
@@ -186,6 +195,8 @@ class MetricsFlushJob(Job):
         dynamic: set[str] = set()
         for entity, counts in windows.site_requests.items():
             site = ConnectorSiteKey(*entity)
+            if site.project_id not in recording:
+                continue
             if counts.requests:
                 # Gateways count requests in a site window only through a dynamic connector; reports, through any.
                 dynamic.add(site.connector_id)
@@ -193,7 +204,7 @@ class MetricsFlushJob(Job):
                 evidence.setdefault(key, RequestCount()).merge(counts)
         hosts: Counter[ConnectorSiteKey] = Counter()
         for (project_id, connector_id, host), delta in windows.hosts.items():
-            if host == HOST_OVERFLOW or delta.request_count <= 0:
+            if project_id not in recording or host == HOST_OVERFLOW or delta.request_count <= 0:
                 continue
             host_site = counted_site(host)
             if host_site is not None:

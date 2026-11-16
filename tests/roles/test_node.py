@@ -233,14 +233,15 @@ class TestLifecycle:
         assert snapshot.streams["changes"].position is not None
         assert snapshot.streams["changes"].full_reads == {"start": 1}
         assert (snapshot.gateway, snapshot.controller, snapshot.worker) == (None, None, None)
-        # The api runtime runs no loop: the refresher, the observation recorder and the database retry are the
-        # node's, each run once.
+        # The api runtime runs its project map alone: the refresher, the observation recorder and the database retry
+        # are the node's, each run once.
         assert sorted(task.name for task in snapshot.tasks) == [
             "definitions_refresher",
             "geo_database_retry",
             "geo_observation_publisher",
             "heartbeat",
             "loop_lag_monitor",
+            "project_map",
         ]
 
         await node.stop()
@@ -263,8 +264,10 @@ class TestLifecycle:
         names = [task.name for task in snapshot.tasks]
         for loop in ("heartbeat", "loop_lag_monitor", "feed_builder", "feed_follower", "job_runner_health"):
             assert names.count(loop) == 1, loop
-        # One refresher (the worker's), one observation recorder and one database retry (the node's) per process.
+        # One refresher (the worker's), one observation recorder and one database retry (the node's) per process, and
+        # the api's project map.
         assert names.count("definitions_refresher") == 1
+        assert names.count("project_map") == 1
         assert names.count("geo_observation_publisher") == 1
         assert names.count("geo_database_retry") == 1
         assert set(snapshot.streams) == {"changes", "runtime", "feed"}
@@ -323,7 +326,7 @@ class TestLifecycle:
         await node.start()
 
         own = ["heartbeat", "loop_lag_monitor", "geo_observation_publisher", "geo_database_retry", "definitions_refresher"]
-        assert task_names(node) == sorted(["controller_loop", "worker_loop", *own])
+        assert task_names(node) == sorted(["project_map", "controller_loop", "worker_loop", *own])
         await node.stop()
         assert notes == ["start controller", "start worker", "stop worker", "stop controller"]
 

@@ -133,7 +133,8 @@ class GatewayRuntime(RoleRuntime):
             geo.geo_service, redis_client, sightings=self.sightings, exclusions=self.exclusions
         )
         self._exit_verifier = ExitVerifier(self.preflight, self.router)
-        # The exit each tagged request went through, for the exit reports that name a request by its tag.
+        # The exit each tagged request went through, for the exit reports that name a request by its tag: a
+        # publisher too, writing the notes due every 100 ms.
         self.tag_notes = TagNotes(redis_client)
         self.cert_manager = TLSCertManager(Path(settings.tls_mitm_ca_cert_path), Path(settings.tls_mitm_ca_key_path))
         self.mitm_handler = MitmHandler(self.cert_manager, redis_client=redis_client)
@@ -164,7 +165,7 @@ class GatewayRuntime(RoleRuntime):
         self._project_ids: set[str] = set()
         failure_log = (self.failure_log,) if self.failure_log.enabled else ()
         self._loops: tuple[Loop, ...] = (
-            self.database_sync, self.follower, self.metering, *failure_log, self.sightings
+            self.database_sync, self.follower, self.metering, *failure_log, self.sightings, self.tag_notes
         )
 
     @property
@@ -180,7 +181,7 @@ class GatewayRuntime(RoleRuntime):
     # --- Lifecycle ----------------------------------------------------------------------
 
     def loops(self) -> Sequence[Loop]:
-        """The IP database sync, the feed follower and the publishers: request metering, the failure log while it is enabled, the sightings."""
+        """The IP database sync, the feed follower and the publishers: request metering, the failure log while it is enabled, the sightings, the tag notes."""
         return self._loops
 
     async def start(self) -> None:
@@ -216,7 +217,7 @@ class GatewayRuntime(RoleRuntime):
         await super().stop()
         await quietly("MITM captures", self.mitm_handler.settle())
         await quietly("sticky bindings", self.router.settle())
-        await quietly("tag notes", self.tag_notes.settle())
+        await quietly("preflight verdicts", self.preflight.settle())
         for endpoint in self.endpoints:
             await quietly("tunnel endpoint", endpoint.stop())
         if self.tunnel is not None:

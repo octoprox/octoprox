@@ -2,15 +2,16 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """Exit reputation in the workers' metrics jobs: the flush applies the requests and reports the site windows counted
-(and a connector's with IPs requests from its host windows) to the connectors' records, in its transaction, and signals
-once it committed a dynamic connector's factor that moved; compaction deletes records past their retention by the day
-they were last seen.
+(and a connector's with IPs requests from its host windows) to the connectors' records of the projects that record, in
+its transaction, and signals once it committed a dynamic connector's factor that moved; while no project records it
+reads nothing past which. Compaction deletes records past their retention by the day they were last seen.
 
 Windows are written as gateways write them, and the jobs run on the real Postgres and Redis test containers.
 """
 
 from __future__ import annotations
 
+from collections.abc import Collection, Iterable, Mapping
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -21,7 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from api.core import utc_now
 from api.core.stats import RequestCount
 from api.db.redis import RUNTIME_STREAM_KEY, MetricWindows, RedisClient
-from api.db.repository import ProjectRepository
+from api.db.repository import ProjectRepository, ProxyRepository
 from api.db.reputation_repository import ExitReputationRepository
 from api.db.streams import RuntimeSignal
 from api.geo.runtime import GeoStack
@@ -34,6 +35,7 @@ from api.reputation.record import (
     ExitIpKey,
     ExitIpReputation,
     ReportCounts,
+    ReputationChanges,
 )
 from tests.jobs.conftest import Rows
 from tests.jobs.test_metrics import FIRST, SECOND, delivery, live, meter, recorded, requests
@@ -94,6 +96,32 @@ async def ip_record(sessions: async_sessionmaker[AsyncSession], k: ExitIpKey) ->
 
 async def runtime(redis_client: RedisClient) -> list[dict[str, str]]:
     return [fields for _id, fields in await redis_client.client.xrange(RUNTIME_STREAM_KEY)]
+
+
+class Weighed:
+    """What the flush asks of the rows and records: the connectors it asks about, and the keys it weighs evidence for."""
+
+    def __init__(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self.asked: list[set[str]] = []
+        self.keys: list[set[ConnectorSiteKey]] = []
+        dynamic_connectors, apply_evidence = ProxyRepository.dynamic_connectors, ExitReputationRepository.apply_evidence
+
+        async def asking(repository: ProxyRepository, connector_ids: Iterable[str]) -> set[str]:
+            wanted = set(connector_ids)
+            self.asked.append(wanted)
+            return await dynamic_connectors(repository, wanted)
+
+        async def weighing(
+            repository: ExitReputationRepository,
+            evidence: Mapping[ConnectorSiteKey, RequestCount],
+            dynamic: Collection[str],
+            now: datetime,
+        ) -> ReputationChanges:
+            self.keys.append(set(evidence))
+            return await apply_evidence(repository, evidence, dynamic, now)
+
+        monkeypatch.setattr(ProxyRepository, "dynamic_connectors", asking)
+        monkeypatch.setattr(ExitReputationRepository, "apply_evidence", weighing)
 
 
 class TestFlush:
@@ -236,6 +264,68 @@ class TestFlush:
         stored = await connector_record(sessions, key(connector))
         assert stored is not None and (stored.requests, stored.blocked_reports) == (0, 1)
         assert await runtime(redis_client) == []
+
+    async def test_while_no_project_records_the_flush_weighs_nothing(
+        self,
+        flush: MetricsFlushJob,
+        sessions: async_sessionmaker[AsyncSession],
+        redis_client: RedisClient,
+        rows: Rows,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """One small read of which projects record, then neither the rows nor the records."""
+        project = await rows.project(exit_reputation=ExitReputationMode.OFF)
+        connector = await rows.connector(project)
+        weighed = Weighed(monkeypatch)
+        await meter(
+            redis_client,
+            MetricWindows(
+                site_requests={(project.id, connector.id, "google.com", ""): RequestCount(50, blocked=1)},
+                hosts={(project.id, connector.id, "google.com"): requests(50)},
+            ),
+        )
+
+        await flush.run(delivery(FIRST))
+
+        assert (weighed.asked, weighed.keys) == ([], [])
+        assert await connector_record(sessions, key(connector)) is None
+        # The rest of the flush committed, and its windows were cleared.
+        assert FIRST in await recorded(sessions)
+        assert (await live(redis_client)).site_requests == {}
+
+    async def test_only_the_keys_of_the_projects_that_record_are_weighed(
+        self,
+        flush: MetricsFlushJob,
+        sessions: async_sessionmaker[AsyncSession],
+        redis_client: RedisClient,
+        rows: Rows,
+        static: Connector,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Another project's windows are left out before the rows are asked which connectors are dynamic."""
+        off = await rows.project(exit_reputation=ExitReputationMode.OFF)
+        off_connector = await rows.connector(off)
+        weighed = Weighed(monkeypatch)
+        await meter(
+            redis_client,
+            MetricWindows(
+                site_requests={
+                    (static.project_id, static.id, "google.com", "GB"): RequestCount(blocked=1),
+                    (off.id, off_connector.id, "google.com", "GB"): RequestCount(blocked=1),
+                },
+                hosts={
+                    (static.project_id, static.id, "google.com"): requests(10),
+                    (off.id, off_connector.id, "google.com"): requests(10),
+                },
+            ),
+        )
+
+        await flush.run(delivery(FIRST))
+
+        assert weighed.asked == [{static.id}]
+        assert weighed.keys == [{key(static, "GB"), key(static)}]
+        stored = await connector_record(sessions, key(static, "GB"))
+        assert stored is not None and stored.blocked_reports == 1
 
     async def test_a_factor_that_stays_sends_no_signal(
         self,

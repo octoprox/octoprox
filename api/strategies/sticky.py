@@ -4,6 +4,7 @@
 """Sticky session routing: a session keeps one upstream proxy, bound in memory here and in Redis for the other gateways.
 
 A binding lives ``STICKY_BINDING_TTL_SECONDS`` past the session's last request, and Redis failing never fails a request.
+A binding is read from Redis with its key's age in one round trip, and one Redis lacks is not read again for a moment.
 """
 
 import hashlib
@@ -23,7 +24,7 @@ from api.strategies.base import ProxyGroup, RoutingStrategy, weighted_random_gro
 from api.strategies.hash_ring import HashRing, ring_position
 
 if TYPE_CHECKING:
-    from api.db.redis import RedisClient
+    from api.db.redis import RedisClient, StickyBinding
 
 logger = structlog.get_logger()
 
@@ -33,6 +34,11 @@ STICKY_BINDING_TTL_SECONDS = 300
 # bound here or warmed from Redis, so abandoned sessions cannot grow the map
 # without bound between their own lookups.
 _SWEEP_EVERY = 1024
+
+# How long a binding Redis did not hold, or could not be read for, is not read again: one selection asks for a session's
+# binding up to three times within milliseconds (the quarantine and avoid holds, then the pick), and binds the session
+# here as it ends. A binding another gateway writes meanwhile is the race two gateways binding one new session run anyway.
+_MISS_SECONDS = 1.0
 
 
 @dataclass(slots=True)
@@ -67,6 +73,10 @@ class StickySessionStrategy(RoutingStrategy):
         self._ttl = ttl_seconds
         self._clock = clock
         self._bindings_since_sweep = 0
+        # Session -> until when the binding Redis did not hold is not read again (``_MISS_SECONDS``), and the size at
+        # which expired entries are next swept.
+        self._missing: dict[str, float] = {}
+        self._miss_sweep_at = _SWEEP_EVERY
         # Binding writes on their way to Redis, held so none is collected before it runs.
         self._writes = HeldTasks()
         # Connector id -> the ring over its rows, rebuilt when they change.
@@ -141,19 +151,39 @@ class StickySessionStrategy(RoutingStrategy):
         redis_client: "RedisClient | None" = None,
         project_id: str | None = None,
     ) -> str | None:
-        """The proxy ``session_id`` is bound to: this instance's binding, else the one Redis holds, remembered here."""
+        """The proxy ``session_id`` is bound to: this instance's binding, else the one Redis holds, remembered here.
+
+        A binding read from Redis is written back once its key is half its TTL old, and one Redis did not hold, or could
+        not be read for, is not read again for ``_MISS_SECONDS`` unless the session is bound here first.
+        """
         bound = self.bound_proxy_id(session_id)
-        if bound is None and redis_client is not None and project_id is not None:
-            bound = await self.stored_binding(redis_client, project_id, session_id)
-            if bound is not None:
-                self.remember(session_id, bound)
-        return bound
+        if bound is not None or redis_client is None or project_id is None:
+            return bound
+        now = self._clock()
+        if self._missing.get(session_id, -math.inf) > now:
+            return None
+        stored = await self.stored_binding(redis_client, project_id, session_id)
+        if stored is None:
+            self._miss(session_id, now)
+            return None
+        binding = self.remember(session_id, stored.proxy_id)
+        binding.redis_due_at = max(binding.redis_due_at, self._rewrite_due(stored.seconds_left))
+        return stored.proxy_id
+
+    def _miss(self, session_id: str, now: float) -> None:
+        """Note that Redis held no binding of ``session_id``, or could not be read for it, for ``_MISS_SECONDS``; expired
+        notes are swept as the map grows past its last size, so sessions nothing bound cannot grow it."""
+        if len(self._missing) >= self._miss_sweep_at:
+            self._missing = {session: until for session, until in self._missing.items() if until > now}
+            self._miss_sweep_at = max(_SWEEP_EVERY, 2 * len(self._missing))
+        self._missing[session_id] = now + _MISS_SECONDS
 
     def remember(self, session_id: str, proxy_id: str) -> _Binding:
         """Bind ``session_id`` to ``proxy_id`` on this instance, or push out the expiry of that binding.
 
         Local only: the picks and the bindings read from Redis are remembered, so later local checks do not go back there.
         """
+        self._missing.pop(session_id, None)
         now = self._clock()
         binding = self._session_map.get(session_id)
         if binding is not None and binding.proxy_id == proxy_id:
@@ -210,13 +240,23 @@ class StickySessionStrategy(RoutingStrategy):
         except Exception as exc:
             logger.debug("Sticky binding could not be stored", project_id=project_id, error=error_text(exc))
 
-    async def stored_binding(self, redis_client: "RedisClient", project_id: str, session_id: str) -> str | None:
-        """The proxy Redis has ``session_id`` bound to, by any gateway; None when unbound or unreadable."""
+    async def stored_binding(
+        self, redis_client: "RedisClient", project_id: str, session_id: str
+    ) -> "StickyBinding | None":
+        """The binding Redis holds for ``session_id``, by any gateway, and its key's TTL left; None when unbound or
+        unreadable."""
         try:
             return await redis_client.get_sticky_binding(project_id, session_id)
         except Exception as exc:
             logger.debug("Sticky binding could not be read", project_id=project_id, error=error_text(exc))
             return None
+
+    def _rewrite_due(self, seconds_left: float | None) -> float:
+        """When a binding read from Redis is next written there: once its key has half the TTL left, half a TTL after the
+        write that set it; at once for a key without an expiry."""
+        if seconds_left is None:
+            return 0.0
+        return self._clock() + seconds_left - self._ttl / 2
 
     async def _lookup_binding(
         self,

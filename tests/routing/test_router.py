@@ -16,7 +16,7 @@ from datetime import timedelta
 import pytest
 
 from api.core import utc_now
-from api.db.redis import RedisClient
+from api.db.redis import RedisClient, StickyBinding
 from api.models.connector import Connector
 from api.models.credential import Credential, CredentialType
 from api.models.location import LocationTarget
@@ -446,7 +446,7 @@ class BrokenRedis(RedisClient):
         # Never connected: only the two calls below are made.
         super().__init__("redis://redis.invalid")
 
-    async def get_sticky_binding(self, project_id: str, session_id: str) -> str | None:
+    async def get_sticky_binding(self, project_id: str, session_id: str) -> StickyBinding | None:
         raise ConnectionError("Redis is down")
 
     async def set_sticky_binding(self, project_id: str, session_id: str, proxy_id: str, ttl_seconds: int = 300) -> None:
@@ -454,7 +454,8 @@ class BrokenRedis(RedisClient):
 
 
 class SlowRedis(RedisClient):
-    """Sticky bindings in memory, with every read counted and every write held until ``written`` is set."""
+    """Sticky bindings in memory, each with its full TTL left, with every read counted and every write held until
+    ``written`` is set."""
 
     def __init__(self) -> None:
         # Never connected: only the two calls below are made.
@@ -463,9 +464,10 @@ class SlowRedis(RedisClient):
         self.reads = 0
         self.written = asyncio.Event()
 
-    async def get_sticky_binding(self, project_id: str, session_id: str) -> str | None:
+    async def get_sticky_binding(self, project_id: str, session_id: str) -> StickyBinding | None:
         self.reads += 1
-        return self.bindings.get((project_id, session_id))
+        proxy_id = self.bindings.get((project_id, session_id))
+        return None if proxy_id is None else StickyBinding(proxy_id, 300.0)
 
     async def set_sticky_binding(self, project_id: str, session_id: str, proxy_id: str, ttl_seconds: int = 300) -> None:
         await self.written.wait()
@@ -575,6 +577,26 @@ class TestStickyRedisCalls:
         rate_limit = {**STICKY_RATE_LIMIT, "sticky_quarantine": False}
         router = _feed("sticky", rate_limit_config=rate_limit).router(redis_client=redis)
         assert await router.select_proxy_for_project("p", session_id="session-1") is not None
+        assert redis.reads == 1
+
+    async def test_a_selection_reads_a_session_no_gateway_bound_once(self) -> None:
+        """The quarantine hold and the strategy both ask for the binding; Redis is read for it once, and the session is
+        bound here after."""
+        redis = SlowRedis()
+        router = _feed("sticky", rate_limit_config=STICKY_RATE_LIMIT).router(redis_client=redis)
+
+        assert await router.select_proxy_for_project("p", session_id="session-1") is not None
+        assert await router.select_proxy_for_project("p", session_id="session-1") is not None
+        assert redis.reads == 1
+
+    async def test_a_request_nothing_serves_reads_its_session_once(self) -> None:
+        """What the listener asks after a request found nothing reads no binding again."""
+        redis = SlowRedis()
+        router = _feed("sticky", rate_limit_config=STICKY_RATE_LIMIT).router(redis_client=redis)
+        nowhere = LocationTarget(country="JP")
+
+        assert await router.select_proxy_for_project("p", session_id="session-1", location=nowhere) is None
+        assert await router.are_all_proxies_quarantined("p", session_id="session-1", location=nowhere) is False
         assert redis.reads == 1
 
     async def test_a_new_binding_is_written_without_holding_the_request(self) -> None:

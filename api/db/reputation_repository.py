@@ -73,6 +73,14 @@ class ReputationSummary(NamedTuple):
     avoided_until: datetime | None
 
 
+class Recording(NamedTuple):
+    """What a batch of exit reports may count for: its projects that record, and the (project, connector) pairs whose
+    project records and whose connector is that project's."""
+
+    projects: frozenset[str]
+    connectors: frozenset[tuple[str, str]]
+
+
 class _Settings(NamedTuple):
     """What the repository needs of a project that records: how it weighs evidence, and whether it routes by it."""
 
@@ -147,12 +155,23 @@ class ExitReputationRepository:
         )
         return ReputationChanges(ips=tuple(changes), avoiding=self._avoiding(settings))
 
-    async def recording_connectors(self, pairs: Collection[tuple[str, str]]) -> set[tuple[str, str]]:
-        """The (project, connector) pairs among ``pairs`` whose project records and whose connector is that project's:
-        the connectors a report is taken for. Each project and connector held against a delete until the transaction
-        ends."""
+    async def recording_connectors(self, pairs: Collection[tuple[str, str | None]]) -> Recording:
+        """The projects of ``pairs`` that record, and the (project, connector) pairs among ``pairs`` whose project records
+        and whose connector is that project's: what a report is taken for. A pair without a connector asks after its
+        project alone. Each project and connector held against a delete until the transaction ends."""
         settings = await self._settings({project_id for project_id, _connector in pairs})
-        return await self._owned({pair for pair in pairs if pair[0] in settings})
+        owned = await self._owned(
+            {(project_id, connector_id) for project_id, connector_id in pairs if connector_id and project_id in settings}
+        )
+        return Recording(frozenset(settings), frozenset(owned))
+
+    async def recording_projects(self) -> set[str]:
+        """The ids of the projects whose exit reputation records, read without a lock: whether a metrics flush has any
+        evidence to weigh."""
+        result = await self._session.execute(
+            select(ProjectModel.id).where(ProjectModel.exit_reputation != ExitReputationMode.OFF.value)
+        )
+        return set(result.scalars().all())
 
     async def apply_evidence(
         self, evidence: Mapping[ConnectorSiteKey, RequestCount], dynamic: Collection[str], now: datetime

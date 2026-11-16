@@ -9,6 +9,7 @@ Redis (heartbeats, the lease, the feed head, change entries, work stream entries
 
 from __future__ import annotations
 
+import json
 import socket
 import subprocess
 import sys
@@ -274,6 +275,8 @@ def worker(instance_id: str) -> InstanceSnapshot:
         worker=WorkerSnapshot(
             jobs={JobKind.HEALTH: JobKindStats(runs=12, failures=1, duration_seconds=3.5, in_flight=4)},
             sightings_consumed=9,
+            exit_reports_consumed=14,
+            exit_reports_dropped_by_reason={"ip_not_seen": 10, "project": 2},
         ),
     )
 
@@ -327,6 +330,7 @@ class TestCluster:
             "geo_observation_publisher",
             "geo_database_retry",
             "definitions_refresher",
+            "project_map",
         }
         assert all(task["description"] and task["state"] == "running" for task in tasks.values())
         assert all(0 <= task["idle_runs"] <= task["runs"] for task in tasks.values())
@@ -369,6 +373,8 @@ class TestCluster:
             "duration_seconds": 3.5,
             "in_flight": 4,
         }
+        # The exit reports its checks dropped, by reason, which its Exit reports row lists.
+        assert wrk["snapshot"]["worker"]["exit_reports_dropped_by_reason"] == {"ip_not_seen": 10, "project": 2}
         # Each stream the worker follows, as its heartbeat reported it.
         assert wrk["snapshot"]["streams"] == {
             "changes": {
@@ -401,6 +407,21 @@ class TestCluster:
         assert list(data["instances"])[-1] == "sidecar"
         # Without a snapshot there is no feed to compare.
         assert "gw-other" not in {g["instance_id"] for g in data["feed"]["gateways"]}
+
+    def test_a_worker_of_an_earlier_release_reads_as_dropping_no_exit_report(
+        self, authenticated_client: TestClient, cluster: Cluster
+    ) -> None:
+        """Its heartbeat has no drops by reason: they read as none, and the rest of its snapshot is kept."""
+        sent = worker("wrk-old").model_dump(mode="json")
+        del sent["worker"]["exit_reports_dropped_by_reason"]
+        cluster.heartbeat("wrk-old", "worker", json.dumps(sent))
+
+        data = stats_when(authenticated_client, lists("worker", "wrk-old"))
+
+        old = instance_of(data, "worker", "wrk-old")
+        assert old is not None and old["snapshot"] is not None
+        assert old["snapshot"]["worker"]["exit_reports_dropped_by_reason"] == {}
+        assert old["snapshot"]["worker"]["exit_reports_consumed"] == 14
 
     def test_a_process_that_withdrew_is_gone(self, authenticated_client: TestClient, cluster: Cluster) -> None:
         cluster.heartbeat("wrk-leaving", "worker", worker("wrk-leaving"))

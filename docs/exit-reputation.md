@@ -93,17 +93,17 @@ A client tells Octoprox what a site did with a request by sending exit reports t
 
 **Naming the exit.** Octoprox has to know what the request went through. There are two ways:
 
-1. **A tag.** Add `-tag-<id>` to the request's proxy username: it changes nothing about the routing. A gateway notes what a tagged request went through, and keeps the note 2 minutes; report with the same username within that time.
-2. **The exit headers**, when the project sends them (**Exit headers** on its Location tab) and the client can read them: a dynamic connector's `connector_id` alone, or a connector with IPs' `connector_id` with its `ip`, which must be the last seen exit IP of one of that connector's rows. Complete headers name the exit by themselves and win over a tag.
+1. **A tag.** Add `-tag-<id>` to the request's proxy username: it changes nothing about the routing. A gateway notes what a tagged request went through, and keeps the note 2 minutes; report with the same username within that time. The note is written within about 0.1 seconds of the request, so send the report after the request's response, not alongside the request.
+2. **The exit headers**, when the project sends them (**Exit headers** on its Location tab) and the client can read them: a dynamic connector's `connector_id` alone, or a connector with IPs' `connector_id` with its `ip`, which must be the last seen exit IP of one of that connector's rows. A report that carries `connector_id` is named by its headers, and its tag is the fallback: when the headers name no exit of the project's rows, the exit the tag's note names counts instead.
 
 A report that names its exit neither way is refused.
 
 **What to do in a client:**
 
 * Add `-tag-<unique id>` to every request you might report, and report it with that username as soon as the answer is read, within 2 minutes. This works for every connector and every strategy.
-* Always send the tag yourself: a `-sessid-` is never read as a tag, and a username with no `-tag-` and no complete exit headers is refused.
+* Always send the tag yourself: a `-sessid-` is never read as a tag, and a report with no `-tag-` in its username and no `connector_id` is refused.
 * Under the `sticky` strategy a whole session may share one tag value, such as the session's own (`myuser-sessid-abc-tag-abc`), which saves the gateway a write per request. The note is then written again at most once a minute, so report within a minute, and a block reported after the session moved to another exit is counted against the new one. Under the other strategies, use a tag per request.
-* The exit headers are optional. A client that reads them (every plain `http://` request; for `https://`, only clients that read the answer to their `CONNECT`) can name the exit without a tag.
+* The exit headers are optional. A client that reads them (every plain `http://` request; for `https://`, only clients that read the answer to their `CONNECT`) can name the exit without a tag, and with one, keeps the tag as the fallback. Send them as the response carried them: the api takes them as sent, and a mistake in them shows only later, when the workers fall back on the tag or drop the report (see below).
 * A dynamic connector's block rate counts connections. A tag per request gets a connection per request in common clients. A client that shares a tag across a session, or names the exit by the headers of its `CONNECT`, keeps sending requests through one tunnel: turn connection reuse off ([how]({{ site.baseurl }}/metrics#disable-client-side-connection-pooling)) or close the connection after a block, or several blocks count against one request.
 * Good reports are optional. They change nothing for a dynamic connector, and for a connector with IPs they keep a mostly working IP from being avoided for one bad report, through the minimum bad share.
 
@@ -121,18 +121,34 @@ The answer is `202`, with what became of each report, in the order sent. A refus
 }
 ```
 
-An accepted report's `ip`, `connector_id` and `place` are what it counts for: a connector with IPs gets the report on its IP (`place` empty), a dynamic connector on itself at the place the username named (`ip` null). A refused report's `error` says why:
+What an accepted report's `ip`, `connector_id` and `place` say depends on what named its exit:
+
+* **Its tag**: what it counts for. A connector with IPs gets the report on its IP (`place` empty), a dynamic connector on itself at the place the username named (`ip` null).
+* **Its exit headers**: what was sent, the `ip` in canonical form (`::ffff:203.0.113.7` is `203.0.113.7`), with the place the username named. The workers then count a dynamic connector's report on the connector at that place, without the IP, and a connector with IPs' report on its IP, at no place. When the headers name no exit of the project's rows, they count it where the tag's note says instead, if the report had a tag a gateway noted.
+
+**What the api refuses.** The api refuses at once only what it can see in the report itself. Exit headers that can name no exit, such as an `ip` without `connector_id`, leave the report to its tag, and it is refused only when that names none either; the `error` then gives both reasons, as `no recent request with this tag (...); exit headers: ip needs connector_id`. A refused report's `error` says why:
 
 | `error` | Why |
 |---------|-----|
 | `site is empty`, `not a site: co.uk is a public suffix`, `not a site: *.google.com is not a host name` | The site names no host a request can go to, and no IP |
 | `username is not this project's` | The username before its parameters is not the project's proxy username |
 | `username: ...` | Its `-cc-`, `-st-` or `-city-` cannot be read, as a gateway would refuse it |
-| `name the exit with a -tag- in the username, or with the exit headers` | No tag, and no complete exit headers |
-| `no recent request with this tag (...)` | No request with the tag came through lately, or it was refused, or the mode was `off` then |
-| `...; exit headers: ...` | The headers sent did not name the exit, and why: `connector ... is not in this project`, `connector ... has IPs, so ip is needed too`, `not an IP: ...`, `no proxy of connector ... was last seen exiting from ...`, `ip needs connector_id` |
+| `exit headers: ip needs connector_id` | An `ip` was sent without `connector_id` |
+| `exit headers: not an IP: ...`, `exit headers: ip is not an IP` | The `ip` sent is not an IP address |
+| `exit headers: connector_id is not a connector id` | The `connector_id` sent holds a character no connector id has: anything but printable ASCII |
+| `name the exit with a -tag- in the username, or with the exit headers` | No tag, and no `connector_id` |
+| `no recent request with this tag (...)` | No request with the tag came through lately, or it was refused, or the mode was `off` then. A report sent before the gateway wrote the note gets it too |
 
-The request as a whole answers `409` while the mode is `off`, `404` for an unknown project, `422` for a body that breaks the format (no report or more than 1000, a report without `username`, `site` or `verdict`, a `reason` over 64 characters or with a control character), and `503` when Redis cannot be reached: send the reports again. Reports are data, like metrics: they are not in the audit log. A report on an exit IP is applied within about a second of the `202` while the workers keep up; a report on a connector counts at the next minute's flush of request counts ([how fast](#how-fast-a-dynamic-connector-reacts)).
+**What the workers drop.** Whether the exit headers fit the project's rows is for the workers to check, so a report with wrong headers is still accepted. When they do not fit and the report had a tag a gateway noted, the workers count it where the note says. Otherwise they drop it, and record nothing for it, when:
+
+* its project was deleted, or its mode turned `off`, after the report was taken (`project`);
+* the connector it names is gone, or is another project's (`connector`). A report its tag named on a row with IPs still counts on that IP;
+* its headers name a connector with IPs without the `ip` (`ip_needed`);
+* its `ip` is not the last seen exit IP of any of that connector's rows, for example because the row's exit moved since (`ip_not_seen`).
+
+The workers count the reports they drop by reason in `octoprox_worker_exit_reports_dropped_total` ([Metrics]({{ site.baseurl }}/metrics#prometheus)), and log them once per batch at warning, as `Exit reports dropped` with the counts by reason. The same counter counts as `given_up` the reports of a batch the workers gave up after repeated failures, such as Postgres refusing it. On **Administration → System**, each worker's **Exit reports** row shows the reports it took since it started, those given up as *lost*, and on a line under it the reports it dropped, by reason. When reports seem to change nothing, look there first.
+
+The request as a whole answers `409` while the mode is `off`, `404` for an unknown project, `422` for a body that breaks the format (no report or more than 1000, a report without `username`, `site` or `verdict`, a `reason` over 64 characters or with a control character, a `connector_id` over 36 characters or an `ip` over 45), and `503` when Redis cannot be reached: send the reports again. Right after a project is created or its mode is changed, an api can answer `404` or `409` for a moment, normally a few milliseconds, until it has read the change. Reports are data, like metrics: they are not in the audit log. A report on an exit IP is applied within about a second of the `202` while the workers keep up; a report on a connector counts at the next minute's flush of request counts ([how fast](#how-fast-a-dynamic-connector-reacts)).
 
 ```python
 import uuid
